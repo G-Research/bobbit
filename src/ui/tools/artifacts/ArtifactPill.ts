@@ -1,5 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
-import { html, type TemplateResult } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import { FileCode2 } from "lucide";
 import type { ArtifactsPanel } from "./artifacts.js";
 
@@ -17,7 +17,17 @@ export function ArtifactPill(filename: string, artifactsPanel?: ArtifactsPanel):
 			class="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-muted/50 border border-border rounded ${
 				artifactsPanel ? "cursor-pointer hover:bg-muted transition-colors" : ""
 			}"
+			role=${artifactsPanel ? "button" : nothing}
+			tabindex=${artifactsPanel ? "0" : nothing}
 			@click=${artifactsPanel ? handleClick : null}
+			@keydown=${artifactsPanel
+				? (e: KeyboardEvent) => {
+						if (e.key === "Enter" || e.key === " ") {
+							e.preventDefault();
+							handleClick(e);
+						}
+					}
+				: null}
 		>
 			${icon(FileCode2, "sm")}
 			<span class="text-foreground">${filename}</span>

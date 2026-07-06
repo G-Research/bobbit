@@ -62,6 +62,7 @@ export class Console extends LitElement {
 								}}
 								class="p-1 rounded transition-colors ${this.autoscroll ? "bg-accent text-accent-foreground" : "hover:bg-muted"}"
 								title=${this.autoscroll ? i18n("Autoscroll enabled") : i18n("Autoscroll disabled")}
+								aria-label=${this.autoscroll ? i18n("Autoscroll enabled") : i18n("Autoscroll disabled")}
 							>
 								${icon(this.autoscroll ? ChevronsDown : Lock, "sm")}
 							</button>

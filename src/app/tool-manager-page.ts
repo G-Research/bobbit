@@ -465,6 +465,7 @@ function renderAccessRow(label: string, selectValue: string, onChangeSelect: (va
 		<div class="tools-access-row">
 			<span class="tools-access-row-label">${label}</span>
 			<select class="tools-select tools-access-row-select"
+				aria-label=${label}
 				.value=${selectValue}
 				@change=${(e: Event) => onChangeSelect((e.target as HTMLSelectElement).value)}>
 				${options.map(o => html`<option value=${o.value} ?selected=${selectValue === o.value}>${o.label}</option>`)}
@@ -684,11 +685,12 @@ async function handleMcpPolicyChange(key: string, value: string): Promise<void> 
 	renderApp();
 }
 
-function renderMcpPolicySelect(key: string, current: string, testid: string, emptyLabel = "Allow (default)"): TemplateResult {
+function renderMcpPolicySelect(key: string, current: string, testid: string, emptyLabel = "Allow (default)", ariaLabel = "Policy"): TemplateResult {
 	return html`
 		<select class="tool-group-select"
 			data-testid=${testid}
 			data-policy-key=${key}
+			aria-label=${ariaLabel}
 			.value=${current}
 			@click=${(e: Event) => e.stopPropagation()}
 			@keydown=${(e: KeyboardEvent) => e.stopPropagation()}
@@ -718,8 +720,8 @@ function renderMcpOperationRow(tool: ToolInfo, policyKey: string, emptyPolicyLab
 			<span class="tool-row-desc">${tool.description}</span>
 			<div class="tool-row-actions">
 				<span class="tool-group-policy-label">Operation Policy:</span>
-				${renderMcpPolicySelect(policyKey, currentPolicy, "mcp-operation-policy", emptyPolicyLabel)}
-				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
+				${renderMcpPolicySelect(policyKey, currentPolicy, "mcp-operation-policy", emptyPolicyLabel, "Operation Policy")}
+				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit" aria-label="Edit">
 					${icon(Pencil, "sm")}
 				</button>
 			</div>
@@ -776,7 +778,7 @@ function renderMcpSection(): TemplateResult {
 								<span class="text-xs ${statusClass}" data-testid="mcp-server-status">${server.status}</span>
 								<span class="tool-group-count">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
 								<span class="tool-group-policy-label">Server Policy:</span>
-								${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy", serverEmptyPolicyLabel)}
+								${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy", serverEmptyPolicyLabel, "Server Policy")}
 							</div>
 							${server.status === "error" && server.error
 								? html`<div class="text-xs text-red-600 px-3 pb-2" data-testid="mcp-server-error">${server.error}</div>`
@@ -809,7 +811,7 @@ function renderMcpSection(): TemplateResult {
 																<span class="tool-group-name">${toolLabel}</span>
 																<span class="tool-group-count">${ops.length} operation${ops.length !== 1 ? "s" : ""}</span>
 																<span class="tool-group-policy-label">${hasSub ? "Package" : "Tool"} Policy:</span>
-																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", toolEmptyPolicyLabel)}
+																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", toolEmptyPolicyLabel, hasSub ? "Package Policy" : "Tool Policy")}
 															</div>
 															${toolExpanded
 																? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
@@ -850,11 +852,12 @@ function renderNavBar(): TemplateResult {
 		return html`
 			<div class="tools-nav">
 				<div class="tools-nav-left">
-					<button class="tools-back" @click=${showList} title="Back to tools">
+					<button class="tools-back" @click=${showList} title="Back to tools" aria-label="Back to tools">
 						${icon(ArrowLeft, "sm")}
 					</button>
 					<div class="tools-title-group">
-						<span class="tools-breadcrumb" @click=${showList}>Tools</span>
+						<span class="tools-breadcrumb" role="button" tabindex="0" @click=${showList}
+							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showList(); } }}>Tools</span>
 						<span class="tools-breadcrumb-sep">/</span>
 						<h1 class="tools-title">${selectedTool.name}</h1>
 					</div>
@@ -875,7 +878,7 @@ function renderNavBar(): TemplateResult {
 	return html`
 		<div class="tools-nav">
 			<div class="tools-nav-left">
-				<button class="tools-back" @click=${() => setHashRoute("landing")} title="Back to sessions">
+				<button class="tools-back" @click=${() => setHashRoute("landing")} title="Back to sessions" aria-label="Back to sessions">
 					${icon(ArrowLeft, "sm")}
 				</button>
 				<h1 class="tools-title">Tools</h1>
@@ -1023,7 +1026,7 @@ function renderToolRow(tool: ToolInfo): TemplateResult {
 			<span class="tool-row-name">${tool.name} ${renderToolOriginBadges(tool)} ${renderToolDiagnosticBadge(tool)}</span>
 			<span class="tool-row-desc">${tool.description}</span>
 			<div class="tool-row-actions">
-				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
+				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit" aria-label="Edit">
 					${icon(Pencil, "sm")}
 				</button>
 			</div>
@@ -1086,12 +1089,15 @@ function renderListView(): TemplateResult {
 				const currentGroupPolicy = groupPolicies[groupName] || "";
 				return html`
 					<div class="tool-group ${isCollapsed ? "collapsed" : ""}">
-						<div class="tool-group-header" title="Toggle ${groupName} group" @click=${() => toggleGroup(groupName)}>
+						<div class="tool-group-header" title="Toggle ${groupName} group" tabindex="0" role="button"
+							@click=${() => toggleGroup(groupName)}
+							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleGroup(groupName); } }}>
 							${chevronSvg}
 							<span class="tool-group-name">${groupName}</span>
 							<span class="tool-group-count">${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}</span>
 							<span class="tool-group-policy-label">Group Policy:</span>
 							<select class="tool-group-select"
+								aria-label="Group Policy"
 								.value=${currentGroupPolicy}
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${async (e: Event) => {
@@ -1294,6 +1300,7 @@ function renderEditView(): TemplateResult {
 						<div class="tools-field-readonly">${selectedTool.name}</div>
 						<label class="tools-field-label" style="margin-left:8px;">Group</label>
 						<select class="tools-select" style="width:auto"
+							aria-label="Group"
 							.value=${editGroup}
 							@change=${(e: Event) => { editGroup = (e.target as HTMLSelectElement).value; renderApp(); }}>
 							${TOOL_GROUPS.map((g) => html`<option value=${g} ?selected=${editGroup === g}>${g}</option>`)}
@@ -1302,6 +1309,7 @@ function renderEditView(): TemplateResult {
 					<div class="tools-identity-row">
 						<label class="tools-field-label">Description</label>
 						<input class="tools-input"
+							aria-label="Description"
 							.value=${editDescription}
 							placeholder="Short description of what this tool does"
 							@input=${(e: Event) => { editDescription = (e.target as HTMLInputElement).value; renderApp(); }} />

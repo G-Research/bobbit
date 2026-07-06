@@ -91,6 +91,7 @@ export function renderTriggerCard(trigger: TriggerDef, index: number) {
 			<div style="display:flex; align-items:center; gap:8px; margin-bottom:8px">
 				<select
 					data-testid="trigger-type-select"
+					aria-label="Trigger type"
 					class="text-xs px-2 py-1 rounded border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
 					.value=${trigger.type}
 					@change=${onTypeChange}
@@ -108,6 +109,7 @@ export function renderTriggerCard(trigger: TriggerDef, index: number) {
 				<button
 					class="text-[10px] px-1.5 py-0.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
 					title="Remove trigger"
+					aria-label="Remove trigger"
 					@click=${() => removeTrigger(index)}
 				>✕</button>
 			</div>
@@ -119,6 +121,7 @@ export function renderTriggerCard(trigger: TriggerDef, index: number) {
 						type="text"
 						class=${inputClass}
 						placeholder="0 9 * * *"
+						aria-label="Cron expression (UTC)"
 						.value=${trigger.config?.cron || ""}
 						@input=${(e: Event) => updateTrigger(index, (t) => { t.config.cron = (e.target as HTMLInputElement).value; })}
 					/>
@@ -132,6 +135,7 @@ export function renderTriggerCard(trigger: TriggerDef, index: number) {
 						<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Event</label>
 						<select
 							class=${inputClass}
+							aria-label="Event"
 							.value=${trigger.config?.event || "push"}
 							@change=${(e: Event) => updateTrigger(index, (t) => { t.config.event = (e.target as HTMLSelectElement).value; })}
 						>
@@ -144,6 +148,7 @@ export function renderTriggerCard(trigger: TriggerDef, index: number) {
 							type="text"
 							class=${inputClass}
 							placeholder="master"
+							aria-label="Branch"
 							.value=${trigger.config?.branch || ""}
 							@input=${(e: Event) => updateTrigger(index, (t) => { t.config.branch = (e.target as HTMLInputElement).value; })}
 						/>
@@ -158,6 +163,7 @@ export function renderTriggerCard(trigger: TriggerDef, index: number) {
 					rows="2"
 					data-testid="trigger-prompt-${index}"
 					placeholder="Message sent to the agent when this trigger fires"
+					aria-label="${isGoalTrigger ? "Wake prompt (required)" : "Wake prompt (optional)"}"
 					.value=${trigger.prompt || ""}
 					@input=${(e: Event) => updateTrigger(index, (t) => { t.prompt = (e.target as HTMLTextAreaElement).value; })}
 				></textarea>

@@ -52,5 +52,8 @@ export function renderProposalPanelPlaceholder(opts: ProposalPanelPlaceholderOpt
 			</div>
 		</div>`;
 	}
-	return html`<div class="flex-1 min-h-0 flex items-center justify-center">${bobbitLoadingAnimation()}</div>`;
+	return html`<div class="flex-1 min-h-0 flex items-center justify-center">
+		${bobbitLoadingAnimation()}
+		<div class="sr-only" role="status" aria-live="polite" aria-atomic="true">Loading proposal panel…</div>
+	</div>`;
 }

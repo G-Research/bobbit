@@ -113,7 +113,7 @@ export class ChildrenMutationApproval extends LitElement {
 					@click=${() => this._decide("reject")}
 				>${s === "posting-reject" ? "Rejecting…" : "Reject"}</button>
 				${s === "error"
-					? html`<span class="error" data-testid="children-mutation-error">Failed — ${this._errorMessage || "retry"}</span>`
+					? html`<span class="error" data-testid="children-mutation-error" role="alert" aria-live="assertive" aria-atomic="true">Failed — ${this._errorMessage || "retry"}</span>`
 					: ""}
 			</div>
 		`;

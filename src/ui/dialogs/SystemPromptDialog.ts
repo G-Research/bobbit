@@ -113,6 +113,7 @@ export class SystemPromptDialog extends DialogBase {
 			<div class="border border-border rounded-lg overflow-hidden">
 				<button
 					class="w-full flex items-center gap-2 p-3 text-left hover:bg-secondary/50 transition-colors"
+					aria-expanded=${expanded ? "true" : "false"}
 					@click=${() => this.toggleSection(index)}
 				>
 					<svg

@@ -464,7 +464,7 @@ function renderSwarmGovernorStrip(): TemplateResult | typeof nothing {
 					<div class="swarm-governor-strip" data-swarm-group="${swarmGroup}">
 						<div class="swarm-governor-strip-row">
 							<span class="swarm-governor-badge">SWARM best-of-N</span>
-							<span class="swarm-governor-count">${captured}/${expected} candidates terminal</span>
+							<span class="swarm-governor-count" role="status" aria-live="polite" aria-atomic="true">${captured}/${expected} candidates terminal</span>
 							${budget ? html`<span class="swarm-governor-budget">cap ${budget.toLocaleString()} tok/node</span>` : nothing}
 							${status?.allFailed ? html`<span class="swarm-governor-escalate">ALL FAILED — needs human triage</span>` : nothing}
 							${status?.integratedGoalId
@@ -2009,14 +2009,14 @@ function renderSetupBanner(goal: Goal): TemplateResult {
 		return html`
 			<div class="setup-banner setup-banner--preparing">
 				<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
-				<span>Setting up worktree...</span>
+				<span role="status" aria-live="polite" aria-atomic="true">Setting up worktree...</span>
 			</div>
 		`;
 	}
 	if (goal.setupStatus === "error") {
 		return html`
 			<div class="setup-banner setup-banner--error">
-				<span style="color:var(--destructive)">⚠ Worktree setup failed${goal.setupError ? `: ${goal.setupError}` : ""}</span>
+				<span style="color:var(--destructive)" role="alert" aria-live="assertive" aria-atomic="true">⚠ Worktree setup failed${goal.setupError ? `: ${goal.setupError}` : ""}</span>
 				<button class="btn-retry" title="Retry worktree setup" @click=${() => handleRetrySetup(goal.id)}>Retry Setup</button>
 			</div>
 		`;
@@ -2059,7 +2059,7 @@ function renderNavBar(goal: Goal): TemplateResult {
 	return html`
 		<div class="nav">
 			<div class="nav-left">
-				<button class="back-btn" @click=${() => setHashRoute("landing")} title="Back to sessions">
+				<button class="back-btn" @click=${() => setHashRoute("landing")} title="Back to sessions" aria-label="Back to sessions">
 					${svgArrowLeft}
 				</button>
 				<span class="nav-title">${goal.title}</span>
@@ -2180,7 +2180,7 @@ function renderSessionButton(goal: Goal): TemplateResult {
 				${svgPlus}
 				New Session
 			</button>
-			<button class="btn-split-chevron" @click=${(e: Event) => { e.stopPropagation(); toggleRoleDropdown(); }} title="Choose role">
+			<button class="btn-split-chevron" @click=${(e: Event) => { e.stopPropagation(); toggleRoleDropdown(); }} title="Choose role" aria-label="Choose role">
 				${svgChevronDown}
 			</button>
 			${roleDropdownOpen ? html`
@@ -2251,7 +2251,15 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 			<div class="meta-item" style="cursor:pointer;"
 				data-testid="tree-cost-toggle"
 				title="Click for per-child breakdown"
-				@click=${(e: Event) => { e.stopPropagation(); treeCostExpanded = !treeCostExpanded; renderApp(); }}>
+				role="button" tabindex="0"
+				aria-expanded=${String(treeCostExpanded)}
+				@click=${(e: Event) => { e.stopPropagation(); treeCostExpanded = !treeCostExpanded; renderApp(); }}
+				@keydown=${(e: KeyboardEvent) => {
+					if (e.key !== "Enter" && e.key !== " ") return;
+					e.preventDefault();
+					treeCostExpanded = !treeCostExpanded;
+					renderApp();
+				}}>
 				<span style="font-size:11px;color:var(--muted-foreground);">${treeCostExpanded ? "▾" : "▸"}</span>
 				<span class="meta-label" style="margin-left:4px;">Tree cost:</span>
 				<span class="meta-tag cost-tag" data-testid="tree-cost-total">$${total.toFixed(2)}</span>
@@ -2329,8 +2337,18 @@ function renderMetaRows(goal: Goal): TemplateResult {
 			${renderTreeCostRow()}
 			${goalCost && goalCost.totalCost > 0 ? html`
 			<div class="meta-row">
-				<div class="meta-item" style="position:relative;cursor:pointer;" @click=${(e: Event) => {
+				<div class="meta-item" style="position:relative;cursor:pointer;"
+					role="button" tabindex="0"
+					@click=${(e: Event) => {
 						e.stopPropagation();
+						if (!costPopoverOpen) {
+							costPopoverOpen = true;
+							renderApp();
+						}
+					}}
+					@keydown=${(e: KeyboardEvent) => {
+						if (e.key !== "Enter" && e.key !== " ") return;
+						e.preventDefault();
 						if (!costPopoverOpen) {
 							costPopoverOpen = true;
 							renderApp();
@@ -2434,7 +2452,15 @@ function renderGatePipeline(): TemplateResult {
 function renderGateNode(node: GatePipelineNode): TemplateResult {
 	const statusClass = gateNodeStatusClass(node.status);
 	return html`
-		<div class="phase-node ${statusClass}" data-testid="goal-dashboard-pipeline-gate" data-gate-id=${node.id} data-gate-status=${node.status} @click=${() => toggleGateExpand(node.id)} title="${node.name} (${node.status})${node.signalCount > 0 ? ` \u2014 ${node.signalCount} signal${node.signalCount !== 1 ? "s" : ""}` : ""}">
+		<div class="phase-node ${statusClass}" data-testid="goal-dashboard-pipeline-gate" data-gate-id=${node.id} data-gate-status=${node.status}
+			role="button" tabindex="0"
+			@click=${() => toggleGateExpand(node.id)}
+			@keydown=${(e: KeyboardEvent) => {
+				if (e.key !== "Enter" && e.key !== " ") return;
+				e.preventDefault();
+				toggleGateExpand(node.id);
+			}}
+			title="${node.name} (${node.status})${node.signalCount > 0 ? ` \u2014 ${node.signalCount} signal${node.signalCount !== 1 ? "s" : ""}` : ""}">
 			${node.status === "passed" ? html`<span class="phase-check">\u2713</span>` : nothing}
 			${node.status === "failed" ? html`<span class="phase-check" style="color:var(--destructive)">\u2717</span>` : nothing}
 			${node.status === "running" ? html`<span class="phase-running-dot"></span>` : nothing}
@@ -2594,7 +2620,15 @@ function renderTabBar(): TemplateResult {
 	return html`
 		<div class="tab-bar" data-testid="goal-dashboard-tabs">
 			${tabs.map(t => html`
-				<div data-testid="tab-${t.id}" class="tab ${dashboardTab === t.id ? "active" : ""}" data-tab-id=${t.id} data-active=${String(dashboardTab === t.id)} @click=${() => setTab(t.id)} title="${t.label}">
+				<div data-testid="tab-${t.id}" class="tab ${dashboardTab === t.id ? "active" : ""}" data-tab-id=${t.id} data-active=${String(dashboardTab === t.id)}
+					role="button" tabindex="0"
+					@click=${() => setTab(t.id)}
+					@keydown=${(e: KeyboardEvent) => {
+						if (e.key !== "Enter" && e.key !== " ") return;
+						e.preventDefault();
+						setTab(t.id);
+					}}
+					title="${t.label}">
 					${t.icon}
 					<span class="tab-label">${t.label}</span>
 					${t.countStr ? html`<span class="tab-count">${t.countStr}</span>` : nothing}
@@ -2662,7 +2696,15 @@ function renderTasksTab(): TemplateResult {
 								<td><span class="status-chip ${statusChipClass(task.state)}"><span class="dot"></span>${statusLabel(task.state)}</span></td>
 								<td>
 									${assignee
-										? html`<div class="assignee-cell assignee-cell-link" @click=${(e: Event) => { e.stopPropagation(); connectToSession(assignee.id, true); }}>
+										? html`<div class="assignee-cell assignee-cell-link"
+											role="button" tabindex="0"
+											@click=${(e: Event) => { e.stopPropagation(); connectToSession(assignee.id, true); }}
+											@keydown=${(e: KeyboardEvent) => {
+												if (e.key !== "Enter" && e.key !== " ") return;
+												e.preventDefault();
+												e.stopPropagation();
+												connectToSession(assignee.id, true);
+											}}>
 											${statusBobbit(assignee.status, assignee.isCompacting, assignee.id, false, assignee.isAborting, assignee.role === "team-lead", assignee.role === "coder", assignee.accessory)}
 											${assignee.title || assignee.id.slice(0, 8)}
 										</div>`
@@ -2733,7 +2775,15 @@ function renderAgentsTab(): TemplateResult {
 		const displayName = isArchived ? (agent.title || formatAgentName(agent)) : formatAgentName(agent);
 
 		return html`
-			<div class="agent-card ${isArchived ? "opacity-70" : ""}" @click=${() => connectToSession(agent.sessionId, true)} title="${isArchived ? "View archived session" : "Connect to"} ${displayName}">
+			<div class="agent-card ${isArchived ? "opacity-70" : ""}"
+				role="button" tabindex="0"
+				@click=${() => connectToSession(agent.sessionId, true)}
+				@keydown=${(e: KeyboardEvent) => {
+					if (e.key !== "Enter" && e.key !== " ") return;
+					e.preventDefault();
+					connectToSession(agent.sessionId, true);
+				}}
+				title="${isArchived ? "View archived session" : "Connect to"} ${displayName}">
 				<div class="agent-card-bobbit">
 					${statusBobbit(
 						isArchived ? "terminated" : (session?.status ?? agent.status),
@@ -2882,7 +2932,7 @@ function renderGateChecklist(): TemplateResult {
 		<div class="wf-checklist">
 			<div class="wf-checklist-header">
 				<span class="wf-checklist-title">Workflow: ${currentGoal.workflow.name}</span>
-				<span class="wf-checklist-count">${passedCount}/${totalCount} passed</span>
+				<span class="wf-checklist-count" role="status" aria-live="polite" aria-atomic="true">${passedCount}/${totalCount} passed</span>
 			</div>
 			<div class="wf-progress">
 				<div class="wf-progress-bar"><div class="wf-progress-fill" style="width:${pct}%"></div></div>
@@ -2918,7 +2968,14 @@ function renderGateChecklist(): TemplateResult {
 				}
 
 				return html`
-					<div class="wf-checklist-item ${focusedHighlightGateId === wfGate.id ? "wf-checklist-item--focused" : ""}" data-testid="goal-dashboard-gate-row" data-gate-id=${wfGate.id} data-gate-status=${effectiveStatus} data-expanded=${String(isExpanded)} data-focused=${String(isFocused)} @click=${() => toggleGateExpand(wfGate.id)}>
+					<div class="wf-checklist-item ${focusedHighlightGateId === wfGate.id ? "wf-checklist-item--focused" : ""}" data-testid="goal-dashboard-gate-row" data-gate-id=${wfGate.id} data-gate-status=${effectiveStatus} data-expanded=${String(isExpanded)} data-focused=${String(isFocused)}
+						role="button" tabindex="0"
+						@click=${() => toggleGateExpand(wfGate.id)}
+						@keydown=${(e: KeyboardEvent) => {
+							if (e.key !== "Enter" && e.key !== " ") return;
+							e.preventDefault();
+							toggleGateExpand(wfGate.id);
+						}}>
 						<span class="${dotClass}">${dotContent}</span>
 						<div class="wf-checklist-info">
 							<span class="wf-checklist-name">${wfGate.name}</span>
@@ -3023,7 +3080,14 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 
 	return html`
 		<div class="signal-entry signal-entry--${vStatus} ${isFocused ? "signal-entry--focused" : ""}" data-testid="goal-dashboard-signal-entry" data-signal-id=${signal.id} data-signal-status=${vStatus} data-focused=${String(isFocused)}>
-			<div class="signal-entry__header" @click=${() => toggleSignalExpand(signal.id)}>
+			<div class="signal-entry__header"
+				role="button" tabindex="0"
+				@click=${() => toggleSignalExpand(signal.id)}
+				@keydown=${(e: KeyboardEvent) => {
+					if (e.key !== "Enter" && e.key !== " ") return;
+					e.preventDefault();
+					toggleSignalExpand(signal.id);
+				}}>
 				<span class="signal-status-badge signal-status-badge--${vStatus}">
 					${vStatus === "passed" ? "\u2713" : vStatus === "failed" ? "\u2717" : "\u23F3"}
 					${vStatus}
@@ -3162,7 +3226,15 @@ function renderStepArtifact(artifact: { content: string; contentType: string; me
 	return html`
 		<div class="artifact-section">
 			${artifact.contentType === "text/html" ? contentBlock : html`
-				<div class="artifact-toggle" @click=${(e: Event) => { e.stopPropagation(); toggleArtifactExpand(key); }}>
+				<div class="artifact-toggle"
+					role="button" tabindex="0"
+					@click=${(e: Event) => { e.stopPropagation(); toggleArtifactExpand(key); }}
+					@keydown=${(e: KeyboardEvent) => {
+						if (e.key !== "Enter" && e.key !== " ") return;
+						e.preventDefault();
+						e.stopPropagation();
+						toggleArtifactExpand(key);
+					}}>
 					<span class="artifact-toggle-icon">${isExpanded ? "\u25B4" : "\u25BE"}</span>
 					Full Review
 				</div>
@@ -3203,7 +3275,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 
 	return html`
 		<div class="verify-cards">
-			<div class="verify-cards__header">
+			<div class="verify-cards__header" role="status" aria-live="polite" aria-atomic="true">
 				${isDone
 					? entry.overallStatus === "passed"
 						? html`<span class="verify-cards__header-status verify-cards__header-status--pass">\u2713 Verified \u2014 passed</span>`
@@ -3235,7 +3307,20 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 					${showPhaseDivider ? html`<div class="phase-divider">Phase ${curPhase}</div>` : nothing}
 					<div class="verify-card verify-card--${cardClass}">
 						<div class="verify-card__header ${clickable ? "verify-card__header--clickable" : ""}"
+							role=${clickable ? "button" : nothing}
+							tabindex=${clickable ? "0" : nothing}
+							aria-expanded=${clickable && !isRunningCmd ? String(isExpanded) : nothing}
 							@click=${clickable ? () => {
+								if (isRunningCmd) {
+									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || step.output || "", stepType: step.type || "" };
+									renderApp();
+								} else if (hasOutput) {
+									toggleLiveStepExpand(stepKey);
+								}
+							} : null}
+							@keydown=${clickable ? (e: KeyboardEvent) => {
+								if (e.key !== "Enter" && e.key !== " ") return;
+								e.preventDefault();
 								if (isRunningCmd) {
 									dashboardModalStep = { gateId: entry.gateId, signalId: entry.signalId, stepIndex: i, stepName: step.name, liveOutput: step.liveOutput || step.output || "", stepType: step.type || "" };
 									renderApp();

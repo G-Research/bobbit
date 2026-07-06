@@ -249,6 +249,7 @@ export class ProjectPickerPopover extends LitElement {
 					type="text"
 					class="bobbit-project-picker-search"
 					placeholder="Search projects…"
+					aria-label="Search projects…"
 					.value=${this._query}
 					@input=${(e: Event) => {
 						this._query = (e.target as HTMLInputElement).value;

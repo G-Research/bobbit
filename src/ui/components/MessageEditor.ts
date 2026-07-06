@@ -1208,12 +1208,14 @@ export class MessageEditor extends LitElement {
 											@click=${() => this.onEditQueued?.(msg)}
 											class="edit-btn shrink-0 p-1 rounded text-muted-foreground/50 hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer"
 											title="Edit message"
+											aria-label="Edit message"
 										>${icon(Pencil, "xs")}</button>
 										<button
 											draggable="false"
 											@click=${() => this.onRemoveQueued?.(msg.id)}
 											class="remove-btn shrink-0 p-1 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
 											title="Remove from queue"
+											aria-label="Remove from queue"
 										>${icon(X, "xs")}</button>
 									`}
 							</div>
@@ -1276,6 +1278,7 @@ export class MessageEditor extends LitElement {
 					<textarea
 						class="flex-1 bg-transparent text-foreground placeholder-muted-foreground outline-none resize-none overflow-y-auto py-1 px-1"
 						placeholder=${this.isStreaming ? i18n("Message will queue until the agent finishes…") : i18n("Type a message...")}
+						aria-label=${this.isStreaming ? i18n("Message will queue until the agent finishes…") : i18n("Type a message...")}
 						rows="1"
 						autocomplete="off"
 						style="max-height: 200px; field-sizing: content; min-height: 1lh; height: auto;"

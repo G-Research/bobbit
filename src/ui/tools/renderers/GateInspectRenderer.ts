@@ -277,6 +277,14 @@ export class GateInspectRenderer implements ToolRenderer {
 								<div
 									class="p-2 flex items-center gap-2 ${hasOutput ? "cursor-pointer hover:bg-accent/50" : ""}"
 									@click=${hasOutput ? toggleStep : null}
+									role=${hasOutput ? "button" : nothing}
+									tabindex=${hasOutput ? "0" : nothing}
+									@keydown=${hasOutput ? (e: KeyboardEvent) => {
+										if (e.key === "Enter" || e.key === " ") {
+											e.preventDefault();
+											toggleStep(e);
+										}
+									} : null}
 								>
 									${stepStatusIcon(status)}
 									<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name}</span>

@@ -2002,7 +2002,7 @@ export class AgentInterface extends LitElement {
 				${this.renderProviderAuthRequired((state as any).providerAuthRequired)}
 
 				${(state as any).isPreparing ? html`
-					<div class="flex items-center gap-2 px-4 py-2 text-muted-foreground text-sm">
+					<div class="flex items-center gap-2 px-4 py-2 text-muted-foreground text-sm" role="status" aria-live="polite">
 						<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 							<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
 						</svg>
@@ -2349,17 +2349,31 @@ export class AgentInterface extends LitElement {
 				<div class="flex ml-auto items-center gap-3 relative" style="position:relative">
 					${popoverContent}
 					<span class="cursor-pointer hover:text-foreground transition-colors"
-						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}>
+						role="button"
+						tabindex="0"
+						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}
+						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); togglePopover(); } }}>
 						${contextHtml}
 					</span>
 					${costText ? html`
 						<span style="position:relative;">
 							<span class="cursor-pointer hover:text-foreground transition-colors"
+								role="button"
+								tabindex="0"
 								@click=${(e: Event) => {
 									e.stopPropagation();
 									this._costPopoverOpen = !this._costPopoverOpen;
 									this._contextPopoverOpen = false;
 									this.requestUpdate();
+								}}
+								@keydown=${(e: KeyboardEvent) => {
+									if (e.key === "Enter" || e.key === " ") {
+										e.preventDefault();
+										e.stopPropagation();
+										this._costPopoverOpen = !this._costPopoverOpen;
+										this._contextPopoverOpen = false;
+										this.requestUpdate();
+									}
 								}}>${costText}</span>
 							<cost-popover
 								.open=${this._costPopoverOpen}
@@ -2472,11 +2486,11 @@ export class AgentInterface extends LitElement {
 						</div>
 						` : ''}
 						${this._runtimeSwitchNotice ? html`
-						<div class="mx-2 mb-2 px-3 py-2 rounded-md border border-destructive/20 bg-destructive/10 text-destructive text-xs" data-testid="runtime-switch-notice">
+						<div class="mx-2 mb-2 px-3 py-2 rounded-md border border-destructive/20 bg-destructive/10 text-destructive text-xs" data-testid="runtime-switch-notice" role="alert">
 							${this._runtimeSwitchNotice}
 						</div>` : nothing}
 						${(this.session as any)?.isAborting ? html`
-						<div class="flex items-center gap-2 px-4 py-1 text-muted-foreground text-sm">
+						<div class="flex items-center gap-2 px-4 py-1 text-muted-foreground text-sm" role="status" aria-live="polite">
 							<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 								<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
 							</svg>
@@ -2805,6 +2819,7 @@ export class AgentInterface extends LitElement {
 							style="min-width:16px; align-self:stretch"
 							@click=${this._toggleMore}
 							title="Show ${hidden.length} more background process${hidden.length > 1 ? 'es' : ''}"
+							aria-label="Show ${hidden.length} more background process${hidden.length > 1 ? 'es' : ''}"
 						><svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block${this._moreExpanded ? ';transform:rotate(180deg)' : ''}"><path d="M1.5 5.5L4 3L6.5 5.5"/></svg></button>
 					</span>
 					${this._moreExpanded ? html`

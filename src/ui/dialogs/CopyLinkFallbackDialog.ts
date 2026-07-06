@@ -70,6 +70,7 @@ export class CopyLinkFallbackDialog extends DialogBase {
 							data-copy-link-input
 							data-testid="copy-link-fallback-input"
 							class="w-full px-3 py-2 text-sm font-mono border border-border rounded bg-muted text-foreground"
+							aria-label="Session link"
 							.value=${this.url}
 							@click=${(e: Event) => (e.target as HTMLInputElement).select()}
 						/>

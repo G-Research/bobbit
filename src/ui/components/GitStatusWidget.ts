@@ -351,20 +351,20 @@ export class GitStatusWidget extends LitElement {
         // On primary branch only: show ahead/behind remote (edge case)
         if (this.ahead > 0 && this.behind > 0) {
             return html`<div class="text-muted-foreground">
-                Remote: <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} ahead</span>,
-                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span>
+                Remote: <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" role="button" tabindex="0" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }} @keydown=${(e: KeyboardEvent) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._fetchCommits('ahead'); }}>${this.ahead} ahead</span>,
+                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" role="button" tabindex="0" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }} @keydown=${(e: KeyboardEvent) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._fetchCommits('behind'); }}>${this.behind} behind</span>
                 ${this._renderPullButton()}
             </div>`;
         }
         if (this.ahead > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed</span> to remote
+                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" role="button" tabindex="0" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }} @keydown=${(e: KeyboardEvent) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed</span> to remote
                 ${this._renderPushButton()}
             </div>`;
         }
         if (this.behind > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span> remote
+                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" role="button" tabindex="0" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }} @keydown=${(e: KeyboardEvent) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._fetchCommits('behind'); }}>${this.behind} behind</span> remote
                 ${this._renderPullButton()}
             </div>`;
         }
@@ -383,15 +383,15 @@ export class GitStatusWidget extends LitElement {
         }
         if (this.aheadOfPrimary > 0 && this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>,
-                <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
+                <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" role="button" tabindex="0" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }} @keydown=${(e: KeyboardEvent) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>,
+                <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" role="button" tabindex="0" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }} @keydown=${(e: KeyboardEvent) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
                 ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
         }
         if (this.aheadOfPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
+                <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" role="button" tabindex="0" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }} @keydown=${(e: KeyboardEvent) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
                 of ${this.primaryRef}
                 ${!this.prState ? this._renderAskPrButton() : nothing}
                 ${!this.prState && this.viewerIsAdmin ? this._renderSquashPushButton() : nothing}
@@ -399,7 +399,7 @@ export class GitStatusWidget extends LitElement {
         }
         if (this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
+                <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" role="button" tabindex="0" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }} @keydown=${(e: KeyboardEvent) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
                 ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
@@ -487,6 +487,7 @@ export class GitStatusWidget extends LitElement {
                     <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
                         <select
                             style="font-size:12px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--foreground)"
+                            aria-label="Merge method"
                             .value=${this.mergeMethod}
                             @change=${(e: Event) => { this.mergeMethod = (e.target as HTMLSelectElement).value as any; }}
                             ?disabled=${this.merging}
@@ -513,7 +514,7 @@ export class GitStatusWidget extends LitElement {
                         ${this.prMergeable !== "MERGEABLE" && !canBypassMerge ? html`<span style="font-size:11px;color:var(--destructive)">${this.prMergeable === "CONFLICTING" ? "Has conflicts" : "Not mergeable"}</span>` : nothing}
                         `}
                     </div>
-                    ${this.mergeError ? html`<div style="font-size:12px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : nothing}
+                    ${this.mergeError ? html`<div style="font-size:12px;color:var(--destructive);margin-top:4px" role="alert">${this.mergeError}</div>` : nothing}
                 ` : nothing}
             </div>
         `;
@@ -528,7 +529,7 @@ export class GitStatusWidget extends LitElement {
             ?disabled=${this.mergingPrimary}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleMergePrimary(); }}
             title="Rebase this branch on top of ${this.primaryRef}"
-        >${this.mergingPrimary ? 'Rebasing\u2026' : `Rebase on ${this.primaryBranch}`}</button>${this.mergePrimaryError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : nothing}`;
+        >${this.mergingPrimary ? 'Rebasing\u2026' : `Rebase on ${this.primaryBranch}`}</button>${this.mergePrimaryError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px" role="alert">${this.mergePrimaryError}</span>` : nothing}`;
     }
 
     private _handleMergePrimary() {
@@ -568,7 +569,7 @@ export class GitStatusWidget extends LitElement {
             ?disabled=${this.squashPushing}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleSquashPush(); }}
             title="Squash all branch commits into one and push directly to ${this.primaryBranch}"
-        >${this.squashPushing ? 'Pushing\u2026' : 'Squash push'}</button>${this.squashPushError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.squashPushError}</span>` : nothing}`;
+        >${this.squashPushing ? 'Pushing\u2026' : 'Squash push'}</button>${this.squashPushError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px" role="alert">${this.squashPushError}</span>` : nothing}`;
     }
 
     private _handleSquashPush() {
@@ -590,7 +591,7 @@ export class GitStatusWidget extends LitElement {
             style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.pulling}
             @click=${() => this._handlePull()}
-        >${this.pulling ? 'Pulling\u2026' : 'Pull'}</button>${this.pullError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.pullError}</span>` : nothing}`;
+        >${this.pulling ? 'Pulling\u2026' : 'Pull'}</button>${this.pullError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px" role="alert">${this.pullError}</span>` : nothing}`;
     }
 
     private _handlePull() {
@@ -613,7 +614,7 @@ export class GitStatusWidget extends LitElement {
             style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.pushing}
             @click=${() => this._handlePush()}
-        >${this.pushing ? 'Pushing\u2026' : 'Push'}</button>${this.pushError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.pushError}</span>` : nothing}`;
+        >${this.pushing ? 'Pushing\u2026' : 'Push'}</button>${this.pushError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px" role="alert">${this.pushError}</span>` : nothing}`;
     }
 
     private _handlePush() {
@@ -727,7 +728,7 @@ export class GitStatusWidget extends LitElement {
                 Loading diff\u2026
             </div>`;
         } else if (this._diffError) {
-            body = html`<div class="p-8" style="color:var(--destructive)">${this._diffError}</div>`;
+            body = html`<div class="p-8" style="color:var(--destructive)" role="alert">${this._diffError}</div>`;
         } else if (this._diffContent) {
             body = html`<rich-git-diff-viewer
                 .content=${this._diffContent}
@@ -933,7 +934,7 @@ export class GitStatusWidget extends LitElement {
                 Loading commits\u2026
             </div>`;
         } else if (this._commitsError) {
-            body = html`<div class="p-8" style="color:var(--destructive)">${this._commitsError}</div>`;
+            body = html`<div class="p-8" style="color:var(--destructive)" role="alert">${this._commitsError}</div>`;
         } else if (this._commits.length === 0) {
             body = html`<div class="p-8 text-muted-foreground">${this._commitsDirection === 'behind' ? 'No incoming commits' : 'No unpushed commits'}</div>`;
         } else {
@@ -954,6 +955,7 @@ export class GitStatusWidget extends LitElement {
                             class="hover:text-foreground hover:bg-muted/50"
                             @click=${() => this._closeCommitsModal()}
                             title="Close"
+                            aria-label="Close"
                         >&times;</button>
                     </div>
                     <div style="flex:1;overflow:auto">${body}</div>
@@ -1029,7 +1031,10 @@ export class GitStatusWidget extends LitElement {
                                 ? html`<div class="flex flex-col gap-0.5 px-2 pb-2 pt-1">
                                     ${files.map(f => html`
                                         <div class="flex items-center gap-2 py-0.5 min-w-0 rounded px-1 -mx-1 ${(this.sessionId || this.goalId) ? 'cursor-pointer hover:bg-muted/50' : ''}"
-                                             @click=${() => (this.sessionId || this.goalId) ? this._openDiffModal(f.file, repoName) : undefined}>
+                                             role=${(this.sessionId || this.goalId) ? 'button' : nothing}
+                                             tabindex=${(this.sessionId || this.goalId) ? '0' : nothing}
+                                             @click=${() => (this.sessionId || this.goalId) ? this._openDiffModal(f.file, repoName) : undefined}
+                                             @keydown=${(e: KeyboardEvent) => { if (!(this.sessionId || this.goalId)) return; if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._openDiffModal(f.file, repoName); }}>
                                             <span class="${this._statusColor(f.status)} font-mono w-[60px] shrink-0 text-right text-[11px]" title=${this._statusLabel(f.status)}>${this._statusLabel(f.status)}</span>
                                             <span class="text-foreground truncate text-[12px]" title=${f.file}>${f.file}</span>
                                         </div>
@@ -1079,7 +1084,10 @@ export class GitStatusWidget extends LitElement {
                               ${this.statusFiles.map(
                                   (f) => html`
                                       <div class="flex items-center gap-2 py-0.5 min-w-0 rounded px-1 -mx-1 ${(this.sessionId || this.goalId) ? 'cursor-pointer hover:bg-muted/50' : ''}"
-                                           @click=${() => (this.sessionId || this.goalId) ? this._openDiffModal(f.file) : undefined}>
+                                           role=${(this.sessionId || this.goalId) ? 'button' : nothing}
+                                           tabindex=${(this.sessionId || this.goalId) ? '0' : nothing}
+                                           @click=${() => (this.sessionId || this.goalId) ? this._openDiffModal(f.file) : undefined}
+                                           @keydown=${(e: KeyboardEvent) => { if (!(this.sessionId || this.goalId)) return; if (e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); this._openDiffModal(f.file); }}>
                                           <span
                                               class="${this._statusColor(f.status)} font-mono w-[70px] shrink-0 text-right"
                                               title=${this._statusLabel(f.status)}

@@ -41,6 +41,7 @@ export class ErrorMessage extends LitElement {
 				<button
 					class="shrink-0 p-1 rounded hover:bg-destructive/10 text-destructive/60 hover:text-destructive transition-colors"
 					title="Dismiss"
+					aria-label="Dismiss"
 					@click=${() => this.onDismiss?.(this.message.id)}
 				>
 					<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">

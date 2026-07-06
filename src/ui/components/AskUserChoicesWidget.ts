@@ -866,6 +866,7 @@ export class AskUserChoicesWidget extends LitElement {
 					type="text"
 					class="ask-other-input flex-1 self-stretch px-2 py-2 text-sm border border-border rounded bg-background"
 					placeholder="Type your answer…"
+					aria-label="Type your answer…"
 					.value=${otherText}
 					?disabled=${readOnly}
 					@input=${(e: Event) => this._onOtherInput(qIdx, (e.target as HTMLInputElement).value)}>

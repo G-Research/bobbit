@@ -515,11 +515,11 @@ function renderNavBar(): TemplateResult {
 		return html`
 			<div class="roles-nav">
 				<div class="roles-nav-left">
-					<button class="roles-back" @click=${showList} title="Back to roles">
+					<button class="roles-back" @click=${showList} title="Back to roles" aria-label="Back to roles">
 						${icon(ArrowLeft, "sm")}
 					</button>
 					<div class="roles-title-group">
-						<span class="roles-breadcrumb" @click=${showList}>Roles</span>
+						<span class="roles-breadcrumb" role="button" tabindex="0" @click=${showList} @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showList(); } }}>Roles</span>
 						<span class="roles-breadcrumb-sep">/</span>
 						<h1 class="roles-title">${selectedRole.label}</h1>
 					</div>
@@ -549,7 +549,7 @@ function renderNavBar(): TemplateResult {
 	return html`
 		<div class="roles-nav">
 			<div class="roles-nav-left">
-				<button class="roles-back" @click=${() => setHashRoute("landing")} title="Back to sessions">
+				<button class="roles-back" @click=${() => setHashRoute("landing")} title="Back to sessions" aria-label="Back to sessions">
 					${icon(ArrowLeft, "sm")}
 				</button>
 				<h1 class="roles-title">Roles</h1>
@@ -927,7 +927,7 @@ export function renderRoleListRow(opts: RoleRowOptions): TemplateResult {
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(role); } }}>
 			${idleBlob(role.accessory ?? "none", 42, index, index)}
 			<div class="role-row-info">
-				<span class="role-row-label">${role.label}${customized ? html` <span class="role-row-customized-marker" title="Customized for this goal">●</span>` : nothing}${modelControl?.savedFlashRole === role.name ? html` <span class="role-row-saved-flash" data-testid="role-row-saved-flash">Saved</span>` : nothing}</span>
+				<span class="role-row-label">${role.label}${customized ? html` <span class="role-row-customized-marker" title="Customized for this goal">●</span>` : nothing}${modelControl?.savedFlashRole === role.name ? html` <span class="role-row-saved-flash" data-testid="role-row-saved-flash" role="status" aria-live="polite" aria-atomic="true">Saved</span>` : nothing}</span>
 				<span class="role-meta">
 					<span class="role-row-slug">${role.name}</span>
 					${renderRoleDefinitionOriginBadge(origin, overrides, (role as any).originPackName)}
@@ -935,10 +935,10 @@ export function renderRoleListRow(opts: RoleRowOptions): TemplateResult {
 			</div>
 			${modelControl ? renderRoleRowModelControl(role, modelControl) : nothing}
 			<div class="role-row-actions">
-				${onEdit ? html`<button class="role-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); onEdit(role); }} title="Edit">
+				${onEdit ? html`<button class="role-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); onEdit(role); }} title="Edit" aria-label="Edit">
 					${icon(Pencil, "sm")}
 				</button>` : nothing}
-				${onDelete ? html`<button class="role-row-action-btn delete" @click=${(e: Event) => { e.stopPropagation(); onDelete(role); }} title="Delete">
+				${onDelete ? html`<button class="role-row-action-btn delete" @click=${(e: Event) => { e.stopPropagation(); onDelete(role); }} title="Delete" aria-label="Delete">
 					${icon(Trash2, "sm")}
 				</button>` : nothing}
 			</div>
@@ -1105,13 +1105,16 @@ export function renderRoleToolAccessTab(opts: RoleToolAccessTabOptions): Templat
 
 				return html`
 					<div class="roles-access-group ${isCollapsed ? "collapsed" : ""}">
-						<div class="roles-access-group-header" @click=${() => onToggleGroup(groupName)}>
+						<div class="roles-access-group-header" role="button" tabindex="0" aria-expanded=${isCollapsed ? "false" : "true"}
+							@click=${() => onToggleGroup(groupName)}
+							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggleGroup(groupName); } }}>
 							${chevronSvg}
 							<span class="roles-access-group-name">${groupName}</span>
 							<span class="roles-access-group-count">${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}</span>
 							<span class="roles-access-group-policy-label">Group Policy:</span>
 							<select class="roles-access-group-select"
 								.value=${toolPolicies[groupName] || ""}
+								aria-label="Group Policy for ${groupName}"
 								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${(e: Event) => { e.stopPropagation(); onPolicyChange(groupName, (e.target as HTMLSelectElement).value); }}
@@ -1140,6 +1143,7 @@ export function renderRoleToolAccessTab(opts: RoleToolAccessTabOptions): Templat
 										<select
 											class="roles-access-row-select"
 											.value=${currentPolicy}
+											aria-label="Tool policy for ${tool.name}"
 											?disabled=${readOnly}
 											@change=${(e: Event) => onPolicyChange(tool.name, (e.target as HTMLSelectElement).value)}
 										>
@@ -1197,11 +1201,13 @@ export function renderRolePromptTab(opts: RolePromptTabOptions): TemplateResult 
 			<div class="roles-prompt-tabs">
 				<button
 					class="roles-prompt-tab ${activeTab === "baseline" ? "roles-prompt-tab--active" : ""}"
+					aria-selected=${activeTab === "baseline" ? "true" : "false"}
 					@click=${() => onAssistantPromptTabChange?.("baseline")}
 				>Shared Baseline</button>
 				${aPrompts.map((p) => html`
 					<button
 						class="roles-prompt-tab ${activeTab === p.type ? "roles-prompt-tab--active" : ""}"
+						aria-selected=${activeTab === p.type ? "true" : "false"}
 						@click=${() => onAssistantPromptTabChange?.(p.type)}
 					>${p.title.replace(" Assistant", "").replace(" Wizard", "")}</button>
 				`)}
@@ -1213,6 +1219,7 @@ export function renderRolePromptTab(opts: RolePromptTabOptions): TemplateResult 
 				.value=${promptTemplate}
 				?readonly=${readOnly}
 				placeholder="Markdown system prompt template. Supports {{GOAL_BRANCH}} and {{AGENT_ID}} placeholders."
+				aria-label="System prompt template"
 				@input=${(e: Event) => onPromptChange((e.target as HTMLTextAreaElement).value)}
 			></textarea>
 		` : html`
@@ -1221,6 +1228,7 @@ export function renderRolePromptTab(opts: RolePromptTabOptions): TemplateResult 
 				class="roles-prompt-editor"
 				.value=${ePrompts.get(activeTab) ?? ""}
 				?readonly=${readOnly}
+				aria-label="Assistant sub-prompt"
 				@input=${(e: Event) => onAssistantPromptChange?.(activeTab, (e.target as HTMLTextAreaElement).value)}
 			></textarea>
 		`}
@@ -1351,6 +1359,7 @@ export function renderRoleEditor(opts: RoleEditorOptions): TemplateResult {
 								<button
 									class="roles-accessory-option ${selected ? "roles-accessory-option--selected" : ""}"
 									title="${acc.label}"
+									aria-pressed=${selected ? "true" : "false"}
 									?disabled=${readOnly}
 									@click=${() => { if (!readOnly) callbacks.onDraftChange({ accessory: accId }); }}
 								>
@@ -1379,8 +1388,10 @@ export function renderRoleEditor(opts: RoleEditorOptions): TemplateResult {
 				<!-- Tab bar -->
 				<div class="roles-tab-bar">
 					<button class="roles-tab ${draft.activeTab === "prompt" ? "roles-tab--active" : ""}"
+						aria-selected=${draft.activeTab === "prompt" ? "true" : "false"}
 						@click=${() => callbacks.onTabChange("prompt")}>Prompt</button>
 					<button class="roles-tab ${draft.activeTab === "tools" ? "roles-tab--active" : ""}"
+						aria-selected=${draft.activeTab === "tools" ? "true" : "false"}
 						@click=${() => callbacks.onTabChange("tools")}>Tool Access</button>
 				</div>
 

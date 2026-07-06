@@ -701,11 +701,13 @@ function renderMobileLanding() {
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
 															@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", projectSettingsTarget); }}
 															title=${isHeadquartersProject(project) ? "Headquarters settings" : "Project settings"}
+															aria-label=${isHeadquartersProject(project) ? "Headquarters settings" : "Project settings"}
 														>${icon(Settings, "sm")}</button>
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative flex items-center justify-center"
 															@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 															title="New goal in ${project.name}"
+															aria-label="New goal in ${project.name}"
 														>
 															<span class="sidebar-compound-icon sidebar-compound-icon--lg" data-testid="sidebar-add-goal-icon">
 																${icon(GoalIcon, "sm", "sidebar-compound-base")}
@@ -733,6 +735,7 @@ function renderMobileLanding() {
 																	style="line-height:0;"
 																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, defaultCwdForProjectSession(project), undefined, undefined, project.id); }}
 																	title="New session in ${project.name}"
+																	aria-label="New session in ${project.name}"
 																>
 																	<span class="sidebar-compound-icon sidebar-compound-icon--lg" data-testid="sidebar-add-session-icon">
 																							${icon(MessagesSquare, "sm", "sidebar-compound-base")}
@@ -746,6 +749,7 @@ function renderMobileLanding() {
 																	style="line-height:0;"
 																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: defaultCwdForProjectSession(project) }); }}
 																	title="New session with role"
+																	aria-label="New session with role"
 																><span class="sidebar-scale-icon">${icon(ChevronDown, "sm")}</span></button>
 																${renderRolePickerDropdown()}
 															</div>
@@ -2275,6 +2279,9 @@ export function doRenderApp(): void {
 				class="shrink-0 flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium bg-yellow-500/15 text-yellow-700 dark:text-yellow-400"
 				data-testid="orphan-transcripts-banner"
 				title="Agent transcripts exist on disk that are not tracked in sessions.json. See gateway logs for paths."
+				role="status"
+				aria-live="polite"
+				aria-atomic="true"
 			>
 				<span>${n} agent transcript${n === 1 ? "" : "s"} on disk are not tracked — see logs</span>
 			</div>
@@ -2293,6 +2300,9 @@ export function doRenderApp(): void {
 					${status.tripped ? "bg-red-500/15 text-red-700 dark:text-red-400" : "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400"}"
 				data-testid="session-store-stale-recovery-banner"
 				title="A second gateway, cloud sync, or antivirus may have rewritten sessions.json under this running gateway. See docs/design/session-store-crash-safety.md."
+				role="status"
+				aria-live="polite"
+				aria-atomic="true"
 			>
 				<span>${label}</span>
 			</div>
@@ -2305,7 +2315,8 @@ export function doRenderApp(): void {
 			<div class="reconnect-banner shrink-0 flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium
 				${state.connectionStatus === "reconnecting"
 					? "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400"
-					: "bg-red-500/15 text-red-700 dark:text-red-400"}">
+					: "bg-red-500/15 text-red-700 dark:text-red-400"}"
+				role="status" aria-live="polite" aria-atomic="true">
 				${state.connectionStatus === "reconnecting"
 					? html`
 						<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2746,6 +2757,7 @@ export function doRenderApp(): void {
 			class=${sidePanelChromeButtonClass}
 			style=${sidePanelChromeButtonStyle}
 			title="Open preview in new tab"
+			aria-label="Open preview in new tab"
 		>${icon(ExternalLink, "sm")}</a>
 	` : html`<a
 			href=${sidePanelPopoutUrl(tab)}
@@ -2754,12 +2766,13 @@ export function doRenderApp(): void {
 			class=${sidePanelChromeButtonClass}
 			style=${sidePanelChromeButtonStyle}
 			title="Open side panel in new tab"
+			aria-label="Open side panel in new tab"
 			data-testid="side-panel-popout"
 		>${icon(ExternalLink, "sm")}</a>`;
 
 	const sidePanelActionButtons = (tab: UnifiedContentTab) => html`
 		${tab.kind === "preview" && (previewEntryFromTab(tab) || state.previewPanelEntry) ? html`
-			<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh preview">
+			<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh preview" aria-label="Refresh preview">
 				${icon(RotateCw, "sm")}
 			</button>
 		` : ""}
@@ -2776,11 +2789,11 @@ export function doRenderApp(): void {
 			: `Collapse side panel${shortcutHint("toggle-preview")}`;
 		return html`
 		${mode === "fullscreen" ? "" : html`
-			<button @click=${() => setSidePanelModeAndRender("fullscreen")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${fullscreenTitle} data-testid="side-panel-fullscreen">
+			<button @click=${() => setSidePanelModeAndRender("fullscreen")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${fullscreenTitle} aria-label=${fullscreenTitle} data-testid="side-panel-fullscreen">
 				${icon(PanelRightOpen, "sm")}
 			</button>
 		`}
-		<button @click=${() => setSidePanelModeAndRender(collapseTarget)} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${collapseTitle} data-testid="side-panel-collapse">
+		<button @click=${() => setSidePanelModeAndRender(collapseTarget)} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${collapseTitle} aria-label=${collapseTitle} data-testid="side-panel-collapse">
 			${icon(PanelRightClose, "sm")}
 		</button>
 	`;
@@ -2915,7 +2928,7 @@ export function doRenderApp(): void {
 	};
 
 	const sidePanelRestoreButton = () => html`
-		<button @click=${() => setSidePanelModeAndRender("split")} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title=${`Expand side panel${shortcutHint("toggle-sidebar")}`} data-testid="side-panel-restore">
+		<button @click=${() => setSidePanelModeAndRender("split")} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title=${`Expand side panel${shortcutHint("toggle-sidebar")}`} aria-label=${`Expand side panel${shortcutHint("toggle-sidebar")}`} data-testid="side-panel-restore">
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;

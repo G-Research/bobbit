@@ -159,6 +159,7 @@ export class AttachmentOverlay extends LitElement {
 								onClick: this.handleDownload,
 								children: icon(Download, "sm"),
 								className: "h-8 w-8",
+								title: "Download",
 							})}
 							${Button({
 								variant: "ghost",
@@ -166,6 +167,7 @@ export class AttachmentOverlay extends LitElement {
 								onClick: () => this.close(),
 								children: icon(X, "sm"),
 								className: "h-8 w-8",
+								title: "Close",
 							})}
 						</div>
 					</div>

@@ -90,6 +90,7 @@ function renderNavBar(): TemplateResult {
 				class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
 				@click=${() => setHashRoute("landing")}
 				title="Back"
+				aria-label="Back"
 			>${icon(ArrowLeft, "sm")}</button>
 			<h1 class="text-lg font-semibold flex items-center gap-2">
 				${icon(Zap, "sm")}
@@ -219,6 +220,7 @@ function renderDirectoriesSection(): TemplateResult {
 								<button
 									class="p-0.5 rounded hover:bg-destructive/15 text-muted-foreground hover:text-destructive transition-colors shrink-0"
 									title="Remove directory"
+									aria-label="Remove directory"
 									@click=${() => removeCustomDir(i)}
 								>${icon(X, "xs")}</button>
 							</div>
@@ -231,6 +233,7 @@ function renderDirectoriesSection(): TemplateResult {
 							type="text"
 							class="flex-1 text-xs px-2 py-1.5 rounded border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
 							placeholder="~/my-skills or /absolute/path"
+							aria-label="~/my-skills or /absolute/path"
 							.value=${newDirPath}
 							@input=${(e: Event) => { newDirPath = (e.target as HTMLInputElement).value; renderApp(); }}
 							@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newDirPath.trim()) addCustomDir(); }}

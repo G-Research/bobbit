@@ -539,7 +539,7 @@ export class AnnotationPopover extends LitElement {
             <div class="review-sheet-handle-pill"></div>
           </div>
           ${quoteRow}
-          <textarea placeholder="Add your comment..." @keydown=${this._onKeyDown}></textarea>
+          <textarea placeholder="Add your comment..." aria-label="Add your comment" @keydown=${this._onKeyDown}></textarea>
           <div class="review-popover-actions">
             ${deleteBtn}
             <button class="review-popover-cancel" @click=${this._cancel}>Cancel</button>
@@ -552,7 +552,7 @@ export class AnnotationPopover extends LitElement {
     return html`
       <div class="review-popover" @keydown=${this._onKeyDown}>
         ${quoteRow}
-        <textarea placeholder="Add your comment..." @keydown=${this._onKeyDown}></textarea>
+        <textarea placeholder="Add your comment..." aria-label="Add your comment" @keydown=${this._onKeyDown}></textarea>
         <div class="review-popover-actions">
           ${deleteBtn}
           <button class="review-popover-cancel" @click=${this._cancel}>Cancel</button>

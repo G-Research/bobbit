@@ -280,6 +280,7 @@ export class DiffBlock extends LitElement {
 							@click=${() => this.toggleMode()}
 							class="flex items-center gap-1 px-2 py-0.5 text-xs rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors"
 							title="${isSideBySide ? "Switch to inline view" : "Switch to side-by-side view"}"
+							aria-label="${isSideBySide ? "Switch to inline view" : "Switch to side-by-side view"}"
 						>
 							${isSideBySide ? icon(Rows2, "sm") : icon(Columns2, "sm")}
 						</button>
@@ -287,6 +288,7 @@ export class DiffBlock extends LitElement {
 							@click=${() => this.copy()}
 							class="flex items-center gap-1 px-2 py-0.5 text-xs rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors"
 							title="${i18n("Copy output")}"
+							aria-label="${i18n("Copy output")}"
 						>
 							${this.copied ? icon(Check, "sm") : icon(Copy, "sm")}
 							${this.copied ? html`<span>${i18n("Copied!")}</span>` : ""}

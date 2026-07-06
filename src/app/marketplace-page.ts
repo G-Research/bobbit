@@ -1199,6 +1199,7 @@ function renderNavBar(): TemplateResult {
 				class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
 				@click=${() => setHashRoute("landing")}
 				title="Back"
+				aria-label="Back"
 			>${icon(ArrowLeft, "sm")}</button>
 			<h1 class="text-lg font-semibold flex items-center gap-2">
 				${icon(Store, "sm")}
@@ -1345,6 +1346,7 @@ function renderSourcesPanel(): TemplateResult {
 			data-testid="market-source-url"
 			class="market-input ${isGateway ? "flex-1" : ""}"
 			placeholder=${isGateway ? "http://mcp-local.t3.zone/readonly/mcp" : "https://github.com/acme/bobbit-packs.git or /abs/local/path"}
+			aria-label=${isGateway ? "http://mcp-local.t3.zone/readonly/mcp" : "https://github.com/acme/bobbit-packs.git or /abs/local/path"}
 			.value=${newSourceUrl}
 			@input=${(e: Event) => { newSourceUrl = (e.target as HTMLInputElement).value; renderApp(); }}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
@@ -1361,7 +1363,7 @@ function renderSourcesPanel(): TemplateResult {
 	return html`
 		<section class="market-panel" data-testid="market-sources-panel">
 			<h2 class="market-panel-title">${icon(Package, "sm")} Sources</h2>
-			${sourcesError ? html`<div class="market-error" data-testid="market-sources-error">${sourcesError}</div>` : ""}
+			${sourcesError ? html`<div class="market-error" data-testid="market-sources-error" role="alert">${sourcesError}</div>` : ""}
 			${sources.length === 0
 				? html`<p class="text-sm text-muted-foreground italic">No marketplace sources registered yet.</p>`
 				: html`<div class="flex flex-col gap-1.5">${sources.map(renderSourceRow)}</div>`}
@@ -1411,6 +1413,7 @@ function renderSourcesPanel(): TemplateResult {
 								data-testid="market-source-ref"
 								class="market-input flex-1"
 								placeholder="ref (branch/tag, optional)"
+								aria-label="ref (branch/tag, optional)"
 								.value=${newSourceRef}
 								@input=${(e: Event) => { newSourceRef = (e.target as HTMLInputElement).value; renderApp(); }}
 								@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
@@ -1455,10 +1458,10 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 			${isBuiltin
 				? ""
 				: html`
-					<button class="market-icon-btn" title="Re-sync" data-testid="market-sync-source" ?disabled=${syncing} @click=${() => handleSyncSource(src.id)}>
+					<button class="market-icon-btn" title="Re-sync" aria-label="Re-sync" data-testid="market-sync-source" ?disabled=${syncing} @click=${() => handleSyncSource(src.id)}>
 						${icon(RotateCw, "xs", syncing ? "animate-spin" : "")}
 					</button>
-					<button class="market-icon-btn market-icon-btn--danger" title="Remove source" data-testid="market-remove-source" @click=${() => handleRemoveSource(src.id)}>
+					<button class="market-icon-btn market-icon-btn--danger" title="Remove source" aria-label="Remove source" data-testid="market-remove-source" @click=${() => handleRemoveSource(src.id)}>
 						${icon(Trash2, "xs")}
 					</button>
 				`}
@@ -1617,10 +1620,11 @@ function renderBrowseControls(): TemplateResult {
 					class="market-input market-search-input"
 					data-testid="market-browse-search"
 					placeholder="Search packages, descriptions, sources, operations…"
+					aria-label="Search packages, descriptions, sources, operations…"
 					.value=${browseSearch}
 					@input=${(e: Event) => { browseSearch = (e.target as HTMLInputElement).value; renderApp(); }}
 				/>
-				${browseSearch ? html`<button class="market-search-clear" data-testid="market-browse-search-clear" title="Clear search" @click=${() => { browseSearch = ""; renderApp(); }}>×</button>` : ""}
+				${browseSearch ? html`<button class="market-search-clear" data-testid="market-browse-search-clear" title="Clear search" aria-label="Clear search" @click=${() => { browseSearch = ""; renderApp(); }}>×</button>` : ""}
 			</div>
 			<div
 				class="market-source-filter"
@@ -1706,15 +1710,15 @@ function renderBrowseWarnings(): TemplateResult {
 }
 
 function renderBrowseEmptyState(visible: BrowsePackWire[]): TemplateResult {
-	if (browseLoading && browsePacks.length === 0) return html`<p class="text-sm text-muted-foreground">Loading browse catalogue…</p>`;
-	if (browseError) return html`<div class="market-error" data-testid="market-browse-error">${browseError}</div>`;
+	if (browseLoading && browsePacks.length === 0) return html`<p class="text-sm text-muted-foreground" role="status" aria-live="polite" aria-atomic="true">Loading browse catalogue…</p>`;
+	if (browseError) return html`<div class="market-error" data-testid="market-browse-error" role="alert">${browseError}</div>`;
 	if (browseSources.length === 0) return html`<p class="text-sm text-muted-foreground italic">No marketplace sources yet. Add a source in Sources, then return to Browse.</p>`;
 	const selected = browseSources.filter((src) => enabledBrowseSourceIds.has(src.sourceId));
 	if (selected.length === 0) return html`<p class="text-sm text-muted-foreground italic">No sources selected. Open Sources and select at least one source to browse packages.</p>`;
 	const selectedIds = new Set(selected.map((src) => src.sourceId));
 	const selectedPacks = browsePacks.filter((pack) => selectedIds.has(browsePackSourceId(pack)));
 	const allSelectedFailed = selected.every((src) => src.status === "error" || src.status === "unsupported");
-	if (allSelectedFailed) return html`<div class="market-error" data-testid="market-browse-error">Could not load selected sources.</div>`;
+	if (allSelectedFailed) return html`<div class="market-error" data-testid="market-browse-error" role="alert">Could not load selected sources.</div>`;
 	if (selectedPacks.length === 0) {
 		const okSelected = selected.filter((src) => src.status === "ok");
 		return html`<p class="text-sm text-muted-foreground italic">${okSelected.length === 1 ? `${okSelected[0].sourceName} returned no supported packages.` : "Selected sources returned no supported packages."}</p>`;
@@ -1858,7 +1862,7 @@ function renderInstalledPanel(): TemplateResult {
 	return html`
 		<section class="market-panel" data-testid="market-installed-panel">
 			<h2 class="market-panel-title">${icon(Package, "sm")} Installed</h2>
-			${installedError ? html`<div class="market-error" data-testid="market-installed-error">${installedError}</div>` : ""}
+			${installedError ? html`<div class="market-error" data-testid="market-installed-error" role="alert">${installedError}</div>` : ""}
 			${isEmpty
 				? html`<p class="text-sm text-muted-foreground italic">No packs installed.</p>`
 				: html`
@@ -1995,7 +1999,7 @@ function renderHindsightStrip(pack: InstalledPackWire): TemplateResult {
 				${hsState === "managed-starting" || hsState === "managed-running" || hsState === "managed-unhealthy"
 					? html`<button type="button" class="market-btn" data-testid="market-hindsight-stop" ?disabled=${busyStop} @click=${() => hindsightRowStop(pack)}>${busyStop ? "Stopping…" : "Stop"}</button>`
 					: ""}
-				${rowResult ? html`<span class="market-lozenge market-lozenge--${rowResult.ok ? "positive" : "error"}" data-testid="market-hindsight-action-result">${rowResult.text}</span>` : ""}
+				${rowResult ? html`<span class="market-lozenge market-lozenge--${rowResult.ok ? "positive" : "error"}" data-testid="market-hindsight-action-result" role=${rowResult.ok ? "status" : "alert"}>${rowResult.text}</span>` : ""}
 			</div>
 			${hindsightStartConsent.has(key) ? renderHindsightStartConsent(pack, key) : ""}
 			${isOpen && form ? renderHindsightConfigForm(form, key) : ""}
@@ -2029,11 +2033,11 @@ function renderHindsightField(opts: {
 	};
 	const control = type === "select"
 		? html`
-			<select class="market-input" data-testid="market-hindsight-form-${lower}" .value=${value} @change=${onChange}>
+			<select class="market-input" data-testid="market-hindsight-form-${lower}" aria-label=${label} .value=${value} @change=${onChange}>
 				${(options ?? []).map((o) => html`<option value=${o.value} ?selected=${o.value === value}>${o.label}</option>`)}
 			</select>
 		`
-		: html`<input type="text" class="market-input" data-testid="market-hindsight-form-${lower}" .value=${value} @input=${onChange} />`;
+		: html`<input type="text" class="market-input" data-testid="market-hindsight-form-${lower}" aria-label=${label} .value=${value} @input=${onChange} />`;
 	return html`
 		<div class="market-field ${dirty ? "market-field--dirty" : ""}" data-testid="market-hindsight-field-${lower}" data-dirty=${dirty ? "true" : "false"}>
 			<span class="market-field-label">
@@ -2085,7 +2089,7 @@ function renderHindsightConfigForm(form: HindsightFormState, key: string): Templ
 					?disabled=${form.saving}
 					@click=${() => saveHindsightConfigForm(key)}
 				>${form.saving ? "Saving…" : "Save"}</button>
-				${form.result ? html`<span class="market-lozenge market-lozenge--${form.result.ok ? "positive" : "error"}" data-testid="market-hindsight-config-result">${form.result.text}</span>` : ""}
+				${form.result ? html`<span class="market-lozenge market-lozenge--${form.result.ok ? "positive" : "error"}" data-testid="market-hindsight-config-result" role=${form.result.ok ? "status" : "alert"}>${form.result.text}</span>` : ""}
 			</div>
 			${projectId ? renderHindsightOverride(form, key, projectId) : ""}
 		</div>
@@ -2168,7 +2172,7 @@ function renderHindsightOverride(form: HindsightFormState, key: string, projectI
 					?disabled=${form.overrideSaving}
 					@click=${() => saveHindsightOverrideForm(key, projectId)}
 				>${form.overrideSaving ? "Saving…" : "Save override"}</button>
-				${form.overrideResult ? html`<span class="market-lozenge market-lozenge--${form.overrideResult.ok ? "positive" : "error"}" data-testid="market-hindsight-override-result">${form.overrideResult.text}</span>` : ""}
+				${form.overrideResult ? html`<span class="market-lozenge market-lozenge--${form.overrideResult.ok ? "positive" : "error"}" data-testid="market-hindsight-override-result" role=${form.overrideResult.ok ? "status" : "alert"}>${form.overrideResult.text}</span>` : ""}
 			</div>
 		</div>
 	`;
@@ -2594,7 +2598,7 @@ function renderHindsightWizardConnectStep(pack: InstalledPackWire): TemplateResu
 					>${w.busy ? "Testing…" : "Test connection"}</button>
 				</div>
 			`}
-		${w.result ? html`<div class="market-lozenge market-lozenge--${w.result.ok ? "positive" : "error"}" data-testid="market-hindsight-wizard-connect-result">${w.result.text}</div>` : ""}
+		${w.result ? html`<div class="market-lozenge market-lozenge--${w.result.ok ? "positive" : "error"}" data-testid="market-hindsight-wizard-connect-result" role=${w.result.ok ? "status" : "alert"}>${w.result.text}</div>` : ""}
 	`;
 }
 
@@ -2731,8 +2735,8 @@ function renderInstalledPackCard(pack: InstalledPackWire, scope: MarketScope, in
 				</div>
 				<div class="flex flex-col items-end gap-1 shrink-0">
 					<div class="flex items-center gap-1">
-						<button class="market-icon-btn" data-testid="market-move-up" title="Move up (lower precedence)" ?disabled=${index === 0} @click=${() => movePack(scope, pack.packName, -1)}>${icon(ChevronDown, "xs", "rotate-180")}</button>
-						<button class="market-icon-btn" data-testid="market-move-down" title="Move down (higher precedence)" ?disabled=${index === total - 1} @click=${() => movePack(scope, pack.packName, 1)}>${icon(ChevronDown, "xs")}</button>
+						<button class="market-icon-btn" data-testid="market-move-up" title="Move up (lower precedence)" aria-label="Move up (lower precedence)" ?disabled=${index === 0} @click=${() => movePack(scope, pack.packName, -1)}>${icon(ChevronDown, "xs", "rotate-180")}</button>
+						<button class="market-icon-btn" data-testid="market-move-down" title="Move down (higher precedence)" aria-label="Move down (higher precedence)" ?disabled=${index === total - 1} @click=${() => movePack(scope, pack.packName, 1)}>${icon(ChevronDown, "xs")}</button>
 					</div>
 					<div class="flex items-center gap-1">
 						${pack.updateAvailable
@@ -3326,7 +3330,7 @@ export function renderMarketplacePage(): TemplateResult {
 				${renderNavBar()}
 				${renderResearchPreviewBanner()}
 				<div class="flex-1 flex items-center justify-center">
-					<div class="text-sm text-muted-foreground">Loading marketplace…</div>
+					<div class="text-sm text-muted-foreground" role="status" aria-live="polite" aria-atomic="true">Loading marketplace…</div>
 				</div>
 			</div>
 		`;

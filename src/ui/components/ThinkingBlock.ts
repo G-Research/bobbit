@@ -33,7 +33,14 @@ export class ThinkingBlock extends LitElement {
 			<div class="thinking-block">
 				<div
 					class="thinking-header cursor-pointer select-none flex items-center gap-2 py-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+					role="button"
+					tabindex="0"
 					@click=${this.toggleExpanded}
+					@keydown=${(e: KeyboardEvent) => {
+						if (e.key !== "Enter" && e.key !== " ") return;
+						e.preventDefault();
+						this.toggleExpanded();
+					}}
 				>
 					<span class="transition-transform inline-block ${this.isExpanded ? "rotate-90" : ""}">${icon(ChevronRight, "sm")}</span>
 					<span class="${shimmerClasses}">Thinking...</span>

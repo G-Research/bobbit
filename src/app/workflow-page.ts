@@ -976,7 +976,9 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 			@dragstart=${readOnly ? undefined : (e: DragEvent) => { e.stopPropagation(); handleVStepDragStart(inst, e, gateIdx, stepIdx); }}
 			@dragend=${readOnly ? undefined : () => handleVStepDragEnd(inst)}>
 			<div class="wf-vstep-collapsed-header"
+				role="button" tabindex="0"
 				@click=${(e: Event) => { e.stopPropagation(); toggleVStepExpand(inst, gateIdx, stepIdx); }}
+				@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); toggleVStepExpand(inst, gateIdx, stepIdx); } }}
 				@touchstart=${readOnly ? undefined : (e: TouchEvent) => handleVStepHeaderTouchStart(inst, e, gateIdx, stepIdx)}
 				@touchmove=${readOnly ? undefined : (e: TouchEvent) => handleVStepTouchMove(inst, e)}
 				@touchend=${readOnly ? undefined : () => handleVStepTouchEnd(inst)}
@@ -991,7 +993,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 				${step.optional ? html`<span class="wf-vstep-optional-badge">optional</span>` : nothing}
 				${saveAttempted && Object.keys(errs).length > 0 ? html`<span class="wf-vstep-error-badge" title="This step has validation errors">${icon(AlertCircle, "sm")}</span>` : nothing}
 				<span class="wf-vstep-spacer"></span>
-				${readOnly ? nothing : html`<button class="wf-criteria-remove" title="Remove verification step" @click=${(e: Event) => {
+				${readOnly ? nothing : html`<button class="wf-criteria-remove" title="Remove verification step" aria-label="Remove verification step" @click=${(e: Event) => {
 					e.stopPropagation();
 					const steps = (gate.verify || []).filter((_: any, i: number) => i !== stepIdx);
 					updateGateField(inst, gateIdx, "verify", steps);
@@ -1002,11 +1004,13 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 					<div class="wf-identity-row">
 						<label class="wf-field-label">Name</label>
 						<input class="wf-input ${errs.name ? "wf-input-error" : ""}" data-testid="wf-step-name" style="flex:1;min-width:0;" .value=${step.name || ""} placeholder="Step name"
+							aria-label="Name"
 							?disabled=${readOnly}
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => updateStep({ name: (e.target as HTMLInputElement).value })} />
 						<label class="wf-field-label" style="margin-left:8px;">Type</label>
 						<select class="wf-select" data-testid="wf-step-type" .value=${stepType}
+							aria-label="Type"
 							?disabled=${readOnly}
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${handleTypeChange}
@@ -1019,6 +1023,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 						${stepType === "command" ? html`
 							<label class="wf-field-label" style="margin-left:8px;">Expect</label>
 							<select class="wf-select" data-testid="wf-step-expect" .value=${step.expect || "success"}
+								aria-label="Expect"
 								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${(e: Event) => updateStep({ expect: (e.target as HTMLSelectElement).value as "success" | "failure" })}>
@@ -1033,16 +1038,19 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 						<div class="wf-cmd-mode-row">
 							<span class="wf-field-label">Source</span>
 							<button class="wf-cmd-mode-toggle ${!useNamedCommand ? "is-active" : ""}" data-testid="wf-cmd-mode-run"
+								aria-pressed=${!useNamedCommand ? "true" : "false"}
 								?disabled=${readOnly}
 								@pointerdown=${readOnly ? undefined : (e: Event) => { e.stopPropagation(); setCommandMode("run"); }}
 								@click=${readOnly ? undefined : (e: Event) => { e.stopPropagation(); setCommandMode("run"); }}>Free-form <code>run</code></button>
 							<button class="wf-cmd-mode-toggle ${useNamedCommand ? "is-active" : ""}" data-testid="wf-cmd-mode-command"
+								aria-pressed=${useNamedCommand ? "true" : "false"}
 								?disabled=${readOnly}
 								@pointerdown=${readOnly ? undefined : (e: Event) => { e.stopPropagation(); setCommandMode("command"); }}
 								@click=${readOnly ? undefined : (e: Event) => { e.stopPropagation(); setCommandMode("command"); }}>Named <code>command</code></button>
 						</div>
 						${!useNamedCommand ? html`
 							<input class="wf-input ${errs.run ? "wf-input-error" : ""}" data-testid="wf-step-run" .value=${step.run || ""} placeholder="Command to run..."
+								aria-label="Command to run"
 								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => updateStep({ run: (e.target as HTMLInputElement).value })} />
@@ -1050,6 +1058,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 							${errs.run ? html`<div class="wf-field-error" data-testid="wf-step-run-error">${errs.run}</div>` : nothing}
 						` : html`
 							<input class="wf-input ${errs.command ? "wf-input-error" : ""}" data-testid="wf-step-command" .value=${step.command || ""} placeholder="Named command (e.g. build, unit)"
+								aria-label="Named command"
 								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => updateStep({ command: (e.target as HTMLInputElement).value })} />
@@ -1058,6 +1067,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 						`}
 					` : html`
 						<textarea class="wf-textarea ${errs.prompt ? "wf-input-error" : ""}" data-testid="wf-step-prompt" .value=${step.prompt || ""} placeholder="${stepType === "agent-qa" ? "QA test prompt..." : stepType === "human-signoff" ? "What to ask the reviewer…" : "Review prompt..."}"
+							aria-label="${stepType === "agent-qa" ? "QA test prompt" : stepType === "human-signoff" ? "What to ask the reviewer" : "Review prompt"}"
 							?readonly=${readOnly}
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => updateStep({ prompt: (e.target as HTMLTextAreaElement).value })}></textarea>
@@ -1068,6 +1078,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 						<div class="wf-field">
 							<label class="wf-field-label">Card Title</label>
 							<input class="wf-input ${errs.label ? "wf-input-error" : ""}" data-testid="wf-step-label" .value=${step.label || ""} placeholder="Approve design doc"
+								aria-label="Card Title"
 								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => updateStep({ label: (e.target as HTMLInputElement).value })} />
@@ -1082,6 +1093,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 							<div class="wf-field">
 								<label class="wf-field-label">Phase</label>
 								<input class="wf-input" data-testid="wf-step-phase" type="number" min="0" step="1" .value=${String(step.phase ?? 0)}
+									aria-label="Phase"
 									?disabled=${readOnly}
 									@click=${(e: Event) => e.stopPropagation()}
 									@input=${(e: Event) => {
@@ -1095,6 +1107,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 								<div class="wf-field">
 									<label class="wf-field-label">Timeout (seconds)</label>
 									<input class="wf-input" data-testid="wf-step-timeout" type="number" min="1" step="1" placeholder="300" .value=${step.timeout != null ? String(step.timeout) : ""}
+										aria-label="Timeout (seconds)"
 										?disabled=${readOnly}
 										@click=${(e: Event) => e.stopPropagation()}
 										@input=${(e: Event) => {
@@ -1111,6 +1124,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 								<div class="wf-field">
 									<label class="wf-field-label">Role</label>
 									<input class="wf-input" data-testid="wf-step-role" placeholder="reviewer" .value=${step.role || ""}
+										aria-label="Role"
 										?disabled=${readOnly}
 										@click=${(e: Event) => e.stopPropagation()}
 										@input=${(e: Event) => updateStep({ role: (e.target as HTMLInputElement).value || undefined })} />
@@ -1122,6 +1136,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 									<label class="wf-field-label">Component</label>
 									${componentOptions.length > 0 ? html`
 										<select class="wf-select ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""}
+											aria-label="Component"
 											?disabled=${readOnly}
 											@click=${(e: Event) => e.stopPropagation()}
 											@change=${(e: Event) => updateStep({ component: (e.target as HTMLSelectElement).value || undefined })}>
@@ -1130,6 +1145,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 										</select>
 									` : html`
 										<input class="wf-input ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""} placeholder="Component name"
+											aria-label="Component"
 											?disabled=${readOnly}
 											@click=${(e: Event) => e.stopPropagation()}
 											@input=${(e: Event) => updateStep({ component: (e.target as HTMLInputElement).value || undefined })} />
@@ -1141,6 +1157,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 							<div class="wf-field">
 								<label class="wf-field-label">Description</label>
 								<textarea class="wf-textarea" data-testid="wf-step-description" rows="2" .value=${step.description || ""} placeholder="Free-form description (shown in tooltips and the opt-in card)"
+									aria-label="Description"
 									?readonly=${readOnly}
 									@click=${(e: Event) => e.stopPropagation()}
 									@input=${(e: Event) => updateStep({ description: (e.target as HTMLTextAreaElement).value || undefined })}></textarea>
@@ -1168,6 +1185,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 						</label>
 						${step.optional ? html`
 							<input class="wf-input" data-testid="wf-step-optional-label" style="flex:1;" .value=${step.optionalLabel || ""} placeholder="Toggle label (e.g. Enable QA Testing)"
+								aria-label="Toggle label"
 								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => updateStep({ optionalLabel: (e.target as HTMLInputElement).value || undefined })} />
@@ -1206,11 +1224,11 @@ function renderNavBar(): TemplateResult {
 		return html`
 			<div class="wf-nav">
 				<div class="wf-nav-left">
-					<button class="wf-back" @click=${showList} title="Back to workflows">
+					<button class="wf-back" @click=${showList} title="Back to workflows" aria-label="Back to workflows">
 						${icon(ArrowLeft, "sm")}
 					</button>
 					<div class="wf-title-group">
-						<span class="wf-breadcrumb" @click=${showList}>Workflows</span>
+						<span class="wf-breadcrumb" role="button" tabindex="0" @click=${showList} @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showList(); } }}>Workflows</span>
 						<span class="wf-breadcrumb-sep">/</span>
 						<h1 class="wf-title">${title}</h1>
 					</div>
@@ -1238,7 +1256,7 @@ function renderNavBar(): TemplateResult {
 	return html`
 		<div class="wf-nav">
 			<div class="wf-nav-left">
-				<button class="wf-back" @click=${() => setHashRoute("landing")} title="Back to sessions">
+				<button class="wf-back" @click=${() => setHashRoute("landing")} title="Back to sessions" aria-label="Back to sessions">
 					${icon(ArrowLeft, "sm")}
 				</button>
 				<h1 class="wf-title">Workflows</h1>
@@ -1274,10 +1292,10 @@ function renderWorkflowRow(wf: Workflow): TemplateResult {
 		selected: false,
 		onSelect: () => showEdit(wf),
 		actions: html`
-			<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(wf); }} title="Edit">
+			<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(wf); }} title="Edit" aria-label="Edit">
 				${icon(Pencil, "sm")}
 			</button>
-			<button class="wf-action-btn delete" @click=${(e: Event) => { e.stopPropagation(); handleDelete(wf); }} title="Delete">
+			<button class="wf-action-btn delete" @click=${(e: Event) => { e.stopPropagation(); handleDelete(wf); }} title="Delete" aria-label="Delete">
 				${icon(Trash2, "sm")}
 			</button>
 		`,
@@ -1528,7 +1546,7 @@ function renderPhaseGroups(inst: EditorInstance, gate: WorkflowGate, gateIdx: nu
 				<div class="wf-phase-header">
 					<span>Phase ${phase}</span>
 					${!readOnly && isEmpty && isEmptyTracked ? html`
-						<button class="wf-phase-delete" title="Remove empty phase" @click=${(e: Event) => {
+						<button class="wf-phase-delete" title="Remove empty phase" aria-label="Remove empty phase" @click=${(e: Event) => {
 							e.stopPropagation();
 							removeEmptyPhase(inst, gateIdx, phase);
 						}}>${icon(Trash2, "sm")}</button>
@@ -1577,6 +1595,7 @@ function renderDependsOnEditor(inst: EditorInstance, gate: WorkflowGate, idx: nu
 					return html`
 						<button class="wf-dep-toggle-chip ${active ? "wf-dep-toggle-chip--active" : ""}"
 							data-testid="wf-dep-chip-${g.id}"
+							aria-pressed=${active ? "true" : "false"}
 							@click=${(e: Event) => {
 								e.stopPropagation();
 								const next = new Set(current);
@@ -1625,6 +1644,7 @@ function renderMetadataEditor(inst: EditorInstance, gate: WorkflowGate, idx: num
 				${rows.length === 0 ? html`<div class="wf-dep-none">No metadata entries.</div>` : rows.map(([k, v], rowIdx) => html`
 					<div class="wf-metadata-row" data-testid="wf-metadata-row">
 						<input class="wf-input" data-testid="wf-metadata-key" placeholder="key" .value=${k}
+							aria-label="Metadata key"
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => {
 								// Read the latest draft rows instead of the render-time closure. Input
@@ -1636,13 +1656,14 @@ function renderMetadataEditor(inst: EditorInstance, gate: WorkflowGate, idx: num
 								commitMetadataRows(inst, idx, next);
 							}} />
 						<input class="wf-input" data-testid="wf-metadata-value" placeholder="value" .value=${v}
+							aria-label="Metadata value"
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => {
 								const currentRows = metadataDrafts.get(idx) || rows!;
 								const next: Array<[string, string]> = currentRows.map((p, i) => i === rowIdx ? [p[0], (e.target as HTMLInputElement).value] : p);
 								commitMetadataRows(inst, idx, next);
 							}} />
-						<button class="wf-criteria-remove" title="Remove metadata entry" data-testid="wf-metadata-remove" @click=${(e: Event) => {
+						<button class="wf-criteria-remove" title="Remove metadata entry" aria-label="Remove metadata entry" data-testid="wf-metadata-remove" @click=${(e: Event) => {
 							e.stopPropagation();
 							const currentRows = metadataDrafts.get(idx) || rows!;
 							const next: Array<[string, string]> = currentRows.filter((_, i) => i !== rowIdx);
@@ -1683,6 +1704,7 @@ function renderGateEditor(inst: EditorInstance, gate: WorkflowGate, idx: number)
 		${inst.dropTargetIndex === idx && inst.dragIndex !== null && inst.dragIndex !== idx ? html`<div class="wf-drop-indicator"></div>` : nothing}
 		<div class=${gateClasses} data-gate-id=${gate.id}>
 			<div class="wf-gate-header"
+				role="button" tabindex="0"
 				draggable=${readOnly ? "false" : "true"}
 				@dragstart=${readOnly ? undefined : (e: DragEvent) => handleDragStart(inst, e, idx)}
 				@dragover=${readOnly ? undefined : (e: DragEvent) => handleDragOver(inst, e, idx)}
@@ -1692,7 +1714,8 @@ function renderGateEditor(inst: EditorInstance, gate: WorkflowGate, idx: number)
 				@touchmove=${readOnly ? undefined : (e: TouchEvent) => handleTouchMove(inst, e)}
 				@touchend=${readOnly ? undefined : () => handleTouchEnd(inst)}
 				@touchcancel=${readOnly ? undefined : () => cancelTouchDrag(inst)}
-				@click=${() => toggleGateExpand(inst, idx)}>
+				@click=${() => toggleGateExpand(inst, idx)}
+				@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleGateExpand(inst, idx); } }}>
 				${readOnly ? nothing : html`<span class="wf-gate-grip"
 					@touchstart=${(e: TouchEvent) => handleGripTouchStart(inst, e, idx)}>${icon(GripVertical, "sm")}</span>`}
 				<span class="wf-gate-idx">${idx + 1}</span>
@@ -1701,7 +1724,7 @@ function renderGateEditor(inst: EditorInstance, gate: WorkflowGate, idx: number)
 				${readOnly && gate.content ? html`<span class="wf-gate-pill">content</span>` : nothing}
 				${readOnly && gate.injectDownstream ? html`<span class="wf-gate-pill">inject downstream</span>` : nothing}
 				${verifySummary ? html`<span class="wf-gate-pill">${verifySummary}</span>` : nothing}
-				${readOnly ? nothing : html`<button class="wf-gate-delete" @click=${(e: Event) => { e.stopPropagation(); removeGate(inst, idx); }} title="Remove gate">${icon(Trash2, "sm")}</button>`}
+				${readOnly ? nothing : html`<button class="wf-gate-delete" @click=${(e: Event) => { e.stopPropagation(); removeGate(inst, idx); }} title="Remove gate" aria-label="Remove gate">${icon(Trash2, "sm")}</button>`}
 			</div>
 
 			<div class="wf-gate-body">
@@ -1709,10 +1732,12 @@ function renderGateEditor(inst: EditorInstance, gate: WorkflowGate, idx: number)
 					<div class="wf-identity-row">
 						<label class="wf-field-label">ID</label>
 						<input class="wf-input" data-testid="wf-gate-id" style="width:140px;" .value=${gate.id} placeholder="e.g. issue-analysis"
+							aria-label="Gate ID"
 							?disabled=${readOnly}
 							@input=${(e: Event) => updateGateField(inst, idx, "id", (e.target as HTMLInputElement).value)} />
 						<label class="wf-field-label" style="margin-left:8px;">Name</label>
 						<input class="wf-input" data-testid="wf-gate-name" style="flex:1;min-width:0;" .value=${gate.name} placeholder="Display name"
+							aria-label="Gate name"
 							?disabled=${readOnly}
 							@input=${(e: Event) => updateGateField(inst, idx, "name", (e.target as HTMLInputElement).value)} />
 					</div>
@@ -1817,18 +1842,21 @@ function renderEditView(inst: EditorInstance): TemplateResult {
 					<label class="wf-field-label">ID</label>
 					${inst.isNew && !readOnly ? html`
 						<input class="wf-input" style="width:140px;" .value=${inst.editId} placeholder="e.g. bug-fix"
+							aria-label="Workflow ID"
 							@input=${(e: Event) => { inst.editId = (e.target as HTMLInputElement).value; notifyControlledChange(inst); renderApp(); }} />
 					` : html`
-						<input class="wf-input" style="width:140px;opacity:0.6;cursor:not-allowed;" .value=${inst.editId} disabled />
+						<input class="wf-input" style="width:140px;opacity:0.6;cursor:not-allowed;" .value=${inst.editId} aria-label="Workflow ID" disabled />
 					`}
 					<label class="wf-field-label" style="margin-left:8px;">Name</label>
 					<input class="wf-input" style="flex:1;min-width:0;" .value=${inst.editName} placeholder="Workflow name"
+						aria-label="Workflow name"
 						?disabled=${readOnly}
 						@input=${(e: Event) => { inst.editName = (e.target as HTMLInputElement).value; notifyControlledChange(inst); renderApp(); }} />
 				</div>
 				<div class="wf-identity-row">
 					<label class="wf-field-label" style="flex-shrink:0;">Description</label>
 					<textarea class="wf-textarea wf-desc-auto" rows="1" .value=${inst.editDescription} placeholder="What this workflow does"
+						aria-label="Description"
 						?readonly=${readOnly}
 						@input=${(e: Event) => { inst.editDescription = (e.target as HTMLTextAreaElement).value; notifyControlledChange(inst); autoGrowTextarea(e.target as HTMLTextAreaElement); }}></textarea>
 				</div>

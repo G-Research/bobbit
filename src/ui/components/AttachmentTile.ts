@@ -51,7 +51,14 @@ export class AttachmentTile extends LitElement {
 									class="w-16 h-16 object-cover rounded-lg border border-input cursor-pointer hover:opacity-80 transition-opacity"
 									alt="${this.attachment.fileName}"
 									title="${this.attachment.fileName}"
+									role="button"
+									tabindex="0"
 									@click=${this.handleClick}
+									@keydown=${(e: KeyboardEvent) => {
+										if (e.key !== "Enter" && e.key !== " ") return;
+										e.preventDefault();
+										this.handleClick();
+									}}
 								/>
 								${
 									isPdf
@@ -71,6 +78,13 @@ export class AttachmentTile extends LitElement {
 								class="w-16 h-16 rounded-lg border border-input cursor-pointer hover:opacity-80 transition-opacity bg-muted text-muted-foreground flex flex-col items-center justify-center p-2"
 								@click=${this.handleClick}
 								title="${this.attachment.fileName}"
+								role="button"
+								tabindex="0"
+								@keydown=${(e: KeyboardEvent) => {
+									if (e.key !== "Enter" && e.key !== " ") return;
+									e.preventDefault();
+									this.handleClick();
+								}}
 							>
 								${getDocumentIcon()}
 								<div class="text-[10px] text-center truncate w-full">
@@ -93,6 +107,7 @@ export class AttachmentTile extends LitElement {
 								}}
 								class="absolute -top-1 -right-1 w-5 h-5 bg-background hover:bg-muted text-muted-foreground hover:text-foreground rounded-full flex items-center justify-center opacity-100 hover:opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 transition-opacity border border-input shadow-sm"
 								title="${i18n("Remove")}"
+								aria-label="${i18n("Remove")}"
 							>
 								${icon(X, "xs")}
 							</button>

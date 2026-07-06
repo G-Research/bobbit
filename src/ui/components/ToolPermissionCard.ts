@@ -93,6 +93,7 @@ export class ToolPermissionCard extends LitElement {
 					<label class="text-xs text-muted-foreground">Duration:</label>
 					<select
 						class="text-xs rounded-md border border-border bg-background px-2 py-1 cursor-pointer"
+						aria-label="Duration"
 						@change=${(e: Event) => this._mode = (e.target as HTMLSelectElement).value}
 					>
 						<option value="session-only">This session</option>

@@ -115,7 +115,7 @@ export function renderSubgoalSettings(goal: Goal): TemplateResult | typeof nothi
 					<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--foreground);${depthFixed || disabled ? "opacity:0.7;" : ""}">
 						<span>Max nesting depth</span>
 						<span style="display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
-							<button type="button" title="Decrease"
+							<button type="button" title="Decrease" aria-label="Decrease"
 								?disabled=${depthFixed || disabled || depthValue <= minDepth}
 								data-testid="goal-subgoal-settings-depth-dec"
 								style="width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:var(--background);color:var(--muted-foreground);border:none;cursor:pointer;"
@@ -124,12 +124,13 @@ export function renderSubgoalSettings(goal: Goal): TemplateResult | typeof nothi
 								.value=${String(depthValue)}
 								?disabled=${depthFixed || disabled}
 								data-testid="goal-subgoal-settings-depth"
+								aria-label="Max nesting depth"
 								style="width:34px;text-align:center;border:none;border-left:1px solid var(--border);border-right:1px solid var(--border);background:var(--background);color:var(--foreground);padding:3px 0;"
 								@change=${(e: Event) => {
 									const raw = parseInt((e.target as HTMLInputElement).value, 10);
 									if (Number.isFinite(raw)) saveSubgoalPolicy(goal.id, { maxNestingDepth: Math.min(maxDepth, Math.max(minDepth, raw)) });
 								}} />
-							<button type="button" title="Increase"
+							<button type="button" title="Increase" aria-label="Increase"
 								?disabled=${depthFixed || disabled || depthValue >= maxDepth}
 								data-testid="goal-subgoal-settings-depth-inc"
 								style="width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:var(--background);color:var(--muted-foreground);border:none;cursor:pointer;"
@@ -211,8 +212,10 @@ function renderChildCard(s: ChildCardSummary): TemplateResult {
 	const progressStr = s.gatesTotal > 0 ? `${s.gatesPassed}/${s.gatesTotal}` : "—";
 	return html`
 		<div class="child-card" data-testid="child-card-${g.id}"
+			role="button" tabindex="0"
 			style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;cursor:pointer;background:var(--card);min-width:0;${g.archived ? "opacity:0.7;" : ""}"
-			@click=${() => setHashRoute("goal-dashboard", g.id)}>
+			@click=${() => setHashRoute("goal-dashboard", g.id)}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setHashRoute("goal-dashboard", g.id); } }}>
 			<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
 				<span class="status-chip ${statusChipClass(stateChip)}" data-testid="child-card-state">
 					<span class="dot"></span>${stateLabel}

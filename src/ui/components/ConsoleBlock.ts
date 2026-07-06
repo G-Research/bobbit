@@ -53,6 +53,7 @@ export class ConsoleBlock extends LitElement {
 						@click=${() => this.copy()}
 						class="flex items-center gap-1 px-2 py-0.5 text-xs rounded hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors"
 						title="${i18n("Copy output")}"
+						aria-label="${i18n("Copy output")}"
 					>
 						${this.copied ? icon(Check, "sm") : icon(Copy, "sm")}
 						${this.copied ? html`<span>${i18n("Copied!")}</span>` : ""}

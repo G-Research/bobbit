@@ -345,6 +345,7 @@ export class BgProcessPill extends LitElement {
 					style="font-size:11px; line-height:1; min-width:16px; align-self:stretch"
 					@click=${isRunning ? this._kill : this._dismiss}
 					title=${isRunning ? "Kill process" : "Remove"}
+					aria-label=${isRunning ? "Kill process" : "Remove"}
 				>${isRunning ? icon(Skull, "xs") : "✕"}</button>
 			</span>
 		`;

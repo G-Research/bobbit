@@ -660,6 +660,7 @@ export function renderSearchPage(): TemplateResult {
 						class="shrink-0 p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
 						@click=${() => { _initialized = false; history.back(); }}
 						title="Back"
+						aria-label="Back"
 					>${icon(ArrowLeft, "sm")}</button>
 					<div class="relative flex-1">
 						<span class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
@@ -671,6 +672,7 @@ export function renderSearchPage(): TemplateResult {
 							type="text"
 							.value=${_query}
 							placeholder="Search everything..."
+							aria-label="Search everything..."
 							class="w-full h-11 pl-10 pr-4 rounded-lg border border-input bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
 							@input=${_handleInput}
 							@keydown=${_handleKeydown}
@@ -678,6 +680,19 @@ export function renderSearchPage(): TemplateResult {
 						/>
 					</div>
 					<search-status-dot></search-status-dot>
+				</div>
+
+				<!-- Search status announcer (screen-reader only): result-count/loading
+				     changes are a purely visual affordance below, so mirror them here for
+				     assistive tech. -->
+				<div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+					${_loading
+						? "Searching…"
+						: !_query
+							? ""
+							: _results.length === 0
+								? `No matches for "${_query}"`
+								: `${_total} result${_total === 1 ? "" : "s"} found`}
 				</div>
 
 				<!-- Type filter toggles -->

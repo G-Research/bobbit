@@ -556,6 +556,7 @@ function renderSandboxSection(
 				<span class="${labelClass}">Sandbox Mode</span>
 				<select
 					class="${inputClass} max-w-48"
+					aria-label="Sandbox Mode"
 					.value=${sandboxMode}
 					@change=${(e: Event) => {
 						pendingChanges.sandbox = (e.target as HTMLSelectElement).value;
@@ -614,7 +615,7 @@ function renderSandboxSection(
 														>${sandboxBuildInProgress ? "Building..." : "Build Image"}</button>
 													</div>
 													<span class="text-xs text-muted-foreground">Server restart required after build for sandbox pool.</span>
-													${sandboxBuildError ? html`<span class="text-xs text-red-500">${sandboxBuildError}</span>` : ""}
+													${sandboxBuildError ? html`<span class="text-xs text-red-500" role="alert" aria-live="assertive" aria-atomic="true">${sandboxBuildError}</span>` : ""}
 												</div>
 											` : ""}`
 									: ""}
@@ -626,6 +627,7 @@ function renderSandboxSection(
 					<button
 						class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
 						title="Refresh Docker status"
+						aria-label="Refresh Docker status"
 						@click=${() => { sandboxStatusLoaded = false; loadSandboxStatus(); }}
 					>${icon(RotateCcw, "xs")}</button>
 				</div>
@@ -638,6 +640,7 @@ function renderSandboxSection(
 					type="text"
 					class="${inputClass} max-w-64"
 					placeholder="bobbit-agent"
+					aria-label="Image Name"
 					.value=${pendingChanges.sandbox_image ?? resolved.sandbox_image?.value ?? ""}
 					@input=${(e: Event) => {
 						pendingChanges.sandbox_image = (e.target as HTMLInputElement).value;
@@ -663,6 +666,7 @@ function renderSandboxSection(
 							<input
 								type="checkbox"
 								class="accent-primary shrink-0"
+								aria-label=${`Enable token ${entry.key || `entry ${i + 1}`}`}
 								.checked=${entry.enabled}
 								@change=${(e: Event) => {
 									tokenEntries[i].enabled = (e.target as HTMLInputElement).checked;
@@ -675,6 +679,7 @@ function renderSandboxSection(
 								class="w-52 shrink-0 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
 									focus:outline-none focus:ring-2 focus:ring-ring"
 								placeholder="ENV_VAR"
+								aria-label="ENV_VAR"
 								.value=${entry.key}
 								@input=${(e: Event) => {
 									tokenEntries[i].key = (e.target as HTMLInputElement).value;
@@ -702,6 +707,7 @@ function renderSandboxSection(
 								class="flex-1 min-w-0 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
 									focus:outline-none focus:ring-2 focus:ring-ring ${!entry.value && entry.isHost ? 'text-muted-foreground italic' : ''}"
 								placeholder=${entry.isHost ? '(from host)' : 'value'}
+								aria-label=${entry.isHost ? '(from host)' : 'value'}
 								.value=${entry.value}
 								@input=${(e: Event) => {
 									tokenEntries[i].value = (e.target as HTMLInputElement).value;
@@ -712,6 +718,7 @@ function renderSandboxSection(
 							<button
 								class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 								title="Remove"
+								aria-label="Remove"
 								@click=${() => {
 									tokenEntries.splice(i, 1);
 									syncTokenEntries(tokenEntries, pendingChanges);
@@ -738,6 +745,7 @@ function renderSandboxSection(
 							class="flex-1 min-w-0 px-2 py-1 rounded-md border border-input bg-background text-sm font-mono
 								focus:outline-none focus:ring-2 focus:ring-ring"
 							placeholder="/host/path:/container/path:ro"
+							aria-label="/host/path:/container/path:ro"
 							.value=${mount}
 							@input=${(e: Event) => {
 								mountEntries[i] = (e.target as HTMLInputElement).value;
@@ -749,6 +757,7 @@ function renderSandboxSection(
 						<button
 							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 							title="Remove"
+							aria-label="Remove"
 							@click=${() => {
 								mountEntries.splice(i, 1);
 								const filtered = mountEntries.filter(Boolean);
@@ -800,6 +809,7 @@ function renderWorktreeSection(
 					type="text"
 					class="${inputClass}"
 					placeholder="<rootPath>-wt/ (default)"
+					aria-label="Worktree Root"
 					.value=${pendingChanges.worktree_root ?? resolved.worktree_root?.value ?? ""}
 					@input=${(e: Event) => {
 						pendingChanges.worktree_root = (e.target as HTMLInputElement).value;
@@ -815,6 +825,7 @@ function renderWorktreeSection(
 					type="text"
 					class="${inputClass}"
 					placeholder=${baseRefBlank && resolvedRef ? resolvedRef : "origin/master (default)"}
+					aria-label="Base Ref"
 					.value=${baseRefValue}
 					@input=${(e: Event) => {
 						pendingChanges.base_ref = (e.target as HTMLInputElement).value;
@@ -856,7 +867,7 @@ function renderWorktreeSection(
 				overrides are not supported.
 			</p>
 			${baseRefError ? html`
-				<div data-testid="base-ref-error" class="ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)] -mt-1">
+				<div data-testid="base-ref-error" class="ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)] -mt-1" role="alert" aria-live="assertive" aria-atomic="true">
 					<p class="text-xs text-destructive">${baseRefError.error}</p>
 					${baseRefError.details && baseRefError.details.length > 0 ? html`
 						<ul class="list-disc ml-5 text-xs text-destructive mt-1">
@@ -874,6 +885,7 @@ function renderWorktreeSection(
 					class="px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
 					style="width: 5rem;"
 					placeholder="2"
+					aria-label="Pool Size"
 					.value=${pendingChanges.worktree_pool_size ?? resolved.worktree_pool_size?.value ?? ""}
 					@input=${(e: Event) => {
 						pendingChanges.worktree_pool_size = (e.target as HTMLInputElement).value;
@@ -900,6 +912,7 @@ function renderWorktreeSection(
 					<button
 						class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
 						title="Refresh pool status"
+						aria-label="Refresh pool status"
 						@click=${() => { worktreePoolStatusLoaded = false; worktreePoolStatus = null; loadWorktreePoolStatus(); }}
 					>${icon(RotateCcw, "xs")}</button>
 				</div>
@@ -1176,6 +1189,7 @@ function renderShortcutRow(entry: ShortcutEntry, index = 0) {
 								class="inline-flex items-center px-0.5 py-0.5 rounded-r text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 border border-transparent transition-colors "
 								@click=${() => handleRemoveBinding(entry.id, idx)}
 								title="Remove binding"
+								aria-label="Remove binding"
 							>${icon(X, "xs")}</button>
 						</span>
 					`;
@@ -1190,12 +1204,14 @@ function renderShortcutRow(entry: ShortcutEntry, index = 0) {
 							class="inline-flex items-center p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80 transition-colors "
 							@click=${() => startRebind(entry.id, null)}
 							title="Add binding"
+							aria-label="Add binding"
 						>${icon(Plus, "xs")}</button>`}
 				${isCustom
 					? html`<button
 							class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80 transition-colors "
 							@click=${() => handleResetBinding(entry.id)}
 							title="Reset to default"
+							aria-label="Reset to default"
 						>${icon(RotateCcw, "xs")}</button>`
 					: ""}
 			</div>
@@ -2294,6 +2310,13 @@ export function renderModelRow(
 									: testResult?.error
 										? `Failed: ${testResult.error}`
 										: "Send a 'Reply with OK' test prompt to this model"}
+							aria-label=${testing
+								? "Testing…"
+								: testResult?.ok
+									? `OK (${testResult.latencyMs ?? 0}ms)`
+									: testResult?.error
+										? `Failed: ${testResult.error}`
+										: "Send a 'Reply with OK' test prompt to this model"}
 							data-testid="model-test-btn"
 							?disabled=${testing || showUnavailable}
 							@click=${() => runModelTest(modelValue)}
@@ -2338,14 +2361,14 @@ export function renderModelRow(
 				</div>
 			</div>
 			${testResult && !testing ? html`
-				<p class="text-xs ${testResult.ok ? "text-green-600" : "text-destructive"}" data-testid="model-test-result">
+				<p class="text-xs ${testResult.ok ? "text-green-600" : "text-destructive"}" data-testid="model-test-result" role="status" aria-live="polite" aria-atomic="true">
 					${testResult.ok
 						? `Test OK${testResult.latencyMs != null ? ` (${testResult.latencyMs}ms)` : ""}`
 						: `Test failed: ${testResult.error}`}
 				</p>
 			` : ""}
 			${showUnavailable ? html`
-				<p class="text-xs text-destructive">
+				<p class="text-xs text-destructive" role="alert" aria-live="assertive" aria-atomic="true">
 					This model is not in the current available-models list. Clear it or pick another.
 				</p>
 			` : ""}
@@ -2392,12 +2415,13 @@ function renderClaudeCodeSection() {
 						@click=${refreshClaudeCodeStatus}
 					>${claudeCodeStatusLoading ? "Checking…" : "Refresh status"}</button>
 				</div>
-				${claudeCodeStatusError ? html`<div class="text-xs text-destructive">${claudeCodeStatusError}</div>` : ""}
+				${claudeCodeStatusError ? html`<div class="text-xs text-destructive" role="alert" aria-live="assertive" aria-atomic="true">${claudeCodeStatusError}</div>` : ""}
 			</div>
 
 			<div class="flex flex-col gap-2">
-				<label class="text-sm font-medium text-foreground">Executable path</label>
+				<label class="text-sm font-medium text-foreground" for="claude-code-executable-input">Executable path</label>
 				<input
+					id="claude-code-executable-input"
 					type="text"
 					class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
 					placeholder="claude"
@@ -2495,6 +2519,7 @@ function renderImageModelRow(
 						<button
 							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
 							title=${showUnavailable ? "Clear unavailable model" : "Reset image model to auto"}
+							aria-label=${showUnavailable ? "Clear unavailable model" : "Reset image model to auto"}
 							data-testid="image-model-clear-btn"
 							@click=${() => onModelChange("")}
 						>${icon(X, "xs")}</button>
@@ -2502,7 +2527,7 @@ function renderImageModelRow(
 				</div>
 			</div>
 			${showUnavailable ? html`
-				<p class="text-xs text-destructive">
+				<p class="text-xs text-destructive" role="alert" aria-live="assertive" aria-atomic="true">
 					This image model is not in the current available-models list. Clear it or pick another.
 				</p>
 			` : ""}
@@ -2574,9 +2599,10 @@ export function renderModelsTab() {
 
 				<!-- URL input -->
 				<div class="flex flex-col gap-2">
-					<label class="text-sm font-medium text-foreground">Gateway URL</label>
+					<label class="text-sm font-medium text-foreground" for="aigw-url-input">Gateway URL</label>
 					<div class="flex gap-2">
 						<input
+							id="aigw-url-input"
 							type="text"
 							class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
 								focus:outline-none focus:ring-2 focus:ring-ring"
@@ -2602,7 +2628,7 @@ export function renderModelsTab() {
 
 				<!-- Error -->
 				${aigwError ? html`
-					<div class="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">
+					<div class="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md" role="alert" aria-live="assertive" aria-atomic="true">
 						${aigwError}
 					</div>
 				` : ""}
@@ -3095,8 +3121,8 @@ function renderHeadquartersVisibilityControl() {
 				<span class="text-xs text-muted-foreground">
 					Displays Headquarters in the sidebar, project pickers, and project lists. Hiding it only removes the shortcut; Headquarters sessions, staff, goals, and server configuration are kept.
 				</span>
-				${settingsHeadquartersVisibilityStatus === "saved" ? html`<span class="text-xs text-green-600">Saved.</span>` : ""}
-				${settingsHeadquartersVisibilityStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+				${settingsHeadquartersVisibilityStatus === "saved" ? html`<span class="text-xs text-green-600" role="status" aria-live="polite" aria-atomic="true">Saved.</span>` : ""}
+				${settingsHeadquartersVisibilityStatus === "error" ? html`<span class="text-xs text-destructive" role="alert" aria-live="assertive" aria-atomic="true">Failed to save.</span>` : ""}
 			</span>
 		</label>
 	`;
@@ -3193,6 +3219,7 @@ function renderGeneralTab() {
 						step="1"
 						data-testid="general-max-nesting-depth"
 						class="w-24 px-2 py-1 rounded border border-input bg-background text-sm"
+						aria-label="Max subgoal depth"
 						.value=${String(settingsMaxNestingDepth ?? MAX_NESTING_DEPTH_DEFAULT)}
 						?disabled=${!settingsSubgoalsEnabled}
 						@change=${(e: Event) => setMaxNestingDepth(Number((e.target as HTMLInputElement).value))}
@@ -3220,6 +3247,7 @@ function renderGeneralTab() {
 						step="1"
 						data-testid="general-skills-catalog-budget"
 						class="w-24 px-2 py-1 rounded border border-input bg-background text-sm"
+						aria-label="Skills catalog budget"
 						.value=${String(Math.round((settingsSkillsCatalogBudget ?? SKILLS_CATALOG_BUDGET_DEFAULT_BYTES) / 1024))}
 						@change=${(e: Event) => setSkillsCatalogBudget(Number((e.target as HTMLInputElement).value))}
 					/>
@@ -3244,7 +3272,7 @@ function renderGeneralTab() {
 						data-testid="general-customise-system-prompt"
 						@click=${customiseSystemPrompt}
 					>Customise default prompt</button>
-					${customisePromptStatus ? html`<span class="text-xs text-muted-foreground">${customisePromptStatus}</span>` : ""}
+					${customisePromptStatus ? html`<span class="text-xs text-muted-foreground" role="status" aria-live="polite" aria-atomic="true">${customisePromptStatus}</span>` : ""}
 				</div>
 			</div>
 		</div>
@@ -3399,6 +3427,7 @@ function renderDirRow(dir: ConfigDirectory) {
 				<button
 					class="p-1 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
 					title="Remove directory"
+					aria-label="Remove directory"
 					?disabled=${configDirsSaveStatus === "saving"}
 					@click=${() => removeCustomDir(dir.path)}
 				>${icon(X, "xs")}</button>
@@ -3417,7 +3446,7 @@ function renderDirectoriesTab() {
 	if (configDirsError) {
 		return html`
 			<div class="flex flex-col items-center justify-center py-12 gap-3">
-				<p class="text-sm text-destructive">${configDirsError}</p>
+				<p class="text-sm text-destructive" role="alert" aria-live="assertive" aria-atomic="true">${configDirsError}</p>
 				<button
 					class="text-xs text-muted-foreground hover:text-foreground underline"
 					@click=${retryLoadConfigDirs}
@@ -3488,6 +3517,7 @@ function renderDirectoriesTab() {
 						class="flex-1 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
 							focus:outline-none focus:ring-2 focus:ring-ring"
 						placeholder="${placeholder}"
+						aria-label=${placeholder}
 						.value=${newDirPath}
 						@input=${(e: Event) => { newDirPath = (e.target as HTMLInputElement).value; renderApp(); }}
 						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newDirPath.trim() && hasAtLeastOneType) addCustomDir(); }}
@@ -3521,8 +3551,8 @@ function renderDirectoriesTab() {
 						@click=${addCustomDir}
 					>Add</button>
 				</div>
-				${configDirsSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved successfully.</span>` : ""}
-				${configDirsSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+				${configDirsSaveStatus === "saved" ? html`<span class="text-xs text-green-600" role="status" aria-live="polite" aria-atomic="true">Saved successfully.</span>` : ""}
+				${configDirsSaveStatus === "error" ? html`<span class="text-xs text-destructive" role="alert" aria-live="assertive" aria-atomic="true">Failed to save.</span>` : ""}
 			</div>
 		</div>
 	`;
@@ -3703,7 +3733,7 @@ export function renderAccountTab() {
 								: ""}
 						</div>
 						${accountLogoutError[provider.id]
-							? html`<p class="text-xs text-destructive" data-testid="account-logout-error-${provider.id}">Failed to log out — try again.</p>`
+							? html`<p class="text-xs text-destructive" data-testid="account-logout-error-${provider.id}" role="alert" aria-live="assertive" aria-atomic="true">Failed to log out — try again.</p>`
 							: ""}
 
 						${isGoogle
@@ -3833,6 +3863,7 @@ function renderProjectScopeTab(projectId: string) {
 									type="text"
 									class="${inputClass} ${isInherited ? "text-muted-foreground" : "text-foreground"}"
 									placeholder=${isInherited ? entry.value : ""}
+									aria-label=${projectKeyLabel(key)}
 									.value=${displayValue}
 									@input=${(e: Event) => {
 										pendingChanges[key] = (e.target as HTMLInputElement).value;
@@ -3844,12 +3875,14 @@ function renderProjectScopeTab(projectId: string) {
 								<button
 									class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 									title="Reset to inherited value"
+									aria-label="Reset to inherited value"
 									@click=${() => resetProjectScopeField(projectId, key)}
 								>${icon(X, "xs")}</button>
 							` : !entry ? html`
 								<button
 									class="p-1 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
 									title="Discard pending key"
+									aria-label="Discard pending key"
 									@click=${() => { delete pendingChanges[key]; renderApp(); }}
 								>${icon(X, "xs")}</button>
 							` : html`<div class="w-7 shrink-0"></div>`}
@@ -3879,6 +3912,7 @@ function renderProjectScopeTab(projectId: string) {
 									class="${inputClass} text-foreground"
 									style="width: 11rem; flex: 0 0 auto;"
 									placeholder="key_name"
+									aria-label="key_name"
 									data-testid="custom-key-name"
 									.value=${nk.key}
 									@input=${(e: Event) => { nk.key = (e.target as HTMLInputElement).value; renderApp(); }}
@@ -3888,6 +3922,7 @@ function renderProjectScopeTab(projectId: string) {
 										type="text"
 										class="${inputClass} text-foreground"
 										placeholder="value"
+										aria-label="value"
 										data-testid="custom-key-value"
 										.value=${nk.value}
 										@input=${(e: Event) => { nk.value = (e.target as HTMLInputElement).value; renderApp(); }}
@@ -3929,8 +3964,8 @@ function renderProjectScopeTab(projectId: string) {
 						}
 					}}
 				>${projectScopeSaveStatus === "saving" ? "Saving..." : "Save"}</button>
-				${projectScopeSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved successfully.</span>` : ""}
-				${projectScopeSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+				${projectScopeSaveStatus === "saved" ? html`<span class="text-xs text-green-600" role="status" aria-live="polite" aria-atomic="true">Saved successfully.</span>` : ""}
+				${projectScopeSaveStatus === "error" ? html`<span class="text-xs text-destructive" role="alert" aria-live="assertive" aria-atomic="true">Failed to save.</span>` : ""}
 			</div>
 
 		</div>
@@ -3967,6 +4002,7 @@ function renderProjectGeneralTab(projectId: string) {
 					<input
 						type="text"
 						class="${inputClass} text-foreground"
+						aria-label="Working Directory"
 						.value=${pendingChanges._rootPath ?? project?.rootPath ?? ""}
 						@input=${(e: Event) => {
 							pendingChanges._rootPath = (e.target as HTMLInputElement).value;
@@ -4008,8 +4044,8 @@ function renderProjectGeneralTab(projectId: string) {
 							}
 						}}
 					>${projectScopeSaveStatus === "saving" ? "Saving..." : "Save"}</button>
-					${projectScopeSaveStatus === "saved" ? html`<span class="text-xs text-green-600">Saved.</span>` : ""}
-					${projectScopeSaveStatus === "error" ? html`<span class="text-xs text-destructive">Failed to save.</span>` : ""}
+					${projectScopeSaveStatus === "saved" ? html`<span class="text-xs text-green-600" role="status" aria-live="polite" aria-atomic="true">Saved.</span>` : ""}
+					${projectScopeSaveStatus === "error" ? html`<span class="text-xs text-destructive" role="alert" aria-live="assertive" aria-atomic="true">Failed to save.</span>` : ""}
 				</div>
 			` : ""}
 
@@ -4162,7 +4198,7 @@ function renderProjectComponentsTab(projectId: string) {
 		const cmdCountLabel = dataOnly ? "data-only" : `${c.commands.length} cmd${c.commands.length === 1 ? "" : "s"}`;
 		return html`
 			<div class="wf-gate-card ${isExpanded ? "expanded" : ""}" data-testid="component-card" data-component-name=${c.name}>
-				<div class="wf-gate-header" @click=${() => toggleExpand(index)}>
+				<div class="wf-gate-header" role="button" tabindex="0" @click=${() => toggleExpand(index)} @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleExpand(index); } }}>
 					<span class="wf-gate-idx">${index + 1}</span>
 					<span class="wf-gate-chevron">▸</span>
 					<span class="wf-gate-name">${c.name || "(unnamed)"}</span>
@@ -4174,6 +4210,7 @@ function renderProjectComponentsTab(projectId: string) {
 					<button
 						class="wf-gate-delete"
 						title="Remove component"
+						aria-label="Remove component"
 						data-testid="delete-component"
 						@click=${(e: Event) => {
 							e.stopPropagation();
@@ -4188,25 +4225,25 @@ function renderProjectComponentsTab(projectId: string) {
 				<div class="wf-gate-body">
 					<div class="wf-gate-body-inner">
 						<div class="wf-identity-row">
-							<label class="wf-field-label">Name</label>
-							<input class="wf-input" style="flex:1;min-width:0;" .value=${c.name} placeholder="Component name"
+							<label class="wf-field-label" for=${`component-${index}-name`}>Name</label>
+							<input id=${`component-${index}-name`} class="wf-input" style="flex:1;min-width:0;" .value=${c.name} placeholder="Component name"
 								data-testid="component-name"
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => { c.name = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
 						</div>
 						<div class="wf-identity-row">
-							<label class="wf-field-label">Git repo</label>
-							<input class="wf-input" style="width:160px;" .value=${c.repo} placeholder="."
+							<label class="wf-field-label" for=${`component-${index}-repo`}>Git repo</label>
+							<input id=${`component-${index}-repo`} class="wf-input" style="width:160px;" .value=${c.repo} placeholder="."
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => { c.repo = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
-							<label class="wf-field-label" style="margin-left:8px;">Component path</label>
-							<input class="wf-input" style="flex:1;min-width:0;" .value=${c.relative_path ?? ""} placeholder="e.g. packages/api"
+							<label class="wf-field-label" style="margin-left:8px;" for=${`component-${index}-path`}>Component path</label>
+							<input id=${`component-${index}-path`} class="wf-input" style="flex:1;min-width:0;" .value=${c.relative_path ?? ""} placeholder="e.g. packages/api"
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => { c.relative_path = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
 						</div>
 						<div class="wf-identity-row">
-							<label class="wf-field-label">Worktree setup</label>
-							<input class="wf-input" style="flex:1;min-width:0;" .value=${c.worktree_setup_command ?? ""} placeholder="e.g. npm ci --prefer-offline"
+							<label class="wf-field-label" for=${`component-${index}-worktree-setup`}>Worktree setup</label>
+							<input id=${`component-${index}-worktree-setup`} class="wf-input" style="flex:1;min-width:0;" .value=${c.worktree_setup_command ?? ""} placeholder="e.g. npm ci --prefer-offline"
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => { c.worktree_setup_command = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
 						</div>
@@ -4216,14 +4253,17 @@ function renderProjectComponentsTab(projectId: string) {
 									${c.commands.map((cmd, ci) => html`
 										<div class="flex items-center gap-2" data-testid="command-row" @click=${(e: Event) => e.stopPropagation()}>
 											<input type="text" class="wf-input" style="width:140px;" .value=${cmd.key} placeholder="name"
+												aria-label="name"
 												data-testid="command-key"
 												@input=${(e: Event) => { cmd.key = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
 											<input type="text" class="wf-input" style="flex:1;min-width:0;" .value=${cmd.value} placeholder="shell command"
+												aria-label="shell command"
 												data-testid="command-value"
 												@input=${(e: Event) => { cmd.value = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
 											<button
 												class="wf-gate-delete"
 												title="Remove command"
+												aria-label="Remove command"
 												@click=${() => { c.commands.splice(ci, 1); markComponentsDirty(projectId); renderApp(); }}
 											>${icon(X, "sm")}</button>
 										</div>
@@ -4243,14 +4283,17 @@ function renderProjectComponentsTab(projectId: string) {
 								${c.config.map((cfg, ci) => html`
 									<div class="flex items-center gap-2" data-testid="config-row" @click=${(e: Event) => e.stopPropagation()}>
 										<input type="text" class="wf-input" style="width:200px;" .value=${cfg.key} placeholder="qa_start_command"
+											aria-label="qa_start_command"
 											data-testid="config-key"
 											@input=${(e: Event) => { cfg.key = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
 										<input type="text" class="wf-input" style="flex:1;min-width:0;" .value=${cfg.value} placeholder="value"
+											aria-label="value"
 											data-testid="config-value"
 											@input=${(e: Event) => { cfg.value = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
 										<button
 											class="wf-gate-delete"
 											title="Remove config entry"
+											aria-label="Remove config entry"
 											data-testid="delete-config"
 											@click=${() => { c.config.splice(ci, 1); markComponentsDirty(projectId); renderApp(); }}
 										>${icon(X, "sm")}</button>
@@ -4319,8 +4362,8 @@ function renderProjectComponentsTab(projectId: string) {
 					data-testid="save-components"
 					@click=${() => saveComponentsTab(projectId)}
 				>${s.saving === "saving" ? "Saving…" : "Save"}</button>
-				${s.saving === "saved" ? html`<span class="text-xs text-green-600" data-testid="save-status">Saved.</span>` : ""}
-				${s.saving === "error" ? html`<span class="text-xs text-destructive" data-testid="save-status">Failed.</span>` : ""}
+				${s.saving === "saved" ? html`<span class="text-xs text-green-600" data-testid="save-status" role="status" aria-live="polite" aria-atomic="true">Saved.</span>` : ""}
+				${s.saving === "error" ? html`<span class="text-xs text-destructive" data-testid="save-status" role="alert" aria-live="assertive" aria-atomic="true">Failed.</span>` : ""}
 			</div>
 		</div>
 	`;
@@ -4454,8 +4497,8 @@ function renderAppearanceTab(projectId: string) {
 				</div>
 				<div class="flex items-center gap-6">
 					<div class="flex items-center gap-2">
-						<label class="text-sm text-muted-foreground">Light mode</label>
-						<input type="color"
+						<label class="text-sm text-muted-foreground" for="project-accent-color-light">Light mode</label>
+						<input id="project-accent-color-light" type="color"
 							.value=${oklchToHex(project.colorLight || '')}
 							@change=${(e: Event) => { const hex = (e.target as HTMLInputElement).value; saveColor("colorLight", hex); }}
 							class="w-10 h-8 rounded border border-input cursor-pointer"
@@ -4464,8 +4507,8 @@ function renderAppearanceTab(projectId: string) {
 						<span class="text-xs text-muted-foreground font-mono">${project.colorLight || ''}</span>
 					</div>
 					<div class="flex items-center gap-2">
-						<label class="text-sm text-muted-foreground">Dark mode</label>
-						<input type="color"
+						<label class="text-sm text-muted-foreground" for="project-accent-color-dark">Dark mode</label>
+						<input id="project-accent-color-dark" type="color"
 							.value=${oklchToHex(project.colorDark || '')}
 							@change=${(e: Event) => { const hex = (e.target as HTMLInputElement).value; saveColor("colorDark", hex); }}
 							class="w-10 h-8 rounded border border-input cursor-pointer"
@@ -5773,7 +5816,7 @@ function renderAgentDirSettingsCard(scanBtnClass: string, actionBtnClass: string
 				>${agentDirLoading ? "Refreshing…" : "Refresh"}</button>
 			</div>
 
-			${agentDirError ? html`<p class="text-xs text-destructive" data-testid="agent-dir-load-error">${agentDirError}</p>` : ""}
+			${agentDirError ? html`<p class="text-xs text-destructive" data-testid="agent-dir-load-error" role="alert" aria-live="assertive" aria-atomic="true">${agentDirError}</p>` : ""}
 			${!s && agentDirLoading ? html`<p class="text-xs text-muted-foreground italic">Loading agent directory settings…</p>` : ""}
 			${s ? html`
 				<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
@@ -5866,7 +5909,7 @@ function renderAgentDirSettingsCard(scanBtnClass: string, actionBtnClass: string
 							<span class="text-xs text-muted-foreground">Restart after saving/migrating to use the next-start directory.</span>
 						</div>
 						${agentDirMigrationReport ? renderAgentDirMigrationReport(agentDirMigrationReport) : ""}
-						${agentDirMigrationError ? html`<p class="text-xs text-destructive" data-testid="agent-dir-migration-error">${agentDirMigrationError}</p>` : ""}
+						${agentDirMigrationError ? html`<p class="text-xs text-destructive" data-testid="agent-dir-migration-error" role="alert" aria-live="assertive" aria-atomic="true">${agentDirMigrationError}</p>` : ""}
 					</div>
 				` : ""}
 			` : ""}
@@ -5941,7 +5984,7 @@ function renderMaintenanceTab() {
 					</div>
 				` : ""}
 				${searchIndexError ? html`
-					<p class="text-xs text-destructive mt-1" data-search-error>${searchIndexError}</p>
+					<p class="text-xs text-destructive mt-1" data-search-error role="alert" aria-live="assertive" aria-atomic="true">${searchIndexError}</p>
 				` : ""}
 				<div class="flex items-center gap-2 mt-2">
 					<button
@@ -6081,6 +6124,7 @@ export function renderSettingsPage() {
 						class="p-1.5 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
 						@click=${() => { resetRebindState(); cleanupListener(); toggleSettings(); }}
 						title="Back"
+						aria-label="Back"
 					>${icon(ArrowLeft, "sm")}</button>
 					<h1 class="text-lg font-semibold truncate">Settings</h1>
 				</div>

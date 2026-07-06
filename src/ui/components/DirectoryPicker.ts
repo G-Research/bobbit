@@ -561,6 +561,7 @@ export class DirectoryPicker extends LitElement {
 						autocorrect="off"
 						.value=${this.value}
 						placeholder=${this.placeholder}
+						aria-label=${this.placeholder}
 						?disabled=${this.disabled}
 						aria-autocomplete="list"
 						aria-expanded=${showSuggestions ? "true" : "false"}

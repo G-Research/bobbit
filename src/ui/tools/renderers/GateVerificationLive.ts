@@ -455,7 +455,16 @@ export class GateVerificationLive extends LitElement {
 		const completedCount = passedCount + failedCount;
 		const isRunning = this.overallStatus === "running";
 
+		const announcement = this.overallStatus === "passed"
+			? `Gate ${this.gateId} verified — ${summary || `${passedCount}/${total} passed`}`
+			: this.overallStatus === "failed"
+				? `Gate ${this.gateId} verification failed — ${passedCount} passed, ${failedCount} failed`
+				: `Verifying gate ${this.gateId} — ${summary || `${completedCount}/${total} steps`}`;
+
 		return html`
+			<!-- Screen-reader announcer: the step cards below are a purely visual
+			     progress affordance, so mirror status transitions here for assistive tech. -->
+			<div class="sr-only" data-testid="gate-verification-live-region" role="status" aria-live="polite" aria-atomic="true">${announcement}</div>
 			<div class="mt-2 space-y-1">
 				${isRunning
 					? html`<div class="flex items-center justify-end text-[10px] text-muted-foreground tabular-nums -mt-[1.35rem]">${summary || `${completedCount}/${total}`}</div>`
@@ -535,12 +544,24 @@ export class GateVerificationLive extends LitElement {
 			<div class="border border-border rounded text-sm">
 				<div
 					class="p-2 flex items-center gap-2 ${clickable ? "cursor-pointer hover:bg-accent/50" : ""}"
+					role=${clickable ? "button" : nothing}
+					tabindex=${clickable ? "0" : nothing}
+					aria-expanded=${clickable && !isRunningCommand ? String(isExpanded) : nothing}
 					@click=${clickable ? () => {
 						if (isRunningCommand) {
 							// Running command: open the full-screen live output modal
 							this._openModal(index, step.name);
 						} else if (hasOutput) {
 							// Completed or streaming non-command step: toggle inline body
+							this._toggleStep(index);
+						}
+					} : null}
+					@keydown=${clickable ? (e: KeyboardEvent) => {
+						if (e.key !== "Enter" && e.key !== " ") return;
+						e.preventDefault();
+						if (isRunningCommand) {
+							this._openModal(index, step.name);
+						} else if (hasOutput) {
 							this._toggleStep(index);
 						}
 					} : null}

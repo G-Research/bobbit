@@ -355,6 +355,7 @@ export class CustomProviderDialog extends DialogBase {
 										min="0"
 										class="${NUMBER_INPUT_CLASS}"
 										placeholder="auto (8192)"
+										aria-label=${i18n("Context window")}
 										.value=${row.contextWindow != null ? String(row.contextWindow) : ""}
 										@input=${(e: Event) => {
 											const v = (e.target as HTMLInputElement).value;
@@ -369,6 +370,7 @@ export class CustomProviderDialog extends DialogBase {
 										min="0"
 										class="${NUMBER_INPUT_CLASS}"
 										placeholder="auto (4096)"
+										aria-label=${i18n("Max output tokens")}
 										.value=${row.maxTokens != null ? String(row.maxTokens) : ""}
 										@input=${(e: Event) => {
 											const v = (e.target as HTMLInputElement).value;

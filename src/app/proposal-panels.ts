@@ -726,17 +726,18 @@ function renderGoalMetadataEditor(config: GoalFormConfig): TemplateResult {
 					? html`<div class="text-[10px] text-muted-foreground opacity-70">No metadata entries.</div>`
 					: rows.map(([k, v], i) => html`
 						<div class="flex items-center gap-1.5" data-testid="goal-metadata-row">
-							<input class=${inputCls} data-testid="goal-metadata-key" placeholder="key" .value=${k}
+							<input class=${inputCls} data-testid="goal-metadata-key" placeholder="key" aria-label="key" .value=${k}
 								@input=${(e: Event) => {
 									const val = (e.target as HTMLInputElement).value;
 									config.onMetadataRowsChange((prev) => prev.map((p, j): [string, string] => j === i ? [val, p[1]] : p));
 								}} />
-							<input class="${inputCls} font-mono" data-testid="goal-metadata-value" placeholder="value (JSON or text)" .value=${v}
+							<input class="${inputCls} font-mono" data-testid="goal-metadata-value" placeholder="value (JSON or text)" aria-label="value (JSON or text)" .value=${v}
 								@input=${(e: Event) => {
 									const val = (e.target as HTMLInputElement).value;
 									config.onMetadataRowsChange((prev) => prev.map((p, j): [string, string] => j === i ? [p[0], val] : p));
 								}} />
 							<button class="text-muted-foreground hover:text-foreground text-sm px-1.5 shrink-0" title="Remove metadata entry"
+								aria-label="Remove metadata entry"
 								data-testid="goal-metadata-remove"
 								@click=${() => config.onMetadataRowsChange((prev) => prev.filter((_, j) => j !== i))}>✕</button>
 						</div>
@@ -798,8 +799,9 @@ function renderParentPickerRow(config: GoalFormConfig, lblCls: string): Template
 	return html`
 		<div class="flex flex-col gap-1.5" data-testid="goal-form-parent-row">
 			<div class="flex items-center gap-2">
-				<label class="${lblCls} w-20 md:w-16">Parent Goal</label>
+				<label class="${lblCls} w-20 md:w-16" for="goal-form-parent-picker">Parent Goal</label>
 				<select
+					id="goal-form-parent-picker"
 					class="flex-1 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
 					.value=${config.parentGoalId || ""}
 					@change=${(e: Event) => {
@@ -906,6 +908,7 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 						type="button"
 						class="flex items-center justify-center w-6 h-6 text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
 						title="Decrease"
+						aria-label="Decrease"
 						?disabled=${depthFixed || depthValue <= minDepth}
 						@click=${() => config.onMaxNestingDepthChange?.(Math.max(minDepth, depthValue - 1))}
 					>${icon(Minus, "xs")}</button>
@@ -917,6 +920,7 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 						.value=${String(depthValue)}
 						?disabled=${depthFixed}
 						data-testid="goal-form-max-depth"
+						aria-label="Max nesting depth"
 						class="w-8 text-xs text-center px-0 py-0.5 border-0 border-x border-border bg-background text-foreground focus:outline-none focus:ring-0 disabled:opacity-60 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 						@change=${(e: Event) => {
 							const raw = parseInt((e.target as HTMLInputElement).value, 10);
@@ -930,6 +934,7 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 						type="button"
 						class="flex items-center justify-center w-6 h-6 text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
 						title="Increase"
+						aria-label="Increase"
 						?disabled=${depthFixed || depthValue >= maxDepth}
 						@click=${() => config.onMaxNestingDepthChange?.(Math.min(maxDepth, depthValue + 1))}
 					>${icon(Plus, "xs")}</button>
@@ -1004,11 +1009,12 @@ function renderSubgoalOrchestration(config: GoalFormConfig): TemplateResult | st
 				<span class="inline-flex items-center rounded-md border border-border bg-background overflow-hidden">
 					<button type="button"
 						class="flex items-center justify-center w-6 h-6 text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
-						title="Decrease" ?disabled=${concurrency <= 1}
+						title="Decrease" aria-label="Decrease" ?disabled=${concurrency <= 1}
 						@click=${() => config.onMaxConcurrentChildrenChange?.(Math.max(1, concurrency - 1))}
 					>${icon(Minus, "xs")}</button>
 					<input type="number" min="1" max="8" step="1" .value=${String(concurrency)}
 						data-testid="goal-form-max-concurrent-children"
+						aria-label="Max concurrent children"
 						class="w-8 text-xs text-center px-0 py-0.5 border-0 border-x border-border bg-background text-foreground focus:outline-none focus:ring-0 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 						@change=${(e: Event) => {
 							const raw = parseInt((e.target as HTMLInputElement).value, 10);
@@ -1016,7 +1022,7 @@ function renderSubgoalOrchestration(config: GoalFormConfig): TemplateResult | st
 						}} />
 					<button type="button"
 						class="flex items-center justify-center w-6 h-6 text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
-						title="Increase" ?disabled=${concurrency >= 8}
+						title="Increase" aria-label="Increase" ?disabled=${concurrency >= 8}
 						@click=${() => config.onMaxConcurrentChildrenChange?.(Math.min(8, concurrency + 1))}
 					>${icon(Plus, "xs")}</button>
 				</span>
@@ -1115,9 +1121,10 @@ function renderGoalForm(config: GoalFormConfig) {
 			` : ""}
 			<div class="flex flex-col md:flex-row gap-2.5 md:items-center">
 				<div class="flex items-center gap-2 flex-1 min-w-0">
-					<label class="${lblCls} w-20 md:w-16">Title</label>
+					<label class="${lblCls} w-20 md:w-16" for="goal-form-title-input">Title</label>
 					<div class="flex-1 min-w-0">
 						${Input({
+							id: "goal-form-title-input",
 							type: "text",
 							value: config.title,
 							placeholder: "Goal title",
@@ -1132,8 +1139,9 @@ function renderGoalForm(config: GoalFormConfig) {
 					</div>
 				` : workflowOptions.length > 0 ? html`
 					<div class="flex items-center gap-2 md:shrink-0">
-						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
+						<label class="${lblCls} w-20 md:w-auto" for="goal-form-workflow-picker">Workflow</label>
 						<select
+							id="goal-form-workflow-picker"
 							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowProblem ? "border-[color:var(--negative)]" : "border-border"}"
 							.value=${selectedWorkflowId}
 							aria-invalid=${workflowProblem ? "true" : "false"}
@@ -1266,6 +1274,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				${config.specEditMode
 					? html`<textarea
 							${ref(goalSpecTextareaRef)}
+							aria-label="Spec"
 							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${config.streaming ? STREAMING_BORDER : ""}"
 							.value=${config.spec}
 							@input=${config.onSpecChange}
@@ -1446,8 +1455,9 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 				? html`<p class="text-xs text-muted-foreground px-5 pt-3">No workflows available for this project.</p>`
 				: html`
 					<div class="shrink-0 flex items-center gap-2 px-5 pt-3 md:pt-4 pb-3">
-						<label class="text-xs text-muted-foreground font-medium shrink-0">Workflow</label>
+						<label class="text-xs text-muted-foreground font-medium shrink-0" for="goal-proposal-workflow-select">Workflow</label>
 						<select
+							id="goal-proposal-workflow-select"
 							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border bg-background text-foreground h-9 ${workflowProblem ? "border-[color:var(--negative)]" : "border-border"}"
 							data-testid="goal-proposal-workflow-select"
 							.value=${selectedId}
@@ -2063,8 +2073,9 @@ function rolePreviewPanel() {
 			${proposalToast()}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium" for="role-preview-name-input">Name</label>
 					${Input({
+						id: "role-preview-name-input",
 						type: "text",
 						value: state.rolePreviewName,
 						placeholder: "role-name (lowercase, hyphens)",
@@ -2077,8 +2088,9 @@ function rolePreviewPanel() {
 					})}
 				</div>
 				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Label</label>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium" for="role-preview-label-input">Label</label>
 					${Input({
+						id: "role-preview-label-input",
 						type: "text",
 						value: state.rolePreviewLabel,
 						placeholder: "Display Label",
@@ -2107,6 +2119,7 @@ function rolePreviewPanel() {
 										renderApp();
 									}}
 									title=${acc.label}
+									aria-pressed=${isSelected ? "true" : "false"}
 								>
 									${statusBobbit("idle", false, undefined, isSelected, false, accId === "crown", accId === "bandana", accId)}
 									<span class="text-[10px] text-muted-foreground">${acc.label}</span>
@@ -2121,7 +2134,7 @@ function rolePreviewPanel() {
 						${currentTools.map((tool) => html`
 							<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-secondary text-secondary-foreground">
 								${tool}
-								<button class="hover:text-destructive" title="Remove tool" @click=${() => {
+								<button class="hover:text-destructive" title="Remove tool" aria-label="Remove tool" @click=${() => {
 									const remaining = currentTools.filter((t) => t !== tool);
 									state.rolePreviewTools = remaining.join(", ");
 									state.rolePreviewToolsEdited = true;
@@ -2174,6 +2187,7 @@ function rolePreviewPanel() {
 					${state.rolePreviewPromptEditMode
 						? html`<textarea
 								${ref(rolePromptTextareaRef)}
+								aria-label="System Prompt"
 								class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${streaming ? STREAMING_BORDER : ""}"
 								.value=${state.rolePreviewPrompt}
 								@input=${(e: Event) => {
@@ -2537,8 +2551,9 @@ function staffPreviewPanel() {
 			${proposalToast()}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium" for="staff-preview-name-input">Name</label>
 					${Input({
+						id: "staff-preview-name-input",
 						type: "text",
 						value: state.staffPreviewName,
 						placeholder: "Staff agent name",
@@ -2549,8 +2564,9 @@ function staffPreviewPanel() {
 					})}
 				</div>
 				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Description</label>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium" for="staff-preview-description-input">Description</label>
 					<textarea
+						id="staff-preview-description-input"
 						class="w-full p-2 text-sm rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
 						rows="2"
 						placeholder="What does this staff agent do?"
@@ -2562,8 +2578,9 @@ function staffPreviewPanel() {
 					></textarea>
 				</div>
 				<div data-testid="staff-proposal-cwd-field">
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium" for="staff-proposal-cwd-input">Working Directory</label>
 					<input
+						id="staff-proposal-cwd-input"
 						type="text"
 						data-testid="staff-proposal-cwd-input"
 						class="flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm md:text-sm text-foreground shadow-xs transition-[color,box-shadow] outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30"
@@ -2616,9 +2633,10 @@ function staffPreviewPanel() {
 					</label>
 				</div>
 				<div data-testid="staff-proposal-role-picker">
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Role</label>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium" for="staff-proposal-role-select">Role</label>
 					<p class="text-[10px] text-muted-foreground mb-1">Optional. Prepends the role's prompt context and pre-fills the accessory.</p>
 					<select
+						id="staff-proposal-role-select"
 						data-testid="staff-proposal-role-select"
 						class="w-full h-9 px-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
 						.value=${_staffProposalRoleId ?? ""}
@@ -2667,6 +2685,7 @@ function staffPreviewPanel() {
 					${state.staffPreviewPromptEditMode
 						? html`<textarea
 								${ref(staffPromptTextareaRef)}
+								aria-label="System Prompt"
 								class="p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${streaming ? STREAMING_BORDER : ""}"
 								style="min-height:150px; max-height:400px; width:100%"
 								.value=${state.staffPreviewPrompt}
@@ -2906,10 +2925,12 @@ function projectProposalPanel() {
 		const proposed = fields[key] ?? "";
 		const placeholder = PLACEHOLDERS[key] ?? "";
 		const inputType = key === "worktree_pool_size" ? "number" : "text";
+		const inputId = `project-field-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 		return html`
 			<div data-field=${key}>
-				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium" for=${inputId}>${label}</label>
 				${Input({
+					id: inputId,
 					type: inputType,
 					value: proposed,
 					placeholder,

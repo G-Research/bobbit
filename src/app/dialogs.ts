@@ -1343,6 +1343,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 													@click=${doGenerate}
 													?disabled=${generating}
 													title="Auto-generate title from chat history"
+													aria-label="Auto-generate title from chat history"
 												>
 													${generating
 														? html`<svg class="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1372,6 +1373,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 																	: "hover:bg-secondary/50"}"
 															style="width:${hasAccessory ? 34 : 28}px;height:24px;"
 															title="Colour ${i + 1}"
+															aria-label="Colour ${i + 1}"
 															@click=${() => { pendingColorIndex = i === initialColorIndex ? null : i; renderDialog(); }}
 														>
 															<!-- Wrapper applies hue-rotate to both bobbit + accessory; accessory counter-rotates inside -->
@@ -1974,7 +1976,7 @@ function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
 								</div>
 							</div>
 							<div class="flex-1 min-h-0 px-6 overflow-hidden flex flex-col gap-2">
-								<div class="text-[11px] min-h-[16px] ${errorMessage ? "text-red-500" : "text-muted-foreground"}" data-testid="add-project-browse-status">
+								<div class="text-[11px] min-h-[16px] ${errorMessage ? "text-red-500" : "text-muted-foreground"}" data-testid="add-project-browse-status" role="status" aria-live="polite" aria-atomic="true">
 									${loading
 										? "Loading…"
 										: errorMessage

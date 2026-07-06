@@ -124,7 +124,15 @@ export function renderInlineImages(content: any[] | undefined): TemplateResult {
 							alt="Tool output image"
 							class="max-w-full rounded border border-border cursor-pointer hover:opacity-90 transition-opacity"
 							style="max-height: 400px; object-fit: contain;"
+							role="button"
+							tabindex="0"
 							@click=${() => showLightbox(src)}
+							@keydown=${(e: KeyboardEvent) => {
+								if (e.key === "Enter" || e.key === " ") {
+									e.preventDefault();
+									showLightbox(src);
+								}
+							}}
 						/>
 					`;
 				},

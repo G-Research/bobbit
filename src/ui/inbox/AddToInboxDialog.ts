@@ -103,8 +103,9 @@ export class AddToInboxDialog extends LitElement {
 						>×</button>
 					</div>
 					<div>
-						<label style="display:block;font-size:11px;color:var(--muted-foreground);margin-bottom:4px;">Title</label>
+						<label for="add-to-inbox-title-input" style="display:block;font-size:11px;color:var(--muted-foreground);margin-bottom:4px;">Title</label>
 						<input
+							id="add-to-inbox-title-input"
 							class="add-to-inbox-title"
 							type="text"
 							.value=${this._title}
@@ -114,8 +115,9 @@ export class AddToInboxDialog extends LitElement {
 						/>
 					</div>
 					<div>
-						<label style="display:block;font-size:11px;color:var(--muted-foreground);margin-bottom:4px;">Prompt</label>
+						<label for="add-to-inbox-prompt-input" style="display:block;font-size:11px;color:var(--muted-foreground);margin-bottom:4px;">Prompt</label>
 						<textarea
+							id="add-to-inbox-prompt-input"
 							class="add-to-inbox-prompt"
 							rows="6"
 							.value=${this._prompt}
@@ -125,7 +127,7 @@ export class AddToInboxDialog extends LitElement {
 						></textarea>
 					</div>
 					${this._error
-						? html`<div style="font-size:12px;color:var(--negative,var(--destructive));">${this._error}</div>`
+						? html`<div style="font-size:12px;color:var(--negative,var(--destructive));" role="alert" aria-live="assertive" aria-atomic="true">${this._error}</div>`
 						: ""}
 					<div style="display:flex;justify-content:flex-end;gap:8px;padding-top:4px;">
 						<button

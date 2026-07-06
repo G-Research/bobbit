@@ -770,7 +770,7 @@ export class GoalStatusWidget extends LitElement {
 							title="Confirm completion despite bypassed gate(s)"
 						>${this._confirmCompletionLoading ? icon(Loader2, "xs", "animate-spin") : icon(CheckCircle2, "xs")}<span>${this._confirmCompletionLoading ? "Completing…" : "Confirm completion"}</span></button>
 					` : goalComplete ? html`
-						<span class="goal-widget-completed" data-testid="goal-widget-completed" title="This goal has been marked complete">${icon(CheckCircle2, "xs")}<span>Completed</span></span>
+						<span class="goal-widget-completed" data-testid="goal-widget-completed" title="This goal has been marked complete" role="status" aria-live="polite" aria-atomic="true">${icon(CheckCircle2, "xs")}<span>Completed</span></span>
 					` : nothing}
 					<button
 						class="goal-widget-button goal-widget-button-neutral"
@@ -780,7 +780,7 @@ export class GoalStatusWidget extends LitElement {
 					>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
 				</div>
 			</div>
-			${canConfirmCompletion && this._confirmCompletionError ? html`<div class="goal-widget-gate-error mb-2" data-testid="goal-widget-confirm-completion-error">${this._confirmCompletionError}</div>` : nothing}
+			${canConfirmCompletion && this._confirmCompletionError ? html`<div class="goal-widget-gate-error mb-2" data-testid="goal-widget-confirm-completion-error" role="alert">${this._confirmCompletionError}</div>` : nothing}
 
 			<div class="border-t border-border mb-2"></div>
 
@@ -857,7 +857,7 @@ export class GoalStatusWidget extends LitElement {
 						>${icon(AlertTriangle, "xs")}<span>Bypass</span></button>
 					</div>
 				` : nothing}
-				${resetError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-reset-error">${resetError}</div>` : nothing}
+				${resetError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-reset-error" role="alert">${resetError}</div>` : nothing}
 			</div>
 			${effectiveStatus === "bypassed" && (gate.whoAmI || gate.whyBypassed) ? html`
 				<div class="goal-widget-bypass-caption" data-testid="goal-widget-gate-bypass-info" title=${rowTitle}>
@@ -865,7 +865,7 @@ export class GoalStatusWidget extends LitElement {
 				</div>
 			` : nothing}
 			${formOpen ? this._renderBypassForm(gate) : nothing}
-			${bypassError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-bypass-error">${bypassError}</div>` : nothing}
+			${bypassError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-bypass-error" role="alert">${bypassError}</div>` : nothing}
 		`;
 	}
 
@@ -881,6 +881,7 @@ export class GoalStatusWidget extends LitElement {
 					data-testid="goal-widget-bypass-why"
 					rows="3"
 					placeholder="Justification (recorded for audit)"
+					aria-label="Why are you bypassing this gate?"
 					.value=${this._bypassWhy}
 					@input=${(e: Event) => { this._bypassWhy = (e.target as HTMLTextAreaElement).value; }}
 				></textarea>
@@ -890,6 +891,7 @@ export class GoalStatusWidget extends LitElement {
 					data-testid="goal-widget-bypass-who"
 					type="text"
 					placeholder="Your name / role"
+					aria-label="Who are you?"
 					.value=${this._bypassWho}
 					@input=${(e: Event) => { this._bypassWho = (e.target as HTMLInputElement).value; }}
 				/>
@@ -944,7 +946,7 @@ export class GoalStatusWidget extends LitElement {
 						data-testid="goal-widget-signoff-content-toggle"
 					>${launchLoading ? icon(Loader2, "xs", "animate-spin") : icon(FileText, "xs")}<span>${launchLoading ? "Opening…" : "Start Review"}</span></button>
 				</div>
-				${launchError ? html`<div style="font-size:11px;color:var(--destructive)" data-testid="goal-widget-signoff-content-error">${launchError}</div>` : nothing}
+				${launchError ? html`<div style="font-size:11px;color:var(--destructive)" data-testid="goal-widget-signoff-content-error" role="alert">${launchError}</div>` : nothing}
 			</div>
 		`;
 	}

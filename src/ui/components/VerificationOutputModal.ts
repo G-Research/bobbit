@@ -225,7 +225,7 @@ export class VerificationOutputModal extends LitElement {
 					style="background:#18181b;max-width:56rem;width:calc(100% - 2rem);max-height:80vh;">
 					<!-- Header -->
 					<div class="flex items-center justify-between px-4 py-2.5 border-b" style="border-color:#27272a;">
-						<div class="flex items-center gap-2">
+						<div class="flex items-center gap-2" role="status" aria-live="polite" aria-atomic="true">
 							${this._completed
 								? html`<span class="${this._finalStatus === "passed" ? "text-green-500" : "text-red-500"}">${this._finalStatus === "passed" ? "\u2713" : "\u2717"}</span>`
 								: html`<span class="text-amber-400 animate-pulse">\u25CF</span>`}
@@ -239,7 +239,7 @@ export class VerificationOutputModal extends LitElement {
 								<span class="text-xs px-1.5 py-0.5 rounded text-amber-400" style="background:rgba(245,158,11,0.15)">running</span>
 							`}
 						</div>
-						<button class="text-zinc-400 hover:text-zinc-200 transition-colors" style="font-size:18px;line-height:1;padding:2px 6px;" @click=${this._close} title="Close">\u2715</button>
+						<button class="text-zinc-400 hover:text-zinc-200 transition-colors" style="font-size:18px;line-height:1;padding:2px 6px;" @click=${this._close} title="Close" aria-label="Close">\u2715</button>
 					</div>
 					<!-- Body -->
 					${this._isAgentStep()

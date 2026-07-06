@@ -324,6 +324,7 @@ function renderTriggerCard(trigger: TriggerDef, index: number) {
 			<div style="display:flex; align-items:center; gap:8px; margin-bottom:8px">
 				<select
 					data-testid="trigger-type-select"
+					aria-label="Trigger type"
 					class="text-xs px-2 py-1 rounded border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
 					.value=${trigger.type}
 					@change=${onTypeChange}
@@ -341,6 +342,7 @@ function renderTriggerCard(trigger: TriggerDef, index: number) {
 				<button
 					class="text-[10px] px-1.5 py-0.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
 					title="Remove trigger"
+					aria-label="Remove trigger"
 					@click=${() => removeTrigger(index)}
 				>${"\u2715"}</button>
 			</div>
@@ -352,6 +354,7 @@ function renderTriggerCard(trigger: TriggerDef, index: number) {
 						type="text"
 						class=${inputClass}
 						placeholder="0 9 * * *"
+						aria-label="Cron expression (UTC)"
 						.value=${trigger.config?.cron || ""}
 						@input=${(e: Event) => updateTrigger(index, (t) => { t.config.cron = (e.target as HTMLInputElement).value; })}
 					/>
@@ -365,6 +368,7 @@ function renderTriggerCard(trigger: TriggerDef, index: number) {
 						<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Event</label>
 						<select
 							class=${inputClass}
+							aria-label="Event"
 							.value=${trigger.config?.event || "push"}
 							@change=${(e: Event) => updateTrigger(index, (t) => { t.config.event = (e.target as HTMLSelectElement).value; })}
 						>
@@ -377,6 +381,7 @@ function renderTriggerCard(trigger: TriggerDef, index: number) {
 							type="text"
 							class=${inputClass}
 							placeholder="master"
+							aria-label="Branch"
 							.value=${trigger.config?.branch || ""}
 							@input=${(e: Event) => updateTrigger(index, (t) => { t.config.branch = (e.target as HTMLInputElement).value; })}
 						/>
@@ -391,6 +396,7 @@ function renderTriggerCard(trigger: TriggerDef, index: number) {
 					rows="2"
 					data-testid="trigger-prompt-${index}"
 					placeholder="Message sent to the agent when this trigger fires"
+					aria-label=${isGoalTrigger ? "Wake prompt (required)" : "Wake prompt (optional)"}
 					.value=${trigger.prompt || ""}
 					@input=${(e: Event) => updateTrigger(index, (t) => { t.prompt = (e.target as HTMLTextAreaElement).value; })}
 				></textarea>
@@ -486,6 +492,7 @@ function renderListView(): TemplateResult {
 						variant: "ghost",
 						size: "sm",
 						onClick: () => setHashRoute("landing"),
+						title: "Back to sessions",
 						children: html`${icon(ArrowLeft, "sm")}`,
 					})}
 					<h1 class="text-lg font-semibold">Staff Agents</h1>
@@ -554,6 +561,7 @@ function renderEditView(): TemplateResult {
 						variant: "ghost",
 						size: "sm",
 						onClick: showList,
+						title: "Back to staff list",
 						children: html`${icon(ArrowLeft, "sm")}`,
 					})}
 					<h1 class="text-lg font-semibold">${selectedStaff.name}</h1>
@@ -603,6 +611,7 @@ function renderEditView(): TemplateResult {
 						class="w-full p-2 text-sm rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
 						rows="2"
 						placeholder="What does this staff agent do?"
+						aria-label="Description"
 						.value=${editDescription}
 						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; renderApp(); }}
 					></textarea>
@@ -640,6 +649,7 @@ function renderEditView(): TemplateResult {
 												${isSelected ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : "hover:bg-secondary/50"}"
 											style="width:${hasAccessory ? 34 : 28}px;height:24px;"
 											title="Colour ${i + 1}"
+											aria-label="Colour ${i + 1}"
 											@click=${() => { editColorIndex = i; renderApp(); }}
 										>
 											<span style="position:absolute;left:${hasAccessory ? 3 : 4}px;top:3px;filter:hue-rotate(${rot}deg);">
@@ -659,6 +669,7 @@ function renderEditView(): TemplateResult {
 					<p class="text-[10px] text-muted-foreground mb-1">Optional. Prepends the role's prompt context and pre-fills the accessory.</p>
 					<select
 						data-testid="staff-role-select"
+						aria-label="Role"
 						class="w-full h-9 px-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
 						.value=${editRoleId ?? ""}
 						@change=${onRoleChange}
@@ -731,6 +742,7 @@ function renderEditView(): TemplateResult {
 					<textarea
 						class="w-full p-2 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
 						rows="4"
+						aria-label="Pinned Context"
 						.value=${editMemory}
 						@input=${(e: Event) => { editMemory = (e.target as HTMLTextAreaElement).value; }}
 					></textarea>
@@ -763,7 +775,7 @@ function renderEditView(): TemplateResult {
 					</div>
 				</div>
 
-				${wakeFeedback ? html`<div class="text-xs text-muted-foreground border border-border rounded p-2 bg-secondary/30" data-testid="wake-feedback">${wakeFeedback}</div>` : ""}
+				${wakeFeedback ? html`<div class="text-xs text-muted-foreground border border-border rounded p-2 bg-secondary/30" data-testid="wake-feedback" role="status" aria-live="polite" aria-atomic="true">${wakeFeedback}</div>` : ""}
 
 				<div class="flex items-center justify-end gap-2 pt-2 border-t border-border">
 					${Button({

@@ -954,7 +954,7 @@ export class ReviewDocument extends LitElement {
   render() {
     return html`
       ${this._bannerMessage
-        ? html`<div class="review-banner">${this._bannerMessage}</div>`
+        ? html`<div class="review-banner" role="status" aria-live="polite" aria-atomic="true">${this._bannerMessage}</div>`
         : ""}
       <div class="review-document-content"></div>
       ${this._detachedAnnotations.length > 0
@@ -971,6 +971,7 @@ export class ReviewDocument extends LitElement {
                       class="review-detached-remove"
                       @click=${() => { void this._removeAnnotation(ann.id); }}
                       title="Remove comment"
+                      aria-label="Remove comment"
                     >×</button>
                   </div>
                 `,
@@ -986,7 +987,7 @@ export class ReviewDocument extends LitElement {
           >+ Comment</button>`
         : ""}
       ${this._toastMessage
-        ? html`<div class="review-toast">${this._toastMessage}</div>`
+        ? html`<div class="review-toast" role="status" aria-live="polite" aria-atomic="true">${this._toastMessage}</div>`
         : ""}
       ${this._hoverChipId && !this._isMobile
         ? html`<div

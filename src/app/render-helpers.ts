@@ -1429,7 +1429,7 @@ function renderGoalBadge(goal: Goal) {
 	if (!badge.show) return gateBadge;
 	const prIcon = goalPrIconSvg(badge.color);
 	if (badge.url) {
-		return html`<a class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" href=${badge.url} target="_blank" rel="noopener" title=${badge.label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
+		return html`<a class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" href=${badge.url} target="_blank" rel="noopener" title=${badge.label} aria-label=${badge.label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
 	}
 	return html`<span class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" title=${badge.label}>${prIcon}</span>`;
 }

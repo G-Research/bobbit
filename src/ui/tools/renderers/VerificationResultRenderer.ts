@@ -93,6 +93,7 @@ export class VerificationResultRenderer implements ToolRenderer {
 							<iframe
 								class="w-full h-[400px] mt-2 rounded border border-border"
 								sandbox="allow-scripts"
+								title="Verification HTML report"
 								.srcdoc=${reportHtml}
 							></iframe>
 						</details>

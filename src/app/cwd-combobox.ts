@@ -127,6 +127,7 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 					aria-expanded=${opts.dropdownOpen}
 					aria-autocomplete="list"
 					aria-controls="cwd-listbox"
+					aria-label=${opts.placeholder || (state.defaultCwd ? normalizePath(state.defaultCwd) : "(server default)")}
 					class="flex w-full min-w-0 rounded-md border border-input bg-transparent text-foreground shadow-xs h-9 px-3 py-1 text-sm pr-8 placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none dark:bg-input/30"
 					.value=${opts.value}
 					placeholder=${opts.placeholder || (state.defaultCwd ? normalizePath(state.defaultCwd) : "(server default)")}
@@ -144,6 +145,7 @@ export function cwdCombobox(opts: CwdComboboxProps) {
 						type="button"
 						class="absolute right-0 top-0 bottom-0 w-8 flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
 						title="Show recent directories"
+						aria-label="Show recent directories"
 						@mousedown=${(e: Event) => { e.preventDefault(); opts.onToggle(!opts.dropdownOpen); }}
 						tabindex="-1"
 					>

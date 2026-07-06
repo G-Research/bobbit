@@ -222,8 +222,10 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 									style="flex-shrink:0;width:8px;height:8px;border-radius:50%;background:${planGateStatusColor(gateStatus)};${gateStatus === 'running' ? 'box-shadow:0 0 0 2px color-mix(in oklch, var(--info) 25%, transparent);' : ''}"
 									title="Gate: ${gateStatus}"></span>` : nothing}
 								${childHasSubPlan && n.childGoal ? html`<span data-testid="plan-node-chevron" class="plan-chevron"
+									role="button" tabindex="0"
 									style="cursor:pointer;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;background:transparent;"
 									@click=${(e: Event) => { e.stopPropagation(); _togglePlanExpanded(n.childGoal!.id); }}
+									@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); _togglePlanExpanded(n.childGoal!.id); } }}
 									title="${_isPlanExpanded(n.childGoal.id) ? "Collapse" : "Expand"} sub-plan">
 									${_isPlanExpanded(n.childGoal.id) ? "▾" : "▸"}
 								</span>` : nothing}
@@ -234,8 +236,10 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 							<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground);">
 								<span>${n.state}</span>
 								${n.childGoal ? html`<a class="plan-node-link"
+									role="button" tabindex="0"
 									style="color:var(--primary);text-decoration:none;cursor:pointer;"
 									@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", n.childGoal!.id); }}
+									@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setHashRoute("goal-dashboard", n.childGoal!.id); } }}
 									title="Open ${n.childGoal.title}">open →</a>` : nothing}
 							</div>
 						</div>

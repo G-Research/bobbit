@@ -497,7 +497,7 @@ export class AssistantMessage extends LitElement {
 				${
 					this.message.stopReason === "error" && this.message.errorMessage
 						? html`
-							<div class="mx-2 sm:mx-4 mt-3 p-3 bg-destructive/10 text-destructive rounded-lg text-sm overflow-hidden">
+							<div class="mx-2 sm:mx-4 mt-3 p-3 bg-destructive/10 text-destructive rounded-lg text-sm overflow-hidden" role="alert">
 								<div class="flex items-start justify-between gap-3">
 									<div class="min-w-0">
 										<strong>${i18n("Error:")}</strong> ${this.message.errorMessage}
@@ -529,7 +529,7 @@ export class AssistantMessage extends LitElement {
 				}
 				${
 					this.message.stopReason === "aborted" && !this.suppressAbortedBanner
-						? html`<span class="text-sm text-destructive italic">${i18n("Request aborted")}</span>`
+						? html`<span class="text-sm text-destructive italic" role="alert">${i18n("Request aborted")}</span>`
 						: ""
 				}
 			</div>
@@ -777,7 +777,7 @@ export class AbortedMessage extends LitElement {
 	}
 
 	protected override render(): unknown {
-		return html`<span class="text-sm text-destructive italic">${i18n("Request aborted")}</span>`;
+		return html`<span class="text-sm text-destructive italic" role="alert">${i18n("Request aborted")}</span>`;
 	}
 }
 

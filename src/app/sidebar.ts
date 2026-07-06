@@ -573,7 +573,7 @@ export function renderRolePickerDropdown() {
 			@click=${(e: Event) => { e.stopPropagation(); if (_pickerRoleDropdownOpen) { _pickerRoleDropdownOpen = false; renderApp(); } }}>
 			<div class="flex items-center px-3 pt-2 pb-1.5 shrink-0">
 				<span class="flex-1 font-semibold text-foreground">Create New Session${_pickerProjectName ? html` <span class="text-muted-foreground font-normal">in ${_pickerProjectName}</span>` : ""}</span>
-				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
+				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" aria-label="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
 					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
 				</button>
 			</div>
@@ -1048,12 +1048,14 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 						class="${mobile ? "p-1 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
 						@click=${() => { import("./staff-page.js").then((m) => m.loadStaffPageData()); setHashRoute("staff"); }}
 						title="Manage staff agents"
+						aria-label="Manage staff agents"
 					>${icon(List, mobile ? "sm" : "xs")}</button>
 					<button
 						class="${mobile ? "p-1 rounded active:bg-secondary/50" : "p-0.5 rounded-md hover:bg-secondary"} text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
 						style="line-height:0;"
 						@click=${(e: Event) => startNewStaffFlow(e, projectId)}
 						title="New staff agent"
+						aria-label="New staff agent"
 					>
 						<span class="sidebar-compound-icon ${mobile ? "sidebar-compound-icon--lg" : ""}" data-testid="sidebar-add-staff-icon">
 							${icon(Bot, mobile ? "sm" : "xs", "sidebar-compound-base")}
@@ -1086,7 +1088,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				const btnPad = mobile ? "p-1" : "p-0.5";
 				const editBtn = html`<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
 					@click=${(e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${agent.id}`; }}
-					title="Edit">${icon(Pencil, "xs")}</button>`;
+					title="Edit" aria-label="Edit">${icon(Pencil, "xs")}</button>`;
 				const staffSessionNavId = agent.currentSessionId ? `session:${agent.currentSessionId}` : "";
 				return html`
 				<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
@@ -1351,6 +1353,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 				style="padding:0;line-height:0;"
 				@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", projectSettingsTarget); }}
 				title=${isHeadquarters ? "Headquarters settings" : "Project settings"}
+				aria-label=${isHeadquarters ? "Headquarters settings" : "Project settings"}
 			>${icon(Settings, "xs")}</button>
 			<button
 				type="button"
@@ -1358,6 +1361,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 				style="padding:0 2px;line-height:0;"
 				@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 				title="New goal in ${project.name}"
+				aria-label="New goal in ${project.name}"
 			>
 				<span class="sidebar-compound-icon" data-testid="sidebar-add-goal-icon">
 					${icon(GoalIcon, "xs", "sidebar-compound-base")}
@@ -1584,7 +1588,9 @@ function renderTruncationRow(projectId: string, count: number, depth: number) {
 			class="flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors text-[10px] text-muted-foreground italic"
 			data-testid="sidebar-show-more-children"
 			style="${sidebarTreeTruncationIndentStyle(depth)}"
+			role="button" tabindex="0"
 			@click=${(e: Event) => { e.stopPropagation(); _expandNestedDepth(projectId); }}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); _expandNestedDepth(projectId); } }}
 			title="Reveal deeper nested goals">
 			Show ${count} more child goal${count === 1 ? "" : "s"}…
 		</div>
@@ -1741,6 +1747,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 						style="line-height:0;"
 						@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 						title="New session in ${project.name}"
+						aria-label="New session in ${project.name}"
 						?disabled=${state.creatingSession}
 					>
 						<span class="sidebar-compound-icon" data-testid="sidebar-add-session-icon">
@@ -1755,6 +1762,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 						style="line-height:0;"
 						@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
 						title="New session with role"
+						aria-label="New session with role"
 					><span class="sidebar-scale-icon">${icon(ChevronDown, "xs")}</span></button>
 					${renderRolePickerDropdown()}
 				</div>
@@ -1938,6 +1946,7 @@ export function renderSidebar() {
 					class="flex items-center gap-1.5 px-2 py-2 text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
 					@click=${toggleSidebar}
 					title=${`Collapse sidebar${shortcutHint("toggle-sidebar")}`}
+					aria-label=${`Collapse sidebar${shortcutHint("toggle-sidebar")}`}
 				>
 					${icon(PanelLeftClose, "sm")}
 				</button>
@@ -2123,6 +2132,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 				class="p-2 mb-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
 				@click=${toggleSidebar}
 				title=${`Expand sidebar${shortcutHint("toggle-sidebar")}`}
+				aria-label=${`Expand sidebar${shortcutHint("toggle-sidebar")}`}
 			>
 				${icon(PanelLeftOpen, "sm")}
 			</button>

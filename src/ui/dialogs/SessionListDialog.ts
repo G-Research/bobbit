@@ -118,7 +118,15 @@ export class SessionListDialog extends DialogBase {
 											(session) => html`
 											<div
 												class="group flex items-start gap-3 p-3 rounded-lg border border-border hover:bg-secondary/50 cursor-pointer transition-colors"
+												role="button"
+												tabindex="0"
 												@click=${() => this.handleSelect(session.id)}
+												@keydown=${(e: KeyboardEvent) => {
+													if (e.key === "Enter" || e.key === " ") {
+														e.preventDefault();
+														this.handleSelect(session.id);
+													}
+												}}
 											>
 												<div class="flex-1 min-w-0">
 													<div class="font-medium text-sm text-foreground truncate">${session.title}</div>
@@ -131,6 +139,7 @@ export class SessionListDialog extends DialogBase {
 													class="sm:opacity-0 sm:group-hover:opacity-100 p-1 rounded hover:bg-destructive/10 text-destructive transition-opacity"
 													@click=${(e: Event) => this.handleDelete(session.id, e)}
 													title=${i18n("Delete")}
+													aria-label=${i18n("Delete")}
 												>
 													<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 														<path d="M3 6h18"></path>
