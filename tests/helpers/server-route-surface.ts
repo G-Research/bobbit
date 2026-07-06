@@ -133,6 +133,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/extension-host-ui-routes.ts",
 	// STR-01 cohort 29 (tools metadata/customization routes).
 	"src/server/routes/tools-routes.ts",
+	// STR-01 cohort 30 (extension-host invocation routes).
+	"src/server/routes/extension-host-invocation-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */

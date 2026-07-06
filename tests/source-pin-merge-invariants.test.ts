@@ -393,11 +393,11 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("server.ts exposes the sessionless /api/ext/pack-route/:packId/:routeName seam (restored by the w2-pack-runtimes-restore fix)", () => {
-		const text = read("src/server/server.ts");
+	it("extension-host-invocation-routes.ts exposes the sessionless /api/ext/pack-route/:packId/:routeName seam (restored by the w2-pack-runtimes-restore fix)", () => {
+		const text = read("src/server/routes/extension-host-invocation-routes.ts");
 		assert.ok(
 			text.includes("url.pathname.match(/^\\/api\\/ext\\/pack-route\\/([^/]+)\\/([^/]+)$/)"),
-			"src/server/server.ts must handle GET/POST /api/ext/pack-route/:packId/:routeName —\n" +
+			"src/server/routes/extension-host-invocation-routes.ts must handle GET/POST /api/ext/pack-route/:packId/:routeName —\n" +
 			"the sessionless, admin-bearer, BUILT-IN-pack-only seam the Marketplace uses to\n" +
 			"read/write a built-in pack's route (e.g. Hindsight config) when `#/market` has no\n" +
 			"active chat session to mint a surface token. Without it\n" +
@@ -621,17 +621,21 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("server.ts injects spawnChildGoal into the route/action host.agents surface (restored by W2.G)", () => {
-		const text = read("src/server/server.ts");
+	it("server.ts plus extension-host-invocation-routes.ts inject spawnChildGoal into the route/action host.agents surface (restored by W2.G)", () => {
+		const serverText = read("src/server/server.ts");
+		const routeText = read("src/server/routes/extension-host-invocation-routes.ts");
 		assert.ok(
-			text.includes('import { spawnExperimentChildGoal } from "./agent/experiment-spawn-goal.js";'),
-			"src/server/server.ts must import spawnExperimentChildGoal.",
+			routeText.includes('import { spawnExperimentChildGoal } from "../agent/experiment-spawn-goal.js";'),
+			"src/server/routes/extension-host-invocation-routes.ts must import spawnExperimentChildGoal.",
 		);
-		const injectionCount = (text.match(/spawnChildGoal: \(ownerSessionId: string, spawnOpts\) => spawnExperimentChildGoal\(\{/g) ?? []).length;
+		const injectionCount = (
+			(serverText.match(/spawnChildGoal: \(ownerSessionId: string, spawnOpts\) => spawnExperimentChildGoal\(\{/g) ?? []).length
+			+ (routeText.match(/spawnChildGoal: \(ownerSessionId: string, spawnOpts\) => spawnExperimentChildGoal\(\{/g) ?? []).length
+		);
 		assert.equal(
 			injectionCount,
 			2,
-			"src/server/server.ts must inject `spawnChildGoal` (backed by\n" +
+			"src/server/server.ts plus src/server/routes/extension-host-invocation-routes.ts must inject `spawnChildGoal` (backed by\n" +
 			"spawnExperimentChildGoal) into BOTH the action and route\n" +
 			"createServerHostApi() call sites, so host.agents.spawnGoal has a live\n" +
 			"backend wherever a pack handler can reach it. Originally added by\n" +
@@ -642,7 +646,7 @@ describe("Source pin — merge-loss invariants", () => {
 		// Least privilege: the masked provider-hook host (capabilities.store-only)\n" +
 		// must NEVER receive the spawnGoal backend — pinned by the masked-namespace\n" +
 		// denial test in tests/host-agents-spawn-goal.test.ts.
-		const providerHostMatch = text.match(/providerHostApi: \(\{ sessionId, packId \}\) => createServerHostApi\(\{[\s\S]*?\}\),/);
+		const providerHostMatch = serverText.match(/providerHostApi: \(\{ sessionId, packId \}\) => createServerHostApi\(\{[\s\S]*?\}\),/);
 		assert.ok(providerHostMatch, "src/server/server.ts must still define providerHostApi via createServerHostApi.");
 		assert.ok(
 			!providerHostMatch[0].includes("spawnChildGoal"),

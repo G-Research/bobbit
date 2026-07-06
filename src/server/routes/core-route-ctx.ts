@@ -54,6 +54,12 @@ import type { VerificationHarness } from "../agent/verification-harness.js";
 import type { TeamManager } from "../agent/team-manager.js";
 import type { PersistedTask } from "../agent/task-store.js";
 import type { CookieStore } from "../auth/cookie.js";
+import type { ExtensionChannelServices } from "../agent/session-manager.js";
+import type { OrchestrationCore } from "../agent/orchestration-core.js";
+import type { RuntimeContext } from "../agent/lifecycle-hub.js";
+import type { ToolManager as ExtensionToolManager } from "../agent/tool-manager.js";
+import type { ActionGuardSession } from "../extension-host/action-guard.js";
+import type { RouteDispatcher, RouteRegistry } from "../extension-host/route-dispatcher.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -323,4 +329,29 @@ export interface CoreRouteCtx {
 
 	// ── Goals G2a additions — append-only.
 	cookieStore: CookieStore;
+
+	// ── Cohort 30 (extension-host invocation routes) additions — append-only.
+	extensionChannelServices?: ExtensionChannelServices;
+	mintScopedExtensionChannelOpenPermit(input: {
+		openPermits: unknown;
+		packContributionRegistry: PackContributionRegistry;
+		projectId?: string;
+		resolver: ExtensionToolManager;
+		headerSessionId: string | undefined;
+		rawHeaderSessionId: string | string[] | undefined;
+		bodySessionId: unknown;
+		surfaceToken: unknown;
+		name: unknown;
+		init: unknown;
+		singletonKey: unknown;
+		resolveSession(id: string): ActionGuardSession | undefined;
+	}): Promise<{ ok: true; openGrant: string; channelName: string; packId: string; sessionId: string } | { ok: false; status: number; error: string }>;
+	notePackStoreWrite(key: unknown): void;
+	orchestrationCore: OrchestrationCore;
+	resolveManagedRuntimeContext(
+		supervisor: PackRuntimeSupervisorLike | undefined,
+		opts: { packId: string; runtimeId: string; projectId?: string; config?: Record<string, unknown> },
+	): Promise<RuntimeContext | undefined>;
+	routeDispatcher: RouteDispatcher;
+	routeRegistry: RouteRegistry;
 }
