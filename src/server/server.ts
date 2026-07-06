@@ -8,7 +8,6 @@ import path from "node:path";
 
 import os from "node:os";
 import { parse as parseYaml } from "yaml";
-import { fileURLToPath } from "node:url";
 import {
 	bobbitStateDir,
 	bobbitConfigDir,
@@ -45,7 +44,7 @@ import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { buildOrientPayload, type OrientSessionInput } from "./agent/orient.js";
 import { bobbitPackageVersion } from "./agent/aigw-user-agent.js";
-import { ToolManager, copyDirRecursive, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
+import { ToolManager, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 // STR-01 core route registry (cohort 1: projects). See docs/design/route-registry.md.
@@ -119,6 +118,8 @@ import { registerGoalReadRoutes } from "./routes/goal-read-routes.js";
 import { registerTasksRoutes } from "./routes/tasks-routes.js";
 // STR-01 cohort 28: pack UI/contribution discovery routes.
 import { registerExtensionHostUiRoutes } from "./routes/extension-host-ui-routes.js";
+// STR-01 cohort 29: tools metadata/customization routes.
+import { registerToolsRoutes } from "./routes/tools-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -3403,6 +3404,7 @@ registerPromptAutocompleteRoutes(coreRouteTable);
 registerGoalReadRoutes(coreRouteTable);
 registerTasksRoutes(coreRouteTable);
 registerExtensionHostUiRoutes(coreRouteTable);
+registerToolsRoutes(coreRouteTable);
 
 interface HandleApiRouteDeps {
 	sessionManager: SessionManager;
@@ -3487,16 +3489,6 @@ async function handleApiRoute(
 		packRuntimeSupervisor,
 		lspSupervisor,
 	} = deps;
-	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
-	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
-		...r.item,
-		origin: r.origin,
-		...(r.overrides ? { overrides: r.overrides } : {}),
-		// Always emit originPackId/originPackName (null for builtin/user entities)
-		// so roles/tools match the skills wire shape (finding #3).
-		originPackId: r.originPackId ?? null,
-		originPackName: r.originPackName ?? null,
-	});
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
 		return cascadeRole ?? roleManager.getRole(roleId);
@@ -3712,6 +3704,8 @@ async function handleApiRoute(
 	// cohort 27, task routes (src/server/routes/tasks-routes.ts).
 	// cohort 28, pack UI/contribution discovery routes
 	// (src/server/routes/extension-host-ui-routes.ts).
+	// cohort 29, tools metadata/customization routes
+	// (src/server/routes/tools-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -4769,185 +4763,10 @@ async function handleApiRoute(
 
 	// ── Role endpoints ─────────────────────────────────────────────
 
-	const toolDiagnosticsForProject = (projectId?: string): Array<Record<string, unknown>> => {
-		const diagnostics: Array<Record<string, unknown>> = [];
-		const seen = new Set<string>();
-		const add = (rows: Array<Record<string, unknown>> | undefined): void => {
-			for (const row of rows ?? []) {
-				const key = `${row.toolName ?? row.tool ?? ""}\0${row.extensionPath ?? row.path ?? ""}\0${row.message ?? ""}`;
-				if (seen.has(key)) continue;
-				seen.add(key);
-				diagnostics.push(row);
-			}
-		};
-		if (toolManager) add(toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>>);
-		if (projectId) add(projectContextManager.getOrCreate(projectId)?.toolManager.getToolDiagnostics() as unknown as Array<Record<string, unknown>> | undefined);
-		return diagnostics;
-	};
-	const attachToolDiagnostics = (tools: Array<Record<string, unknown>>, diagnostics: Array<Record<string, unknown>>): void => {
-		if (diagnostics.length === 0) return;
-		for (const tool of tools) {
-			const name = typeof tool.name === "string" ? tool.name : undefined;
-			if (!name) continue;
-			const related = diagnostics.filter((diagnostic) => diagnostic.toolName === name || diagnostic.tool === name || diagnostic.name === name);
-			if (related.length > 0) tool.diagnostics = related;
-		}
-	};
-
-	// GET /api/tools — list available agent tools (with cascade origin)
-	if (url.pathname === "/api/tools" && req.method === "GET") {
-		// Require an explicit projectId. First-party UI/test helpers pass
-		// `headquarters` for the server scope; normalize it before any downstream
-		// config/toolManager/marketplace lookup so the synthetic HQ id never leaks
-		// into project-context calls.
-		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
-		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-		const effectiveConfigProjectId = projectScope.effectiveProjectId;
-		const resolved = configCascade.resolveTools(effectiveConfigProjectId);
-		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
-		// `market-packs/<name>` dir segment via the same `resolvePackIdentityForTool`
-		// the renderer/action endpoints + /api/ext/contributions use) so a tool
-		// renderer's `host.ui.openPanel({panelId})` resolves the panel WITHIN its own
-		// pack (panel ids are pack-local) via /api/ext/packs/:packId/panels/:panelId.
-		// Empty/absent for builtins. Tool-scoped origin identity only — NOT a
-		// pack-scoped contribution field.
-		const toolPackTm = resolveActionToolManager(
-			toolManager,
-			projectScope.context?.toolManager,
-		);
-		const tools: Array<Record<string, unknown>> = resolved.map(r => {
-			const out = withOrigin(r as any);
-			if (r.originPackId && toolPackTm) {
-				const packId = resolvePackIdentityForTool(toolPackTm, r.item.name).packId;
-				if (packId) out.packId = packId;
-			}
-			return out;
-		});
-		// Include MCP/external tools not covered by the config cascade
-		if (toolManager) {
-			const resolvedNames = new Set(resolved.map(r => r.item.name));
-			for (const t of toolManager.getAvailableTools(piExtensionToolScopeContext({ projectId: effectiveConfigProjectId }))) {
-				if (!resolvedNames.has(t.name)) {
-					tools.push({ ...t, origin: t.origin ?? "mcp" });
-				}
-			}
-		}
-		appendPiExtensionToolRows(tools, buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId)));
-		const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
-		attachToolDiagnostics(tools, toolDiagnostics);
-		json({ tools, diagnostics: toolDiagnostics, toolDiagnostics });
-		return;
-	}
-
-	// Routes with tool :name parameter
-	const toolMatch = url.pathname.match(/^\/api\/tools\/([^/]+)$/);
-	if (toolMatch) {
-		const name = decodeURIComponent(toolMatch[1]);
-
-		if (req.method === "GET") {
-			// Resolve via the selected project's toolManager so project-scope
-			// market-pack tools are visible. Headquarters normalizes to the
-			// server/global scope; missing or unknown projectId never falls back.
-			const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
-			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-			const effectiveConfigProjectId = projectScope.effectiveProjectId;
-			const tm = resolveActionToolManager(toolManager, projectScope.context?.toolManager);
-			const fallbackTm = fallbackToolManagerForConfig(projectScope.context?.configDir ?? bobbitConfigDir());
-			const piRows = buildPiExtensionToolRows(sessionManager.resolveMarketplacePiExtensionContributions(effectiveConfigProjectId));
-			const piTool = piRows.find((row) => row.name === name);
-			const tool = tm.getToolByName(name) ?? fallbackTm?.getToolByName(name);
-			if (!tool && !piTool) { json({ error: "Tool not found" }, 404); return; }
-			// Merge in cascade origin metadata so the detail payload carries the same
-			// origin/originPackId/originPackName the LIST endpoint emits (finding #1).
-			// Without this, the tools edit page replaces the cascade list item with the
-			// raw detail and a market-pack tool loses its origin badge + read-only state.
-			const cascadeEntry = configCascade.resolveTools(effectiveConfigProjectId).find(r => r.item.name === name);
-			const toolDiagnostics = toolDiagnosticsForProject(effectiveConfigProjectId);
-			if (cascadeEntry && tool) {
-				const withMeta = withOrigin(cascadeEntry as any);
-				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
-				// tools edit page keeps the same own-pack identity for a market-pack tool.
-				const packId = cascadeEntry.originPackId ? resolvePackIdentityForTool(tm, name).packId : "";
-				const detail: Record<string, unknown> = { ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName, ...(packId ? { packId } : {}) };
-				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
-				attachToolDiagnostics([detail], toolDiagnostics);
-				json(detail);
-			} else if (tool) {
-				const detail: Record<string, unknown> = { ...tool };
-				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
-				attachToolDiagnostics([detail], toolDiagnostics);
-				json(detail);
-			} else {
-				const detail: Record<string, unknown> = { ...(piTool as Record<string, unknown>) };
-				attachToolDiagnostics([detail], toolDiagnostics);
-				json(detail);
-			}
-			return;
-		}
-
-		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"));
-			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-			const targetToolManager = projectScope.context?.toolManager ?? toolManager;
-			const targetConfigDir = projectScope.context?.configDir ?? bobbitConfigDir();
-			const updates = {
-				description: body.description,
-				group: body.group,
-				docs: body.docs,
-				detail_docs: body.detail_docs,
-				grantPolicy: body.grantPolicy,
-			};
-			const ok = targetToolManager.updateToolMetadata(name, updates)
-				|| (fallbackToolManagerForConfig(targetConfigDir)?.updateToolMetadata(name, updates) ?? false);
-			if (!ok) { json({ error: "Tool not found" }, 404); return; }
-			json({ ok: true });
-			return;
-		}
-	}
-
-	function runtimeBuiltinToolsDir(): string {
-		const moduleDefaults = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "tools");
-		if (fs.existsSync(moduleDefaults)) return moduleDefaults;
-		return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "defaults", "tools");
-	}
-
-	function fallbackToolManagerForConfig(configDirForScope: string): ToolManager | null {
-		const builtinToolsDir = runtimeBuiltinToolsDir();
-		if (!fs.existsSync(builtinToolsDir)) return null;
-		return new ToolManager(configDirForScope, builtinToolsDir);
-	}
-
-	// Shared helper: find which group subdirectory contains a tool by scanning YAML files.
-	function findToolGroupDir(toolName: string, toolsDir: string): string | null {
-		try {
-			const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
-			for (const entry of entries) {
-				if (!entry.isDirectory()) continue;
-				const groupPath = path.join(toolsDir, entry.name);
-				try {
-					const files = fs.readdirSync(groupPath);
-					for (const file of files) {
-						if (!file.endsWith(".yaml")) continue;
-						try {
-							const raw = fs.readFileSync(path.join(groupPath, file), "utf-8");
-							// Quick check without full YAML parse
-							if (raw.includes(`name: ${toolName}`) || raw.includes(`name: "${toolName}"`)) {
-								// Verify with proper field check
-								const lines = raw.split("\n");
-								for (const line of lines) {
-									const m = line.match(/^name:\s*"?([^"\n]+)"?\s*$/);
-									if (m && m[1].trim() === toolName) return entry.name;
-								}
-							}
-						} catch { /* skip unreadable */ }
-					}
-				} catch { /* skip */ }
-			}
-		} catch { /* dir doesn't exist */ }
-		return null;
-	}
+	// GET /api/tools, GET/PUT /api/tools/:name,
+	// POST /api/tools/:name/customize, and DELETE /api/tools/:name/override moved
+	// to the core route registry (STR-01 cohort 29) — see
+	// src/server/routes/tools-routes.ts.
 
 	// GET /api/tools/:tool/renderer, GET /api/ext/packs/:packId/panels/:panelId,
 	// GET/POST /api/ext/packs/:packId/settings-sections/:sectionId{/surface-token},
@@ -5665,109 +5484,6 @@ async function handleApiRoute(
 	// secret ever rides a pack-monkey-patchable `fetch`, and pack code — which has no
 	// handle to the WS — cannot send it. A raw same-realm `fetch` to any session
 	// endpoint therefore cannot drive the agent. See docs/design/extension-host-phase2.md §8 C2.1.
-
-	// POST /api/tools/:name/customize — copy tool group to a target scope
-	const toolCustomizeMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/customize$/);
-	if (toolCustomizeMatch && req.method === "POST") {
-		const name = decodeURIComponent(toolCustomizeMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
-		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
-		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-		const projectId = projectScope.effectiveProjectId;
-
-		// Find the tool in the cascade to get its origin
-		const resolved = configCascade.resolveTools(projectId);
-		const source = resolved.find(r => r.item.name === name);
-		if (!source) { json({ error: "Tool not found" }, 404); return; }
-
-		// Find the groupDir by scanning tool directories to locate this tool's YAML
-		const builtinToolsDir = runtimeBuiltinToolsDir();
-		const serverToolsDir = path.join(bobbitConfigDir(), "tools");
-
-		// Find groupDir from the source layer
-		let groupDir: string | null = null;
-		let sourceToolsDir: string;
-		if (source.origin === "builtin") {
-			sourceToolsDir = builtinToolsDir;
-			groupDir = findToolGroupDir(name, builtinToolsDir);
-		} else if (source.origin === "project" && projectId) {
-			const ctx = projectContextManager.getOrCreate(projectId);
-			sourceToolsDir = ctx ? path.join(ctx.configDir, "tools") : serverToolsDir;
-			groupDir = findToolGroupDir(name, sourceToolsDir);
-		} else {
-			sourceToolsDir = serverToolsDir;
-			groupDir = findToolGroupDir(name, serverToolsDir);
-		}
-		// Fallback: try all layers
-		if (!groupDir) groupDir = findToolGroupDir(name, builtinToolsDir) || findToolGroupDir(name, serverToolsDir);
-		if (!groupDir) { json({ error: "Could not determine tool group directory" }, 400); return; }
-
-		// Determine target directory
-		let targetToolsDir: string;
-		if (scope === "project" && projectId) {
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetToolsDir = path.join(ctx.configDir, "tools");
-		} else {
-			targetToolsDir = serverToolsDir;
-		}
-
-		// Determine the actual source dir for copying
-		let actualSourceDir = sourceToolsDir;
-		// If the source layer doesn't have this group, try builtins then server
-		if (!fs.existsSync(path.join(actualSourceDir, groupDir))) {
-			if (fs.existsSync(path.join(builtinToolsDir, groupDir))) actualSourceDir = builtinToolsDir;
-			else if (fs.existsSync(path.join(serverToolsDir, groupDir))) actualSourceDir = serverToolsDir;
-		}
-
-		const srcDir = path.join(actualSourceDir, groupDir);
-		const destDir = path.join(targetToolsDir, groupDir);
-
-		if (!fs.existsSync(srcDir)) { json({ error: "Source tool group not found" }, 404); return; }
-
-		// Copy entire group directory (recursively handles nested files)
-		copyDirRecursive(srcDir, destDir);
-
-		json({ ok: true, groupDir }, 201);
-		return;
-	}
-
-	// DELETE /api/tools/:name/override — remove tool group override at a scope
-	const toolOverrideMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/override$/);
-	if (toolOverrideMatch && req.method === "DELETE") {
-		const name = decodeURIComponent(toolOverrideMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
-		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"), { aliasSystem: true });
-		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-		const projectId = projectScope.effectiveProjectId;
-
-		// Determine the tools directory for the target scope
-		let targetToolsDir: string;
-		if (scope === "project" && projectId) {
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetToolsDir = path.join(ctx.configDir, "tools");
-		} else {
-			targetToolsDir = path.join(bobbitConfigDir(), "tools");
-		}
-
-		// Find which group directory contains this tool
-		const builtinToolsDir = runtimeBuiltinToolsDir();
-
-		// Find groupDir in the target scope (the override we're deleting)
-		let groupDir = findToolGroupDir(name, targetToolsDir);
-		// If not found in target, try builtins to at least know the group name
-		if (!groupDir) groupDir = findToolGroupDir(name, builtinToolsDir);
-		if (!groupDir) { json({ error: "Could not determine tool group directory" }, 400); return; }
-
-		const dirToRemove = path.join(targetToolsDir, groupDir);
-		if (fs.existsSync(dirToRemove)) {
-			fs.rmSync(dirToRemove, { recursive: true, force: true });
-		}
-
-		json({ ok: true });
-		return;
-	}
 
 	// /api/tool-group-policies* and /api/config/cwd moved to the core route
 	// registry (STR-01 cohort 18) — see src/server/routes/host-config-routes.ts
