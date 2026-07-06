@@ -129,6 +129,10 @@ export default defineConfig({
 					name: "v2-integration",
 					environment: "node",
 					include: ["tests2/integration/**/*.test.ts"],
+					// Integration tests each boot a real gateway + verification harness;
+					// under concurrent load they can take >30 s, so override the default.
+					testTimeout: 60_000,
+					hookTimeout: 90_000,
 				},
 			},
 		],
