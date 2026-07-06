@@ -45,6 +45,7 @@ import type { TsServerSupervisor } from "../lsp/supervisor.js";
 import type { PersistedGoal } from "../agent/goal-store.js";
 import type { TaskManager } from "../agent/task-manager.js";
 import type { Workflow } from "../agent/workflow-store.js";
+import type { ColorStore } from "../agent/color-store.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -279,4 +280,10 @@ export interface CoreRouteCtx {
 	// ── Cohort 18 (host configuration routes) additions — append-only.
 	/** handleApiRoute's mutable gateway config object, threaded so PUT /api/config/cwd preserves the legacy in-place write. */
 	mutableGatewayConfig: { defaultCwd: string };
+
+	// ── Cohort 20 (session discovery routes) additions — append-only.
+	archivedSessionMatchesQuery(session: any, query: string): boolean;
+	bfsEnrichArchived(seedIds: string[], allArchived: any[]): any[];
+	colorStore: ColorStore;
+	normalizedArchivedQuery(value: string | null): string;
 }
