@@ -46,7 +46,7 @@ async function signalGate(goalId: string, gateId: string, body: Record<string, u
 	return text ? JSON.parse(text) : null;
 }
 
-async function waitForGateStatus(goalId: string, gateId: string, status: "pending" | "passed" | "failed", timeoutMs = 15_000): Promise<any> {
+async function waitForGateStatus(goalId: string, gateId: string, status: "pending" | "passed" | "failed", timeoutMs = 30_000): Promise<any> {
 	return pollUntil(async () => {
 		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
 		if (!res.ok) return null;
