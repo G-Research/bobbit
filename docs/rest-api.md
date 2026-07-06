@@ -275,6 +275,8 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 
 `<type>` is one of `goal | project | role | tool | staff`. `goal` files are markdown with YAML frontmatter; the others are native YAML.
 
+The implementation lives in `src/server/routes/session-proposal-routes.ts` (STR-01 cohort 17).
+
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions/:id/proposal/:type` | Read the raw proposal file body. `200` with `text/markdown` (goal) or `application/yaml` (others). `404 {ok:false, code:"FILE_NOT_FOUND", message}` if no draft. |
@@ -346,7 +348,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals` | List goals. `?archived=true` returns archived goals with an `archivedSessions` field; `q` filters archived goals by goal title or affiliated session title/role before pagination. Supports `?since=N` generation counter for conditional fetch. See [Archived goal list and query search](#archived-goal-list-and-query-search) |
-| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, projectId?, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. `projectId: "headquarters"` is valid; with `worktree: false`, a Headquarters goal can run data-only with no branch/worktree. See [Hierarchical goal metadata](design/goal-metadata.md). |
+| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, projectId?, workflowId?, workflow?, team?, worktree?, reattemptOf?, metadata? }`). Workflow resolution is strict: inline `workflow` wins, explicit `workflowId` resolves in the project workflow store/cascade, omitted `workflowId` uses the first stored workflow, and an empty store returns `400 { code: "NO_WORKFLOWS", available: [] }` without creating a goal. Unknown explicit ids return `400 { code: "WORKFLOW_NOT_FOUND", workflowId, available }` when other workflows exist. There is no magic `general` fallback and no goal-create auto-seed. `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. `projectId: "headquarters"` is valid; with `worktree: false`, a Headquarters goal can run data-only with no branch/worktree. See [Hierarchical goal metadata](design/goal-metadata.md). |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
@@ -498,6 +500,22 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 Restart semantics: boot restores persisted active team entries and re-subscribes their sessions; it does not call `/team/start` implicitly for existing teamless goals. After `/team/teardown`, or after creating a goal with `autoStartTeam: false`, the goal remains teamless across restart and this explicit start route remains the manual recovery path.
 
+### Swarm groups
+
+Swarm routes are handled by `src/server/agent/swarm-routes.ts`. They expose the shipped best-of-N, plan-fan-in, and orchestrator-worker surfaces; topology mechanics are summarized in [goals-workflows-tasks.md](goals-workflows-tasks.md) and designed in [SWARM-W4](design/swarm-orchestration-w4.md).
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/goals/:id/swarm/best-of-n` | Create a best-of-N group under a parent goal. |
+| `POST` | `/api/goals/:id/swarm/plan-fan-in` | Create a plan-fan-in group: planning-only siblings fan out, then a synthesis reduce step prepares one plan. |
+| `POST` | `/api/goals/:id/swarm/orchestrator-worker` | Create an orchestrator-worker group: a decompose role emits disjoint shards, worker children run with `reconcileMode: "merge-all"`, and shard merges use the ordinary `mergeChild` path. |
+| `GET` | `/api/goals/:id/swarm-groups/:swarmGroup` | Inspect group status, artifacts, last best-of-N verification, `reconcileMode`, config, synthesis status, build child, and plan rejection state. |
+| `POST` | `/api/goals/:id/swarm-groups/:swarmGroup/verify` | Run best-of-N verification and, for a verified human/UI caller, mint a one-shot confirmation token for the selected winner. Refused with `400 WRONG_TOPOLOGY` for plan-fan-in and orchestrator-worker groups. |
+| `POST` | `/api/goals/:id/swarm-groups/:swarmGroup/confirm` | Human-confirm a best-of-N winner and integrate it with `mergeChild(..., { forceIntegrateSwarmWinner: true })`; losing siblings are archived without merging. Refused for plan-fan-in and orchestrator-worker groups. |
+| `POST` | `/api/goals/:id/swarm-groups/:swarmGroup/plan-verify` | For plan-fan-in, return synthesis status/output and mint the pre-build `swarm-plan-fan-in-build-start` token only for a verified human/UI caller. |
+| `POST` | `/api/goals/:id/swarm-groups/:swarmGroup/plan-confirm` | Consume the plan token and create exactly one ordinary, non-swarm build child. |
+| `POST` | `/api/goals/:id/swarm-groups/:swarmGroup/plan-reject` | Consume the same plan token, archive planning siblings, and mark the synthesized plan rejected without auto-retry or fallback build. |
+
 ### Orchestration routes (child agents)
 
 These back the `team_delegate` / `team_wait` / own-children `team_*` agent tools. `:id` is the
@@ -604,6 +622,8 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semant
 Role list/mutation routes that accept `projectId` treat `projectId=headquarters` as server/Headquarters scope for non-workflow config. Created or customized roles are stored in server config and appear with origin `server` (labelled Headquarters in the UI), not as a duplicate project override.
 
 ### Tool Group Policies
+
+The implementation lives in `src/server/routes/host-config-routes.ts` (STR-01 cohort 18).
 
 | Method | Path | Description |
 |---|---|---|
@@ -828,6 +848,8 @@ Server-level fallback, labelled Headquarters in the UI (applied when no normal p
 
 ### Config
 
+The implementation lives in `src/server/routes/host-config-routes.ts` (STR-01 cohort 18).
+
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/config/cwd` | Get the server's working directory |
@@ -887,7 +909,7 @@ Model-related preference keys include `default.sessionModel`, `default.reviewMod
 
 ### Agent directory
 
-These endpoints back Settings → Maintenance → Agent Directory. They are restart-gated: they expose the active startup directory and save only the next-start preference. See [Configurable agent directory](configurable-agent-directory.md).
+These endpoints back Settings → Maintenance → Agent Directory. They are restart-gated: they expose the active startup directory and save only the next-start preference. The implementation lives in `src/server/routes/host-config-routes.ts` (STR-01 cohort 18). See [Configurable agent directory](configurable-agent-directory.md).
 
 | Method | Path | Description |
 |---|---|---|
