@@ -4,7 +4,7 @@
  * All helpers use Playwright's built-in waiting (locator assertions,
  * expect().toBeVisible()). No fixed-duration setTimeout sleeps.
  */
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { readE2ETokenAsync, base, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
 
@@ -85,6 +85,30 @@ export async function activeSessionId(page: Page): Promise<string | null> {
 	});
 }
 
+// `Locator.isVisible({ timeout })` does NOT wait — Playwright's own type
+// declarations document this: "does not wait for the element to become
+// visible and returns immediately." It's an instant DOM snapshot, not a
+// poll. Right after `openApp()` (which only waits for the sidebar's
+// "Settings" button — present in the very first, pre-fetch render frame,
+// before `/api/projects` has resolved), the sidebar's project buttons can
+// still be mid-fetch. An immediate `isVisible()` check on the preferred
+// project's "New session" button races that fetch and can see nothing at
+// all, even though the button paints moments later. `Locator.waitFor({
+// state: "visible" })` (unlike `isVisible()`) actually polls up to
+// `timeout`, which is the real fix here — confirmed by forcing the race
+// with an artificial `/api/projects` response delay: the broken
+// `isVisible({timeout})` check reliably fell through to the
+// first-in-DOM-order fallback button (Headquarters, since it registers
+// before any harness-created project) instead of waiting for "default".
+async function isVisibleWithin(locator: Locator, timeout: number): Promise<boolean> {
+	try {
+		await locator.waitFor({ state: "visible", timeout });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Click "New session" button in the sidebar and wait for the newly-created
  * session to become the active route/session, not just for the already-visible
@@ -97,7 +121,7 @@ export async function createSessionViaUI(page: Page, opts?: { projectName?: stri
 	// first visible session button for single-project or custom-project tests.
 	const preferredName = opts?.projectName ?? "default";
 	const preferredButton = page.locator(`button[title="New session in ${preferredName}"]`).first();
-	if (await preferredButton.isVisible({ timeout: 1_000 }).catch(() => false)) {
+	if (await isVisibleWithin(preferredButton, 10_000)) {
 		await preferredButton.click();
 	} else {
 		await page.locator("button[title^='New session in']").first().click();

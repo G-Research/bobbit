@@ -14,8 +14,8 @@ import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, hostPathToContainer, type IRpcBridge, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime } from "./session-runtime.js";
-import { sessionFileExists, sessionFileRead, sessionFsContextForAgentFile } from "./session-fs.js";
-import { safePersistedHostAgentSessionFile, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { sessionFileExists, sessionFsContextForAgentFile } from "./session-fs.js";
+import { sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { SessionStore, type PersistedSession, type WorktreePushPolicy, type SessionRuntime } from "./session-store.js";
@@ -60,13 +60,13 @@ import { SessionPromptPlumbing, type SessionPromptPlumbingDeps } from "./session
 export { isNarrowDelegateAllowedTools } from "./session-prompt-plumbing.js";
 import { SessionToolPermissions, type SessionToolPermissionsDeps, type ToolGrantMode, type ToolGrantResolution } from "./session-tool-permissions.js";
 export type { ToolGrantMode, ToolGrantResolution } from "./session-tool-permissions.js";
+import { SessionMetadata, type SessionListEntry, type SessionMetadataDeps, type SessionMetadataUpdate, type ArchivedChildMetadataUpdate } from "./session-metadata.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
 import { shouldKeepDespiteOrphan } from "./orphan-cleanup.js";
 import { cleanupSessionPrompt, type PromptParts, type PromptProfile } from "./system-prompt.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
@@ -82,7 +82,7 @@ import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
-import { getAigwUrl, deriveName } from "./aigw-manager.js";
+import { deriveName } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
@@ -1003,6 +1003,7 @@ export class SessionManager {
 	private sessionSetupPlumbing!: SessionSetupPlumbing;
 	private sessionPromptPlumbing!: SessionPromptPlumbing;
 	private sessionToolPermissions!: SessionToolPermissions;
+	private sessionMetadata!: SessionMetadata;
 	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
 
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
@@ -1380,6 +1381,19 @@ export class SessionManager {
 		} satisfies SessionToolPermissionsDeps);
 		this.retainSessionToolPermissionsHostSurface();
 
+		this.sessionMetadata = new SessionMetadata({
+			getSessions: () => this.sessions,
+			getProjectContextManager: () => this.projectContextManager,
+			getTestStore: () => this._testStore,
+			getPreferencesStore: () => this.preferencesStore,
+			getSandboxManager: () => this.sandboxManager,
+			resolveStoreForSession: (id) => this.resolveStoreForSession(id),
+			resolveStoreForId: (id) => this.resolveStoreForId(id),
+			updateArchivedMeta: (id, updates) => this.updateArchivedMeta(id, updates),
+			broadcast: (clients, msg) => broadcast(clients, msg),
+		} satisfies SessionMetadataDeps);
+		this.retainSessionMetadataHostSurface();
+
 		this.sessionSetupPlumbing = new SessionSetupPlumbing({
 			getAgentCliPath: () => this.agentCliPath,
 			getSystemPromptPath: () => this.systemPromptPath,
@@ -1590,6 +1604,28 @@ export class SessionManager {
 		void this.denyToolPermission;
 		void this.recomputeAllowedToolsForRestart;
 		void this.getPendingToolPermission;
+	}
+
+	private retainSessionMetadataHostSurface(): void {
+		// SessionMetadata owns catalog/metadata/draft/title behavior after
+		// cohort 14, while SessionManager keeps same-named wrappers for callers
+		// and source-shape pins.
+		void this.getAllSessionsRaw;
+		void this.listSessions;
+		void this.getAllSessionIdsForGoal;
+		void this.markSessionRead;
+		void this.setTitle;
+		void this.generateGoalTitle;
+		void this.updateSessionMeta;
+		void this.markChildTerminal;
+		void this.getDraft;
+		void this.setDraft;
+		void this.deleteDraft;
+		void this.tryGenerateTitleFromPrompt;
+		void this.generateTitleForAnySession;
+		void this.autoGenerateTitle;
+		void this.getPersistedSession;
+		void this.getArchivedSession;
 	}
 
 	private retainSessionSpawnHostSurface(): void {
@@ -3147,286 +3183,48 @@ export class SessionManager {
 		};
 	}
 
-	/**
-	 * @internal — full in-memory `SessionInfo[]` for callers inside
-	 * `src/server/agent/` that need to drive `forceAbort`/lifecycle ops
-	 * over every session (e.g. the pause-cascade sweep in
-	 * `nested-goal-routes.ts`). Do NOT expose over REST or WS — leaks
-	 * `rpcClient`, `eventBuffer`, etc.
-	 */
 	getAllSessionsRaw(): SessionInfo[] {
-		return Array.from(this.sessions.values());
+		return this.sessionMetadata.getAllSessionsRaw();
 	}
 
-	listSessions(): Array<{
-		id: string;
-		title: string;
-		cwd: string;
-		status: string;
-		createdAt: number;
-		lastActivity: number;
-		lastReadAt?: number;
-		clientCount: number;
-		isCompacting: boolean;
-		goalId?: string;
-		assistantType?: string;
-		goalAssistant?: boolean;
-		roleAssistant?: boolean;
-		toolAssistant?: boolean;
-		delegateOf?: string;
-		parentSessionId?: string;
-		childKind?: string;
-		readOnly?: boolean;
-		role?: string;
-		teamGoalId?: string;
-		teamLeadSessionId?: string;
-		worktreePath?: string;
-		taskId?: string;
-		staffId?: string;
-		accessory?: string;
-		nonInteractive?: boolean;
-		preview?: boolean;
-		reattemptGoalId?: string;
-		sandboxed?: boolean;
-		projectId?: string;
-		spawnPinnedModel?: string;
-		spawnPinnedThinkingLevel?: string;
-		repoPath?: string;
-		branch?: string;
-		repoWorktrees?: Record<string, string>;
-		runtime?: SessionRuntime;
-		claudeCodeSessionId?: string;
-		claudeCodeExecutable?: string;
-		claudeCodePermissionMode?: string;
-		claudeCodeModelAlias?: string;
-		modelProvider?: string;
-		modelId?: string;
-		thinkingLevelUserPinned?: boolean;
-	}> {
-		return Array.from(this.sessions.values()).map((s) => {
-			let ps: PersistedSession | undefined;
-			try {
-				ps = this.resolveStoreForSession(s.id).get(s.id);
-			} catch {
-				// Session can't be resolved (no projectId, not in any store) — use in-memory data only
-			}
-			return {
-				id: s.id,
-				title: s.title,
-				cwd: s.cwd,
-				status: s.status,
-				createdAt: s.createdAt,
-				lastActivity: s.lastActivity,
-				lastReadAt: ps?.lastReadAt,
-				clientCount: s.clients.size,
-				isCompacting: s.isCompacting,
-				goalId: s.goalId,
-				assistantType: s.assistantType,
-				// Legacy boolean fields for backward compat
-				goalAssistant: s.assistantType === "goal",
-				roleAssistant: s.assistantType === "role",
-				toolAssistant: s.assistantType === "tool",
-				delegateOf: s.delegateOf,
-				parentSessionId: ps?.parentSessionId ?? s.parentSessionId,
-				childKind: ps?.childKind ?? s.childKind,
-				readOnly: ps?.readOnly ?? s.readOnly,
-				role: s.role,
-				teamGoalId: s.teamGoalId,
-				teamLeadSessionId: s.teamLeadSessionId,
-				worktreePath: s.worktreePath,
-				taskId: s.taskId,
-				staffId: s.staffId,
-				accessory: s.accessory,
-				nonInteractive: s.nonInteractive,
-				preview: s.preview,
-				reattemptGoalId: ps?.reattemptGoalId,
-				sandboxed: ps?.sandboxed || s.sandboxed,
-				projectId: ps?.projectId || s.projectId,
-				runtime: ps?.runtime ?? "pi",
-				claudeCodeSessionId: ps?.claudeCodeSessionId,
-				claudeCodeExecutable: ps?.claudeCodeExecutable,
-				claudeCodePermissionMode: ps?.claudeCodePermissionMode,
-				claudeCodeModelAlias: ps?.claudeCodeModelAlias,
-				modelProvider: ps?.modelProvider,
-				modelId: ps?.modelId,
-				thinkingLevelUserPinned: s.thinkingLevelUserPinned,
-				spawnPinnedModel: s.spawnPinnedModel,
-				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
-				repoPath: ps?.repoPath || s.repoPath,
-				branch: ps?.branch || s.branch,
-				repoWorktrees: ps?.repoWorktrees || (s.repoWorktrees ? Object.fromEntries(s.repoWorktrees.map(w => [w.repo, w.worktreePath])) : undefined),
-			};
-		});
+	listSessions(): SessionListEntry[] {
+		return this.sessionMetadata.listSessions();
 	}
 
-	/**
-	 * Get all session IDs for a goal, including terminated sessions from the store.
-	 * Useful for cost aggregation where terminated sessions still have cost data.
-	 */
 	getAllSessionIdsForGoal(goalId: string): string[] {
-		const ids = new Set(
-			Array.from(this.sessions.values())
-				.filter((s) => s.goalId === goalId)
-				.map((s) => s.id),
-		);
-		const allPersisted = this.projectContextManager
-			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getAll())
-			: (this._testStore?.getAll() ?? []);
-		for (const ps of allPersisted) {
-			if (ps.goalId === goalId) ids.add(ps.id);
-		}
-		return [...ids];
+		return this.sessionMetadata.getAllSessionIdsForGoal(goalId);
 	}
 
-	/** Record that the user viewed this session. Updates lastReadAt only — never lastActivity. */
 	markSessionRead(id: string): boolean {
-		const store = this.resolveStoreForId(id);
-		if (!store?.get(id)) return false;
-		store.update(id, { lastReadAt: Date.now() });
-		return true;
+		return this.sessionMetadata.markSessionRead(id);
 	}
 
 	setTitle(id: string, title: string, opts?: { markGenerated?: boolean }): boolean {
-		const session = this.sessions.get(id);
-		if (!session) return false;
-		session.title = title;
-		if (opts?.markGenerated) session.titleGenerated = true;
-		this.resolveStoreForSession(id).update(id, { title });
-		broadcast(session.clients, { type: "session_title", sessionId: id, title });
-		return true;
+		return this.sessionMetadata.setTitle(id, title, opts);
 	}
 
-	/**
-	 * Generate an AI-summarized goal title and rename the session.
-	 * Fire-and-forget — does NOT check titleGenerated (independent of first-message auto-title).
-	 */
 	generateGoalTitle(sessionId: string, goalTitle: string): void {
-		const session = this.sessions.get(sessionId);
-		if (!session) return;
-		this._generateGoalTitleAsync(session, goalTitle).catch(err => {
-			console.error(`[session ${session.id}] Goal title generation failed:`, err);
-		});
+		this.sessionMetadata.generateGoalTitle(sessionId, goalTitle);
 	}
 
-	private async _generateGoalTitleAsync(session: SessionInfo, goalTitle: string): Promise<void> {
-		const title = await generateGoalSummaryTitle(goalTitle, this.getTitleGenOptions());
-		if (title) {
-			const finalTitle = `New goal: ${title}`;
-			session.title = finalTitle;
-			this.resolveStoreForSession(session.id).update(session.id, { title: finalTitle });
-			broadcast(session.clients, { type: "session_title", sessionId: session.id, title: finalTitle });
-		}
+	updateSessionMeta(id: string, updates: SessionMetadataUpdate): boolean {
+		return this.sessionMetadata.updateSessionMeta(id, updates);
 	}
 
-	/** Update session metadata fields and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; childTerminal?: boolean; terminalAt?: number }): boolean {
-		const session = this.sessions.get(id);
-		if (!session) {
-			// Store-only session (dormant/delegate) — update store directly
-			const store = this.resolveStoreForId(id);
-			if (store) store.update(id, updates);
-			return !!store;
-		}
-		if (updates.role !== undefined) session.role = updates.role;
-		if (updates.teamGoalId !== undefined) session.teamGoalId = updates.teamGoalId;
-		if (updates.worktreePath !== undefined) session.worktreePath = updates.worktreePath;
-		if (updates.repoPath !== undefined) session.repoPath = updates.repoPath;
-		if (updates.branch !== undefined) session.branch = updates.branch;
-		if (updates.repoWorktrees !== undefined) {
-			const repoPath = updates.repoPath ?? session.repoPath;
-			session.repoWorktrees = repoPath
-				? Object.entries(updates.repoWorktrees).map(([repo, worktreePath]) => ({
-					repo,
-					repoPath: repo === "." ? repoPath : path.join(repoPath, repo),
-					worktreePath,
-				}))
-				: undefined;
-		}
-		if (updates.accessory !== undefined) session.accessory = updates.accessory;
-		if (updates.nonInteractive !== undefined) session.nonInteractive = updates.nonInteractive;
-		if (updates.teamLeadSessionId !== undefined) session.teamLeadSessionId = updates.teamLeadSessionId;
-		if (updates.delegateOf !== undefined) session.delegateOf = updates.delegateOf;
-		if (updates.parentSessionId !== undefined) session.parentSessionId = updates.parentSessionId;
-		if (updates.childKind !== undefined) session.childKind = updates.childKind;
-		if (updates.readOnly !== undefined) session.readOnly = updates.readOnly;
-		if (updates.childTerminal !== undefined) session.childTerminal = updates.childTerminal;
-		if (updates.terminalAt !== undefined) session.terminalAt = updates.terminalAt;
-		this.resolveStoreForSession(id).update(id, updates);
-		return true;
-	}
-
-	/**
-	 * Stamp the GENERIC persisted terminal marker on a child session
-	 * (`childTerminal:true` + `terminalAt`), so the generic boot-reap
-	 * (`shouldReapChildOnBoot` reading `PersistedSessionLike.childTerminal`)
-	 * removes it after a restart even if a dismiss never ran (orchestration-core
-	 * Decision E / Findings 3–4). Idempotent; carries NO pack/kind knowledge.
-	 * Implements `OrchestrationSessionView.markChildTerminal` and is also called
-	 * by the pr-walkthrough submit-yaml route before its terminal-synchronous
-	 * dismiss. Routes through `updateSessionMeta` for a live/dormant session and
-	 * `updateArchivedMeta` for an archived one.
-	 */
 	markChildTerminal(childSessionId: string): void {
-		const updates = { childTerminal: true, terminalAt: Date.now() };
-		if (this.sessions.has(childSessionId)) {
-			this.updateSessionMeta(childSessionId, updates);
-			return;
-		}
-		// Not live: try the archived path; if it is not archived (dormant store-only),
-		// fall back to updateSessionMeta's store-only branch.
-		if (!this.archivedWorktrees.updateArchivedMeta(childSessionId, updates)) {
-			this.updateSessionMeta(childSessionId, updates);
-		}
+		this.sessionMetadata.markChildTerminal(childSessionId);
 	}
 
-	// ── Draft storage ──────────────────────────────────────────────
-
-	/**
-	 * Ensure the session has an entry in the persistent store.
-	 * When a session is first created, store.put() is called asynchronously
-	 * (fire-and-forget) so it may not have completed yet. This ensures
-	 * draft operations work even before persistence is complete.
-	 */
-	private ensureStoreEntry(id: string): boolean {
-		const session = this.sessions.get(id);
-		if (!session) return false;
-		const store = this.resolveStoreForSession(id);
-		if (!store.get(id)) {
-			store.put({
-				id: session.id,
-				title: session.title,
-				cwd: session.cwd,
-				agentSessionFile: "",
-				createdAt: session.createdAt,
-				lastActivity: session.lastActivity,
-				goalId: session.goalId,
-				delegateOf: session.delegateOf,
-				parentSessionId: session.parentSessionId,
-				childKind: session.childKind,
-				readOnly: session.readOnly,
-				sandboxed: session.sandboxed,
-				projectId: session.projectId,
-			});
-		}
-		return true;
-	}
-
-	/** Get a draft for a session by type. */
 	getDraft(id: string, type: string): unknown | undefined {
-		if (!this.ensureStoreEntry(id)) return undefined;
-		return this.resolveStoreForSession(id).getDraft(id, type);
+		return this.sessionMetadata.getDraft(id, type);
 	}
 
-	/** Set a draft for a session by type. Returns false if session not found. */
 	setDraft(id: string, type: string, data: unknown): boolean {
-		if (!this.ensureStoreEntry(id)) return false;
-		return this.resolveStoreForSession(id).setDraft(id, type, data);
+		return this.sessionMetadata.setDraft(id, type, data);
 	}
 
-	/** Delete a draft for a session by type. */
 	deleteDraft(id: string, type: string): boolean {
-		if (!this.ensureStoreEntry(id)) return false;
-		return this.resolveStoreForSession(id).deleteDraft(id, type);
+		return this.sessionMetadata.deleteDraft(id, type);
 	}
 
 	/**
@@ -3653,110 +3451,16 @@ export class SessionManager {
 		return true;
 	}
 
-	/**
-	 * Generate a title for a session on the first user prompt.
-	 * Called immediately when the user sends a message, not after the agent replies.
-	 */
 	tryGenerateTitleFromPrompt(sessionId: string, userText: string): void {
-		const session = this.sessions.get(sessionId);
-		if (!session || session.titleGenerated) return;
-		if (session.staffId) return; // Staff sessions use the staff name as title
-		session.titleGenerated = true;
-
-		// Fire-and-forget
-		this.autoGenerateTitleFromText(session, userText).catch((err) => {
-			console.error(`[session ${session.id}] Title generation failed:`, err);
-		});
+		this.sessionMetadata.tryGenerateTitleFromPrompt(sessionId, userText);
 	}
 
-	private getTitleGenOptions(): import("./title-generator.js").TitleGenOptions {
-		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
-		const sessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
-		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, aigwUrl, thinkingLevel: "off", preferencesStore: this.preferencesStore };
-	}
-
-	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {
-		const messages = [{ role: "user", content: userText }];
-		const title = await generateSessionTitle(messages, this.getTitleGenOptions());
-		if (title) {
-			session.title = title;
-			this.resolveStoreForSession(session.id).update(session.id, { title });
-			broadcast(session.clients, { type: "session_title", sessionId: session.id, title });
-		}
-	}
-
-	/**
-	 * Generate a title for any session by id — live or archived. Returns the
-	 * generated title, or null if no messages were available. Persists the
-	 * title and broadcasts to any connected clients (live sessions only).
-	 * Used by `POST /api/sessions/:id/generate-title` for the rename dialog
-	 * when the user is editing a non-focused session.
-	 */
 	async generateTitleForAnySession(id: string): Promise<string | null> {
-		const live = this.sessions.get(id);
-		if (live && live.status !== "terminated") {
-			const msgsResp = await live.rpcClient.getMessages();
-			if (!msgsResp.success) return null;
-			const rawMessages = msgsResp.data?.messages || msgsResp.data;
-			if (!Array.isArray(rawMessages) || rawMessages.length === 0) return null;
-			const messages = spliceInFlightMessage(rawMessages, live.latestMessageUpdate);
-			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
-			if (!title) return null;
-			live.title = title;
-			this.resolveStoreForSession(live.id).update(live.id, { title });
-			broadcast(live.clients, { type: "session_title", sessionId: live.id, title });
-			return title;
-		}
-
-		// Archived or dormant — read messages from .jsonl without restoring the agent.
-		const store = this.resolveStoreForId(id);
-		const ps = store?.get(id);
-		if (!ps || !ps.agentSessionFile) return null;
-		let messages: unknown[] = [];
-		try {
-			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
-			if (!safeFile) return null;
-			trustPersistedAgentSessionFile(safeFile);
-			const ctx = sessionFsContextForAgentFile(ps, safeFile);
-			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
-			if (content) {
-				for (const line of content.trim().split("\n")) {
-					if (!line.trim()) continue;
-					try {
-						const entry = JSON.parse(line);
-						if (entry.type === "message" && entry.message) messages.push(entry.message);
-					} catch { /* skip malformed */ }
-				}
-			}
-		} catch {
-			messages = [];
-		}
-		if (messages.length === 0) return null;
-		const title = await generateSessionTitle(messages as any[], this.getTitleGenOptions());
-		if (!title) return null;
-		store?.update(id, { title });
-		return title;
+		return this.sessionMetadata.generateTitleForAnySession(id);
 	}
 
 	async autoGenerateTitle(session: SessionInfo): Promise<void> {
-		try {
-			const msgsResp = await session.rpcClient.getMessages();
-			if (!msgsResp.success) return;
-
-			const rawMessages = msgsResp.data?.messages || msgsResp.data;
-			if (!Array.isArray(rawMessages) || rawMessages.length === 0) return;
-			const messages = spliceInFlightMessage(rawMessages, session.latestMessageUpdate);
-
-			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
-			if (title) {
-				session.title = title;
-				this.resolveStoreForSession(session.id).update(session.id, { title });
-				broadcast(session.clients, { type: "session_title", sessionId: session.id, title });
-			}
-		} catch (err) {
-			console.error(`[session ${session.id}] Title generation failed:`, err);
-		}
+		return this.sessionMetadata.autoGenerateTitle(session);
 	}
 
 	/**
@@ -4118,15 +3822,12 @@ export class SessionManager {
 		return true;
 	}
 
-	/** Get persisted session metadata by ID (live or dormant). */
 	getPersistedSession(id: string): PersistedSession | undefined {
-		return this.resolveStoreForId(id)?.get(id);
+		return this.sessionMetadata.getPersistedSession(id);
 	}
 
-	/** Get an archived session's metadata. */
 	getArchivedSession(id: string): PersistedSession | undefined {
-		const ps = this.resolveStoreForId(id)?.get(id);
-		return ps?.archived ? ps : undefined;
+		return this.sessionMetadata.getArchivedSession(id);
 	}
 
 	/**
@@ -4139,7 +3840,7 @@ export class SessionManager {
 	}
 
 	/** Update metadata on an archived session (stored in the session store). Delegates to ArchivedWorktreeManager (SessionManager decomposition cohort 1, docs/design/session-manager-decomposition.md). */
-	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; childTerminal?: boolean; terminalAt?: number }): boolean {
+	updateArchivedMeta(id: string, updates: ArchivedChildMetadataUpdate): boolean {
 		return this.archivedWorktrees.updateArchivedMeta(id, updates);
 	}
 

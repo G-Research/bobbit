@@ -345,10 +345,22 @@ test.describe("Project drag reorder (browser E2E)", () => {
 	test("Headquarters is first by default but is a reorderable project like any other", async ({ page }) => {
 		await setHeadquartersVisible(true);
 		await openDesktop(page);
-		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
-			els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
-		);
-		expect(headerIds[0], "Headquarters should be first by default when visible").toBe(HEADQUARTERS_PROJECT_ID);
+		// openDesktop() only waits for the sidebar's "Settings" button, which
+		// renders in the very first paint — before the /api/projects fetch
+		// resolves. That first frame shows a "Loading…" placeholder with zero
+		// project headers, so a bare, unwaited evaluateAll() right here can
+		// race that frame (or a stale intermediate one) and read the wrong
+		// snapshot. Poll like every other rendered-order assertion in this
+		// file (see expectRenderedOrder) instead of reading once.
+		await expect.poll(async () => {
+			const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
+				els.map((el) => (el as HTMLElement).dataset.projectId).filter(Boolean),
+			);
+			return headerIds[0];
+		}, {
+			message: "Headquarters should be first by default when visible",
+			timeout: 20_000,
+		}).toBe(HEADQUARTERS_PROJECT_ID);
 		await expect(projectHeader(page, HEADQUARTERS_PROJECT_ID)).toBeVisible({ timeout: 20_000 });
 		await expect(projectReorderRow(page, HEADQUARTERS_PROJECT_ID), "Headquarters participates in reorder rows").toHaveCount(1);
 		await expect(projectHandle(page, HEADQUARTERS_PROJECT_ID), "Headquarters renders a reorder handle like any other project").toHaveCount(1);
