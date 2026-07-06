@@ -50,6 +50,8 @@ import type { Workflow } from "../agent/workflow-store.js";
 import type { ColorStore } from "../agent/color-store.js";
 import type { GoalManager } from "../agent/goal-manager.js";
 import type { PrStatusStore } from "../agent/pr-status-store.js";
+import type { TeamManager } from "../agent/team-manager.js";
+import type { PersistedTask } from "../agent/task-store.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -304,4 +306,9 @@ export interface CoreRouteCtx {
 	isHeadquartersSession(session: { projectId?: string }): boolean;
 	prStatusStore: PrStatusStore;
 	sessionGitUnavailablePayload(session: { id: string; projectId?: string }, action: string): Record<string, unknown>;
+
+	// ── Cohort 27 (task routes) additions — append-only.
+	getTaskRecordForTask(taskId: string): { task: PersistedTask; taskManager: TaskManager; projectId: string } | undefined;
+	sandboxCanAccessTask(task: PersistedTask): boolean;
+	teamManager: TeamManager;
 }

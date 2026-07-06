@@ -114,6 +114,8 @@ import { registerSessionGitReadRoutes } from "./routes/session-git-read-routes.j
 import { registerSessionGitWriteRoutes } from "./routes/session-git-write-routes.js";
 // STR-01 cohort 25: session content/readback routes.
 import { registerSessionContentRoutes } from "./routes/session-content-routes.js";
+// STR-01 cohort 27: task routes.
+import { registerTasksRoutes } from "./routes/tasks-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -168,7 +170,7 @@ import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import {
 	initCompactionSidecarDir,
 } from "./agent/compaction-sidecar.js";
-import type { PersistedTask, TaskState } from "./agent/task-store.js";
+import type { PersistedTask } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
@@ -655,8 +657,6 @@ import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agen
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 import { validateGoalInlineWorkflow } from "./proposals/proposal-types.js";
-
-const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
 /** Max WebSocket frame the gateway will accept (S31). The ws default is 100 MiB;
  *  a multi-image prompt frame carries ~3x base64 per image and could silently
@@ -3398,6 +3398,7 @@ registerSessionCreationRoutes(coreRouteTable);
 registerSessionGitReadRoutes(coreRouteTable);
 registerSessionGitWriteRoutes(coreRouteTable);
 registerSessionContentRoutes(coreRouteTable);
+registerTasksRoutes(coreRouteTable);
 
 interface HandleApiRouteDeps {
 	sessionManager: SessionManager;
@@ -3612,6 +3613,8 @@ async function handleApiRoute(
 		return false;
 	}
 
+	const taskManagerCache = new Map<string, TaskManager>();
+
 	if (await handleSidePanelWorkspaceRoute(url, req, res, {
 		sessionManager,
 		readBody,
@@ -3688,6 +3691,9 @@ async function handleApiRoute(
 	// (src/server/routes/session-git-read-routes.ts).
 	// cohort 24, session git write/PR mutation routes
 	// (src/server/routes/session-git-write-routes.ts).
+	// cohort 25, session content/readback routes
+	// (src/server/routes/session-content-routes.ts).
+	// cohort 27, task routes (src/server/routes/tasks-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3747,6 +3753,8 @@ async function handleApiRoute(
 				sandboxTokenStore, writeCwdValidationError,
 				// Cohort 23 (session git read/status routes) additions — append-only.
 				isHeadquartersSession, prStatusStore, sessionGitUnavailablePayload,
+				// Cohort 27 (task routes) additions — append-only.
+				getTaskRecordForTask, sandboxCanAccessTask, teamManager,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -3908,7 +3916,6 @@ async function handleApiRoute(
 	}
 
 	/** Get a TaskManager for the project that owns the given goal. Throws if not found. */
-	const taskManagerCache = new Map<string, TaskManager>();
 	function getTaskManagerForGoal(goalId: string): TaskManager {
 		const ctx = projectContextManager.getContextForGoal(goalId);
 		if (!ctx) throw new Error(`Goal "${goalId}" not found in any project`);
@@ -7264,148 +7271,9 @@ async function handleApiRoute(
 		return;
 	}
 
-	// Routes with task :id parameter
-	const taskMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
-	if (taskMatch) {
-		const id = taskMatch[1];
-
-		// GET /api/tasks/:id
-		if (req.method === "GET") {
-			try {
-				const record = getTaskRecordForTask(id);
-				if (!record) { json({ error: "Task not found" }, 404); return; }
-				if (!sandboxCanAccessTask(record.task)) return;
-				json(record.task);
-			} catch {
-				json({ error: "Task not found" }, 404);
-			}
-			return;
-		}
-
-		// PUT /api/tasks/:id
-		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
-			try {
-				const record = getTaskRecordForTask(id);
-				if (!record) { json({ error: "Task not found" }, 404); return; }
-				if (!sandboxCanAccessTask(record.task)) return;
-				const tm = record.taskManager;
-				const task = record.task;
-				const prevState = task.state;
-				const ok = tm.updateTask(id, {
-					title: body.title,
-					spec: body.spec,
-					state: body.state,
-					assignedSessionId: body.assignedSessionId,
-					dependsOn: body.dependsOn,
-					workflowGateId: typeof body.workflowGateId === "string" ? body.workflowGateId : undefined,
-					inputGateIds: Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined,
-					headSha: typeof body.headSha === "string" ? body.headSha : undefined,
-					baseSha: typeof body.baseSha === "string" ? body.baseSha : undefined,
-					branch: typeof body.branch === "string" ? body.branch : undefined,
-					resultSummary: typeof body.resultSummary === "string" ? body.resultSummary : undefined,
-				});
-				if (!ok) { json({ error: "Task not found" }, 404); return; }
-
-				// Notify team lead when state transitions to terminal or blocked via PUT
-				if (body.state && body.state !== prevState && (body.state === "complete" || body.state === "skipped" || body.state === "blocked") && task?.goalId) {
-					teamManager.notifyTeamLeadOfTaskCompletion(task.goalId, task.title, body.state);
-				}
-
-				json({ ok: true });
-			} catch (err: any) {
-				jsonError(400, err);
-			}
-			return;
-		}
-
-		// DELETE /api/tasks/:id
-		if (req.method === "DELETE") {
-			try {
-				const ok = getTaskManagerForTask(id).deleteTask(id);
-				if (!ok) { json({ error: "Task not found" }, 404); return; }
-				json({ ok: true });
-			} catch {
-				json({ error: "Task not found" }, 404);
-			}
-			return;
-		}
-	}
-
-	// POST /api/tasks/:id/assign — assign task to session
-	const taskAssignMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/assign$/);
-	if (taskAssignMatch && req.method === "POST") {
-		const body = await readBody(req);
-		const sessionId = body?.sessionId;
-		if (!sessionId || typeof sessionId !== "string") {
-			json({ error: "Missing sessionId" }, 400);
-			return;
-		}
-		try {
-			const taskId = taskAssignMatch[1];
-			const record = getTaskRecordForTask(taskId);
-			if (!record) { json({ error: "Task not found" }, 400); return; }
-			if (!sandboxCanAccessTask(record.task)) return;
-			const tm = record.taskManager;
-			const ok = tm.assignTask(taskId, sessionId);
-			if (!ok) { json({ error: "Task not found" }, 400); return; }
-
-			// Auto-populate baseSha and branch from TeamAgent record
-			const agent = teamManager.findAgentBySessionId(sessionId);
-			if (agent) {
-				const task = tm.getTask(taskId);
-				if (task) {
-					const fields: Record<string, string> = {};
-					if (agent.baseSha && !task.baseSha) fields.baseSha = agent.baseSha;
-					if (agent.branch && !task.branch) fields.branch = agent.branch;
-					if (Object.keys(fields).length) {
-						tm.updateTask(taskId, fields);
-					}
-				}
-			}
-
-			json({ ok: true });
-		} catch (err: any) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// POST /api/tasks/:id/transition — state transition
-	const taskTransitionMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/transition$/);
-	if (taskTransitionMatch && req.method === "POST") {
-		const body = await readBody(req);
-		const state = body?.state;
-		if (!state || typeof state !== "string") {
-			json({ error: "Missing state" }, 400);
-			return;
-		}
-		if (!VALID_TASK_STATES.has(state)) {
-			json({ error: `Invalid task state: ${state}` }, 400);
-			return;
-		}
-		try {
-			const taskId = taskTransitionMatch[1];
-			const record = getTaskRecordForTask(taskId);
-			if (!record) { json({ error: "Task not found" }, 400); return; }
-			if (!sandboxCanAccessTask(record.task)) return;
-			const tm = record.taskManager;
-			const task = record.task;
-			const ok = tm.transitionTask(taskId, state as TaskState);
-			if (!ok) { json({ error: "Task not found" }, 400); return; }
-
-			// Notify team lead when a task reaches a terminal or blocked state
-			if ((state === "complete" || state === "skipped" || state === "blocked") && task?.goalId) {
-				teamManager.notifyTeamLeadOfTaskCompletion(task.goalId, task.title, state);
-			}
-
-			json({ ok: true });
-		} catch (err: any) {
-			jsonError(400, err);
-		}
-		return;
-	}
+	// /api/tasks/:id, /api/tasks/:id/assign, and /api/tasks/:id/transition
+	// moved to the core route registry (STR-01 cohort 27) — see
+	// src/server/routes/tasks-routes.ts.
 
 	// ── Team endpoints ─────────────────────────────────────────────
 	// Routes accept both /team/ and legacy /swarm/ paths
