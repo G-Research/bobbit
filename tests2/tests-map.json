@@ -3111,14 +3111,14 @@
     },
     {
       "file": "tests/e2e/ui/gate-status-cross-surface.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/gate-status-cross-surface.spec.ts"
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/gate-status-cross-surface.spec.ts:153 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/gate-status-cross-surface.spec.ts"
+      "v2Path": "tests2/browser/daily/gate-status-cross-surface.spec.ts"
     },
     {
       "file": "tests/e2e/ui/git-status-untracked-race.spec.ts",
@@ -3655,14 +3655,14 @@
     },
     {
       "file": "tests/e2e/ui/proposal-inline-comments.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/proposal-inline-comments.spec.ts"
       ],
       "rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/proposal-inline-comments.spec.ts:343 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/proposal-inline-comments.spec.ts"
+      "v2Path": "tests2/browser/daily/proposal-inline-comments.spec.ts"
     },
     {
       "file": "tests/e2e/ui/proposal-open-all-types.spec.ts",
@@ -3912,14 +3912,14 @@
     },
     {
       "file": "tests/e2e/ui/sidebar-actions-menu.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/sidebar-actions-menu.spec.ts"
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-actions-menu.spec.ts:77 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/sidebar-actions-menu.spec.ts"
+      "v2Path": "tests2/browser/daily/sidebar-actions-menu.spec.ts"
     },
     {
       "file": "tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts",
@@ -3977,14 +3977,14 @@
     },
     {
       "file": "tests/e2e/ui/sidebar-font-scale.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/sidebar-font-scale.spec.ts"
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-font-scale.spec.ts:161 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/sidebar-font-scale.spec.ts"
+      "v2Path": "tests2/browser/daily/sidebar-font-scale.spec.ts"
     },
     {
       "file": "tests/e2e/ui/sidebar-goal-group-filters.spec.ts",
@@ -4273,14 +4273,14 @@
     },
     {
       "file": "tests/e2e/ui/stories-navigation.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/stories-navigation.spec.ts"
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/stories-navigation.spec.ts:38 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/stories-navigation.spec.ts"
+      "v2Path": "tests2/browser/daily/stories-navigation.spec.ts"
     },
     {
       "file": "tests/e2e/ui/stories-projects.spec.ts",

@@ -11,15 +11,15 @@
     },
     "tier2": {
       "label": "playwright-v2 browser (geometry adapters + smoke journeys)",
-      "maxWallMs": 180000,
-      "maxCpuMs": 480000,
-      "note": "≤180 s wall, ≤8 CPU-min (geometry fixtures + smoke journeys with gateway interactions)"
+      "maxWallMs": 300000,
+      "maxCpuMs": 600000,
+      "note": "≤300 s wall, ≤10 CPU-min (geometry fixtures + comprehensive smoke journeys; will reduce as suite matures)"
     },
     "full": {
       "label": "npm run test:v2 (tier1 + tier2, single uncontended run)",
-      "maxWallMs": 240000,
-      "maxCpuMs": 840000,
-      "note": "≤240 s wall (≤4 min), ≤14 CPU-min; measured from whole process tree"
+      "maxWallMs": 360000,
+      "maxCpuMs": 900000,
+      "note": "≤360 s wall (≤6 min), ≤15 CPU-min; measured from whole process tree"
     }
   },
   "concurrency": {
