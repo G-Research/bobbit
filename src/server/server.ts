@@ -5013,12 +5013,9 @@ async function handleApiRoute(
 		try {
 			// When Headquarters is hidden from project lists it is not part of the
 			// client-visible reorder set, so the client cannot include it in the
-			// payload. Detect this from the payload itself (more reliable than the
-			// live preference which may not have propagated yet): if HQ id is absent
-			// from the submitted ids, exclude it from reconciliation so its position
-			// is preserved rather than triggering a stale-order rejection.
-			const submittedIds: string[] = Array.isArray(body?.projectIds) ? body.projectIds : [];
-			const excludeIds = submittedIds.includes(HEADQUARTERS_PROJECT_ID) ? [] : [HEADQUARTERS_PROJECT_ID];
+			// payload. Exclude it from reconciliation so its position is preserved
+			// rather than triggering a stale-order rejection.
+			const excludeIds = shouldShowHeadquartersInProjectLists() ? [] : [HEADQUARTERS_PROJECT_ID];
 			projectRegistry.setVisibleOrder(body?.projectIds, { excludeIds });
 			const projects = listProjectsForApi();
 			broadcastToAll({ type: "projects_changed", projects });
