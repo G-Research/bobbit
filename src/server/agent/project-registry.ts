@@ -789,13 +789,6 @@ export class ProjectRegistry {
     let project = existing;
 
     if (!project) {
-      // Insert HQ at position 0 so it appears first by default.
-      // Bump all existing participating projects up to make room.
-      for (const p of this.projects.values()) {
-        if (this.participatesInVisibleOrder(p) && p.position !== undefined) {
-          p.position += 1;
-        }
-      }
       project = {
         id: HEADQUARTERS_PROJECT_ID,
         name: HEADQUARTERS_PROJECT_NAME,
@@ -804,10 +797,10 @@ export class ProjectRegistry {
         kind: "headquarters",
         colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
         colorDark: DEFAULT_PROJECT_COLOR_DARK,
-        // Headquarters is a normal, user-reorderable project. On first
-        // creation it takes position 0 so it appears first by default;
-        // its position can be changed by drag like any other project.
-        position: 0,
+        // Headquarters is a normal, user-reorderable project: a freshly
+        // registered one appends to the end of the visible order just like any
+        // other new project. Its position persists and can be changed by drag.
+        position: this.nextVisiblePosition(),
       };
     }
 
