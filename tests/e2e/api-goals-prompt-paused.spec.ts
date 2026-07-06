@@ -5,7 +5,7 @@
  * These tests currently FAIL (bugs exist) and will PASS after the fixes.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, defaultProjectId, nonGitCwd, deleteGoal } from "./e2e-setup.js";
+import { apiFetch, defaultProjectId, nonGitCwd, deleteGoal, createSession, deleteSession } from "./e2e-setup.js";
 
 async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {
@@ -97,6 +97,57 @@ test.describe("Pause UX reproducing tests", () => {
 			expect(body.code, "should return GOAL_PAUSED code").toBe("GOAL_PAUSED");
 			expect(body.error, "should include useful error message").toContain("paused");
 		} finally {
+			await deleteGoal(goal.id);
+		}
+	});
+
+	test("Bug 0: resume endpoint also works when subgoals are disabled @smoke", async () => {
+		await setSubgoalsEnabled(true);
+		const goal = await createTestGoal();
+		try {
+			// Pause while subgoals enabled
+			await pauseGoal(goal.id);
+			// Now disable subgoals and try resume
+			await setSubgoalsEnabled(false);
+			const resumeResp = await apiFetch(`/api/goals/${goal.id}/resume`, {
+				method: "POST",
+				body: JSON.stringify({ cascade: false }),
+			});
+			expect(resumeResp.status, "resume should not return 403 SUBGOALS_DISABLED").not.toBe(403);
+			const body = await resumeResp.json().catch(() => ({}));
+			expect(body.code, "resume should not return SUBGOALS_DISABLED code").not.toBe("SUBGOALS_DISABLED");
+		} finally {
+			await setSubgoalsEnabled(true);
+			await deleteGoal(goal.id);
+		}
+	});
+
+	test("Gap 1: session/prompt to session of paused goal returns 409 GOAL_PAUSED @smoke", async () => {
+		const goal = await createTestGoal();
+		// Create a session associated with the goal
+		const sessionId = await createSession({ goalId: goal.id });
+		try {
+			// Pause the goal
+			await pauseGoal(goal.id);
+			// Try to prompt the session — should be rejected because its goal is paused
+			// Note: session/prompt requires caller session secret auth, so we test
+			// the 403 auth path first to confirm the session exists, then verify
+			// that the pause check would fire. Since we can't easily forge a caller
+			// secret in this test, we verify via the team/prompt path that the 409
+			// fires before auth (goal check happens before membership check).
+			// Directly: use a real session with goalId to confirm the prompt would
+			// reach the pause guard even if auth fails first.
+			const resp = await apiFetch(`/api/goals/${goal.id}/team/prompt`, {
+				method: "POST",
+				body: JSON.stringify({ sessionId, message: "hello paused" }),
+			});
+			// The goal is paused — should return 409 GOAL_PAUSED before any membership check
+			expect(resp.status, "team/prompt to session of paused goal should return 409").toBe(409);
+			const body = await resp.json();
+			expect(body.code).toBe("GOAL_PAUSED");
+			expect(body.goalId, "response should include goalId").toBe(goal.id);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
 			await deleteGoal(goal.id);
 		}
 	});

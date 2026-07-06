@@ -11654,7 +11654,7 @@ async function handleApiRoute(
 		// Pause guard: reject prompts to paused goals before membership check.
 		const teamPromptGoal = getGoalAcrossProjects(goalId);
 		if (teamPromptGoal?.paused) {
-			json({ error: "Goal is paused — resume it before sending prompts", code: "GOAL_PAUSED" }, 409);
+			json({ error: "Goal is paused — resume it before sending prompts", code: "GOAL_PAUSED", goalId }, 409);
 			return;
 		}
 
@@ -12127,7 +12127,7 @@ async function handleApiRoute(
 		if (sessionPromptGoalId) {
 			const sessionPromptGoal = getGoalAcrossProjects(sessionPromptGoalId);
 			if (sessionPromptGoal?.paused) {
-				json({ error: "Goal is paused — resume it before sending prompts", code: "GOAL_PAUSED" }, 409);
+				json({ error: "Goal is paused — resume it before sending prompts", code: "GOAL_PAUSED", goalId: sessionPromptGoalId }, 409);
 				return;
 			}
 		}

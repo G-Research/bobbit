@@ -1998,7 +1998,7 @@ function renderGoalPausedBannerIfNeeded(activeSession: import("./state.js").Gate
 	if (!activeSession) return "";
 	const activeGoalId = activeSession.goalId ?? activeSession.teamGoalId;
 	if (!activeGoalId) return "";
-	const goal = state.goals.find((g: any) => g.id === activeGoalId);
+	const goal = state.goals.find(g => g.id === activeGoalId);
 	if (!goal?.paused) return "";
 	return html`
 		<div class="shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-sm"
@@ -3016,7 +3016,7 @@ export function doRenderApp(): void {
 						${renderSidePanelWorkspace("fullscreen")}
 						<!-- Compact prompt bar at bottom -->
 						<div class="side-panel-fullscreen-prompt preview-fullscreen-prompt shrink-0 border-t border-border">
-							${state.chatPanel}
+							${renderGoalPausedBannerIfNeeded(activeSession)}${state.chatPanel}
 						</div>
 					</div>
 				`;
