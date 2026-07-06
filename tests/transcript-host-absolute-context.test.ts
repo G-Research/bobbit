@@ -58,14 +58,20 @@ describe("sandboxed persisted host-absolute transcript paths", () => {
 
 	it("server transcript routes and continue flow use host-absolute-aware contexts", () => {
 		const source = fs.readFileSync(path.join(process.cwd(), "src", "server", "server.ts"), "utf-8");
-		assert.doesNotMatch(source, /SessionFsContext = \{ sandboxed: (?:targetPs|ps|extPs)\.sandboxed/);
-		assert.doesNotMatch(source, /const (?:srcCtx|dstCtx|copyCtx) = \{ sandboxed: !!ps\.sandboxed/);
+		// Fork/continue moved to the core route registry (STR-01 cohort 21) —
+		// scan both files: the transcript route stays in server.ts, the
+		// fork/continue clone contexts live in session-mutation-routes.ts.
+		const mutationRoutes = fs.readFileSync(path.join(process.cwd(), "src", "server", "routes", "session-mutation-routes.ts"), "utf-8");
+		for (const src of [source, mutationRoutes]) {
+			assert.doesNotMatch(src, /SessionFsContext = \{ sandboxed: (?:targetPs|ps|extPs)\.sandboxed/);
+			assert.doesNotMatch(src, /const (?:srcCtx|dstCtx|copyCtx) = \{ sandboxed: !!ps\.sandboxed/);
+		}
 		// GET /api/sessions/:id/transcript's readContent is async (it falls back to
 		// the live Claude Code bridge's get_messages when there is no on-disk
 		// agentSessionFile yet — see the Claude Code live-session fallback below),
 		// but it must still route the on-disk case through the host-absolute-aware
 		// `ctx` from `sessionFsContextForAgentFile`, never a raw sandboxed read.
 		assert.match(source, /if \(targetPs\.agentSessionFile\) return sessionFileRead\(ctx, targetPs\.agentSessionFile, sandboxManager\);/);
-		assert.match(source, /const srcCtx = sessionFsContextForAgentFile\(ps, sourceJsonl\)/);
+		assert.match(mutationRoutes, /const srcCtx = sessionFsContextForAgentFile\(ps, sourceJsonl\)/);
 	});
 });
