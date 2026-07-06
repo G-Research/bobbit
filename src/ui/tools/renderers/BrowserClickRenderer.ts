@@ -30,7 +30,7 @@ export class BrowserClickRenderer implements ToolRenderer<BrowserClickParams, an
 				content: html`
 					<div class="space-y-2">
 						${renderHeader(state, MousePointerClick, headerText)}
-						<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
+						<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}" role=${isSkippedToolResult(result) ? "status" : "alert"} aria-live=${isSkippedToolResult(result) ? "polite" : "assertive"} aria-atomic="true">${output}</div>
 					</div>
 				`,
 				isCustom: false,

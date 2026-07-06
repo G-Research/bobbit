@@ -13,15 +13,15 @@ if (!customElements.get("gate-verification-live")) {
 	customElements.define("gate-verification-live", GateVerificationLiveStub);
 }
 
-function toolResult(data: any) {
-	return { isError: false, content: [{ type: "text", text: JSON.stringify(data) }] };
+function toolResult(data: any, isError = false) {
+	return { isError, content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data) }] };
 }
 
-async function renderStatus(params: any, data: any) {
+async function renderStatus(params: any, data: any, isError = false) {
 	const container = document.getElementById("container")!;
 	container.innerHTML = "";
 	const renderer = new GateStatusRenderer();
-	const out = renderer.render(params, toolResult(data));
+	const out = renderer.render(params, toolResult(data, isError));
 	render(out.content, container);
 	await Promise.resolve();
 	const live = container.querySelector("gate-verification-live") as any;

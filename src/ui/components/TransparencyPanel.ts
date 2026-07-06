@@ -146,6 +146,7 @@ export class TransparencyPanel extends LitElement {
 
 	private renderRow(d: TransparencyDecision, index: number) {
 		const expanded = this._expandedRows.has(index);
+		const detailId = `transparency-panel-row-detail-${index}`;
 		const meta = kindMeta(d.decisionKind);
 		const verdict = d.decision.kind === "select"
 			? meta.label
@@ -159,6 +160,8 @@ export class TransparencyPanel extends LitElement {
 					type="button"
 					class="w-full flex items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/50 transition-colors"
 					data-testid="transparency-panel-row-toggle"
+					aria-expanded=${expanded ? "true" : "false"}
+					aria-controls=${detailId}
 					@click=${() => this.toggleRow(index)}
 				>
 					<svg
@@ -194,7 +197,7 @@ export class TransparencyPanel extends LitElement {
 				</button>
 				${expanded
 					? html`
-							<div class="border-t border-border px-2 py-1.5 space-y-1 bg-muted/40">
+							<div id=${detailId} class="border-t border-border px-2 py-1.5 space-y-1 bg-muted/40">
 								<div>
 									<span class="text-muted-foreground">consulted:</span>
 									${d.consulted.length ? d.consulted.join(", ") : "(none)"}
@@ -224,6 +227,7 @@ export class TransparencyPanel extends LitElement {
 
 	override render() {
 		if (!this.decisions || this.decisions.length === 0) return nothing;
+		const bodyId = "transparency-panel-body";
 		// Stable kind order: first-seen order across the turn's decisions,
 		// rather than alphabetical — keeps chip order matching row order.
 		const kinds: string[] = [];
@@ -244,6 +248,8 @@ export class TransparencyPanel extends LitElement {
 					type="button"
 					class="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-colors"
 					data-testid="transparency-panel-toggle"
+					aria-expanded=${this._expanded ? "true" : "false"}
+					aria-controls=${bodyId}
 					@click=${() => {
 						this._expanded = !this._expanded;
 					}}
@@ -262,7 +268,7 @@ export class TransparencyPanel extends LitElement {
 					<span>${this.decisions.length} decision${this.decisions.length === 1 ? "" : "s"}</span>
 				</button>
 				${this._expanded
-					? html`<div class="mt-1.5 space-y-1.5">
+					? html`<div id=${bodyId} class="mt-1.5 space-y-1.5">
 							${kinds.length > 1
 								? html`
 										<div

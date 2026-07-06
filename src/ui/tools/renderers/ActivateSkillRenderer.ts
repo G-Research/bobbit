@@ -70,7 +70,7 @@ export class ActivateSkillRenderer
 					content: html`
 						<div class="space-y-2">
 							${renderHeader("error", Sparkles, name ? `/${name}` : "activate_skill")}
-							<div class="text-sm text-destructive">${errText}</div>
+							<div class="text-sm text-destructive" role="alert" aria-live="assertive" aria-atomic="true">${errText}</div>
 						</div>
 					`,
 					isCustom: false,
@@ -85,7 +85,7 @@ export class ActivateSkillRenderer
 					content: html`
 						<div class="space-y-2">
 							${renderHeader("error", Sparkles, name ? `/${name}` : "activate_skill")}
-							<div class="text-sm text-destructive">Failed to activate skill</div>
+							<div class="text-sm text-destructive" role="alert" aria-live="assertive" aria-atomic="true">Failed to activate skill</div>
 						</div>
 					`,
 					isCustom: false,

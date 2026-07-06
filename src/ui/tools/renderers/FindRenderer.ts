@@ -37,7 +37,7 @@ export class FindRenderer implements ToolRenderer<FindParams, any> {
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, FileText, headerText)}
-							<div class="text-sm ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${output}</div>
+							<div class="text-sm ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}" role=${skipped ? "status" : "alert"} aria-live=${skipped ? "polite" : "assertive"} aria-atomic="true">${output}</div>
 						</div>
 					`,
 					isCustom: false,

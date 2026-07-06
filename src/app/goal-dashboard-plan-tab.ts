@@ -220,7 +220,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 							<div style="display:flex;align-items:center;gap:4px;">
 								${gateStatus ? html`<span data-testid="plan-node-gate-dot" data-gate-status="${gateStatus}"
 									style="flex-shrink:0;width:8px;height:8px;border-radius:50%;background:${planGateStatusColor(gateStatus)};${gateStatus === 'running' ? 'box-shadow:0 0 0 2px color-mix(in oklch, var(--info) 25%, transparent);' : ''}"
-									title="Gate: ${gateStatus}"></span>` : nothing}
+									title="Gate: ${gateStatus}" aria-label="Gate: ${gateStatus}"></span>` : nothing}
 								${childHasSubPlan && n.childGoal ? html`<span data-testid="plan-node-chevron" class="plan-chevron"
 									role="button" tabindex="0"
 									style="cursor:pointer;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;background:transparent;"

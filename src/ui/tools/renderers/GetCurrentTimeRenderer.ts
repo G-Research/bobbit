@@ -34,7 +34,7 @@ export class GetCurrentTimeRenderer implements ToolRenderer<GetCurrentTimeParams
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Clock, headerText)}
-							<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}" role=${isSkippedToolResult(result) ? "status" : "alert"} aria-live=${isSkippedToolResult(result) ? "polite" : "assertive"} aria-atomic="true">${output}</div>
 						</div>
 					`,
 					isCustom: false,
@@ -59,7 +59,7 @@ export class GetCurrentTimeRenderer implements ToolRenderer<GetCurrentTimeParams
 					content: html`
 						<div class="space-y-3">
 							${renderHeader(state, Clock, i18n("Getting current date and time"))}
-							<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
+							<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}" role=${isSkippedToolResult(result) ? "status" : "alert"} aria-live=${isSkippedToolResult(result) ? "polite" : "assertive"} aria-atomic="true">${output}</div>
 						</div>
 					`,
 					isCustom: false,

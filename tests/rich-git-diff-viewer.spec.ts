@@ -146,14 +146,17 @@ test.describe("RichGitDiffViewer browser fixture", () => {
 		const firstFile = page.locator('[data-testid="rich-git-diff-file"]').first();
 		const toggle = firstFile.locator('[data-testid="rich-git-diff-file-toggle"]');
 		await expect(toggle).toHaveAttribute("aria-expanded", "true");
+		await expect(toggle).toHaveAttribute("aria-label", "Collapse src/alpha.ts");
 		await expect(firstFile.locator('[data-testid="rich-git-diff-line"]', { hasText: "new alpha" })).toBeVisible();
 
 		await toggle.click();
 		await expect(toggle).toHaveAttribute("aria-expanded", "false");
+		await expect(toggle).toHaveAttribute("aria-label", "Expand src/alpha.ts");
 		await expect(firstFile.locator('[data-testid="rich-git-diff-line"]', { hasText: "new alpha" })).toBeHidden();
 
 		await toggle.click();
 		await expect(toggle).toHaveAttribute("aria-expanded", "true");
+		await expect(toggle).toHaveAttribute("aria-label", "Collapse src/alpha.ts");
 		await expect(firstFile.locator('[data-testid="rich-git-diff-line"]', { hasText: "new alpha" })).toBeVisible();
 	});
 
@@ -232,6 +235,8 @@ test.describe("RichGitDiffViewer browser fixture", () => {
 		const warning = page.locator('[data-testid="rich-git-diff-truncated"]');
 		await expect(warning).toBeVisible();
 		await expect(warning).toHaveAttribute("role", "status");
+		await expect(warning).toHaveAttribute("aria-live", "polite");
+		await expect(warning).toHaveAttribute("aria-atomic", "true");
 		await expect(warning).toContainText(/truncated/i);
 	});
 });

@@ -194,3 +194,31 @@ test.describe("gate verification live-region a11y", () => {
 		}
 	});
 });
+
+test.describe("sidebar session status dot a11y (judgment item 9)", () => {
+	// Source: PR #246 judgment inventory, "Color-only signaling" item 9 —
+	// the sidebar's per-session status "bobbit" sprite conveys running/idle/
+	// stopping/etc. purely via sprite palette + pose, with no accessible
+	// name fallback. Fix: a visually-hidden (sr-only) status word sits next
+	// to the sprite in the row. Zero visible pixel changes.
+	test("session row exposes its status word via a visually-hidden label", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		try {
+			await openApp(page);
+
+			const row = page.locator(`[data-session-id="${sessionId}"]`).first();
+			await expect(row).toBeVisible({ timeout: 15_000 });
+
+			const statusLabel = row.locator('[data-testid="sidebar-session-status-label"]').first();
+			await expect(statusLabel).toHaveCount(1);
+			await expect(statusLabel).toHaveText("idle");
+			// sr-only: present in the accessibility tree, visually hidden on screen
+			// (same idiom as gate-verification-live-region / composer-queue-live-region).
+			await expect(statusLabel).toHaveClass(/sr-only/);
+		} finally {
+			await deleteSession(sessionId).catch(() => { /* best-effort */ });
+		}
+	});
+});

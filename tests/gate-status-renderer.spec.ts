@@ -71,4 +71,17 @@ test.describe("GateStatusRenderer", () => {
 		expect(result.initialSteps).toHaveLength(1);
 		expect(result.finalStatus).toBe("passed");
 	});
+
+	test("error result exposes failure text as an assertive alert", async ({ page }) => {
+		await page.evaluate(() => (window as any).__renderGateStatus(
+			{ gate_id: "implementation" },
+			"gate_status failed",
+			true,
+		));
+
+		const alert = page.locator("#container [role='alert']");
+		await expect(alert).toContainText("gate_status failed");
+		await expect(alert).toHaveAttribute("aria-live", "assertive");
+		await expect(alert).toHaveAttribute("aria-atomic", "true");
+	});
 });

@@ -112,7 +112,7 @@ export class DefaultRenderer implements ToolRenderer {
 				content: html`
 					<div class="space-y-3">
 						${renderHeader(state, Code, this.label)}
-						${errorPreview ? html`<div class="text-sm text-destructive whitespace-pre-wrap break-words" role="alert">${errorPreview}</div>` : ""}
+						${errorPreview ? html`<div class="text-sm text-destructive whitespace-pre-wrap break-words" role="alert" aria-live="assertive" aria-atomic="true">${errorPreview}</div>` : ""}
 						${paramsJson ? this.renderPayloadSection(i18n("Input"), paramsJson, "json") : ""}
 						${this.renderPayloadSection(i18n("Output"), outputJson, outputLanguage)}
 						${images}

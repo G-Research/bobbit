@@ -90,7 +90,7 @@ export class GoalPlanProposeRenderer implements ToolRenderer {
 			return {
 				content: html`<div>
 					${renderHeader(state, ClipboardList, skipped ? "Aborted plan proposal" : "Plan proposal failed")}
-					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}" role=${skipped ? "status" : "alert"} aria-live=${skipped ? "polite" : "assertive"} aria-atomic="true">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -122,7 +122,7 @@ export class GoalPlanProposeRenderer implements ToolRenderer {
 						</div>` : ""}
 					${steps.length > 0 ? renderSteps(steps) : ""}
 					${classification === "criteria-drop"
-						? html`<div class="px-2 py-1.5 rounded text-xs bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/40" data-testid="children-criteria-drop-banner">This plan would drop acceptance criteria — automatically rejected.</div>`
+						? html`<div class="px-2 py-1.5 rounded text-xs bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/40" data-testid="children-criteria-drop-banner" role="alert" aria-live="assertive" aria-atomic="true">This plan would drop acceptance criteria — automatically rejected.</div>`
 						: ""}
 					${requiresApproval && requestId && !applied
 						? html`<div data-testid="children-mutation-approval-wrap">
@@ -142,7 +142,7 @@ export class GoalPlanProposeRenderer implements ToolRenderer {
 									<span class="font-mono">${s.planId || "(no planId)"}</span>
 									${s.childGoalId ? html`<span class="font-mono text-muted-foreground">${s.childGoalId.slice(0, 8)}</span>` : ""}
 									${s.alreadyExists ? html`<span class="text-muted-foreground italic">(existed)</span>` : ""}
-									${s.error ? html`<span class="text-destructive">${s.error}</span>` : ""}
+									${s.error ? html`<span class="text-destructive" role="alert" aria-live="assertive" aria-atomic="true">${s.error}</span>` : ""}
 								</div>
 							`)}
 						</div>` : ""}

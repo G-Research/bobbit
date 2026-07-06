@@ -115,4 +115,23 @@ test.describe("AskUserChoicesRenderer error-vs-interactive gating", () => {
 		await expect(page.locator("#container .ask-submit")).toHaveCount(1);
 		await expect(page.locator("#container .ask-error")).toHaveCount(0);
 	});
+
+	test("posted stub with no answer exposes waiting heartbeat as a polite status", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate((params) => {
+			const el = document.getElementById("container")!;
+			const result = {
+				content: [{
+					type: "text",
+					text: JSON.stringify({ status: "posted", tool_use_id: "abc" }),
+				}],
+			};
+			(window as any).__renderAsk(el, params, result, true);
+		}, PARAMS);
+
+		const status = page.locator('#container [role="status"][aria-label="Waiting for your answer"]');
+		await expect(status).toHaveCount(1);
+		await expect(status).toHaveAttribute("aria-live", "polite");
+		await expect(status).toHaveAttribute("aria-atomic", "true");
+	});
 });
