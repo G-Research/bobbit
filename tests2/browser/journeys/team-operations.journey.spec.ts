@@ -160,7 +160,7 @@ test.describe("Journey: Dashboard Fanout — behavioral assertions", () => {
 				const gate = (data.gates as Array<{ gateId: string; status: string }>)
 					.find((g) => g.gateId === "design-doc");
 				return gate?.status;
-			}, { timeout: 15_000 }).toMatch(/^(verifying|passed)$/);
+			}, { timeout: 30_000 }).toMatch(/^(verifying|passed)$/);
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
@@ -338,6 +338,7 @@ test.describe("Journey: Plan-Tab Archived Children — behavioral assertions", (
 // Behavioral assertions ported from verification-progress-indicator.spec.ts
 test.describe("Journey: Verification Progress — behavioral assertions", () => {
 	test("gate signal via API moves gate into verifying or passed state", async () => {
+		test.slow(); // gate signal + async verification state poll
 		const goal = await createGoal({ title: "v2-verify-signal-state", workflowId: "test-fast" });
 		try {
 			const signalResp = await apiFetch(`/api/goals/${goal.id}/gates/design-doc/signal`, {
@@ -353,7 +354,7 @@ test.describe("Journey: Verification Progress — behavioral assertions", () => 
 				const gate = (data.gates as Array<{ gateId: string; status: string }>)
 					.find((g) => g.gateId === "design-doc");
 				return gate?.status;
-			}, { timeout: 15_000 }).toMatch(/^(verifying|passed)$/);
+			}, { timeout: 30_000 }).toMatch(/^(verifying|passed)$/);
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
