@@ -142,6 +142,6 @@ export function renderDelegateCardList(entries: DelegateCardEntry[]): TemplateRe
 		<div class="space-y-1">
 			${entries.map((d) => renderDelegateCard(d))}
 		</div>
-		${failCount > 0 ? html`<div class="mt-2 text-sm text-destructive">Warning: ${failCount} delegate(s) failed or timed out.</div>` : ""}
+		${failCount > 0 ? html`<div class="mt-2 text-sm text-destructive" role="alert" aria-live="assertive" aria-atomic="true">Warning: ${failCount} delegate(s) failed or timed out.</div>` : ""}
 	`;
 }

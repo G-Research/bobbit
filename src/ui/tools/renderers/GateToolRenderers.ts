@@ -46,7 +46,7 @@ export class GateListRenderer implements ToolRenderer {
 			return {
 				content: html`<div>
 					${renderHeader(state, ShieldCheck, skipped ? "Aborted gate list" : "Gate list failed")}
-					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}" role=${skipped ? "status" : "alert"} aria-live=${skipped ? "polite" : "assertive"} aria-atomic="true">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -108,7 +108,7 @@ export class GateSignalRenderer implements ToolRenderer {
 					${renderHeader(state, ShieldCheck, skipped
 						? html`Aborted signal for <span class="font-mono">${gateId}</span>`
 						: html`Failed to signal <span class="font-mono">${gateId}</span>`)}
-					<div class="mt-1 text-xs ${textCls}">${text}</div>
+					<div class="mt-1 text-xs ${textCls}" role=${skipped || is409 ? "status" : "alert"} aria-live=${skipped || is409 ? "polite" : "assertive"} aria-atomic="true">${text}</div>
 				</div>`,
 				isCustom: false,
 			};
@@ -178,7 +178,7 @@ export class GateStatusRenderer implements ToolRenderer {
 					${renderHeader(state, ShieldCheck, skipped
 						? html`Aborted check of gate <span class="font-mono">${gateId}</span>`
 						: html`Failed to check gate <span class="font-mono">${gateId}</span>`)}
-					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
+					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}" role=${skipped ? "status" : "alert"} aria-live=${skipped ? "polite" : "assertive"} aria-atomic="true">${text}</div>
 				</div>`,
 				isCustom: false,
 			};

@@ -77,6 +77,10 @@ test.describe("Children tool renderers — streaming/success/error per tool", ()
 			const destructiveCount = await page.locator("#container .text-destructive").count();
 			expect(destructiveCount).toBeGreaterThan(0);
 			await expect(page.locator("#container")).toContainText("boom");
+			const alert = page.locator("#container [role='alert']");
+			await expect(alert).toContainText("boom");
+			await expect(alert).toHaveAttribute("aria-live", "assertive");
+			await expect(alert).toHaveAttribute("aria-atomic", "true");
 		});
 	}
 });
@@ -127,6 +131,8 @@ test.describe("goal_plan_propose", () => {
 				false);
 		});
 		await expect(page.locator('[data-testid="children-criteria-drop-banner"]')).toContainText(/drop acceptance criteria/);
+		await expect(page.locator('[data-testid="children-criteria-drop-banner"]')).toHaveAttribute("role", "alert");
+		await expect(page.locator('[data-testid="children-criteria-drop-banner"]')).toHaveAttribute("aria-live", "assertive");
 	});
 
 	test("requiresApproval renders <children-mutation-approval> with buttons", async ({ page }) => {

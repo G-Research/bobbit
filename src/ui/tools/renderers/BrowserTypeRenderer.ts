@@ -36,7 +36,7 @@ export class BrowserTypeRenderer implements ToolRenderer<BrowserTypeParams, any>
 				content: html`
 					<div class="space-y-2">
 						${renderHeader(state, Keyboard, headerText)}
-						<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}">${output}</div>
+						<div class="text-sm ${isSkippedToolResult(result) ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}" role=${isSkippedToolResult(result) ? "status" : "alert"} aria-live=${isSkippedToolResult(result) ? "polite" : "assertive"} aria-atomic="true">${output}</div>
 					</div>
 				`,
 				isCustom: false,

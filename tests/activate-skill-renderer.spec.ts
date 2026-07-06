@@ -99,7 +99,11 @@ test.describe("ActivateSkillRenderer failed-activation surfacing", () => {
 			(window as any).__renderActivate(el, params, result, false);
 		}, { params: PARAMS, failText: FAIL_TEXT });
 
-		await expect(page.locator("#container div.text-destructive")).toContainText(FAIL_TEXT);
+		const alert = page.locator("#container div.text-destructive");
+		await expect(alert).toContainText(FAIL_TEXT);
+		await expect(alert).toHaveAttribute("role", "alert");
+		await expect(alert).toHaveAttribute("aria-live", "assertive");
+		await expect(alert).toHaveAttribute("aria-atomic", "true");
 		// The benign "Activating…" header must NOT be the only thing shown.
 		await expect(page.locator("#container")).not.toContainText("Activating");
 	});
@@ -115,7 +119,9 @@ test.describe("ActivateSkillRenderer failed-activation surfacing", () => {
 			(window as any).__renderActivate(el, params, result, false);
 		}, { params: PARAMS, failText: FAIL_TEXT });
 
-		await expect(page.locator("#container div.text-destructive")).toContainText(FAIL_TEXT);
+		const alert = page.locator("#container div.text-destructive");
+		await expect(alert).toContainText(FAIL_TEXT);
+		await expect(alert).toHaveAttribute("role", "alert");
 		await expect(page.locator("#container")).not.toContainText("Activating");
 	});
 

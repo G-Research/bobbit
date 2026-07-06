@@ -125,6 +125,10 @@ test.describe("DefaultRenderer payload collapse", () => {
 
 		await expect(page.locator("#container")).toContainText("Diagnostic Tool");
 		await expect(page.locator("#container span[class*='text-destructive']").first()).toBeVisible();
+		const alert = page.locator("#container [role='alert']");
+		await expect(alert).toContainText(ERROR_SENTINEL);
+		await expect(alert).toHaveAttribute("aria-live", "assertive");
+		await expect(alert).toHaveAttribute("aria-atomic", "true");
 		await expect(payloadControl(page, "Output")).toBeVisible();
 		await expectPayloadVisible(page, ERROR_SENTINEL, false);
 
