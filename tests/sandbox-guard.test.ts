@@ -85,6 +85,30 @@ describe("sandbox route guard", () => {
 		assert.equal(isSandboxAllowed("/api/image-generation/generate", "POST", scope()), true);
 	});
 
+	describe("ext endpoints for PR walkthrough reviewer sessions", () => {
+		it("allows POST /api/ext/surface-token (needed for surface-token mint step)", () => {
+			assert.equal(isSandboxAllowed("/api/ext/surface-token", "POST", scope()), true);
+			assert.equal(isSandboxAllowed("/api/ext/surface-token", "GET", scope()), false);
+			assert.equal(isSandboxAllowed("/api/ext/surface-token", "DELETE", scope()), false);
+		});
+
+		it("allows POST /api/ext/route/:name (needed for all ext route dispatches)", () => {
+			assert.equal(isSandboxAllowed("/api/ext/route/submit-chunk", "POST", scope()), true);
+			assert.equal(isSandboxAllowed("/api/ext/route/finalize", "POST", scope()), true);
+			assert.equal(isSandboxAllowed("/api/ext/route/submit-yaml", "POST", scope()), true);
+			assert.equal(isSandboxAllowed("/api/ext/route/submission-status", "GET", scope()), false);
+			// nested paths must not match
+			assert.equal(isSandboxAllowed("/api/ext/route/submit-chunk/extra", "POST", scope()), false);
+		});
+
+		it("allows POST /api/internal/pr-walkthrough/bundle and /analysis-bundle (needed for read_pr_walkthrough_bundle)", () => {
+			assert.equal(isSandboxAllowed("/api/internal/pr-walkthrough/bundle", "POST", scope()), true);
+			assert.equal(isSandboxAllowed("/api/internal/pr-walkthrough/analysis-bundle", "POST", scope()), true);
+			assert.equal(isSandboxAllowed("/api/internal/pr-walkthrough/bundle", "GET", scope()), false);
+			assert.equal(isSandboxAllowed("/api/internal/pr-walkthrough/analysis-bundle", "GET", scope()), false);
+		});
+	});
+
 	describe("google-code-assist runtime token endpoint", () => {
 		it("allows a sandboxed session to GET its OWN token endpoint", () => {
 			assert.equal(

@@ -81,9 +81,16 @@ export function isSandboxAllowed(
 	// session's project scope; this guard only lets the request reach that scoped
 	// handler, not the host-side /api/internal/mcp-call executor above.
 	if (pathname === "/api/internal/mcp-describe" && m === "POST") return true;
-	// PR walkthrough YAML submission is allowed through the sandbox guard; the
-	// route manager performs the scoped child-session/job ownership check.
+	// PR walkthrough YAML submission — legacy direct path kept for backward compat;
+	// tools have migrated to the ext/route/publish dispatch pattern below.
 	if (pathname === "/api/internal/pr-walkthrough/submit-yaml" && m === "POST") return true;
+	// Ext route endpoints — handlers enforce session+tool ownership via
+	// authorizeScopedRequest / sandboxScope session checks; the ext framework
+	// is the correct auth boundary for these routes.
+	if (pathname === "/api/ext/surface-token" && m === "POST") return true;
+	if (/^\/api\/ext\/route\/[^/]+$/.test(pathname) && m === "POST") return true;
+	// PR walkthrough bundle read — handler performs its own sandbox session-scope check.
+	if ((pathname === "/api/internal/pr-walkthrough/bundle" || pathname === "/api/internal/pr-walkthrough/analysis-bundle") && m === "POST") return true;
 	// /api/internal/user-question/submit is called from UI widgets (not the
 	// sandboxed agent) — the legacy POST /api/internal/user-question used by the
 	// blocking tool extension has been removed.
