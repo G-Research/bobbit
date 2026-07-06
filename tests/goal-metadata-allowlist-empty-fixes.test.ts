@@ -29,8 +29,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-const SM_SRC = readFileSync(
-	path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+const STP_SRC = readFileSync(
+	path.join(process.cwd(), "src/server/agent/session-tool-permissions.ts"),
 	"utf-8",
 );
 const SR_SRC = readFileSync(
@@ -112,7 +112,7 @@ describe("session-manager restore preserves persisted explicit empty allowlist (
 
 describe("recomputeAllowedToolsForRestart preserves persisted explicit empty allowlist (F1)", () => {
 	const persistedRhs = extract(
-		SM_SRC,
+		STP_SRC,
 		/const persistedAllowedTools = (Array\.isArray\(ps\.allowedTools\) \? ps\.allowedTools : undefined);\n\t\tconst sessionGrants/,
 		"recompute persistedAllowedTools RHS",
 	);
@@ -130,7 +130,7 @@ describe("recomputeAllowedToolsForRestart preserves persisted explicit empty all
 
 	it("source: neither restore site gates persisted allowlist on `.length > 0`", () => {
 		assert.ok(
-			!/Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0/.test(SM_SRC),
+			!/Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0/.test(STP_SRC),
 			"restart recompute must not treat a persisted explicit empty allowlist as absent via `.length > 0`",
 		);
 		assert.ok(
