@@ -4,6 +4,7 @@
  * Consolidated from: staff-inbox, debug-panel, api-error-modal, etc.
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
+import { sendMessage } from "../../../tests/e2e/ui/ui-helpers.js";
 
 test.describe("Journey: Staff", () => {
 	test("settings staff section navigable", async ({ page }) => {
@@ -20,6 +21,25 @@ test.describe("Journey: Staff", () => {
 		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 5_000 });
 	});
+
+	test("staff page renders with 'Staff Agents' heading", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/staff");
+		// The staff page always renders the "Staff Agents" h1 heading.
+		await expect(page.locator("h1").filter({ hasText: "Staff Agents" })).toBeVisible({ timeout: 15_000 });
+	});
+
+	test("staff page shows empty-state or table when there are no staff agents", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/staff");
+		await expect(page.locator("h1").filter({ hasText: "Staff Agents" })).toBeVisible({ timeout: 15_000 });
+
+		// Either the empty-state message or a staff table must be present.
+		const emptyState = page.getByText("No staff agents yet");
+		const staffTable = page.locator("table");
+		// Use or() to accept either state — whichever renders first.
+		await expect(emptyState.or(staffTable).first()).toBeVisible({ timeout: 10_000 });
+	});
 });
 
 test.describe("Journey: Debug Tools", () => {
@@ -33,6 +53,17 @@ test.describe("Journey: Debug Tools", () => {
 		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
 		const title = await page.title();
 		expect(title).toBeTruthy();
+	});
+
+	test("settings general page renders Appearance section", async ({ page }) => {
+		// The general settings tab contains the Appearance heading and the
+		// debug-mode-toggle area (visible in dev-harness mode only).
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+		// The Settings h1 must appear.
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 15_000 });
+		// The Appearance section heading must be present.
+		await expect(page.getByTestId("general-appearance-heading")).toBeVisible({ timeout: 10_000 });
 	});
 
 	test("send message → mock agent response appears (tool renderer output path)", async ({ page }) => {
