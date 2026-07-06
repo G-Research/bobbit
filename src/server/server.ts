@@ -16,14 +16,6 @@ import {
 	headquartersDir,
 	getProjectRoot,
 	globalAgentDir,
-	getAgentDirApiState,
-	validateAgentDirTarget,
-	refreshAgentDirNextStart,
-	migrateAgentDirData,
-	isKnownAgentDir,
-	isPendingAgentDir,
-	buildAgentDirRestartGuidance,
-	normalizeAgentDirInput,
 } from "./bobbit-dir.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
@@ -109,6 +101,8 @@ import { registerCostRoutes } from "./routes/cost-routes.js";
 import { registerPreviewRoutes } from "./routes/preview-routes.js";
 // STR-01 cohort 17: editable proposal REST endpoints.
 import { registerSessionProposalRoutes } from "./routes/session-proposal-routes.js";
+// STR-01 cohort 18: host configuration routes.
+import { registerHostConfigRoutes } from "./routes/host-config-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
@@ -3438,6 +3432,7 @@ registerModelProviderRoutes(coreRouteTable);
 registerCostRoutes(coreRouteTable);
 registerPreviewRoutes(coreRouteTable);
 registerSessionProposalRoutes(coreRouteTable);
+registerHostConfigRoutes(coreRouteTable);
 
 interface HandleApiRouteDeps {
 	sessionManager: SessionManager;
@@ -3714,6 +3709,8 @@ async function handleApiRoute(
 	// STR-05, roles routes (src/server/routes/roles-routes.ts).
 	// cohort 17, editable proposal REST routes
 	// (src/server/routes/session-proposal-routes.ts).
+	// cohort 18, host configuration routes
+	// (src/server/routes/host-config-routes.ts).
 	{
 		const coreMatch = coreRouteTable.match(req.method || "GET", url.pathname);
 		if (coreMatch) {
@@ -3763,6 +3760,8 @@ async function handleApiRoute(
 				broadcastToSession: _broadcastToSession,
 				// Cohort 17 (editable proposal routes) additions — append-only.
 				validateGoalProposalWorkflow,
+				// Cohort 18 (host configuration routes) additions — append-only.
+				mutableGatewayConfig: config,
 			};
 			await coreMatch.handler(coreCtx, coreMatch.params);
 			return;
@@ -7058,57 +7057,9 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Tool group policies ──
-
-	// GET /api/tool-group-policies
-	if (url.pathname === "/api/tool-group-policies" && req.method === "GET") {
-		const projectScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
-		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-		json(configCascade.resolveToolGroupPolicies(projectScope.effectiveProjectId));
-		return;
-	}
-
-	// PUT /api/tool-group-policies/:group
-	const groupPolicyMatch = url.pathname.match(/^\/api\/tool-group-policies\/(.+)$/);
-	if (groupPolicyMatch && req.method === "PUT") {
-		const group = decodeURIComponent(groupPolicyMatch[1]);
-		const body = await readBody(req);
-		if (!body) { json({ error: "Missing body" }, 400); return; }
-		const validPolicies = ['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask'];
-		if (body.policy && !validPolicies.includes(body.policy)) {
-			json({ error: `Invalid policy. Must be one of: allow, ask, never` }, 400);
-			return;
-		}
-		// Scope the mutation to a project-level store when projectId is given.
-		// Headquarters/system alias to server scope (mirrors role mutation routes).
-		const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"), { aliasSystem: true });
-		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
-		const targetStore: ToolGroupPolicyStore = projectScope.context?.toolGroupPolicyStore ?? groupPolicyStore;
-		targetStore.setGroupPolicy(group, body.policy || null);
-		json({ ok: true });
-		return;
-	}
-
-	// ── Config: default cwd ──
-
-	// GET /api/config/cwd
-	if (url.pathname === "/api/config/cwd" && req.method === "GET") {
-		json({ cwd: config.defaultCwd });
-		return;
-	}
-
-	// PUT /api/config/cwd
-	if (url.pathname === "/api/config/cwd" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body?.cwd || typeof body.cwd !== "string") {
-			json({ error: "Missing or invalid cwd" }, 400);
-			return;
-		}
-		config.defaultCwd = body.cwd;
-		preferencesStore.set("defaultCwd", body.cwd);
-		json({ cwd: config.defaultCwd });
-		return;
-	}
+	// /api/tool-group-policies* and /api/config/cwd moved to the core route
+	// registry (STR-01 cohort 18) — see src/server/routes/host-config-routes.ts
+	// and docs/design/route-registry.md.
 
 	// ── Preferences ──
 
@@ -7129,78 +7080,9 @@ async function handleApiRoute(
 		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
 	}
 
-	// GET /api/agent-dir — return startup-resolved active dir plus next-start state.
-	if (url.pathname === "/api/agent-dir" && req.method === "GET") {
-		json(getAgentDirApiState());
-		return;
-	}
-
-	// POST /api/agent-dir/validate — validate and probe an agent-dir target.
-	if (url.pathname === "/api/agent-dir/validate" && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ ok: false, error: { code: "MISSING_BODY", message: "Missing body" } }, 400); return; }
-		const result = validateAgentDirTarget((body as any).path, getProjectRoot());
-		json(result);
-		return;
-	}
-
-	// PUT /api/agent-dir/pending — save the next-start agent dir without live-switching.
-	if (url.pathname === "/api/agent-dir/pending" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const rawPath = (body as any).path;
-		let persistedPath: string | undefined;
-		if (rawPath === null || rawPath === undefined || (typeof rawPath === "string" && rawPath.trim().length === 0)) {
-			preferencesStore.remove("agentDir");
-		} else if (typeof rawPath === "string") {
-			const validation = validateAgentDirTarget(rawPath, getProjectRoot());
-			if (!validation.ok) { json(validation, 400); return; }
-			persistedPath = validation.resolvedPath;
-			preferencesStore.set("agentDir", persistedPath);
-		} else {
-			json({ error: "path must be a string, null, or empty" }, 400);
-			return;
-		}
-
-		const state = refreshAgentDirNextStart(persistedPath, bobbitStateDir());
-		preferencesStore.set("agentDirHistory", state.history);
-		broadcastPreferencesChanged();
-		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
-		json({ ...getAgentDirApiState(), guidance: buildAgentDirRestartGuidance() });
-		return;
-	}
-
-	// POST /api/agent-dir/migrate — copy allowlisted agent data; never delete or move source.
-	if (url.pathname === "/api/agent-dir/migrate" && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const sourceRaw = (body as any).sourcePath;
-		const destinationRaw = (body as any).destinationPath;
-		if (typeof sourceRaw !== "string" || typeof destinationRaw !== "string" || sourceRaw.trim().length === 0 || destinationRaw.trim().length === 0) {
-			json({ error: "sourcePath and destinationPath are required" }, 400);
-			return;
-		}
-		const sourcePath = normalizeAgentDirInput(sourceRaw, getProjectRoot());
-		const destinationPath = normalizeAgentDirInput(destinationRaw, getProjectRoot());
-		if (!isKnownAgentDir(sourcePath)) {
-			json({ error: "sourcePath must be the active or a historical agent directory", code: "INVALID_SOURCE" }, 400);
-			return;
-		}
-		if (!isPendingAgentDir(destinationPath)) {
-			json({ error: "destinationPath must be the pending next-start agent directory", code: "INVALID_DESTINATION" }, 400);
-			return;
-		}
-		const report = migrateAgentDirData(sourcePath, destinationPath, (body as any).overwrite === true);
-		if (report.error) {
-			json(report, 400);
-			return;
-		}
-		const state = refreshAgentDirNextStart((preferencesStore.get("agentDir") as string | undefined), bobbitStateDir());
-		preferencesStore.set("agentDirHistory", state.history);
-		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
-		json({ ...report, guidance: buildAgentDirRestartGuidance() });
-		return;
-	}
+	// /api/agent-dir* moved to the core route registry (STR-01 cohort 18) —
+	// see src/server/routes/host-config-routes.ts and
+	// docs/design/route-registry.md.
 
 	function firstHeader(name: string): string | undefined {
 		const value = req.headers[name.toLowerCase()];
