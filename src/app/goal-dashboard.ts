@@ -2146,6 +2146,26 @@ function isHeadquartersNoWorktreeGoal(goal: Goal): boolean {
 	return isHeadquartersProject(goal.projectId) && !goal.branch && !goal.worktreePath;
 }
 
+/**
+ * The canonical "Ready to Merge" gate (`readyToMergeGate()` in
+ * seed-default-workflows.ts, reused verbatim/by id across every seeded
+ * workflow — general/feature/bug-fix/quick-fix/solo-fast/per-component) is
+ * itself a git/PR affordance: its verify steps push the branch, check the
+ * base ref is merged in, and require an open PR. It is never a dependency
+ * target (nothing else's `dependsOn` references it), so it's always safe to
+ * drop from the tail of the gate list.
+ *
+ * No-git Headquarters goals (`isHeadquartersNoWorktreeGoal`) have no branch
+ * and no worktree, so this gate can never meaningfully pass — surfacing it
+ * exposes the exact branch/merge/PR affordance the no-worktree notice says
+ * is unavailable. Filter it out of the gate pipeline/checklist for those
+ * goals, mirroring the git-status-widget gating in `renderMetaRows`.
+ */
+function visibleWorkflowGates<T extends { id: string }>(goal: Goal, wfGates: T[]): T[] {
+	if (!isHeadquartersNoWorktreeGoal(goal)) return wfGates;
+	return wfGates.filter(g => g.id !== "ready-to-merge");
+}
+
 function renderHeadquartersNoWorktreeNotice(goal: Goal): TemplateResult | typeof nothing {
 	if (!isHeadquartersNoWorktreeGoal(goal)) return nothing;
 	return html`
@@ -2573,8 +2593,10 @@ function renderMetaRows(goal: Goal): TemplateResult {
 // ============================================================================
 
 function renderGatePipeline(): TemplateResult {
-	const wfGates = currentGoal?.workflow?.gates;
-	if (!wfGates || wfGates.length === 0) return html``;
+	const allWfGates = currentGoal?.workflow?.gates;
+	if (!allWfGates || allWfGates.length === 0) return html``;
+	const wfGates = currentGoal ? visibleWorkflowGates(currentGoal, allWfGates) : allWfGates;
+	if (wfGates.length === 0) return html``;
 
 	const statusMap = getGateStatusMap();
 	const summaryMap = currentGateSummaryMap();
@@ -3058,7 +3080,7 @@ function renderGatesTab(): TemplateResult {
 function renderGateChecklist(): TemplateResult {
 	if (!currentGoal?.workflow) return nothing as any;
 
-	const wfGates = currentGoal.workflow.gates;
+	const wfGates = visibleWorkflowGates(currentGoal, currentGoal.workflow.gates);
 	const statusMap = getGateStatusMap();
 
 	// Topological sort for display order
