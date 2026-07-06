@@ -121,6 +121,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/session-git-write-routes.ts",
 	// STR-01 cohort 25 (session content/readback routes).
 	"src/server/routes/session-content-routes.ts",
+	// STR-01 cohort 26 (prompt autocomplete/read-only discovery routes).
+	"src/server/routes/prompt-autocomplete-routes.ts",
 	// STR-01 cohort 27 (task routes).
 	"src/server/routes/tasks-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));

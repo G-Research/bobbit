@@ -27,8 +27,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { AuthenticatedWS } from "./ws/protocol.js";
-import { discoverSlashSkills, getSkillDirectories, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
-import { enumerateFiles } from "./skills/file-enumeration.js";
+import { invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
@@ -114,6 +113,8 @@ import { registerSessionGitReadRoutes } from "./routes/session-git-read-routes.j
 import { registerSessionGitWriteRoutes } from "./routes/session-git-write-routes.js";
 // STR-01 cohort 25: session content/readback routes.
 import { registerSessionContentRoutes } from "./routes/session-content-routes.js";
+// STR-01 cohort 26: prompt autocomplete/read-only discovery routes.
+import { registerPromptAutocompleteRoutes } from "./routes/prompt-autocomplete-routes.js";
 // STR-01 cohort 27: task routes.
 import { registerTasksRoutes } from "./routes/tasks-routes.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
@@ -631,7 +632,7 @@ import {
 } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import type { ProjectContext } from "./agent/project-context.js";
-import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource } from "./agent/resolve-project.js";
+import { resolveProjectForRequest, validateExecutionCwd } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
@@ -3398,6 +3399,7 @@ registerSessionCreationRoutes(coreRouteTable);
 registerSessionGitReadRoutes(coreRouteTable);
 registerSessionGitWriteRoutes(coreRouteTable);
 registerSessionContentRoutes(coreRouteTable);
+registerPromptAutocompleteRoutes(coreRouteTable);
 registerTasksRoutes(coreRouteTable);
 
 interface HandleApiRouteDeps {
@@ -8452,92 +8454,9 @@ async function handleApiRoute(
 	// moved to the core route registry (STR-01 cohort 24) — see
 	// src/server/routes/session-git-write-routes.ts.
 
-	// GET /api/slash-skills — discover .claude/skills/ SKILL.md files for autocomplete
-	if (url.pathname === "/api/slash-skills" && req.method === "GET") {
-		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
-		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		const resolvedStore = resolveProjectConfigStore(resolvedProject.projectId);
-		// For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...).
-		// Skill files live on the host, so resolve the project rootPath for discovery.
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, resolvedProject.projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(resolvedProject.projectId));
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })) });
-		return;
-	}
-
-	// GET /api/file-mentions — bounded file enumeration for @-mention autocomplete.
-	// Includes gitignored/untracked files; excludes .git/node_modules/etc. (no .gitignore consulted).
-	if (url.pathname === "/api/file-mentions" && req.method === "GET") {
-		const rawCwd = url.searchParams.get("cwd") || undefined;
-		const sessionId = url.searchParams.get("sessionId") || undefined;
-		const rawProjectId = url.searchParams.get("projectId") || undefined;
-		const q = url.searchParams.get("q") || undefined;
-		const limitRaw = url.searchParams.get("limit");
-		const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
-		const limit = limitParsed !== undefined && Number.isFinite(limitParsed) ? limitParsed : undefined;
-
-		let resolvedProjectId: string;
-		let cwd: string;
-		let cwdSource: CwdOwnershipSource;
-		if (sessionId) {
-			const session = sessionManager.getSession(sessionId);
-			const persisted = session
-				? undefined
-				: (sessionManager.getPersistedSession(sessionId) ?? projectContextManager.getContextForSession(sessionId)?.sessionStore.get(sessionId));
-			if (!session && !persisted) {
-				json({ error: `Session "${sessionId}" not found` }, 404);
-				return;
-			}
-			const sessionProjectId = session?.projectId ?? persisted?.projectId;
-			if (!sessionProjectId) {
-				json({ error: "Session missing projectId", code: "PROJECT_ID_REQUIRED" }, 403);
-				return;
-			}
-			if (rawProjectId && rawProjectId !== sessionProjectId) {
-				json({ error: "projectId does not match session projectId", code: "PROJECT_SCOPE_MISMATCH" }, 422);
-				return;
-			}
-			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: sessionProjectId });
-			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-			resolvedProjectId = resolvedProject.projectId;
-			// Enumerate the session's HOST worktree, NOT the project root. The
-			// project-root redirect (resolveSkillDiscoveryCwd) is correct for SKILL
-			// discovery but wrong here: file mentions must see the goal/session
-			// worktree's branch-local, untracked and gitignored files. worktreePath
-			// is the host path; for sandboxed sessions cwd is a container path so
-			// worktreePath is required.
-			cwd = session?.worktreePath || persisted?.worktreePath || session?.cwd || persisted?.cwd || rawCwd || resolvedProject.project.rootPath;
-			cwdSource = { kind: "session", sessionId };
-		} else {
-			const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId: rawProjectId });
-			if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-			resolvedProjectId = resolvedProject.projectId;
-			cwd = rawCwd || resolvedProject.project.rootPath;
-			cwdSource = { kind: "user-input" };
-		}
-
-		const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolvedProjectId, cwd, cwdSource);
-		if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
-		const files = await enumerateFiles(cwd, { query: q, limit });
-		json({ files: files.map((p) => ({ path: p })) });
-		return;
-	}
-
-	// GET /api/slash-skills/details — full slash skill details including content and file paths
-	if (url.pathname === "/api/slash-skills/details" && req.method === "GET") {
-		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolvedProject = resolveProjectForRequest(projectRegistry, { projectId });
-		if (!resolvedProject.ok) { writeProjectResolutionError(resolvedProject); return; }
-		const resolvedStore = resolveProjectConfigStore(resolvedProject.projectId);
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, resolvedProject.projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(resolvedProject.projectId));
-		const directories = getSkillDirectories(cwd, resolvedStore);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })), directories });
-		return;
-	}
+	// GET /api/slash-skills, GET /api/file-mentions, and
+	// GET /api/slash-skills/details moved to the core route registry
+	// (STR-01 cohort 26) — see src/server/routes/prompt-autocomplete-routes.ts.
 
 	// Cost endpoints moved to the core route registry (STR-01 cohort 16a) —
 	// see src/server/routes/cost-routes.ts and docs/design/route-registry.md.
