@@ -2269,10 +2269,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enforce sandbox route guard
 			if (sandboxScope && !isSandboxAllowed(url.pathname, req.method || "GET", sandboxScope)) {
 				res.writeHead(403, { "Content-Type": "application/json" });
-				const sandboxError = req.method === "POST" && /^\/api\/goals\/[^/]+\/gates\/[^/]+\/bypass$/.test(url.pathname)
-					? "Forbidden: sandbox token cannot bypass gates"
-					: "Forbidden: sandbox token cannot access this endpoint";
-				res.end(JSON.stringify({ error: sandboxError }));
+				res.end(JSON.stringify({ error: "Forbidden: sandbox token cannot access this endpoint" }));
 				return;
 			}
 

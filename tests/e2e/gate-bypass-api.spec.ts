@@ -284,7 +284,12 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 			});
 			expect(res.status).toBe(403);
 			const body = await res.json();
-			expect(body.error).toBe("Forbidden: sandbox token cannot bypass gates");
+			// The deny rule lives in src/server/auth/sandbox-guard.ts:45 — the
+			// generic route guard in server.ts is the layer that actually
+			// enforces this and produces this message. The route module's own
+			// "cannot bypass gates" guard is unreachable defense-in-depth for
+			// sandbox tokens, since the generic guard rejects them first.
+			expect(body.error).toBe("Forbidden: sandbox token cannot access this endpoint");
 		} finally {
 			await deleteGoal(goalId).catch(() => {});
 			await deleteWorkflow(wf);
