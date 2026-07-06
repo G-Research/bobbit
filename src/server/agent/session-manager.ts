@@ -18,13 +18,9 @@ import { RpcBridge, hostPathToContainer, type IRpcBridge, type RpcBridgeOptions,
 import { readClaudeCodeConfig } from "./claude-code-config.js";
 import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime } from "./session-runtime.js";
 import { sessionFileExists, sessionFileRead, sessionFsContextForAgentFile } from "./session-fs.js";
-import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
 import { resolveReadablePersistedAgentSessionFile, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
-import {
-	mergeCompactionSidecarIntoMessages,
-} from "./compaction-sidecar.js";
 import { SessionStore, type PersistedSession, type WorktreePushPolicy, type SessionRuntime } from "./session-store.js";
 import {
 	ArchivedWorktreeManager,
@@ -60,6 +56,7 @@ import { SessionSpawn } from "./session-spawn.js";
 import { SessionSteering } from "./session-steering.js";
 import { SessionBoot } from "./session-boot.js";
 import { SessionModels, type SessionModelsDeps } from "./session-models.js";
+import { SessionTranscripts, type SessionTranscriptsDeps } from "./session-transcripts.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -92,7 +89,7 @@ import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
-import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
+import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { getAigwUrl, deriveName } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
@@ -110,7 +107,7 @@ import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
-import { migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
+import { migratedActiveAgentSessionFileForHostPath } from "./agent-session-path.js";
 import type { OrchestrationCoreView, InboxNudgerView, StaffRecordSource } from "./session-manager-consumer-types.js";
 
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
@@ -863,54 +860,6 @@ export interface SessionManagerOptions {
 	toolPermissionAuditLog?: ToolPermissionAuditLog;
 }
 
-function withPersistedClaudeCodeMessageTimestamp(message: any, envelopeTs: unknown): any {
-	if (!message || typeof message !== "object" || message.timestamp !== undefined) return message;
-	let timestamp: number | undefined;
-	if (typeof envelopeTs === "number" && Number.isFinite(envelopeTs)) timestamp = envelopeTs < 10_000_000_000 ? envelopeTs * 1000 : envelopeTs;
-	else if (typeof envelopeTs === "string") {
-		const parsed = Date.parse(envelopeTs);
-		if (Number.isFinite(parsed)) timestamp = parsed;
-	}
-	return timestamp === undefined ? message : { ...message, timestamp };
-}
-
-function normalizePersistedClaudeCodeAskMessages(messages: unknown[]): unknown[] {
-	const askToolIds = new Set<string>();
-	for (const message of messages as any[]) {
-		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			const id = typeof block?.toolCallId === "string" ? block.toolCallId : (typeof block?.id === "string" ? block.id : undefined);
-			if (block?.type === "toolCall" && block.name === "ask_user_choices" && id) askToolIds.add(id);
-		}
-	}
-	return messages.map((message: any) => {
-		if (message?.role !== "toolResult") return message;
-		if (message.toolName !== "ask_user_choices" || !askToolIds.has(message.toolCallId)) return message;
-		const text = stringifyPersistedToolResultContent(message.content).trim();
-		if (text !== "Answer questions?") return message;
-		const rest = { ...message };
-		delete rest.error;
-		return {
-			...rest,
-			isError: false,
-			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: message.toolCallId }) }],
-		};
-	});
-}
-
-function stringifyPersistedToolResultContent(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		return content.map((item: any) => {
-			if (typeof item === "string") return item;
-			if (item?.type === "text" && typeof item.text === "string") return item.text;
-			try { return JSON.stringify(item); } catch { return String(item); }
-		}).join("\n");
-	}
-	if (content == null) return "";
-	try { return JSON.stringify(content); } catch { return String(content); }
-}
-
 /**
  * F22 (RECONCILIATION-2026-07-05.md NEXT QUEUE item 5) — tool names that are
  * safe within a "narrow worker" delegate's scope: pure file/shell primitives
@@ -1129,6 +1078,7 @@ export class SessionManager {
 	private sessionSteering!: SessionSteering;
 	private sessionBoot!: SessionBoot;
 	private sessionModels!: SessionModels;
+	private sessionTranscripts!: SessionTranscripts;
 	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
 
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
@@ -1496,6 +1446,17 @@ export class SessionManager {
 		} satisfies SessionCostPlumbingDeps);
 		this.retainSessionCostHostSurface();
 
+		this.sessionTranscripts = new SessionTranscripts({
+			resolveStoreForId: (id) => this.resolveStoreForId(id),
+			resolveStoreForSession: (id) => this.resolveStoreForSession(id),
+			getSession: (id) => this.sessions.get(id),
+			getSandboxManager: () => this.sandboxManager,
+			broadcastSessionCost: (session) => this.broadcastSessionCost(session),
+			withSessionCostInState: (sessionId, data) => this.withSessionCostInState(sessionId, data),
+			broadcast: (clients, msg) => broadcast(clients, msg),
+		} satisfies SessionTranscriptsDeps);
+		this.retainSessionTranscriptsHostSurface();
+
 		// Constructed here (not lazily) so every field it captures by value
 		// (projectContextManager, testStore, testSearchIndex, colorStore) is
 		// already final — all four are assigned above, never reassigned again.
@@ -1623,6 +1584,18 @@ export class SessionManager {
 		void this.resolveCostTracker;
 		void this.resolveTaskIdForSession;
 		void this.costTriggerFromEvent;
+	}
+
+	private retainSessionTranscriptsHostSurface(): void {
+		// SessionTranscripts owns transcript/sidecar behavior after cohort 10,
+		// while SessionManager keeps same-named wrappers for callers and pins.
+		void this.getMessagesSnapshotBase;
+		void this.hydrateClaudeCodeSnapshotMessages;
+		void this.getSessionOutput;
+		void this.refreshAfterCompaction;
+		void this.persistSessionMetadata;
+		void this.getArchivedMessages;
+		void this.recoverSessionFile;
 	}
 
 	private retainSessionBootHostSurface(): void {
@@ -3846,199 +3819,24 @@ export class SessionManager {
 		return this.sessions.get(sessionId)?.promptQueue.length ?? 0;
 	}
 
-	/**
-	 * Extract concatenated assistant text from a parsed message list (shared by
-	 * the live and persisted-transcript output paths).
-	 */
-	private extractAssistantText(messages: unknown[]): string {
-		const texts: string[] = [];
-		for (const msg of messages as Array<{ role?: string; content?: unknown }>) {
-			if (msg?.role !== "assistant") continue;
-			const content = msg.content;
-			if (typeof content === "string") {
-				texts.push(content);
-			} else if (Array.isArray(content)) {
-				for (const block of content) {
-					if (block?.type === "text" && block.text) texts.push(block.text);
-				}
-			}
-		}
-		return texts.join("\n\n");
-	}
-
-	private async getPersistedSessionMessages(sessionId: string, opts?: { claudeCodeOnly?: boolean; archivedOnly?: boolean }): Promise<unknown[]> {
-		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-		if (!ps?.agentSessionFile) return [];
-		if (opts?.archivedOnly && !ps.archived) return [];
-		const isClaudeCode = resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }) === "claude-code";
-		if (opts?.claudeCodeOnly && !isClaudeCode) return [];
-		try {
-			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
-			if (!safeFile) return [];
-			trustPersistedAgentSessionFile(safeFile);
-			const ctx = sessionFsContextForAgentFile(ps, safeFile);
-			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
-			if (!content) return [];
-			const messages: unknown[] = [];
-			for (const line of content.split(/\r?\n/)) {
-				if (!line.trim()) continue;
-				try {
-					const entry = JSON.parse(line);
-					if (entry.type === "message" && entry.message) messages.push(isClaudeCode ? withPersistedClaudeCodeMessageTimestamp(entry.message, entry.ts) : entry.message);
-				} catch { /* skip malformed line */ }
-			}
-			return isClaudeCode ? normalizePersistedClaudeCodeAskMessages(messages) : messages;
-		} catch {
-			return [];
-		}
-	}
-
-	/**
-	 * Claude Code resumes from Claude's session id instead of replaying Bobbit's
-	 * JSONL into the bridge, so immediately after gateway restart the live bridge
-	 * can have an empty/new-only in-memory snapshot. Prefer the persisted Claude
-	 * transcript fallback when it contains more complete history.
-	 */
+	/** Delegates to SessionTranscripts (SessionManager decomposition cohort 10). */
 	async hydrateClaudeCodeSnapshotMessages(sessionId: string, liveData: unknown): Promise<unknown> {
-		const persisted = await this.getPersistedSessionMessages(sessionId, { claudeCodeOnly: true });
-		if (persisted.length === 0) return liveData;
-		const liveMessages = Array.isArray(liveData)
-			? liveData
-			: (liveData && typeof liveData === "object" && Array.isArray((liveData as any).messages) ? (liveData as any).messages : []);
-		if (persisted.length <= liveMessages.length) return liveData;
-		const messages = truncateLargeToolContentInMessages(persisted) as unknown[];
-		if (Array.isArray(liveData)) return messages;
-		if (liveData && typeof liveData === "object") return { ...(liveData as Record<string, unknown>), messages };
-		return { messages };
+		return this.sessionTranscripts.hydrateClaudeCodeSnapshotMessages(sessionId, liveData);
 	}
 
-	/**
-	 * PERF-06: memoized base snapshot for `get_messages` (on-attach, live
-	 * `get_messages`, and post-`restart_agent`). Wraps the expensive part of
-	 * the pipeline — `rpcClient.getMessages()` (agent-process RPC round-trip
-	 * + full-transcript JSON parse) followed by `hydrateClaudeCodeSnapshotMessages`
-	 * and `normalizeToolResultErrorSnapshot` — and caches the result on the
-	 * session, keyed by `session.eventBuffer.lastSeq`.
-	 *
-	 * Soundness of the cache key: `emitSessionEvent` is the single emit path
-	 * for every live agent event (see its doc comment) and always calls
-	 * `session.eventBuffer.push(...)`, bumping `lastSeq`. Every call site
-	 * invokes `handleAgentLifecycle(session, event)` — which synchronously
-	 * persists new Claude Code transcript rows via
-	 * `persistClaudeCodeMessageToTranscript` (a synchronous `fs.appendFileSync`)
-	 * — strictly before `emitSessionEvent`. So by the time `lastSeq` advances,
-	 * both the agent's own live transcript (what `rpcClient.getMessages()`
-	 * returns) AND the persisted-file fallback that
-	 * `hydrateClaudeCodeSnapshotMessages` reads have already reflected the
-	 * change. A cache hit at an unchanged `lastSeq` is therefore guaranteed
-	 * byte-identical to a fresh fetch. Restarts always replace `SessionInfo`
-	 * with a brand-new object (fresh `messagesSnapshotCache: undefined`), so
-	 * there is no cross-restart collision even though the reseeded
-	 * `EventBuffer` can briefly reuse the pre-restart `lastSeq` value.
-	 *
-	 * Deliberately NOT covered by this cache — callers must still apply these
-	 * fresh on every call, cache hit or miss, because they read session-mutable
-	 * state that can change independently of `lastSeq` (e.g. a steer dispatched
-	 * before the agent has emitted any event yet, or a compaction-sidecar
-	 * fallback write on RPC rejection with no preceding event):
-	 *   - `spliceInFlightMessage` / `spliceInFlightSteers`
-	 *   - `mergeCompactionSidecarIntoMessages` / `mergeSkillSidecarIntoMessages`
-	 *   - `truncateLargeToolContentInMessages` / `stampSnapshotOrder`
-	 *
-	 * Concurrent callers at the same `lastSeq` share one in-flight promise, so
-	 * N tabs opening/reconnecting at once trigger exactly one RPC round-trip.
-	 */
+	/** Delegates to SessionTranscripts (SessionManager decomposition cohort 10). */
 	async getMessagesSnapshotBase(session: SessionInfo): Promise<{ success: boolean; data?: unknown; error?: string }> {
-		const seq = session.eventBuffer.lastSeq;
-		const cached = session.messagesSnapshotCache;
-		if (cached && cached.seq === seq) return cached.promise;
-		const promise = (async (): Promise<{ success: boolean; data?: unknown; error?: string }> => {
-			const msgsResp = await session.rpcClient.getMessages();
-			if (!msgsResp?.success) return msgsResp;
-			const hydrated = await this.hydrateClaudeCodeSnapshotMessages(session.id, msgsResp.data);
-			const raw = normalizeToolResultErrorSnapshot(hydrated as any);
-			return { ...msgsResp, data: raw };
-		})();
-		session.messagesSnapshotCache = { seq, promise };
-		// Never let a failed fetch poison the cache for the next attempt at the
-		// same seq (e.g. a transient RPC timeout) — only successful bases are
-		// worth reusing.
-		promise.then(
-			(r) => { if (!r?.success && session.messagesSnapshotCache?.promise === promise) session.messagesSnapshotCache = undefined; },
-			() => { if (session.messagesSnapshotCache?.promise === promise) session.messagesSnapshotCache = undefined; },
-		);
-		return promise;
+		return this.sessionTranscripts.getMessagesSnapshotBase(session);
 	}
 
-	/**
-	 * Read a (dormant/non-live) session's final assistant output from its PERSISTED
-	 * transcript file. Used as the H1 fallback so a child that completed before a
-	 * restart can still be collected via team_wait without a live process.
-	 */
-	private async getPersistedSessionOutput(sessionId: string): Promise<string> {
-		const messages = await this.getPersistedSessionMessages(sessionId);
-		return this.extractAssistantText(messages);
-	}
-
-	/**
-	 * Get the final assistant output from a session's messages. For a dormant /
-	 * non-live session (no running agent process) this reads the PERSISTED
-	 * transcript instead of querying the placeholder RpcBridge (H1).
-	 */
+	/** Delegates to SessionTranscripts (SessionManager decomposition cohort 10). */
 	async getSessionOutput(sessionId: string): Promise<string> {
-		const session = this.sessions.get(sessionId);
-		if (!session || session.dormant === true) {
-			return this.getPersistedSessionOutput(sessionId);
-		}
-
-		const msgsResp = await session.rpcClient.getMessages();
-		if (!msgsResp.success) return this.getPersistedSessionOutput(sessionId);
-
-		const messages = msgsResp.data?.messages || msgsResp.data;
-		if (!Array.isArray(messages)) return "";
-
-		return this.extractAssistantText(messages);
+		return this.sessionTranscripts.getSessionOutput(sessionId);
 	}
 
-	/** Query the agent for its session file and save metadata to disk */
-	/** After compaction, refresh messages and state for all connected clients. */
+	/** Delegates to SessionTranscripts (SessionManager decomposition cohort 10). */
 	async refreshAfterCompaction(session: SessionInfo): Promise<void> {
-		try {
-			// Send the authoritative cumulative cost before the compacted messages
-			// snapshot so clients never fall back to the reduced visible transcript.
-			this.broadcastSessionCost(session);
-
-			const msgs = await session.rpcClient.getMessages();
-			if (msgs.success) {
-				const raw: any = normalizeToolResultErrorSnapshot(msgs.data);
-				let data: any = raw;
-				if (Array.isArray(raw)) {
-					const spliced = spliceInFlightSteers(
-						spliceInFlightMessage(raw, session.latestMessageUpdate),
-						session.inFlightSteerTexts,
-					);
-					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
-					data = truncateLargeToolContentInMessages(withCompaction);
-				} else if (raw && Array.isArray(raw.messages)) {
-					const spliced = spliceInFlightSteers(
-						spliceInFlightMessage(raw.messages, session.latestMessageUpdate),
-						session.inFlightSteerTexts,
-					);
-					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
-					const truncated = truncateLargeToolContentInMessages(withCompaction);
-					data = spliced === raw.messages && truncated === raw.messages && withCompaction === raw.messages
-						? raw
-						: { ...raw, messages: truncated };
-				}
-				broadcast(session.clients, { type: "messages", data });
-			}
-			const st = await session.rpcClient.getState();
-			if (st.success) {
-				broadcast(session.clients, { type: "state", data: this.withSessionCostInState(session.id, st.data) });
-			}
-		} catch (err) {
-			console.error(`[session-manager] Failed to refresh after compaction for ${session.id}:`, err);
-		}
+		return this.sessionTranscripts.refreshAfterCompaction(session);
 	}
 
 	/**
@@ -4115,76 +3913,7 @@ export class SessionManager {
 	}
 
 	async persistSessionMetadata(session: SessionInfo): Promise<void> {
-		const maxRetries = 3;
-		const delays = [500, 1000, 2000];
-
-		for (let attempt = 0; attempt <= maxRetries; attempt++) {
-			try {
-				const stateResp = await session.rpcClient.getState();
-				if (!stateResp.success || !stateResp.data?.sessionFile) {
-					if (attempt < maxRetries) {
-						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
-						await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-						continue;
-					}
-					console.error(
-						`[session-manager] CRITICAL: Could not get agent session file for ${session.id} after ${maxRetries + 1} attempts. ` +
-						`This session will NOT survive a server restart.`,
-					);
-					return;
-				}
-
-				// Store the path as returned by the agent — always in the agent's
-				// coordinate system (container path for sandbox, host path for local).
-				// The session-fs module handles routing reads/checks to the right place.
-				const agentSessionFile = stateResp.data.sessionFile;
-
-				// NEVER pre-create this file. Pi (>=0.77) creates the session JSONL
-				// lazily on the first assistant flush with an exclusive `openSync(file, "wx")`.
-				// If Bobbit touches the path first, that open throws
-				// `EEXIST: file already exists` and the agent loses every transcript
-				// write for the session. We only record the path; restoreOneSession()
-				// tolerates the file not yet existing (a session that crashed before its
-				// first assistant message has no transcript to restore anyway).
-				// Pinned by tests/session-manager-no-precreate.test.ts.
-				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
-
-				// Write the bobbit sidecar alongside the .jsonl so a future
-				// recovery (when sessions.json loses this entry) can restore the
-				// ORIGINAL bobbit session id, title, role, team links, and model
-				// prefs instead of inventing fresh ones. Fire-and-forget;
-				// atomic write makes repeat invocations safe.
-				try {
-					const ps = this.resolveStoreForSession(session.id).get(session.id);
-					if (ps) {
-						// pi-coding-agent names .jsonl files after the agent session id
-						// (path/<agent-id>.jsonl). Use the basename as a stable id when
-						// the rpc response doesn't expose it directly.
-						const agentSessionId = (stateResp.data?.sessionId as string | undefined)
-							|| path.basename(agentSessionFile).replace(/\.jsonl$/, "");
-						const sidecar = buildSessionSidecar(
-							ps,
-							agentSessionId,
-							undefined,
-						);
-						writeSessionSidecar(agentSessionFile, sidecar);
-					}
-				} catch (err) {
-					console.warn(`[session-manager] Failed to write session sidecar for ${session.id}: ${err}`);
-				}
-				return; // success
-			} catch (err) {
-				if (attempt < maxRetries) {
-					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
-					await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-				} else {
-					console.error(
-						`[session-manager] CRITICAL: persistSessionMetadata failed for ${session.id} after ${maxRetries + 1} attempts: ${err}\n` +
-						`  This session will NOT survive a server restart.`,
-					);
-				}
-			}
-		}
+		return this.sessionTranscripts.persistSessionMetadata(session);
 	}
 
 	getSession(id: string): SessionInfo | undefined {
@@ -5334,8 +5063,7 @@ export class SessionManager {
 
 	/** Parse the .jsonl file for an archived session and return messages. */
 	async getArchivedMessages(id: string): Promise<unknown[]> {
-		const messages = await this.getPersistedSessionMessages(id, { archivedOnly: true });
-		return normalizeToolResultErrorSnapshot(truncateLargeToolContentInMessages(messages)) as unknown[];
+		return this.sessionTranscripts.getArchivedMessages(id);
 	}
 
 	/** List archived sessions in the same format as listSessions(). Delegates to ArchivedWorktreeManager. */
@@ -5374,74 +5102,7 @@ export class SessionManager {
 	 * field was never populated.
 	 */
 	recoverSessionFile(ps: PersistedSession): string | null {
-		try {
-			if (ps.agentSessionFile && isHostAbsoluteAgentSessionPath(ps.agentSessionFile) && fs.existsSync(ps.agentSessionFile)) {
-				const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
-				if (safePath) {
-					trustPersistedAgentSessionFile(safePath);
-					return safePath.replace(/\\/g, "/");
-				}
-			}
-
-			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
-			// For sandboxed sessions, the CWD stored in ps.cwd is the host path (set during setup).
-			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
-			const TOLERANCE_MS = 60_000;
-
-			const sessionRoots = trustedAgentSessionsRoots();
-
-			// Prefer an exact filename/session-id match across all known roots before
-			// falling back to timestamp proximity. This preserves historical-root
-			// recovery when another root has a different session with the same createdAt.
-			for (const sessionsDir of sessionRoots) {
-				const cwdDir = path.join(sessionsDir, cwdSlug);
-				if (!fs.existsSync(cwdDir)) continue;
-				const exactFile = fs.readdirSync(cwdDir).find(f => f.endsWith(`_${ps.id}.jsonl`));
-				if (exactFile) {
-					const recovered = path.join(cwdDir, exactFile).replace(/\\/g, "/");
-					trustPersistedAgentSessionFile(recovered);
-					return recovered;
-				}
-			}
-
-			for (const sessionsDir of sessionRoots) {
-				const cwdDir = path.join(sessionsDir, cwdSlug);
-				if (!fs.existsSync(cwdDir)) continue;
-
-				const files = fs.readdirSync(cwdDir).filter(f => f.endsWith(".jsonl"));
-				if (files.length === 0) continue;
-
-				// Parse timestamp from filename: 2026-04-03T15-15-12-009Z_<uuid>.jsonl
-				// Find the file whose timestamp is closest to (and within 60s of) ps.createdAt.
-				let bestFile: string | null = null;
-				let bestDelta = Infinity;
-
-				for (const file of files) {
-					const tsMatch = file.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
-					if (!tsMatch) continue;
-					// Convert filename timestamp back to ISO: replace hyphens in time part with colons.
-					const isoStr = tsMatch[1]
-						.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "$1-$2-$3T$4:$5:$6.$7Z");
-					const fileTime = new Date(isoStr).getTime();
-					if (isNaN(fileTime)) continue;
-
-					const delta = Math.abs(fileTime - ps.createdAt);
-					if (delta < TOLERANCE_MS && delta < bestDelta) {
-						bestDelta = delta;
-						bestFile = file;
-					}
-				}
-
-				if (bestFile) {
-					const recovered = path.join(cwdDir, bestFile).replace(/\\/g, "/");
-					trustPersistedAgentSessionFile(recovered);
-					return recovered;
-				}
-			}
-		} catch {
-			// Recovery is best-effort — don't break restore flow
-		}
-		return null;
+		return this.sessionTranscripts.recoverSessionFile(ps);
 	}
 
 	/**
