@@ -46,6 +46,10 @@ const SOURCE_PATH = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts
 const SOURCE = fs.readFileSync(SOURCE_PATH, "utf-8");
 const REVIVE_SOURCE_PATH = path.join(PROJECT_ROOT, "src/server/agent/session-revive.ts");
 const REVIVE_SOURCE = fs.readFileSync(REVIVE_SOURCE_PATH, "utf-8");
+// SM decomposition c15 moved forceAbort (the abort-restart handler) into
+// session-live-control.ts — the abort-restart pin scans there now.
+const LIVE_CONTROL_SOURCE_PATH = path.join(PROJECT_ROOT, "src/server/agent/session-live-control.ts");
+const LIVE_CONTROL_SOURCE = fs.readFileSync(LIVE_CONTROL_SOURCE_PATH, "utf-8");
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-last-activity-test-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -136,9 +140,9 @@ describe("session-manager.ts has the isUserVisibleActivity filter wired in", () 
 	});
 
 	it("abort-restart's onEvent handler uses isUserVisibleActivity to gate lastActivity", () => {
-		const idx = SOURCE.indexOf("const abortStore = this.resolveStoreForSession(id);");
+		const idx = LIVE_CONTROL_SOURCE.indexOf("const abortStore = this.resolveStoreForSession(id);");
 		assert.ok(idx > 0, "abortStore declaration not found — abort-restart scope changed");
-		const window = SOURCE.slice(idx, idx + 800);
+		const window = LIVE_CONTROL_SOURCE.slice(idx, idx + 800);
 		assert.ok(
 			/isUserVisibleActivity\s*\(/.test(window),
 			"abort-restart handler must call isUserVisibleActivity before bumping lastActivity",
