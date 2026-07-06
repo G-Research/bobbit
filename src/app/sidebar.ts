@@ -27,7 +27,7 @@ import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialog
 import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
 import { refreshSessions, retryLoadSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
-import { statusBobbit, sessionAcronym } from "./session-colors.js";
+import { statusBobbit, sessionAcronym, sessionStatusLabel } from "./session-colors.js";
 import { renderGoalGroup, renderTreeSessionNode, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
@@ -1096,7 +1096,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 					data-nav-active=${active ? "true" : "false"}
 					style="padding-left:var(--sidebar-chevron-w);"
 					@click=${() => handleStaffClick(agent)}>
-					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session), true)}</span>
+					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session), true)}<span class="sr-only" data-testid="sidebar-session-status-label">${sessionStatusLabel(sessionStatus, isCompacting, isAborting)}</span></span>
 					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal"><span class="block min-w-0 max-w-full truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
 							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
@@ -1973,6 +1973,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 				data-tree-key=${treeKey ?? ""}
 				class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
 				title=${displayTitle}
+				aria-label="${displayTitle} — ${sessionStatusLabel(s.status, s.isCompacting, s.isAborting)}"
 				@click=${() => { if (!active) connectToSession(s.id, true); }}
 			>
 				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(s) ? "bobbit-unread-pulse" : ""}">${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory, false, !active && hasUnseenActivity(s), true)}</span>
@@ -2011,6 +2012,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 				data-tree-key=${node.key}
 				class="flex items-center sidebar-action-cluster ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
 				title=${displayTitle}
+				aria-label="${displayTitle} — ${sessionStatusLabel(session.status, session.isCompacting, session.isAborting)}"
 				@click=${() => { if (!active) connectToSession(session.id, true); }}
 			>
 				<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none" style="cursor:pointer;"
@@ -2039,6 +2041,8 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 			<button
 				data-tree-key=${node.key}
 				class="flex items-center sidebar-action-cluster ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${tlActive ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
+				title=${tlTitle}
+				aria-label="${tlTitle} — ${sessionStatusLabel(teamLead.status, teamLead.isCompacting, teamLead.isAborting)}"
 				@click=${() => { if (!tlActive) connectToSession(teamLead.id, true); }}
 			>
 				<span class="sidebar-chevron-slot sidebar-chevron-slot--collapsed text-muted-foreground shrink-0 select-none" style="cursor:pointer;"

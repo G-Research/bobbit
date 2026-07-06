@@ -438,6 +438,20 @@ export class GitStatusWidget extends LitElement {
         return html`<span class="${colorClass}${pulseClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title=${title}><span style="font-size:11px">⦿</span>${this.prNumber != null ? html`<span style="font-size:11px">#${this.prNumber}</span>` : nothing}</span>`;
     }
 
+    /**
+     * PR review-status word (approved / changes requested), currently
+     * conveyed only by color on the non-focusable `_prPillIcon` span
+     * (its `title` never reaches the focusable pill's accessible name).
+     * Used to extend the pill button's aria-label — PR #246 judgment
+     * item 10 (color-only signaling).
+     */
+    private _prReviewStatusWord(): string {
+        if (this.prState !== 'OPEN') return '';
+        if (this.reviewDecision === 'APPROVED') return 'approved';
+        if (this.reviewDecision === 'CHANGES_REQUESTED') return 'changes requested';
+        return '';
+    }
+
     /** Review decision badge for inside the PR section */
     private _renderReviewBadge() {
         if (!this.reviewDecision || this.prState !== 'OPEN') return nothing;
@@ -1174,11 +1188,13 @@ export class GitStatusWidget extends LitElement {
                 ? html`<span class="git-partial-dot" aria-label="Partial" title="Status scan timed out \u2014 showing partial data."></span>`
                 : nothing;
 
+        const reviewWord = this._prReviewStatusWord();
         return html`
             <button
                 class="git-status-pill inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[12px] leading-tight ${this.loading ? 'loading' : ''} ${this.partial ? 'partial' : ''}"
                 style="max-width:100%; height:var(--pill-h, auto)"
                 data-state=${stateAttr}
+                aria-label=${reviewWord ? `${this.branch}, PR #${this.prNumber} review ${reviewWord}` : nothing}
                 @click=${this._toggle}
             >
                 <span class="shrink-0 relative" style="display:inline-block">⎇${refreshDot}</span>

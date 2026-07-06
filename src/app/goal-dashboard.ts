@@ -15,7 +15,7 @@ import { createVisibilityAwarePoller, hasPollDiff, type VisibilityAwarePoller } 
 import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
-import { statusBobbit } from "./session-colors.js";
+import { statusBobbit, sessionStatusLabel } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import { shouldShowPlanTab, shouldShowChildrenTab } from "./goal-dashboard-tab-visibility.js";
 import { nestingDepthOf, effectiveMaxNestingDepthOf } from "./subgoal-eligibility.js";
@@ -2946,6 +2946,7 @@ function renderAgentsTab(): TemplateResult {
 						agent.role === "coder",
 						isArchived ? agent.accessory : session?.accessory,
 					)}
+					<span class="sr-only" data-testid="agent-card-status-label">${isArchived ? sessionStatusLabel("terminated") : sessionStatusLabel(session?.status ?? agent.status, session?.isCompacting ?? false, session?.isAborting ?? false)}</span>
 				</div>
 				<div class="agent-card-info">
 					<div class="agent-card-name-row">

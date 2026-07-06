@@ -117,3 +117,34 @@ export function statusBobbit(status: string, isCompacting = false, sessionId?: s
 		disableIdleBreathing,
 	});
 }
+
+/**
+ * Human-readable status word for a session/agent, matching what `statusBobbit`
+ * conveys purely via sprite palette/pose. Used to expose the status through
+ * an accessible name (aria-label / sr-only text) alongside the color-coded
+ * dot — never as a replacement for it. Keep in sync with the status handling
+ * in `renderSidebarBobbitCanvas` (src/ui/bobbit-render.ts).
+ */
+export function sessionStatusLabel(status: string, isCompacting = false, isAborting = false): string {
+	if (isAborting) return "stopping";
+	if (isCompacting) return "compacting";
+	switch (status) {
+		case "streaming":
+		case "busy":
+			return "running";
+		case "idle":
+			return "idle";
+		case "starting":
+			return "starting";
+		case "preparing":
+			return "preparing";
+		case "terminated":
+			return "terminated";
+		case "archived":
+			return "archived";
+		case "aborting":
+			return "stopping";
+		default:
+			return status;
+	}
+}
