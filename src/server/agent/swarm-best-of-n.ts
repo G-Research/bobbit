@@ -39,9 +39,12 @@ import type { PersistedGoal } from "./goal-store.js";
 import type { ProjectContext } from "./project-context.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
+import type { PromptProfile } from "./system-prompt.js";
 
-/** Per-sibling override — the SAME prompt (`spec`) is shared by every sibling; only role varies. */
+/** Per-sibling override — best-of-N shares the same prompt; orchestrator-worker uses title/spec overrides for disjoint shards. */
 export interface BestOfNSiblingSpec {
+	title?: string;
+	spec?: string;
 	/** Optional per-sibling role override — omitted siblings resolve their role the normal way (goal/team defaults). Lets a best-of-N run vary role/model/thinking across candidates per design §4. */
 	suggestedRole?: string;
 }
@@ -79,6 +82,29 @@ export interface BestOfNSwarmOptions {
 	 * signal on the early-kill path itself. See the PR's "Judgment calls".
 	 */
 	earlyKill?: boolean;
+	/**
+	 * SWARM-W4.5 (design/swarm-orchestration-w4.md §1.1) — the pattern id this
+	 * fan-out belongs to, stamped verbatim onto the group's `config` for
+	 * downstream consumers (verification-harness.ts's synthesis trigger,
+	 * swarm-routes.ts's plan-fan-in-only guard on `/verify`+`/confirm`) to
+	 * branch on WITHOUT re-deriving it from siblings/prompt text. Default
+	 * `"best-of-n"` — every existing caller is unaffected; only
+	 * `swarm-plan-fan-in.ts` passes `"plan-fan-in"`.
+	 */
+	topology?: "best-of-n" | "plan-fan-in" | "orchestrator-worker";
+	/** SWARM-W4.6 — top-level group merge semantics. Absent means pick-best behavior. */
+	reconcileMode?: "pick-best" | "merge-all";
+	/**
+	 * SWARM-W4.5 — narrow, opt-in F2/F22 prompt-slimming profile stamped onto
+	 * EVERY sibling goal created by this call (see `PersistedGoal.
+	 * promptProfile`'s doc comment for the read-back path). Default `undefined`
+	 * (no profile, today's behavior for every existing best-of-n/orchestrator-
+	 * worker caller) — only `swarm-plan-fan-in.ts`'s plan-phase siblings set
+	 * this (to `"reviewer"`, per the orchestrator ruling: plan-phase siblings
+	 * are planning-only, provably no-build, so the reviewer profile's trimmed
+	 * stanzas are always safe; build siblings never set this field).
+	 */
+	siblingPromptProfile?: PromptProfile;
 }
 
 export interface BestOfNSwarmResult {
@@ -101,9 +127,13 @@ export interface BestOfNSwarmDeps {
  * other child-spawn path uses.
  */
 export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSwarmOptions): Promise<BestOfNSwarmResult> {
-	const { parentGoalId, title, spec, siblings, tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMsPerNode, verifyCommand, earlyKill } = opts;
-	if (!Array.isArray(siblings) || siblings.length < 2) {
-		throw new Error("createBestOfNSwarm requires at least 2 siblings (N>=2) — one candidate is `solo`, not best-of-N");
+	const { parentGoalId, title, spec, siblings, tokenBudgetPerNode, hardKillMarginMultiplier, wallClockMsPerNode, verifyCommand, earlyKill, topology, reconcileMode, siblingPromptProfile } = opts;
+	const resolvedTopology = topology ?? "best-of-n";
+	const minSiblings = resolvedTopology === "orchestrator-worker" ? 1 : 2;
+	if (!Array.isArray(siblings) || siblings.length < minSiblings) {
+		throw new Error(resolvedTopology === "orchestrator-worker"
+			? "createBestOfNSwarm requires at least 1 orchestrator-worker shard"
+			: "createBestOfNSwarm requires at least 2 siblings (N>=2) — one candidate is `solo`, not best-of-N");
 	}
 	const ctx = deps.getContextForGoal(parentGoalId);
 	if (!ctx) throw new Error(`createBestOfNSwarm: project context not found for parent goal ${parentGoalId}`);
@@ -140,14 +170,16 @@ export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSw
 	// carry-forward fix this module exists to close.
 	const created: PersistedGoal[] = [];
 	for (let i = 0; i < siblings.length; i++) {
-		const child = await goalManager.createGoal(`${title} (candidate ${i + 1})`, childCwd, {
-			spec,
+		const sibling = siblings[i];
+		const child = await goalManager.createGoal(sibling.title ?? `${title} (candidate ${i + 1})`, childCwd, {
+			spec: sibling.spec ?? spec,
 			workflowId,
 			resolvedWorkflow: resolvedWorkflowForChild,
 			projectId: parent.projectId,
 			sandboxed: parent.sandboxed,
 			parentGoalId,
 			swarmGroup,
+			promptProfile: siblingPromptProfile,
 		});
 		if (siblings[i].suggestedRole) {
 			await goalManager.updateGoal(child.id, { suggestedRole: siblings[i].suggestedRole });
@@ -165,6 +197,8 @@ export async function createBestOfNSwarm(deps: BestOfNSwarmDeps, opts: BestOfNSw
 		wallClockMsPerNode,
 		verifyCommand,
 		earlyKill: earlyKill === true,
+		topology: resolvedTopology,
+		reconcileMode,
 	});
 
 	// Route the start through the SAME per-root scheduler every other

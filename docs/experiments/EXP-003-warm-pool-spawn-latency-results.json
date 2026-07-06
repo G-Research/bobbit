@@ -1,0 +1,1398 @@
+{
+  "summary": {
+    "experimentId": "EXP-003",
+    "generatedAt": "2026-07-06T00:51:44.161Z",
+    "commit": "a6948372ad9a0c2c0d85c9fe9b3ce2d40fee8a7f",
+    "preregistrationCommit": "a6948372ad9a0c2c0d85c9fe9b3ce2d40fee8a7f",
+    "command": "node scripts/exp-warm-pool-report.mjs",
+    "pairs": 10,
+    "arms": {
+      "off": {
+        "n": 10,
+        "medianMs": 126.1954790000002,
+        "p90Ms": 127.65425000000005,
+        "meanMs": 142.85822489999993,
+        "minMs": 123.97687499999984,
+        "maxMs": 295.21512499999994
+      },
+      "on": {
+        "n": 10,
+        "medianMs": 28.52822899999984,
+        "p90Ms": 29.582417000000078,
+        "meanMs": 28.494670900000017,
+        "minMs": 26.637416999999914,
+        "maxMs": 29.755875000000742
+      }
+    },
+    "pool": {
+      "measuredOnHits": 10,
+      "measuredOnMisses": 0,
+      "measuredOnHitRate": 1,
+      "warmupMisses": 10
+    },
+    "paired": {
+      "medianReductionPct": 0.7780473177765088,
+      "medianReductionMs": 97.17231199999935,
+      "p90RegressionPct": -0.7682614014026163,
+      "rows": [
+        {
+          "pair": 1,
+          "offMs": 295.21512499999994,
+          "onMs": 28.825582999999938,
+          "reductionMs": 266.389542,
+          "reductionPct": 0.9023573639731367,
+          "onPoolHit": true
+        },
+        {
+          "pair": 2,
+          "offMs": 126.05370799999992,
+          "onMs": 29.276791999999887,
+          "reductionMs": 96.77691600000003,
+          "reductionPct": 0.7677435081877964,
+          "onPoolHit": true
+        },
+        {
+          "pair": 3,
+          "offMs": 123.97687499999984,
+          "onMs": 29.582417000000078,
+          "reductionMs": 94.39445799999976,
+          "reductionPct": 0.7613876216834783,
+          "onPoolHit": true
+        },
+        {
+          "pair": 4,
+          "offMs": 125.02666599999998,
+          "onMs": 27.661375000000135,
+          "reductionMs": 97.36529099999984,
+          "reductionPct": 0.778756197497899,
+          "onPoolHit": true
+        },
+        {
+          "pair": 5,
+          "offMs": 124.52749999999969,
+          "onMs": 27.636250000000018,
+          "reductionMs": 96.89124999999967,
+          "reductionPct": 0.7780711087912302,
+          "onPoolHit": true
+        },
+        {
+          "pair": 6,
+          "offMs": 127.65425000000005,
+          "onMs": 28.23087499999974,
+          "reductionMs": 99.4233750000003,
+          "reductionPct": 0.7788489219904567,
+          "onPoolHit": true
+        },
+        {
+          "pair": 7,
+          "offMs": 127.00195899999972,
+          "onMs": 26.637416999999914,
+          "reductionMs": 100.3645419999998,
+          "reductionPct": 0.7902597943390781,
+          "onPoolHit": true
+        },
+        {
+          "pair": 8,
+          "offMs": 126.33170800000016,
+          "onMs": 28.04266699999971,
+          "reductionMs": 98.28904100000045,
+          "reductionPct": 0.7780235267617875,
+          "onPoolHit": true
+        },
+        {
+          "pair": 9,
+          "offMs": 126.7352079999996,
+          "onMs": 29.755875000000742,
+          "reductionMs": 96.97933299999886,
+          "reductionPct": 0.7652122447299662,
+          "onPoolHit": true
+        },
+        {
+          "pair": 10,
+          "offMs": 126.05925000000025,
+          "onMs": 29.297458000000006,
+          "reductionMs": 96.76179200000024,
+          "reductionPct": 0.7675897802025639,
+          "onPoolHit": true
+        }
+      ]
+    },
+    "memory": {
+      "measurable": true,
+      "samples": 10,
+      "medianIdleRssMiB": 57.84375,
+      "p90IdleRssMiB": 58.015625,
+      "maxIdleRssMiB": 58.0625
+    },
+    "shutdownError": null,
+    "notes": [
+      "Measurement uses an isolated in-process gateway and the repo mock-agent as a real RpcBridge child process, not the InProcessMockBridge shortcut.",
+      "Primary ready signal is SessionManager.createSession returning a session whose normal setup path has set status to idle."
+    ],
+    "recommendation": "recommend-default-on-follow-up"
+  },
+  "rows": [
+    {
+      "pair": 1,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "f5fdf710-3b01-4629-8a0c-cd212514da16",
+      "status": "idle",
+      "latencyMs": 295.21512499999994,
+      "poolBefore": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 1,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "fdc099f4-e091-46b3-b3ab-2599ef5885e6",
+      "status": "idle",
+      "latencyMs": 130.03395899999998,
+      "poolBefore": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 1,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "2f270684-3c30-45a0-944e-6b2c4151d606",
+      "status": "idle",
+      "latencyMs": 28.825582999999938,
+      "poolBefore": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 1,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 1,
+        "misses": 1,
+        "spawns": 1,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 2,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "55545a35-1c22-4a0c-90b6-c689502b8e41",
+      "status": "idle",
+      "latencyMs": 126.05370799999992,
+      "poolBefore": {
+        "hits": 1,
+        "misses": 1,
+        "spawns": 2,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 1,
+        "misses": 1,
+        "spawns": 2,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 2,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "29e5acde-52c0-426d-a1f9-18111b176a8e",
+      "status": "idle",
+      "latencyMs": 128.23291700000004,
+      "poolBefore": {
+        "hits": 1,
+        "misses": 1,
+        "spawns": 2,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 1,
+        "misses": 2,
+        "spawns": 2,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 2,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "ba11df5c-d410-4171-a37f-4bc84904914f",
+      "status": "idle",
+      "latencyMs": 29.276791999999887,
+      "poolBefore": {
+        "hits": 1,
+        "misses": 2,
+        "spawns": 3,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 2,
+        "misses": 2,
+        "spawns": 3,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 3,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "7473930a-1f9b-41aa-9183-5b4b5378be12",
+      "status": "idle",
+      "latencyMs": 123.97687499999984,
+      "poolBefore": {
+        "hits": 2,
+        "misses": 2,
+        "spawns": 4,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 2,
+        "misses": 2,
+        "spawns": 4,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 3,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "fa92fa22-a734-4211-8b65-1cce9115ddcd",
+      "status": "idle",
+      "latencyMs": 128.90016600000013,
+      "poolBefore": {
+        "hits": 2,
+        "misses": 2,
+        "spawns": 4,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 2,
+        "misses": 3,
+        "spawns": 4,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 3,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "30cbf9ad-8f64-4170-bbd3-ffc8c4491644",
+      "status": "idle",
+      "latencyMs": 29.582417000000078,
+      "poolBefore": {
+        "hits": 2,
+        "misses": 3,
+        "spawns": 5,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 3,
+        "misses": 3,
+        "spawns": 5,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 4,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "25391e69-2746-4c27-91df-72f5992e2d6f",
+      "status": "idle",
+      "latencyMs": 125.02666599999998,
+      "poolBefore": {
+        "hits": 3,
+        "misses": 3,
+        "spawns": 6,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 3,
+        "misses": 3,
+        "spawns": 6,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 4,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "17cb66e4-92e6-4008-87e5-1847f8706894",
+      "status": "idle",
+      "latencyMs": 128.45229199999994,
+      "poolBefore": {
+        "hits": 3,
+        "misses": 3,
+        "spawns": 6,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 3,
+        "misses": 4,
+        "spawns": 6,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 4,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "84e982c5-1513-4789-af3c-ba9146fe2124",
+      "status": "idle",
+      "latencyMs": 27.661375000000135,
+      "poolBefore": {
+        "hits": 3,
+        "misses": 4,
+        "spawns": 7,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 4,
+        "misses": 4,
+        "spawns": 7,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 5,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "0166a603-84c8-41f4-b89c-7db4dfd430d9",
+      "status": "idle",
+      "latencyMs": 124.52749999999969,
+      "poolBefore": {
+        "hits": 4,
+        "misses": 4,
+        "spawns": 8,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 4,
+        "misses": 4,
+        "spawns": 8,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 5,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "71bb8b03-1d5f-45eb-b479-c5a2fe0ac8b2",
+      "status": "idle",
+      "latencyMs": 132.04958299999998,
+      "poolBefore": {
+        "hits": 4,
+        "misses": 4,
+        "spawns": 8,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 4,
+        "misses": 5,
+        "spawns": 8,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 5,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "dcef7225-a823-4aa6-94cb-82db2cd3bb34",
+      "status": "idle",
+      "latencyMs": 27.636250000000018,
+      "poolBefore": {
+        "hits": 4,
+        "misses": 5,
+        "spawns": 9,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 5,
+        "misses": 5,
+        "spawns": 9,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 6,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "61d1a24d-c4e2-4a3e-8630-8f446fec5a98",
+      "status": "idle",
+      "latencyMs": 127.65425000000005,
+      "poolBefore": {
+        "hits": 5,
+        "misses": 5,
+        "spawns": 10,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 5,
+        "misses": 5,
+        "spawns": 10,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 6,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "2ae95c81-5eae-4d37-b844-f291238bb61c",
+      "status": "idle",
+      "latencyMs": 129.40091600000005,
+      "poolBefore": {
+        "hits": 5,
+        "misses": 5,
+        "spawns": 10,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 5,
+        "misses": 6,
+        "spawns": 10,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 6,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "3b7a31cf-58e1-4d1a-9b66-a4ad8dee7f90",
+      "status": "idle",
+      "latencyMs": 28.23087499999974,
+      "poolBefore": {
+        "hits": 5,
+        "misses": 6,
+        "spawns": 11,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 6,
+        "misses": 6,
+        "spawns": 11,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 7,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "f220f2b5-d805-41e3-a14a-6b6d6c011b9e",
+      "status": "idle",
+      "latencyMs": 127.00195899999972,
+      "poolBefore": {
+        "hits": 6,
+        "misses": 6,
+        "spawns": 12,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 6,
+        "misses": 6,
+        "spawns": 12,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 7,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "f67c47d0-6cf0-4515-afe7-048c2890689a",
+      "status": "idle",
+      "latencyMs": 127.87366699999984,
+      "poolBefore": {
+        "hits": 6,
+        "misses": 6,
+        "spawns": 12,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 6,
+        "misses": 7,
+        "spawns": 12,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 7,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "1b319b61-0692-4160-aa11-900224e4b845",
+      "status": "idle",
+      "latencyMs": 26.637416999999914,
+      "poolBefore": {
+        "hits": 6,
+        "misses": 7,
+        "spawns": 13,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 7,
+        "misses": 7,
+        "spawns": 13,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 8,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "8ec47b40-ffdb-4eae-8e60-e374c1a0074a",
+      "status": "idle",
+      "latencyMs": 126.33170800000016,
+      "poolBefore": {
+        "hits": 7,
+        "misses": 7,
+        "spawns": 14,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 7,
+        "misses": 7,
+        "spawns": 14,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 8,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "a6582af0-81b7-4c84-ace6-0f9cbcb55307",
+      "status": "idle",
+      "latencyMs": 129.38254199999983,
+      "poolBefore": {
+        "hits": 7,
+        "misses": 7,
+        "spawns": 14,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 7,
+        "misses": 8,
+        "spawns": 14,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 8,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "5b4c5759-dcda-4a1a-ab24-f4d9894f2e23",
+      "status": "idle",
+      "latencyMs": 28.04266699999971,
+      "poolBefore": {
+        "hits": 7,
+        "misses": 8,
+        "spawns": 15,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 8,
+        "misses": 8,
+        "spawns": 15,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 9,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "2e3d571f-aa78-442e-84d2-821305558fbe",
+      "status": "idle",
+      "latencyMs": 126.7352079999996,
+      "poolBefore": {
+        "hits": 8,
+        "misses": 8,
+        "spawns": 16,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 8,
+        "misses": 8,
+        "spawns": 16,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 9,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "d07cd378-8c77-4ff9-9c58-5f34d0a135e3",
+      "status": "idle",
+      "latencyMs": 129.9394169999996,
+      "poolBefore": {
+        "hits": 8,
+        "misses": 8,
+        "spawns": 16,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 8,
+        "misses": 9,
+        "spawns": 16,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 9,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "505108fd-8cf2-40e5-a6f2-10fca4fdb7e5",
+      "status": "idle",
+      "latencyMs": 29.755875000000742,
+      "poolBefore": {
+        "hits": 8,
+        "misses": 9,
+        "spawns": 17,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 9,
+        "misses": 9,
+        "spawns": 17,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 10,
+      "arm": "off",
+      "phase": "measured",
+      "sessionId": "5d1414c5-ce5c-4dac-af1f-6f3d5476acfe",
+      "status": "idle",
+      "latencyMs": 126.05925000000025,
+      "poolBefore": {
+        "hits": 9,
+        "misses": 9,
+        "spawns": 18,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 9,
+        "misses": 9,
+        "spawns": 18,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 10,
+      "arm": "on",
+      "phase": "warmup",
+      "sessionId": "19112678-4880-4800-92e5-81465317faf6",
+      "status": "idle",
+      "latencyMs": 128.31916700000056,
+      "poolBefore": {
+        "hits": 9,
+        "misses": 9,
+        "spawns": 18,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 9,
+        "misses": 10,
+        "spawns": 18,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 0,
+        "misses": 1,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    },
+    {
+      "pair": 10,
+      "arm": "on",
+      "phase": "measured",
+      "sessionId": "b2adf6cb-f5d5-4976-a246-e8b33eb34441",
+      "status": "idle",
+      "latencyMs": 29.297458000000006,
+      "poolBefore": {
+        "hits": 9,
+        "misses": 10,
+        "spawns": 19,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolAfter": {
+        "hits": 10,
+        "misses": 10,
+        "spawns": 19,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      },
+      "poolDelta": {
+        "hits": 1,
+        "misses": 0,
+        "spawns": 0,
+        "spawnFailures": 0,
+        "evictedTtl": 0,
+        "evictedVersion": 0,
+        "evictedExited": 0
+      }
+    }
+  ],
+  "memorySamples": [
+    {
+      "pair": 1,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "9d094d13-defb-4039-a555-9124005cb6f7",
+          "pid": 90354,
+          "rssKb": 59168,
+          "rssMiB": 57.78125
+        }
+      ]
+    },
+    {
+      "pair": 2,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "ee34ae33-26de-4863-8a9b-93db8ab0d521",
+          "pid": 90380,
+          "rssKb": 59168,
+          "rssMiB": 57.78125
+        }
+      ]
+    },
+    {
+      "pair": 3,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "58415569-3a15-4a1b-b07c-f3007a5e0fc0",
+          "pid": 90397,
+          "rssKb": 59232,
+          "rssMiB": 57.84375
+        }
+      ]
+    },
+    {
+      "pair": 4,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "3e64becb-9779-4e4a-8eb3-567a0997bee1",
+          "pid": 90414,
+          "rssKb": 59296,
+          "rssMiB": 57.90625
+        }
+      ]
+    },
+    {
+      "pair": 5,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "52890b18-de04-47b6-b219-fa72d424cf41",
+          "pid": 90431,
+          "rssKb": 59408,
+          "rssMiB": 58.015625
+        }
+      ]
+    },
+    {
+      "pair": 6,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "8e770e2a-63bf-4eca-af27-96e2299121d2",
+          "pid": 90447,
+          "rssKb": 59232,
+          "rssMiB": 57.84375
+        }
+      ]
+    },
+    {
+      "pair": 7,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "749fe203-b4de-444c-a975-2d5d2507dfd5",
+          "pid": 90464,
+          "rssKb": 59184,
+          "rssMiB": 57.796875
+        }
+      ]
+    },
+    {
+      "pair": 8,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "70a028ad-aa32-422b-919a-166706c0c90c",
+          "pid": 90480,
+          "rssKb": 59328,
+          "rssMiB": 57.9375
+        }
+      ]
+    },
+    {
+      "pair": 9,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "a9b90334-57ae-4b63-b35f-f9fe069bc8fc",
+          "pid": 90498,
+          "rssKb": 59200,
+          "rssMiB": 57.8125
+        }
+      ]
+    },
+    {
+      "pair": 10,
+      "at": "after-warmup",
+      "status": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "ready": 1,
+          "target": 1,
+          "filling": false
+        }
+      ],
+      "samples": [
+        {
+          "key": "1c7ca5ed-8cbb-4adf-b5a2-17795090eeff::/private/var/folders/qb/7js4lg914yqglb4_y8ctkz5r0000gn/T/bobbit-exp003-rnp6fD/default-project::f19112920049ba4b",
+          "poolOwnedId": "17fadb88-02d3-40c7-a16b-830bc077fc42",
+          "pid": 90514,
+          "rssKb": 59456,
+          "rssMiB": 58.0625
+        }
+      ]
+    }
+  ]
+}

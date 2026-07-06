@@ -19,7 +19,10 @@ describe("delegated helper worktree push policy plumbing", () => {
 	});
 
 	it("threads createSession opts into SessionSetupPlan", () => {
-		const manager = src("session-manager.ts");
+		// SM decomposition c6: createSession's body (setup-plan construction)
+		// lives in session-spawn.ts; session-manager.ts keeps a same-signature
+		// delegating wrapper.
+		const manager = src("session-spawn.ts");
 		assert.match(manager, /worktreePushPolicy\?: WorktreePushPolicy/);
 		assert.match(manager, /const worktreePushPolicy = headquartersScope \? undefined : opts\?\.worktreePushPolicy;/);
 		assert.match(manager, /worktreePushPolicy,/);

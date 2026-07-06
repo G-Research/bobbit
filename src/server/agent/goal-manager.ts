@@ -12,11 +12,13 @@ import type { Component } from "./project-config-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { TeamStore } from "./team-store.js";
 import type { SessionStore } from "./session-store.js";
+import type { SwarmGroupStore } from "./swarm-group-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
 import { isHeadquartersProject } from "./project-registry.js";
+import type { PromptProfile } from "./system-prompt.js";
 
 const pExecFile = promisify(execFileCb);
 
@@ -144,10 +146,14 @@ export class GoalManager {
 	 * setupWorktreeAndStartTeam to create the worktree from the right base
 	 * branch. Set by server.ts on startup. */
 	private baseRefResolver?: (projectId: string) => string | undefined;
+	private swarmGroupStore?: SwarmGroupStore;
 	private liveSessionResolver?: () => WorktreeReferenceRecord[];
 	private readonly diagnosticsStateDir?: string;
 	setBaseRefResolver(resolver: (projectId: string) => string | undefined): void {
 		this.baseRefResolver = resolver;
+	}
+	setSwarmGroupStore(store: SwarmGroupStore): void {
+		this.swarmGroupStore = store;
 	}
 	/** Returns the configured base ref for a project, if set. */
 	getBaseRef(projectId: string): string | undefined {
@@ -339,8 +345,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; swarmGroup?: string }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, swarmGroup } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; swarmGroup?: string; promptProfile?: PromptProfile }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, swarmGroup, promptProfile } = opts ?? {};
 		const team = true;
 		const headquartersGoal = isHeadquartersProject(projectId);
 		const worktree = !headquartersGoal && opts?.worktree !== false;
@@ -439,6 +445,15 @@ export class GoalManager {
 			goal.swarmGroup = swarmGroup;
 			goal.subgoalsAllowed = false;
 			goal.maxNestingDepth = 0;
+		}
+
+		// SWARM-W4.5 (docs/design/swarm-orchestration-w4.md §1.1, staged-plan
+		// item 4.0/4.5): narrow, opt-in promptProfile stamp — `TeamManager.
+		// startTeam` reads this back to pass through to `createSession`. Absent
+		// for every existing caller (byte-identical default); today's only
+		// production writer is `swarm-plan-fan-in.ts`'s plan-phase siblings.
+		if (promptProfile) {
+			goal.promptProfile = promptProfile;
 		}
 
 		// Per-goal metadata (arbitrary, namespaced keys). Persist only a non-empty
@@ -857,7 +872,7 @@ export class GoalManager {
 		// default, opts omitted) still gets the unconditional skip above —
 		// zero behavior change for the existing SWARM-W0 auto-merge-suppression
 		// contract and its pinning tests.
-		if (child.swarmGroup && !opts?.forceIntegrateSwarmWinner) {
+		if (child.swarmGroup && !opts?.forceIntegrateSwarmWinner && this.swarmGroupStore?.get(child.swarmGroup)?.reconcileMode !== "merge-all") {
 			return {
 				merged: false,
 				alreadyMerged: false,

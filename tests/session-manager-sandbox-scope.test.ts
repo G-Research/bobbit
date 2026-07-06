@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SESSION_MANAGER = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
+const SESSION_SPAWN = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-spawn.ts"), "utf-8");
+const SESSION_REVIVE = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-revive.ts"), "utf-8");
 const RPC_BRIDGE = fs.readFileSync(path.join(process.cwd(), "src/server/agent/rpc-bridge.ts"), "utf-8");
 
 function methodBody(name: string): string {
@@ -37,8 +39,8 @@ describe("session-manager sandbox scope regressions", () => {
 	it("Headquarters/system scopes are forced out of sandbox at the session-manager boundary", () => {
 		assert.match(SESSION_MANAGER, /import \{ isSandboxExemptProject, type SandboxManager \} from "\.\/sandbox-manager\.js";/);
 		assert.match(methodBody("applySandboxWiring"), /if \(isSandboxExemptProject\(projectId\)\) \{[\s\S]*?bridgeOptions\.sandboxed = false;[\s\S]*?return false;/);
-		assert.match(SESSION_MANAGER, /const effectiveSandboxed = opts\?\.sandboxed && !sandboxExemptScope \? true : undefined;/);
-		assert.match(SESSION_MANAGER, /let restoredSandboxed = ps\.sandboxed === true && !\(ps\.projectId && isSandboxExemptProject\(ps\.projectId\)\);/);
+		assert.match(SESSION_SPAWN, /const effectiveSandboxed = opts\?\.sandboxed && !sandboxExemptScope \? true : undefined;/);
+		assert.match(SESSION_REVIVE, /let restoredSandboxed = ps\.sandboxed === true && !\(ps\.projectId && isSandboxExemptProject\(ps\.projectId\)\);/);
 	});
 
 	it("force-abort respawn honors a false sandbox wiring result", () => {
@@ -48,8 +50,8 @@ describe("session-manager sandbox scope regressions", () => {
 
 	it("direct agents receive scoped gateway credentials from session-manager", () => {
 		assert.match(SESSION_MANAGER, /private mintScopedGatewayToken\([\s\S]*?this\.sandboxTokenStore\.register\(projectId\)[\s\S]*?addSession\(projectId, sessionId\)/);
-		assert.match(SESSION_MANAGER, /const directGatewayEnv = !effectiveSandboxed[\s\S]*?this\.scopedGatewayEnvForDirectAgent\(id, projectId/);
-		assert.match(SESSION_MANAGER, /env: \{ \.\.\.\(opts\?\.env \?\? \{\}\), \.\.\.\(directGatewayEnv \?\? \{\}\) \}/);
+		assert.match(SESSION_SPAWN, /const directGatewayEnv = !effectiveSandboxed[\s\S]*?this\.scopedGatewayEnvForDirectAgent\(id, projectId/);
+		assert.match(SESSION_SPAWN, /env: \{ \.\.\.\(opts\?\.env \?\? \{\}\), \.\.\.\(directGatewayEnv \?\? \{\}\) \}/);
 		assert.match(SESSION_MANAGER, /if \(!session\.sandboxed\) this\.applyScopedGatewayCredentials\(bridgeOptions, id, session\.projectId/);
 	});
 });

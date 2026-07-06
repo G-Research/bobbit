@@ -153,4 +153,191 @@ test.describe("SWARM-W1 governor strip — Agents tab", () => {
 			await deleteGoal(parentId).catch(() => {});
 		}
 	});
+
+	test("killed sibling rows explain the kill class and persist after reload", async ({ page, gateway }) => {
+		const parent = await createGoal({ title: `Swarm kill labels ${Date.now()}`, autoStartTeam: false, worktree: false });
+		const parentId = parent.id as string;
+		const createdChildIds: string[] = [];
+		const swarmGroup = `swarm-e2e-kill-labels-${Date.now()}`;
+
+		try {
+			const pcm = gateway.projectContextManager ?? gateway.sessionManager?.getProjectContextManager?.();
+			const ctx = pcm?.getContextForGoal(parentId);
+			expect(ctx, "browser harness must expose the project context for direct swarm fixture seeding").toBeTruthy();
+			const parentGoal = ctx.goalManager.getGoal(parentId);
+			expect(parentGoal, "parent goal must be visible in its project context").toBeTruthy();
+
+			const children = [];
+			for (const [suffix, reason] of [
+				["Superseded", "superseded"],
+				["Budget", "governor-budget"],
+				["Wall Clock", "governor-wallclock"],
+			] as const) {
+				const child = await ctx.goalManager.createGoal(`Kill label ${suffix}`, parentGoal.cwd, {
+					spec: `Fixture child for ${reason}`,
+					workflowId: parentGoal.workflow?.id ?? "general",
+					resolvedWorkflow: parentGoal.workflow,
+					projectId: parentGoal.projectId,
+					parentGoalId: parentId,
+					swarmGroup,
+					worktree: false,
+				});
+				children.push({ child, reason });
+				createdChildIds.push(child.id);
+			}
+
+			const childIds = children.map(({ child }) => child.id);
+			ctx.swarmGroupStore.createGroup(swarmGroup, childIds, parentGoal.rootGoalId ?? parentId, {
+				parentGoalId: parentId,
+				tokenBudgetPerNode: 1000,
+				wallClockMsPerNode: 1000,
+				verifyCommand: "true",
+				earlyKill: true,
+			});
+			for (const { child, reason } of children) {
+				ctx.swarmGroupStore.recordArtifact(swarmGroup, {
+					goalId: child.id,
+					output: "",
+					status: "killed",
+					killReason: reason,
+					verifierScore: null,
+					capturedAt: Date.now(),
+				}, childIds, parentGoal.rootGoalId ?? parentId);
+			}
+
+			await openApp(page);
+			await navigateToGoalDashboard(page, parentId);
+			await page.locator('[data-testid="tab-agents"]').click();
+
+			const strip = page.locator(`.swarm-governor-strip[data-swarm-group="${swarmGroup}"]`);
+			await expect(strip).toBeVisible({ timeout: 15_000 });
+			await expect(strip.locator(".swarm-governor-count")).toHaveText("3/3 candidates terminal", { timeout: 10_000 });
+
+			const expectedLabels: Array<[string, string]> = [
+				[children[0].child.id, "killed (superseded)"],
+				[children[1].child.id, "killed (budget)"],
+				[children[2].child.id, "killed (wall-clock)"],
+			];
+			for (const [childId, label] of expectedLabels) {
+				await expect(
+					strip.locator(`.swarm-governor-sibling[data-sibling-goal-id="${childId}"] .swarm-governor-sibling-state`),
+				).toHaveText(label, { timeout: 10_000 });
+			}
+
+			await page.reload();
+			await navigateToGoalDashboard(page, parentId);
+			await page.locator('[data-testid="tab-agents"]').click();
+			const stripAfterReload = page.locator(`.swarm-governor-strip[data-swarm-group="${swarmGroup}"]`);
+			await expect(stripAfterReload).toBeVisible({ timeout: 15_000 });
+			for (const [childId, label] of expectedLabels) {
+				await expect(
+					stripAfterReload.locator(`.swarm-governor-sibling[data-sibling-goal-id="${childId}"] .swarm-governor-sibling-state`),
+				).toHaveText(label, { timeout: 10_000 });
+			}
+		} finally {
+			for (const childId of createdChildIds) await deleteGoal(childId).catch(() => {});
+			await deleteGoal(parentId).catch(() => {});
+		}
+	});
+});
+
+/**
+ * SWARM-W4.5 (design/swarm-orchestration-w4.md §1.1/§5) — plan-fan-in's
+ * pre-build gate, browser E2E. Reuses the SAME sibling-row component (no
+ * verdict column, since a plan-fan-in group never runs the deterministic
+ * verifier) plus the ONE new row kind this wave adds, `synthesis` — the
+ * smallest useful addition per §5, not a new view. Flow: fan out N
+ * planning-only siblings → drive both to terminal → the REAL server-side
+ * synthesis role runs → the strip's copy/buttons switch to the plan-fan-in
+ * shape ("SWARM plan-fan-in" badge, "Review plan" → "Confirm build"/"Reject
+ * plan") → confirming spawns the single ordinary build child, which then
+ * renders as an ordinary (non-swarm) goal — never inside this strip.
+ */
+test.describe("SWARM-W4.5 governor strip — plan-fan-in", () => {
+	test("run → synthesis row → review → confirm build; reload-persists the build-started state", async ({ page, gateway }) => {
+		const parent = await createGoal({ title: `Plan-fan-in strip ${Date.now()}`, cwd: gitCwd(), worktree: true, autoStartTeam: false, workflowId: "feature" });
+		const parentId = parent.id as string;
+		await waitSetupReady(parentId);
+
+		const createResp = await apiFetch(`/api/goals/${parentId}/swarm/plan-fan-in`, {
+			method: "POST",
+			headers: seedTeamLeadHeader(gateway, parentId),
+			body: JSON.stringify({
+				spec: "Plan-fan-in browser E2E: propose a caching strategy for the search endpoint.",
+				fanOut: 2,
+				tokenBudgetPerNode: 500_000,
+				wallClockMsPerNode: 5 * 60_000,
+			}),
+		});
+		expect(createResp.status).toBe(201);
+		const created = await createResp.json();
+		const swarmGroup = created.swarmGroup as string;
+		const [sib0Id, sib1Id] = created.siblingGoalIds as string[];
+		let buildGoalId = "";
+
+		try {
+			await waitSetupReady(sib0Id);
+			await waitSetupReady(sib1Id);
+			await apiFetch(`/api/goals/${sib0Id}?cascade=true&mergedManually=true`, { method: "DELETE" });
+			await apiFetch(`/api/goals/${sib1Id}?cascade=true&mergedManually=true`, { method: "DELETE" });
+
+			// ── RUN: open the dashboard, switch to the Agents tab ──
+			await openApp(page);
+			await navigateToGoalDashboard(page, parentId);
+			await page.locator('[data-testid="tab-agents"]').click();
+
+			const strip = page.locator(`.swarm-governor-strip[data-swarm-group="${swarmGroup}"]`);
+			await expect(strip).toBeVisible({ timeout: 15_000 });
+			await expect(strip).toHaveAttribute("data-swarm-topology", "plan-fan-in");
+			await expect(strip.locator(".swarm-governor-badge")).toHaveText("SWARM plan-fan-in");
+			await expect(strip.locator(".swarm-governor-count")).toHaveText("2/2 candidates terminal", { timeout: 10_000 });
+
+			// The plan-phase siblings have NO verdict column (design §5) — the
+			// existing sibling-row component renders unchanged, just without a
+			// score span.
+			const sib0Row = strip.locator(`.swarm-governor-sibling[data-sibling-goal-id="${sib0Id}"]`);
+			await expect(sib0Row).toBeVisible({ timeout: 10_000 });
+			await expect(sib0Row.locator(".swarm-governor-sibling-score")).toHaveCount(0);
+
+			// SWARM-W4.5's one new row kind: `synthesis`. The REAL server-side
+			// synthesis role is running against the mock agent — poll for it to
+			// finish ("synthesizing" → "plan ready").
+			const synthesisRow = strip.locator("[data-synthesis-row]");
+			await expect(synthesisRow).toBeVisible({ timeout: 10_000 });
+			await expect(synthesisRow).toHaveAttribute("data-synthesis-state", "plan ready", { timeout: 20_000 });
+
+			// ── REVIEW: "Review plan" mints the pre-build gate token ──
+			const reviewBtn = strip.locator("button", { hasText: "Review plan" });
+			await expect(reviewBtn).toBeVisible({ timeout: 10_000 });
+			await reviewBtn.click();
+			const confirmBtn = strip.locator("button", { hasText: "Confirm build" });
+			const rejectBtn = strip.locator("button", { hasText: "Reject plan" });
+			await expect(confirmBtn).toBeVisible({ timeout: 10_000 });
+			await expect(rejectBtn).toBeVisible();
+
+			// ── CONFIRM: spawns the single ordinary build child ──
+			await confirmBtn.click();
+			await expect(strip.locator(".swarm-governor-integrated")).toContainText("build started:", { timeout: 15_000 });
+			await expect(confirmBtn).toHaveCount(0);
+			await expect(rejectBtn).toHaveCount(0);
+
+			const statusResp = await apiFetch(`/api/goals/${parentId}/swarm-groups/${swarmGroup}`);
+			const status = await statusResp.json();
+			buildGoalId = status.buildGoalId;
+			expect(buildGoalId).toBeTruthy();
+
+			// ── RELOAD-PERSIST: still shows the build-started state ──
+			await page.reload();
+			await navigateToGoalDashboard(page, parentId);
+			await page.locator('[data-testid="tab-agents"]').click();
+			const stripAfterReload = page.locator(`.swarm-governor-strip[data-swarm-group="${swarmGroup}"]`);
+			await expect(stripAfterReload).toBeVisible({ timeout: 15_000 });
+			await expect(stripAfterReload.locator(".swarm-governor-integrated")).toContainText("build started:", { timeout: 10_000 });
+		} finally {
+			if (buildGoalId) await deleteGoal(buildGoalId).catch(() => {});
+			await deleteGoal(sib0Id).catch(() => {});
+			await deleteGoal(sib1Id).catch(() => {});
+			await deleteGoal(parentId).catch(() => {});
+		}
+	});
 });

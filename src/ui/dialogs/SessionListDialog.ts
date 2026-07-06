@@ -44,7 +44,10 @@ export class SessionListDialog extends DialogBase {
 	private async handleDelete(sessionId: string, event: Event) {
 		event.stopPropagation();
 
-		if (!confirm(i18n("Delete this session?"))) {
+		// UX audit finding 1: native confirm() -> hardened confirmAction.
+		const { confirmAction } = await import("../../app/dialogs-lazy.js");
+		const confirmed = await confirmAction(i18n("Delete this session?"), i18n("This can't be undone."), i18n("Delete"), true);
+		if (!confirmed) {
 			return;
 		}
 

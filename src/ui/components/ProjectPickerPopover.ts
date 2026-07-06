@@ -12,7 +12,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { HEADQUARTERS_HELPER_TEXT, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId, projectSearchText, sortProjectsWithHeadquartersFirst } from "../../app/headquarters.js";
+import { HEADQUARTERS_HELPER_TEXT, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId, projectSearchText } from "../../app/headquarters.js";
 
 /**
  * Project info exposed to the picker. Callers pass the subset of their
@@ -169,7 +169,9 @@ export class ProjectPickerPopover extends LitElement {
 	}
 
 	private _filteredProjects(): ProjectPickerItem[] {
-		const projects = sortProjectsWithHeadquartersFirst(this.projects);
+		// Preserve the caller-supplied order (the server's user-controlled project
+		// order); Headquarters is a normal reorderable project, not anchored first.
+		const projects = [...this.projects];
 		const q = this._query.trim().toLowerCase();
 		if (!q) return projects;
 		return projects.filter(p => projectSearchText(p).toLowerCase().includes(q));

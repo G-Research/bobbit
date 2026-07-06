@@ -2,7 +2,7 @@ import { test, expect } from "../gateway-harness.js";
 import { openApp } from "./ui-helpers.js";
 import { apiFetch, defaultProject } from "../e2e-setup.js";
 
-test.use({ viewport: { width: 375, height: 667 } });
+test.use({ viewport: { width: 390, height: 844 } });
 
 /**
  * Post restore-staff-sub-section: staff render inside a dedicated per-project
@@ -10,13 +10,7 @@ test.use({ viewport: { width: 375, height: 667 } });
  * asserts a freshly-created staff agent appears under a STAFF sub-header on
  * mobile — not under SESSIONS.
  */
-// TODO(unrelated-master-regression): pre-existing failure on master after the
-// "Move Staff sub-section after Sessions in sidebar" / "Restore per-project
-// Staff sub-section (#585)" commits. Staff rows end up inside the Sessions
-// section wrapper on mobile (assertion `result.underSessions === false` fails).
-// Skipped here so unrelated bug-fix branches can pass E2E. Restore once the
-// sidebar DOM nesting on mobile is fixed; a separate goal tracks the real fix.
-test.skip("staff appears inside the project's Staff sub-section on mobile", async ({ page }) => {
+test("staff appears inside the project's Staff sub-section on mobile", async ({ page }, testInfo) => {
   const project = await defaultProject();
   const pid = project.id;
 
@@ -28,56 +22,71 @@ test.skip("staff appears inside the project's Staff sub-section on mobile", asyn
     body: JSON.stringify({ name: staffName, systemPrompt: "You are a test bot.", cwd: project.rootPath, projectId: pid }),
   });
   expect(res.ok).toBe(true);
+  const createdStaff = (await res.json()) as { id?: string; staff?: { id?: string } };
+  const createdStaffId = createdStaff.staff?.id ?? createdStaff.id;
 
-  await openApp(page);
+  try {
+    await openApp(page);
 
-  // The staff row should appear under a Staff header in the same project bucket.
-  await expect(page.getByText(staffName, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
+    // The staff row should appear under a Staff header in the same project bucket.
+    await expect(page.getByText(staffName, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 
-  // Assert the staff row shares a common ancestor with the project's "Staff"
-  // sub-header within 8 levels — i.e. it lives inside the Staff sub-section,
-  // NOT inside Sessions.
-  const result = await page.evaluate((name) => {
-    // Find the staff row's name span (rendered via renderSessionTitle inside
-    // renderStaffSidebarSection — inner text matches the staff name).
-    const titleEls = [...document.querySelectorAll("span")]
-      .filter((el) => (el.textContent || "").trim() === name);
-    if (titleEls.length === 0) return { found: false, underStaff: false, underSessions: false };
-    // For each section header (Staff/Sessions), the section wrapper is
-    // header.parentElement.parentElement (header span -> header row -> section).
-    // The staff row title sits inside the rows wrapper which is a child of the
-    // section wrapper, so it must be contained by the section wrapper.
-    const headersWithLabel = (label: string) =>
-      [...document.querySelectorAll("span")].filter(
-        (el) => (el.textContent || "").trim().toLowerCase() === label.toLowerCase(),
-      );
-    const sectionWrappersFor = (label: string): Element[] => {
-      const wrappers: Element[] = [];
-      for (const h of headersWithLabel(label)) {
-        const w = h.parentElement?.parentElement;
-        if (w) wrappers.push(w);
+    await testInfo.attach("mobile-staff-sidebar", {
+      body: await page.screenshot({ fullPage: true }),
+      contentType: "image/png",
+    });
+
+    // Assert the staff row shares a common ancestor with the project's "Staff"
+    // sub-header — i.e. it lives inside the Staff sub-section, NOT inside Sessions.
+    const result = await page.evaluate((name) => {
+      // Find the staff row's name span (rendered via renderSessionTitle inside
+      // renderStaffSidebarSection — inner text matches the staff name).
+      const titleEls = [...document.querySelectorAll("span")]
+        .filter((el) => (el.textContent || "").trim() === name);
+      if (titleEls.length === 0) return { found: false, underStaff: false, underSessions: false };
+      // For each section header (Staff/Sessions), the section wrapper is
+      // header.parentElement.parentElement (header span -> header row -> section).
+      // The staff row title sits inside the rows wrapper which is a child of the
+      // section wrapper, so it must be contained by the section wrapper.
+      const headersWithLabel = (label: string) =>
+        [...document.querySelectorAll("span")].filter(
+          (el) => (el.textContent || "").trim().toLowerCase() === label.toLowerCase(),
+        );
+      const sectionWrappersFor = (label: string): Element[] => {
+        const wrappers: Element[] = [];
+        for (const h of headersWithLabel(label)) {
+          const w = h.parentElement?.parentElement;
+          if (w) wrappers.push(w);
+        }
+        return wrappers;
+      };
+      const staffWrappers = sectionWrappersFor("Staff");
+      const sessionWrappers = sectionWrappersFor("Sessions");
+      const isInside = (wrappers: Element[], el: Element) =>
+        wrappers.some((w) => w !== el && w.contains(el));
+      let underStaff = false;
+      let underSessions = false;
+      for (const t of titleEls) {
+        if (isInside(staffWrappers, t)) underStaff = true;
+        if (isInside(sessionWrappers, t)) underSessions = true;
       }
-      return wrappers;
-    };
-    const staffWrappers = sectionWrappersFor("Staff");
-    const sessionWrappers = sectionWrappersFor("Sessions");
-    const isInside = (wrappers: Element[], el: Element) =>
-      wrappers.some((w) => w !== el && w.contains(el));
-    let underStaff = false;
-    let underSessions = false;
-    for (const t of titleEls) {
-      if (isInside(staffWrappers, t)) underStaff = true;
-      if (isInside(sessionWrappers, t)) underSessions = true;
+      return { found: true, underStaff, underSessions };
+    }, staffName);
+
+    expect(result.found).toBe(true);
+    expect(result.underStaff).toBe(true);
+    expect(result.underSessions).toBe(false);
+
+    await page.locator(`[data-testid="sidebar-staff-header"][data-nav-id="staff-header:${pid}"]`).first().click();
+    await expect(page.getByText(staffName, { exact: false })).toHaveCount(0, { timeout: 5_000 });
+    await expect(page.locator(`[data-testid="sidebar-sessions-header"]`).first()).toBeVisible({ timeout: 5_000 });
+  } finally {
+    if (createdStaffId) {
+      await apiFetch(`/api/staff/${createdStaffId}`, { method: "DELETE" }).catch(() => {});
+    } else {
+      const list = (await (await apiFetch(`/api/staff?projectId=${encodeURIComponent(pid!)}`)).json()) as any;
+      const created = (list.staff as any[]).find((s) => s.name === staffName);
+      if (created) await apiFetch(`/api/staff/${created.id}`, { method: "DELETE" }).catch(() => {});
     }
-    return { found: true, underStaff, underSessions };
-  }, staffName);
-
-  expect(result.found).toBe(true);
-  expect(result.underStaff).toBe(true);
-  expect(result.underSessions).toBe(false);
-
-  // Cleanup
-  const list = (await (await apiFetch(`/api/staff?projectId=${encodeURIComponent(pid!)}`)).json()) as any;
-  const created = (list.staff as any[]).find((s) => s.name === staffName);
-  if (created) await apiFetch(`/api/staff/${created.id}`, { method: "DELETE" }).catch(() => {});
+  }
 });

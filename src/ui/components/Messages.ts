@@ -10,6 +10,7 @@ import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
+import { ensureTransparencyPanel } from "../lazy/transparency-panel.js";
 import { renderTool } from "../tools/index.js";
 import { TOOL_RENDERER_LOADED_EVENT, TOOL_RENDER_REQUESTED_EVENT } from "../tools/renderer-registry.js";
 import type { Attachment } from "../utils/attachment-utils.js";
@@ -25,7 +26,6 @@ import "./SkillChip.js";
 import type { SkillChipData } from "./SkillChip.js";
 import "./FileMentionChip.js";
 import type { FileMentionChipData, FileMentionKind } from "./FileMentionChip.js";
-import "./TransparencyPanel.js";
 import type { TransparencyDecision } from "./TransparencyPanel.js";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 
@@ -269,6 +269,12 @@ export class UserMessage extends LitElement {
 			chipItems.length
 				? renderTextWithChips(rawContent, chipItems)
 				: html`<markdown-block .content=${content}></markdown-block>`;
+		const transparencyPanel = this.decisions?.length
+			? (() => {
+					ensureTransparencyPanel();
+					return html`<transparency-panel .decisions=${this.decisions}></transparency-panel>`;
+				})()
+			: "";
 
 		return html`
 			<div class="flex justify-start mx-2 sm:mx-4 my-1">
@@ -296,7 +302,7 @@ export class UserMessage extends LitElement {
 							`
 							: "";
 					})()}
-					<transparency-panel .decisions=${this.decisions}></transparency-panel>
+					${transparencyPanel}
 				</div>
 				<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 			</div>

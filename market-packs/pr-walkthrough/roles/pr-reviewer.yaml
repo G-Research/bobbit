@@ -33,6 +33,7 @@ toolPolicies:
   "Ask": never
   "Browser": never
   "Children": never
+  "Code": never
   "File System": never
   "Gates": never
   "Harness": never

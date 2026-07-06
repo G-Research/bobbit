@@ -9,13 +9,14 @@ import path from "node:path";
 describe("child session metadata wiring", () => {
 	it("createSession accepts and forwards PR walkthrough child metadata without delegateOf", () => {
 		const managerSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
+		const spawnSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-spawn.ts"), "utf-8");
 		for (const field of [
 			"parentSessionId",
 			"childKind",
 			"readOnly",
 		]) {
 			assert.match(managerSrc, new RegExp(`${field}\\?:`), `createSession opts/SessionInfo must include ${field}`);
-			const forwards = managerSrc.match(new RegExp(`${field}:\\s*opts\\?\\.${field}`, "g")) ?? [];
+			const forwards = spawnSrc.match(new RegExp(`${field}:\\s*opts\\?\\.${field}`, "g")) ?? [];
 			assert.ok(forwards.length >= 2, `createSession must forward opts.${field} into both normal and worktree plans`);
 		}
 	});
@@ -33,7 +34,7 @@ describe("child session metadata wiring", () => {
 
 	it("persists and restores explicit walkthrough allowedTools", () => {
 		const setupSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-setup.ts"), "utf-8");
-		const managerSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
+		const reviveSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-revive.ts"), "utf-8");
 		const storeSrc = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-store.ts"), "utf-8");
 
 		assert.match(storeSrc, /allowedTools\?:\s*string\[\]/, "PersistedSession must store explicit session allowedTools");
@@ -42,8 +43,8 @@ describe("child session metadata wiring", () => {
 		// preserved exactly — no `.length > 0` gate that would silently re-acquire role
 		// defaults for a deliberately-emptied allowlist (recursion-stripped delegate,
 		// bobbit.disabledTools). Restore reads `Array.isArray(...) ? ... : undefined`.
-		assert.match(managerSrc, /const persistedAllowedTools = Array\.isArray\(ps\.allowedTools\) \? ps\.allowedTools : undefined;/, "restoreSession must read persisted allowedTools without a .length > 0 gate so `[]` survives as no-tools");
-		assert.doesNotMatch(managerSrc, /Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0 \? ps\.allowedTools : undefined/, "restoreSession must NOT gate persisted allowedTools on length > 0 (empty `[]` must be preserved)");
-		assert.match(managerSrc, /persistedAllowedTools\.map\(n => tagAllowedTool\(n, this\.toolManager\)\)/, "restoreSession must prefer persisted allowedTools before role defaults");
+		assert.match(reviveSrc, /const persistedAllowedTools = Array\.isArray\(ps\.allowedTools\) \? ps\.allowedTools : undefined;/, "restoreSession must read persisted allowedTools without a .length > 0 gate so `[]` survives as no-tools");
+		assert.doesNotMatch(reviveSrc, /Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0 \? ps\.allowedTools : undefined/, "restoreSession must NOT gate persisted allowedTools on length > 0 (empty `[]` must be preserved)");
+		assert.match(reviveSrc, /persistedAllowedTools\.map\(n => tagAllowedTool\(n, this\.deps\.host\.toolManager\)\)/, "restoreSession must prefer persisted allowedTools before role defaults");
 	});
 });

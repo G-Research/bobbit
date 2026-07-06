@@ -39,7 +39,12 @@ import type { Role, RoleStore } from "../agent/role-store.js";
 import type { RoleManager } from "../agent/role-manager.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import type { SandboxManager } from "../agent/sandbox-manager.js";
+import type { SandboxScope } from "../auth/sandbox-token.js";
 import type { ResolvedProject } from "../agent/resolve-project.js";
+import type { TsServerSupervisor } from "../lsp/supervisor.js";
+import type { PersistedGoal } from "../agent/goal-store.js";
+import type { TaskManager } from "../agent/task-manager.js";
+import type { Workflow } from "../agent/workflow-store.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -245,4 +250,33 @@ export interface CoreRouteCtx {
 	roleManager: RoleManager;
 	serverRoleStore: RoleStore;
 	writeConfigProjectScopeError(error: RequiredConfigProjectScopeError): void;
+
+	// ── Cohort 14 (directory browser routes) additions — append-only.
+	defaultCwd: string;
+
+	// ── Cohort 15 (model/provider routes) additions — append-only.
+	sandboxScope?: SandboxScope;
+	// ── Wave 1 LSP routes (docs/design/lsp-product-tools.md) additions —
+	// append-only. Per-gateway-instance singleton, threaded exactly like
+	// bgProcessManager above. Optional so gateways that opt out of LSP (e.g.
+	// some lightweight test harnesses) leave routes fail-open rather than
+	// throwing on a missing field.
+	lspSupervisor?: TsServerSupervisor;
+
+	// ── Cohort 16a (cost routes) additions — append-only.
+	getGoalAcrossProjects(goalId: string): PersistedGoal | undefined;
+	getTaskManagerForTask(taskId: string): TaskManager;
+
+	// ── Cohort 16b (preview routes) additions — append-only.
+	broadcastToSession?: (sessionId: string, event: any) => void;
+
+	// ── Cohort 17 (editable proposal routes) additions — append-only.
+	validateGoalProposalWorkflow(
+		args: Record<string, unknown>,
+		workflows: Workflow[],
+	): { ok: false; code: string; message: string; availableWorkflows?: { id: string; name: string }[]; validOptionalSteps?: string[] } | null;
+
+	// ── Cohort 18 (host configuration routes) additions — append-only.
+	/** handleApiRoute's mutable gateway config object, threaded so PUT /api/config/cwd preserves the legacy in-place write. */
+	mutableGatewayConfig: { defaultCwd: string };
 }

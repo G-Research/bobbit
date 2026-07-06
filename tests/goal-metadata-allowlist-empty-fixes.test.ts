@@ -33,6 +33,10 @@ const SM_SRC = readFileSync(
 	path.join(process.cwd(), "src/server/agent/session-manager.ts"),
 	"utf-8",
 );
+const SR_SRC = readFileSync(
+	path.join(process.cwd(), "src/server/agent/session-revive.ts"),
+	"utf-8",
+);
 const SS_SRC = readFileSync(
 	path.join(process.cwd(), "src/server/agent/session-setup.ts"),
 	"utf-8",
@@ -50,7 +54,7 @@ function extract(src: string, re: RegExp, what: string): string {
 describe("session-manager restore preserves persisted explicit empty allowlist (F1)", () => {
 	// The two assignments that decide whether a persisted `[]` is honoured.
 	const persistedRhs = extract(
-		SM_SRC,
+		SR_SRC,
 		/const persistedAllowedTools = (Array\.isArray\(ps\.allowedTools\) \? ps\.allowedTools : undefined);/,
 		"restore persistedAllowedTools RHS",
 	);
@@ -76,7 +80,7 @@ describe("session-manager restore preserves persisted explicit empty allowlist (
 	// explicit source OR the resolved allowlist is non-empty; only collapse a
 	// genuinely-unrestricted (`[]`, no explicit source) session to undefined.
 	const decisionExpr = extract(
-		SM_SRC,
+		SR_SRC,
 		/const restoredAllowedTools: EffectiveTool\[\] \| undefined =\s*\n\s*(\(hasExplicitAllowlist \|\| effectiveAllowed\.length > 0\) \? restoredFiltered : undefined);/,
 		"restore restoredAllowedTools decision",
 	);
@@ -127,7 +131,11 @@ describe("recomputeAllowedToolsForRestart preserves persisted explicit empty all
 	it("source: neither restore site gates persisted allowlist on `.length > 0`", () => {
 		assert.ok(
 			!/Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0/.test(SM_SRC),
-			"a persisted explicit empty allowlist must not be treated as absent via `.length > 0`",
+			"restart recompute must not treat a persisted explicit empty allowlist as absent via `.length > 0`",
+		);
+		assert.ok(
+			!/Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0/.test(SR_SRC),
+			"restore must not treat a persisted explicit empty allowlist as absent via `.length > 0`",
 		);
 	});
 });

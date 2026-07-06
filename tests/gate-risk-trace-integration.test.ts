@@ -117,6 +117,7 @@ describe("Gate-risk classifier — real registration + trace-row integration (CL
 			assert.deepEqual(recorded?.consulted, [GATE_RISK_CLASSIFIER_ID]);
 			assert.equal(recorded?.decision.kind, "select");
 			assert.equal((recorded?.decision as { choice: string }).choice, "high");
+			assert.deepEqual(recorded?.argSummary, { changedFileCount: 1 });
 			// Pure telemetry this wave — never applied, never even attempted.
 			assert.equal(recorded?.applied, undefined);
 

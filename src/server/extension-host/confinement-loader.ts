@@ -38,7 +38,10 @@
 // resource caps / spawned-child kill) lives in module-host-worker.ts — that is the
 // genuine, defensible boundary. This hook is import hygiene only.
 
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+
+const nodeRequire = createRequire(import.meta.url);
 
 /** The realpath-containment check, INJECTED by the bootstrap (it imports the
  *  shared `path-guard` helper). The bootstrap injects it instead of this module
@@ -65,10 +68,21 @@ export interface ConfinementConfig {
 let packRoot: string | undefined;
 let isWithin: PackPathGuard | undefined;
 
+function canonicalizePackRoot(root: string): string {
+	try {
+		const fs = nodeRequire("node:fs") as typeof import("node:fs");
+		return fs.realpathSync(root);
+	} catch {
+		// Keep the root set so the injected path guard still fails closed if the
+		// root itself cannot be resolved.
+		return root;
+	}
+}
+
 /** Configure the hook BEFORE installing it (called by the bootstrap once, before
  *  any pack module is imported). */
 export function configure(config: ConfinementConfig): void {
-	packRoot = typeof config?.packRoot === "string" && config.packRoot.length > 0 ? config.packRoot : undefined;
+	packRoot = typeof config?.packRoot === "string" && config.packRoot.length > 0 ? canonicalizePackRoot(config.packRoot) : undefined;
 	isWithin = typeof config?.isWithin === "function" ? config.isWithin : undefined;
 }
 

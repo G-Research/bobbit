@@ -1477,6 +1477,13 @@ let _modelsLoaded = false;
 let customProviders: CustomProvider[] = [];
 let _customProvidersLoaded = false;
 let customProviderStatus: Map<string, { modelCount: number; status: "connected" | "disconnected" | "checking" }> = new Map();
+// UX audit findings 2/5: load failures used to be console.error-only (invisible
+// to the user), and delete had no in-flight state so a double-click could
+// double-fire the DELETE request. Mirrors `customProviderStatus`'s per-provider
+// Map tracking above.
+let customProvidersLoadError: string | null = null;
+let customProviderDeleting: Set<string> = new Set();
+let customProviderDeleteError: Map<string, string> = new Map();
 
 function isAutoDiscoveryProviderType(type: string): boolean {
 	return type === "ollama" || type === "llama.cpp" || type === "vllm" || type === "lmstudio";
@@ -1492,10 +1499,27 @@ async function refreshCustomProviders(): Promise<void> {
 	try {
 		const res = await gatewayFetch("/api/custom-providers");
 		if (res.ok) {
-			customProviders = await res.json();
+			const data = await res.json();
+			// Guard against a non-array response (malformed JSON shape, an error
+			// object despite `res.ok`, etc.) — `renderCustomProvidersSection()`
+			// calls `customProviders.map(...)` on every render, so an unguarded
+			// non-array here would throw on the NEXT render and permanently break
+			// re-rendering of the whole Models tab until reload, not just this
+			// section. Same defensive pattern as `checkCustomProviderStatus`'s
+			// `Array.isArray(models) ? models : []` guard below.
+			customProviders = Array.isArray(data) ? data : [];
+			customProvidersLoadError = null;
+		} else {
+			customProvidersLoadError = `Failed to load custom providers (HTTP ${res.status})`;
 		}
 	} catch (error) {
+		// UX audit finding 2: this used to be console.error-only — a failed
+		// load silently left the section showing stale (or empty) data with
+		// no indication anything went wrong. Keep the console.error for
+		// debugging, but also surface it in the section (see
+		// renderCustomProvidersSection's `customProvidersLoadError` banner).
 		console.error("Failed to load custom providers:", error);
+		customProvidersLoadError = error instanceof Error ? error.message : "Failed to load custom providers";
 	}
 	renderApp();
 	for (const provider of customProviders) {
@@ -1534,13 +1558,35 @@ async function editCustomProvider(provider: CustomProvider): Promise<void> {
 }
 
 async function deleteCustomProvider(provider: CustomProvider): Promise<void> {
-	if (!confirm("Are you sure you want to delete this provider?")) return;
+	// UX audit finding 5: guard against double-fire while a delete for this
+	// provider is already in flight (button is also disabled below, this is
+	// belt-and-suspenders for a stray second click event).
+	if (customProviderDeleting.has(provider.id)) return;
+	// UX audit finding 1: native confirm() is invisible to focus-trapped
+	// dialog UX and to Playwright without a page.on("dialog") handler —
+	// replaced with the app's hardened confirmAction (src/app/dialogs.ts).
+	const confirmed = await confirmAction("Delete provider?", "Are you sure you want to delete this provider?", "Delete", true);
+	if (!confirmed) return;
+	customProviderDeleting = new Set(customProviderDeleting).add(provider.id);
+	customProviderDeleteError.delete(provider.id);
+	renderApp();
 	try {
 		const res = await gatewayFetch(`/api/custom-providers/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
-		if (!res.ok) throw new Error("Failed to delete provider");
+		if (!res.ok) throw new Error(`Failed to delete provider (HTTP ${res.status})`);
 		await refreshCustomProviders();
 	} catch (error) {
+		// UX audit finding 2: this used to be console.error-only — a failed
+		// delete request left the card looking untouched with no indication
+		// anything went wrong. Surface inline on the card (see
+		// CustomProviderCard's `deleteError` prop), copying GoalStatusWidget's
+		// `_confirmCompletionError` idiom.
 		console.error("Failed to delete custom provider:", error);
+		customProviderDeleteError.set(provider.id, error instanceof Error ? error.message : "Failed to delete provider");
+	} finally {
+		const next = new Set(customProviderDeleting);
+		next.delete(provider.id);
+		customProviderDeleting = next;
+		renderApp();
 	}
 }
 
@@ -1576,6 +1622,9 @@ function renderCustomProvidersSection() {
 					size: "sm",
 				})}
 			</div>
+			${customProvidersLoadError ? html`
+				<p class="text-xs text-destructive" data-testid="custom-providers-load-error" aria-live="assertive">${customProvidersLoadError}</p>
+			` : ""}
 			${
 				customProviders.length === 0
 					? html`
@@ -1591,6 +1640,8 @@ function renderCustomProvidersSection() {
 										.provider=${provider}
 										.isAutoDiscovery=${isAutoDiscoveryProviderType(provider.type)}
 										.status=${customProviderStatus.get(provider.id)}
+										.isDeleting=${customProviderDeleting.has(provider.id)}
+										.deleteError=${customProviderDeleteError.get(provider.id)}
 										.onRefresh=${(p: CustomProvider) => checkCustomProviderStatus(p)}
 										.onEdit=${(p: CustomProvider) => editCustomProvider(p)}
 										.onDelete=${(p: CustomProvider) => deleteCustomProvider(p)}
@@ -4058,7 +4109,13 @@ function renderProjectGeneralTab(projectId: string) {
 					class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
 						hover:bg-destructive hover:text-destructive-foreground hover:border-destructive transition-colors"
 					@click=${async () => {
-						const ok = confirm("Remove project '" + (project?.name || "") + "' from this server? This won't delete any files on disk.");
+						// UX audit finding 1: native confirm() -> hardened confirmAction.
+						const ok = await confirmAction(
+							"Remove project?",
+							`Remove project "${project?.name || ""}" from this server? This won't delete any files on disk.`,
+							"Remove",
+							true,
+						);
 						if (!ok) return;
 						const success = await removeProject(projectId);
 						if (success) {
@@ -4212,9 +4269,11 @@ function renderProjectComponentsTab(projectId: string) {
 						title="Remove component"
 						aria-label="Remove component"
 						data-testid="delete-component"
-						@click=${(e: Event) => {
+						@click=${async (e: Event) => {
 							e.stopPropagation();
-							if (!confirm(`Delete component "${c.name}"?`)) return;
+							// UX audit finding 1: native confirm() -> hardened confirmAction.
+							const ok = await confirmAction("Delete component?", `Delete component "${c.name}"?`, "Delete", true);
+							if (!ok) return;
 							s.components.splice(index, 1);
 							s.expanded.delete(index);
 							markComponentsDirty(projectId);
@@ -4754,7 +4813,14 @@ function ensureSearchIndexWsSubscribed(): void {
 }
 
 async function rebuildSearchIndex(): Promise<void> {
-	if (!window.confirm("Rebuild the search index? This re-embeds every goal, session, message, and staff record for the active project. It runs in the background.")) return;
+	// UX audit finding 1: native confirm() -> hardened confirmAction.
+	const ok = await confirmAction(
+		"Rebuild search index?",
+		"This re-embeds every goal, session, message, and staff record for the active project. It runs in the background.",
+		"Rebuild",
+		true,
+	);
+	if (!ok) return;
 	maintenanceLoading = "search";
 	renderApp();
 	try {

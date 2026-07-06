@@ -1,6 +1,7 @@
 # CLF — Classifier Framework lane: in-repo status ledger
 
-Status: Wave 5 shipped (gate-risk classifier, observe-only). Wave 4 shipped
+Status: Wave 5 shipped (gate-risk classifier, observe-only). SWARM-W4.3
+shipped (swarm-topology classifier, observe-only). Wave 4 shipped
 (model-tier classifier, observe-only). Wave 3 (F14
 thinking-router apply mode) shipped behind `BOBBIT_CLF_THINKING_ROUTER=enforce`,
 defaulting to observe — unset/`=observe` stays byte-identical to Wave 1(b).
@@ -297,3 +298,58 @@ removed, semantic diffing) — this classifier will only ever reason about
 changed-file identity/shape, same as every other rule table in this lane;
 tuning `LARGE_CHANGESET_FILE_THRESHOLD` or the high-risk-surface list against
 real data (that's exactly what this wave's own telemetry is for).
+
+## Evidence tooling — offline report consumer (D6)
+
+Waves 4/5 above each ship telemetry-only with an explicit "this wave builds
+no consumer for that question" disclaimer. `scripts/clf-evidence-report.mjs`
+is that consumer: an offline, read-only script that joins the three
+telemetry producers this lane (plus Wave 2 and cost-tracker.ts) now
+accumulates and emits a markdown report —
+
+- **(a) tool-approve** — confusion matrix + disagreement list between the
+  `tool-call`/`tool-approve` heuristic's `select` verdict (when one is
+  registered — Wave 2 ships harness-only, so real state dirs may show zero
+  `select` rows) and the actual human/system grant-or-deny outcome
+  (`tool-permission-audit-log.ts`).
+- **(b) thinking-router** — select/applied rates and a by-rule breakdown
+  (`session-context-trace`'s `decisions[]`, CLF-W1a/W1b).
+- **(c) model-tier + gate-risk** — proposed-label distributions, plus
+  by-role/by-gate breakdowns for newer `DecisionOutcome` rows that include
+  privacy-safe `argSummary` identity fields. Older rows without `argSummary`
+  remain aggregate-only; their role/gate breakdown is still not derivable.
+- **(d) cost** — per-session Tukey-fence spike outliers and compaction-
+  tagged share, over `session-cost-turns.json`'s per-turn rows.
+
+Every section degrades to an explicit "no data yet" line (naming the
+producer and its landing date) when its source is empty, rather than
+crashing or silently omitting the section. Privacy: the script never reads
+or prints prompt text, file contents, or diff content — the thinking-router
+section in particular can't do prompt-based false-positive detection at all,
+because `DecisionOutcome` never carries prompt text in the first place (a
+property of the upstream producer, not a gap here).
+
+Pure parsing/aggregation functions are unit-tested against synthetic
+fixtures in `tests/clf-evidence-report.test.ts`; no test reads a real
+`.bobbit` state dir. See the script's own header comment for state-dir
+resolution and the `CostTracker`-is-per-project-not-headquarters caveat.
+## SWARM-W4.3 — swarm-topology classifier (observe-only, no apply path)
+
+`swarm-topology-classifier.ts`: the first real classifier at the SWARM-W4.2
+decision point, `(goal-create, swarm-topology)`, registered unconditionally
+from `server.ts` like the model-tier and gate-risk classifiers. The consult
+site is the existing best-of-N create route; the route records the classifier
+decision but never reads it back, so topology remains 100% caller-supplied.
+
+**Rule table v1 is deliberately narrow:** only the two already-typed
+deterministic signals are used. `requestedFanOut >= 2 && hasVerifyCommand`
+selects `{topology:"best-of-n", fanOut: requestedFanOut, earlyKill:false}`
+with the rationale that the caller already wants fan-out and a deterministic
+verifier exists. `requestedFanOut >= 2 && !hasVerifyCommand` abstains, and
+everything else abstains. No spec-text heuristics, no prompt parsing, no new
+arg fields.
+
+**Deliberately not built this wave:** any apply/enforce flag, any consumer
+that changes the topology based on the decision, and any interaction with
+`forceIntegrateSwarmWinner` or operator-confirmation. Those human-gated
+integration paths stay owned by the existing `/confirm` route.

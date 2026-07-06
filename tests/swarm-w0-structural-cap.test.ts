@@ -87,6 +87,14 @@ describe("SWARM-W0 — createGoal forces the cap on swarmGroup-tagged goals", ()
 		assert.equal(worker.maxNestingDepth, 0);
 	});
 
+	it("merge-all regression: a swarmGroup-tagged worker still gets the same unconditional structural cap", async () => {
+		const { gm } = makeManager();
+		const worker = await gm.createGoal("Merge-all worker", tmpRoot, { workflowId: "feature", swarmGroup: "grp-merge-all" });
+		assert.equal(worker.swarmGroup, "grp-merge-all");
+		assert.equal(worker.subgoalsAllowed, false);
+		assert.equal(worker.maxNestingDepth, 0);
+	});
+
 	it("zero-behavior-change: a NON-swarm goal's subgoalsAllowed/maxNestingDepth are byte-identical to today", async () => {
 		const { gm } = makeManager();
 		const goal = await gm.createGoal("Regular", tmpRoot, {

@@ -41,7 +41,8 @@ export const DECISION_POINTS = [
 	// (the route-registry-derived interception-point generalization) — flag
 	// this point for STR-01 to later subsume, same discipline as this file's
 	// own header. See swarm-topology-classifier.ts's header for the full
-	// design/scope of this wave (harness only — zero classifiers registered).
+	// design/scope of the observe-only built-in classifier now registered
+	// there.
 	"goal-create",
 ] as const;
 
@@ -96,6 +97,13 @@ export interface DecisionOutcome {
 	consulted: string[];
 	decision: Decision;
 	ms: number;
+	/**
+	 * Privacy-safe, identity/shape-only summary of the classifier consult input,
+	 * when derivable. Never contains prompt text, spec/content, command args, diff
+	 * content, or changed-file paths; `changedFiles` is recorded only as
+	 * `changedFileCount`. Omitted for legacy rows and for absent/non-object args.
+	 */
+	argSummary?: Record<string, string | number | boolean>;
 	/**
 	 * CLF-W3 — whether a `select` decision was actually applied to live session
 	 * state, as opposed to merely recorded for telemetry. Set by the CALLER via

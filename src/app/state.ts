@@ -4,7 +4,7 @@ import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import type { SidePanelWorkspace } from "./side-panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
-import { sortProjectsWithHeadquartersFirst, type ProjectKind } from "./headquarters.js";
+import { type ProjectKind } from "./headquarters.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
 import {
 	clearSidebarTreePreference,
@@ -850,10 +850,11 @@ export function setRenderSuppressed(suppressed: boolean): void {
 /** Update the project list and ensure activeProjectId stays in sync.
  *  Defaults to the first project when no explicit selection exists. */
 export function setProjects(projects: Project[]): void {
-	const ordered = sortProjectsWithHeadquartersFirst(projects);
-	state.projects = ordered;
-	if (!state.activeProjectId || !ordered.some(p => p.id === state.activeProjectId)) {
-		state.activeProjectId = ordered[0]?.id ?? null;
+	// Respect the server's user-controlled order; Headquarters is a normal
+	// reorderable project and is no longer anchored first.
+	state.projects = projects;
+	if (!state.activeProjectId || !projects.some(p => p.id === state.activeProjectId)) {
+		state.activeProjectId = projects[0]?.id ?? null;
 	}
 }
 

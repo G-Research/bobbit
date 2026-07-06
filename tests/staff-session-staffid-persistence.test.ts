@@ -8,14 +8,14 @@
  * respawn, the tools vanish and inbox entries re-fire forever.
  *
  * Root cause (see Issue Analysis gate): `StaffManager.createStaff` mutated
- * `session.staffId = id` purely in memory, but `SessionManager.createSession`
+ * `session.staffId = id` purely in memory, but the create-session path
  * never accepted `staffId` in its `opts`, so `plan.staffId` stayed undefined
  * and `persistOnce` wrote `staffId: undefined` to disk.
  *
  * This file pins, in order:
  *
  *   1. **Spawn-path regression** — both plan-builders inside
- *      `SessionManager.createSession` (worktree branch + normal branch) must
+ *      `SessionSpawn.createSession` (worktree branch + normal branch) must
  *      forward `opts?.staffId` into `plan.staffId`. Plus a behavioural
  *      end-to-end via `persistOnce`: persist with `plan.staffId = "staff-x"`,
  *      reload, replay the `restoreSession` env builder, assert
@@ -88,18 +88,18 @@ describe("staff session staffId persistence", () => {
 
 	it("createSession must thread staffId through plan-builder to persisted record (regression)", () => {
 		// ── Part A: source-level guards on the two plan literals inside
-		// `SessionManager.createSession`. Both must forward `opts?.staffId`.
+		// `SessionSpawn.createSession`. Both must forward `opts?.staffId`.
 		// This is the part that FAILS on master — neither plan builder had
 		// the `staffId: opts?.staffId,` line until the fix landed.
 		const sessionManagerSrc = fs.readFileSync(
-			path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+			path.join(process.cwd(), "src/server/agent/session-spawn.ts"),
 			"utf-8",
 		);
 		// Count plan-literal occurrences that thread staffId from opts.
 		const planForwards = sessionManagerSrc.match(/staffId:\s*opts\?\.staffId/g) ?? [];
 		assert.ok(
 			planForwards.length >= 2,
-			`SessionManager.createSession must contain TWO plan-builder lines threading ` +
+			`SessionSpawn.createSession must contain TWO plan-builder lines threading ` +
 			`'staffId: opts?.staffId' (one for the worktree branch, one for the normal branch). ` +
 			`Found ${planForwards.length}. Without both, staffId never reaches plan.staffId ` +
 			`and persistOnce writes \`staffId: undefined\` to disk.`,
@@ -107,7 +107,7 @@ describe("staff session staffId persistence", () => {
 		// Cross-check: the opts inline type must accept staffId in the first place.
 		assert.ok(
 			/createSession\([\s\S]*?staffId\?\s*:\s*string[\s\S]*?\)\s*:\s*Promise<SessionInfo>/.test(sessionManagerSrc),
-			"SessionManager.createSession opts type must accept `staffId?: string`",
+			"SessionSpawn.createSession opts type must accept `staffId?: string`",
 		);
 
 		// ── Part B: behavioural end-to-end through SessionStore. Mirror the
@@ -314,9 +314,9 @@ describe("staff session staffId backfill migration", () => {
 // (persistOnce payload) so a future refactor that drops either line fails
 // loudly.
 describe("staff session staffId persistence source guards", () => {
-	it("session-manager.ts contains the BOBBIT_STAFF_ID env wiring in restoreSession", () => {
+	it("session-revive.ts contains the BOBBIT_STAFF_ID env wiring in restoreSession", () => {
 		const src = fs.readFileSync(
-			path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+			path.join(process.cwd(), "src/server/agent/session-revive.ts"),
 			"utf-8",
 		);
 		assert.ok(

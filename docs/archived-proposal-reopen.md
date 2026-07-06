@@ -258,7 +258,7 @@ one we want to keep working.
 
 | Symptom | What's happening | Where to look |
 |---|---|---|
-| Resubmit button missing on archived footer | `GET /api/sessions/:id/proposals` returned empty, or `canContinueArchived` is false (goal-linked, delegate, team, or unregistered project). | `AgentInterface.canContinueArchived` + `_refreshArchivedProposalTypes`. The endpoint is in `src/server/server.ts` and matches `^/api/sessions/([^/]+)/proposals$`. |
+| Resubmit button missing on archived footer | `GET /api/sessions/:id/proposals` returned empty, or `canContinueArchived` is false (goal-linked, delegate, team, or unregistered project). | `AgentInterface.canContinueArchived` + `_refreshArchivedProposalTypes`. The endpoint is in `src/server/routes/session-proposal-routes.ts` and registers `/api/sessions/:id/proposals`. |
 | Continue assistant returns 422 | Source has `goalId`, `delegateOf`, or `teamGoalId` set. Assistant guard is gone but coding-agent guards stay. | `src/server/server.ts` — the continue handler. |
 | Resubmit toasts a 404 from `DELETE /api/sessions/:id` | The archive-guard was bypassed. The `isSessionArchived` helper in `src/app/render.ts` should short-circuit that DELETE for archived parents. | `isSessionArchived` call sites in `render.ts` — pinned by `tests/e2e/ui/archived-proposal-resubmit.spec.ts`. |
 | Continued session shows no draft | Clone failed silently, or the WS rehydrate fired before the copy completed. Server logs surface a `[continue-archived] proposal-dir copy failed (non-fatal): …` warning when `copyProposalDirIfPresent` throws. | `copyProposalDirIfPresent` in `src/server/agent/continue-archived.ts`; rehydrate emitter in `src/server/ws/handler.ts`. |

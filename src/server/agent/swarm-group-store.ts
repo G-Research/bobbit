@@ -89,6 +89,12 @@ export interface SwarmGroupRecord {
 	 * the first `recordArtifact` call's parameter, exactly as before.
 	 */
 	expectedSiblingIds?: string[];
+	/**
+	 * SWARM-W4.6: "pick-best" (default, absent = today's behavior byte-for-byte)
+	 * suppresses auto-merge for every swarmGroup child. "merge-all" lets
+	 * swarmGroup children merge exactly like ordinary non-swarm subgoals.
+	 */
+	reconcileMode?: "pick-best" | "merge-all";
 	/** SWARM-W1: opaque per-group config (token/wall-clock budgets, verify command) the governor/verifier read. Not interpreted by this store. */
 	config?: Record<string, unknown>;
 	/**
@@ -108,6 +114,56 @@ export interface SwarmGroupRecord {
 	/** SWARM-W1: set once a human has confirmed a winner and it has been actually integrated (real git merge, bypassing the swarm-suppression). Never set for losers. */
 	integratedGoalId?: string;
 	integratedAt?: number;
+
+	/**
+	 * SWARM-W4.5 (docs/design/swarm-orchestration-w4.md §1.1) — plan-fan-in's
+	 * synthesis reduce step: one `TeamManager.spawnRole` call (not
+	 * swarm-tagged, so it never appears in `artifacts`), triggered exactly
+	 * once, the instant the barrier fires for a `topology: "plan-fan-in"`
+	 * group (see `VerificationHarness._maybeTriggerPlanSynthesis`). Absent for
+	 * every non-plan-fan-in group (best-of-n, orchestrator-worker) — those
+	 * never populate this field. `"done"`'s `planHash` is the pre-build human
+	 * gate's binding (`mintOperatorConfirmation({purpose:
+	 * "swarm-plan-fan-in-build-start", binding:{swarmGroup, planHash}})`) —
+	 * NOT restart-durable across a synthesis session that's still `"pending"`
+	 * when the server restarts (deliberately out of scope for this wave, see
+	 * the module doc; a stuck `"pending"` synthesis after a restart needs
+	 * manual human triage, same as an `allFailed` best-of-n group).
+	 */
+	synthesis?: {
+		status: "pending" | "done" | "failed";
+		/** The synthesis role's session id, once spawned. */
+		sessionId?: string;
+		/** The single merged plan text, once synthesis succeeds. */
+		output?: string;
+		/** Stable hash of `output`, scoping the pre-build gate's token to THIS exact synthesized plan. */
+		planHash?: string;
+		/** Failure reason, when `status === "failed"` — never auto-retried (human must re-trigger via a fresh plan-fan-in call, or manually start an ordinary goal from a retained plan sibling). */
+		error?: string;
+		startedAt: number;
+		completedAt?: number;
+	};
+	/**
+	 * SWARM-W4.5 — set once a human has confirmed the synthesized plan
+	 * (consumed the `swarm-plan-fan-in-build-start` token via `/plan-confirm`)
+	 * and the single ordinary (non-swarm-tagged) build child has been created.
+	 * That build child's own merge into the parent is an ORDINARY nested-goal
+	 * integrate — it is NOT swarm-tagged, so it goes through the existing,
+	 * completely unmodified `mergeChild` non-swarm path, never
+	 * `forceIntegrateSwarmWinner`. This field is purely for the dashboard/API
+	 * to point at which child is "the build."
+	 */
+	buildGoalId?: string;
+	/**
+	 * SWARM-W4.5 (orchestrator ruling #1 — plan-rejection path) — set when a
+	 * human REJECTS the synthesized plan at the pre-build gate via
+	 * `/plan-reject`. No auto-retry, no fallback build: the group is done,
+	 * permanently, at this point. The N plan-phase sibling goals are archived
+	 * (soft-deleted, branches preserved, exactly like a best-of-n group's
+	 * losing siblings) but NEVER deleted — a human can still manually start an
+	 * ordinary goal from any retained plan sibling's branch/output.
+	 */
+	planRejectedAt?: number;
 }
 
 export class SwarmGroupStore {
@@ -176,6 +232,7 @@ export class SwarmGroupStore {
 			allFailed: false,
 			updatedAt: Date.now(),
 			expectedSiblingIds: [...expectedSiblingIds],
+			reconcileMode: config?.reconcileMode === "merge-all" || config?.reconcileMode === "pick-best" ? config.reconcileMode : undefined,
 			config,
 		};
 		this.groups.set(swarmGroup, record);
@@ -220,10 +277,19 @@ export class SwarmGroupStore {
 			allFailed,
 			updatedAt: Date.now(),
 			expectedSiblingIds: existing?.expectedSiblingIds,
+			reconcileMode: existing?.reconcileMode,
 			config: existing?.config,
 			lastVerify: existing?.lastVerify,
 			integratedGoalId: existing?.integratedGoalId,
 			integratedAt: existing?.integratedAt,
+			// SWARM-W4.5: preserve plan-fan-in bookkeeping across a (today,
+			// unreachable in production — see field docs) later `recordArtifact`
+			// call for the same group. Defensive, not load-bearing: nothing
+			// currently re-calls `recordArtifact` for a group whose barrier has
+			// already fired.
+			synthesis: existing?.synthesis,
+			buildGoalId: existing?.buildGoalId,
+			planRejectedAt: existing?.planRejectedAt,
 		};
 		this.groups.set(swarmGroup, record);
 		this.save();
@@ -245,6 +311,72 @@ export class SwarmGroupStore {
 		const existing = this.groups.get(swarmGroup);
 		if (!existing) return undefined;
 		const record: SwarmGroupRecord = { ...existing, integratedGoalId: winnerGoalId, integratedAt: Date.now(), updatedAt: Date.now() };
+		this.groups.set(swarmGroup, record);
+		this.save();
+		return record;
+	}
+
+	/**
+	 * SWARM-W4.5 — mark a plan-fan-in group's synthesis reduce step as
+	 * started (idempotent-by-caller: `VerificationHarness._maybeTriggerPlanSynthesis`
+	 * only calls this once per group, guarded by a barrier-just-fired check at
+	 * the call site — see that method's doc). No-op if the group doesn't exist.
+	 */
+	recordSynthesisStarted(swarmGroup: string, sessionId?: string): SwarmGroupRecord | undefined {
+		const existing = this.groups.get(swarmGroup);
+		if (!existing) return undefined;
+		const record: SwarmGroupRecord = {
+			...existing,
+			synthesis: { status: "pending", sessionId, startedAt: Date.now() },
+			updatedAt: Date.now(),
+		};
+		this.groups.set(swarmGroup, record);
+		this.save();
+		return record;
+	}
+
+	/** SWARM-W4.5 — attach the synthesis role's session id once `spawnRole` returns it (the id isn't known at `recordSynthesisStarted` call time — see the call site). No-op if the group or its synthesis record doesn't exist. */
+	recordSynthesisSessionId(swarmGroup: string, sessionId: string): SwarmGroupRecord | undefined {
+		const existing = this.groups.get(swarmGroup);
+		if (!existing?.synthesis) return undefined;
+		const record: SwarmGroupRecord = {
+			...existing,
+			synthesis: { ...existing.synthesis, sessionId },
+			updatedAt: Date.now(),
+		};
+		this.groups.set(swarmGroup, record);
+		this.save();
+		return record;
+	}
+
+	/** SWARM-W4.5 — record the synthesis reduce step's terminal outcome (success with `{output, planHash}`, or failure with `{error}`). No-op if the group or its synthesis record doesn't exist. */
+	recordSynthesisResult(swarmGroup: string, result: { output: string; planHash: string } | { error: string }): SwarmGroupRecord | undefined {
+		const existing = this.groups.get(swarmGroup);
+		if (!existing?.synthesis) return undefined;
+		const synthesis: SwarmGroupRecord["synthesis"] = "error" in result
+			? { ...existing.synthesis, status: "failed", error: result.error, completedAt: Date.now() }
+			: { ...existing.synthesis, status: "done", output: result.output, planHash: result.planHash, completedAt: Date.now() };
+		const record: SwarmGroupRecord = { ...existing, synthesis, updatedAt: Date.now() };
+		this.groups.set(swarmGroup, record);
+		this.save();
+		return record;
+	}
+
+	/** SWARM-W4.5 — mark the single ordinary build child spawned after a human confirmed the synthesized plan. No-op if the group doesn't exist. */
+	recordBuildStart(swarmGroup: string, buildGoalId: string): SwarmGroupRecord | undefined {
+		const existing = this.groups.get(swarmGroup);
+		if (!existing) return undefined;
+		const record: SwarmGroupRecord = { ...existing, buildGoalId, updatedAt: Date.now() };
+		this.groups.set(swarmGroup, record);
+		this.save();
+		return record;
+	}
+
+	/** SWARM-W4.5 (orchestrator ruling #1) — mark a plan-fan-in group as permanently rejected at the pre-build gate. No-op if the group doesn't exist. */
+	recordPlanRejected(swarmGroup: string): SwarmGroupRecord | undefined {
+		const existing = this.groups.get(swarmGroup);
+		if (!existing) return undefined;
+		const record: SwarmGroupRecord = { ...existing, planRejectedAt: Date.now(), updatedAt: Date.now() };
 		this.groups.set(swarmGroup, record);
 		this.save();
 		return record;

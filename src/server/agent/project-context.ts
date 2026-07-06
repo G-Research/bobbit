@@ -15,6 +15,7 @@ import { WorkflowStore } from "./workflow-store.js";
 import { ToolManager } from "./tool-manager.js";
 import { ProjectConfigStore } from "./project-config-store.js";
 import { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
+import { VerificationPolicyStore } from "./verification-policy-store.js";
 import { ColorStore } from "./color-store.js";
 import { SearchService } from "../search/search-service.js";
 import { CostTracker } from "./cost-tracker.js";
@@ -73,6 +74,9 @@ export class ProjectContext {
   readonly toolManager: ToolManager;
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
+  /** Project-scope verification-policy override (S8 seam, V0). See
+   *  docs/design/verification-policy-seam.md and `ConfigCascade.resolveVerificationPolicy`. */
+  readonly verificationPolicyStore: VerificationPolicyStore;
 
   constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore } = {}) {
     this.project = project;
@@ -117,11 +121,13 @@ export class ProjectContext {
     this.workflowStore = new WorkflowStore(this.projectConfigStore);
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
+    this.verificationPolicyStore = new VerificationPolicyStore(this.configDir);
 
     // GoalManager depends on workflowStore (GoalManager requires WorkflowStore — fail-loud). Constructed
     // after the config stores above so the project's WorkflowStore is
     // available for workflow-id resolution at goal creation time.
     this.goalManager = new GoalManager(this.goalStore, this.workflowStore);
+    this.goalManager.setSwarmGroupStore(this.swarmGroupStore);
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */

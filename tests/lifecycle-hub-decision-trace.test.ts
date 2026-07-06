@@ -149,6 +149,38 @@ describe("ContextTraceStore.appendDecision (CLF-W1a)", () => {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("backward-compat read: old DecisionOutcome rows without argSummary read unchanged", () => {
+		const dir = tmpDir();
+		try {
+			const store = new ContextTraceStore(dir);
+			const legacy: TraceEntry = {
+				ts: 1,
+				hook: "beforePrompt",
+				sessionId: "sess-legacy-decision",
+				providers: [],
+				decisions: [{
+					ts: 2,
+					point: "session-spawn",
+					decisionKind: "model-tier",
+					consulted: ["builtin.model-tier"],
+					decision: { kind: "select", choice: "frontier" },
+					ms: 1,
+				}],
+			};
+			const traceDir = path.join(dir, "session-context-trace");
+			fs.mkdirSync(traceDir, { recursive: true });
+			fs.writeFileSync(path.join(traceDir, "sess-legacy-decision.jsonl"), JSON.stringify(legacy) + "\n");
+
+			const rows = store.readTrace("sess-legacy-decision");
+			assert.equal(rows.length, 1);
+			const recorded = rows[0].decisions?.[0];
+			assert.equal(recorded?.decisionKind, "model-tier");
+			assert.equal(recorded ? "argSummary" in recorded : true, false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("LifecycleHub decision-outcome recording (CLF-W1a migration)", () => {

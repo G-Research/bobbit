@@ -595,3 +595,114 @@ describe("ConfigCascade — Headquarters server-scope alias", () => {
 		assert.deepEqual(activationCalls, [["server", undefined, "sample"]]);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// S8 seam, V0 — ConfigCascade.resolveVerificationPolicy (see
+// docs/design/verification-policy-seam.md §2/§4). Deliberately NOT routed
+// through PackResolver — same three-layer (builtin -> server -> project)
+// manual merge shape as resolveToolGroupPolicies, but per-field (not a
+// name-keyed map) via mergeVerificationPolicyRaw + a single final
+// resolveVerificationPolicy validation pass.
+// ---------------------------------------------------------------------------
+describe("ConfigCascade — resolveVerificationPolicy", () => {
+	it("with no builtin file, no server override, no project override: resolves to DEFAULT_VERIFICATION_POLICY", async () => {
+		const { DEFAULT_VERIFICATION_POLICY } = await import("../src/server/agent/verification-logic.ts");
+		const builtins = new BuiltinConfigProvider(mkTemp());
+		const cascade = new ConfigCascade(builtins, {
+			getRoles: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+		}, { getOrCreate: () => undefined } as any);
+
+		assert.deepEqual(cascade.resolveVerificationPolicy(), DEFAULT_VERIFICATION_POLICY);
+		assert.deepEqual(cascade.resolveVerificationPolicy("proj1"), DEFAULT_VERIFICATION_POLICY);
+	});
+
+	it("project overrides server overrides builtin, per field — matching the tool-group-policies precedence", async () => {
+		const { VerificationPolicyStore } = await import("../src/server/agent/verification-policy-store.ts");
+
+		const builtinsDir = mkTemp();
+		fs.writeFileSync(path.join(builtinsDir, "verification-policy.yaml"), [
+			"gateCacheDefault: sha",
+			"parallelReviewsDefault: true",
+			"gateRoles:",
+			"  ready-to-merge:",
+			"    childRewrite: adapt-ready-to-merge",
+		].join("\n"));
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+
+		// Server layer: mirrors how server.ts wires a top-level VerificationPolicyStore
+		// with setBuiltinRaw + an on-disk override.
+		const serverConfigDir = mkTemp();
+		const serverStore = new VerificationPolicyStore(serverConfigDir);
+		serverStore.setBuiltinRaw(builtins.getVerificationPolicyRaw());
+		fs.writeFileSync(path.join(serverConfigDir, "verification-policy.yaml"), "parallelReviewsDefault: false\n");
+
+		// Project layer: per-project instance, never receives setBuiltinRaw
+		// (ConfigCascade supplies the true builtin layer separately) — matches
+		// ToolGroupPolicyStore's existing pattern.
+		const projectConfigDir = mkTemp();
+		const projectStore = new VerificationPolicyStore(projectConfigDir);
+		fs.writeFileSync(path.join(projectConfigDir, "verification-policy.yaml"), [
+			"gateCacheDefault: content",
+			"gateRoles:",
+			"  my-custom-gate:",
+			"    childRewrite: none",
+		].join("\n"));
+
+		const fakePcm = {
+			getOrCreate: (id: string) => id === "proj1" ? { verificationPolicyStore: projectStore } : undefined,
+		} as any;
+
+		const cascade = new ConfigCascade(builtins, {
+			getRoles: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+			getVerificationPolicyRaw: () => serverStore.getMergedRaw(),
+		}, fakePcm);
+
+		// System scope (no project): builtin + server layers only.
+		const systemPolicy = cascade.resolveVerificationPolicy();
+		assert.equal(systemPolicy.gateCacheDefault, "sha", "builtin value survives when no override sets it");
+		assert.equal(systemPolicy.parallelReviewsDefault, false, "server override wins over builtin");
+		assert.deepEqual(systemPolicy.gateRoles, { "ready-to-merge": { childRewrite: "adapt-ready-to-merge" } });
+
+		// Project scope: project overrides server overrides builtin.
+		const projectPolicy = cascade.resolveVerificationPolicy("proj1");
+		assert.equal(projectPolicy.gateCacheDefault, "content", "project override wins over builtin");
+		assert.equal(projectPolicy.parallelReviewsDefault, false, "server override still applies when the project doesn't touch this field");
+		assert.deepEqual(projectPolicy.gateRoles, {
+			"ready-to-merge": { childRewrite: "adapt-ready-to-merge" },
+			"my-custom-gate": { childRewrite: "none" },
+		}, "gateRoles merged by key across all three layers, not replaced wholesale");
+	});
+
+	it("Headquarters normalizes to system scope — the project layer is never consulted", () => {
+		const builtins = new BuiltinConfigProvider(mkTemp());
+		const calls: string[] = [];
+		const fakePcm = {
+			getOrCreate: (id: string) => { calls.push(id); return undefined; },
+		} as any;
+		const cascade = new ConfigCascade(builtins, {
+			getRoles: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+		}, fakePcm);
+
+		cascade.resolveVerificationPolicy(HEADQUARTERS_PROJECT_ID);
+		assert.deepEqual(calls, [], "Headquarters must not trigger a project-context lookup for non-workflow config");
+	});
+
+	it("a ServerStores fake that doesn't implement getVerificationPolicyRaw (existing test doubles) degrades to builtin-only", async () => {
+		const { DEFAULT_VERIFICATION_POLICY } = await import("../src/server/agent/verification-logic.ts");
+		const builtins = new BuiltinConfigProvider(mkTemp());
+		const cascade = new ConfigCascade(builtins, {
+			getRoles: () => [],
+			getTools: () => [],
+			getToolGroupPolicies: () => ({}),
+			// getVerificationPolicyRaw intentionally omitted.
+		}, { getOrCreate: () => undefined } as any);
+
+		assert.deepEqual(cascade.resolveVerificationPolicy(), DEFAULT_VERIFICATION_POLICY);
+	});
+});

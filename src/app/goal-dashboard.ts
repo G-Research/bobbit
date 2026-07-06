@@ -353,12 +353,24 @@ interface SwarmGroupStatus {
 	artifacts?: Array<{ goalId: string; status: "done" | "failed" | "killed"; branch?: string; commitSha?: string; capturedAt: number; killReason?: "governor-budget" | "governor-wallclock" | "superseded" }>;
 	lastVerify?: { outcome: string; winnerGoalId?: string; scores: Array<{ goalId: string; passed: boolean; score: number }> };
 	integratedGoalId?: string;
-	config?: { tokenBudgetPerNode?: number; wallClockMsPerNode?: number; verifyCommand?: string; earlyKill?: boolean };
+	config?: { tokenBudgetPerNode?: number; wallClockMsPerNode?: number; verifyCommand?: string; earlyKill?: boolean; topology?: "best-of-n" | "plan-fan-in" };
+	/**
+	 * SWARM-W4.5 (design/swarm-orchestration-w4.md §1.1/§5) — present only for
+	 * a `config.topology === "plan-fan-in"` group. `undefined` for every
+	 * best-of-n group, exactly as before this wave.
+	 */
+	synthesis?: { status: "pending" | "done" | "failed"; sessionId?: string; output?: string; planHash?: string; error?: string };
+	/** SWARM-W4.5 — the single ordinary (non-swarm-tagged) build child's goal id, once a human has confirmed the synthesized plan. */
+	buildGoalId?: string;
+	/** SWARM-W4.5 (orchestrator ruling #1) — epoch ms when a human rejected the synthesized plan at the pre-build gate. Terminal: no auto-retry. */
+	planRejectedAt?: number;
 }
 const swarmGroupStatusCache = new Map<string, SwarmGroupStatus>();
 const swarmGroupStatusInFlight = new Set<string>();
 /** One-shot confirmation token minted by the LAST successful /verify call — never persisted server-side (design §9 human-gate), held client-side just long enough for the operator to click Confirm. Cleared on use or on a fresh /verify. */
 const swarmPendingConfirmation = new Map<string, { token: string; winnerGoalId: string }>();
+/** SWARM-W4.5 — the plan-fan-in analogue of `swarmPendingConfirmation`: a one-shot `swarm-plan-fan-in-build-start` token minted by the last successful `/plan-verify` call, bound to `{swarmGroup, planHash}` rather than a winnerGoalId. Consumed by EITHER `/plan-confirm` or `/plan-reject` — exactly one decision per synthesized plan. */
+const swarmPlanPendingConfirmation = new Map<string, { token: string; planHash: string }>();
 const swarmActionInFlight = new Set<string>();
 
 function swarmGroupIdsForCurrentGoal(): string[] {
@@ -444,6 +456,147 @@ async function confirmSwarmWinner(parentGoalId: string, swarmGroup: string): Pro
 	}
 }
 
+/** SWARM-W4.5 — mint the plan-fan-in pre-build gate token, once synthesis is done. Mirrors `runSwarmVerify` exactly, for the `/plan-verify` endpoint. */
+async function runPlanVerify(parentGoalId: string, swarmGroup: string): Promise<void> {
+	if (swarmActionInFlight.has(swarmGroup)) return;
+	swarmActionInFlight.add(swarmGroup);
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/goals/${parentGoalId}/swarm-groups/${swarmGroup}/plan-verify`, { method: "POST" });
+		const data = await res.json().catch(() => null);
+		if (res.ok && data?.confirmationToken && data?.planHash) {
+			swarmPlanPendingConfirmation.set(swarmGroup, { token: data.confirmationToken, planHash: data.planHash });
+		} else if (res.ok) {
+			swarmPlanPendingConfirmation.delete(swarmGroup);
+		}
+	} catch {
+		// best-effort — surfaced implicitly by the strip not changing
+	} finally {
+		swarmActionInFlight.delete(swarmGroup);
+		await fetchSwarmGroupStatus(parentGoalId, swarmGroup);
+	}
+}
+
+/** SWARM-W4.5 — consume the pre-build gate token, spawn the single ordinary build child. */
+async function confirmPlanFanIn(parentGoalId: string, swarmGroup: string): Promise<void> {
+	const pending = swarmPlanPendingConfirmation.get(swarmGroup);
+	if (!pending || swarmActionInFlight.has(swarmGroup)) return;
+	swarmActionInFlight.add(swarmGroup);
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/goals/${parentGoalId}/swarm-groups/${swarmGroup}/plan-confirm`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Bobbit-Operator-Confirmation": pending.token },
+			body: JSON.stringify({ confirmationToken: pending.token }),
+		});
+		if (res.ok) swarmPlanPendingConfirmation.delete(swarmGroup);
+	} catch {
+		// best-effort
+	} finally {
+		swarmActionInFlight.delete(swarmGroup);
+		await fetchSwarmGroupStatus(parentGoalId, swarmGroup);
+		void fetchDashboardDescendants(parentGoalId);
+	}
+}
+
+/** SWARM-W4.5 (orchestrator ruling #1) — consume the SAME pre-build gate token, archive the plan siblings, no auto-retry. */
+async function rejectPlanFanIn(parentGoalId: string, swarmGroup: string): Promise<void> {
+	const pending = swarmPlanPendingConfirmation.get(swarmGroup);
+	if (!pending || swarmActionInFlight.has(swarmGroup)) return;
+	swarmActionInFlight.add(swarmGroup);
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/goals/${parentGoalId}/swarm-groups/${swarmGroup}/plan-reject`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Bobbit-Operator-Confirmation": pending.token },
+			body: JSON.stringify({ confirmationToken: pending.token }),
+		});
+		if (res.ok) swarmPlanPendingConfirmation.delete(swarmGroup);
+	} catch {
+		// best-effort
+	} finally {
+		swarmActionInFlight.delete(swarmGroup);
+		await fetchSwarmGroupStatus(parentGoalId, swarmGroup);
+		void fetchDashboardDescendants(parentGoalId);
+	}
+}
+
+/** The best-of-N gate controls (unchanged from SWARM-W1/W3 — extracted verbatim so `renderSwarmGovernorStrip` can branch on topology without duplicating this block). */
+function renderBestOfNGate(goalId: string, swarmGroup: string, status: SwarmGroupStatus | undefined, busy: boolean): TemplateResult | typeof nothing {
+	const pending = swarmPendingConfirmation.get(swarmGroup);
+	if (status?.integratedGoalId) {
+		return html`<span class="swarm-governor-integrated">integrated: ${status.integratedGoalId.slice(0, 8)}</span>`;
+	}
+	if (!status?.barrierFired) {
+		return html`<span class="swarm-governor-waiting">waiting for barrier…</span>`;
+	}
+	return html`
+		<button class="swarm-governor-btn" ?disabled=${busy} @click=${() => runSwarmVerify(goalId, swarmGroup)}>Run verifier</button>
+		${pending
+			? html`<button class="swarm-governor-btn swarm-governor-btn-primary" ?disabled=${busy} @click=${() => confirmSwarmWinner(goalId, swarmGroup)}>Confirm winner ${pending.winnerGoalId.slice(0, 8)}</button>`
+			: nothing}
+	`;
+}
+
+/**
+ * SWARM-W4.5 (design/swarm-orchestration-w4.md §1.1/§4/§5) — the plan-fan-in
+ * pre-build gate controls: "waiting for barrier" while the N plan siblings
+ * run, "synthesizing…"/"synthesis failed" while/if the reduce step runs,
+ * then "Review plan"/"Confirm build"+"Reject plan" once synthesis is done,
+ * and a terminal "build started"/"plan rejected" label after a decision.
+ */
+function renderPlanFanInGate(goalId: string, swarmGroup: string, status: SwarmGroupStatus | undefined, busy: boolean): TemplateResult | typeof nothing {
+	if (status?.planRejectedAt) {
+		return html`<span class="swarm-governor-rejected">plan rejected — archived</span>`;
+	}
+	if (status?.buildGoalId) {
+		return html`<span class="swarm-governor-integrated">build started: ${status.buildGoalId.slice(0, 8)}</span>`;
+	}
+	if (!status?.barrierFired) {
+		return html`<span class="swarm-governor-waiting">waiting for barrier…</span>`;
+	}
+	const synthesis = status.synthesis;
+	if (!synthesis || synthesis.status === "pending") {
+		return html`<span class="swarm-governor-waiting" data-synthesis-waiting>synthesizing plan…</span>`;
+	}
+	if (synthesis.status === "failed") {
+		return html`<span class="swarm-governor-escalate">synthesis failed — needs human triage${synthesis.error ? `: ${synthesis.error}` : ""}</span>`;
+	}
+	// synthesis.status === "done"
+	const pending = swarmPlanPendingConfirmation.get(swarmGroup);
+	return html`
+		<button class="swarm-governor-btn" ?disabled=${busy} @click=${() => runPlanVerify(goalId, swarmGroup)}>Review plan</button>
+		${pending
+			? html`
+				<button class="swarm-governor-btn swarm-governor-btn-primary" ?disabled=${busy} @click=${() => confirmPlanFanIn(goalId, swarmGroup)}>Confirm build</button>
+				<button class="swarm-governor-btn swarm-governor-btn-danger" ?disabled=${busy} @click=${() => rejectPlanFanIn(goalId, swarmGroup)}>Reject plan</button>
+			`
+			: nothing}
+	`;
+}
+
+/**
+ * SWARM-W4.5 (design §5 "one new row kind, `synthesis`") — the smallest
+ * useful addition for plan-fan-in's reduce step: reuses the existing
+ * `.swarm-governor-siblings`/`.swarm-governor-sibling` row shell (no new row
+ * component) with three states — pending→failed|done — instead of a
+ * goal-backed sibling row (the synthesis step is a bare session, not a
+ * swarm-tagged goal, so it never appears in `dashboardDescendants`).
+ */
+function renderSynthesisRow(status: SwarmGroupStatus | undefined): TemplateResult | typeof nothing {
+	if (!status?.barrierFired) return nothing;
+	const synthesis = status.synthesis;
+	const stateLabel = !synthesis || synthesis.status === "pending" ? "synthesizing" : synthesis.status === "failed" ? "failed" : "plan ready";
+	return html`
+		<div class="swarm-governor-siblings">
+			<div class="swarm-governor-sibling" data-synthesis-row data-synthesis-state="${stateLabel}">
+				<span class="swarm-governor-sibling-title">Synthesis</span>
+				<span class="swarm-governor-sibling-state swarm-governor-sibling-state-${stateLabel.replace(/[^a-z-]/g, "")}">${stateLabel}</span>
+			</div>
+		</div>
+	`;
+}
+
 /** Renders the governor strip for every swarm group tagged on the current goal's direct children — `nothing` for a goal with none (zero visual/DOM change for non-swarm goals). */
 function renderSwarmGovernorStrip(): TemplateResult | typeof nothing {
 	if (!currentGoal) return nothing;
@@ -455,33 +608,25 @@ function renderSwarmGovernorStrip(): TemplateResult | typeof nothing {
 			${groupIds.map((swarmGroup) => {
 				const status = swarmGroupStatusCache.get(swarmGroup);
 				if (!status) { void fetchSwarmGroupStatus(goalId, swarmGroup); }
-				const pending = swarmPendingConfirmation.get(swarmGroup);
 				const busy = swarmActionInFlight.has(swarmGroup);
 				const expected = status?.expectedCount ?? 0;
 				const captured = status?.capturedCount ?? 0;
 				const budget = status?.config?.tokenBudgetPerNode;
+				const isPlanFanIn = status?.config?.topology === "plan-fan-in";
 				return html`
-					<div class="swarm-governor-strip" data-swarm-group="${swarmGroup}">
+					<div class="swarm-governor-strip" data-swarm-group="${swarmGroup}" data-swarm-topology="${isPlanFanIn ? "plan-fan-in" : "best-of-n"}">
 						<div class="swarm-governor-strip-row">
-							<span class="swarm-governor-badge">SWARM best-of-N</span>
+							<span class="swarm-governor-badge">${isPlanFanIn ? "SWARM plan-fan-in" : "SWARM best-of-N"}</span>
 							<span class="swarm-governor-count" role="status" aria-live="polite" aria-atomic="true">${captured}/${expected} candidates terminal</span>
 							${budget ? html`<span class="swarm-governor-budget">cap ${budget.toLocaleString()} tok/node</span>` : nothing}
 							${status?.allFailed ? html`<span class="swarm-governor-escalate">ALL FAILED — needs human triage</span>` : nothing}
-							${status?.integratedGoalId
-								? html`<span class="swarm-governor-integrated">integrated: ${status.integratedGoalId.slice(0, 8)}</span>`
-								: status?.barrierFired
-									? html`
-										<button class="swarm-governor-btn" ?disabled=${busy} @click=${() => runSwarmVerify(goalId, swarmGroup)}>Run verifier</button>
-										${pending
-											? html`<button class="swarm-governor-btn swarm-governor-btn-primary" ?disabled=${busy} @click=${() => confirmSwarmWinner(goalId, swarmGroup)}>Confirm winner ${pending.winnerGoalId.slice(0, 8)}</button>`
-											: nothing}
-									`
-									: html`<span class="swarm-governor-waiting">waiting for barrier…</span>`}
+							${isPlanFanIn ? renderPlanFanInGate(goalId, swarmGroup, status, busy) : renderBestOfNGate(goalId, swarmGroup, status, busy)}
 						</div>
 						${status?.lastVerify
 							? html`<div class="swarm-governor-scores">verify outcome: ${status.lastVerify.outcome}${status.lastVerify.winnerGoalId ? ` — pick: ${status.lastVerify.winnerGoalId.slice(0, 8)}` : ""}</div>`
 							: nothing}
 						${renderSwarmSiblingRows(swarmGroup, status)}
+						${isPlanFanIn ? renderSynthesisRow(status) : nothing}
 					</div>
 				`;
 			})}
@@ -519,13 +664,19 @@ function renderSwarmSiblingRows(swarmGroup: string, status: SwarmGroupStatus | u
 				// reads as a budget/timeout failure — misleading for a deliberate
 				// early-kill. One-word suffix, no new row shape, reuses this exact
 				// existing state span.
-				const killReasonSuffix = artifact?.status === "killed" && artifact.killReason
-					? (artifact.killReason === "superseded" ? " (superseded)" : artifact.killReason === "governor-budget" ? " (budget)" : " (wall-clock)")
-					: "";
+				// UX audit finding 4: the suffix alone doesn't explain the kill
+				// class — a title= tooltip spells out what each one means.
+				const killReasonInfo = artifact?.status === "killed" && artifact.killReason
+					? (artifact.killReason === "superseded"
+						? { suffix: " (superseded)", title: "Killed early because a sibling swarm candidate already passed verification." }
+						: artifact.killReason === "governor-budget"
+							? { suffix: " (budget)", title: "Killed by the swarm governor for exceeding its cost/step budget." }
+							: { suffix: " (wall-clock)", title: "Killed by the swarm governor for exceeding its wall-clock time limit." })
+					: null;
 				return html`
 					<div class="swarm-governor-sibling" data-sibling-goal-id="${sib.id}" data-sibling-state="${stateLabel}">
 						<span class="swarm-governor-sibling-title">${sib.title}</span>
-						<span class="swarm-governor-sibling-state swarm-governor-sibling-state-${stateLabel.replace(/[^a-z-]/g, "")}">${stateLabel}${killReasonSuffix}</span>
+						<span class="swarm-governor-sibling-state swarm-governor-sibling-state-${stateLabel.replace(/[^a-z-]/g, "")}">${stateLabel}${killReasonInfo ? html`<span title=${killReasonInfo.title} data-testid="swarm-kill-reason-suffix">${killReasonInfo.suffix}</span>` : ""}</span>
 						${score
 							? html`<span class="swarm-governor-sibling-score">verify: ${score.passed ? "pass" : "fail"}${typeof score.score === "number" ? ` (${score.score})` : ""}</span>`
 							: nothing}

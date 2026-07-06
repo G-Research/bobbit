@@ -1,7 +1,7 @@
 /**
  * API E2E — provider hook endpoints honour the EFFECTIVE goal (teamGoalId).
  *
- * Regression (code-quality finding): `server.ts::resolveHookCtx()` resolved the
+ * Regression (code-quality finding): `session-control-routes.ts::resolveHookCtx()` resolved the
  * dispatch context's `goalId` as `live?.goalId ?? persisted?.goalId`, dropping
  * `teamGoalId`. Team members, `team_delegate` sub-agents, and `llm-review`
  * reviewers carry their effective goal ONLY in `teamGoalId` (no `goalId`), so

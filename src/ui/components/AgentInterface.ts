@@ -25,7 +25,7 @@ async function openImageModelSelector(...args: Parameters<typeof ImageModelSelec
 	mod.ImageModelSelector.open(...args);
 }
 import type { MessageEditor } from "./MessageEditor.js";
-import "./MessageEditor.js";
+import { ensureMessageEditor } from "../lazy/message-editor.js";
 import "./MessageList.js";
 // <git-status-widget> is loaded on demand via `app/lazy-widgets.ts` to
 // keep its 52 kB chunk out of the entry bundle. AgentInterface's
@@ -2394,6 +2394,8 @@ export class AgentInterface extends LitElement {
 
 		const session = this.session;
 		const state = this.session.state;
+		const showComposer = !((this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing);
+		if (showComposer) ensureMessageEditor();
 		return html`
 			<div class="flex flex-col h-full bg-background text-foreground min-w-0">
 				<!-- Messages Area -->
@@ -2522,7 +2524,7 @@ export class AgentInterface extends LitElement {
 							</div>
 						</div>
 						` : nothing}
-						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
+						${showComposer ? html`<message-editor style="position:relative;z-index:20"
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
 							.projectId=${this.projectId}
@@ -2577,7 +2579,7 @@ export class AgentInterface extends LitElement {
 										}
 									: undefined
 							}
-						></message-editor>`}
+						></message-editor>` : nothing}
 						${this.renderStats()}
 					</div>
 				</div>

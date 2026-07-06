@@ -9,13 +9,16 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 const ROOT = join(import.meta.dirname ?? ".", "..");
 const SCAN_DIRS = [
 	join(ROOT, "src", "server", "agent"),
 	join(ROOT, "src", "app"),
+];
+const GOAL_WORKFLOW_ROUTE_FILES = [
+	join(ROOT, "src", "server", "server.ts"),
 ];
 
 /** Per-file allowlist for non-workflow uses of the literal "general". */
@@ -61,21 +64,27 @@ interface Hit {
 	text: string;
 }
 
-function findGeneralHits(): Hit[] {
+function relPath(file: string): string {
+	return relative(ROOT, file).split(sep).join("/");
+}
+
+function findGeneralHitsInFiles(files: string[]): Hit[] {
 	const hits: Hit[] = [];
 	const re = /["']general["']/;
-	for (const dir of SCAN_DIRS) {
-		for (const file of listSourceFiles(dir)) {
-			const text = readFileSync(file, "utf8");
-			const lines = text.split(/\r?\n/);
-			for (let i = 0; i < lines.length; i++) {
-				const ln = lines[i];
-				if (!re.test(ln)) continue;
-				hits.push({ file: relative(ROOT, file).split(sep).join("/"), line: i + 1, text: ln.trim() });
-			}
+	for (const file of files) {
+		const text = readFileSync(file, "utf8");
+		const lines = text.split(/\r?\n/);
+		for (let i = 0; i < lines.length; i++) {
+			const ln = lines[i];
+			if (!re.test(ln)) continue;
+			hits.push({ file: relPath(file), line: i + 1, text: ln.trim() });
 		}
 	}
 	return hits;
+}
+
+function findGeneralHits(): Hit[] {
+	return findGeneralHitsInFiles(SCAN_DIRS.flatMap(dir => listSourceFiles(dir)));
 }
 
 /** Workflow-defaulting offence patterns. A hit is an offender only if it
@@ -90,35 +99,66 @@ const OFFENCE_PATTERNS: RegExp[] = [
 	/["']general["'][^\n]*workflow/i,
 ];
 
+function workflowDefaultOffenders(hits: Hit[]): Hit[] {
+	const offenders: Hit[] = [];
+	for (const h of hits) {
+		// Per-file allowlist (doc examples, etc.).
+		if (FILE_ALLOWLIST.has(h.file)) continue;
+		// Allowlisted role-related lines.
+		if (ROLE_LITERAL_ALLOWLIST.has(h.text)) continue;
+		// Comments referring to the absence of the magic default are explicitly fine.
+		if (/no "general" magic|\bno "general" workflow magic\b/i.test(h.text)) continue;
+		// Settings-tab enumeration: lines listing many quoted tab ids side by side
+		// (e.g. `"shortcuts", "general", ..., "workflows", ...`). The match against
+		// `/workflow.*general/` is coincidental — they're sibling string literals.
+		if (/["']shortcuts["'].*["']general["']/.test(h.text)) continue;
+		// Must match at least one workflow-defaulting pattern to count.
+		if (!OFFENCE_PATTERNS.some(re => re.test(h.text))) continue;
+		offenders.push(h);
+	}
+	return offenders;
+}
+
+function assertNoWorkflowDefaultOffenders(offenders: Hit[]): void {
+	if (offenders.length > 0) {
+		const detail = offenders
+			.map(o => `  ${o.file}:${o.line}  ${o.text}`)
+			.join("\n");
+		assert.fail(
+			`Found ${offenders.length} unexpected reference(s) to literal "general"/'general' in workflow-defaulting source:\n${detail}\n\n` +
+			"Workflow resolution must be: explicit id → first workflow in store → error. " +
+			"If your line legitimately refers to the role named 'general', add its exact " +
+			"trimmed line text to ROLE_LITERAL_ALLOWLIST in this test.",
+		);
+	}
+}
+
 describe("no 'general' as workflow default in source", () => {
 	it("no source file under src/server/agent/ or src/app/ defaults to workflow 'general'", () => {
 		const hits = findGeneralHits();
-		const offenders: Hit[] = [];
-		for (const h of hits) {
-			// Per-file allowlist (doc examples, etc.).
-			if (FILE_ALLOWLIST.has(h.file)) continue;
-			// Allowlisted role-related lines.
-			if (ROLE_LITERAL_ALLOWLIST.has(h.text)) continue;
-			// Comments referring to the absence of the magic default are explicitly fine.
-			if (/no "general" magic|\bno "general" workflow magic\b/i.test(h.text)) continue;
-			// Settings-tab enumeration: lines listing many quoted tab ids side by side
-			// (e.g. `"shortcuts", "general", ..., "workflows", ...`). The match against
-			// `/workflow.*general/` is coincidental — they're sibling string literals.
-			if (/["']shortcuts["'].*["']general["']/.test(h.text)) continue;
-			// Must match at least one workflow-defaulting pattern to count.
-			if (!OFFENCE_PATTERNS.some(re => re.test(h.text))) continue;
-			offenders.push(h);
+		assertNoWorkflowDefaultOffenders(workflowDefaultOffenders(hits));
+	});
+
+	it("goal workflow route scan file list resolves and still contains the POST /api/goals path", () => {
+		for (const file of GOAL_WORKFLOW_ROUTE_FILES) {
+			assert.equal(existsSync(file), true, `Expected explicit scan file to exist: ${relPath(file)}`);
+			assert.equal(statSync(file).isFile(), true, `Expected explicit scan path to be a file: ${relPath(file)}`);
 		}
-		if (offenders.length > 0) {
-			const detail = offenders
-				.map(o => `  ${o.file}:${o.line}  ${o.text}`)
-				.join("\n");
-			assert.fail(
-				`Found ${offenders.length} unexpected reference(s) to literal "general"/'general' in workflow-defaulting source:\n${detail}\n\n` +
-				"Workflow resolution must be: explicit id → first workflow in store → error. " +
-				"If your line legitimately refers to the role named 'general', add its exact " +
-				"trimmed line text to ROLE_LITERAL_ALLOWLIST in this test.",
-			);
-		}
+		const routeFilesWithGoalCreateRoute = GOAL_WORKFLOW_ROUTE_FILES
+			.filter(file => {
+				const src = readFileSync(file, "utf8");
+				return src.includes('url.pathname === "/api/goals"') && src.includes('req.method === "POST"');
+			})
+			.map(relPath);
+		assert.deepEqual(
+			routeFilesWithGoalCreateRoute,
+			["src/server/server.ts"],
+			"Update GOAL_WORKFLOW_ROUTE_FILES when the POST /api/goals route moves.",
+		);
+	});
+
+	it("no POST /api/goals route defaults to workflow 'general'", () => {
+		const hits = findGeneralHitsInFiles(GOAL_WORKFLOW_ROUTE_FILES);
+		assertNoWorkflowDefaultOffenders(workflowDefaultOffenders(hits));
 	});
 });

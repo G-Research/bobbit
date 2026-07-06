@@ -606,6 +606,10 @@ test.describe("BG timer regression", () => {
 
 		const dropdown = page.locator("#bg-process-dropdown");
 		await expect(dropdown).toContainText(/\b2m 00s\b/);
+		// The dropdown also hosts an async output-preview area ("Loading..." →
+		// "(no output yet)"); let it settle before snapshotting, or the strict
+		// equality below races the fetch instead of pinning the timer text.
+		await expect(dropdown).not.toContainText("Loading...");
 		const before = await dropdown.innerText();
 
 		await page.waitForTimeout(1100);

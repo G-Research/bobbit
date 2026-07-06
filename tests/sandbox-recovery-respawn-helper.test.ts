@@ -304,21 +304,22 @@ test("real _respawnAgentInPlace exists in session-manager.ts and matches the shi
 	// known callsites (restartAgent, _restartSessionWithUpdatedRole,
 	// recoverSandboxSessions, ensureSessionAlive) must route through it.
 	const src = readFileSync(SESSION_MANAGER_PATH, "utf8");
+	const reviveSrc = readFileSync("src/server/agent/session-revive.ts", "utf8");
 
 	assert.ok(
 		/private\s+(?:async\s+)?_respawnAgentInPlace\s*\(/.test(src),
 		"SessionManager._respawnAgentInPlace must be defined",
 	);
 
-	for (const callsite of [
-		"private async _restartSessionWithUpdatedRole(",
-		"async restartAgent(",
-		"private async recoverSandboxSessions(",
-		"async ensureSessionAlive(",
-	]) {
-		const i = src.indexOf(callsite);
+	for (const [source, callsite] of [
+		[reviveSrc, "async restartSessionWithUpdatedRole("],
+		[src, "async restartAgent("],
+		[src, "private async recoverSandboxSessions("],
+		[src, "async ensureSessionAlive("],
+	] as const) {
+		const i = source.indexOf(callsite);
 		assert.ok(i >= 0, `callsite ${callsite} not found`);
-		const rest = src.slice(i + callsite.length);
+		const rest = source.slice(i + callsite.length);
 		const endRel = rest.search(/\n\t(?:\/\*\*|private |async |public |constructor)/);
 		const body = rest.slice(0, endRel >= 0 ? endRel : 4000);
 		assert.ok(

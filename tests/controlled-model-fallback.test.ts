@@ -25,6 +25,8 @@ import { selectAigwModelForRoleTier } from "../src/server/agent/model-registry.j
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
+const SESSION_REVIVE_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-revive.ts");
+const SESSION_STEERING_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-steering.ts");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 const VERIFICATION_HARNESS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/verification-harness.ts");
 const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");
@@ -676,7 +678,7 @@ describe("controlled model fallback policy — session setup visibility", () => 
 		);
 
 		const worktreeBody = extractMethodBody(src, "export async function executeWorktreeAsync");
-		const postSpawnIdx = worktreeBody.indexOf("await postSpawn(session, plan, ctx)");
+		const postSpawnIdx = worktreeBody.indexOf("postSpawn(session, plan, ctx)");
 		const idleIdx = worktreeBody.indexOf('broadcastStatus(session, "idle")');
 		assert.ok(postSpawnIdx >= 0, "worktree setup must call postSpawn");
 		assert.ok(idleIdx >= 0, "worktree setup must broadcast idle");
@@ -713,8 +715,8 @@ describe("controlled model fallback policy — restore/respawn lifecycle", () =>
 	});
 
 	it("restore verifies spawn-pinned persisted model before broadcasting idle", () => {
-		const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
-		const body = extractMethodBody(src, "private async restoreSession(ps: PersistedSession)");
+		const src = readFileSync(SESSION_REVIVE_SOURCE, "utf-8");
+		const body = extractMethodBody(src, "async restoreSession(ps: PersistedSession)");
 
 		assert.match(
 			body,
@@ -722,7 +724,7 @@ describe("controlled model fallback policy — restore/respawn lifecycle", () =>
 			"controlled model fallback policy: restored persisted initialModel must be carried as spawnPinnedModel for read-back verification",
 		);
 		const switchIdx = body.indexOf("if (!switchResp.success)");
-		const verifyIdx = body.indexOf("await this.tryAutoSelectModel(session)");
+		const verifyIdx = body.indexOf("await this.deps.host.tryAutoSelectModel(session)");
 		const idleIdx = body.indexOf('broadcastStatus(session, "idle")', verifyIdx);
 		assert.ok(switchIdx >= 0 && verifyIdx > switchIdx, "restore must verify model after switch_session succeeds");
 		assert.ok(idleIdx > verifyIdx, "restore must verify controlled fallback policy before broadcasting idle");
@@ -782,11 +784,11 @@ describe("controlled model fallback policy — direct host provider env", () => 
 
 	it("normal setup, restore/respawn, and legacy verification use the fallback provider allowlist", () => {
 		const setupSrc = readFileSync(SESSION_SETUP_SOURCE, "utf-8");
-		const managerSrc = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
+		const steeringSrc = readFileSync(SESSION_STEERING_SOURCE, "utf-8");
 		const verificationSrc = readFileSync(VERIFICATION_HARNESS_SOURCE, "utf-8");
 
 		assert.match(setupSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\)/);
-		assert.match(managerSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
+		assert.match(steeringSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
 		assert.match(verificationSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
 	});
 });
