@@ -548,7 +548,7 @@ import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy 
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
-import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
+import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData, seedModelDefaultsFromLegacy } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
@@ -1775,6 +1775,15 @@ export function createGateway(config: GatewayConfig) {
 		headquartersStateDir: stateDir,
 		headquartersConfigDir: configDir,
 		legacyServerBobbitDir: path.join(getProjectRoot(), ".bobbit"),
+	});
+	// Non-destructively seed model-default preference keys from the legacy
+	// .bobbit/state/preferences.json into the headquarters state dir. This
+	// covers the case where BOBBIT_DIR points to a fresh directory (the
+	// migrateLegacyHeadquartersDirectory call above skips the legacy copy when
+	// an override is active) as well as first-ever installs.
+	seedModelDefaultsFromLegacy({
+		headquartersStateDir: stateDir,
+		serverRunDir: getProjectRoot(),
 	});
 	fs.mkdirSync(stateDir, { recursive: true });
 	// Ensure API-only/test gateways also get a startup-resolved agent dir even when

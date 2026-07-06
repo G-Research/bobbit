@@ -1716,3 +1716,83 @@ export function recoverPreMigrationData(stateDir: string): void {
 		fs.writeFileSync(recoveryMarker, new Date().toISOString(), "utf-8");
 	} catch { /* best effort */ }
 }
+
+/**
+ * Model-default preference keys that must be preserved across Headquarters
+ * directory changes (e.g. when BOBBIT_DIR points to a fresh dir).
+ */
+export const MODEL_DEFAULT_PREF_KEYS = [
+	"default.sessionModel",
+	"default.reviewModel",
+	"default.namingModel",
+	"default.imageModel",
+	"default.sessionThinkingLevel",
+	"default.reviewThinkingLevel",
+	"default.namingThinkingLevel",
+] as const;
+
+/**
+ * Seed model-default preference keys into the headquarters state dir from any
+ * discoverable prior preferences location.
+ *
+ * This runs **after** `migrateLegacyHeadquartersDirectory` and is a
+ * non-destructive complement to it: it targets only the specific
+ * `default.*Model` / `default.*ThinkingLevel` keys and never overwrites keys
+ * that are already present in the target.
+ *
+ * Scenarios covered:
+ * - Fresh BOBBIT_DIR override pointing to an empty dir (migration skips the
+ *   legacy copy, so model defaults would be silently lost without this).
+ * - First-ever fresh install where the HQ dir didn't previously exist.
+ * - Standard upgrade that introduced the `headquarters/` subdirectory (the
+ *   main migration already handles this, but this acts as a safety net).
+ *
+ * Sources attempted in priority order:
+ * 1. `<serverRunDir>/.bobbit/state/preferences.json` — the legacy default path
+ *    that predates the Headquarters split.
+ */
+export function seedModelDefaultsFromLegacy({
+	headquartersStateDir,
+	serverRunDir,
+}: {
+	headquartersStateDir: string;
+	serverRunDir: string;
+}): void {
+	const hqPrefsFile = path.join(headquartersStateDir, "preferences.json");
+	const legacyPrefsFile = path.join(serverRunDir, ".bobbit", "state", "preferences.json");
+
+	// Skip if source and target are the same file (legacy path IS headquarters
+	// state dir — no-op, nothing to seed from anywhere else).
+	if (samePath(hqPrefsFile, legacyPrefsFile)) return;
+
+	// Load target preferences (current HQ dir).
+	const target: Record<string, unknown> = readJsonValue<Record<string, unknown>>(hqPrefsFile) ?? {};
+
+	// Determine which model-default keys are missing from the target.
+	const missingKeys = MODEL_DEFAULT_PREF_KEYS.filter(k => !(k in target));
+	if (missingKeys.length === 0) return;
+
+	// Attempt to load source preferences from the legacy path.
+	const source = readJsonValue<Record<string, unknown>>(legacyPrefsFile);
+	if (!source || typeof source !== "object" || Array.isArray(source)) return;
+
+	// Copy only missing keys that exist in the source.
+	let seeded = 0;
+	for (const key of missingKeys) {
+		if (key in source) {
+			target[key] = source[key];
+			seeded++;
+		}
+	}
+
+	if (seeded === 0) return;
+
+	// Persist the updated target preferences.
+	try {
+		fs.mkdirSync(path.dirname(hqPrefsFile), { recursive: true });
+		fs.writeFileSync(hqPrefsFile, JSON.stringify(target, null, 2), "utf-8");
+		console.log(`[migration] Seeded ${seeded} model-default preference key(s) from legacy path into Headquarters state dir`);
+	} catch (err) {
+		console.warn(`[migration] Warning: could not write seeded preferences to ${hqPrefsFile}: ${err}`);
+	}
+}
