@@ -234,7 +234,7 @@ function collectClientReferences(): ClientReference[] {
  * concrete routes all exist server-side as per-resource-type regexes (not a
  * generic wildcard) — verified directly:
  *   - /api/roles/:name/customize|override     — server.ts:9427, :9456
- *   - /api/tools/:name/customize|override     — server.ts:7792, :7856
+ *   - /api/tools/:name/customize|override     — src/server/routes/tools-routes.ts
  *   - /api/workflows/:name/customize|override — server.ts:13718, :13739
  * Allowlisted rather than special-cased because resolving the finite
  * `type` union at the call site would require real type-flow analysis,
