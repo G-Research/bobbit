@@ -1186,6 +1186,8 @@ export class MessageEditor extends LitElement {
 							<div class="queue-pill flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ${msg.isSteered ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted/50 border border-border/50"} text-xs text-muted-foreground${this._draggedPillId === msg.id ? " opacity-50" : ""}" style="${this._draggedPillId === msg.id ? "opacity: 0.5" : ""}"
 								data-pill-id="${msg.id}"
 								data-steered="${msg.isSteered}"
+								role=${msg.isSteered ? "group" : nothing}
+								aria-label=${msg.isSteered ? `${msg.text} (steered)` : nothing}
 								draggable="${!msg.isSteered}"
 								@dragstart=${(e: DragEvent) => this._handlePillDragStart(e, msg)}
 								@dragover=${(e: DragEvent) => this._handlePillDragOver(e, msg.id)}

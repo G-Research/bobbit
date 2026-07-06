@@ -455,3 +455,44 @@ test.describe("GitStatusWidget render states", () => {
 		expect(diffUrl).toContain("commit=abcdef1234567890");
 	});
 });
+
+test.describe("GitStatusWidget a11y — PR review-status accessible name (judgment item 10)", () => {
+	// Source: PR #246 judgment inventory, "Color-only signaling" item 10 —
+	// the PR pill's review-status color (approved=green / changes-requested=red)
+	// was only exposed via a `title` on the non-focusable `_prPillIcon` span.
+	// Fix: the focusable `.git-status-pill` button now carries an aria-label
+	// with the review word when one applies. Zero visible-pixel change — the
+	// icon's own `title` is untouched.
+	test("approved review decision: pill aria-label includes 'approved'", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, { ...OPEN_PR_PROPS, reviewDecision: "APPROVED" });
+
+		const pill = page.locator('git-status-widget button[data-state="ready"]');
+		await expect(pill).toHaveAttribute("aria-label", `${OPEN_PR_PROPS.branch}, PR #${OPEN_PR_PROPS.prNumber} review approved`);
+	});
+
+	test("changes-requested review decision: pill aria-label includes 'changes requested'", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, { ...OPEN_PR_PROPS, reviewDecision: "CHANGES_REQUESTED" });
+
+		const pill = page.locator('git-status-widget button[data-state="ready"]');
+		await expect(pill).toHaveAttribute("aria-label", `${OPEN_PR_PROPS.branch}, PR #${OPEN_PR_PROPS.prNumber} review changes requested`);
+	});
+
+	test("awaiting-review decision and no-PR branches: pill has no aria-label override", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, { ...OPEN_PR_PROPS, reviewDecision: "REVIEW_REQUIRED" });
+		const pill = page.locator('git-status-widget button[data-state="ready"]');
+		await expect(pill).not.toHaveAttribute("aria-label");
+
+		await mount(page, {
+			loading: false,
+			branch: "main",
+			primaryBranch: "master",
+			isOnPrimary: true,
+			clean: true,
+			statusFiles: [],
+		});
+		await expect(pill).not.toHaveAttribute("aria-label");
+	});
+});
