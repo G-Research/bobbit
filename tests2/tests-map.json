@@ -10061,6 +10061,22 @@
       "migrated": true,
       "v2Path": "tests2/core/reproducing-child-completion-bugs.test.ts",
       "rationale": "new unit test from master cbd0c82f"
+    },
+    {
+      "file": "tests/e2e/api-goals-prompt-paused.spec.ts",
+      "bucket": "v2-integration",
+      "method": "port",
+      "migrated": true,
+      "v2Path": "tests2/integration/api-goals-prompt-paused.test.ts",
+      "rationale": "new API e2e test from master pause-cascade feature"
+    },
+    {
+      "file": "tests/e2e/ui/goal-paused-banner.spec.ts",
+      "bucket": "v2-browser",
+      "method": "port",
+      "migrated": true,
+      "v2Path": "tests2/browser/journeys/goal-paused-banner.journey.spec.ts",
+      "rationale": "new browser e2e test from master pause-cascade feature"
     }
   ]
 }
