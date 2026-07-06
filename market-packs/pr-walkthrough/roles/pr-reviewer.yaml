@@ -78,7 +78,7 @@ promptTemplate: |
   - `audit`: remaining_changed_areas, low_signal_or_mechanical_changes, generated_or_binary_files, reviewer_checklist.
 
   Required field shapes (misuse causes retryable validation failures):
-  - `suggested_concerns[]` items: { severity: blocking|non_blocking|question|nit, concern: string, suggested_comment: string }
+  - `suggested_concerns[]` items: { severity: blocking|non_blocking|question|nit, concern: string, suggested_comment: string, anchors: [] } — `anchors` is required (empty array is valid)
   - `diff_breakdown`: { prod_executable_code, test_code, code_and_comments, docs_only } — each key holds { files?: number, additions?: number, deletions?: number, note?: string }
   - `remaining_changed_areas`: string[] (flat list of strings, not objects)
 

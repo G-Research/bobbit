@@ -17,6 +17,6 @@ docs: |-
 
   `narrative` entries are ordered and support `text`, `diff`, `note`, `suggested_comment`, and `checklist`. For `suggested_comment` entries, `severity` must be one of: `blocking`, `non_blocking`, `question`, `nit`. Keep setup and notes brief, and place suggested comments close to the relevant diff anchor.
 
-  In `review_chunks[]`, `suggested_concerns[]` items require three fields: `severity` (blocking|non_blocking|question|nit), `concern`, and `suggested_comment`.
+  In `review_chunks[]`, `suggested_concerns[]` items require four fields: `severity` (blocking|non_blocking|question|nit), `concern`, `suggested_comment`, and `anchors` (array, may be empty).
 
   Successful saves return compact model-facing status such as saved, section_id, nextRequired, and missing instead of the full growing chunk summary. Use read_pr_walkthrough_submission_status whenever you need saved chunks, read receipts, coverage counts, repeated references, skipped/remaining hunks, or finalization state.

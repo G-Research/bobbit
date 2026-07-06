@@ -92,18 +92,20 @@ validates them; a wrong shape returns a retryable `PRW_SCHEMA_INVALID` error.
 ### `suggested_concerns[]` items
 
 Every item in `suggested_concerns` at the card or decision level must have exactly
-three fields:
+four fields:
 
 ```yaml
 suggested_concerns:
   - severity: blocking           # blocking | non_blocking | question | nit
     concern: Short description of the concern.
     suggested_comment: The text of the comment to add to the PR.
+    anchors: []                  # required; empty array is valid
 ```
 
-**Common mistake:** sending plain strings or objects with only `comment` or only
-`severity`. All three fields — `severity`, `concern`, and `suggested_comment` —
-are required.
+**Common mistake:** sending plain strings or objects missing one or more fields.
+All four fields — `severity`, `concern`, `suggested_comment`, and `anchors` —
+are required. `anchors: []` (empty array) is valid when the concern is not tied
+to a specific diff location.
 
 ### `diff_breakdown`
 
