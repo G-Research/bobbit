@@ -101,6 +101,7 @@ export interface SessionSetupPlumbingDeps {
 }
 
 export class SessionSetupPlumbing {
+	/** Network name for sandbox containers. */
 	private static readonly SANDBOX_NETWORK = "bobbit-sandbox-net";
 
 	constructor(private readonly deps: SessionSetupPlumbingDeps) {}
