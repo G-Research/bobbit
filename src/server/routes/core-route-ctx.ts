@@ -363,4 +363,8 @@ export interface CoreRouteCtx {
 
 	// ── Goals G3b additions — append-only.
 	getGateAndTransitiveDependents(workflow: Workflow, gateId: string): string[];
+
+	// ── Goals G4a additions — append-only.
+	// No new fields: goal git/PR/team read routes reuse ctx values already
+	// threaded by earlier cohorts.
 }

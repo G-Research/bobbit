@@ -141,6 +141,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/extension-host-invocation-routes.ts",
 	// STR-01 goals cohort G3b (gate mutation routes).
 	"src/server/routes/goal-gate-mutation-routes.ts",
+	// STR-01 goals cohort G4a (goal git/PR/team read routes).
+	"src/server/routes/goal-git-team-read-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
