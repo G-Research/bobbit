@@ -119,6 +119,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/session-git-read-routes.ts",
 	// STR-01 cohort 24 (session git write/PR mutation routes).
 	"src/server/routes/session-git-write-routes.ts",
+	// STR-01 cohort 25 (session content/readback routes).
+	"src/server/routes/session-content-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
