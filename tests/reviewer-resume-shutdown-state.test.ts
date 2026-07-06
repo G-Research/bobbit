@@ -11,9 +11,14 @@ function sessionManagerSource(): string {
 function shutdownBody(source: string): string {
 	const start = source.indexOf("\tasync shutdown(): Promise<void> {");
 	assert.notEqual(start, -1, "precondition: SessionManager.shutdown() must exist");
-	const end = source.indexOf("\n// ── Sandbox credential auto-resolution", start);
-	assert.notEqual(end, -1, "precondition: SessionManager.shutdown() section must be bounded before sandbox credential code");
-	return source.slice(start, end);
+	// The old lower bound ("// ── Sandbox credential auto-resolution") moved to
+	// session-setup-plumbing.ts in SM decomposition cohort 11. Bound the slice
+	// at the next top-level class member (1-tab-indented declaration or doc
+	// comment) or the class-closing brace, whichever comes first.
+	const tail = source.slice(start + 1);
+	const boundary = tail.search(/\n\t(?:async |private |public |static |get |set |\/\*\*)|\n\}/);
+	assert.notEqual(boundary, -1, "precondition: SessionManager.shutdown() section must be bounded");
+	return source.slice(start, start + 1 + boundary);
 }
 
 function makeShutdownSession(id: string, status: any, extra: Record<string, unknown> = {}) {
