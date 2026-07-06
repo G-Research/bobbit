@@ -1095,10 +1095,10 @@ function migrateHeadquartersProjectAliases(
 			delete headquartersProject.provisional;
 			registryChanged = true;
 		}
-		if (headquartersProject.position !== undefined) {
-			delete headquartersProject.position;
-			registryChanged = true;
-		}
+		// NOTE: do NOT delete headquartersProject.position here. Since PR #933,
+		// Headquarters is a first-class reorderable project and its position is
+		// user-controlled. Deleting it every startup would reset HQ to the end of
+		// the list. The pre-PR#933 code that stripped this field is now incorrect.
 		if (headquartersProject.parentProjectId !== undefined) {
 			delete headquartersProject.parentProjectId;
 			registryChanged = true;
