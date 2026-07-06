@@ -31,3 +31,15 @@ detail_docs: >-
   - `{ merged: true }` — clean merge; child archived + team torn down.
 
   - 409 `{ conflict: true, output }` — merge conflict; child stays live.
+
+  ## Parameters
+
+
+  - `childGoalId` (required) — id of the child goal to merge.
+
+  - `force` (optional boolean, default false) — bypass the
+    `ready-to-merge` gate check. Use when the child's workflow has no
+    `ready-to-merge` gate, or when you (or the human operator) have
+    determined it is safe to merge. The `git merge --no-ff` operation
+    itself still runs; conflicts still surface as a 409 with
+    `{ conflict: true, output }`.

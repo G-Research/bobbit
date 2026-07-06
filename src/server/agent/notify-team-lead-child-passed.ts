@@ -2,14 +2,22 @@
  * Pure helpers for parent-team-lead notifications when a child goal's
  * lifecycle hits a state the parent needs to know about.
  *
- * The verification harness already notifies a goal's OWN team-lead on
- * gate verification events. These helpers compute the additional
- * notification that should fan out to the parent goal's team-lead so
- * the parent doesn't sit idle while children change state.
+ * Notification triggers:
+ *   - `buildParentCompletionNotification` — fires when `team_complete` is
+ *     called on a child goal (state → "complete"). This is the primary
+ *     parent-notification path: it fires regardless of workflow shape so
+ *     bespoke-workflow children without a `ready-to-merge` gate are never
+ *     silent. Called from `TeamManager.completeTeam()`.
+ *   - `buildParentReadyNotification` — retained for reference; previously
+ *     used by the verification harness to notify the parent when a child's
+ *     `ready-to-merge` gate resolved. No longer wired up — the
+ *     goal-complete trigger supersedes it.
+ *   - `buildParentPausedNotification` — fires when the child is auto-paused
+ *     (replan overflow, restructure-requires-pause). Called from the
+ *     mutation classifier in nested-goal-routes.ts.
  *
  * Pure — no side effects, no I/O. The caller decides how to deliver
- * the message (typically via the `notifyTeamLeadFn` injected into the
- * harness from server.ts).
+ * the message.
  */
 
 export interface ChildGoalForParentNotify {
@@ -66,6 +74,25 @@ export function buildParentReadyNotification(
 		};
 	}
 	return null;
+}
+
+/**
+ * Compute the parent-team-lead notification for a child goal completing
+ * (i.e. `team_complete` was called on the child). Fires regardless of
+ * workflow shape — a child with a bespoke workflow and no `ready-to-merge`
+ * gate will still notify the parent when done.
+ *
+ * Returns null for root goals (no parent to notify) or when child is undefined.
+ */
+export function buildParentCompletionNotification(
+	child: ChildGoalForParentNotify | undefined,
+): ParentNotification | null {
+	if (!child?.parentGoalId) return null;
+	const display = displayName(child);
+	return {
+		parentGoalId: child.parentGoalId,
+		message: `Subgoal "${display}" has completed. Its branch is ready to merge into your branch. Use \`goal_merge_child\` to merge it (or \`goal_archive_child\` if you no longer need it).`,
+	};
 }
 
 /**
