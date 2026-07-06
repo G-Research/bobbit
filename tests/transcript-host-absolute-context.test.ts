@@ -57,12 +57,13 @@ describe("sandboxed persisted host-absolute transcript paths", () => {
 	});
 
 	it("server transcript routes and continue flow use host-absolute-aware contexts", () => {
-		const source = fs.readFileSync(path.join(process.cwd(), "src", "server", "server.ts"), "utf-8");
+		const transcriptRoutes = fs.readFileSync(path.join(process.cwd(), "src", "server", "routes", "session-content-routes.ts"), "utf-8");
 		// Fork/continue moved to the core route registry (STR-01 cohort 21) —
-		// scan both files: the transcript route stays in server.ts, the
-		// fork/continue clone contexts live in session-mutation-routes.ts.
+		// scan both files: the transcript route moved to session-content-routes.ts
+		// (STR-01 cohort 25), the fork/continue clone contexts live in
+		// session-mutation-routes.ts.
 		const mutationRoutes = fs.readFileSync(path.join(process.cwd(), "src", "server", "routes", "session-mutation-routes.ts"), "utf-8");
-		for (const src of [source, mutationRoutes]) {
+		for (const src of [transcriptRoutes, mutationRoutes]) {
 			assert.doesNotMatch(src, /SessionFsContext = \{ sandboxed: (?:targetPs|ps|extPs)\.sandboxed/);
 			assert.doesNotMatch(src, /const (?:srcCtx|dstCtx|copyCtx) = \{ sandboxed: !!ps\.sandboxed/);
 		}
@@ -71,7 +72,7 @@ describe("sandboxed persisted host-absolute transcript paths", () => {
 		// agentSessionFile yet — see the Claude Code live-session fallback below),
 		// but it must still route the on-disk case through the host-absolute-aware
 		// `ctx` from `sessionFsContextForAgentFile`, never a raw sandboxed read.
-		assert.match(source, /if \(targetPs\.agentSessionFile\) return sessionFileRead\(ctx, targetPs\.agentSessionFile, sandboxManager\);/);
+		assert.match(transcriptRoutes, /if \(targetPs\.agentSessionFile\) return sessionFileRead\(ctx, targetPs\.agentSessionFile, sandboxManager \?\? null\);/);
 		assert.match(mutationRoutes, /const srcCtx = sessionFsContextForAgentFile\(ps, sourceJsonl\)/);
 	});
 });

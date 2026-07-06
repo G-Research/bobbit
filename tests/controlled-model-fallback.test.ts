@@ -25,6 +25,7 @@ import { selectAigwModelForRoleTier } from "../src/server/agent/model-registry.j
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
+const SESSION_LIVE_CONTROL_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-live-control.ts");
 const SESSION_MODELS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-models.ts");
 const SESSION_REVIVE_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-revive.ts");
 const SESSION_STEERING_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-steering.ts");
@@ -735,10 +736,11 @@ describe("controlled model fallback policy — restore/respawn lifecycle", () =>
 	});
 
 	it("role assignment and force-abort respawns verify spawn-pinned model before idle", () => {
-		const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
-		for (const [label, marker] of [
-			["role assignment", "): Promise<boolean> {\n\t\tconst session = this.sessions.get(id);"],
-			["force abort", "async forceAbort(id: string"],
+		const managerSrc = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
+		const liveControlSrc = readFileSync(SESSION_LIVE_CONTROL_SOURCE, "utf-8");
+		for (const [label, src, marker] of [
+			["role assignment", managerSrc, "): Promise<boolean> {\n\t\tconst session = this.sessions.get(id);"],
+			["force abort", liveControlSrc, "async forceAbort(id: string"],
 		] as const) {
 			const body = extractMethodBody(src, marker);
 			const pinnedIdx = body.indexOf("session.spawnPinnedModel = bridgeOptions.initialModel");

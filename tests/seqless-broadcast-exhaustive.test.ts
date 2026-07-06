@@ -7,7 +7,7 @@
  * agent_end), so a reconnect during backoff/abort orphaned a stale banner or
  * stranded a streaming partial (S5/S21). Source-scan structural pin: fails if a
  * raw `broadcast(..., {type:"event", ...})` is reintroduced in session-manager.ts
- * or the extracted session-steering.ts.
+ * or the extracted session-steering.ts / session-live-control.ts.
  * See docs/design/comms-stack/02-analysis.md §RC3.
  */
 import { test } from "node:test";
@@ -24,6 +24,7 @@ test("no raw broadcast({type:'event'}) sites remain in session event sources (co
 	const sources = [
 		"src/server/agent/session-manager.ts",
 		"src/server/agent/session-steering.ts",
+		"src/server/agent/session-live-control.ts",
 	];
 	// A broadcast(...) whose frame literal carries type:"event", tolerant of
 	// newlines between the call and the key. emitSessionEvent is the only path.
@@ -42,14 +43,14 @@ test("no raw broadcast({type:'event'}) sites remain in session event sources (co
 });
 
 test("the three former bypass frames are emitted via emitSessionEvent", () => {
-	const managerSrc = fs.readFileSync(path.resolve("src/server/agent/session-manager.ts"), "utf-8");
 	const steeringSrc = fs.readFileSync(path.resolve("src/server/agent/session-steering.ts"), "utf-8");
+	const liveControlSrc = fs.readFileSync(path.resolve("src/server/agent/session-live-control.ts"), "utf-8");
 	// Assert the exact emit-call expressions exist (guards against a regression
 	// that drops the frames entirely instead of re-routing them).
 	for (const [src, call] of [
 		[steeringSrc, "emitSessionEvent(session, pendingEvent)"],
 		[steeringSrc, "emitSessionEvent(session, cancelledEvent)"],
-		[managerSrc, 'emitSessionEvent(session, { type: "agent_end", messages: [] })'],
+		[liveControlSrc, 'emitSessionEvent(session, { type: "agent_end", messages: [] })'],
 	] as const) {
 		assert.ok(src.includes(call), `expected call: ${call} (WP4/RC3)`);
 	}

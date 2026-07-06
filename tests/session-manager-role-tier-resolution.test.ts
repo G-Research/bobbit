@@ -11,7 +11,7 @@
  *     `session-setup.ts::_resolveBridgeOptions`)
  *   - session restore (`restoreSession`, session-manager.ts ~5546/5549)
  *   - role-reassignment respawn (`assignRole`, ~7543/7546)
- *   - force-abort respawn (~9614/9617)
+ *   - force-abort respawn (`session-live-control.ts`)
  *
  * A source-level pin (below) confirms all four call sites route through
  * these exact methods rather than a stale/duplicated copy. This test proves
@@ -138,6 +138,10 @@ describe("source pin: restore / respawn / force-abort-respawn route through the 
 		path.join(process.cwd(), "src/server/agent/session-manager.ts"),
 		"utf-8",
 	);
+	const liveControlSrc = fs.readFileSync(
+		path.join(process.cwd(), "src/server/agent/session-live-control.ts"),
+		"utf-8",
+	);
 	const reviveSrc = fs.readFileSync(
 		path.join(process.cwd(), "src/server/agent/session-revive.ts"),
 		"utf-8",
@@ -165,10 +169,11 @@ describe("source pin: restore / respawn / force-abort-respawn route through the 
 
 	it("force-abort respawn falls back to this.resolveInitialModel/resolveInitialThinkingLevel(session.role, session.projectId)", () => {
 		// Anchor on the force-abort-specific persisted lookup var name used just
-		// before the model/thinking pin block (see session-manager.ts ~9610).
-		const idx = src.indexOf("const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);");
+		// before the model/thinking pin block (moved to session-live-control.ts
+		// in SM decomposition cohort 15).
+		const idx = liveControlSrc.indexOf("const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);");
 		assert.ok(idx > 0, "force-abort respawn persisted lookup not found");
-		const window = src.slice(idx, idx + 2000);
+		const window = liveControlSrc.slice(idx, idx + 2000);
 		assert.match(window, /this\.resolveInitialModel\(session\.role, session\.projectId\)/);
 		assert.match(window, /this\.resolveInitialThinkingLevel\(session\.role, session\.projectId\)/);
 	});
