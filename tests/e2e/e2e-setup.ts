@@ -690,7 +690,7 @@ async function withChildrenAuthzCookie(path: string, method: string, headers: Re
 	const bare = path.split("?")[0];
 	// Child creation via `POST /api/goals` with a `parentGoalId` is now an
 	// OPERATOR-class Children mutation (the proposal UI drives it; see the S1
-	// authz block in server.ts). A node `apiFetch` carries no cookie, so child
+	// authz block in goal-crud-routes.ts). A node `apiFetch` carries no cookie, so child
 	// creation would 403 without one. We can't see the body here (only the
 	// path), so we cover ALL `POST /api/goals`; top-level goal creation ignores
 	// the cookie, so injecting it is harmless. Tests exercising the agent/deny

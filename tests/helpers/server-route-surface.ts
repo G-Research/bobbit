@@ -125,6 +125,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/prompt-autocomplete-routes.ts",
 	// STR-01 goals cohort G1 (goal read/dashboard routes).
 	"src/server/routes/goal-read-routes.ts",
+	// STR-01 goals cohort G2a (goal CRUD-core create/read/update routes).
+	"src/server/routes/goal-crud-routes.ts",
 	// STR-01 cohort 27 (task routes).
 	"src/server/routes/tasks-routes.ts",
 	// STR-01 cohort 28 (pack UI/contribution discovery routes).
