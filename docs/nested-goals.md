@@ -212,7 +212,7 @@ UI controls are UX only; the server is the authority.
 
 ### SWARM-W0 — the structural recursion cap on swarm-tagged workers
 
-A goal created with `swarmGroup` set (a dynamic-swarms fan-out sibling — see
+A goal created with `swarmGroup` set (a swarm fan-out sibling — see
 [docs/design/swarm-orchestration-w0.md](design/swarm-orchestration-w0.md)) is a
 **lowered worker node**: `GoalManager.createGoal` unconditionally forces
 **both** `subgoalsAllowed: false` **and** `maxNestingDepth: 0` on it, no matter
@@ -220,8 +220,16 @@ what the caller passed for those two fields — belt-and-braces, since either
 field alone is independently sufficient to make `checkCanSpawnChild` reject a
 spawn attempt from that worker (`PARENT_SUBGOALS_DISABLED` /
 `NESTING_DEPTH_EXCEEDED`). A goal without `swarmGroup` is completely
-unaffected. Nothing stamps `swarmGroup` in production yet — it is a seam
-exercised by tests, consumed by the swarm feature's later waves.
+unaffected. Production swarm topologies now stamp the field for best-of-N,
+plan-fan-in planning siblings, and orchestrator-worker shards. In ordinary
+pick-best groups `GoalManager.mergeChild` suppresses auto-merge until a human
+confirms the winner; in orchestrator-worker groups the stored
+`reconcileMode: "merge-all"` is the narrow exception that lets each shard child
+use the normal nested-goal merge path as it completes. Plan-fan-in keeps its
+planning siblings non-merged, runs a synthesis reduce step, then starts one
+ordinary non-swarm build child only after the `/plan-confirm` pre-build gate.
+See [docs/design/swarm-orchestration-w4.md](design/swarm-orchestration-w4.md)
+for the topology design.
 
 ### Max-depth semantics
 
@@ -542,6 +550,7 @@ per-session containers.
 | Subtree / descendant queries | `src/server/agent/goal-subtree.ts`, `goal-descendants.ts` |
 | Ready-to-merge check | `src/server/agent/child-ready-to-merge.ts` |
 | Local branch merge helpers | `src/server/agent/skills/git.ts` (`mergeChildBranchLocal`, `shouldSkipRemotePush`) |
+| Swarm topologies and merge mode | `src/server/agent/swarm-best-of-n.ts`, `swarm-plan-fan-in.ts`, `swarm-orchestrator-worker.ts`, `swarm-group-store.ts`, `goal-manager.ts` (`mergeChild`) |
 | dependsOn validation | `src/server/agent/depends-on-validation.ts` |
 | Persisted goal fields | `src/server/agent/goal-store.ts` |
 | Children tool definitions | `defaults/tools/children/*`, policy in `defaults/tool-group-policies.yaml` |

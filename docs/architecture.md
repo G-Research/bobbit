@@ -22,6 +22,10 @@ Bobbit has three layers:
 
 3. **UI components** (`src/ui/`) — Lit-based component library (forked from pi-web-ui). Message rendering, specialised tool call renderers, model selection, settings, and more.
 
+## Agent runtime map
+
+The agent runtime lives under `src/server/agent/`. `session-manager.ts` remains the public session facade, but decomposition modules now own several large areas: `session-setup.ts` runs the shared setup pipeline, `session-spawn.ts` owns create/delegate bring-up, `session-cost-plumbing.ts` resolves per-project cost trackers and emits cost updates, `session-status.ts` owns status mutation helpers, and `mcp-wiring.ts` owns MCP manager wiring. The design history and cohort plan live in [SessionManager decomposition](design/session-manager-decomposition.md).
+
 ## Client routing
 
 Bobbit's browser UI is primarily hash-routed so it can run as a static single-page app behind the gateway, Vite, or a remote reverse proxy. Session routes support both forms:
