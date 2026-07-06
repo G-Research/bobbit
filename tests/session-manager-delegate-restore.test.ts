@@ -94,7 +94,7 @@ describe("delegate restore — prompt re-assembly from durable task", () => {
 
 describe("delegate restore — source guards", () => {
 	const src = fs.readFileSync(
-		path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+		path.join(process.cwd(), "src/server/agent/session-boot.ts"),
 		"utf-8",
 	);
 	const reviveSrc = fs.readFileSync(
@@ -138,7 +138,7 @@ describe("delegate restore — source guards", () => {
 		// The orphan boot-reap MUST stay in restoreSessions() (a stubbed
 		// restoreOneSession test relies on it being here, before dispatch).
 		const reapIdx = window.indexOf("shouldReapChildOnBoot({");
-		const dispatchIdx = window.indexOf("batch.map(ps => this.restoreOneSession(ps))");
+		const dispatchIdx = window.indexOf("batch.map((ps: PersistedSession) => host.restoreOneSession(ps))");
 		assert.ok(reapIdx > 0, "delegate orphan reap must remain in restoreSessions()");
 		assert.ok(dispatchIdx > reapIdx, "orphan reap must run before live restore dispatch");
 
