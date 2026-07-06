@@ -51,6 +51,8 @@ import type { ColorStore } from "../agent/color-store.js";
 import type { GoalManager } from "../agent/goal-manager.js";
 import type { PrStatusStore } from "../agent/pr-status-store.js";
 import type { VerificationHarness } from "../agent/verification-harness.js";
+import type { TeamManager } from "../agent/team-manager.js";
+import type { PersistedTask } from "../agent/task-store.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -312,4 +314,9 @@ export interface CoreRouteCtx {
 	listGoalsAcrossProjects(opts?: { projectId?: string }): PersistedGoal[];
 	requireSubgoalsEnabled(): boolean;
 	verificationHarness: VerificationHarness;
+
+	// ── Cohort 27 (task routes) additions — append-only.
+	getTaskRecordForTask(taskId: string): { task: PersistedTask; taskManager: TaskManager; projectId: string } | undefined;
+	sandboxCanAccessTask(task: PersistedTask): boolean;
+	teamManager: TeamManager;
 }
