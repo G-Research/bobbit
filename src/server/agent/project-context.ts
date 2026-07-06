@@ -127,6 +127,7 @@ export class ProjectContext {
     // after the config stores above so the project's WorkflowStore is
     // available for workflow-id resolution at goal creation time.
     this.goalManager = new GoalManager(this.goalStore, this.workflowStore);
+    this.goalManager.setSwarmGroupStore(this.swarmGroupStore);
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */

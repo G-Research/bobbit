@@ -61,6 +61,7 @@ import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { mintOperatorConfirmation, consumeOperatorConfirmation, stableConfirmationBinding } from "../auth/operator-confirmation.js";
 import { createBestOfNSwarm, type BestOfNSiblingSpec } from "./swarm-best-of-n.js";
 import { createPlanFanInSwarm } from "./swarm-plan-fan-in.js";
+import { createOrchestratorWorkerSwarm } from "./swarm-orchestrator-worker.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { verifyBestOfNGroup } from "./swarm-verifier.js";
 import { SWARM_TOPOLOGY_POINT, SWARM_TOPOLOGY_KIND, type SwarmTopologyChoice, type SwarmTopologyArg } from "./swarm-topology-classifier.js";
@@ -212,6 +213,45 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 		return true;
 	}
 
+	// POST /api/goals/:id/swarm/orchestrator-worker — SWARM-W4.6 merge-all.
+	const orchestratorWorkerCreateMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/swarm\/orchestrator-worker$/);
+	if (orchestratorWorkerCreateMatch && req.method === "POST") {
+		const parentId = orchestratorWorkerCreateMatch[1];
+		const parent = getGoalAcrossProjects(parentId);
+		if (!parent) { json({ error: "Parent goal not found" }, 404); return true; }
+		if (!authorize(parentId, "orchestration").ok) return true;
+		if (!teamManager.getTeamState(parentId)) {
+			json({ error: "Parent goal has no active team — orchestrator-worker's decompose and synthesis steps spawn roles into the parent's own team", code: "PARENT_TEAM_NOT_ACTIVE" }, 409);
+			return true;
+		}
+		const body = await readBody(req).catch(() => null);
+		if (!body) { json({ error: "Missing body" }, 400); return true; }
+		const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : parent.title;
+		const spec = typeof body.spec === "string" ? body.spec : "";
+		if (!spec) { json({ error: "spec is required" }, 400); return true; }
+		const tokenBudgetPerNode = typeof body.tokenBudgetPerNode === "number" && body.tokenBudgetPerNode > 0 ? body.tokenBudgetPerNode : undefined;
+		const wallClockMsPerNode = typeof body.wallClockMsPerNode === "number" && body.wallClockMsPerNode > 0 ? body.wallClockMsPerNode : undefined;
+		const hardKillMarginMultiplier = typeof body.hardKillMarginMultiplier === "number" && body.hardKillMarginMultiplier > 1 ? body.hardKillMarginMultiplier : undefined;
+		await consultSwarmTopologyHub(deps, req, { goalId: parentId, spec, hasVerifyCommand: false, requestedFanOut: undefined }, resolveCandidateCwd(parent));
+		try {
+			const result = await createOrchestratorWorkerSwarm(
+				{
+					getContextForGoal: (gid) => projectContextManager.getContextForGoal(gid) ?? undefined,
+					getGoalManagerForGoal,
+					harness: verificationHarness,
+					teamManager,
+					sessionManager: deps.sessionManager,
+				},
+				{ parentGoalId: parentId, title, spec, tokenBudgetPerNode, wallClockMsPerNode, hardKillMarginMultiplier },
+			);
+			broadcastToAll({ type: "goal_created", goalId: parentId, swarmGroup: result.swarmGroup });
+			json({ ...result }, 201);
+		} catch (err) {
+			jsonError(500, err);
+		}
+		return true;
+	}
+
 	// GET/POST /api/goals/:id/swarm-groups/:swarmGroup(/verify|/confirm|/plan-verify|/plan-confirm|/plan-reject)?
 	const groupMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/swarm-groups\/([^/]+)(\/verify|\/confirm|\/plan-verify|\/plan-confirm|\/plan-reject)?$/);
 	if (groupMatch) {
@@ -245,12 +285,12 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 				lastVerify: group.lastVerify,
 				integratedGoalId: group.integratedGoalId,
 				integratedAt: group.integratedAt,
+				reconcileMode: group.reconcileMode,
 				config: group.config,
 				updatedAt: group.updatedAt,
-				// SWARM-W4.5 — present only for a `topology: "plan-fan-in"` group;
-				// `undefined` for every best-of-n/orchestrator-worker group, exactly
-				// as before this wave (zero response-shape change for existing
-				// callers that don't read these keys).
+				// SWARM-W4.5/W4.6 — present only for topologies with a reduce
+				// role (`plan-fan-in` and `orchestrator-worker`); undefined for
+				// best-of-n groups.
 				synthesis: group.synthesis,
 				buildGoalId: group.buildGoalId,
 				planRejectedAt: group.planRejectedAt,
@@ -258,16 +298,20 @@ export async function tryHandleSwarmRoute(req: http.IncomingMessage, url: URL, d
 			return true;
 		}
 
-		// SWARM-W4.5: a plan-fan-in group's siblings are planning-only, never
-		// buildable/mergeable — refuse the best-of-n verify/confirm pair
-		// outright rather than let a human accidentally `mergeChild`-integrate
-		// a plan sibling as if it were a winning build. Plan-fan-in has its
-		// own `/plan-verify`, `/plan-confirm`, `/plan-reject` pair below. This
-		// guard is the ONLY change to `/verify`/`/confirm` — their own
-		// mint/consume bodies (below) are byte-identical to before this wave.
-		const isPlanFanIn = (group.config as { topology?: string } | undefined)?.topology === "plan-fan-in";
-		if (isPlanFanIn && (suffix === "/verify" || suffix === "/confirm")) {
-			json({ error: "This is a plan-fan-in group — use /plan-verify, /plan-confirm, or /plan-reject instead", code: "WRONG_TOPOLOGY" }, 400);
+		// Non-best-of-N topologies do not have a winner candidate for the
+		// `/verify` → `/confirm` best-of-N route pair. Plan-fan-in has its own
+		// pre-build gate routes; orchestrator-worker workers merge via ordinary
+		// mergeChild calls under reconcileMode:"merge-all".
+		const topology = (group.config as { topology?: string } | undefined)?.topology;
+		const isPlanFanIn = topology === "plan-fan-in";
+		const isOrchestratorWorker = topology === "orchestrator-worker";
+		if ((isPlanFanIn || isOrchestratorWorker) && (suffix === "/verify" || suffix === "/confirm")) {
+			json({
+				error: isPlanFanIn
+					? "This is a plan-fan-in group — use /plan-verify, /plan-confirm, or /plan-reject instead"
+					: "This is an orchestrator-worker merge-all group — workers merge through ordinary mergeChild and there is no best-of-N winner to confirm",
+				code: "WRONG_TOPOLOGY",
+			}, 400);
 			return true;
 		}
 

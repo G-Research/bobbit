@@ -22,6 +22,7 @@ import type { GateStore } from "./gate-store.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { GoalCompletedCtx } from "./lifecycle-hub.js";
+import type { PromptProfile } from "./system-prompt.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
 import { anyInFlightChild } from "./team-manager-helpers.js";
 import {
@@ -2068,7 +2069,7 @@ export class TeamManager {
 		goalId: string,
 		role: string,
 		task: string,
-		opts?: { workflowGateId?: string; inputGateIds?: string[] },
+		opts?: { workflowGateId?: string; inputGateIds?: string[]; allowedTools?: string[]; promptProfile?: PromptProfile },
 	): Promise<{ sessionId: string; worktreePath?: string }> {
 		const roleStore = this.config.roleStore;
 		// Resolve via the goal's inline-roles snapshot first, then the
@@ -2240,6 +2241,8 @@ export class TeamManager {
 					// Fixed CLF-W1c; see the matching comment/tests in startTeam() above.
 					initialModel: inlineRoleDef?.model || undefined,
 					initialThinkingLevel: inlineRoleDef?.thinkingLevel || undefined,
+					allowedTools: opts?.allowedTools,
+					promptProfile: opts?.promptProfile,
 				},
 			);
 
