@@ -11,7 +11,6 @@ import { applyModelString, type ReviewModelRpc } from "../src/server/agent/revie
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
-const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 
 const API_KEY = "sk-or-" + "a".repeat(28);
 const BEARER = "bearer_secret_" + "b".repeat(40);
@@ -87,9 +86,9 @@ function stripTypesForEval(body: string): string {
 }
 
 function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
-	const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
-	let body = extractFunctionBody(src, "private async tryAutoSelectModel(session: SessionInfo)");
-	body = stripTypesForEval(body).replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
+	const src = readFileSync(path.join(PROJECT_ROOT, "src/server/agent/session-models.ts"), "utf-8");
+	let body = extractFunctionBody(src, "async tryAutoSelectModel(session: SessionInfo)");
+	body = stripTypesForEval(body).replace(/SessionModels\.AIGW_CACHE_TTL_MS/g, "60_000");
 	const applyModelString = async (_rpc: any, modelString: string) => {
 		throw new Error(`provider rejected ${modelString}: api_key=${API_KEY}; Authorization: Bearer ${BEARER}; cause=provider unavailable`);
 	};
@@ -192,6 +191,7 @@ describe("model setup error redaction", () => {
 				resolveRoleThinkingLevel: () => undefined,
 				resolveStoreForSession: () => ({ get: () => undefined, update: () => {} }),
 				_writeModelNameFile: () => {},
+				broadcast: () => {},
 			}, {
 				id: "session-manager-redaction",
 				role: "coder",

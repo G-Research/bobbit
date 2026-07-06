@@ -25,6 +25,7 @@ import { selectAigwModelForRoleTier } from "../src/server/agent/model-registry.j
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
+const SESSION_MODELS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-models.ts");
 const SESSION_REVIVE_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-revive.ts");
 const SESSION_STEERING_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-steering.ts");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
@@ -65,11 +66,11 @@ function extractMethodBody(src: string, marker: string): string {
 }
 
 function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
-	const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
-	let body = extractMethodBody(src, "private async tryAutoSelectModel(session: SessionInfo)");
+	const src = readFileSync(SESSION_MODELS_SOURCE, "utf-8");
+	let body = extractMethodBody(src, "async tryAutoSelectModel(session: SessionInfo)");
 	body = body
 		.replace(/\s+as\s+string\s*\|\s*undefined/g, "")
-		.replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
+		.replace(/SessionModels\.AIGW_CACHE_TTL_MS/g, "60_000");
 
 	const applyModelString = async (rpc: any, modelString: string, opts: any = {}) => {
 		const slash = modelString.indexOf("/");
@@ -172,6 +173,9 @@ async function exerciseAutoSelect(options: {
 			update: (_sessionId: string, update: Record<string, unknown>) => persisted.push(update),
 		}),
 		_writeModelNameFile: (_sessionId: string, model: string) => modelFiles.push(model),
+		broadcast: (clients: Set<any>, message: any) => {
+			for (const target of clients) target.messages.push(message);
+		},
 		_aigwModelCache: undefined,
 	};
 	const session = {
