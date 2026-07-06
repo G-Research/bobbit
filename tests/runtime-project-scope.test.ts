@@ -55,12 +55,7 @@ describe("runtime project scoping", () => {
 	});
 
 	it("POST /api/sessions includes the authoritative projectId in create responses", () => {
-		const source = fs.readFileSync(path.join(process.cwd(), "src/server/server.ts"), "utf-8");
-		const start = source.indexOf("\n\t// POST /api/sessions\n");
-		assert.notEqual(start, -1);
-		const end = source.indexOf("\n\t// ── Nested-goal endpoints", start);
-		assert.notEqual(end, -1);
-		const route = source.slice(start, end);
+		const route = fs.readFileSync(path.join(process.cwd(), "src/server/routes/session-creation-routes.ts"), "utf-8");
 
 		assert.match(route, /projectId:\s*session\.projectId\s*\?\?\s*resolvedProjectId/);
 		assert.match(route, /projectId:\s*session\.projectId,\s*\n\s*delegateOf:/);

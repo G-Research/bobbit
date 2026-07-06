@@ -40,7 +40,9 @@ import type { RoleManager } from "../agent/role-manager.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import type { SandboxManager } from "../agent/sandbox-manager.js";
 import type { SandboxScope } from "../auth/sandbox-token.js";
+import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ResolvedProject } from "../agent/resolve-project.js";
+import type { CwdValidationResult } from "../agent/resolve-project.js";
 import type { TsServerSupervisor } from "../lsp/supervisor.js";
 import type { PersistedGoal } from "../agent/goal-store.js";
 import type { TaskManager } from "../agent/task-manager.js";
@@ -292,4 +294,8 @@ export interface CoreRouteCtx {
 	getGoalManagerForGoal(goalId: string): GoalManager;
 	isUnsupportedForkSource(session: any, ps: any): string | null;
 	roleCreateOptions(role: Role): { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
+
+	// ── Cohort 22 (session creation route) additions — append-only.
+	sandboxTokenStore?: SandboxTokenStore;
+	writeCwdValidationError(validation: Extract<CwdValidationResult, { ok: false }>): void;
 }
