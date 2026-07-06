@@ -9,7 +9,6 @@ import { caCertPath } from "../auth/tls.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
-import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
@@ -365,7 +364,6 @@ export class RpcBridge {
 	}
 
 	async start(): Promise<void> {
-		ensurePiAiBedrockHeadersPatch();
 		const cliPath = this.options.cliPath || findAgentCli();
 		const args = buildAgentArgs(this.options);
 
