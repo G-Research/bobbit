@@ -40,7 +40,7 @@ async function startGW(dir: string, port: number, label: string): Promise<GW> {
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
 	], {
-		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), NODE_ENV: "test" },
+		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), BOBBIT_SECRETS_DIR: join(dir, ".bobbit", "state"), NODE_ENV: "test" },
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
@@ -168,18 +168,16 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 	gw.defaultProjectId = reg.id;
 	console.log(`  [boot] project ${reg.id}`);
 
-	// Create plain session (no git repo — by passing a non-git cwd)
-	// Actually: a session in a git repo auto-gets a worktree. To get "plain",
-	// we use a sibling non-git tmp dir.
-	const plainCwd = join(tmp, `.bobbit-restart-min-plain-${port1}`);
-	mkdirSync(plainCwd, { recursive: true });
+	// Create plain session (no worktree). A session in a git repo auto-gets a
+	// worktree; pass worktree:false to opt out. The cwd defaults to the project
+	// root (validateExecutionCwd rejects cwds outside the project since PR #932).
 	const plainRes = await api(gw, "/api/sessions", {
 		method: "POST",
-		body: JSON.stringify({ projectId: reg.id, cwd: plainCwd }),
+		body: JSON.stringify({ projectId: reg.id, worktree: false }),
 	});
 	expect(plainRes.status).toBe(201);
 	const plainId = (await plainRes.json() as any).id;
-	console.log(`  [boot] plain session ${plainId} cwd=${plainCwd}`);
+	console.log(`  [boot] plain session ${plainId} (no worktree)`);
 
 	// Create worktree session (cwd inside the registered git project root)
 	const wtRes = await api(gw, "/api/sessions", {
@@ -309,7 +307,6 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 
 	await stopGW(gw);
 	cleanDirs(dir);
-	cleanDirs(plainCwd);
 
 	if (failures.length) {
 		throw new Error(`Restart-minimal failures:\n  - ${failures.join("\n  - ")}`);

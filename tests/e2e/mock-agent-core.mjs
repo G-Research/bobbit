@@ -1136,8 +1136,17 @@ export class MockAgentCore {
 	 *
 	 * Emits auto_compaction_start → (tick) → auto_compaction_end with
 	 * result.firstKeptEntryId so the server appends the sidecar and refreshes.
+	 *
+	 * `reason` selects the event family emitted, faithfully mirroring pi
+	 * 0.74+: "threshold"/"auto"/"overflow" emit `auto_compaction_start/end`
+	 * (auto path, handled by session-manager); "manual" emits
+	 * `compaction_start/end` (the /compact path — session-manager's manual
+	 * branch + ws-handler's manual sidecar logic).
 	 */
-	async _handleAutoCompaction(preCount) {
+	async _handleAutoCompaction(preCount, reason = "threshold") {
+		const isManual = reason === "manual";
+		const startType = isManual ? "compaction_start" : "auto_compaction_start";
+		const endType = isManual ? "compaction_end" : "auto_compaction_end";
 		const sf = this.ensureSessionFile();
 		const ts = new Date().toISOString();
 		const firstKeptEntryId = "kept-0";
@@ -1186,12 +1195,15 @@ export class MockAgentCore {
 		this.conversationMessages = [{ id: firstKeptEntryId, ...keptMsg }];
 
 		// Lifecycle: start → settle (let the client render the in-flight card) → end.
-		this.emit({ type: "auto_compaction_start", reason: "threshold" });
+		this.emit({ type: startType, reason });
 		await this.tick(150);
-		if (!this.currentAbortController || this.currentAbortController.signal.aborted) return;
+		// The auto path runs inside a prompt turn and must honour a mid-turn
+		// abort. The manual /compact path is driven from handleCommand with no
+		// turn abort controller — don't treat its absence as an abort.
+		if (!isManual && (!this.currentAbortController || this.currentAbortController.signal.aborted)) return;
 		this.emit({
-			type: "auto_compaction_end",
-			reason: "threshold",
+			type: endType,
+			reason,
 			result: { tokensBefore, firstKeptEntryId },
 		});
 	}
@@ -2681,6 +2693,12 @@ export class MockAgentCore {
 			}
 
 			case "compact":
+				// Manual /compact: mirror pi 0.74+ by emitting compaction_start/end
+				// (reason "manual") from inside compact() before resolving. Drives the
+				// ws-handler manual branch + session-manager manual sidecar path so the
+				// summary card renders complete/ok. Keep a small pre-compaction history
+				// (3 orphans) so the transcript shape matches a real compaction.
+				await this._handleAutoCompaction(3, "manual");
 				return { success: true };
 
 			case "switch_session": {
