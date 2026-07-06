@@ -15,7 +15,7 @@ import { sessionFileRead, sessionFsContextForAgentFile } from "./session-fs.js";
 import { buildSessionSidecar, writeSessionSidecar } from "./session-sidecar.js";
 import type { PersistedSession, SessionStore } from "./session-store.js";
 import { resolveSessionRuntime } from "./session-runtime.js";
-import { resolveReadablePersistedAgentSessionFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { isHostAbsoluteAgentSessionPath, safePersistedHostAgentSessionFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import { mergeCompactionSidecarIntoMessages } from "./compaction-sidecar.js";
 import { normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { truncateLargeToolContentInMessages } from "./truncate-large-content.js";
@@ -30,30 +30,6 @@ export interface SessionTranscriptsDeps {
 	broadcastSessionCost(session: SessionInfo): void;
 	withSessionCostInState(sessionId: string, data: unknown): unknown;
 	broadcast(clients: Set<WebSocket>, msg: ServerMessage): void;
-}
-
-function isWindowsAbsolutePath(filePath: string): boolean {
-	return /^[A-Za-z]:[\\/]/.test(filePath);
-}
-
-function isContainerAgentSessionPath(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, "/");
-	return normalized === "/home/node/.bobbit/agent/sessions"
-		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
-		|| normalized === "/bobbit-state/sessions"
-		|| normalized.startsWith("/bobbit-state/sessions/");
-}
-
-function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
-	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
-	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
-}
-
-function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {
-	if (!filePath) return null;
-	if (!isHostAbsoluteAgentSessionPath(filePath)) return filePath;
-	trustPersistedAgentSessionFile(filePath);
-	return resolveReadablePersistedAgentSessionFile(filePath);
 }
 
 function stringifyPersistedToolResultContent(content: unknown): string {
@@ -175,6 +151,42 @@ export class SessionTranscripts {
 		return { messages };
 	}
 
+	/**
+	 * PERF-06: memoized base snapshot for `get_messages` (on-attach, live
+	 * `get_messages`, and post-`restart_agent`). Wraps the expensive part of
+	 * the pipeline — `rpcClient.getMessages()` (agent-process RPC round-trip
+	 * + full-transcript JSON parse) followed by `hydrateClaudeCodeSnapshotMessages`
+	 * and `normalizeToolResultErrorSnapshot` — and caches the result on the
+	 * session, keyed by `session.eventBuffer.lastSeq`.
+	 *
+	 * Soundness of the cache key: `emitSessionEvent` is the single emit path
+	 * for every live agent event (see its doc comment) and always calls
+	 * `session.eventBuffer.push(...)`, bumping `lastSeq`. Every call site
+	 * invokes `handleAgentLifecycle(session, event)` — which synchronously
+	 * persists new Claude Code transcript rows via
+	 * `persistClaudeCodeMessageToTranscript` (a synchronous `fs.appendFileSync`)
+	 * — strictly before `emitSessionEvent`. So by the time `lastSeq` advances,
+	 * both the agent's own live transcript (what `rpcClient.getMessages()`
+	 * returns) AND the persisted-file fallback that
+	 * `hydrateClaudeCodeSnapshotMessages` reads have already reflected the
+	 * change. A cache hit at an unchanged `lastSeq` is therefore guaranteed
+	 * byte-identical to a fresh fetch. Restarts always replace `SessionInfo`
+	 * with a brand-new object (fresh `messagesSnapshotCache: undefined`), so
+	 * there is no cross-restart collision even though the reseeded
+	 * `EventBuffer` can briefly reuse the pre-restart `lastSeq` value.
+	 *
+	 * Deliberately NOT covered by this cache — callers must still apply these
+	 * fresh on every call, cache hit or miss, because they read session-mutable
+	 * state that can change independently of `lastSeq` (e.g. a steer dispatched
+	 * before the agent has emitted any event yet, or a compaction-sidecar
+	 * fallback write on RPC rejection with no preceding event):
+	 *   - `spliceInFlightMessage` / `spliceInFlightSteers`
+	 *   - `mergeCompactionSidecarIntoMessages` / `mergeSkillSidecarIntoMessages`
+	 *   - `truncateLargeToolContentInMessages` / `stampSnapshotOrder`
+	 *
+	 * Concurrent callers at the same `lastSeq` share one in-flight promise, so
+	 * N tabs opening/reconnecting at once trigger exactly one RPC round-trip.
+	 */
 	async getMessagesSnapshotBase(session: SessionInfo): Promise<{ success: boolean; data?: unknown; error?: string }> {
 		const seq = session.eventBuffer.lastSeq;
 		const cached = session.messagesSnapshotCache;
@@ -187,6 +199,9 @@ export class SessionTranscripts {
 			return { ...msgsResp, data: raw };
 		})();
 		session.messagesSnapshotCache = { seq, promise };
+		// Never let a failed fetch poison the cache for the next attempt at the
+		// same seq (e.g. a transient RPC timeout) — only successful bases are
+		// worth reusing.
 		promise.then(
 			(r) => { if (!r?.success && session.messagesSnapshotCache?.promise === promise) session.messagesSnapshotCache = undefined; },
 			() => { if (session.messagesSnapshotCache?.promise === promise) session.messagesSnapshotCache = undefined; },
@@ -271,12 +286,32 @@ export class SessionTranscripts {
 					return;
 				}
 
+				// Store the path as returned by the agent — always in the agent's
+				// coordinate system (container path for sandbox, host path for local).
+				// The session-fs module handles routing reads/checks to the right place.
 				const agentSessionFile = stateResp.data.sessionFile;
+
+				// NEVER pre-create this file. Pi (>=0.77) creates the session JSONL
+				// lazily on the first assistant flush with an exclusive `openSync(file, "wx")`.
+				// If Bobbit touches the path first, that open throws
+				// `EEXIST: file already exists` and the agent loses every transcript
+				// write for the session. We only record the path; restoreOneSession()
+				// tolerates the file not yet existing (a session that crashed before its
+				// first assistant message has no transcript to restore anyway).
+				// Pinned by tests/session-manager-no-precreate.test.ts.
 				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
 
+				// Write the bobbit sidecar alongside the .jsonl so a future
+				// recovery (when sessions.json loses this entry) can restore the
+				// ORIGINAL bobbit session id, title, role, team links, and model
+				// prefs instead of inventing fresh ones. Fire-and-forget;
+				// atomic write makes repeat invocations safe.
 				try {
 					const ps = this.resolveStoreForSession(session.id).get(session.id);
 					if (ps) {
+						// pi-coding-agent names .jsonl files after the agent session id
+						// (path/<agent-id>.jsonl). Use the basename as a stable id when
+						// the rpc response doesn't expose it directly.
 						const agentSessionId = (stateResp.data?.sessionId as string | undefined)
 							|| path.basename(agentSessionFile).replace(/\.jsonl$/, "");
 						const sidecar = buildSessionSidecar(
@@ -319,11 +354,16 @@ export class SessionTranscripts {
 				}
 			}
 
+			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
+			// For sandboxed sessions, the CWD stored in ps.cwd is the host path (set during setup).
 			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
 			const TOLERANCE_MS = 60_000;
 
 			const sessionRoots = trustedAgentSessionsRoots();
 
+			// Prefer an exact filename/session-id match across all known roots before
+			// falling back to timestamp proximity. This preserves historical-root
+			// recovery when another root has a different session with the same createdAt.
 			for (const sessionsDir of sessionRoots) {
 				const cwdDir = path.join(sessionsDir, cwdSlug);
 				if (!fs.existsSync(cwdDir)) continue;
@@ -342,12 +382,15 @@ export class SessionTranscripts {
 				const files = fs.readdirSync(cwdDir).filter(f => f.endsWith(".jsonl"));
 				if (files.length === 0) continue;
 
+				// Parse timestamp from filename: 2026-04-03T15-15-12-009Z_<uuid>.jsonl
+				// Find the file whose timestamp is closest to (and within 60s of) ps.createdAt.
 				let bestFile: string | null = null;
 				let bestDelta = Infinity;
 
 				for (const file of files) {
 					const tsMatch = file.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
 					if (!tsMatch) continue;
+					// Convert filename timestamp back to ISO: replace hyphens in time part with colons.
 					const isoStr = tsMatch[1]
 						.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "$1-$2-$3T$4:$5:$6.$7Z");
 					const fileTime = new Date(isoStr).getTime();

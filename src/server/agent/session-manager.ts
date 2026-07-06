@@ -18,7 +18,7 @@ import { RpcBridge, hostPathToContainer, type IRpcBridge, type RpcBridgeOptions,
 import { readClaudeCodeConfig } from "./claude-code-config.js";
 import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime } from "./session-runtime.js";
 import { sessionFileExists, sessionFileRead, sessionFsContextForAgentFile } from "./session-fs.js";
-import { resolveReadablePersistedAgentSessionFile, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { isHostAbsoluteAgentSessionPath, safePersistedHostAgentSessionFile, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { SessionStore, type PersistedSession, type WorktreePushPolicy, type SessionRuntime } from "./session-store.js";
@@ -132,30 +132,6 @@ const execFileAsync = promisify(execFileCb);
 
 function isSandboxContainerPath(cwd?: string): boolean {
 	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
-}
-
-function isWindowsAbsolutePath(filePath: string): boolean {
-	return /^[A-Za-z]:[\\/]/.test(filePath);
-}
-
-function isContainerAgentSessionPath(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, "/");
-	return normalized === "/home/node/.bobbit/agent/sessions"
-		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
-		|| normalized === "/bobbit-state/sessions"
-		|| normalized.startsWith("/bobbit-state/sessions/");
-}
-
-function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
-	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
-	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
-}
-
-function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {
-	if (!filePath) return null;
-	if (!isHostAbsoluteAgentSessionPath(filePath)) return filePath;
-	trustPersistedAgentSessionFile(filePath);
-	return resolveReadablePersistedAgentSessionFile(filePath);
 }
 
 export function extractClaudeCodeSessionId(value: any): string | undefined {
