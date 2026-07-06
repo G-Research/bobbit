@@ -671,30 +671,32 @@ not create missing parents recursively.
 
 #### Project order
 
-`GET /api/projects` returns visible projects in the server-persisted order. Headquarters is anchored first when visible and has no `position`; normal project records may include a `position` field, but clients should not need to sort by it.
+`GET /api/projects` returns visible projects in the server-persisted order. Headquarters is a normal reorderable project (PR #933) and carries a `position` field like any other visible project. Clients should not need to sort by it — the server returns projects already sorted by position.
 
 `PUT /api/projects/order` is a reserved collection-level endpoint. It must be handled by the dedicated order route, never by the generic `PUT /api/projects/:id` update path. The server keeps the dedicated route before project-id handlers and excludes reserved collection subroutes from the generic matcher so `order` cannot be interpreted as a project ID.
 
-`PUT /api/projects/order` saves a new global order for normal visible projects. Do not include Headquarters:
+`PUT /api/projects/order` saves a new global order for all visible projects, including Headquarters when it is visible.
 
 ```http
 PUT /api/projects/order
 Content-Type: application/json
 
-{ "projectIds": ["project-c", "project-a", "project-b"] }
+{ "projectIds": ["headquarters", "project-c", "project-a", "project-b"] }
 ```
 
-`projectIds` must be the complete current list of normal visible project IDs in the requested order. Headquarters, hidden projects, and `system` are excluded. On success, the server stores contiguous positions, returns `200` with all visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
+`projectIds` must be the complete current ordered list of all participating visible project IDs (normal projects **and** Headquarters when shown). Hidden projects and `system` are excluded. When Headquarters is hidden from project lists via the `showHeadquartersInProjectLists` preference, it is excluded from the expected set — clients should omit it from the payload in that case and the server preserves its existing slot.
+
+On success, the server stores contiguous positions, returns `200` with all visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
 
 Project objects include the normal project fields; this example is truncated to the fields relevant to ordering:
 
 ```json
 {
   "projects": [
-    { "id": "headquarters", "name": "Headquarters", "kind": "headquarters", "rootPath": "/server" },
-    { "id": "project-c", "name": "Gamma", "rootPath": "/repo/gamma", "position": 0 },
-    { "id": "project-a", "name": "Alpha", "rootPath": "/repo/alpha", "position": 1 },
-    { "id": "project-b", "name": "Beta", "rootPath": "/repo/beta", "position": 2 }
+    { "id": "headquarters", "name": "Headquarters", "kind": "headquarters", "rootPath": "/server", "position": 0 },
+    { "id": "project-c", "name": "Gamma", "rootPath": "/repo/gamma", "position": 1 },
+    { "id": "project-a", "name": "Alpha", "rootPath": "/repo/alpha", "position": 2 },
+    { "id": "project-b", "name": "Beta", "rootPath": "/repo/beta", "position": 3 }
   ]
 }
 ```

@@ -116,7 +116,7 @@ The `showHeadquartersInProjectLists` preference controls presentation only:
 
 The preference is presentation-only and persists across reload/restart. When Headquarters is hidden and no normal projects are visible, the UI shows an escape hatch with **Quick Session in Headquarters**, **Show Headquarters**, and **Add Project**.
 
-Headquarters is anchored before normal projects and is excluded from user drag-reorder payloads (`ProjectRegistry.setVisibleOrder()` returns Headquarters first, then normal projects by position). Deleting the same-root normal project removes only that entry and never removes or hides Headquarters.
+Headquarters is a normal, user-reorderable project (since PR #933). It participates in `ProjectRegistry.setVisibleOrder()` just like any other visible project, carries a `position` field, and can be dragged to any slot in the sidebar. A freshly-created Headquarters record takes the next available position (appending after any pre-existing projects). Deleting the same-root normal project removes only that entry and never removes or hides Headquarters.
 
 ## Immutability and Add Project safeguards
 
