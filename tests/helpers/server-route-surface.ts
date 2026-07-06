@@ -125,6 +125,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/prompt-autocomplete-routes.ts",
 	// STR-01 cohort 27 (task routes).
 	"src/server/routes/tasks-routes.ts",
+	// STR-01 cohort 28 (pack UI/contribution discovery routes).
+	"src/server/routes/extension-host-ui-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */

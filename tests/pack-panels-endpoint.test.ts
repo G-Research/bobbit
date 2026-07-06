@@ -5,8 +5,8 @@
  * `GET /api/ext/packs/:packId/panels/:panelId` — NOT the old tool-keyed
  * `/api/tools/:tool/panel/:panelId` (which is removed).
  *
- * The endpoint lives inside server.ts's large handler; this pins its security
- * shape at the source level (no full gateway spin-up):
+ * The endpoint lives inside the STR-01 route-registry module; this pins its
+ * security shape at the source level (no full gateway spin-up):
  *   - it is BEARER-ONLY (no allowedTools / action-guard call), like the renderer;
  *   - it resolves the panel via the pack-contribution registry by { packId, panelId };
  *   - it re-validates the resolved path stays within the PACK ROOT
@@ -19,13 +19,14 @@ import fs from "node:fs";
 import path from "node:path";
 
 const serverSrc = fs.readFileSync(path.resolve("src/server/server.ts"), "utf-8");
+const routeSrc = fs.readFileSync(path.resolve("src/server/routes/extension-host-ui-routes.ts"), "utf-8");
 
 function extPanelBlock(): string {
-	const start = serverSrc.indexOf("const extPanelMatch = url.pathname.match");
-	assert.ok(start > 0, "pack-addressed panel endpoint must exist in server.ts");
-	const end = serverSrc.indexOf("GET /api/ext/contributions", start);
-	assert.ok(end > start, "the contributions endpoint must follow the panel endpoint");
-	return serverSrc.slice(start, end);
+	const start = routeSrc.indexOf("GET /api/ext/packs/:packId/panels/:panelId");
+	assert.ok(start > 0, "pack-addressed panel endpoint must exist in extension-host-ui-routes.ts");
+	const end = routeSrc.indexOf("GET /api/ext/packs/:packId/settings-sections", start);
+	assert.ok(end > start, "the settings-section endpoint must follow the panel endpoint");
+	return routeSrc.slice(start, end);
 }
 
 function codeOnly(block: string): string {
@@ -35,12 +36,14 @@ function codeOnly(block: string): string {
 describe("GET /api/ext/packs/:packId/panels/:panelId (pack-schema-v1 §6.3)", () => {
 	it("the OLD tool-keyed panel route is removed", () => {
 		assert.equal(serverSrc.includes("\\/api\\/tools\\/([^/]+)\\/panel\\/"), false, "old /api/tools/:tool/panel/:panelId must be gone");
+		assert.equal(routeSrc.includes("\\/api\\/tools\\/([^/]+)\\/panel\\/"), false, "old /api/tools/:tool/panel/:panelId must not be reintroduced in the registry module");
 	});
 
-	it("matches the pack-addressed route and is GET", () => {
+	it("registers the pack-addressed route as GET", () => {
 		const block = extPanelBlock();
-		assert.ok(block.includes("\\/api\\/ext\\/packs\\/([^/]+)\\/panels\\/([^/]+)"), "must capture :packId + :panelId");
-		assert.match(block, /req\.method === "GET"/);
+		assert.ok(routeSrc.includes('table.register("GET", "/api/ext/packs/:packId/panels/:panelId", handleExtPackPanelGet)'), "must register GET /api/ext/packs/:packId/panels/:panelId");
+		assert.match(block, /decodeURIComponent\(params\.packId\)/);
+		assert.match(block, /decodeURIComponent\(params\.panelId\)/);
 	});
 
 	it("is bearer-only — NO allowedTools / action-guard / scoped-guard call", () => {
