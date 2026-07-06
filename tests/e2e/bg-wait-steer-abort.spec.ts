@@ -50,8 +50,12 @@ test.describe("bash_bg wait — steer abort", () => {
 			expect(bgRes.status).toBe(201);
 			const bg = await bgRes.json();
 
-			const waitRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=5`);
+			// Use a generous timeout (30s) — on Windows under load, Node.js startup
+			// can take several seconds, causing spurious timeouts at 5s.
+			const waitRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=30`);
 			expect(waitRes.status).toBe(200);
+			const waitBody = await waitRes.json();
+			expect(waitBody.timedOut, "process should have exited before the 30s timeout").toBe(false);
 
 			const logsRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}/logs`);
 			expect(logsRes.status).toBe(200);

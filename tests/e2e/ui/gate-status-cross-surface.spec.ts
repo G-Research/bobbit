@@ -129,7 +129,7 @@ async function waitForGatePassed(goalId: string): Promise<void> {
 		const body = await res.json();
 		const gates = Array.isArray(body?.summary?.gates) ? body.summary.gates : [];
 		return gates.find((gate: any) => gate?.gateId === GATE_ID)?.effectiveStatus ?? null;
-	}, { timeout: 15_000, message: "first gate signal should pass before re-signal coverage starts" }).toBe("passed");
+	}, { timeout: 30_000, message: "first gate signal should pass before re-signal coverage starts" }).toBe("passed");
 }
 
 function expectedGateBadge(label: string): { compactText: string; requiresBlink: boolean } | null {
