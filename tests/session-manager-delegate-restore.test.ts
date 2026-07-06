@@ -34,7 +34,7 @@ initPromptDirs(path.join(tmpRoot, "state"));
 
 /**
  * Verbatim copy of the durable delegate taskSpec assembly used by
- * session-manager.ts::buildDelegatePromptParts and session-setup.ts::_resolvePrompt
+ * session-prompt-plumbing.ts::buildDelegatePromptParts and session-setup.ts::_resolvePrompt
  * mode === "delegate". Kept in lock-step with production by the source guard below.
  */
 function buildDelegateTaskSpec(ps: Pick<PersistedSession, "instructions" | "context">): string {
@@ -165,7 +165,7 @@ describe("delegate restore — source guards", () => {
 /**
  * F22 (RECONCILIATION-2026-07-05.md NEXT QUEUE item 5) — narrow-worker
  * delegate profile. Narrowness criterion (see `isNarrowDelegateAllowedTools`
- * in session-manager.ts): a delegate is PROVABLY narrow iff its spawn-time
+ * in session-prompt-plumbing.ts): a delegate is PROVABLY narrow iff its spawn-time
  * `allowedTools` is a non-empty, EXPLICIT list drawn entirely from pure
  * file/shell primitives (read/write/edit/grep/find/ls/bash/bash_bg/
  * read_session/activate_skill) — no team/goal/gate/review/task tool. An
@@ -192,12 +192,12 @@ describe("F22 — narrow-delegate criterion (isNarrowDelegateAllowedTools)", () 
 
 describe("F22 — buildDelegatePromptParts wires the narrow-worker profile (source guard)", () => {
 	const src = fs.readFileSync(
-		path.join(process.cwd(), "src/server/agent/session-manager.ts"),
+		path.join(process.cwd(), "src/server/agent/session-prompt-plumbing.ts"),
 		"utf-8",
 	);
 
 	it("applies isNarrowDelegateAllowedTools, trims the AGENTS.md cascade to nearest-only, and sets promptProfile", () => {
-		const idx = src.indexOf("private buildDelegatePromptParts(opts: {");
+		const idx = src.indexOf("buildDelegatePromptParts(opts: {");
 		assert.ok(idx > 0, "buildDelegatePromptParts declaration not found");
 		const window = src.slice(idx, idx + 2_000);
 
