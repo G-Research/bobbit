@@ -327,4 +327,7 @@ export interface CoreRouteCtx {
 	// ── Goals G2b additions — append-only.
 	// No new fields: lifecycle/archive routes reuse ctx values already
 	// threaded by earlier cohorts.
+
+	// ── Goals G3a additions — append-only.
+	broadcastToGoal(goalId: string, event: any): void;
 }

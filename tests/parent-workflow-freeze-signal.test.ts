@@ -3,10 +3,10 @@
  * execution.verify[] (sets execution.metadata.frozen = "true").
  *
  * `computePlanFreezeUpdate()` (parent-workflow-freeze.ts) is the pure helper
- * the gate-signal handler in server.ts calls. These tests pin:
+ * the gate-signal handler in goal-gate-heavy-routes.ts calls. These tests pin:
  *   1. The helper's guards (only goal-plan + parent + execution-gate freezes).
  *   2. The freeze CONTRACT end-to-end at the data layer: apply the update the
- *      way the server.ts handler does (goalManager.getGoalStore().update),
+ *      way the goal-gate-heavy-routes.ts handler does (goalManager.getGoalStore().update),
  *      reload the store from disk, and confirm `frozen` is durably "true" and
  *      that the GET /plan frozen-read flips false → true.
  *   3. Idempotency: re-signalling is a harmless no-op write.
@@ -71,7 +71,7 @@ function readFrozen(goal: PersistedGoal | undefined, gateId = "execution"): bool
 }
 
 /**
- * Mirror of the server.ts gate-signal handler's freeze step: compute the
+ * Mirror of the goal-gate-heavy-routes.ts gate-signal handler's freeze step: compute the
  * update and persist it via the goal store the same way the route does.
  */
 function applyFreezeLikeHandler(gm: GoalManager, goal: PersistedGoal, gateId: string): boolean {
