@@ -35,6 +35,28 @@ function resolveMaxForks(): number {
 	}
 }
 
+// Files that mutate process.env / NODE_OPTIONS at module-top (or in beforeAll) and
+// require genuine process isolation because a sibling file's env-guard afterAll can
+// clobber the values between collection and test execution under pool:forks isolate:false.
+// Keep this list alphabetical. Target: ≤10 files (currently 9 + some env-bleed stragglers).
+const singleForkFiles = [
+	// extension-host files all spawn worker_threads that need NODE_OPTIONS=--import ts-worker-register
+	// which env-guard's afterAll strips between collect and run.
+	"tests2/core/extension-host-action-dispatcher.test.ts",
+	"tests2/core/extension-host-channel-registry.test.ts",
+	"tests2/core/extension-host-isolation-config-invariant.test.ts",
+	"tests2/core/extension-host-module-isolation.test.ts",
+	"tests2/core/extension-host-route-dispatcher.test.ts",
+	// env-bleed stragglers: BOBBIT_DIR / HOME / agent-dir recorded at module-top
+	"tests2/core/container-path-translation.test.ts",
+	"tests2/core/goal-metadata-edges.test.ts",
+	"tests2/core/lifecycle-hub.test.ts",
+	"tests2/core/pr-walkthrough-durable-routes.test.ts",
+	"tests2/core/sandbox-wiring-goal-provisioned.test.ts",
+	"tests2/core/session-recovery-agent-dir.test.ts",
+	"tests2/core/transcript-sanitizer-agent-dir.test.ts",
+];
+
 const MAX_FORKS = resolveMaxForks();
 console.log(
 	`[vitest.config] maxForks=${MAX_FORKS} (source: ${
@@ -75,10 +97,8 @@ export default defineConfig({
 					// Exclude stragglers that require process isolation (singleFork project below)
 					include: ["tests2/core/**/*.test.ts"],
 					exclude: [
-						"tests2/core/session-recovery-agent-dir.test.ts",
-						"tests2/core/container-path-translation.test.ts",
-						"tests2/core/goal-metadata-edges.test.ts",
-						"tests2/core/transcript-sanitizer-agent-dir.test.ts",
+						// singleFork stragglers — all listed in singleFork project below
+						...singleForkFiles,
 					],
 				},
 			},
@@ -92,17 +112,7 @@ export default defineConfig({
 					isolate: true,
 					pool: "forks" as const,
 					poolOptions: { forks: { singleFork: true } },
-					include: [
-						// HOME/USERPROFILE env is set at module-top AND re-asserted in beforeAll;
-						// under rare sibling fork orderings the re-assert fires too late.
-						"tests2/core/session-recovery-agent-dir.test.ts",
-						// BOBBIT_AGENT_DIR/BOBBIT_DIR set at module-top; same shared-fork ordering hazard.
-						"tests2/core/container-path-translation.test.ts",
-						// LifecycleHub/disabledProviders bleed from global BOBBIT_DIR mutation.
-						"tests2/core/goal-metadata-edges.test.ts",
-						// Agent-dir history bleed from module-top process.env recording.
-						"tests2/core/transcript-sanitizer-agent-dir.test.ts",
-					],
+					include: singleForkFiles,
 				},
 			},
 			{
