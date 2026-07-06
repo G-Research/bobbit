@@ -15,12 +15,12 @@ import { sessionFileRead, sessionFsContextForAgentFile } from "./session-fs.js";
 import { buildSessionSidecar, writeSessionSidecar } from "./session-sidecar.js";
 import type { PersistedSession, SessionStore } from "./session-store.js";
 import { resolveSessionRuntime } from "./session-runtime.js";
-import { isHostAbsoluteAgentSessionPath, safePersistedHostAgentSessionFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { safePersistedHostAgentSessionFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import { mergeCompactionSidecarIntoMessages } from "./compaction-sidecar.js";
 import { normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
-import { trustedAgentSessionsRoots } from "./agent-session-path.js";
+import { isHostAbsoluteAgentSessionPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
 
 export interface SessionTranscriptsDeps {
 	resolveStoreForId(id: string): SessionStore | null;

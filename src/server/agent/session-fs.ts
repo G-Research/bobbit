@@ -12,6 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { isHostAbsoluteAgentSessionPath } from "./agent-session-path.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 
 async function containerPathToHostLazy(filePath: string): Promise<string> {
@@ -37,23 +38,6 @@ export class CrossRealmCopyError extends Error {
 export interface SessionFsContext {
 	sandboxed?: boolean;
 	projectId?: string;
-}
-
-function isWindowsAbsolutePath(filePath: string): boolean {
-	return /^[A-Za-z]:[\\/]/.test(filePath);
-}
-
-function isContainerAgentSessionPath(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, "/");
-	return normalized === "/home/node/.bobbit/agent/sessions"
-		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
-		|| normalized === "/bobbit-state/sessions"
-		|| normalized.startsWith("/bobbit-state/sessions/");
-}
-
-function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
-	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
-	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
 }
 
 export function sessionFsContextForAgentFile(ps: Pick<SessionFsContext, "sandboxed" | "projectId">, filePath: string | undefined): SessionFsContext {

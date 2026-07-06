@@ -37,6 +37,7 @@ import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type 
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { resolveSafeSessionsPath } from "./transcript-sanitizer.js";
+import { isHostAbsoluteAgentSessionPath } from "./agent-session-path.js";
 import { sidecarPathFor } from "./session-sidecar.js";
 import { cleanupSessionPrompt, purgePromptSectionsJson } from "./system-prompt.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
@@ -44,25 +45,6 @@ import { shouldSkipRemotePushForTests } from "../skills/git.js";
 import { shouldKeepDespiteOrphan } from "./orphan-cleanup.js";
 
 const execFileAsync = promisify(execFileCb);
-
-// Duplicated from session-manager.ts (also duplicated separately in
-// session-fs.ts) rather than imported — session-manager.ts imports
-// ArchivedWorktreeManager from this file, so importing back from
-// session-manager.ts would create a real import cycle. These are small,
-// pure, and already tolerated as a pre-existing duplication pattern between
-// session-manager.ts and session-fs.ts; not introduced by this extraction.
-function isWindowsAbsolutePath(filePath: string): boolean {
-	return /^[a-zA-Z]:[\\/]/.test(filePath);
-}
-
-function isContainerAgentSessionPath(filePath: string): boolean {
-	return filePath.startsWith("/workspace") || filePath.startsWith("/root/.claude") || filePath.startsWith("/home/");
-}
-
-function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
-	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
-	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
-}
 
 export type ArchivedWorktreeLegacyStatus = "removable" | "skipped" | "already-cleaned";
 export type ArchivedWorktreeDisposition = "ready-to-clean" | "already-cleaned" | "ineligible" | "needs-attention" | "failed";
