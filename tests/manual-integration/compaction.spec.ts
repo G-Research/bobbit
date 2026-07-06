@@ -1,17 +1,19 @@
 /**
  * Real-LLM manual-integration test for context compaction via the explicit
- * `/compact` command (the user-initiated counterpart to the auto-compaction
- * path covered by `compaction-pressure.spec.ts`).
+ * `/compact` command (the user-initiated path). The auto/threshold
+ * compaction lifecycle is covered deterministically (mock agent, no LLM) by
+ * the `@live-compaction-affordance` test in
+ * `tests/e2e/ui/pre-compaction-history.spec.ts`.
  *
  * Runs under the manual-integration config (real LLM, ~5 min wall):
  *
  *   npm run test:manual -- --grep "compaction —"
  *
  * Unlike its previous life under a config-level `webServer`, this spec
- * bootstraps its own isolated gateway in `beforeAll`/`afterAll` (same pattern
- * as `compaction-pressure.spec.ts`) so it is collected by
- * `playwright-manual.config.ts` with no shared web server. The gateway serves
- * the built UI so the browser can drive the real `/compact` flow.
+ * bootstraps its own isolated gateway in `beforeAll`/`afterAll` so it is
+ * collected by `playwright-manual.config.ts` with no shared web server. The
+ * gateway serves the built UI so the browser can drive the real `/compact`
+ * flow.
  *
  * Flow:
  *   1. Knock down the default model's contextWindow so the session faces a
@@ -64,6 +66,7 @@ async function startGW(dir: string, agentDir: string, port: number): Promise<GW>
 		env: {
 			...process.env,
 			BOBBIT_DIR: join(dir, ".bobbit"),
+			BOBBIT_SECRETS_DIR: join(dir, ".bobbit", "state"),
 			BOBBIT_AGENT_DIR: agentDir,
 			NODE_ENV: "test",
 		},
@@ -238,7 +241,12 @@ test("compaction — real LLM @real", async ({ page }) => {
 		writeContextWindowOverride(agentDir, modelId, providerId, 16_000);
 		await stopGW(gw);
 		gw = await startGW(dir, agentDir, port);
-		gw.defaultProjectId = (await (await api(gw, "/api/projects")).json() as any).projects?.[0]?.id || gw.defaultProjectId;
+		// GET /api/projects returns a bare array — read [0].id, not .projects[0].id.
+		{
+			const projList = await (await api(gw, "/api/projects")).json() as any;
+			const projects = Array.isArray(projList) ? projList : (projList?.projects ?? []);
+			gw.defaultProjectId = projects[0]?.id || gw.defaultProjectId;
+		}
 
 		const otherRes = await api(gw, "/api/sessions", { method: "POST", body: "{}" });
 		expect(otherRes.status).toBe(201);

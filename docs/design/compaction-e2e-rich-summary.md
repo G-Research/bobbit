@@ -669,6 +669,16 @@ Flake avoidance:
 
 ### 3.2 Manual‑integration — `tests/manual-integration/compaction-pressure.spec.ts`
 
+> **Superseded / removed.** This real-LLM pressure spec was removed: it seeded
+> agent auth by copying a static `auth.json` OAuth snapshot whose short-lived
+> access token expired mid-run (refresh failed with `invalid_grant`), so it
+> could not authenticate reliably. The auto/threshold compaction lifecycle it
+> covered is now asserted deterministically (mock agent, no LLM) by the
+> `@live-compaction-affordance` test in
+> `tests/e2e/ui/pre-compaction-history.spec.ts`, which checks the summary card
+> resolves to `data-state="complete"` / `data-verdict="ok"`. The section below
+> is retained for historical design rationale.
+
 Follow `tests/manual-integration/restart-minimal.spec.ts:1–60` for the
 gateway scaffold:
 

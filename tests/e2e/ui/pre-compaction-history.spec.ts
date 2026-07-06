@@ -254,6 +254,15 @@ test.describe("Pre-compaction history affordance", () => {
 		const cards = page.locator("[data-testid='compaction-summary-card']");
 		await expect(cards.first()).toBeVisible({ timeout: 20_000 });
 
+		// The live auto/threshold compaction must resolve to a SUCCESSFUL card.
+		// This is the deterministic (mock-agent, no-LLM) coverage of the terminal
+		// state formerly asserted only by the real-LLM manual `compaction-pressure`
+		// spec: server-side auto_compaction_start/end lifecycle -> sidecar +
+		// broadcast -> client renders the summary card as complete/ok.
+		await expect(cards.first()).toHaveAttribute("data-state", "complete", { timeout: 20_000 });
+		await expect(cards.first().locator("[data-test='verdict']"))
+			.toHaveAttribute("data-verdict", "ok", { timeout: 15_000 });
+
 		// The affordance must surface in the live session. Proactively kick the
 		// count fetch (headless IntersectionObserver can be flaky) and wait for
 		// the resolved collapsed state with the correct count. Reaching this

@@ -245,21 +245,23 @@ npm run test:manual
 It needs an API key (real LLM), so it is opt-in and never part of the
 `unit` or `e2e` gates.
 
-### Manual-integration pressure test
+### Auto-compaction lifecycle coverage (deterministic e2e)
 
-`tests/manual-integration/compaction-pressure.spec.ts` exercises the
-**real auto-compaction** path with real agents and Docker. It pushes a
-session near the actual context limit, waits for the agent subprocess to
-fire `auto_compaction_start` on its own, asserts the card renders with
-`data-test="trigger"` reading `auto`, then sends one more prompt and
-checks the agent keeps working post-compact. Runtime is roughly the same
-as the rest of the manual suite (~5 min).
+The **auto-compaction** path is covered deterministically (mock agent, no
+real LLM) by the `@live-compaction-affordance` test in
+`tests/e2e/ui/pre-compaction-history.spec.ts`. It drives a real mock-agent
+auto/threshold compaction (`AUTO_COMPACT:N`), exercising the full server
+lifecycle (`auto_compaction_start`/`auto_compaction_end` -> sidecar append +
+broadcast -> client render), and asserts the summary card resolves to
+`data-state="complete"` with `data-verdict="ok"`, plus the single-card
+invariant and the pre-compaction affordance.
 
-Run it with:
-
-```bash
-npm run test:manual
-```
+> A previous real-LLM `compaction-pressure.spec.ts` manual test covered the
+> same terminal card state, but it could not authenticate reliably (it
+> copied a static `auth.json` OAuth snapshot whose short-lived access token
+> expired mid-run), so it was removed in favour of the deterministic e2e
+> above. The explicit user-initiated `/compact` path still has a real-LLM
+> manual test (`tests/manual-integration/compaction.spec.ts`).
 
 ## Files
 
@@ -279,5 +281,5 @@ npm run test:manual
 | Browser E2E (`@live-compaction-affordance` live-session affordance + transient count-probe retry) | `tests/e2e/ui/pre-compaction-history.spec.ts` |
 | Compact-cost regression | `tests/e2e/compact-cost-ws.spec.ts`, `tests/e2e/ui/compact-cost.spec.ts`, `tests/context-cost-stats.spec.ts` |
 | Real-LLM `/compact` (manual) | `tests/manual-integration/compaction.spec.ts` |
-| Manual-integration pressure test | `tests/manual-integration/compaction-pressure.spec.ts` |
+| Auto-compaction lifecycle (deterministic e2e) | `tests/e2e/ui/pre-compaction-history.spec.ts` (`@live-compaction-affordance`) |
 | Full design rationale | `docs/design/compaction-e2e-rich-summary.md` |
