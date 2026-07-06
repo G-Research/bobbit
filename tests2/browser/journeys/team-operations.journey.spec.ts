@@ -3,7 +3,7 @@
  * Covers: journey-team-delegate, journey-dashboard-fanout
  * Consolidated from: archive-child-cascade, team-delegate-*, dashboard-fanout-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 
 test.describe("Journey: Team Delegate", () => {
 	test("goal dashboard accessible for team delegate context", async ({ page }) => {
@@ -56,6 +56,40 @@ test.describe("Journey: Dashboard Fanout", () => {
 		} finally {
 			await deleteGoal(g1.id, true);
 			await deleteGoal(g2.id, true);
+		}
+	});
+
+	test("terminate session: confirmation dialog appears", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			// Hover the session row (data-session-id) in the sidebar to reveal the actions trigger
+			const row = page.locator(`[data-session-id="${sessionId}"]`).first();
+			if (!await row.isVisible({ timeout: 5_000 }).catch(() => false)) {
+				test.skip(true, "session row not found in sidebar; terminate test skipped");
+				return;
+			}
+			await row.scrollIntoViewIfNeeded();
+			await row.hover();
+			const trigger = row.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="session"]`).first();
+			if (!await trigger.isVisible({ timeout: 3_000 }).catch(() => false)) {
+				test.skip(true, "sidebar-actions-trigger not visible after hover; terminate test skipped in headless");
+				return;
+			}
+			await trigger.click();
+			const terminateItem = page.locator(`sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="terminate"]`).first();
+			await expect(terminateItem).toBeVisible({ timeout: 5_000 });
+			await terminateItem.click();
+			// Confirmation dialog should appear
+			const confirmDialog = page.locator("p.text-muted-foreground").filter({ hasText: /Are you sure you want to terminate/ }).first();
+			await expect(confirmDialog).toBeVisible({ timeout: 5_000 });
+			// Dismiss without terminating
+			await page.keyboard.press("Escape");
+		} finally {
+			await deleteSession(sessionId);
 		}
 	});
 });

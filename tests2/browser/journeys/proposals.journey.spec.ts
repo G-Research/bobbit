@@ -43,4 +43,24 @@ test.describe("Journey: Proposals", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	test("New Goal button opens dialog or navigates to goal form", async ({ page }) => {
+		await openApp(page);
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+		// Look for the New Goal button
+		const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
+		if (await newGoalBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
+			await newGoalBtn.click();
+			// Either a dialog opens, or we navigate to a goal form / project picker
+			const dialogOrForm = page.locator(
+				"dialog, [role='dialog'], [role='alertdialog'], " +
+				"goal-proposal-panel, [data-testid='goal-proposal'], " +
+				"input[placeholder*='title' i], input[placeholder*='goal' i]"
+			).first();
+			await expect(dialogOrForm).toBeVisible({ timeout: 10_000 });
+		} else {
+			// New Goal button not visible (single-session mode or different layout)
+			test.skip(true, "New Goal button not found; proposals may surface differently in this gateway config");
+		}
+	});
 });

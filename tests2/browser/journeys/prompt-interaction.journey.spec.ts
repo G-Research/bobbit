@@ -48,4 +48,21 @@ test.describe("Journey: Prompt Interaction", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	test("send message → mock agent 'OK' response appears in chat", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const editor = page.locator("message-editor textarea").first();
+			await expect(editor).toBeVisible({ timeout: 15_000 });
+			await editor.fill("hello test");
+			await editor.press("Enter");
+			// The mock agent responds with "OK" — assert it appears in the chat
+			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
 });
