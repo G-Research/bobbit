@@ -323,4 +323,8 @@ export interface CoreRouteCtx {
 
 	// ── Goals G2a additions — append-only.
 	cookieStore: CookieStore;
+
+	// ── Goals G2b additions — append-only.
+	// No new fields: lifecycle/archive routes reuse ctx values already
+	// threaded by earlier cohorts.
 }

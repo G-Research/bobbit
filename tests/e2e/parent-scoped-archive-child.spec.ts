@@ -15,10 +15,12 @@
  *      absent-header bypass is closed), and the child is NOT archived.
  *   2. Authz — a verified human/UI operator (bobbit_session cookie) is
  *      allowed past the gate and the child is archived.
- *   3. Authz — an agent caller presenting a spawning-session header that does
+ *   3. Authz — an agent caller presenting the authentic team-lead session
+ *      secret (without a human cookie) is allowed and the child is archived.
+ *   4. Authz — an agent caller presenting a spawning-session header that does
  *      NOT match the parent's authoritative team-lead is rejected 403
  *      NOT_TEAM_LEAD and the child is NOT archived.
- *   4. Relationship — once authorized, a target that is NOT a direct child of
+ *   5. Relationship — once authorized, a target that is NOT a direct child of
  *      the parent is rejected 403 NOT_DIRECT_CHILD (authenticating
  *      legitimately via the human cookie so the request reaches the
  *      relationship check).
@@ -180,6 +182,26 @@ test.describe("DELETE /api/goals/:parentId/archive-child/:childId — Children a
 				parentId: parent.id,
 				childId,
 				headers: humanHeaders(),
+			});
+			expect(status).toBe(200);
+			expect(body.ok).toBe(true);
+			expect(body.archived).toBeGreaterThanOrEqual(1);
+			expect(await isArchived(childId)).toBe(true);
+		} finally {
+			await deleteGoal(childId);
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test("authentic team-lead secret without human cookie → allowed, child archived", async () => {
+		const parent = await createReadyGoal("archive-child team-lead parent");
+		const childId = await spawnChild(parent.id, "plan-authz-teamlead");
+		try {
+			const tlHeaders = seedTeamLeadHeader(gw, parent.id);
+			const { status, body } = await archiveChildRaw({
+				parentId: parent.id,
+				childId,
+				headers: { "X-Bobbit-Session-Secret": tlHeaders["X-Bobbit-Session-Secret"] },
 			});
 			expect(status).toBe(200);
 			expect(body.ok).toBe(true);
