@@ -275,4 +275,8 @@ export interface CoreRouteCtx {
 		args: Record<string, unknown>,
 		workflows: Workflow[],
 	): { ok: false; code: string; message: string; availableWorkflows?: { id: string; name: string }[]; validOptionalSteps?: string[] } | null;
+
+	// ── Cohort 18 (host configuration routes) additions — append-only.
+	/** handleApiRoute's mutable gateway config object, threaded so PUT /api/config/cwd preserves the legacy in-place write. */
+	mutableGatewayConfig: { defaultCwd: string };
 }
