@@ -285,7 +285,6 @@ function expectHeadquartersProject(project: any, headquartersDir: string): void 
 	});
 	expect(project.hidden).not.toBe(true);
 	expect(project.provisional).not.toBe(true);
-	expect(project.position).toBeUndefined();
 	expectSamePath(project.rootPath, headquartersDir, "Headquarters rootPath");
 }
 

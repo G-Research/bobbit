@@ -38,7 +38,7 @@ async function listNormalVisibleProjects(): Promise<ProjectSummary[]> {
 async function expectHeadquartersAnchored(projects?: ProjectSummary[]): Promise<void> {
 	const visible = projects ?? await listVisibleProjects();
 	expect(visible[0]).toMatchObject({ id: HEADQUARTERS_PROJECT_ID, kind: "headquarters" });
-	expect(visible[0].position).toBeUndefined();
+	// HQ now participates in visible ordering and has a numeric position.
 }
 
 async function showHeadquarters(): Promise<void> {
@@ -112,10 +112,13 @@ test.describe("PUT /api/projects/order", () => {
 		try {
 			const [a, b, c] = projects;
 			const order = [c.id, a.id, b.id];
+			// HQ is a first-class reorderable project; it must be included in the
+			// order payload. Keep HQ at position 0 (its default) in this test.
+			const fullOrder = [HEADQUARTERS_PROJECT_ID, ...order];
 
 			const putRes = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: order }),
+				body: JSON.stringify({ projectIds: fullOrder }),
 			});
 			const putBody = await expectProjectOrderJson<{ projects: ProjectSummary[] }>(putRes);
 			expect(putRes.status).toBe(200);
@@ -123,21 +126,23 @@ test.describe("PUT /api/projects/order", () => {
 			await expectHeadquartersAnchored(putBody.projects);
 			expect(projectIds(normalProjects(putBody.projects))).toEqual(order);
 			expect(projectNames(normalProjects(putBody.projects))).toEqual(["C", "A", "B"]);
-			expect(normalProjects(putBody.projects).map((project: ProjectSummary) => project.position)).toEqual([0, 1, 2]);
+			// HQ is at position 0; normal projects follow at 1, 2, 3.
+			expect(normalProjects(putBody.projects).map((project: ProjectSummary) => project.position)).toEqual([1, 2, 3]);
 
 			const getProjects = await listProjects();
 			await expectHeadquartersAnchored(getProjects);
 			expect(projectIds(normalProjects(getProjects))).toEqual(order);
 			expect(projectNames(normalProjects(getProjects))).toEqual(["C", "A", "B"]);
-			expect(normalProjects(getProjects).map(project => project.position)).toEqual([0, 1, 2]);
+			expect(normalProjects(getProjects).map(project => project.position)).toEqual([1, 2, 3]);
 
 			const stored = JSON.parse(readFileSync(join(gateway.bobbitDir, "state", "projects.json"), "utf-8")) as ProjectSummary[];
 			const storedHeadquarters = stored.find(project => project.id === HEADQUARTERS_PROJECT_ID);
 			expect(storedHeadquarters).toMatchObject({ id: HEADQUARTERS_PROJECT_ID, kind: "headquarters" });
-			expect(storedHeadquarters?.position).toBeUndefined();
+			// HQ participates in visible ordering and has a numeric position.
+			expect(storedHeadquarters?.position).toBe(0);
 			const storedVisible = stored.filter(project => order.includes(project.id));
 			expect(storedVisible.map(project => project.id)).toEqual(order);
-			expect(storedVisible.map(project => project.position)).toEqual([0, 1, 2]);
+			expect(storedVisible.map(project => project.position)).toEqual([1, 2, 3]);
 
 			const { ProjectRegistry } = await import("../../dist/server/agent/project-registry.js");
 			const reloaded = new ProjectRegistry(join(gateway.bobbitDir, "state"));
@@ -192,13 +197,15 @@ test.describe("PUT /api/projects/order", () => {
 			expect(unknownBody).toMatchObject({ code: "invalid_project_order" });
 			await expectVisibleOrder(original);
 
+			// HQ is a first-class reorderable project; sending [HQ, a, b, c] is
+			// VALID (200). It preserves normal-project order so expectVisibleOrder
+			// still passes.
 			const headquarters = await apiFetch("/api/projects/order", {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: [HEADQUARTERS_PROJECT_ID, a.id, b.id, c.id] }),
 			});
-			const headquartersBody = await expectProjectOrderJson(headquarters);
-			expect(headquarters.status).toBe(400);
-			expect(headquartersBody).toMatchObject({ code: "invalid_project_order" });
+			await expectProjectOrderJson(headquarters);
+			expect(headquarters.status).toBe(200);
 			await expectVisibleOrder(original);
 
 			const systemProjectRes = await apiFetch("/api/projects/system");
@@ -220,9 +227,10 @@ test.describe("PUT /api/projects/order", () => {
 			});
 			const staleBody = await expectProjectOrderJson(stale);
 			expect(stale.status).toBe(409);
+			// HQ participates in ordering so expectedProjectIds includes it.
 			expect(staleBody).toMatchObject({
 				code: "stale_project_order",
-				expectedProjectIds: original,
+				expectedProjectIds: [HEADQUARTERS_PROJECT_ID, ...original],
 				receivedProjectIds: [a.id, b.id],
 			});
 			await expectVisibleOrder(original);
@@ -235,9 +243,10 @@ test.describe("PUT /api/projects/order", () => {
 		const projects = await seedProjects(["A", "B", "C"]);
 		try {
 			const [a, b, c] = projects;
+			// HQ is a first-class reorderable project; include it in the payload.
 			const reordered = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: [c.id, a.id, b.id] }),
+				body: JSON.stringify({ projectIds: [HEADQUARTERS_PROJECT_ID, c.id, a.id, b.id] }),
 			});
 			await expectProjectOrderJson(reordered);
 			expect(reordered.status).toBe(200);
@@ -248,14 +257,15 @@ test.describe("PUT /api/projects/order", () => {
 			await expectHeadquartersAnchored(visible);
 			let normalVisible = normalProjects(visible);
 			expect(normalVisible.map(project => project.id)).toEqual([c.id, b.id]);
-			expect(normalVisible.map(project => project.position)).toEqual([0, 1]);
+			// HQ is at position 0; normal projects follow from position 1.
+			expect(normalVisible.map(project => project.position)).toEqual([1, 2]);
 
 			const d = await registerTmpProject("D");
 			visible = await listVisibleProjects();
 			await expectHeadquartersAnchored(visible);
 			normalVisible = normalProjects(visible);
 			expect(normalVisible.map(project => project.id)).toEqual([c.id, b.id, d.id]);
-			expect(normalVisible.map(project => project.position)).toEqual([0, 1, 2]);
+			expect(normalVisible.map(project => project.position)).toEqual([1, 2, 3]);
 		} finally {
 			await clearVisibleProjects();
 		}
