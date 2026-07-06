@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { migrateLegacyHeadquartersDirectory } = await import("../src/server/agent/state-migration.ts");
+const { migrateLegacyHeadquartersDirectory, seedModelDefaultsFromLegacy } = await import("../src/server/agent/state-migration.ts");
 
 // Pin BOBBIT_SECRETS_DIR to an isolated temp dir so the test never writes admin
 // secrets into the developer's home directory.
@@ -57,8 +57,7 @@ describe("preserve model defaults on fresh HQ startup (BOBBIT_DIR override scena
 			"default.namingThinkingLevel": "low",
 		});
 
-		// Simulate startup: run only migrateLegacyHeadquartersDirectory in the
-		// override scenario. The bug: model defaults from legacy are NOT seeded.
+		// Simulate the fixed startup sequence: migration followed by model-defaults seeding.
 		migrateLegacyHeadquartersDirectory({
 			serverRunDir: serverRoot,
 			headquartersDir: overrideHqDir,
@@ -66,10 +65,12 @@ describe("preserve model defaults on fresh HQ startup (BOBBIT_DIR override scena
 			headquartersConfigDir: overrideHqConfigDir,
 			legacyServerBobbitDir: path.join(serverRoot, ".bobbit"),
 		});
+		seedModelDefaultsFromLegacy({
+			headquartersStateDir: overrideHqStateDir,
+			serverRunDir: serverRoot,
+		});
 
 		// Assert that model defaults are present in the override HQ state dir.
-		// BUG: migrateLegacyHeadquartersDirectory skips legacy copy when override
-		// is active, so these keys are absent → assertions fail.
 		const hqPrefs = readJsonOrEmpty(path.join(overrideHqStateDir, "preferences.json"));
 
 		assert.equal(hqPrefs["default.sessionModel"], "anthropic/claude-opus-4",
