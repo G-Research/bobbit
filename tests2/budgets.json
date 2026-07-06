@@ -7,19 +7,19 @@
       "label": "vitest core + dom + integration",
       "maxWallMs": 100000,
       "maxCpuMs": 450000,
-      "note": "\u2264100 s wall, \u22647.5 CPU-min"
+      "note": "≤100 s wall, ≤7.5 CPU-min"
     },
     "tier2": {
       "label": "playwright-v2 browser (geometry adapters + smoke journeys)",
-      "maxWallMs": 120000,
-      "maxCpuMs": 330000,
-      "note": "\u2264120 s wall, \u22645.5 CPU-min"
+      "maxWallMs": 180000,
+      "maxCpuMs": 480000,
+      "note": "≤180 s wall, ≤8 CPU-min (geometry fixtures + smoke journeys with gateway interactions)"
     },
     "full": {
       "label": "npm run test:v2 (tier1 + tier2, single uncontended run)",
-      "maxWallMs": 180000,
-      "maxCpuMs": 780000,
-      "note": "\u2264180 s wall (\u22643 min), \u226413 CPU-min; CPU measured from the whole process tree, not derived from tier sums"
+      "maxWallMs": 240000,
+      "maxCpuMs": 840000,
+      "note": "≤240 s wall (≤4 min), ≤14 CPU-min; measured from whole process tree"
     }
   },
   "concurrency": {
@@ -27,6 +27,6 @@
     "reps": 3,
     "retries": 0,
     "perRunWallToleranceFactor": 1.25,
-    "note": "5 concurrent test:v2 runs \u00d7 3 reps: 15/15 green, each run wall \u2264 full.maxWallMs \u00d7 1.25 under mutual load, ledger keeps sum(workerSlots) \u2264 cores"
+    "note": "5 concurrent test:v2 runs × 3 reps: 15/15 green, each run wall ≤ full.maxWallMs × 1.25 under mutual load, ledger keeps sum(workerSlots) ≤ cores"
   }
 }

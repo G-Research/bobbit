@@ -80,7 +80,8 @@ export default {
 	workers: playwrightWorkers,
 	reporter: [
 		[process.stdout.isTTY ? "list" : "line"],
-	] as Array<[string]>,
+		["json", { outputFile: ".profiles/testing-v2/budgets/playwright-report.json" }],
+	] as Array<[string, unknown?]>,
 	globalSetup: "./tests2/browser-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
 	use: {

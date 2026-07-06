@@ -29,7 +29,7 @@
     "test:v2": "node scripts/testing-v2/run-v2.mjs",
     "test:v2:core": "vitest run --config vitest.config.ts",
     "test:v2:changed": "vitest --config vitest.config.ts --changed",
-    "test:v2:browser": "playwright test --config playwright-v2.config.ts",
+    "test:v2:browser": "playwright test --config playwright-v2.config.ts && node scripts/testing-v2/assert-budget.mjs browser --report .profiles/testing-v2/budgets/playwright-report.json",
     "test:daily": "node scripts/testing-v2/run-daily.mjs",
     "pretest:unit": "node -e \"require('fs').existsSync('dist/server')||require('child_process').execSync('npm run build:server',{stdio:'inherit'})\"",
     "test:unit": "node scripts/run-unit.mjs",

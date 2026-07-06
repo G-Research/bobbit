@@ -3537,25 +3537,25 @@
     },
     {
       "file": "tests/e2e/ui/pr-walkthrough-pack.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/pr-walkthrough-pack.spec.ts"
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/pr-walkthrough-pack.spec.ts:787 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/pr-walkthrough-pack.spec.ts"
+      "v2Path": "tests2/browser/daily/pr-walkthrough-pack.spec.ts"
     },
     {
       "file": "tests/e2e/ui/pre-compaction-history.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/pre-compaction-history.spec.ts"
       ],
       "rationale": "Browser E2E uses IntersectionObserver at tests/e2e/ui/pre-compaction-history.spec.ts:258 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/pre-compaction-history.spec.ts"
+      "v2Path": "tests2/browser/daily/pre-compaction-history.spec.ts"
     },
     {
       "file": "tests/e2e/ui/preparing-ux.spec.ts",
@@ -4405,14 +4405,14 @@
     },
     {
       "file": "tests/e2e/ui/terminal-pack.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [
         "tests2/browser/fixtures/terminal-pack.spec.ts"
       ],
       "rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/terminal-pack.spec.ts:224 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/fixtures/terminal-pack.spec.ts"
+      "v2Path": "tests2/browser/daily/terminal-pack.spec.ts"
     },
     {
       "file": "tests/e2e/ui/tool-ask-policy.spec.ts",
@@ -6759,11 +6759,11 @@
     },
     {
       "file": "tests/pr-walkthrough-panel-parity.spec.ts",
-      "bucket": "v2-browser",
+      "bucket": "daily",
       "method": "adapter",
       "replacement": [],
       "rationale": "Browser fixture uses getBoundingClientRect() at tests/pr-walkthrough-panel-parity.spec.ts:482 â€” needs Chromium real-browser fidelity.",
-      "v2Path": "tests2/browser/fixtures/pr-walkthrough-panel-parity.spec.ts",
+      "v2Path": "tests2/browser/daily/pr-walkthrough-panel-parity.spec.ts",
       "migrated": true
     },
     {
