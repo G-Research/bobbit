@@ -74,7 +74,10 @@ export default defineConfig({
 					environment: "node",
 					// Exclude stragglers that require process isolation (singleFork project below)
 					include: ["tests2/core/**/*.test.ts"],
-					exclude: ["tests2/core/session-recovery-agent-dir.test.ts"],
+					exclude: [
+						"tests2/core/session-recovery-agent-dir.test.ts",
+						"tests2/core/container-path-translation.test.ts",
+					],
 				},
 			},
 			// singleFork: files that genuinely cannot share a fork even with env-guard.
@@ -91,6 +94,8 @@ export default defineConfig({
 						// HOME/USERPROFILE env is set at module-top AND re-asserted in beforeAll;
 						// under rare sibling fork orderings the re-assert fires too late.
 						"tests2/core/session-recovery-agent-dir.test.ts",
+						// BOBBIT_AGENT_DIR/BOBBIT_DIR set at module-top; same shared-fork ordering hazard.
+						"tests2/core/container-path-translation.test.ts",
 					],
 				},
 			},
