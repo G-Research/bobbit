@@ -77,6 +77,8 @@ export default defineConfig({
 					exclude: [
 						"tests2/core/session-recovery-agent-dir.test.ts",
 						"tests2/core/container-path-translation.test.ts",
+						"tests2/core/goal-metadata-edges.test.ts",
+						"tests2/core/transcript-sanitizer-agent-dir.test.ts",
 					],
 				},
 			},
@@ -96,6 +98,10 @@ export default defineConfig({
 						"tests2/core/session-recovery-agent-dir.test.ts",
 						// BOBBIT_AGENT_DIR/BOBBIT_DIR set at module-top; same shared-fork ordering hazard.
 						"tests2/core/container-path-translation.test.ts",
+						// LifecycleHub/disabledProviders bleed from global BOBBIT_DIR mutation.
+						"tests2/core/goal-metadata-edges.test.ts",
+						// Agent-dir history bleed from module-top process.env recording.
+						"tests2/core/transcript-sanitizer-agent-dir.test.ts",
 					],
 				},
 			},
