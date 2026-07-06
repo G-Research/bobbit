@@ -107,6 +107,8 @@ export const REGISTRY_ROUTE_MODULE_PATHS = [
 	"src/server/routes/session-proposal-routes.ts",
 	// STR-01 cohort 18 (host configuration routes).
 	"src/server/routes/host-config-routes.ts",
+	// STR-01 cohort 19 (session control/provider-hook routes).
+	"src/server/routes/session-control-routes.ts",
 ].map((rel) => path.join(REPO_ROOT, rel));
 
 /** Regex-literal body: escaped chars, character classes (which may contain unescaped `/`), or any non-slash/backslash char. */
