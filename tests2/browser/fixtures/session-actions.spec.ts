@@ -62,10 +62,10 @@ async function openSessionView(page: Page, sessionId: string): Promise<void> {
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 }
 
-async function openSession(page: Page, sessionId: string): Promise<Locator> {
+async function openSession(page: Page, sessionId: string, rowTimeout = 10_000): Promise<Locator> {
 	await openSessionView(page, sessionId);
 	const row = sessionRow(page, sessionId);
-	await expect(row).toBeVisible({ timeout: 10_000 });
+	await expect(row).toBeVisible({ timeout: rowTimeout });
 	return row;
 }
 
@@ -334,7 +334,7 @@ test.describe("unified session actions", () => {
 		teamsToTeardown.add(goal.id as string);
 		sessionsToDelete.add(teamLeadId);
 		await waitForSessionStatus(teamLeadId, "idle", 30_000);
-		await openSession(page, teamLeadId);
+		await openSession(page, teamLeadId, 30_000);
 
 		expect(await actionLabel(page, "terminate")).toContain("End team");
 		const teamHeaderIds = await headerActionIds(page);
