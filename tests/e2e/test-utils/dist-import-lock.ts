@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
 const LOCK_STALE_MS = 60_000;
 const LOCK_WAIT_MS = 25;
-const LOCK_TIMEOUT_MS = 30_000;
+const LOCK_TIMEOUT_MS = 120_000;
 
 function e2eTempRoot(): string {
 	if (existsSync("/.dockerenv")) return "/tmp";
@@ -25,6 +25,25 @@ function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readOwnerPid(dir: string): number | undefined {
+	try {
+		const raw = readFileSync(join(dir, "owner.txt"), "utf-8").split(/\r?\n/, 1)[0]?.trim();
+		const pid = raw ? Number(raw) : NaN;
+		return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err: any) {
+		return err?.code === "EPERM";
+	}
+}
+
 async function acquireDistImportLock(): Promise<() => void> {
 	const dir = lockDir();
 	const start = Date.now();
@@ -37,6 +56,11 @@ async function acquireDistImportLock(): Promise<() => void> {
 			};
 		} catch (err: any) {
 			if (err?.code !== "EEXIST") throw err;
+			const ownerPid = readOwnerPid(dir);
+			if (ownerPid && !isProcessAlive(ownerPid)) {
+				rmSync(dir, { recursive: true, force: true });
+				continue;
+			}
 			try {
 				const ageMs = Date.now() - statSync(dir).mtimeMs;
 				if (ageMs > LOCK_STALE_MS) {
@@ -48,7 +72,8 @@ async function acquireDistImportLock(): Promise<() => void> {
 				continue;
 			}
 			if (Date.now() - start > LOCK_TIMEOUT_MS) {
-				throw new Error(`Timed out waiting for dist/server import lock at ${dir}`);
+				const owner = ownerPid ? ` held by pid ${ownerPid}` : "";
+				throw new Error(`Timed out waiting for dist/server import lock at ${dir}${owner}`);
 			}
 			await delay(LOCK_WAIT_MS);
 		}
