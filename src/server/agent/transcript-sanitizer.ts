@@ -29,7 +29,7 @@
 import { ATTACHMENT_ONLY_TEXT } from "./rpc-bridge.js";
 import { sessionFileRead, type SessionFsContext } from "./session-fs.js";
 import { containerPathToHost } from "./rpc-bridge.js";
-import { trustedAgentSessionsRoots } from "./agent-session-path.js";
+import { isHostAbsoluteAgentSessionPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -417,27 +417,6 @@ export function resolveReadablePersistedAgentSessionFile(filePath: string | null
 	const realPath = realpathRegularJsonlFile(path.resolve(filePath));
 	if (!realPath || !isTrustedExactSessionFile(realPath)) return null;
 	return realPath;
-}
-
-// Single source of truth for host-vs-container agentSessionFile path-trust
-// classification. session-manager.ts and session-transcripts.ts import these;
-// never reintroduce local copies at call sites — two copies of path-trust
-// logic will drift.
-function isWindowsAbsolutePath(filePath: string): boolean {
-	return /^[A-Za-z]:[\\/]/.test(filePath);
-}
-
-function isContainerAgentSessionPath(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, "/");
-	return normalized === "/home/node/.bobbit/agent/sessions"
-		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
-		|| normalized === "/bobbit-state/sessions"
-		|| normalized.startsWith("/bobbit-state/sessions/");
-}
-
-export function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
-	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
-	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
 }
 
 export function safePersistedHostAgentSessionFile(filePath: string | undefined): string | null {

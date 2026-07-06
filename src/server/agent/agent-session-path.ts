@@ -79,6 +79,28 @@ export function trustedAgentSessionsRoots(): string[] {
 	return roots;
 }
 
+// Single source of truth for host-vs-container agentSessionFile path-trust
+// classification. transcript-sanitizer.ts, session-fs.ts,
+// archived-worktree-manager.ts, session-manager.ts, and
+// session-transcripts.ts import these; never reintroduce local copies at call
+// sites — two copies of path-trust logic will drift.
+function isWindowsAbsolutePath(filePath: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(filePath);
+}
+
+export function isContainerAgentSessionPath(filePath: string): boolean {
+	const normalized = filePath.replace(/\\/g, "/");
+	return normalized === "/home/node/.bobbit/agent/sessions"
+		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
+		|| normalized === "/bobbit-state/sessions"
+		|| normalized.startsWith("/bobbit-state/sessions/");
+}
+
+export function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
+	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
+	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
+}
+
 function relativePathInside(root: string, candidate: string): string | null {
 	const relative = path.relative(normalizeHostPath(root), normalizeHostPath(candidate));
 	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;

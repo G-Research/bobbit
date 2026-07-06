@@ -18,7 +18,7 @@ import { RpcBridge, hostPathToContainer, type IRpcBridge, type RpcBridgeOptions,
 import { readClaudeCodeConfig } from "./claude-code-config.js";
 import { assertRuntimeAllowedForSession, createSessionBridge, hydrateRuntimeOptions, resolveSessionRuntime } from "./session-runtime.js";
 import { sessionFileExists, sessionFileRead, sessionFsContextForAgentFile } from "./session-fs.js";
-import { isHostAbsoluteAgentSessionPath, safePersistedHostAgentSessionFile, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { safePersistedHostAgentSessionFile, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { SessionStore, type PersistedSession, type WorktreePushPolicy, type SessionRuntime } from "./session-store.js";
@@ -107,7 +107,7 @@ import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
-import { migratedActiveAgentSessionFileForHostPath } from "./agent-session-path.js";
+import { isHostAbsoluteAgentSessionPath, migratedActiveAgentSessionFileForHostPath } from "./agent-session-path.js";
 import type { OrchestrationCoreView, InboxNudgerView, StaffRecordSource } from "./session-manager-consumer-types.js";
 
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
