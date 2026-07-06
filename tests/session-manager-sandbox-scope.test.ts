@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SESSION_MANAGER = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
+const SESSION_LIVE_CONTROL = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-live-control.ts"), "utf-8");
 const SESSION_SETUP_PLUMBING = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-setup-plumbing.ts"), "utf-8");
 const SESSION_SPAWN = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-spawn.ts"), "utf-8");
 const SESSION_REVIVE = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-revive.ts"), "utf-8");
@@ -49,8 +50,8 @@ describe("session-manager sandbox scope regressions", () => {
 	});
 
 	it("force-abort respawn honors a false sandbox wiring result", () => {
-		assert.match(SESSION_MANAGER, /const sandboxApplied = await this\.applySandboxWiring\(bridgeOptions, id, \{/);
-		assert.match(SESSION_MANAGER, /if \(!sandboxApplied\) \{[\s\S]*?session\.sandboxed = false;[\s\S]*?update\(id, \{ sandboxed: false \}\);/);
+		assert.match(SESSION_LIVE_CONTROL, /const sandboxApplied = await this\.applySandboxWiring\(bridgeOptions, id, \{/);
+		assert.match(SESSION_LIVE_CONTROL, /if \(!sandboxApplied\) \{[\s\S]*?session\.sandboxed = false;[\s\S]*?update\(id, \{ sandboxed: false \}\);/);
 	});
 
 	it("direct agents receive scoped gateway credentials from session-manager", () => {
