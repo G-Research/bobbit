@@ -330,6 +330,10 @@ export interface CoreRouteCtx {
 	// ── Goals G2a additions — append-only.
 	cookieStore: CookieStore;
 
+	// ── Goals G2b additions — append-only.
+	// No new fields: lifecycle/archive routes reuse ctx values already
+	// threaded by earlier cohorts.
+
 	// ── Cohort 30 (extension-host invocation routes) additions — append-only.
 	extensionChannelServices?: ExtensionChannelServices;
 	mintScopedExtensionChannelOpenPermit(input: {
