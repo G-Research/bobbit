@@ -69,6 +69,25 @@ export function buildParentReadyNotification(
 }
 
 /**
+ * Compute the parent-team-lead notification for a child goal completing
+ * (i.e. `team_complete` was called on the child). Fires regardless of
+ * workflow shape — a child with a bespoke workflow and no `ready-to-merge`
+ * gate will still notify the parent when done.
+ *
+ * Returns null for root goals (no parent to notify) or when child is undefined.
+ */
+export function buildParentCompletionNotification(
+	child: ChildGoalForParentNotify | undefined,
+): ParentNotification | null {
+	if (!child?.parentGoalId) return null;
+	const display = displayName(child);
+	return {
+		parentGoalId: child.parentGoalId,
+		message: `Subgoal "${display}" has completed. Its branch is ready to merge into your branch. Use \`goal_merge_child\` to merge it (or \`goal_archive_child\` if you no longer need it).`,
+	};
+}
+
+/**
  * Compute the parent-team-lead notification for a child auto-pause event.
  * Fires when the child's `paused` field flips to true via the mutation
  * classifier's auto-pause path (e.g. `replanCount > 5`, `RESTRUCTURE_REQUIRES_PAUSE`).
