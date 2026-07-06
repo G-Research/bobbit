@@ -46,6 +46,7 @@ import type { PersistedGoal } from "../agent/goal-store.js";
 import type { TaskManager } from "../agent/task-manager.js";
 import type { Workflow } from "../agent/workflow-store.js";
 import type { ColorStore } from "../agent/color-store.js";
+import type { GoalManager } from "../agent/goal-manager.js";
 /**
  * Structural copy of server.ts's own `PackRuntimeSupervisorLike` (defined
  * there, not in a leaf module — it can't be imported here without recreating
@@ -286,4 +287,9 @@ export interface CoreRouteCtx {
 	bfsEnrichArchived(seedIds: string[], allArchived: any[]): any[];
 	colorStore: ColorStore;
 	normalizedArchivedQuery(value: string | null): string;
+
+	// ── Cohort 21 (session mutation/lifecycle routes) additions — append-only.
+	getGoalManagerForGoal(goalId: string): GoalManager;
+	isUnsupportedForkSource(session: any, ps: any): string | null;
+	roleCreateOptions(role: Role): { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
 }

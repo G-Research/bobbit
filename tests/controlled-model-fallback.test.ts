@@ -30,7 +30,7 @@ const SESSION_REVIVE_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-
 const SESSION_STEERING_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-steering.ts");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 const VERIFICATION_HARNESS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/verification-harness.ts");
-const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");
+const SESSION_MUTATION_ROUTES_SOURCE = path.join(PROJECT_ROOT, "src/server/routes/session-mutation-routes.ts");
 
 type Prefs = Record<string, unknown>;
 type ModelPair = [string, string];
@@ -695,8 +695,8 @@ describe("controlled model fallback policy — session setup visibility", () => 
 
 describe("controlled model fallback policy — restore/respawn lifecycle", () => {
 	it("fork and continue routes verify inherited persisted models instead of skipping auto-selection", () => {
-		const src = readFileSync(SERVER_SOURCE, "utf-8");
-		const forkRoute = extractRouteSlice(src, "// POST /api/sessions/:id/fork", "// POST /api/sessions/:id/wait");
+		const src = readFileSync(SESSION_MUTATION_ROUTES_SOURCE, "utf-8");
+		const forkRoute = extractRouteSlice(src, "// POST /api/sessions/:id/fork", "// ── SUB-GOAL B SEAM");
 		const continueRoute = extractRouteSlice(src, "// POST /api/sessions/:archivedId/continue", "// GET /api/sessions/:id/output");
 
 		for (const [label, route] of [["fork", forkRoute], ["continue", continueRoute]] as const) {
