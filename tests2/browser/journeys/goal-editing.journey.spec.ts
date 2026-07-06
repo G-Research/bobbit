@@ -153,7 +153,7 @@ test.describe("Journey: Goal Empty Workflows Banner — behavioral assertions", 
 	});
 
 	test("empty-workflows route: banner visible and Create Goal button disabled", async ({ page }) => {
-		test.setTimeout(90_000);
+		test.setTimeout(45_000);
 		// Route-mock all GET /api/workflows to return an empty list
 		await page.route(/\/api\/workflows(?:\?.*)?$/, async (route, req) => {
 			if (req.method() === "GET") {
@@ -191,7 +191,7 @@ test.describe("Journey: Goal Empty Workflows Banner — behavioral assertions", 
 // Behavioral assertions ported from goal-form-tooltips.spec.ts
 test.describe("Journey: Goal Form Tooltips — behavioral assertions", () => {
 	test("workflow select dropdown renders in goal proposal panel", async ({ page }) => {
-		test.setTimeout(90_000);
+		test.setTimeout(45_000);
 		await openApp(page);
 		await createGoalAssistantViaUI(page);
 		const textarea = page.locator("textarea").first();
@@ -209,7 +209,7 @@ test.describe("Journey: Goal Form Tooltips — behavioral assertions", () => {
 	});
 
 	test("optional step tooltip ⓘ icon renders with cursor-help class after workflow switch", async ({ page }) => {
-		test.setTimeout(90_000);
+		test.setTimeout(45_000);
 		// Configure qa_start_command on default project for the tooltip to show workflow description
 		const projectId = await defaultProjectId();
 		if (projectId) {
@@ -354,7 +354,7 @@ test.describe("Journey: Subgoal Parent Picker — behavioral assertions", () => 
 	});
 
 	test("ineligible (sub-goals off) parent option is marked in proposal panel picker", async ({ page }) => {
-		test.setTimeout(90_000);
+		test.setTimeout(45_000);
 		await apiFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ subgoalsEnabled: true }),

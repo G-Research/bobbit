@@ -105,7 +105,7 @@ test.describe("Journey: Proposals — behavioral", () => {
 	});
 
 	test("goal proposal streaming badge visible during STAY_BUSY stream then disappears", async ({ page }) => {
-		test.slow();
+		test.setTimeout(45_000);
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "STAY_BUSY:propose_goal:10:150");
@@ -115,7 +115,7 @@ test.describe("Journey: Proposals — behavioral", () => {
 	});
 
 	test("goal proposal submit disabled while streaming then enables", async ({ page }) => {
-		test.slow();
+		test.setTimeout(45_000);
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "STAY_BUSY:propose_goal:10:150");
@@ -171,7 +171,7 @@ test.describe("Journey: Proposals — behavioral", () => {
 	});
 
 	test("goal proposal dismiss during streaming sticks after stream ends", async ({ page }) => {
-		test.slow();
+		test.setTimeout(45_000);
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "STAY_BUSY:propose_goal:20:150");
@@ -194,7 +194,7 @@ test.describe("Journey: Proposals — behavioral", () => {
 
 test.describe("Journey: Proposals — API error handling", () => {
 	test("createGoal 400 shows server error in error modal (page.route stub)", async ({ page }) => {
-		test.slow();
+		test.setTimeout(45_000);
 		await page.route("**/api/goals", async (route) => {
 			if (route.request().method() !== "POST") return route.continue();
 			await route.fulfill({

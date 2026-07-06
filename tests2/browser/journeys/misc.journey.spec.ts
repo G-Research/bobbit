@@ -143,7 +143,7 @@ test.describe("Journey: Preview Artifacts", () => {
 	});
 
 	test("preview mount via API reaches client state and iframe renders", async ({ page }) => {
-		test.slow();
+		test.setTimeout(45_000);
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		try {

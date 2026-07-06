@@ -121,7 +121,7 @@ test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
 	});
 
 	test("route-injected gateStatus:failed renders as data-plan-gate-status on plan node", async ({ page, gateway }) => {
-		test.slow(); // complex: parent+child goal creation, archive, route injection, plan-tab navigation
+		test.setTimeout(45_000); // plan-tab with real goal hierarchy: parent+child create, archive, route inject
 		const parent = await createGoal({ title: "v2-plan-gate-status-inject", team: false });
 		const parentId = parent.id as string;
 		let childId = "";

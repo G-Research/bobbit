@@ -3039,7 +3039,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
-        "tests2/browser/journeys/crash-restart.journey.spec.ts"
+        "tests2/browser/daily/crash-restart.journey.spec.ts"
       ]
     },
     {
@@ -3563,7 +3563,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
-        "tests2/browser/journeys/crash-restart.journey.spec.ts"
+        "tests2/browser/daily/crash-restart.journey.spec.ts"
       ]
     },
     {
@@ -3813,7 +3813,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
-        "tests2/browser/journeys/crash-restart.journey.spec.ts"
+        "tests2/browser/daily/crash-restart.journey.spec.ts"
       ]
     },
     {
@@ -3849,7 +3849,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
-        "tests2/browser/journeys/crash-restart.journey.spec.ts"
+        "tests2/browser/daily/crash-restart.journey.spec.ts"
       ]
     },
     {
