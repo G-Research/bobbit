@@ -1,351 +1,595 @@
 [
-	{
-		"id": "BR00-null",
-		"area": "harness-integrity",
-		"file": "src/app/goal-dashboard-plan-tab.ts",
-		"target": "ui",
-		"operator": "no-op",
-		"nullMutant": true,
-		"search": "\t\tcase \"passed\": return \"var(--positive)\";",
-		"replace": "\t\tcase \"passed\":  return \"var(--positive)\";",
-		"description": "NULL mutant — inserts an extra space in a whitespace-insensitive location. Behaviourally identical; both the legacy spec and the v2 journey MUST still pass. Guards against a broken harness that reports false kills (e.g. a build failure counted as 'caught').",
-		"expectedLegacyCatchers": ["tests/e2e/ui/plan-tab-gate-status.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/goal-team-gates.journey.spec.ts"]
-	},
-	{
-		"id": "BR01",
-		"area": "plan-tab",
-		"file": "src/app/goal-dashboard-plan-tab.ts",
-		"target": "ui",
-		"operator": "inverted-boolean",
-		"search": "const isArchived = !!n.childGoal?.archived;",
-		"replace": "const isArchived = false;",
-		"description": "Plan-tab DAG never marks a node archived — data-archived stays 'false' and the archived pill/dashed border never render. The journey's archived-child assertions (data-archived=\"true\", plan-node-archived-pill) must fail. Legacy home is the dedicated archived-children spec (the gate-status spec only reads the attribute on live nodes, never asserts =\"true\").",
-		"expectedLegacyCatchers": ["tests/e2e/ui/plan-tab-archived-children.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/goal-team-gates.journey.spec.ts"]
-	},
-	{
-		"id": "BR02",
-		"area": "plan-tab",
-		"file": "src/app/goal-dashboard-plan-tab.ts",
-		"target": "ui",
-		"operator": "dropped-attribute",
-		"search": "data-plan-gate-status=\"${gateStatus ?? \"\"}\"",
-		"replace": "data-plan-gate-status=\"\"",
-		"description": "Plan node always emits an empty data-plan-gate-status attribute regardless of the resolved child's gate progress. The journey's route-injected gateStatus:failed assertion (toHaveAttribute data-plan-gate-status failed) must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/plan-tab-gate-status.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/goal-team-gates.journey.spec.ts"]
-	},
-	{
-		"id": "BR03",
-		"area": "goal-proposal",
-		"file": "src/app/proposal-panels.ts",
-		"target": "ui",
-		"operator": "forced-false",
-		"search": "const noWorkflows = wfState === \"empty\" && workflowOptions.length === 0;",
-		"replace": "const noWorkflows = false;",
-		"description": "The no-workflows warning banner never renders and the Create-Goal button is never disabled for a project with zero workflows. The journey's empty-workflows-route assertions (banner visible + Create button disabled) must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/goal-empty-workflows-banner.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/goal-editing.journey.spec.ts"]
-	},
-	{
-		"id": "BR04",
-		"area": "goal-proposal",
-		"file": "src/app/proposal-panels.ts",
-		"target": "ui",
-		"operator": "dropped-render",
-		"search": "${config.streaming ? streamingBadge() : \"\"}",
-		"replace": "${false ? streamingBadge() : \"\"}",
-		"description": "The goal-proposal 'Streaming…' badge never renders during a streaming proposal. The journey's 'streaming badge visible during STAY_BUSY stream' assertion must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/proposal-panel-streaming.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/proposals.journey.spec.ts"]
-	},
-	{
-		"id": "BR05",
-		"area": "goal-proposal",
-		"file": "src/app/proposal-panels.ts",
-		"target": "ui",
-		"operator": "removed-guard",
-		"search": "(config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows",
-		"replace": "(config.createDisabled ?? !config.title.trim()) || noWorkflows",
-		"description": "The goal-proposal submit button is no longer disabled while a proposal is streaming (drops the !!config.streaming guard). The journey's 'submit disabled while streaming then enables' assertion must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/proposal-panel-streaming.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/proposals.journey.spec.ts"]
-	},
-	{
-		"id": "BR06",
-		"area": "panel-tabs",
-		"file": "src/app/render.ts",
-		"target": "ui",
-		"operator": "forced-false",
-		"search": "return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);",
-		"replace": "return false;",
-		"description": "Proposal panel tabs never show the unread/active dot (goal-tab-dot). The journey's 'role proposal tab appears with dot' assertion (.goal-tab-dot visible) must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/proposal-open-all-types.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/proposals.journey.spec.ts"]
-	},
-	{
-		"id": "BR07",
-		"area": "notification-policy",
-		"file": "src/app/render-helpers.ts",
-		"target": "ui",
-		"operator": "forced-false",
-		"search": "return session.lastActivity > lastRead;",
-		"replace": "return false;",
-		"description": "hasUnseenActivity never reports unseen activity, so the sidebar unread dot (.unseen-dot) never renders for a fresh session. The journey's 'fresh session has unseen dot' assertion (count 1) must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/unseen-activity.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/misc.journey.spec.ts"]
-	},
-	{
-		"id": "BR08",
-		"area": "goal-dashboard",
-		"file": "src/app/goal-dashboard.ts",
-		"target": "ui",
-		"operator": "inverted-comparison",
-		"search": "const pending = dashboardPendingMutations.filter(m => m.expiresAt === undefined || m.expiresAt > now);",
-		"replace": "const pending = dashboardPendingMutations.filter(m => m.expiresAt === undefined || m.expiresAt < now);",
-		"description": "Non-expired pending plan mutations are treated as expired and filtered out, so the pending-mutation card never renders. The journey's 'pending mutation card renders from route-mocked endpoint' assertion must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/dashboard-mutation-pending.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/team-operations.journey.spec.ts"]
-	},
-	{
-		"id": "BR09",
-		"area": "goal-status-widget",
-		"file": "src/ui/components/GoalStatusWidget.ts",
-		"target": "ui",
-		"operator": "inverted-conditional",
-		"search": "if (!this.goalId) return nothing;",
-		"replace": "if (this.goalId) return nothing;",
-		"description": "The goal-status-widget render guard is inverted — the pill renders NOTHING whenever a goalId is present (i.e. always hidden on a team-lead session). The journey's 'goal-status-widget pill visible on team-lead session' assertion must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/goal-status-widget.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/team-operations.journey.spec.ts"]
-	},
-	{
-		"id": "BR10",
-		"area": "delegate-renderer",
-		"file": "src/ui/tools/renderers/DelegateRenderer.ts",
-		"target": "ui",
-		"operator": "off-by-one",
-		"search": "html`Delegated to ${delegates.length} agents —",
-		"replace": "html`Delegated to ${delegates.length + 1} agents —",
-		"description": "The multi-agent delegate card header count is off by one ('Delegated to 3 agents' for 2 delegates). The journey's 'TEAM_DELEGATE_CARD_PARALLEL renders multi-agent card' assertion (getByText 'Delegated to 2 agents') must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/team-delegate.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/team-operations.journey.spec.ts"]
-	},
-	{
-		"id": "BR11",
-		"area": "sidebar-search",
-		"file": "src/app/sidebar.ts",
-		"target": "ui",
-		"operator": "match-all",
-		"search": "const goalMatches = goal.title.toLowerCase().includes(q);",
-		"replace": "const goalMatches = goal.title.toLowerCase().includes(\"\");",
-		"description": "Every live GOAL matches any search query (includes('') always true), so the sidebar search never hides non-matching goals. Legacy search-e2e SR-01 asserts a non-matching goal title is hidden after search; the v2 sidebar-nav journey only exercises SESSION-title search (never goal-title), so this is expected to expose a real journey gap: goal-title sidebar search is uncovered by the consolidated journey.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/search-e2e.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/sidebar-nav.journey.spec.ts"]
-	},
-	{
-		"id": "BR12",
-		"area": "session-actions",
-		"file": "src/app/session-actions.ts",
-		"target": "ui",
-		"operator": "forced-false",
-		"search": "visible: canForkSession(session),",
-		"replace": "visible: false,",
-		"description": "The Fork action is never visible in the sidebar-actions popover. The journey's 'sidebar actions popover contains expected action items' assertion (fork action visible) must fail. Legacy home is session-actions.spec.ts (sidebar-actions-menu.spec.ts's fork test is test.skip'd as fixture-covered).",
-		"expectedLegacyCatchers": ["tests/e2e/ui/session-actions.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/session-lifecycle.journey.spec.ts"]
-	},
-	{
-		"id": "BR13",
-		"area": "draft-persistence",
-		"file": "src/app/session-manager.ts",
-		"target": "ui",
-		"operator": "dropped-restore",
-		"search": "const draft = await loadDraftFromServer(sessionId, 'prompt');",
-		"replace": "const draft = null; void loadDraftFromServer;",
-		"description": "The message composer never restores a persisted prompt draft on session (re)bind. The journey's draft-persistence-across-reload assertion (textarea value contains the drafted text) must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/draft-loss.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/app-smoke.journey.spec.ts"]
-	},
-	{
-		"id": "BR14",
-		"area": "add-project",
-		"file": "src/app/dialogs.ts",
-		"target": "ui",
-		"operator": "renamed-label",
-		"search": "children: \"Select current\",",
-		"replace": "children: \"Choose current\",",
-		"description": "The directory-browser confirm button is relabelled 'Choose current'. The project-onboarding journey selects the button by hasText 'Select current'; the enable/click assertions must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/add-project-browse-modal.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/project-onboarding.journey.spec.ts"]
-	},
-	{
-		"id": "BR15",
-		"area": "add-project",
-		"file": "src/app/dialogs.ts",
-		"target": "ui",
-		"operator": "dropped-testid",
-		"search": "<div class=\"flex flex-col h-full\" data-testid=\"add-project-browse-dialog\">",
-		"replace": "<div class=\"flex flex-col h-full\" data-testid=\"add-project-browse-dialog-mut\">",
-		"description": "The directory-browser overlay loses its add-project-browse-dialog testid. The project-onboarding journey's 'Browse button opens add-project-browse-dialog overlay' assertion must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/add-project-browse-modal.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/project-onboarding.journey.spec.ts"]
-	},
-	{
-		"id": "BR16",
-		"area": "add-project",
-		"file": "src/app/dialogs.ts",
-		"target": "ui",
-		"operator": "dropped-testid",
-		"search": "data-testid=\"add-project-browse-up\"",
-		"replace": "data-testid=\"add-project-browse-up-mut\"",
-		"description": "The directory-browser 'Up' button loses its add-project-browse-up testid. The project-onboarding journey's 'Browse modal shows directory entries and Up button' assertion must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/add-project-browse-modal.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/project-onboarding.journey.spec.ts"]
-	},
-	{
-		"id": "BR17",
-		"area": "app-smoke",
-		"file": "src/app/render.ts",
-		"target": "ui",
-		"operator": "dropped-suffix",
-		"search": "`${activeProject.name} \u00b7 Bobbit`",
-		"replace": "`${activeProject.name}`",
-		"description": "document.title drops the ' \u00b7 Bobbit' suffix. Legacy page-title.spec.ts asserts document.title matches /.+ \u00b7 Bobbit$/; the app-smoke journey only checks the title is non-empty (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/page-title.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/app-smoke.journey.spec.ts"]
-	},
-	{
-		"id": "BR18",
-		"area": "misc-api-error",
-		"file": "src/ui/components/ErrorDetails.ts",
-		"target": "ui",
-		"operator": "dropped-testid",
-		"search": "data-testid=\"error-details-message\"",
-		"replace": "data-testid=\"error-details-message-mut\"",
-		"description": "The API error modal's message element loses its error-details-message testid. Legacy api-error-modal.spec.ts asserts the server error surfaces in error-details-message; the misc journey does not exercise the error modal (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/api-error-modal.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/misc.journey.spec.ts"]
-	},
-	{
-		"id": "BR19",
-		"area": "misc-cost",
-		"file": "src/ui/components/CostPopover.ts",
-		"target": "ui",
-		"operator": "dropped-testid",
-		"search": "data-testid=\"cost-cache-hit\"",
-		"replace": "data-testid=\"cost-cache-hit-mut\"",
-		"description": "The cost popover's cache-hit row loses its cost-cache-hit testid. Legacy cost-popover-cache-hit.spec.ts asserts the cache-hit % renders; the misc journey only best-effort checks a cost element (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/cost-popover-cache-hit.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/misc.journey.spec.ts"]
-	},
-	{
-		"id": "BR20",
-		"area": "team-operations",
-		"file": "src/app/goal-dashboard.ts",
-		"target": "ui",
-		"operator": "off-by-one",
-		"search": "${signalCount} signal${signalCount !== 1 ? \"s\" : \"\"}",
-		"replace": "${signalCount + 1} signal${signalCount !== 1 ? \"s\" : \"\"}",
-		"description": "The workflow-checklist gate-signal-badge count is off by one ('2 signals' for 1 signal). Legacy goal-dashboard-fanout.spec.ts asserts the '1 signal' badge after a gate signal; the team-operations journey stops at the 201 and never asserts the badge (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/goal-dashboard-fanout.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/team-operations.journey.spec.ts"]
-	},
-	{
-		"id": "BR21",
-		"area": "team-operations",
-		"file": "src/ui/components/GoalStatusWidget.ts",
-		"target": "ui",
-		"operator": "forced-attribute",
-		"search": "data-awaiting-signoffs=${awaiting ? \"true\" : \"false\"}",
-		"replace": "data-awaiting-signoffs=\"true\"",
-		"description": "The goal-status pill always reports data-awaiting-signoffs=\"true\". Legacy goal-status-widget.spec.ts asserts it is 'false' with no pending sign-offs; the team-operations journey only checks the pill is visible (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/goal-status-widget.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/team-operations.journey.spec.ts"]
-	},
-	{
-		"id": "BR22",
-		"area": "proposals",
-		"file": "src/ui/tools/renderers/ProposalRenderer.ts",
-		"target": "ui",
-		"operator": "dropped-testid",
-		"search": "data-testid=\"proposal-open-button\"",
-		"replace": "data-testid=\"proposal-open-button-mut\"",
-		"description": "The proposal tool card's Open button loses its proposal-open-button testid. Legacy proposal-tools.spec.ts asserts the Open button on the tool card; the proposals journey does not drive the tool-card Open flow (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/proposal-tools.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/proposals.journey.spec.ts"]
-	},
-	{
-		"id": "BR23",
-		"area": "prompt-interaction",
-		"file": "src/ui/components/MessageEditor.ts",
-		"target": "ui",
-		"operator": "dropped-class",
-		"search": "slash-menu at-menu border-b border-border max-h-48 overflow-y-auto",
-		"replace": "slash-menu atmenu-mut border-b border-border max-h-48 overflow-y-auto",
-		"description": "The @-mention autocomplete menu loses its at-menu class. Legacy at-mention.spec.ts asserts the .at-menu opens on '@'; the prompt-interaction journey does not exercise @-mention (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/at-mention.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/prompt-interaction.journey.spec.ts"]
-	},
-	{
-		"id": "BR24",
-		"area": "stories-sessions",
-		"file": "src/ui/components/MessageEditor.ts",
-		"target": "ui",
-		"operator": "removed-guard",
-		"search": "disabled: !hasContent || this.processingFiles,",
-		"replace": "disabled: this.processingFiles,",
-		"description": "The Send button is no longer disabled on an empty composer. Legacy stories-sessions.spec.ts (S-01) asserts Send is disabled when the composer is empty; the stories-registry journey does not assert Send-disabled (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/stories-sessions.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/stories-registry.journey.spec.ts"]
-	},
-	{
-		"id": "BR25",
-		"area": "project-settings",
-		"file": "src/app/settings-page.ts",
-		"target": "ui",
-		"operator": "dropped-testid",
-		"search": "data-testid=\"allow-session-model-fallback-toggle\"",
-		"replace": "data-testid=\"allow-session-model-fallback-toggle-mut\"",
-		"description": "The session-model-fallback settings toggle loses its testid. Legacy settings-model-fallback.spec.ts asserts the toggle default + PUT round-trip; the project-settings journey only shows the models route (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/settings-model-fallback.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/project-settings.journey.spec.ts"]
-	},
-	{
-		"id": "BR26",
-		"area": "staff-debug",
-		"file": "src/app/render-triggers.ts",
-		"target": "ui",
-		"operator": "inverted-label",
-		"search": "${isGoalTrigger ? \"Wake prompt (required)\" : \"Wake prompt (optional)\"}",
-		"replace": "${isGoalTrigger ? \"Wake prompt (optional)\" : \"Wake prompt (optional)\"}",
-		"description": "A goal-scoped staff trigger no longer labels its wake prompt 'required'. Campaign result: BOTH-MISSED — the legacy staff-triggers.spec.ts does NOT assert this label either (it covers the trigger dropdown + PUT/GET round-trip), so this is a pre-existing browser-e2e gap, not a consolidation regression (tracked in consolidation-assertion-parity.md). Add a staff-trigger-editor assertion when that editor flow is journey-covered.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/staff-triggers.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/staff-debug.journey.spec.ts"]
-	},
-	{
-		"id": "BR27",
-		"area": "project-onboarding",
-		"file": "src/app/dialogs.ts",
-		"target": "ui",
-		"operator": "forced-attribute",
-		"search": "data-has-fail=${opts.report.hasFail ? \"1\" : \"0\"}",
-		"replace": "data-has-fail=\"0\"",
-		"description": "The Add-Project preflight panel always reports data-has-fail=\"0\", so failing checks never block Continue. Legacy add-project-preflight.spec.ts asserts data-has-fail=1 + Continue disabled for a nested-in-project path; the project-onboarding journey never inspects the preflight panel (GAP) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/add-project-preflight.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/project-onboarding.journey.spec.ts"]
-	},
-	{
-		"id": "BR28",
-		"area": "marketplace-packs",
-		"file": "src/app/marketplace-page.ts",
-		"target": "ui",
-		"operator": "dropped-testid",
-		"search": "data-testid=\"market-research-preview-banner\"",
-		"replace": "data-testid=\"market-research-preview-banner-mut\"",
-		"description": "The marketplace 'Research Preview' banner loses its testid. Legacy marketplace.spec.ts asserts the research-preview banner renders; the marketplace-packs journey only checks route/tabs (GAP/PARTIAL) — expected real hole.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/marketplace.spec.ts"],
-		"expectedV2Catchers": ["tests2/browser/journeys/marketplace-packs.journey.spec.ts"]
-	}
+  {
+    "id": "BR00-null",
+    "area": "harness-integrity",
+    "file": "src/app/goal-dashboard-plan-tab.ts",
+    "target": "ui",
+    "operator": "no-op",
+    "nullMutant": true,
+    "search": "\t\tcase \"passed\": return \"var(--positive)\";",
+    "replace": "\t\tcase \"passed\":  return \"var(--positive)\";",
+    "description": "NULL mutant — inserts an extra space in a whitespace-insensitive location. Behaviourally identical; both the legacy spec and the v2 journey MUST still pass. Guards against a broken harness that reports false kills (e.g. a build failure counted as 'caught').",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/plan-tab-gate-status.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR01",
+    "area": "plan-tab",
+    "file": "src/app/goal-dashboard-plan-tab.ts",
+    "target": "ui",
+    "operator": "inverted-boolean",
+    "search": "const isArchived = !!n.childGoal?.archived;",
+    "replace": "const isArchived = false;",
+    "description": "Plan-tab DAG never marks a node archived — data-archived stays 'false' and the archived pill/dashed border never render. The journey's archived-child assertions (data-archived=\"true\", plan-node-archived-pill) must fail. Legacy home is the dedicated archived-children spec (the gate-status spec only reads the attribute on live nodes, never asserts =\"true\").",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/plan-tab-archived-children.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR02",
+    "area": "plan-tab",
+    "file": "src/app/goal-dashboard-plan-tab.ts",
+    "target": "ui",
+    "operator": "dropped-attribute",
+    "search": "data-plan-gate-status=\"${gateStatus ?? \"\"}\"",
+    "replace": "data-plan-gate-status=\"\"",
+    "description": "Plan node always emits an empty data-plan-gate-status attribute regardless of the resolved child's gate progress. The journey's route-injected gateStatus:failed assertion (toHaveAttribute data-plan-gate-status failed) must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/plan-tab-gate-status.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR03",
+    "area": "goal-proposal",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "forced-false",
+    "search": "const noWorkflows = wfState === \"empty\" && workflowOptions.length === 0;",
+    "replace": "const noWorkflows = false;",
+    "description": "The no-workflows warning banner never renders and the Create-Goal button is never disabled for a project with zero workflows. The journey's empty-workflows-route assertions (banner visible + Create button disabled) must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-empty-workflows-banner.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR04",
+    "area": "goal-proposal",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-render",
+    "search": "${config.streaming ? streamingBadge() : \"\"}",
+    "replace": "${false ? streamingBadge() : \"\"}",
+    "description": "The goal-proposal 'Streaming…' badge never renders during a streaming proposal. The journey's 'streaming badge visible during STAY_BUSY stream' assertion must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/proposal-panel-streaming.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR05",
+    "area": "goal-proposal",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "removed-guard",
+    "search": "(config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows",
+    "replace": "(config.createDisabled ?? !config.title.trim()) || noWorkflows",
+    "description": "The goal-proposal submit button is no longer disabled while a proposal is streaming (drops the !!config.streaming guard). The journey's 'submit disabled while streaming then enables' assertion must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/proposal-panel-streaming.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR06",
+    "area": "panel-tabs",
+    "file": "src/app/render.ts",
+    "target": "ui",
+    "operator": "forced-false",
+    "search": "return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);",
+    "replace": "return false;",
+    "description": "Proposal panel tabs never show the unread/active dot (goal-tab-dot). The journey's 'role proposal tab appears with dot' assertion (.goal-tab-dot visible) must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/proposal-open-all-types.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR07",
+    "area": "notification-policy",
+    "file": "src/app/render-helpers.ts",
+    "target": "ui",
+    "operator": "forced-false",
+    "search": "return session.lastActivity > lastRead;",
+    "replace": "return false;",
+    "description": "hasUnseenActivity never reports unseen activity, so the sidebar unread dot (.unseen-dot) never renders for a fresh session. The journey's 'fresh session has unseen dot' assertion (count 1) must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/unseen-activity.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/misc.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR08",
+    "area": "goal-dashboard",
+    "file": "src/app/goal-dashboard.ts",
+    "target": "ui",
+    "operator": "inverted-comparison",
+    "search": "const pending = dashboardPendingMutations.filter(m => m.expiresAt === undefined || m.expiresAt > now);",
+    "replace": "const pending = dashboardPendingMutations.filter(m => m.expiresAt === undefined || m.expiresAt < now);",
+    "description": "Non-expired pending plan mutations are treated as expired and filtered out, so the pending-mutation card never renders. The journey's 'pending mutation card renders from route-mocked endpoint' assertion must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/dashboard-mutation-pending.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/team-operations.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR09",
+    "area": "goal-status-widget",
+    "file": "src/ui/components/GoalStatusWidget.ts",
+    "target": "ui",
+    "operator": "inverted-conditional",
+    "search": "if (!this.goalId) return nothing;",
+    "replace": "if (this.goalId) return nothing;",
+    "description": "The goal-status-widget render guard is inverted — the pill renders NOTHING whenever a goalId is present (i.e. always hidden on a team-lead session). The journey's 'goal-status-widget pill visible on team-lead session' assertion must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-status-widget.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/team-operations.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR10",
+    "area": "delegate-renderer",
+    "file": "src/ui/tools/renderers/DelegateRenderer.ts",
+    "target": "ui",
+    "operator": "off-by-one",
+    "search": "html`Delegated to ${delegates.length} agents —",
+    "replace": "html`Delegated to ${delegates.length + 1} agents —",
+    "description": "The multi-agent delegate card header count is off by one ('Delegated to 3 agents' for 2 delegates). The journey's 'TEAM_DELEGATE_CARD_PARALLEL renders multi-agent card' assertion (getByText 'Delegated to 2 agents') must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/team-delegate.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/team-operations.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR11",
+    "area": "sidebar-search",
+    "file": "src/app/sidebar.ts",
+    "target": "ui",
+    "operator": "match-all",
+    "search": "const goalMatches = goal.title.toLowerCase().includes(q);",
+    "replace": "const goalMatches = goal.title.toLowerCase().includes(\"\");",
+    "description": "Every live GOAL matches any search query (includes('') always true), so the sidebar search never hides non-matching goals. Legacy search-e2e SR-01 asserts a non-matching goal title is hidden after search; the v2 sidebar-nav journey only exercises SESSION-title search (never goal-title), so this is expected to expose a real journey gap: goal-title sidebar search is uncovered by the consolidated journey.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/search-e2e.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR12",
+    "area": "session-actions",
+    "file": "src/app/session-actions.ts",
+    "target": "ui",
+    "operator": "forced-false",
+    "search": "visible: canForkSession(session),",
+    "replace": "visible: false,",
+    "description": "The Fork action is never visible in the sidebar-actions popover. The journey's 'sidebar actions popover contains expected action items' assertion (fork action visible) must fail. Legacy home is session-actions.spec.ts (sidebar-actions-menu.spec.ts's fork test is test.skip'd as fixture-covered).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/session-actions.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/session-lifecycle.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR13",
+    "area": "draft-persistence",
+    "file": "src/app/session-manager.ts",
+    "target": "ui",
+    "operator": "dropped-restore",
+    "search": "const draft = await loadDraftFromServer(sessionId, 'prompt');",
+    "replace": "const draft = null; void loadDraftFromServer;",
+    "description": "The message composer never restores a persisted prompt draft on session (re)bind. The journey's draft-persistence-across-reload assertion (textarea value contains the drafted text) must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/draft-loss.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR14",
+    "area": "add-project",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "renamed-label",
+    "search": "children: \"Select current\",",
+    "replace": "children: \"Choose current\",",
+    "description": "The directory-browser confirm button is relabelled 'Choose current'. The project-onboarding journey selects the button by hasText 'Select current'; the enable/click assertions must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-browse-modal.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR15",
+    "area": "add-project",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "<div class=\"flex flex-col h-full\" data-testid=\"add-project-browse-dialog\">",
+    "replace": "<div class=\"flex flex-col h-full\" data-testid=\"add-project-browse-dialog-mut\">",
+    "description": "The directory-browser overlay loses its add-project-browse-dialog testid. The project-onboarding journey's 'Browse button opens add-project-browse-dialog overlay' assertion must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-browse-modal.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR16",
+    "area": "add-project",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"add-project-browse-up\"",
+    "replace": "data-testid=\"add-project-browse-up-mut\"",
+    "description": "The directory-browser 'Up' button loses its add-project-browse-up testid. The project-onboarding journey's 'Browse modal shows directory entries and Up button' assertion must fail.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-browse-modal.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR17",
+    "area": "app-smoke",
+    "file": "src/app/render.ts",
+    "target": "ui",
+    "operator": "dropped-suffix",
+    "search": "`${activeProject.name} · Bobbit`",
+    "replace": "`${activeProject.name}`",
+    "description": "document.title drops the ' · Bobbit' suffix. Legacy page-title.spec.ts asserts document.title matches /.+ · Bobbit$/; the app-smoke journey only checks the title is non-empty (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/page-title.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR18",
+    "area": "misc-api-error",
+    "file": "src/ui/components/ErrorDetails.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"error-details-message\"",
+    "replace": "data-testid=\"error-details-message-mut\"",
+    "description": "The API error modal's message element loses its error-details-message testid. Legacy api-error-modal.spec.ts asserts the server error surfaces in error-details-message; the misc journey does not exercise the error modal (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/api-error-modal.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/misc.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR19",
+    "area": "misc-cost",
+    "file": "src/ui/components/CostPopover.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"cost-cache-hit\"",
+    "replace": "data-testid=\"cost-cache-hit-mut\"",
+    "description": "The cost popover's cache-hit row loses its cost-cache-hit testid. Legacy cost-popover-cache-hit.spec.ts asserts the cache-hit % renders; the misc journey only best-effort checks a cost element (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/cost-popover-cache-hit.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/misc.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR20",
+    "area": "team-operations",
+    "file": "src/app/goal-dashboard.ts",
+    "target": "ui",
+    "operator": "off-by-one",
+    "search": "${signalCount} signal${signalCount !== 1 ? \"s\" : \"\"}",
+    "replace": "${signalCount + 1} signal${signalCount !== 1 ? \"s\" : \"\"}",
+    "description": "The workflow-checklist gate-signal-badge count is off by one ('2 signals' for 1 signal). Legacy goal-dashboard-fanout.spec.ts asserts the '1 signal' badge after a gate signal; the team-operations journey stops at the 201 and never asserts the badge (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-dashboard-fanout.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/team-operations.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR21",
+    "area": "team-operations",
+    "file": "src/ui/components/GoalStatusWidget.ts",
+    "target": "ui",
+    "operator": "forced-attribute",
+    "search": "data-awaiting-signoffs=${awaiting ? \"true\" : \"false\"}",
+    "replace": "data-awaiting-signoffs=\"true\"",
+    "description": "The goal-status pill always reports data-awaiting-signoffs=\"true\". Legacy goal-status-widget.spec.ts asserts it is 'false' with no pending sign-offs; the team-operations journey only checks the pill is visible (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-status-widget.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/team-operations.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR22",
+    "area": "proposals",
+    "file": "src/ui/tools/renderers/ProposalRenderer.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"proposal-open-button\"",
+    "replace": "data-testid=\"proposal-open-button-mut\"",
+    "description": "The proposal tool card's Open button loses its proposal-open-button testid. Legacy proposal-tools.spec.ts asserts the Open button on the tool card; the proposals journey does not drive the tool-card Open flow (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/proposal-tools.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR23",
+    "area": "prompt-interaction",
+    "file": "src/ui/components/MessageEditor.ts",
+    "target": "ui",
+    "operator": "dropped-class",
+    "search": "slash-menu at-menu border-b border-border max-h-48 overflow-y-auto",
+    "replace": "slash-menu atmenu-mut border-b border-border max-h-48 overflow-y-auto",
+    "description": "The @-mention autocomplete menu loses its at-menu class. Legacy at-mention.spec.ts asserts the .at-menu opens on '@'; the prompt-interaction journey does not exercise @-mention (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/at-mention.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR24",
+    "area": "stories-sessions",
+    "file": "src/ui/components/MessageEditor.ts",
+    "target": "ui",
+    "operator": "removed-guard",
+    "search": "disabled: !hasContent || this.processingFiles,",
+    "replace": "disabled: this.processingFiles,",
+    "description": "The Send button is no longer disabled on an empty composer. Legacy stories-sessions.spec.ts (S-01) asserts Send is disabled when the composer is empty; the stories-registry journey does not assert Send-disabled (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/stories-sessions.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/stories-registry.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR25",
+    "area": "project-settings",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"allow-session-model-fallback-toggle\"",
+    "replace": "data-testid=\"allow-session-model-fallback-toggle-mut\"",
+    "description": "The session-model-fallback settings toggle loses its testid. Legacy settings-model-fallback.spec.ts asserts the toggle default + PUT round-trip; the project-settings journey only shows the models route (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/settings-model-fallback.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR26",
+    "area": "staff-debug",
+    "file": "src/app/render-triggers.ts",
+    "target": "ui",
+    "operator": "inverted-label",
+    "search": "${isGoalTrigger ? \"Wake prompt (required)\" : \"Wake prompt (optional)\"}",
+    "replace": "${isGoalTrigger ? \"Wake prompt (optional)\" : \"Wake prompt (optional)\"}",
+    "description": "A goal-scoped staff trigger no longer labels its wake prompt 'required'. Campaign result: BOTH-MISSED — the legacy staff-triggers.spec.ts does NOT assert this label either (it covers the trigger dropdown + PUT/GET round-trip), so this is a pre-existing browser-e2e gap, not a consolidation regression (tracked in consolidation-assertion-parity.md). Add a staff-trigger-editor assertion when that editor flow is journey-covered.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/staff-triggers.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/staff-debug.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR27",
+    "area": "project-onboarding",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "forced-attribute",
+    "search": "data-has-fail=${opts.report.hasFail ? \"1\" : \"0\"}",
+    "replace": "data-has-fail=\"0\"",
+    "description": "The Add-Project preflight panel always reports data-has-fail=\"0\", so failing checks never block Continue. Legacy add-project-preflight.spec.ts asserts data-has-fail=1 + Continue disabled for a nested-in-project path; the project-onboarding journey never inspects the preflight panel (GAP) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-preflight.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR28",
+    "area": "marketplace-packs",
+    "file": "src/app/marketplace-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"market-research-preview-banner\"",
+    "replace": "data-testid=\"market-research-preview-banner-mut\"",
+    "description": "The marketplace 'Research Preview' banner loses its testid. Legacy marketplace.spec.ts asserts the research-preview banner renders; the marketplace-packs journey only checks route/tabs (GAP/PARTIAL) — expected real hole.",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/marketplace.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR29",
+    "area": "misc-auto-retry",
+    "file": "src/ui/components/AgentInterface.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"auto-retry-banner\"",
+    "replace": "data-testid=\"auto-retry-banner-mut\"",
+    "description": "Auto-retry banner loses its testid. Legacy auto-retry-banner.spec.ts injects auto_retry_pending and asserts the banner; the misc journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/auto-retry-banner.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/misc.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR30",
+    "area": "app-smoke-github-hosts",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"github-trusted-host-add\"",
+    "replace": "data-testid=\"github-trusted-host-add-mut\"",
+    "description": "GitHub trusted-host Add control loses its testid. Legacy github-trusted-hosts.spec.ts asserts add/remove persistence; app-smoke journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/github-trusted-hosts.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR31",
+    "area": "staff-debug",
+    "file": "src/app/sidebar.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"sidebar-staff-header\"",
+    "replace": "data-testid=\"sidebar-staff-header-mut\"",
+    "description": "Sidebar per-project Staff header loses its testid. Legacy staff-sub-section.spec.ts asserts the staff header + rows under Staff; staff-debug journey only checks the #/staff heading (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/staff-sub-section.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/staff-debug.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR32",
+    "area": "misc-image-model",
+    "file": "src/ui/components/AgentInterface.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"footer-image-model-id\"",
+    "replace": "data-testid=\"footer-image-model-id-mut\"",
+    "description": "Footer image-model id loses its testid. Legacy image-model-selector-lock.spec.ts asserts the footer image-model id + persistence; the misc journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/image-model-selector-lock.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/misc.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR33",
+    "area": "marketplace-packs",
+    "file": "src/app/marketplace-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"market-installed-panel\"",
+    "replace": "data-testid=\"market-installed-panel-mut\"",
+    "description": "Marketplace Installed panel loses its testid. Legacy market-activation.spec.ts asserts the installed-panel toggle cycle; marketplace-packs journey only checks route/sources (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/market-activation.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR34",
+    "area": "stories-headquarters",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"headquarters-visibility-setting\"",
+    "replace": "data-testid=\"headquarters-visibility-setting-mut\"",
+    "description": "Headquarters visibility setting loses its testid. Legacy headquarters.spec.ts asserts the Show-Headquarters toggle persistence; the stories-registry journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/headquarters.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/stories-registry.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR35",
+    "area": "sidebar-archived",
+    "file": "src/app/render-helpers.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"sidebar-archived-divider\"",
+    "replace": "data-testid=\"sidebar-archived-divider-mut\"",
+    "description": "Sidebar Archived divider loses its testid. Legacy sidebar-archived-layout.spec.ts asserts the archived section appears under Show Archived; the sidebar-nav journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/sidebar-archived-layout.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR36",
+    "area": "project-settings-roles",
+    "file": "src/app/role-manager-page.ts",
+    "target": "ui",
+    "operator": "renamed-label",
+    "search": "${icon(Plus, \"sm\")} New Role</span>",
+    "replace": "${icon(Plus, \"sm\")} Add Role</span>",
+    "description": "The #/roles 'New Role' button is relabelled. Legacy role-assistant-new.spec.ts clicks 'New Role' and asserts a 201 session + hash + textarea; the project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/role-assistant-new.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  }
 ]
