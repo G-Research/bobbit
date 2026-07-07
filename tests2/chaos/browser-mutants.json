@@ -320,7 +320,7 @@
 		"operator": "inverted-label",
 		"search": "${isGoalTrigger ? \"Wake prompt (required)\" : \"Wake prompt (optional)\"}",
 		"replace": "${isGoalTrigger ? \"Wake prompt (optional)\" : \"Wake prompt (optional)\"}",
-		"description": "A goal-scoped staff trigger no longer labels its wake prompt 'required'. Legacy staff-triggers.spec.ts asserts goal-* triggers flip the label to 'Wake prompt (required)'; the staff-debug journey never opens the trigger editor (GAP) — expected real hole.",
+		"description": "A goal-scoped staff trigger no longer labels its wake prompt 'required'. Campaign result: BOTH-MISSED — the legacy staff-triggers.spec.ts does NOT assert this label either (it covers the trigger dropdown + PUT/GET round-trip), so this is a pre-existing browser-e2e gap, not a consolidation regression (tracked in consolidation-assertion-parity.md). Add a staff-trigger-editor assertion when that editor flow is journey-covered.",
 		"expectedLegacyCatchers": ["tests/e2e/ui/staff-triggers.spec.ts"],
 		"expectedV2Catchers": ["tests2/browser/journeys/staff-debug.journey.spec.ts"]
 	},
