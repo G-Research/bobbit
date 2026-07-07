@@ -159,5 +159,21 @@
     "expectedV2Catchers": [
       "tests2/browser/journeys/team-operations.journey.spec.ts"
     ]
+  },
+  {
+    "id": "BR57",
+    "area": "proposals-project-workflow-views",
+    "file": "src/app/project-proposal-views.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"workflow-card-${id}\"",
+    "replace": "data-testid=\"workflow-card-mut-${id}\"",
+    "description": "The project-proposal Workflows-view workflow cards lose their testid. Legacy project-assistant.spec.ts asserts per-component + all-components workflow cards render under the Workflows tab; proposals journey does not exercise the project-proposal structured views (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/project-assistant.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
   }
 ]

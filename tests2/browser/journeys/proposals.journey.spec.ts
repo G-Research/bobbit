@@ -377,4 +377,29 @@ test.describe("Journey: Editable Project Proposal", () => {
 		);
 		await expect(panel).toBeHidden({ timeout: 10_000 });
 	});
+
+	// Ported from project-assistant.spec.ts (audit: proposals/project-assistant
+	// GAP, mutant BR57): a multi-component propose_project renders structured
+	// component cards in the Components view and per-component + all-components
+	// workflow cards under the Workflows tab.
+	test("multi-component project proposal renders component + workflow cards", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "MULTI_COMPONENT_PROPOSAL");
+
+		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 20_000 });
+
+		// Components view (default) renders both structured component cards.
+		await expect(panel.locator('[data-testid="component-card-api"]')).toBeVisible({ timeout: 20_000 });
+		await expect(panel.locator('[data-testid="component-card-web"]')).toBeVisible({ timeout: 10_000 });
+
+		// Switch to the Workflows tab — per-component + all-components cards
+		// (mutant target: workflow-card-<id>) must render.
+		await panel.locator('[data-testid="view-tab-workflows"]').click();
+		await expect(panel.locator('[data-testid="workflow-card-feature-api"]')).toBeVisible({ timeout: 15_000 });
+		await expect(panel.locator('[data-testid="workflow-card-feature-web"]')).toBeVisible({ timeout: 10_000 });
+		await expect(panel.locator('[data-testid="workflow-card-all-components"]')).toBeVisible({ timeout: 10_000 });
+	});
 });
