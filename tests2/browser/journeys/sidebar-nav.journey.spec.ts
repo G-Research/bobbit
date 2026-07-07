@@ -224,4 +224,22 @@ test.describe("Journey: Sidebar Navigation", () => {
 			await deleteGoal(goal.id, true).catch(() => {});
 		}
 	});
+
+	// Ported from search-e2e.spec.ts SR-02 (audit: sidebar-nav PARTIAL / BR54):
+	// typing a query then clicking "Full Search" must navigate to the #/search
+	// route carrying the query.
+	test("Full Search link navigates to the #/search route with the query", async ({ page }) => {
+		await openApp(page);
+		const searchInput = page.locator("input[data-search]");
+		await expect(searchInput).toBeVisible({ timeout: 15_000 });
+		await searchInput.fill("testquery");
+		const fullSearchLink = page.getByText("Full Search");
+		await expect(fullSearchLink).toBeVisible({ timeout: 5_000 });
+		await fullSearchLink.click();
+		await expect(async () => {
+			const hash = await page.evaluate(() => window.location.hash);
+			expect(hash).toContain("#/search");
+			expect(hash).toContain("testquery");
+		}).toPass({ timeout: 5_000 });
+	});
 });

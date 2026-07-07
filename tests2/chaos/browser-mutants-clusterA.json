@@ -79,5 +79,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/misc.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR53",
+		"area": "misc-compaction-card",
+		"file": "src/ui/tools/renderers/CompactionSummaryRenderer.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "\t\t\t\t\tdata-testid=\"compaction-summary-card\"\n\t\t\t\t\tdata-state=${state}\n\t\t\t\t\tclass=\"rounded-md border border-border bg-card p-3\"",
+		"replace": "\t\t\t\t\tdata-testid=\"compaction-summary-card-mut\"\n\t\t\t\t\tdata-state=${state}\n\t\t\t\t\tclass=\"rounded-md border border-border bg-card p-3\"",
+		"description": "The success/complete compaction summary card (non-error render path) loses its testid. Legacy compaction-persistence.spec.ts asserts a seeded sidecar renders [data-testid=compaction-summary-card] with data-state=complete surviving reload; misc journey previously only asserted the editor loaded (GAP). Ported into misc.journey.spec.ts (Journey: Compaction).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/compaction-persistence.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR54",
+		"area": "sidebar-full-search-nav",
+		"file": "src/app/sidebar.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "window.location.hash = query ? `#/search?q=${encodeURIComponent(query)}` : \"#/search\";",
+		"replace": "window.location.hash = query ? `#/find?q=${encodeURIComponent(query)}` : \"#/find\";",
+		"description": "The sidebar 'Full Search' link navigates to a non-search route. Legacy search-e2e.spec.ts SR-02 asserts the click sets the hash to #/search carrying the query; sidebar-nav journey never clicked Full Search (PARTIAL). Ported into sidebar-nav.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/search-e2e.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
 	}
 ]

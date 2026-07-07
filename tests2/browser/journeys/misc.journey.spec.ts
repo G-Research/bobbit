@@ -10,6 +10,8 @@ import { test, expect, openApp, navigateToHash, createSession, deleteSession, wa
 import { sendMessage, apiFetch, defaultProject, createGoal, deleteGoal, defaultProjectId } from "../_helpers/journey-fixture.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 import { rawApiFetch } from "../e2e-setup.js";
+import fs from "node:fs";
+import path from "node:path";
 
 test.describe("Journey: Notification Policy", () => {
 	test("app renders without notification errors", async ({ page }) => {
@@ -214,6 +216,42 @@ test.describe("Journey: Compaction", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId);
+		}
+	});
+
+	// Ported from compaction-persistence.spec.ts (audit: misc GAP / BR53): a
+	// seeded compaction sidecar splices a rich summary row into the snapshot; the
+	// renderer must show the card (data-state complete) and it must survive reload.
+	test("seeded compaction sidecar renders the summary card and survives reload", async ({ page, gateway }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			// Seed one success sidecar entry (→ complete card). Mirrors the legacy setup.
+			const dir = path.join(gateway.bobbitDir, "state", "compaction-sidecar");
+			fs.mkdirSync(dir, { recursive: true });
+			const safe = sessionId.replace(/[^A-Za-z0-9_-]/g, "_");
+			const line = JSON.stringify({
+				schemaVersion: 1, id: "c_journey_1", trigger: "manual",
+				tokensBefore: 50_000, tokensAfter: null, durationMs: 1000,
+				startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(),
+				success: true, firstKeptEntryId: null,
+			}) + "\n";
+			fs.appendFileSync(path.join(dir, `${safe}.jsonl`), line, "utf-8");
+
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			const card = page.locator("[data-testid='compaction-summary-card']");
+			await expect(card).toHaveCount(1, { timeout: 15_000 });
+			await expect(card).toHaveAttribute("data-state", "complete");
+			// Sidecar must still anchor the card after a full reload.
+			await page.reload();
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await expect(card).toHaveCount(1, { timeout: 20_000 });
+			await expect(card).toHaveAttribute("data-state", "complete");
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
 		}
 	});
 });
