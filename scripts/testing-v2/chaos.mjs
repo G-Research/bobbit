@@ -666,16 +666,20 @@ function generateMarkdownReport(results, runMeta) {
   lines.push("## Acceptance Criteria");
   lines.push("");
 
-  const v2CatchesAllLegacyCaught = contentMutants.every(r => {
-    if (r.legacyResult !== "caught") return true; // legacy didn't catch — not a requirement
-    return r.v2Result === "caught";
-  });
-  lines.push(`- **v2 catches every legacy-caught mutant:** ${v2CatchesAllLegacyCaught ? "✅ PASS" : "❌ FAIL"}`);
+  const legacyOnlyGaps = contentMutants.filter(r => r.legacyResult === "caught" && r.v2Result !== "caught");
+  const v2CatchesAllLegacyCaught = legacyOnlyGaps.length === 0;
+  lines.push(`- **v2 catches every legacy-caught mutant (no legacy>v2 gap):** ${v2CatchesAllLegacyCaught ? "✅ PASS" : "❌ FAIL"}`);
+  if (!v2CatchesAllLegacyCaught) {
+    lines.push(`  - ⚠️ ${legacyOnlyGaps.length} REAL v2 coverage gap(s) — add a \`tests2/\` test that catches each, then re-run that mutant (never delete/alter the mutant):`);
+    for (const r of legacyOnlyGaps) {
+      lines.push(`    - **${r.id}** (${r.area}): ${r.description} — legacy caught via \`${(r.legacyCatchers[0] || "?")}\`, v2 = ${r.v2Result}`);
+    }
+  }
 
   const v2KillRateNum = v2Killable > 0 ? v2Caught / v2Killable : 1;
   const legacyKillRateNum = legacyKillable > 0 ? legacyCaught / legacyKillable : 0;
-  const v2KillRateGeq = v2KillRateNum >= legacyKillRateNum;
-  lines.push(`- **v2 kill rate ≥ legacy overall:** ${v2KillRateGeq ? "✅ PASS" : "❌ FAIL"} (v2 ${(v2KillRateNum*100).toFixed(1)}% vs legacy ${(legacyKillRateNum*100).toFixed(1)}%)`);
+  const v2KillRateGeq = v2Caught >= legacyCaught;
+  lines.push(`- **v2 ≥ legacy overall (kill count):** ${v2KillRateGeq ? "✅ PASS" : "❌ FAIL"} (v2 caught ${v2Caught} vs legacy ${legacyCaught}; rates v2 ${(v2KillRateNum*100).toFixed(1)}% / legacy ${(legacyKillRateNum*100).toFixed(1)}%)`);
 
   const bothMissed = contentMutants.filter(r =>
     r.legacyResult === "missed" && r.v2Result === "missed"
@@ -710,19 +714,32 @@ function generateMarkdownReport(results, runMeta) {
   }
   lines.push("");
 
-  // Per-area summary
-  lines.push("## Per-area Kill Rates");
+  // Per-area comparison — the actual deliverable: v2 ≥ legacy overall AND per
+  // area, and v2 must catch 100% of every legacy-caught mutant in each area.
+  lines.push("## Per-area Comparison (v2 ≥ legacy is the verdict)");
   lines.push("");
-  lines.push("| Area | Mutants | Legacy caught | V2 caught |");
-  lines.push("|------|---------|---------------|-----------|");
+  lines.push("| Area | Mutants | Legacy caught | V2 caught | Legacy-caught also caught by v2 | v2 ≥ legacy |");
+  lines.push("|------|---------|---------------|-----------|--------------------------------|-------------|");
 
   const areas = [...new Set(contentMutants.map(r => r.area))];
+  let allAreasGeq = true;
+  let allLegacySubset = true;
   for (const area of areas) {
     const areaResults = contentMutants.filter(r => r.area === area);
     const lc = areaResults.filter(r => r.legacyResult === "caught").length;
     const vc = areaResults.filter(r => r.v2Result === "caught").length;
-    lines.push(`| ${area} | ${areaResults.length} | ${lc} | ${vc} |`);
+    // Every mutant legacy caught must ALSO be caught by v2 (no legacy>v2 gap).
+    const legacyCaughtHere = areaResults.filter(r => r.legacyResult === "caught");
+    const legacyAlsoV2 = legacyCaughtHere.filter(r => r.v2Result === "caught").length;
+    const subsetOk = legacyAlsoV2 === legacyCaughtHere.length;
+    const geqOk = vc >= lc;
+    if (!geqOk) allAreasGeq = false;
+    if (!subsetOk) allLegacySubset = false;
+    lines.push(`| ${area} | ${areaResults.length} | ${lc} | ${vc} | ${legacyAlsoV2}/${legacyCaughtHere.length} | ${geqOk ? "✅" : "❌"} |`);
   }
+  lines.push("");
+  lines.push(`**Per-area v2 ≥ legacy:** ${allAreasGeq ? "✅ PASS (no area regresses)" : "❌ FAIL (an area has fewer v2 kills than legacy)"}`);
+  lines.push(`**Per-area legacy-caught ⊆ v2-caught:** ${allLegacySubset ? "✅ PASS (v2 catches every legacy-caught mutant in every area)" : "❌ FAIL (a legacy-caught mutant is missed by v2 — add a tests2/ test and re-run)"}`);
   lines.push("");
 
   // Full matrix (with test-name-level kill attribution)
