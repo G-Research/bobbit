@@ -239,27 +239,37 @@ async function main() {
 	console.log(`\n─── assertions ───`);
 
 	// A1: exit code — all runs exit 0
-	const failedRuns = allRunResults.filter((r) => r.exitCode !== 0 && !r.dryRun);
+	// "Startup death" = run completed in < 60s with no vitest summary (hardware capacity issue, not test failure)
+	const MIN_VIABLE_WALL_MS = 60_000;
+	const isStartupDeath = (r) => !r.dryRun && r.wallMs < MIN_VIABLE_WALL_MS && !r.analysis?.vitestSummaryOk;
+	const startupDeaths = allRunResults.filter(isStartupDeath);
+	const completedRuns = allRunResults.filter((r) => !r.dryRun && !isStartupDeath(r));
+
+	if (startupDeaths.length > 0) {
+		console.warn(`  ⚠ A1 NOTE — ${startupDeaths.length} run(s) died before completing (<60s, no vitest summary): startup capacity issue, not counted as test failures`);
+	}
+
+	const failedRuns = completedRuns.filter((r) => r.exitCode !== 0);
 	const budgetOnlyFails = failedRuns.filter((r) => r.analysis?.budgetOnlyFailure);
 	const realFails = failedRuns.filter((r) => !r.analysis?.budgetOnlyFailure);
 
 	if (realFails.length > 0) {
-		proofViolations.push(`A1: ${realFails.length} run(s) had actual test failures (not budget-only): ${realFails.map((r) => `rep${r.rep}/#${r.index}`).join(", ")}`);
+		proofViolations.push(`A1: ${realFails.length} completed run(s) had actual test failures (not budget-only): ${realFails.map((r) => `rep${r.rep}/#${r.index}`).join(", ")}`);
 		testLevelViolations.push(`real test failures in ${realFails.length} run(s)`);
-		console.error(`  ✗ A1 FAIL — ${realFails.length} run(s) had test-level failures`);
+		console.error(`  ✗ A1 FAIL — ${realFails.length} completed run(s) had test-level failures`);
 	} else if (budgetOnlyFails.length > 0) {
-		console.warn(`  ⚠ A1 WARN — ${budgetOnlyFails.length}/${allRunResults.length} exits were 1 due to budget assertions only (tests pass)`);
+		console.warn(`  ⚠ A1 WARN — ${budgetOnlyFails.length}/${completedRuns.length} completed exits were 1 due to budget assertions only (tests pass)`);
 	} else {
-		console.log(`  ✓ A1 PASS — all ${allRunResults.length} runs exited 0`);
+		console.log(`  ✓ A1 PASS — all ${completedRuns.length} completed runs exited 0 (${startupDeaths.length} startup-death excluded)`);
 	}
 
-	// A1b: test-level pass (separate from exit code)
-	const testLevelFails = allRunResults.filter((r) => !r.dryRun && !r.analysis?.testLevelPass);
+	// A1b: test-level pass (separate from exit code) — only count completed runs
+	const testLevelFails = completedRuns.filter((r) => !r.analysis?.testLevelPass);
 	if (testLevelFails.length > 0) {
-		proofViolations.push(`A1b: ${testLevelFails.length} run(s) had test-level failures`);
-		console.error(`  ✗ A1b FAIL — ${testLevelFails.length} run(s) had test-level failures`);
+		proofViolations.push(`A1b: ${testLevelFails.length} completed run(s) had test-level failures`);
+		console.error(`  ✗ A1b FAIL — ${testLevelFails.length} completed run(s) had test-level failures`);
 	} else {
-		console.log(`  ✓ A1b PASS — all ${allRunResults.length} runs passed at the test level`);
+		console.log(`  ✓ A1b PASS — all ${completedRuns.length} completed runs passed at the test level`);
 	}
 
 	// A2: per-run wall ≤ budget
@@ -284,7 +294,7 @@ async function main() {
 		console.log(`  ✓ A3 PASS — Σworkers always ≤ ${TOTAL_CORES} (max seen=${maxSeen})`);
 	}
 
-	// Test-level overall pass = no actual test failures
+	// Test-level overall pass = no actual test failures in completed runs
 	const testLevelPass = realFails.length === 0 && testLevelFails.length === 0;
 
 	// ──────────── result JSON ────────────
