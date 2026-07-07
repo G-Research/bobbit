@@ -106,36 +106,44 @@ function isCompleteNodeModules(nm) {
   try { return hasVitest(nm) && fs.existsSync(path.join(nm, "@earendil-works", "pi-ai")); }
   catch { return false; }
 }
-function resolveToolchainNodeModules() {
-  // IMPORTANT: only consider node_modules belonging to THIS project (the primary
-  // repo + its worktrees under the shared -wt root). Do NOT scan sibling repos
-  // (e.g. dirname(PRIMARY_REPO) may contain unrelated projects like pi-mono whose
-  // vitest/plugin versions would break both tiers). tsx is resolved separately
-  // via `npx --no-install tsx`, so we only need a project-matching vitest here.
-  const candidates = [
-    path.join(PRIMARY_REPO, "node_modules"),
+// Robust, self-contained toolchain resolution. Considers only node_modules that
+// belong to THIS project (the worktree we run from, the primary repo, and
+// sibling worktrees under the shared -wt root) — never a sibling repo whose
+// vitest/plugin versions would differ. Priority favours STABLE locations
+// (REPO_ROOT = the worktree chaos was launched from, e.g. the goal worktree at
+// gate time; then the primary repo) over transient sibling worktrees, and never
+// depends on a specific ephemeral session worktree existing. Returns a report so
+// callers can fail LOUD when no COMPLETE install (vitest AND @earendil-works/
+// pi-ai) is available, rather than silently producing module-load failures.
+function resolveToolchain() {
+  const stable = [
     path.join(REPO_ROOT, "node_modules"),
+    path.join(PRIMARY_REPO, "node_modules"),
   ];
-  // Sibling WORKTREES only (…-wt/<branch>/node_modules) — same project, same deps.
+  const siblings = [];
   try {
     const wtRoot = path.dirname(REPO_ROOT);
     for (const name of fs.readdirSync(wtRoot)) {
-      candidates.push(path.join(wtRoot, name, "node_modules"));
+      const nm = path.join(wtRoot, name, "node_modules");
+      if (!stable.includes(nm)) siblings.push(nm);
     }
   } catch { /* ignore */ }
-  // Prefer a COMPLETE install (vitest + workspace packages) so full import
-  // graphs load; fall back to vitest-only (some server-graph tests may fail to
-  // load, surfaced distinctly as module-load errors, not kills/misses).
-  for (const nm of candidates) {
-    if (isCompleteNodeModules(nm)) return nm;
-  }
-  for (const nm of candidates) {
-    if (hasVitest(nm)) return nm;
-  }
-  return path.join(PRIMARY_REPO, "node_modules"); // last resort (may be incomplete)
+  const candidates = [...stable, ...siblings];
+  const complete = candidates.find(isCompleteNodeModules);
+  const vitestOnly = candidates.find(hasVitest);
+  const chosen = complete || vitestOnly || path.join(PRIMARY_REPO, "node_modules");
+  return {
+    nm: chosen,
+    complete: !!complete,
+    hasVitest: !!vitestOnly,
+    stable,
+    siblingCount: siblings.length,
+  };
 }
 
-const PRIMARY_NODE_MODULES = resolveToolchainNodeModules();
+const TOOLCHAIN = resolveToolchain();
+const PRIMARY_NODE_MODULES = TOOLCHAIN.nm;
+const TOOLCHAIN_COMPLETE = TOOLCHAIN.complete;
 // Cross-platform JS entry points (invoked as `node <entry>`), resolved once from
 // the toolchain node_modules. `.bin` shims are avoided — they break on Windows.
 const VITEST_ENTRY = path.join(PRIMARY_NODE_MODULES, "vitest", "vitest.mjs");
@@ -981,11 +989,37 @@ async function main() {
   console.log(`vitest entry: ${fs.existsSync(VITEST_ENTRY) ? "✓ " + VITEST_ENTRY : "✗ MISSING"}`);
   console.log(`tsx entry:    ${TSX_ENTRY ? "✓ " + TSX_ENTRY : "(node_modules/tsx absent) → falling back to `npx --no-install tsx`"}`);
 
+  console.log(`toolchain complete (vitest + @earendil-works/pi-ai): ${TOOLCHAIN_COMPLETE ? "✓ yes" : "✗ NO"}`);
+
   // Preflight: ensure the v2 toolchain (vitest) is resolvable.
   if (!fs.existsSync(VITEST_ENTRY)) {
     console.error("\n[chaos] ERROR: Could not locate vitest/vitest.mjs in any candidate node_modules.");
     console.error("  Run this in the tier-1 toolchain environment (in-container) or a worktree with a full `npm ci`.");
     process.exit(1);
+  }
+  // For the AUTHORITATIVE full campaign (--all), a complete workspace install is
+  // mandatory: without @earendil-works/pi-ai, server-graph v2 tests fail to LOAD
+  // and the comparison is invalid. Fail LOUD rather than emit a misleading report.
+  const isFullCampaign = targetIds === null;
+  if (isFullCampaign && !TOOLCHAIN_COMPLETE) {
+    console.error("\n[chaos] ❌ ABORT: no COMPLETE workspace node_modules found for the full campaign.");
+    console.error("  A valid v2-vs-legacy comparison needs BOTH `vitest` AND `@earendil-works/pi-ai`");
+    console.error("  resolvable in a single node_modules (server-graph tests import auth/session code).");
+    console.error(`  Chosen node_modules: ${PRIMARY_NODE_MODULES}`);
+    console.error(`    vitest present: ${fs.existsSync(VITEST_ENTRY) ? "yes" : "no"}`);
+    console.error(`    @earendil-works/pi-ai present: ${fs.existsSync(path.join(PRIMARY_NODE_MODULES, "@earendil-works", "pi-ai")) ? "yes" : "no"}`);
+    console.error("  Searched (stable first, then sibling worktrees):");
+    for (const nm of TOOLCHAIN.stable) {
+      console.error(`    - ${nm}  [vitest=${hasVitest(nm) ? "Y" : "N"} pi-ai=${fs.existsSync(path.join(nm, "@earendil-works", "pi-ai")) ? "Y" : "N"}]`);
+    }
+    console.error(`    - (+${TOOLCHAIN.siblingCount} sibling worktrees under ${path.dirname(REPO_ROOT)})`);
+    console.error("  FIX: run `npm ci` (or install @earendil-works/pi-ai@0.79.6) in the worktree the");
+    console.error("  campaign runs from (the goal worktree at gate time), then re-run `--all`.");
+    process.exit(1);
+  }
+  if (!TOOLCHAIN_COMPLETE) {
+    console.warn("[chaos] WARNING: toolchain node_modules lacks @earendil-works/pi-ai — server-graph v2");
+    console.warn("  tests will report 'load-error' (inconclusive). OK for targeted --ids dev runs only.");
   }
 
   fs.mkdirSync(path.dirname(REPORT_JSON), { recursive: true });
