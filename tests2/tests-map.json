@@ -2766,7 +2766,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-flow.spec.ts",
@@ -2797,7 +2798,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-post-archive.spec.ts",
@@ -2806,7 +2808,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-preflight.spec.ts",
@@ -2815,7 +2818,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-select-all.spec.ts",
@@ -2824,7 +2828,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-symlink.spec.ts",
@@ -2833,7 +2838,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-typeahead.spec.ts",
@@ -2842,14 +2848,17 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/api-error-modal.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - behavioral assertions (API error modal + stack trace + page.route interception) need a dedicated journey test; covered by legacy suite until switchover.",
-      "replacement": ["tests2/browser/journeys/misc.journey.spec.ts"],
+      "replacement": [
+        "tests2/browser/journeys/misc.journey.spec.ts"
+      ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
@@ -2857,7 +2866,9 @@
       "bucket": "v2-browser",
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - cascade modal child enumeration needs dedicated journey assertions; covered by legacy suite until switchover.",
-      "replacement": ["tests2/browser/journeys/team-operations.journey.spec.ts"],
+      "replacement": [
+        "tests2/browser/journeys/team-operations.journey.spec.ts"
+      ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
@@ -2887,7 +2898,9 @@
       "bucket": "v2-browser",
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - pack install + tool API + artifact-pill rendering needs dedicated journey test; covered by legacy suite until switchover.",
-      "replacement": ["tests2/browser/journeys/marketplace-packs.journey.spec.ts"],
+      "replacement": [
+        "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
+      ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
@@ -2897,7 +2910,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/at-mention.spec.ts",
@@ -2906,7 +2920,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/auto-retry-banner.spec.ts",
@@ -2915,7 +2930,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-notification-policy.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/base-ref-detect.spec.ts",
@@ -2924,7 +2940,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/base-ref-settings.spec.ts",
@@ -2933,14 +2950,17 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/bg-process-persistence.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - streaming bg-process restart/exit-code/dismiss lifecycle needs dedicated real-restart journey; bg-wait journey covers steer/abort only; covered by legacy suite until switchover.",
-      "replacement": ["tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"],
+      "replacement": [
+        "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"
+      ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
@@ -2950,7 +2970,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-bg-wait-steer.",
       "replacement": [
         "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/bg-wait-steer-flow.spec.ts",
@@ -2959,7 +2980,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-bg-wait-steer.",
       "replacement": [
         "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/bg-wait-steer-stop-flow.spec.ts",
@@ -2968,7 +2990,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-bg-wait-steer.",
       "replacement": [
         "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/children-tool-renderers.spec.ts",
@@ -2977,7 +3000,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-debug-tools.",
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/compact-cost.spec.ts",
@@ -2986,7 +3010,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-compaction.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/compaction-persistence.spec.ts",
@@ -2995,7 +3020,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-compaction.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/copy-session-link.spec.ts",
@@ -3004,7 +3030,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/cost-popover-cache-hit.spec.ts",
@@ -3013,7 +3040,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-cost-tracking.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/dashboard-mutation-pending.spec.ts",
@@ -3022,7 +3050,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dashboard-fanout.",
       "replacement": [
         "tests2/browser/journeys/team-operations.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/debug-mode-toggle.spec.ts",
@@ -3031,14 +3060,17 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-debug-tools.",
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/dormant-revive-live-reply.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - dormant/revive/live-reply without page.reload is distinct from crash-restart; needs dedicated v2 journey test; covered by legacy suite until switchover.",
-      "replacement": ["tests2/browser/daily/crash-restart.journey.spec.ts"],
+      "replacement": [
+        "tests2/browser/daily/crash-restart.journey.spec.ts"
+      ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
@@ -3068,7 +3100,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/extension-host.spec.ts",
@@ -3077,14 +3110,17 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs.",
       "replacement": [
         "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/failed-goal-proposal-ux.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - missing-workflow failure UX (disabled Create, error card, available workflows list) needs dedicated journey test; covered by legacy suite until switchover.",
-      "replacement": ["tests2/browser/journeys/proposals.journey.spec.ts"],
+      "replacement": [
+        "tests2/browser/journeys/proposals.journey.spec.ts"
+      ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
@@ -3105,7 +3141,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/gate-status-cross-surface.spec.ts",
@@ -3125,7 +3162,8 @@
       "rationale": "Read in re-audit: requestAnimationFrame is only a flush helper; consolidate git-status race into multi-repo/git journey (tests/e2e/ui/git-status-untracked-race.spec.ts:32).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/github-trusted-hosts.spec.ts",
@@ -3134,14 +3172,17 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - 400 interception + error dialog + sessionId preservation needs dedicated journey test; covered by legacy suite until switchover.",
-      "replacement": ["tests2/browser/journeys/project-settings.journey.spec.ts"],
+      "replacement": [
+        "tests2/browser/journeys/project-settings.journey.spec.ts"
+      ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
@@ -3151,7 +3192,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-editing.",
       "replacement": [
         "tests2/browser/journeys/goal-editing.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-creation.spec.ts",
@@ -3160,7 +3202,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-editing.",
       "replacement": [
         "tests2/browser/journeys/goal-editing.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-dashboard-fanout.spec.ts",
@@ -3169,7 +3212,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dashboard-fanout.",
       "replacement": [
         "tests2/browser/journeys/team-operations.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-edit-modal.spec.ts",
@@ -3189,7 +3233,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-editing.",
       "replacement": [
         "tests2/browser/journeys/goal-editing.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-form-tooltips.spec.ts",
@@ -3198,7 +3243,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-editing.",
       "replacement": [
         "tests2/browser/journeys/goal-editing.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-metadata.spec.ts",
@@ -3207,7 +3253,8 @@
       "rationale": "Read in re-audit: form/tab metadata flow with no geometry API; consolidate into goal-editing journey (tests/e2e/ui/goal-metadata.spec.ts:118-154).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-proposal-dismiss-reload.spec.ts",
@@ -3216,7 +3263,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts",
@@ -3225,7 +3273,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-proposal-offscreen-return.spec.ts",
@@ -3234,7 +3283,8 @@
       "rationale": "Read in re-audit: off-screen proposal guard uses app state and rAF flush only; consolidate into proposals journey (tests/e2e/ui/goal-proposal-offscreen-return.spec.ts:122-193).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-proposal-revision-autoupdate.spec.ts",
@@ -3243,7 +3293,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-proposal-subgoal-prefill.spec.ts",
@@ -3252,7 +3303,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-proposal-workflow-tab.spec.ts",
@@ -3261,7 +3313,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-reattempt-project-binding.spec.ts",
@@ -3270,7 +3323,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-assistant.",
       "replacement": [
         "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-role-tabs-wiring.spec.ts",
@@ -3279,7 +3333,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dynamic-panels.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-status-widget.spec.ts",
@@ -3288,7 +3343,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dashboard-fanout.",
       "replacement": [
         "tests2/browser/journeys/team-operations.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-tabs-wiring.spec.ts",
@@ -3308,7 +3364,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-headquarters.",
       "replacement": [
         "tests2/browser/journeys/stories-registry.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/image-attach-roundtrip.spec.ts",
@@ -3317,7 +3374,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/image-model-selector-lock.spec.ts",
@@ -3326,7 +3384,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/instant-loader.spec.ts",
@@ -3335,7 +3394,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-debug-tools.",
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/jump-to-last-prompt.spec.ts",
@@ -3355,7 +3415,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/market-activation.spec.ts",
@@ -3364,7 +3425,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs.",
       "replacement": [
         "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/marketplace-conflicts.spec.ts",
@@ -3373,7 +3435,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs.",
       "replacement": [
         "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/marketplace-mcp.spec.ts",
@@ -3381,8 +3444,9 @@
       "method": "legacy-pending",
       "rationale": "Read in re-audit: marketplace MCP UI tabs/keyboard only, no real MCP subprocess or geometry (tests/e2e/ui/marketplace-mcp.spec.ts:229-350).",
       "replacement": [
-        "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+        "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/marketplace.spec.ts",
@@ -3390,8 +3454,9 @@
       "method": "legacy-pending",
       "rationale": "Read in re-audit: marketplace tabs/search/keyboard flows only; no geometry API (tests/e2e/ui/marketplace.spec.ts:374-448).",
       "replacement": [
-        "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+        "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/mid-session-project-proposal.spec.ts",
@@ -3400,7 +3465,8 @@
       "rationale": "Read in re-audit: project proposal tab lifecycle with no geometry API; consolidate into proposals journey (tests/e2e/ui/mid-session-project-proposal.spec.ts:80-107).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/mobile-review-commenting.spec.ts",
@@ -3420,7 +3486,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-mobile-layout.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/multi-repo-flow.spec.ts",
@@ -3429,7 +3496,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-multi-repo.",
       "replacement": [
         "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/new-tab-no-duplicate-messages.spec.ts",
@@ -3438,7 +3506,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/notification-policy.spec.ts",
@@ -3447,7 +3516,8 @@
       "rationale": "Read in re-audit: notification policy assertions; rAF is only a flush helper (tests/e2e/ui/notification-policy.spec.ts:44).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/open-session-new-window.spec.ts",
@@ -3456,7 +3526,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/optional-steps.spec.ts",
@@ -3465,7 +3536,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/page-title.spec.ts",
@@ -3474,7 +3546,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/palette-session.spec.ts",
@@ -3483,7 +3556,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-session-sharing.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/per-project-native-yaml-fields.spec.ts",
@@ -3492,7 +3566,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/pill-overflow-promotion.spec.ts",
@@ -3511,8 +3586,9 @@
       "method": "legacy-pending",
       "rationale": "Read in re-audit: archived-child plan tab flow with no geometry API (tests/e2e/ui/plan-archived-children.spec.ts:122-124).",
       "replacement": [
-        "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+        "tests2/browser/journeys/team-operations.journey.spec.ts"
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/plan-tab-archived-children.spec.ts",
@@ -3521,7 +3597,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-team-delegate.",
       "replacement": [
         "tests2/browser/journeys/team-operations.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/plan-tab-gate-status.spec.ts",
@@ -3530,7 +3607,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-team-gates-verification.",
       "replacement": [
         "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/pr-walkthrough-pack.spec.ts",
@@ -3561,7 +3639,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
         "tests2/browser/daily/crash-restart.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/preview-durable-restart.spec.ts",
@@ -3581,7 +3660,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/project-assistant-saved-state.spec.ts",
@@ -3601,7 +3681,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-assistant.",
       "replacement": [
         "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/project-drag-reorder.spec.ts",
@@ -3621,7 +3702,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/project-palette-none.spec.ts",
@@ -3630,7 +3712,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-app-smoke.",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/prompt-stats-e2e.spec.ts",
@@ -3639,7 +3722,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-cost-tracking.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/proposal-edit-flow.spec.ts",
@@ -3648,7 +3732,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/proposal-inline-comments.spec.ts",
@@ -3668,7 +3753,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/proposal-panel-streaming.spec.ts",
@@ -3699,7 +3785,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/proposal-tools.spec.ts",
@@ -3708,7 +3795,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
       "replacement": [
         "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/pwa-lifecycle.spec.ts",
@@ -3728,7 +3816,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/remove-first-project.spec.ts",
@@ -3737,7 +3826,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/replace-bobbit-text.spec.ts",
@@ -3746,7 +3836,8 @@
       "rationale": "Read in re-audit: asserts canvas element is replaced/restored but never exercises canvas API/drawing; consolidate into debug-tools journey (tests/e2e/ui/replace-bobbit-text.spec.ts:30-94).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts",
@@ -3755,7 +3846,8 @@
       "rationale": "Read in re-audit: websocket/live-row ordering with rAF flush only; consolidate into crash/restart journey (tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts:134).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/review-pane.spec.ts",
@@ -3764,7 +3856,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-review-commenting.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/role-assistant-new.spec.ts",
@@ -3773,7 +3866,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-assistant.",
       "replacement": [
         "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/search-e2e.spec.ts",
@@ -3791,7 +3885,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/session-actions.spec.ts",
@@ -3811,7 +3906,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
         "tests2/browser/daily/crash-restart.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/session-git-status-multi-repo.spec.ts",
@@ -3820,7 +3916,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-multi-repo.",
       "replacement": [
         "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/session-interactions.spec.ts",
@@ -3829,7 +3926,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/session-prompt-grant-replay.spec.ts",
@@ -3838,7 +3936,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/session-status-recovery.spec.ts",
@@ -3847,7 +3946,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
         "tests2/browser/daily/crash-restart.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/settings-agent-dir.spec.ts",
@@ -3856,7 +3956,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings.",
       "replacement": [
         "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts",
@@ -3865,7 +3966,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings.",
       "replacement": [
         "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/settings-mobile-tabs.spec.ts",
@@ -3885,7 +3987,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings.",
       "replacement": [
         "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/settings-restart-button.spec.ts",
@@ -3894,7 +3997,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings.",
       "replacement": [
         "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/side-panel-tabs.spec.ts",
@@ -3925,7 +4029,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-archived-layout.spec.ts",
@@ -3934,7 +4039,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-archived-per-project.spec.ts",
@@ -3943,7 +4049,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-archived-search-repro.spec.ts",
@@ -3952,7 +4059,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-child-loading.spec.ts",
@@ -3961,7 +4069,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-filters.spec.ts",
@@ -3970,7 +4079,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-font-scale.spec.ts",
@@ -3990,7 +4100,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-goal-staff.spec.ts",
@@ -3999,7 +4110,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-indent.spec.ts",
@@ -4019,7 +4131,8 @@
       "rationale": "Read in re-audit: Ctrl+Arrow navigation smoke with no geometry API; consolidate into sidebar keyboard journey (tests/e2e/ui/sidebar-keyboard-nav.spec.ts:275-291).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-mobile-archived-per-project.spec.ts",
@@ -4028,7 +4141,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-mobile-archived-search.spec.ts",
@@ -4037,7 +4151,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-navigation.spec.ts",
@@ -4046,7 +4161,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-refresh-agent.spec.ts",
@@ -4055,7 +4171,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-resize.spec.ts",
@@ -4075,7 +4192,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-session-actions.spec.ts",
@@ -4084,7 +4202,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-spawned-children-dedupe.spec.ts",
@@ -4093,7 +4212,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-staff-loading.spec.ts",
@@ -4102,7 +4222,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-tree-restart.spec.ts",
@@ -4111,7 +4232,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/sidebar-unified-tree.spec.ts",
@@ -4120,7 +4242,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-sidebar-nav-search-keyboard.",
       "replacement": [
         "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/single-project-sidebar.spec.ts",
@@ -4129,7 +4252,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/skill-multifile.spec.ts",
@@ -4138,7 +4262,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs.",
       "replacement": [
         "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/skills-chip.spec.ts",
@@ -4147,7 +4272,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs.",
       "replacement": [
         "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/splash-multi-project.spec.ts",
@@ -4156,7 +4282,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/splash-no-projects.spec.ts",
@@ -4165,7 +4292,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
         "tests2/browser/journeys/project-onboarding.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/staff-accessory.spec.ts",
@@ -4174,7 +4302,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff.",
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/staff-inbox.spec.ts",
@@ -4194,7 +4323,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff.",
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/staff-sandbox-indicator.spec.ts",
@@ -4203,7 +4333,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff.",
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/staff-sub-section.spec.ts",
@@ -4212,7 +4343,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff.",
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/staff-triggers.spec.ts",
@@ -4221,7 +4353,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-staff.",
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/steer-during-bash-tool-abort-toolend.spec.ts",
@@ -4230,7 +4363,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/steer-during-bash-tool-busy-race.spec.ts",
@@ -4239,7 +4373,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/steer-during-bash-tool.spec.ts",
@@ -4248,7 +4383,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/stories-drafts.spec.ts",
@@ -4257,7 +4393,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry.",
       "replacement": [
         "tests2/browser/journeys/stories-registry.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/stories-goal-routing.spec.ts",
@@ -4266,7 +4403,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry.",
       "replacement": [
         "tests2/browser/journeys/stories-registry.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/stories-navigation.spec.ts",
@@ -4286,7 +4424,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry.",
       "replacement": [
         "tests2/browser/journeys/stories-registry.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/stories-resilience.spec.ts",
@@ -4295,7 +4434,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry.",
       "replacement": [
         "tests2/browser/journeys/stories-registry.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/stories-sessions.spec.ts",
@@ -4304,7 +4444,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry.",
       "replacement": [
         "tests2/browser/journeys/stories-registry.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/stories-sidebar.spec.ts",
@@ -4313,7 +4454,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry.",
       "replacement": [
         "tests2/browser/journeys/stories-registry.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/stories-streaming.spec.ts",
@@ -4322,7 +4464,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-stories-registry.",
       "replacement": [
         "tests2/browser/journeys/stories-registry.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/subgoal-existing-goal-settings.spec.ts",
@@ -4331,7 +4474,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-subgoals.",
       "replacement": [
         "tests2/browser/journeys/goal-editing.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/subgoal-nesting-limit.spec.ts",
@@ -4340,7 +4484,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-subgoals.",
       "replacement": [
         "tests2/browser/journeys/goal-editing.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/subgoal-parent-picker-repro.spec.ts",
@@ -4349,7 +4494,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-subgoals.",
       "replacement": [
         "tests2/browser/journeys/goal-editing.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/subgoals-experimental-toggle.spec.ts",
@@ -4358,7 +4504,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-subgoals.",
       "replacement": [
         "tests2/browser/journeys/goal-editing.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/system-prompt-customise.spec.ts",
@@ -4367,7 +4514,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-settings.",
       "replacement": [
         "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/tail-chat-real-stream.spec.ts",
@@ -4398,7 +4546,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-team-delegate.",
       "replacement": [
         "tests2/browser/journeys/team-operations.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/terminal-pack.spec.ts",
@@ -4418,7 +4567,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/tool-assistant-system-scope.spec.ts",
@@ -4427,7 +4577,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-prompt-interaction.",
       "replacement": [
         "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/tree-cost-rollup.spec.ts",
@@ -4436,7 +4587,8 @@
       "rationale": "Read in re-audit: tree cost rollup data/UI assertions with no geometry API (tests/e2e/ui/tree-cost-rollup.spec.ts:1-443).",
       "replacement": [
         "tests2/browser/journeys/app-smoke.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/unseen-activity.spec.ts",
@@ -4445,7 +4597,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-notification-policy.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/verification-progress-indicator.spec.ts",
@@ -4454,7 +4607,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dashboard-fanout.",
       "replacement": [
         "tests2/browser/journeys/team-operations.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/workflow-editor.spec.ts",
@@ -4463,7 +4617,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/workflow-page-scope.spec.ts",
@@ -4472,7 +4627,8 @@
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
         "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      ],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/unborn-worktree-session.spec.ts",
