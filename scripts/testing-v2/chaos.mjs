@@ -92,6 +92,12 @@ const PRIMARY_REPO = findPrimaryFromWorktreeGit(REPO_ROOT);
 function hasVitest(nm) {
   try { return fs.existsSync(path.join(nm, "vitest", "vitest.mjs")); } catch { return false; }
 }
+function hasTsx(nm) {
+  try {
+    return fs.existsSync(path.join(nm, "tsx", "dist", "cli.mjs")) ||
+           fs.existsSync(path.join(nm, "tsx", "dist", "cli.js"));
+  } catch { return false; }
+}
 function resolveToolchainNodeModules() {
   const candidates = [
     path.join(PRIMARY_REPO, "node_modules"),
@@ -104,6 +110,11 @@ function resolveToolchainNodeModules() {
         candidates.push(path.join(base, name, "node_modules"));
       }
     } catch { /* ignore */ }
+  }
+  // Prefer a node_modules that has BOTH tiers (so the legacy tier can run);
+  // fall back to vitest-only (v2 tier still works, legacy will report 'error').
+  for (const nm of candidates) {
+    if (hasVitest(nm) && hasTsx(nm)) return nm;
   }
   for (const nm of candidates) {
     if (hasVitest(nm)) return nm;
