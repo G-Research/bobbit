@@ -35,6 +35,63 @@ retired test mapped") and the constraint "never weaken/skip/delete an assertion 
 `tier: "retired"` transition is blocked for them. The 8 COVERED are safe to retire (6 are already
 empty stubs migrated to fixtures; 2 are equivalently covered).
 
+## Mutation-campaign reconciliation (browser-chaos, D8)
+
+The browser-dimension mutation campaign (`scripts/testing-v2/browser-chaos.mjs`,
+`docs/testing-v2/browser-chaos-report.md`) is the authoritative adversarial check
+for this consolidation: for a curated mutant per behaviour it runs the targeted
+legacy browser spec AND the replacement journey and records caught/missed. It
+turned the audit's classifications into empirical evidence.
+
+**13 domains mutation-confirmed HELD** (legacy AND journey both catch — the
+journey genuinely reproduces the behaviour, not just navigation smoke):
+plan-tab archived + gate-status; goal-proposal no-workflows-banner / streaming-badge
+/ submit-disabled; panel-tab unread dot; dashboard mutation-pending card;
+delegate-count; session-actions fork; add-project browse dialog / up / select;
+goal-status render guard. (BR01–06, BR08–10, BR12, BR14–16.)
+
+**13 real journey holes found and now CLOSED** — each behaviour's assertion was
+ported into the owning journey and re-verified caught by browser-chaos (0 real
+holes remaining). These specs stay `legacy-pending`: only the mutation-flagged
+behaviour per spec is now covered; their remaining audit assertions below are
+still pending.
+
+| Mutant | Legacy spec | Journey (assertion ported) |
+|---|---|---|
+| BR11 | `search-e2e.spec.ts` | sidebar-nav — non-matching query hides a goal by title |
+| BR13 | `draft-loss.spec.ts` | app-smoke — draft restores from server after client mirror cleared |
+| BR17 | `page-title.spec.ts` | app-smoke — document.title carries the `· Bobbit` suffix |
+| BR18 | `api-error-modal.spec.ts` | misc — createGoal 400 surfaces error message + stack |
+| BR19 | `cost-popover-cache-hit.spec.ts` | misc — cost popover shows cache-hit % |
+| BR20 | `goal-dashboard-fanout.spec.ts` | team-operations — `1 signal` gate-signal-badge |
+| BR21 | `goal-status-widget.spec.ts` | team-operations — pill `data-awaiting-signoffs="false"` |
+| BR22 | `proposal-tools.spec.ts` | proposals — goal tool card `proposal-open-button` |
+| BR23 | `at-mention.spec.ts` | prompt-interaction — `@` opens `.at-menu` |
+| BR24 | `stories-sessions.spec.ts` | stories-registry — Send disabled when composer empty |
+| BR25 | `settings-model-fallback.spec.ts` | project-settings — session-model-fallback toggle (default off) |
+| BR27 | `add-project-preflight.spec.ts` | project-onboarding — nested-in-project `data-has-fail="1"` |
+| BR28 | `marketplace.spec.ts` | marketplace-packs — research-preview banner |
+
+**Both-missed (tracked justification):** BR26 mutated the goal-scoped staff
+trigger's `Wake prompt (required)` label; the legacy `staff-triggers.spec.ts`
+does **not** assert that label either (it covers the trigger dropdown + PUT/GET
+round-trip). This is a pre-existing browser-e2e gap, not a consolidation
+regression — tracked here; a dedicated staff-trigger-editor assertion can be
+added when that editor flow is journey-covered.
+
+**bg-wait-multi-repo + crash-restart** are covered by dedicated tier-1/2/3 specs,
+not journey extensions (per this audit's sequencing recommendation): bg-process
+lifecycle → `tests2/core/bg-process-persistence.test.ts`,
+`tests2/browser/fixtures/bg-process-{pills,popover}.spec.ts`,
+`tests/manual-integration/bg-process-restart-survival.spec.ts`; crash/restart →
+`tests2/browser/daily/crash-restart.journey.spec.ts`; multi-repo →
+`tests/manual-integration/multi-repo-docker.spec.ts` + the `v2-integration`
+adapter for `multi-repo-flow`.
+
+`tests2/tests-map.json` is unchanged by the porting (no files added/moved, no
+`v2Path`/`replacement` changes), so `guard-v2` stays green; the `legacy-pending`
+status of the 13 specs remains accurate.
+
 ## Per-journey summary
 
 | Replacement journey | Legacy specs | COVERED | PARTIAL | GAP |
