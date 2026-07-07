@@ -292,3 +292,13 @@ test.describe("Journey: GitHub Trusted Hosts", () => {
 		).toBeVisible({ timeout: 10_000 });
 	});
 });
+
+// Ported from replace-bobbit-text.spec.ts (audit: app-smoke GAP): settings
+// exposes the replace-bobbit-with-text toggle.
+test.describe("Journey: Replace Bobbit Text", () => {
+	test("settings exposes the replace-bobbit-with-text toggle", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(page.locator('[data-testid="general-replace-bobbit-with-text"]').first()).toBeVisible({ timeout: 15_000 });
+	});
+});

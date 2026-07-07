@@ -255,3 +255,17 @@ test.describe("Journey: Proposals — API error handling", () => {
 		await expect(page.locator('[data-testid="proposal-open-button"]').first()).toBeVisible({ timeout: 15_000 });
 	});
 });
+
+// Ported from failed-goal-proposal-ux.spec.ts (audit: proposals GAP): a
+// MISSING_WORKFLOW failed proposal surfaces the workflow-error row.
+test.describe("Journey: Failed Goal Proposal", () => {
+	test("MISSING_WORKFLOW surfaces the goal-proposal-workflow-error row", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "Please run GOAL_PROPOSAL_MISSING_WORKFLOW now");
+		const workflowError = page.locator('[data-testid="goal-proposal-workflow-error"]').first();
+		await expect(workflowError).toBeVisible({ timeout: 20_000 });
+		await expect(workflowError).toContainText(/Workflow is required/i, { timeout: 10_000 });
+	});
+});

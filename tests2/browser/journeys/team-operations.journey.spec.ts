@@ -507,3 +507,50 @@ test.describe("Journey: Team Delegate Card — behavioral assertions", () => {
 		}
 	});
 });
+// Ported from gate-bypass.spec.ts (audit: gate-bypass GAP): the goal-status
+// widget exposes a human-only bypass control on a failed gate row.
+test.describe("Journey: Gate Bypass", () => {
+	test("failed gate row exposes the goal-widget-gate-bypass control", async ({ page }) => {
+		test.setTimeout(90_000);
+		const goal = await createGoal({ title: `v2-gate-bypass-${Date.now()}`, workflowId: "test-fast", team: false });
+		const goalId = goal.id as string;
+		const gates = [
+			{ gateId: "design-doc", name: "Design Doc", status: "passed" },
+			{ gateId: "implementation", name: "Implementation", status: "failed" },
+			{ gateId: "ready-to-merge", name: "Ready to Merge", status: "pending" },
+		];
+		let sessionId = "";
+		try {
+			await page.route(new RegExp(`/api/goals/${goalId}/gates(?:\?.*)?$`), async (route) => {
+				if (route.request().method() !== "GET") return route.fallback();
+				const summary = route.request().url().includes("view=summary");
+				const body = summary
+					? { summary: { passed: 1, bypassed: 0, bypassedCount: 0, total: gates.length, verifying: false, verifyingCount: 0, awaitingSignoffCount: 0, awaitingHumanSignoff: false, runningGateIds: [], gates: gates.map(g => ({ gateId: g.gateId, name: g.name, status: g.status, effectiveStatus: g.status, running: false, awaitingSignoffCount: 0, dependsOn: [], signalCount: 0 })) } }
+					: { gates: gates.map(g => ({ gateId: g.gateId, name: g.name, status: g.status, signals: [] })) };
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+			});
+			await page.route(new RegExp(`/api/goals/${goalId}/verifications/active(?:\?.*)?$`), async (route) => {
+				if (route.request().method() !== "GET") return route.fallback();
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ verifications: [] }) });
+			});
+
+			sessionId = await createSession({ goalId });
+			await waitForSessionStatus(sessionId, "idle");
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+			await expect(pill).toBeVisible({ timeout: 15_000 });
+			await pill.click();
+			await expect(page.locator("[data-testid='goal-widget-gates']").first()).toBeVisible({ timeout: 10_000 });
+
+			const failedRow = page.locator('[data-testid="goal-widget-gate"][data-gate-id="implementation"]').first();
+			await expect(failedRow).toHaveAttribute("data-gate-status", "failed", { timeout: 10_000 });
+			await expect(failedRow.locator('[data-testid="goal-widget-gate-bypass"]').first()).toBeVisible({ timeout: 10_000 });
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			await deleteGoal(goalId, true).catch(() => {});
+		}
+	});
+});

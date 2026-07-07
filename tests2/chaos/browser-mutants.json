@@ -610,7 +610,7 @@
   },
   {
     "id": "BR38",
-    "area": "misc-gate-bypass",
+    "area": "team-operations-gate-bypass",
     "file": "src/ui/components/GoalStatusWidget.ts",
     "target": "ui",
     "operator": "dropped-testid",
@@ -621,7 +621,7 @@
       "tests/e2e/ui/gate-bypass.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests2/browser/journeys/team-operations.journey.spec.ts"
     ]
   },
   {

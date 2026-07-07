@@ -109,3 +109,25 @@ test.describe("Journey: Staff Sidebar Header", () => {
 		}
 	});
 });
+
+// Ported from staff-role.spec.ts (audit: staff-debug GAP): the staff edit page
+// exposes the role select.
+test.describe("Journey: Staff Role Select", () => {
+	test("staff edit page exposes the role select", async ({ page }) => {
+		const project = await defaultProject();
+		let staffId = "";
+		try {
+			const resp = await apiFetch("/api/staff", {
+				method: "POST",
+				body: JSON.stringify({ name: `v2-staffrole-${Date.now()}`, systemPrompt: "role test bot", cwd: project.rootPath, projectId: project.id }),
+			});
+			expect(resp.status).toBe(201);
+			staffId = (await resp.json()).id;
+			await openApp(page);
+			await navigateToHash(page, `#/staff/${staffId}`);
+			await expect(page.locator('[data-testid="staff-role-select"]').first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+});

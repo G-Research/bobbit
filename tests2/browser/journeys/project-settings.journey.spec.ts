@@ -166,3 +166,14 @@ test.describe("Journey: Project Assistant", () => {
 		await expect(page.locator("button").filter({ hasText: "New Role" }).first()).toBeVisible({ timeout: 15_000 });
 	});
 });
+
+// Ported from system-prompt-customise.spec.ts (audit: project-settings GAP):
+// settings exposes the Customise-system-prompt control.
+test.describe("Journey: Customise System Prompt", () => {
+	test("settings exposes the customise-system-prompt control", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
+		await page.waitForFunction(() => window.location.hash.includes("general"), null, { timeout: 20_000 });
+		await expect(page.locator('[data-testid="general-customise-system-prompt"]').first()).toBeVisible({ timeout: 15_000 });
+	});
+});

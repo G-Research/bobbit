@@ -3,7 +3,7 @@
  * Covers: journey-goal-editing, journey-subgoals
  * Consolidated from: goal-edit-*, goal-spec-*, subgoals-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch, defaultProjectId, createSession, deleteSession, sendMessage, createSessionViaUI } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch, defaultProjectId, sendMessage, createSessionViaUI } from "../_helpers/journey-fixture.js";
 import { nonGitCwd } from "../e2e-setup.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
@@ -475,5 +475,31 @@ test.describe("Journey: Subgoals Experimental Toggle — behavioral assertions",
 			method: "PUT",
 			body: JSON.stringify({ subgoalsEnabled: true }),
 		});
+	});
+});
+
+// Ported from subgoal-parent-picker-repro.spec.ts (audit: goal-editing GAP):
+// with subgoals enabled, the goal-proposal Sub-goals tab exposes the parent
+// picker.
+test.describe("Journey: Subgoal Parent Picker", () => {
+	test("Sub-goals tab exposes the parent picker when subgoals enabled", async ({ page }) => {
+		test.setTimeout(120_000);
+		const pref = await apiFetch("/api/preferences", { method: "PUT", body: JSON.stringify({ subgoalsEnabled: true }) });
+		expect(pref.status).toBe(200);
+		try {
+			await openApp(page);
+			await createGoalAssistantViaUI(page, { timeout: 60_000 });
+			const textarea = page.locator("textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 30_000 });
+			await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+			const titleInput = page.locator("input[placeholder='Goal title']").first();
+			await expect(titleInput).toBeVisible({ timeout: 20_000 });
+			const subgoalsTab = page.locator("[data-testid='goal-proposal-tab-subgoals']").first();
+			await expect(subgoalsTab).toBeVisible({ timeout: 15_000 });
+			await subgoalsTab.click();
+			await expect(page.locator("[data-testid='goal-form-parent-picker']").first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await apiFetch("/api/preferences", { method: "PUT", body: JSON.stringify({ subgoalsEnabled: false }) }).catch(() => {});
+		}
 	});
 });
