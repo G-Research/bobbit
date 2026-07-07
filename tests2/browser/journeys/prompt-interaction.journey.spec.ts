@@ -3,7 +3,10 @@
  * Covers: journey-prompt-interaction, journey-bg-wait-steer
  * Consolidated from: prompt-tool-renderer-*, bg-wait-*, steer-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
 import { sendMessage } from "../../../tests/e2e/ui/ui-helpers.js";
 
 test.describe("Journey: Prompt Interaction", () => {
@@ -117,20 +120,40 @@ test.describe("Journey: Prompt Interaction", () => {
 	});
 
 	// Ported from at-mention.spec.ts (audit: prompt-interaction GAP): typing '@'
-	// in the composer opens the @-mention autocomplete menu (.at-menu).
+	// in the composer opens the @-mention autocomplete menu (.at-menu), populated
+	// by a server file fetch of the session cwd — so the session needs a cwd with
+	// real files.
 	test("typing '@' opens the @-mention autocomplete menu", async ({ page }) => {
-		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
+		const cwd = join(tmpdir(), `bobbit-v2-atmention-${process.env.E2E_PORT ?? "0"}-${Date.now()}`);
+		mkdirSync(cwd, { recursive: true });
+		writeFileSync(join(cwd, "notes.md"), "# notes\n");
+		writeFileSync(join(cwd, "readme.txt"), "readme\n");
+		let sessionId = "";
+		let projectId = "";
 		try {
+			const projResp = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: `v2-atmention-${Date.now()}`, rootPath: cwd }),
+			});
+			expect(projResp.status).toBe(201);
+			projectId = (await projResp.json()).id;
+			const created = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd, projectId, worktree: false }),
+			});
+			expect(created.status).toBe(201);
+			sessionId = (await created.json()).id;
+
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			const textarea = page.locator("message-editor textarea").first();
 			await expect(textarea).toBeVisible({ timeout: 15_000 });
 			await textarea.click();
-			await textarea.type("@");
+			await textarea.pressSequentially("@");
 			await expect(page.locator(".at-menu").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
-			await deleteSession(sessionId).catch(() => {});
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 });

@@ -233,14 +233,26 @@ test.describe("Journey: Project Onboarding", () => {
 		});
 		if (!reg.ok) { testInfo.skip(true, `Failed to seed parent project: ${reg.status}`); return; }
 
-		await openAddProjectDialog(page);
-		await page.locator(ADD_PROJECT.pickerInput).fill(child);
+		// Skip only if the preflight endpoint is genuinely absent (older gateway).
+		const pf = await apiFetch("/api/projects/preflight?path=" + encodeURIComponent(tmpdir()));
+		if (pf.status === 404) { testInfo.skip(true, "preflight endpoint unavailable"); return; }
 
-		const panel = page.locator(ADD_PROJECT.dialog).locator('[data-testid="preflight-panel"]').first();
-		if (!await panel.isVisible({ timeout: 15_000 }).catch(() => false)) {
-			testInfo.skip(true, "preflight panel unavailable (older gateway)");
-			return;
-		}
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await openAddProjectDialog(page);
+		// Fill the picker input (placeholder "/path/to/project") — this triggers the
+		// preflight fetch for the nested-in-project path.
+		await page.locator('input[placeholder="/path/to/project"]').fill(child);
+
+		const panel = page.locator('[data-testid="preflight-panel"]').first();
+		await expect(panel).toBeVisible({ timeout: 15_000 });
+		// Wait for preflight to settle (a check row rendered / loading cleared).
+		await expect.poll(async () => {
+			const rows = await page.locator('[data-testid="preflight-check"]').count();
+			const loading = await panel.getAttribute("data-loading");
+			return rows > 0 || loading === null;
+		}, { timeout: 15_000 }).toBe(true);
 		// Nested-in-project is a fail check → panel must report data-has-fail="1".
 		await expect(panel).toHaveAttribute("data-has-fail", "1", { timeout: 15_000 });
 		await expect(page.locator('[data-testid="preflight-blocked"]').first()).toBeVisible({ timeout: 10_000 });
