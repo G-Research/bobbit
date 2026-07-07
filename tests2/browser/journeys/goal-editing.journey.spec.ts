@@ -105,6 +105,13 @@ test.describe("Journey: Goal Archive Always-On — behavioral assertions", () =>
 				const g = await r.json();
 				return g.archived === true ? "archived" : "active";
 			}, { timeout: 20_000 }).toBe("archived");
+			// Ported from goal-archive-always-on.spec.ts (mutant BR60): the dashboard
+			// must show the read-only banner + a disabled "Archived" button once the
+			// goal is archived.
+			await expect(page.getByText(/This goal was archived .*Dashboard is read-only\./)).toBeVisible({ timeout: 15_000 });
+			const archivedBtn = page.locator(".dashboard-container").getByRole("button", { name: "Archived", exact: true }).first();
+			await expect(archivedBtn).toBeVisible({ timeout: 10_000 });
+			await expect(archivedBtn).toBeDisabled();
 		} finally {
 			await deleteGoal(goalId, true);
 		}
@@ -247,6 +254,11 @@ test.describe("Journey: Goal Form Tooltips — behavioral assertions", () => {
 		const tooltipIcon = qaLabel.locator("span.cursor-help").first();
 		await expect(tooltipIcon).toBeVisible({ timeout: 15_000 });
 		await expect(tooltipIcon).toHaveText("ⓘ");
+		// Ported from goal-form-tooltips.spec.ts (mutant BR61): the tooltip title
+		// attribute must carry the workflow step description (the real form wires
+		// the description into `title`, not just render a bare icon).
+		await expect(tooltipIcon).toHaveAttribute("title", /QA agent/i, { timeout: 15_000 });
+		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/i);
 	});
 });
 

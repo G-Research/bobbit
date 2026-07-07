@@ -168,6 +168,31 @@ test.describe("Journey: Project Assistant", () => {
 	});
 });
 
+// Ported from settings-restart-button.spec.ts (audit: project-settings GAP,
+// mutant BR63): without the dev harness the Restart Server control must be
+// absent — and stay absent across reload + navigation.
+test.describe("Journey: Settings Restart Button", () => {
+	async function expectRestartHidden(page: import("@playwright/test").Page): Promise<void> {
+		await expect(page.getByRole("button", { name: /Restart Server|Restart Requested|Requesting/i })).toHaveCount(0);
+	}
+
+	test("restart button is hidden by default and after reload + navigation", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 15_000 });
+		await expectRestartHidden(page);
+
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/general");
+		await expectRestartHidden(page);
+
+		await navigateToHash(page, "#/");
+		await navigateToHash(page, "#/settings/system/general");
+		await expectRestartHidden(page);
+	});
+});
+
 // Ported from system-prompt-customise.spec.ts (audit: project-settings GAP):
 // settings exposes the Customise-system-prompt control.
 test.describe("Journey: Customise System Prompt", () => {

@@ -161,6 +161,54 @@
     ]
   },
   {
+    "id": "BR60",
+    "area": "goal-editing-archive-readonly-banner",
+    "file": "src/app/goal-dashboard.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": "Dashboard is read-only.",
+    "replace": "Dashboard is now editable.",
+    "description": "After a goal is archived the dashboard read-only banner text changes so it no longer says 'Dashboard is read-only.'. Legacy goal-archive-always-on.spec.ts asserts the banner text post-archive; goal-editing journey only polls the archived flag via API (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-archive-always-on.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR61",
+    "area": "goal-editing-form-tooltip-title",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": ": os.description}",
+    "replace": ": \"\"}",
+    "description": "The optional-step tooltip drops the workflow step description from its title attribute. Legacy goal-form-tooltips.spec.ts asserts title=/QA agent/i + /ephemeral server/i; goal-editing journey only asserts the icon/cursor-help/text (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-form-tooltips.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR63",
+    "area": "project-settings-restart-button-hidden",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "disabled-guard",
+    "search": "if (!harnessRestartAvailable) return \"\";",
+    "replace": "if (false && !harnessRestartAvailable) return \"\";",
+    "description": "The dev-harness Restart Server control renders even when the harness restart endpoint is unavailable (its hide-guard is disabled). Legacy settings-restart-button.spec.ts asserts the button is absent by default; project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/settings-restart-button.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
     "id": "BR57",
     "area": "proposals-project-workflow-views",
     "file": "src/app/project-proposal-views.ts",
