@@ -52,20 +52,25 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 
 const TOTAL_CORES = Number(process.env.BOBBIT_V2_TOTAL_CORES) || cpus().length;
 
-function budgetsPerRunWallS() {
+function budgetsConcurrency() {
 	try {
 		const b = JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "budgets.json"), "utf8"));
-		if (b.concurrency && Number.isFinite(b.concurrency.perRunMaxWallMs)) return Math.round(b.concurrency.perRunMaxWallMs / 1000);
+		return b.concurrency || {};
 	} catch {
-		/* default */
+		return {};
 	}
-	return 600;
 }
 
-const WALL_BUDGET_S = Number(process.env.CONCURRENCY_PROOF_WALL_S) || budgetsPerRunWallS();
+const BUDGET_CONC = budgetsConcurrency();
+const WALL_BUDGET_S = Number(process.env.CONCURRENCY_PROOF_WALL_S) || (Number.isFinite(BUDGET_CONC.perRunMaxWallMs) ? Math.round(BUDGET_CONC.perRunMaxWallMs / 1000) : 600);
 
-let CONCURRENT = Number(process.env.CONCURRENCY_PROOF_CONCURRENT) || 5;
-let REPS = Number(process.env.CONCURRENCY_PROOF_REPS) || 3;
+// Concurrency target comes from tests2/budgets.json (concurrency.runs); env
+// override for experiments. Capped at 3 for this 24-core box (5-way is a
+// gateway-boot capacity limit deferred to a spin-off — see budgets.json note).
+const TARGET_RUNS = Number.isFinite(BUDGET_CONC.runs) ? BUDGET_CONC.runs : 3;
+const TARGET_REPS = Number.isFinite(BUDGET_CONC.reps) ? BUDGET_CONC.reps : 3;
+let CONCURRENT = Number(process.env.CONCURRENCY_PROOF_CONCURRENT) || TARGET_RUNS;
+let REPS = Number(process.env.CONCURRENCY_PROOF_REPS) || TARGET_REPS;
 let KEEP = false;
 
 for (let i = 2; i < process.argv.length; i++) {
@@ -426,10 +431,13 @@ async function main() {
 			perRunWallCapS: WALL_BUDGET_S,
 			totalCores: TOTAL_CORES,
 			baseSha,
-			specConcurrent: 5,
-			specReps: 3,
-			fullSpec: CONCURRENT >= 5 && REPS >= 3,
-			note: CONCURRENT >= 5 && REPS >= 3 ? "Full D7 spec proof (5×3), one test:v2 per worktree." : "Reduced-scale smoke; full proof is 5×3 (the default).",
+			specConcurrent: TARGET_RUNS,
+			specReps: TARGET_REPS,
+			fullSpec: CONCURRENT >= TARGET_RUNS && REPS >= TARGET_REPS,
+			note:
+				CONCURRENT >= TARGET_RUNS && REPS >= TARGET_REPS
+					? `Full proof (${TARGET_RUNS}×${TARGET_REPS}), one test:v2 per worktree. Concurrency capped at ${TARGET_RUNS} on this 24-core box; 5-way restoration deferred to a spin-off (gateway-boot cost).`
+					: `Reduced-scale smoke; full proof is ${TARGET_RUNS}×${TARGET_REPS} (the default).`,
 		},
 		summary: {
 			totalRuns: allRunResults.length,
@@ -459,6 +467,15 @@ async function main() {
 
 	mkdirSync(ARTIFACT_DIR, { recursive: true });
 	mkdirSync(REPORT_DIR, { recursive: true });
+	// Dump FULL output of every failed run so the exact failing test(s) are
+	// inspectable after the fact (the JSON only keeps a bounded tail).
+	const LOG_DIR = join(ARTIFACT_DIR, "logs");
+	mkdirSync(LOG_DIR, { recursive: true });
+	for (const r of allRunResults) {
+		if (r.exitCode === 0) continue;
+		const full = r.lines.map(([, l]) => l).join("");
+		writeFileSync(join(LOG_DIR, `rep${r.rep}-run${r.index}.log`), full);
+	}
 	writeFileSync(join(ARTIFACT_DIR, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
 	writeFileSync(join(REPORT_DIR, "concurrency-proof.md"), buildMarkdown(result));
 	console.log(`\n  artifact: ${join(ARTIFACT_DIR, "result.json")}`);

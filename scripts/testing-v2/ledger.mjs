@@ -325,27 +325,36 @@ function computeGrant(state, myParentRunId, cores) {
 
 /**
  * Split a committed parent bundle into vitest + playwright worker counts.
- * Anchors (verified by selftest): 4→2+2, 6→4+2, 8→6+2, 12→8+4.
+ * Anchors (verified by selftest): 12→8v+4p, 8→7v+1p, 6→5v+1p, 4→3v+1p.
  *
- * The invariant that matters most: `vitest + playwright === input` for every
- * input in [2, MAX_BUNDLE]. splitBundle NEVER returns a total larger than its
- * grant — that was the old "+3 overshoot" bug (splitBundle(2) returned 2+1=3).
- * Sum-preservation is what lets the caller clamp grant ≤ remaining and be sure
- * the committed reservation stays within the free-core budget.
+ * PLAYWRIGHT IS THE HEAVY TIER. Measured: 3 concurrent `test:v2:core` (tier-1
+ * only) pass cleanly, but adding the browser tier (2 playwright workers/run × 3
+ * = 6 chromium + per-test gateways) starves tier-1's gateway-booting integration
+ * tests into timeouts. So under contention we allocate exactly ONE playwright
+ * worker per run and give the rest of the bundle to vitest: this minimises the
+ * count of simultaneous browsers (the tier-1 starvation driver) while keeping
+ * tier-1 fast. A single, uncontended run (bundle ≥ 12) still gets the full
+ * 8v+4p so isolated `test:v2` stays < 300 s.
+ *
+ * Invariant: `vitest + playwright ≤ grant` for every input, and both ≥ 1 for a
+ * two-kind bundle. NEVER returns a total larger than its grant (that was the old
+ * "+3 overshoot" bug), so the caller can clamp grant ≤ remaining and stay within
+ * the free-core budget. Under-allocating (leaving a core idle) is allowed and
+ * safe; it only happens at bundle sizes floor(cores/n) never actually produces.
  */
 export function splitBundle(grant) {
 	const total = clamp(Math.floor(grant) || 0, 1, MAX_BUNDLE);
 	if (total < 2) return { vitest: 1, playwright: 0, total: 1 };
-	let playwright = total >= 4 ? clamp(Math.floor(total / 3), 2, PLAYWRIGHT_CAP) : 1;
-	let vitest = total - playwright;
-	if (vitest > VITEST_CAP) {
-		vitest = VITEST_CAP;
-		playwright = total - vitest;
+	// Uncontended (single/near-single run): full playwright parallelism for speed.
+	if (total >= 12) {
+		const vitest = VITEST_CAP;
+		const playwright = PLAYWRIGHT_CAP;
+		return { vitest, playwright, total: vitest + playwright };
 	}
-	if (vitest < 1) {
-		vitest = 1;
-		playwright = total - 1;
-	}
+	// Mildly contended: 2 playwright workers.
+	// Contended (bundle 4..8, i.e. 3+ concurrent runs): exactly 1 playwright worker.
+	const playwright = total >= 9 ? 2 : 1;
+	const vitest = clamp(total - playwright, 1, VITEST_CAP);
 	return { vitest, playwright, total: vitest + playwright };
 }
 
@@ -645,16 +654,21 @@ function cliSelftest() {
 
 	// 5) splitBundle spot-checks + sum-preservation across the whole range.
 	const s4 = splitBundle(4);
+	const s8 = splitBundle(8);
 	const s12 = splitBundle(12);
-	assert(s4.vitest === 2 && s4.playwright === 2, `split(4)=2+2 got ${s4.vitest}+${s4.playwright}`);
-	assert(s12.vitest === 8 && s12.playwright === 4, `split(12)=8+4 got ${s12.vitest}+${s12.playwright}`);
+	// Under contention (bundle 4/8 = 5-way/3-way) exactly ONE playwright worker so
+	// concurrent browsers stay minimal; a single run (bundle 12) keeps 8v+4p.
+	assert(s4.vitest === 3 && s4.playwright === 1, `split(4)=3v+1p got ${s4.vitest}+${s4.playwright}`);
+	assert(s8.vitest === 7 && s8.playwright === 1, `split(8)=7v+1p got ${s8.vitest}+${s8.playwright}`);
+	assert(s12.vitest === 8 && s12.playwright === 4, `split(12)=8v+4p got ${s12.vitest}+${s12.playwright}`);
 	for (let g = 2; g <= MAX_BUNDLE; g++) {
 		const s = splitBundle(g);
-		assert(s.total === g, `splitBundle(${g}) must preserve sum, got ${s.vitest}+${s.playwright}=${s.total}`);
+		// Never overshoot the grant; under-allocation (idle core) is allowed + safe.
+		assert(s.total <= g, `splitBundle(${g}) must not exceed grant, got ${s.vitest}+${s.playwright}=${s.total}`);
 		assert(s.vitest <= VITEST_CAP && s.playwright <= PLAYWRIGHT_CAP, `splitBundle(${g}) within caps, got v=${s.vitest} pw=${s.playwright}`);
 		assert(s.vitest >= 1 && s.playwright >= 1, `splitBundle(${g}) both kinds ≥1, got v=${s.vitest} pw=${s.playwright}`);
 	}
-	console.log("  splitBundle(4)=2+2 ✓  splitBundle(12)=8+4 ✓  sum-preserving 2..12 ✓");
+	console.log("  splitBundle(4)=3v+1p ✓  splitBundle(8)=7v+1p ✓  splitBundle(12)=8v+4p ✓  no-overshoot 2..12 ✓");
 
 	// 6) Pending-contention: seed 4 live pending markers (distinct runs) so a fresh
 	//    reserve sees activeParents=5 → target=floor(24/5)=4. This is the core
