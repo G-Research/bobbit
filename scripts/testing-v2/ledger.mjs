@@ -62,8 +62,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, cpus } from "node:os";
-import { pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { spawnSync, spawn } from "node:child_process";
 
 const LEDGER_DIRNAME = "bobbit-test-v2-ledger";
 const LOCK_STALE_MS = 30_000;
@@ -696,13 +696,150 @@ function cliSelftest() {
 	console.log("ledger selftest: PASS");
 }
 
+// ─────────────────────── reserve-hold (stress child) ───────────────────────
+
+/**
+ * A single stress child: reserve (parent bundle or one kind), print the grant
+ * and the current committed Σworkers, hold for `holdMs`, then release. Used by
+ * cliStress to model real `test:v2` runs without spawning the whole suite.
+ */
+function cliReserveHold(kind, holdMs, coalesceMs) {
+	const reservation = kind === "parent" ? reserveParentBundle({ coalesceMs }) : reserveWorkerSlots(kind, { coalesceMs });
+	const snap = readLedger();
+	const sigma = snap.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
+	const grant = kind === "parent" ? reservation.total : reservation.workerSlots;
+	const detail = kind === "parent" ? `vitest=${reservation.vitest} playwright=${reservation.playwright}` : `${kind}=${reservation.workerSlots}`;
+	console.log(`RESERVED pid=${process.pid} ${detail} total=${grant} sigma=${sigma}/${snap.totalCores}`);
+	if (sigma > snap.totalCores) {
+		console.error(`INVARIANT VIOLATION at reserve: sigma=${sigma} > cores=${snap.totalCores}`);
+		process.exit(3);
+	}
+	setTimeout(() => {
+		reservation.release();
+		process.exit(0);
+	}, holdMs);
+}
+
+// ─────────────────────────── stress harness ───────────────────────────
+
+/**
+ * cliStress — spawn N reservation-only children with staggered starts, poll the
+ * ledger throughout, and assert peak Σworkers ≤ cores. This validates the
+ * Σworkers≤cores invariant under realistic concurrency (near-simultaneous AND
+ * staggered starts, plus a mid-run straggler and a killed child) WITHOUT running
+ * the test suite — so it is valid even on a shared/busy machine.
+ *
+ * usage: node scripts/testing-v2/ledger.mjs --stress [N=5] [staggerMs=0] [holdMs=6000]
+ */
+async function cliStress() {
+	process.env.BOBBIT_V2_TOTAL_CORES = process.env.BOBBIT_V2_TOTAL_CORES || "24";
+	const cores = totalCores();
+	const N = Number(process.argv[3]) || 5;
+	const staggerMs = Number(process.argv[4]) || 0;
+	const holdMs = Number(process.argv[5]) || 6000;
+	const coalesceMs = Number(process.env.BOBBIT_V2_STRESS_COALESCE_MS) || 1500;
+	const killIdx = process.env.BOBBIT_V2_STRESS_KILL ? Number(process.env.BOBBIT_V2_STRESS_KILL) : -1;
+
+	ensureDir();
+	try {
+		rmSync(reservationsPath(), { force: true });
+		rmSync(lockPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+
+	console.log(`ledger stress: cores=${cores} children=${N} stagger=${staggerMs}ms hold=${holdMs}ms coalesce=${coalesceMs}ms${killIdx >= 0 ? ` kill=#${killIdx}` : ""}`);
+	const selfPath = fileURLToPath(import.meta.url);
+	let peakSigma = 0;
+	let peakCount = 0;
+	let violated = false;
+
+	// Poll the ledger every 200ms; record peak Σ and flag any overshoot.
+	const poll = setInterval(() => {
+		try {
+			const state = readLedger({ lockTimeoutMs: 2000 });
+			const sigma = state.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
+			if (sigma > peakSigma) peakSigma = sigma;
+			if (state.reservations.length > peakCount) peakCount = state.reservations.length;
+			if (sigma > cores) {
+				violated = true;
+				console.error(`  POLL VIOLATION: sigma=${sigma} > cores=${cores} (reservations=${state.reservations.length})`);
+			}
+		} catch {
+			/* locked — skip */
+		}
+	}, 200);
+
+	// Spawn N children with staggered starts; each reserves a parent bundle and
+	// holds. Optionally hard-kill one mid-hold to prove the sweep frees its slots
+	// (dead-PID reservation + pending are reclaimed on the next read).
+	const waits = [];
+	for (let i = 0; i < N; i++) {
+		if (i > 0 && staggerMs > 0) await new Promise((r) => setTimeout(r, staggerMs));
+		const child = spawn(process.execPath, [selfPath, "--reserve-hold", "parent", String(holdMs)], {
+			stdio: "inherit",
+			env: { ...process.env, BOBBIT_V2_STRESS_COALESCE_MS: String(coalesceMs) },
+		});
+		const label = `run-${i + 1}`;
+		const idx = i;
+		waits.push(
+			new Promise((resolveChild) => {
+				child.on("close", (code, signal) => resolveChild({ label, code: code ?? (signal ? 137 : 0), killed: idx === killIdx }));
+				child.on("error", () => resolveChild({ label, code: 1, killed: false }));
+			}),
+		);
+		if (idx === killIdx) {
+			// Let it reserve, then kill it hard (no release) to exercise the sweep.
+			setTimeout(() => child.kill("SIGKILL"), coalesceMs + 1500);
+		}
+	}
+
+	const results = await Promise.all(waits);
+	clearInterval(poll);
+
+	// A killed child is EXPECTED to exit non-zero; that is not a failure.
+	const unexpectedBad = results.filter((r) => r.code !== 0 && !r.killed);
+	for (const r of unexpectedBad) console.error(`  child ${r.label} exited ${r.code} (unexpected)`);
+
+	// Give the sweeper a beat, then confirm the ledger drained.
+	await new Promise((r) => setTimeout(r, 500));
+	const finalState = readLedger();
+	const leftover = finalState.reservations.length;
+	console.log(`ledger stress: peak Σ=${peakSigma}/${cores}  peak reservations=${peakCount}  leftover=${leftover}  unexpectedBadExits=${unexpectedBad.length}`);
+
+	let ok = true;
+	if (violated || peakSigma > cores) {
+		console.error("ledger stress: FAIL — Σworkers exceeded cores at some point");
+		ok = false;
+	}
+	if (unexpectedBad.length > 0) {
+		console.error("ledger stress: FAIL — a non-killed child hit the reserve-time invariant guard");
+		ok = false;
+	}
+	if (leftover > 0) {
+		console.error(`ledger stress: FAIL — ${leftover} reservation(s) not released/swept`);
+		ok = false;
+	}
+	console.log(ok ? "ledger stress: PASS" : "ledger stress: FAILED");
+	process.exit(ok ? 0 : 1);
+}
+
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
 	const arg = process.argv[2] || "--status";
 	if (arg === "--selftest") cliSelftest();
 	else if (arg === "--status") cliStatus();
-	else {
-		console.log("usage: node scripts/testing-v2/ledger.mjs [--status | --selftest]");
+	else if (arg === "--stress") cliStress().catch((e) => {
+		console.error("ledger stress: fatal:", e);
+		process.exit(1);
+	});
+	else if (arg === "--reserve-hold") {
+		const kind = process.argv[3] || "parent";
+		const holdMs = Number(process.argv[4]) || 6000;
+		const coalesceMs = Number(process.env.BOBBIT_V2_STRESS_COALESCE_MS) || 1500;
+		cliReserveHold(kind, holdMs, coalesceMs);
+	} else {
+		console.log("usage: node scripts/testing-v2/ledger.mjs [--status | --selftest | --stress [N] [staggerMs] [holdMs]]");
 		process.exit(2);
 	}
 }
