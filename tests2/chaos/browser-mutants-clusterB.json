@@ -209,6 +209,22 @@
     ]
   },
   {
+    "id": "BR65",
+    "area": "project-settings-project-assistant-provisional",
+    "file": "src/app/sidebar.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": "(setting up)",
+    "replace": "(provisioning)",
+    "description": "A provisional project (created via Add Project → assistant) loses its '(setting up)' sidebar indicator. Legacy project-assistant.spec.ts asserts the provisional '(setting up)' marker; project-settings journey only checks shell stability (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/project-assistant.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
     "id": "BR64",
     "area": "project-onboarding-multi-repo-subset",
     "file": "src/app/dialogs.ts",

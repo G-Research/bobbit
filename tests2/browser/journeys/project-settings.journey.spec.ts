@@ -3,7 +3,7 @@
  * Covers: journey-project-settings, journey-project-assistant
  * Consolidated from: settings-*, project-assistant-*, model-settings-*, etc.
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Page, Route } from "@playwright/test";
@@ -144,6 +144,43 @@ test.describe("Journey: Project Assistant", () => {
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		const title = await page.title();
 		expect(title).toBeTruthy();
+	});
+
+	// Ported from project-assistant.spec.ts (audit: project-settings GAP, mutant
+	// BR65): Add Project on a non-empty dir without .bobbit routes to the project
+	// assistant, creating a provisional project shown with the "(setting up)"
+	// sidebar indicator.
+	test("Add Project (non-.bobbit dir) creates a provisional '(setting up)' project", async ({ page }) => {
+		test.setTimeout(120_000);
+		const dir = uniqueProjectDir();
+		writeFileSync(join(dir, "package.json"), `{"name":"v2-provisional-${Date.now()}"}`);
+		try {
+			await openApp(page);
+			await page.locator("button").filter({ hasText: "Add Project" }).first().click();
+			const pathInput = page.locator('input[placeholder="/path/to/project"]');
+			await expect(pathInput).toBeVisible({ timeout: 15_000 });
+			await pathInput.fill(dir);
+			await page.locator("button").filter({ hasText: "Continue" }).first().click();
+
+			// Dialog closes and we land in the assistant session.
+			await expect(pathInput).not.toBeVisible({ timeout: 15_000 });
+			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toMatch(/^#\/session\//);
+
+			// The provisional project shows the "(setting up)" indicator in the sidebar.
+			const sidebar = page.locator(".sidebar-edge");
+			await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 20_000 });
+		} finally {
+			// Best-effort cleanup of any provisional project bound to this dir.
+			try {
+				const res = await apiFetch("/api/projects");
+				const data = await res.json();
+				for (const p of (data.projects || data || [])) {
+					if (p.name === "default") continue;
+					if (p.rootPath === dir || p.provisional) await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
+				}
+			} catch { /* best-effort */ }
+			try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
 	});
 
 	// Ported from settings-model-fallback.spec.ts (audit: project-settings GAP):
