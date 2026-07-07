@@ -4,6 +4,7 @@
  * Consolidated from: sidebar-navigation.spec.ts, sidebar-filters.spec.ts
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
+import { filtersButton, clickShowArchivedToggle } from "../../../tests/e2e/ui/utils/sidebar-filters.js";
 
 test.describe("Journey: Sidebar Navigation", () => {
 	test("sidebar and new-session button visible on load", async ({ page }) => {
@@ -199,6 +200,26 @@ test.describe("Journey: Sidebar Navigation", () => {
 			// Searching the goal's own title brings it back.
 			await searchInput.fill(goalTitle);
 			await expect(page.getByText(goalTitle).first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await deleteGoal(goal.id, true).catch(() => {});
+		}
+	});
+	// Ported from sidebar-archived-layout.spec.ts (audit: sidebar-nav GAP): an
+	// archived session/goal renders under Show Archived with grayscale dimming.
+	test("Show Archived reveals an archived item with grayscale dimming", async ({ page }) => {
+		const goalTitle = `SidebarArchivedSmoke${Date.now()}`;
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		await deleteSession(sessionId);
+		const goal = await createGoal({ title: goalTitle, worktree: false });
+		try {
+			await apiFetch(`/api/goals/${goal.id}?cascade=false`, { method: "DELETE" });
+			await openApp(page);
+			await expect(filtersButton(page)).toBeVisible({ timeout: 10_000 });
+			await clickShowArchivedToggle(page);
+			// Archived section label + the grayscale-dimmed archived row must render.
+			await expect(page.locator("span.uppercase").filter({ hasText: /^Archived$/ }).first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator("[style*='grayscale(1)']").first()).toBeVisible({ timeout: 10_000 });
 		} finally {
 			await deleteGoal(goal.id, true).catch(() => {});
 		}

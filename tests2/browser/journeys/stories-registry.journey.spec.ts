@@ -275,3 +275,18 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 		}
 	});
 });
+
+// Ported from headquarters.spec.ts (audit: stories-registry GAP): settings must
+// expose the "Show Headquarters in project lists" visibility toggle (by label).
+test.describe("Journey: Headquarters Visibility", () => {
+	test("settings exposes the Show-Headquarters visibility toggle", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({ timeout: 15_000 });
+		const checkbox = page
+			.getByLabel("Show Headquarters in project lists")
+			.or(page.locator("label", { hasText: "Show Headquarters in project lists" }).locator('input[type="checkbox"]'))
+			.first();
+		await expect(checkbox).toBeVisible({ timeout: 15_000 });
+	});
+});
