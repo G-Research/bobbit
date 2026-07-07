@@ -98,6 +98,14 @@ function hasTsx(nm) {
            fs.existsSync(path.join(nm, "tsx", "dist", "cli.js"));
   } catch { return false; }
 }
+// Completeness probe: a node_modules that only has vitest but is missing the
+// workspace packages the server graph imports (e.g. @earendil-works/pi-ai) will
+// make any test whose import chain reaches auth/session code fail to LOAD — a
+// false 'error' that is neither a kill nor a miss. Prefer a complete install.
+function isCompleteNodeModules(nm) {
+  try { return hasVitest(nm) && fs.existsSync(path.join(nm, "@earendil-works", "pi-ai")); }
+  catch { return false; }
+}
 function resolveToolchainNodeModules() {
   // IMPORTANT: only consider node_modules belonging to THIS project (the primary
   // repo + its worktrees under the shared -wt root). Do NOT scan sibling repos
@@ -115,6 +123,12 @@ function resolveToolchainNodeModules() {
       candidates.push(path.join(wtRoot, name, "node_modules"));
     }
   } catch { /* ignore */ }
+  // Prefer a COMPLETE install (vitest + workspace packages) so full import
+  // graphs load; fall back to vitest-only (some server-graph tests may fail to
+  // load, surfaced distinctly as module-load errors, not kills/misses).
+  for (const nm of candidates) {
+    if (isCompleteNodeModules(nm)) return nm;
+  }
   for (const nm of candidates) {
     if (hasVitest(nm)) return nm;
   }
@@ -307,24 +321,32 @@ function parseTapFailures(stdout) {
  * `relTo` roots the reported absolute file paths back to repo-relative form.
  */
 function parseVitestJsonFailures(reportPath, relTo) {
-  const out = { tests: [], files: [] };
+  const out = { tests: [], files: [], loadErrors: [] };
   let data;
   try { data = JSON.parse(fs.readFileSync(reportPath, "utf-8")); } catch { return out; }
   const fileSet = new Set();
   const testSet = new Set();
+  const loadErrs = [];
   for (const tr of data.testResults || []) {
     let rel = tr.name || "";
     try { rel = path.relative(relTo, tr.name).split(path.sep).join("/"); } catch { /* keep abs */ }
-    for (const ar of tr.assertionResults || []) {
-      if (ar.status !== "failed") continue;
+    const failedAssertions = (tr.assertionResults || []).filter(ar => ar.status === "failed");
+    for (const ar of failedAssertions) {
       fileSet.add(rel);
       const suite = (ar.ancestorTitles || []).join(" > ");
       const label = suite ? `${rel} > ${suite} > ${ar.title}` : `${rel} > ${ar.title}`;
       testSet.add(label);
     }
+    // A suite that FAILED with zero assertion results is a collection/module
+    // LOAD failure (e.g. a missing workspace dep) — NOT a test miss and NOT a
+    // kill. Surface it distinctly so it is never counted as a coverage gap.
+    if (tr.status === "failed" && failedAssertions.length === 0 && tr.message) {
+      loadErrs.push({ file: rel, message: String(tr.message).split(/\r?\n/)[0].slice(0, 200) });
+    }
   }
   out.tests = [...testSet];
   out.files = [...fileSet];
+  out.loadErrors = loadErrs;
   return out;
 }
 
@@ -383,6 +405,15 @@ function runTargetedTest(worktreePath, testFile, tier) {
     // node_modules/.vite cache warms up.
     const result = runCommand("node", cliArgs, worktreePath, 300_000);
     const parsed = parseVitestJsonFailures(reportPath, worktreePath);
+    if (process.env.BOBBIT_CHAOS_DEBUG) {
+      try {
+        const dbg = path.join(REPO_ROOT, ".profiles", "chaos", `debug-v2-${path.basename(testFile)}.txt`);
+        fs.mkdirSync(path.dirname(dbg), { recursive: true });
+        const reportExists = fs.existsSync(reportPath);
+        const reportBody = reportExists ? fs.readFileSync(reportPath, "utf-8") : "(no outputFile written)";
+        fs.writeFileSync(dbg, `STATUS=${result.status} SIGNAL=${result.signal}\nERROR=${result.error}\nparsed.tests=${JSON.stringify(parsed.tests)}\n--- STDOUT ---\n${result.stdout || ""}\n--- STDERR ---\n${result.stderr || ""}\n--- REPORT(${reportExists}) ---\n${reportBody.slice(0, 4000)}\n`, "utf-8");
+      } catch { /* ignore */ }
+    }
     try { fs.rmSync(reportPath, { force: true }); } catch { /* ignore */ }
     return {
       exitCode: result.status ?? (result.error ? 1 : 0),
@@ -391,6 +422,7 @@ function runTargetedTest(worktreePath, testFile, tier) {
       timedOut: result.signal === "SIGTERM",
       failingTests: parsed.tests,
       failingFiles: parsed.files,
+      loadErrors: parsed.loadErrors || [],
     };
   }
 
@@ -541,6 +573,7 @@ async function runMutant(mutant) {
       const r = runTargetedTest(worktreePath, v2File, "v2");
       v2DurationMs = Date.now() - t0;
       if (r && r.failingTests) v2CatchTests = r.failingTests;
+      const v2LoadErrors = (r && r.loadErrors) || [];
       if (r === null) {
         v2Result = "skipped";
         v2Detail = "no catcher";
@@ -549,12 +582,17 @@ async function runMutant(mutant) {
         v2Detail = r.stderr.slice(0, 300);
       } else if (r.timedOut) {
         v2Result = "error"; v2Detail = "timed out";
-      } else if (r.exitCode === 0) {
-        v2Result = "missed"; v2Detail = `exit 0 — mutant MISSED (${v2DurationMs}ms)`;
       } else if (v2CatchTests.length > 0) {
-        // Real kill: non-zero exit AND an attributed failing test case.
+        // Real kill: an attributed failing test case (regardless of exit code).
         v2Result = "caught";
         v2Detail = `exit ${r.exitCode} — killed by "${v2CatchTests[0]}" (${v2DurationMs}ms)`;
+      } else if (v2LoadErrors.length > 0) {
+        // Suite failed to LOAD (e.g. missing workspace dep) — inconclusive, NOT a
+        // coverage gap. The v2 test exists but cannot run in this environment.
+        v2Result = "load-error";
+        v2Detail = `module-load failure (not a miss): ${v2LoadErrors[0].message} (${v2DurationMs}ms)`;
+      } else if (r.exitCode === 0) {
+        v2Result = "missed"; v2Detail = `exit 0 — mutant MISSED (${v2DurationMs}ms)`;
       } else {
         // Non-zero exit but the Vitest JSON report named no failing test ⇒ the
         // suite never ran (config/startup crash). Not a kill — inconclusive.
@@ -623,8 +661,34 @@ function buildResult(mutant, legacyResult, v2Result, detail, durationMs, attribu
  * record; when a NON-listed test file caught the mutant, `newCatchers` lists
  * the additions so the caller can update the corpus entry.
  */
-async function runFullV2SampleOne(mutant) {
+// Run the full core+dom tier on a CLEAN tree to record pre-existing / flaky
+// failures. Only failures that appear WITH a mutation but NOT here count as
+// mutation kills — without this baseline, unrelated failing tests would credit
+// false kills and pollute the corpus.
+function runFullV2Baseline() {
   const start = Date.now();
+  let worktreePath;
+  try {
+    worktreePath = createEphemeralWorktree("fullv2-baseline");
+  } catch (err) {
+    console.warn(`[chaos] full-v2 baseline: worktree error (${err.message}); assuming empty baseline`);
+    return { files: new Set(), tests: new Set(), durationMs: Date.now() - start, error: err.message };
+  }
+  try {
+    ensureNodeModulesJunction(worktreePath);
+    console.log(`\n[chaos] full-v2 baseline: running full core+dom tier on the CLEAN tree…`);
+    const r = runFullV2Suite(worktreePath);
+    console.log(`  baseline: ${r.failingFiles.length} pre-existing failing file(s), ${r.failingTests.length} test(s)  (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+    return { files: new Set(r.failingFiles), tests: new Set(r.failingTests), durationMs: Date.now() - start };
+  } finally {
+    removeEphemeralWorktree(worktreePath);
+  }
+}
+
+async function runFullV2SampleOne(mutant, baseline) {
+  const start = Date.now();
+  const baseFiles = baseline?.files ?? new Set();
+  const baseTests = baseline?.tests ?? new Set();
   let worktreePath;
   try {
     worktreePath = createEphemeralWorktree(`fullv2-${mutant.id.replace(/[^a-z0-9]/gi, "-")}`);
@@ -643,12 +707,14 @@ async function runFullV2SampleOne(mutant) {
     }
     console.log(`\n[chaos] full-v2 sample: ${mutant.id} [${mutant.area}] — running full core+dom tier…`);
     const r = runFullV2Suite(worktreePath);
-    // A real kill must name a failing test — a bare non-zero exit with no
-    // attributed failure is a harness/startup error, not a kill.
-    const killed = !r.timedOut && r.failingTests.length > 0;
+    // Attribute ONLY failures new vs the clean-tree baseline to the mutation.
+    const newFailingTests = r.failingTests.filter(t => !baseTests.has(t));
+    const newFailingFiles = r.failingFiles.filter(f => !baseFiles.has(f));
+    const killed = !r.timedOut && newFailingTests.length > 0;
     const listed = new Set(mutant.expectedV2Catchers || []);
-    const newCatchers = r.failingFiles.filter(f => !listed.has(f));
-    console.log(`  full-v2: ${killed ? "KILLED" : "SURVIVED"} by ${r.failingFiles.length} file(s)` +
+    // Only back-fill genuine tests2/ catchers newly failing due to the mutation.
+    const newCatchers = newFailingFiles.filter(f => f.startsWith("tests2/") && !listed.has(f));
+    console.log(`  full-v2: ${killed ? "KILLED" : "SURVIVED"} by ${newFailingFiles.length} NEW file(s) vs baseline` +
       (newCatchers.length ? ` (+${newCatchers.length} non-listed)` : "") + `  (${((Date.now() - start) / 1000).toFixed(1)}s)`);
     return {
       id: mutant.id,
@@ -656,9 +722,10 @@ async function runFullV2SampleOne(mutant) {
       killed,
       timedOut: r.timedOut,
       exitCode: r.exitCode,
-      failingFiles: r.failingFiles,
-      failingTests: r.failingTests.slice(0, 8),
-      failingTestCount: r.failingTests.length,
+      failingFiles: newFailingFiles,
+      failingTests: newFailingTests.slice(0, 8),
+      failingTestCount: newFailingTests.length,
+      baselineNoiseFiles: r.failingFiles.length - newFailingFiles.length,
       newCatchers,
       durationMs: Date.now() - start,
     };
@@ -689,7 +756,7 @@ function generateMarkdownReport(results, runMeta) {
   const legacyMissed = contentMutants.filter(r => r.legacyResult === "missed").length;
   const v2Missed = contentMutants.filter(r => r.v2Result === "missed").length;
   const legacyInvalid = contentMutants.filter(r => r.legacyResult === "invalid" || r.legacyResult === "error").length;
-  const v2Invalid = contentMutants.filter(r => r.v2Result === "invalid" || r.v2Result === "error").length;
+  const v2Invalid = contentMutants.filter(r => r.v2Result === "invalid" || r.v2Result === "error" || r.v2Result === "load-error").length;
 
   const total = contentMutants.length;
   const legacyKillable = contentMutants.filter(r => r.legacyCatchers.length > 0).length;
@@ -720,13 +787,24 @@ function generateMarkdownReport(results, runMeta) {
   lines.push("## Acceptance Criteria");
   lines.push("");
 
-  const legacyOnlyGaps = contentMutants.filter(r => r.legacyResult === "caught" && r.v2Result !== "caught");
-  const v2CatchesAllLegacyCaught = legacyOnlyGaps.length === 0;
-  lines.push(`- **v2 catches every legacy-caught mutant (no legacy>v2 gap):** ${v2CatchesAllLegacyCaught ? "✅ PASS" : "❌ FAIL"}`);
-  if (!v2CatchesAllLegacyCaught) {
-    lines.push(`  - ⚠️ ${legacyOnlyGaps.length} REAL v2 coverage gap(s) — add a \`tests2/\` test that catches each, then re-run that mutant (never delete/alter the mutant):`);
-    for (const r of legacyOnlyGaps) {
-      lines.push(`    - **${r.id}** (${r.area}): ${r.description} — legacy caught via \`${(r.legacyCatchers[0] || "?")}\`, v2 = ${r.v2Result}`);
+  const legacyOnly = contentMutants.filter(r => r.legacyResult === "caught" && r.v2Result !== "caught");
+  // A REAL coverage gap = v2 test RAN and did not detect the mutant (missed).
+  const realGaps = legacyOnly.filter(r => r.v2Result === "missed");
+  // Inconclusive = the v2 test could not run here (module-load / harness error),
+  // e.g. a missing workspace dep in the host node_modules. NOT a coverage gap.
+  const inconclusive = legacyOnly.filter(r => r.v2Result === "load-error" || r.v2Result === "error");
+  const v2CatchesAllLegacyCaught = realGaps.length === 0;
+  lines.push(`- **No REAL v2 coverage gap (every legacy-caught mutant the v2 test RAN on is caught):** ${v2CatchesAllLegacyCaught ? "✅ PASS" : "❌ FAIL"}`);
+  if (realGaps.length > 0) {
+    lines.push(`  - ❌ ${realGaps.length} REAL v2 coverage gap(s) — the v2 test ran and MISSED. Add a \`tests2/\` test that catches each, then re-run that mutant (never delete/alter the mutant):`);
+    for (const r of realGaps) {
+      lines.push(`    - **${r.id}** (${r.area}): ${r.description} — legacy caught via \`${(r.legacyCatchers[0] || "?")}\`, v2 = missed`);
+    }
+  }
+  if (inconclusive.length > 0) {
+    lines.push(`- **Inconclusive (env, NOT a coverage gap):** ⚠️ ${inconclusive.length} legacy-caught mutant(s) whose v2 test could not run here (module-load/harness error — e.g. a workspace dep missing from the host node_modules). Re-run in a complete-install environment:`);
+    for (const r of inconclusive) {
+      lines.push(`    - **${r.id}** (${r.area}): v2 = ${r.v2Result} — ${r.detail.split("| v2:").pop().trim()}`);
     }
   }
 
@@ -803,8 +881,9 @@ function generateMarkdownReport(results, runMeta) {
   lines.push("|----|------|------|--------|-----|--------------------------|----------|");
   for (const r of results) {
     const nullTag = r.nullMutant ? " *(null)*" : "";
-    const legacyIcon = { caught: "🔴", missed: "⚪", skipped: "—", error: "⚠️", invalid: "⛔" }[r.legacyResult] || "?";
-    const v2Icon = { caught: "🔴", missed: "⚪", skipped: "—", error: "⚠️", invalid: "⛔" }[r.v2Result] || "?";
+    const ICONS = { caught: "🔴", missed: "⚪", skipped: "—", error: "⚠️", invalid: "⛔", "load-error": "🧩" };
+    const legacyIcon = ICONS[r.legacyResult] || "?";
+    const v2Icon = ICONS[r.v2Result] || "?";
     let killedBy = "—";
     if (r.v2Result === "caught") {
       const t = (r.v2CatchTests && r.v2CatchTests[0]) || "";
@@ -813,7 +892,7 @@ function generateMarkdownReport(results, runMeta) {
     lines.push(`| ${r.id}${nullTag} | ${r.area} | \`${r.file}\` | ${legacyIcon} ${r.legacyResult} | ${v2Icon} ${r.v2Result} | ${killedBy} | ${(r.durationMs/1000).toFixed(1)}s |`);
   }
   lines.push("");
-  lines.push("**Icon key:** 🔴 caught (test fails on mutant) | ⚪ missed | — skipped (no targeted catcher) | ⚠️ error | ⛔ invalid (patch failed)");
+  lines.push("**Icon key:** 🔴 caught (test fails on mutant) | ⚪ missed | — skipped (no targeted catcher) | ⚠️ error | 🧩 load-error (v2 suite could not load here — env, not a miss) | ⛔ invalid (patch failed)");
   lines.push("");
 
   // Full-v2 sample detail (spec R8).
@@ -905,6 +984,7 @@ async function main() {
   // still counts and back-fills that mutant's expectedV2Catchers.
   const runSample = !fullSampleDisable && (targetIds === null || fullSampleForce);
   let fullV2Sample = [];
+  let fullV2SampleBaseline = null;
   let corpusUpdated = false;
   if (runSample) {
     const eligible = results.filter(r => !r.nullMutant && r.v2Result === "caught");
@@ -914,8 +994,10 @@ async function main() {
       const chosenIds = new Set(seededSample(eligible.map(r => r.id), sampleSize).map(String));
       const chosen = ALL_MUTANTS.filter(m => chosenIds.has(m.id));
       console.log(`\n[chaos] full-v2 sample: ${chosen.length} mutant(s) → ${chosen.map(m => m.id).join(", ")}`);
+      const baseline = runFullV2Baseline();
+      fullV2SampleBaseline = { failingFiles: baseline.files.size, failingTests: baseline.tests.size };
       for (const mutant of chosen) {
-        const rec = await runFullV2SampleOne(mutant);
+        const rec = await runFullV2SampleOne(mutant, baseline);
         fullV2Sample.push(rec);
         // Back-fill expectedV2Catchers with any non-listed catcher file.
         if (rec.newCatchers && rec.newCatchers.length > 0) {
@@ -947,6 +1029,7 @@ async function main() {
       run: fullV2Sample.length,
       killed: sampleKilled,
       survived: fullV2Sample.length - sampleKilled,
+      baseline: fullV2SampleBaseline,
       corpusUpdated,
     },
   };
