@@ -46,6 +46,9 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join as joinPath } from "node:path";
 
 // PRODUCTION-FAITHFUL SYNTHESIS (design built-in-first-party-packs §8.4): the pack
 // runs the SAME YAML→cards synthesis as the deleted built-in via the pure shared
@@ -59,6 +62,18 @@ import { mapYamlToWalkthroughPayload, parsePrWalkthroughYamlValue, validatePrWal
 
 const STORE_SCHEMA_VERSION = 1;
 const GIT_MAX_BUFFER = 20 * 1024 * 1024;
+
+// 4b trust pre-check (design §4b.2): the default-trusted PR host set the `run`
+// route enforces before spawning. `www.github.com` is already normalized to
+// `github.com` by canonicalizeTarget, so only `github.com` is listed. Any other
+// host requires a client-supplied `trustedHostAck` (the ack governs only the
+// harmless spawn; the server-side prefs-backed assertTrustedBindingTarget remains
+// the real gate at bundle/submit time).
+const DEFAULT_TRUSTED_PR_HOSTS = new Set(["github.com"]);
+
+// 4a post-availability reason (design §4a.6): always the actionable gh/env-token
+// message the panel surfaces — never the old env-only text.
+const GH_AUTH_LOGIN_REASON = "Run `gh auth login` (or set GITHUB_TOKEN/GH_TOKEN) on the gateway host to post a review.";
 
 const jobKey = (jobId) => `job/${jobId}`;
 // LLM-enhanced cards persisted at submit time are keyed by the STRUCTURAL changeset
@@ -156,7 +171,8 @@ export const routes = {
 		const finalAccess = await authorizeReviewAccess(ctx.host.store, jobId, ctx);
 		const finalPayload = finalAccess.authorized ? await ctx.host.store.get(finalPayloadKey(jobId)) : null;
 		if (isFinalPayload(finalPayload)) {
-			return finalBundleResult(finalPayload, jobId);
+			const finalExport = await computeBundleExport(ctx, finalAccess.binding && finalAccess.binding.target, finalPayload.changeset);
+			return finalBundleResult(finalPayload, jobId, finalExport);
 		}
 		if (!finalAccess.authorized && await hasFinalPayload(ctx.host.store, jobId)) {
 			return { found: false, jobId, code: "PRW_REVIEW_UNAUTHORIZED", error: "This session is not authorized to read that PR walkthrough." };
@@ -192,6 +208,7 @@ export const routes = {
 		const stored = await ctx.host.store.get(cardsKey(live.changesetId));
 		const hasStored = stored && Array.isArray(stored.cards) && stored.cards.length > 0;
 		const liveChangeset = decorateChangesetWithTarget(live.changeset, finalAccess.binding && finalAccess.binding.target);
+		const liveExport = await computeBundleExport(ctx, finalAccess.binding && finalAccess.binding.target, hasStored && stored.changeset ? stored.changeset : liveChangeset);
 		return {
 			found: true,
 			live: true,
@@ -202,6 +219,7 @@ export const routes = {
 			warnings: live.warnings,
 			cardsSource: hasStored ? "stored-synthesis" : "fallback",
 			persistedAt: hasStored ? stored.persistedAt : undefined,
+			...(liveExport ? { export: liveExport } : {}),
 		};
 	},
 
@@ -286,6 +304,23 @@ export const routes = {
 			return { ok: false, retryable: false, error: "PR walkthrough supports GitHub pull requests only.", code: "LOCAL_UNSUPPORTED" };
 		}
 		const canonicalKey = target.canonicalKey;
+		// 4b trust pre-check (design §4b.2): for a NON-default host, do NOT spawn —
+		// hand the resolved host + prUrl back to the client so it can make the trust
+		// decision (prompt + persist to githubTrustedHosts) and re-invoke `run` with
+		// `trustedHostAck`. github.com (and www.github.com, normalized here) never
+		// prompt. The ack only governs the spawn; the server-side prefs-backed
+		// assertTrustedBindingTarget stays the real gate at bundle/submit.
+		const targetHost = normalizeGithubHost(target.host);
+		if (!DEFAULT_TRUSTED_PR_HOSTS.has(targetHost) && strOf(body.trustedHostAck) !== targetHost) {
+			return {
+				ok: false,
+				code: "HOST_NOT_TRUSTED",
+				retryable: true,
+				host: targetHost,
+				prUrl: target.prUrl,
+				error: `The remote host "${targetHost}" is not in your trusted list.`,
+			};
+		}
 		// ALWAYS-FRESH: spawn a brand-new reviewer on every call (no dedup index, no
 		// in-flight await). The client within-gesture guard prevents a double-click.
 		return await launchReviewer(ctx, parent, target, canonicalKey);
@@ -399,7 +434,125 @@ export const routes = {
 		}
 		return { found: false, phase: "running", jobId: selfBinding.jobId, baseSha: selfBinding.baseSha, headSha: selfBinding.headSha, code: "PRW_REVIEW_RUNNING" };
 	},
+
+	// ── submitReview ───────────────────────────────────────────────────────────────
+	// The panel's post-to-GitHub entry point (design §4a.5). The CONFINED worker
+	// CANNOT read gateway prefs or run `gh` behind the trust gate, and its process
+	// env is the GATEWAY's (NOT the reviewer session's), so the session-secret-gated
+	// /api/internal/* routes are unreachable. Instead this route resolves the caller's
+	// OWN binding (jobId), reads the single-user gateway bearer creds from disk, and
+	// proxies to the bearer-gated PUBLIC route POST /api/pr-walkthrough/submit-review
+	// routed by that jobId. The server route enforces assertTrustedBindingTarget
+	// (prefs-backed) and posts via `gh` server-side — no session secret needed.
+	// Body: { draft, event?, confirm?, probe? }. `probe:true` asks only for
+	// availability ({ available, reason? }); otherwise a confirmed post is required.
+	submitReview: async (ctx, req) => {
+		const body = (req && req.body) || {};
+		const me = strOf(ctx && ctx.sessionId);
+		if (!me) return { ok: false, code: "NO_SESSION", error: "missing bound session" };
+		const binding = await loadReviewerBinding(ctx.host.store, me);
+		if (!binding || !strOf(binding.jobId)) {
+			return { ok: false, code: "PRW_MISSING_BINDING", error: "Caller is not a bound PR-walkthrough reviewer." };
+		}
+		const creds = readGatewayCredsFromDisk();
+		if (creds.error) return { ok: false, code: "NO_GATEWAY", error: creds.error };
+		try {
+			const res = await fetch(`${creds.baseUrl}/api/pr-walkthrough/submit-review`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: `Bearer ${creds.token}` },
+				body: JSON.stringify({
+					jobId: binding.jobId,
+					draft: body.draft,
+					event: body.event,
+					confirm: body.confirm === true,
+					probe: body.probe === true,
+				}),
+			});
+			const json = await res.json().catch(() => undefined);
+			if (json && typeof json === "object") return json;
+			return { ok: res.ok, status: res.status };
+		} catch (e) {
+			return { ok: false, code: "PRW_SUBMIT_PROXY_FAILED", error: messageOf(e) };
+		}
+	},
 };
+
+// Read the single-user gateway bearer creds directly from disk (or env fallback),
+// mirroring defaults/tools/_shared/gateway.ts::readGatewayCreds. routes.mjs is
+// hand-authored and served AS-IS (NOT bundled — see scripts/build-market-packs.mjs),
+// so it cannot import tools/_shared; it uses ambient node:fs/os/path instead. Disk
+// first (the gateway rewrites it on every start), env vars as fallback.
+function readGatewayCredsFromDisk() {
+	const stateDir = process.env.BOBBIT_DIR ? joinPath(process.env.BOBBIT_DIR, "state") : joinPath(homedir(), ".pi");
+	const tokenPath = joinPath(stateDir, process.env.BOBBIT_DIR ? "token" : "gateway-token");
+	const urlPath = joinPath(stateDir, "gateway-url");
+	try {
+		const token = readFileSync(tokenPath, "utf-8").trim();
+		const baseUrl = readFileSync(urlPath, "utf-8").trim().replace(/\/+$/, "");
+		if (token && baseUrl) return { token, baseUrl };
+	} catch { /* disk read failed — fall through to env */ }
+	const envToken = strOf(process.env.BOBBIT_TOKEN);
+	const envUrl = strOf(process.env.BOBBIT_GATEWAY_URL);
+	if (envToken && envUrl) return { token: envToken, baseUrl: envUrl.replace(/\/+$/, "") };
+	return { error: "BOBBIT credentials not found on disk or in env" };
+}
+
+// 4a availability probe (design §4a.5): `gh auth token [--hostname]` exits 0 with a
+// non-empty token when authenticated. Honours BOBBIT_GH_COMMAND. Availability needs
+// NO prefs, so it is safe in the confined worker; the authoritative trust gate is the
+// server submit route's assertTrustedBindingTarget.
+async function ghAuthAvailable(cwd, host) {
+	const args = ["auth", "token"];
+	const h = normalizeGithubHost(host);
+	if (h && h !== "github.com") args.push("--hostname", h);
+	try {
+		const out = await ghCommand(cwd, args);
+		return String(out || "").trim().length > 0;
+	} catch {
+		return false;
+	}
+}
+
+function ghBinary() {
+	return strOf(process.env.BOBBIT_GH_COMMAND) || "gh";
+}
+
+// Like `gh` (below) but honours BOBBIT_GH_COMMAND so tests can stub the CLI. Used
+// for the availability probe; the current-branch resolver keeps the plain `gh`.
+function ghCommand(cwd, args) {
+	return new Promise((resolve, reject) => {
+		execFile(ghBinary(), args, { cwd, maxBuffer: GIT_MAX_BUFFER }, (err, stdout) => {
+			if (err) reject(err);
+			else resolve(typeof stdout === "string" ? stdout : String(stdout));
+		});
+	});
+}
+
+// The github host to probe/label export availability for, derived from the reviewer
+// binding target (preferred) or the changeset's PR URL. Returns undefined for a
+// LOCAL changeset (non-postable — the panel keeps its existing reason).
+function githubHostForExport(target, changeset) {
+	if (target && typeof target === "object" && target.provider === "github") return normalizeGithubHost(target.host);
+	const cs = changeset && typeof changeset === "object" ? changeset : undefined;
+	if (!cs) return undefined;
+	const url = strOf(cs.prUrl) || strOf(cs.url) || strOf(cs.externalUrl);
+	const isGithub = cs.provider === "github" || strOf(cs.owner) || Boolean(url);
+	if (!isGithub) return undefined;
+	const parsed = url ? parseGithubPrUrl(url) : undefined;
+	return normalizeGithubHost(parsed && parsed.host);
+}
+
+// Compute the bundle `export` descriptor the panel uses to enable/label the
+// post-to-GitHub button without a round trip (design §4a.5). Availability only —
+// the trust gate stays server-side at submit.
+async function computeBundleExport(ctx, target, changeset) {
+	const host = githubHostForExport(target, changeset);
+	if (!host) return undefined;
+	const available = await ghAuthAvailable(routeCwd(ctx), host);
+	return available
+		? { provider: "github", available: true }
+		: { provider: "github", available: false, reason: GH_AUTH_LOGIN_REASON };
+}
 
 function prwError(code, error, details, status = 400) {
 	const err = new Error(error);
@@ -1083,8 +1236,8 @@ function decorateChangesetWithTarget(changeset, target) {
 	};
 }
 
-function finalBundleResult(payload, jobId) {
-	return { found: true, live: false, jobId, changesetId: payload.changesetId, changeset: payload.changeset, cards: payload.cards, warnings: payload.warnings || [], coverage: payload.coverage, cardCount: payload.cardCount, cardsSource: "stored-final", persistedAt: payload.persistedAt, finalizedAt: payload.finalizedAt };
+function finalBundleResult(payload, jobId, exportInfo) {
+	return { found: true, live: false, jobId, changesetId: payload.changesetId, changeset: payload.changeset, cards: payload.cards, warnings: payload.warnings || [], coverage: payload.coverage, cardCount: payload.cardCount, cardsSource: "stored-final", persistedAt: payload.persistedAt, finalizedAt: payload.finalizedAt, ...(exportInfo ? { export: exportInfo } : {}) };
 }
 
 function finalSubmittedStatus(payload, binding) {
