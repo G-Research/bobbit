@@ -54,6 +54,19 @@ baseline (raising the bar is allowed). A file present in the baseline but absent
 from current coverage is reported as a **full loss** — a strong signal that the
 consolidation dropped its only exercising test.
 
+**Coverage scope & complementarity.** `--run` captures V8 coverage from the
+`v2-core`, `v2-core-isolated`, and `v2-dom` projects only (override via
+`BOBBIT_COVERAGE_PROJECTS`). `v2-integration` boots a real gateway per fork and
+is unstable under coverage instrumentation (`ERR_IPC_CHANNEL_CLOSED`); its
+`src/server` coverage is measured separately by `parity.mjs`. Crucially, most
+`src/app` / `src/ui` **browser** files have near-zero tier-1 coverage — their
+behavior is exercised almost entirely by the Playwright journeys (e.g.
+`proposal-panels.ts`, `goal-dashboard.ts`, `DelegateRenderer.ts` are ~0% in
+tier-1). So the per-file coverage-delta is **complementary**: it catches tier-1
+(unit/component) regressions and shows which browser files are journey-dependent,
+but it **cannot** detect browser-journey coverage drops — the **browser-mutation
+campaign is the authoritative evidence** for the journey consolidation.
+
 To answer the consolidation question directly, capture legacy-suite V8 coverage
 into one `coverage-summary.json`, capture v2 coverage into another, and run A/B
 mode; any file in the "removed" or "drops" list is a localized regression to
