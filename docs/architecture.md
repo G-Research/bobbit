@@ -58,8 +58,10 @@ because the underlying preview artifact, proposal draft, review document, inbox,
 or pack panel still exists. Tabs open only through explicit workspace open or
 reopen events.
 
-Desktop renders the workspace beside chat or fullscreen with a compact prompt
-dock; mobile renders the same tab set in the header and slider track. Popout
+Desktop renders the workspace beside chat in `split` mode; in `fullscreen` the
+panel fills the whole area down to the bottom edge and the composer is hidden (to
+type the user returns to `split` or `collapsed`). Mobile renders the same tab set
+in the header and slider track. Popout
 links either use the preview content route or the safe app deep link
 `#/session/<sessionId>/panel/<tabId>`, which renders only already-open server
 workspace tabs.

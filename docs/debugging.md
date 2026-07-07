@@ -1179,7 +1179,7 @@ The team-lead role no longer PUTs `prUrl` after `gh pr create` (the curl-PUT ste
 
 ## Header toast vs proposal toast testid collision
 
-The session-header toast (e.g. "Link copied" from the Copy-link button) uses `showHeaderToast()` and `data-testid="header-toast"`. The proposal-panel toast uses `showProposalToast()` and `data-testid="proposal-toast"`. Two separate state slots and two separate `<div class="review-toast">` instances in `src/app/render.ts` — do NOT collapse them onto a shared testid; E2E selectors in `tests/e2e/ui/copy-session-link.spec.ts` and `tests/e2e/ui/proposal-inline-comments.spec.ts` would alias.
+The session-header toast (e.g. "Link copied" from the Copy-link button) uses `showHeaderToast()` and `data-testid="header-toast"`. The proposal-panel toast uses `showProposalToast()` and `data-testid="proposal-toast"`. Launcher progress uses a third, **persistent** surface (`data-testid="launcher-feedback"`, driven by the `bobbit-launcher-feedback` event) that reuses `.review-toast` layout but must NOT auto-fade — `pending` persists until the launch resolves and `error` persists until the user clicks `data-testid="launcher-feedback-dismiss"`. All three are separate state slots / `<div class="review-toast">` instances in `src/app/render.ts` — do NOT collapse them onto a shared testid; E2E selectors in `tests/e2e/ui/copy-session-link.spec.ts` and `tests/e2e/ui/proposal-inline-comments.spec.ts` (plus the launcher-feedback specs) would alias. See [docs/extension-host-authoring.md § launcher feedback](extension-host-authoring.md) for the three-kind contract.
 
 ## Transcript access errors
 
