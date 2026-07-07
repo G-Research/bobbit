@@ -149,10 +149,17 @@ const PLAYWRIGHT_CLI = path.join(PRIMARY_NODE_MODULES, "playwright", "cli.js");
 const TSC_ENTRY = path.join(PRIMARY_NODE_MODULES, "typescript", "bin", "tsc");
 const VITE_ENTRY = path.join(PRIMARY_NODE_MODULES, "vite", "bin", "vite.js");
 
-const MUTANTS_FILE = path.join(REPO_ROOT, "tests2", "chaos", "browser-mutants.json");
-const REPORT_JSON = path.join(REPO_ROOT, ".profiles", "chaos", "browser-comparison-report.json");
-const REPORT_MD = path.join(REPO_ROOT, ".profiles", "chaos", "browser-comparison-report.md");
-const REPORT_MD_DOCS = path.join(REPO_ROOT, "docs", "testing-v2", "browser-chaos-report.md");
+// --corpus <name> selects tests2/chaos/browser-mutants-<name>.json and suffixes
+// the report paths with -<name>, so two coders can run DISJOINT corpus files +
+// reports in parallel without clobbering each other. Default (no --corpus) uses
+// the canonical browser-mutants.json and unsuffixed report paths.
+const _corpusArgIdx = process.argv.indexOf("--corpus");
+const CORPUS_NAME = _corpusArgIdx !== -1 ? (process.argv[_corpusArgIdx + 1] || "").trim() : "";
+const _corpusSuffix = CORPUS_NAME ? `-${CORPUS_NAME}` : "";
+const MUTANTS_FILE = path.join(REPO_ROOT, "tests2", "chaos", `browser-mutants${_corpusSuffix}.json`);
+const REPORT_JSON = path.join(REPO_ROOT, ".profiles", "chaos", `browser-comparison-report${_corpusSuffix}.json`);
+const REPORT_MD = path.join(REPO_ROOT, ".profiles", "chaos", `browser-comparison-report${_corpusSuffix}.md`);
+const REPORT_MD_DOCS = path.join(REPO_ROOT, "docs", "testing-v2", `browser-chaos-report${_corpusSuffix}.md`);
 
 const LEGACY_CONFIG = "playwright-e2e.config.ts";
 const V2_CONFIG = "playwright-v2.config.ts";
@@ -169,6 +176,7 @@ for (let i = 0; i < args.length; i++) {
 	else if (args[i] === "--dry-run") dryRun = true;
 	else if (args[i] === "--keep-worktree") keepWorktree = true;
 	else if (args[i] === "--resume") resume = true;
+	else if (args[i] === "--corpus" && args[i + 1]) { i++; /* consumed above into CORPUS_NAME */ }
 	else if (args[i] === "--id" && args[i + 1]) targetIds = [args[++i]];
 	else if (args[i] === "--ids" && args[i + 1]) targetIds = args[++i].split(",");
 }
