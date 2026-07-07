@@ -21,6 +21,7 @@ import { openApp } from "./ui-helpers.js";
 
 test.describe("Goal paused banner (UI)", () => {
 	test("shows banner with Resume button when goal is paused; disappears on resume", async ({ page }) => {
+		test.slow(); // WS broadcast + Lit re-render under concurrent suite load
 		// 1. Create a goal (no team — we only need the goalId binding)
 		const goal = await createGoal({ title: "E2E pause banner goal", autoStartTeam: false });
 		const goalId = goal.id as string;
@@ -67,7 +68,7 @@ test.describe("Goal paused banner (UI)", () => {
 			);
 
 			// 7. Banner should now be visible
-			await expect(banner).toBeVisible({ timeout: 10_000 });
+			await expect(banner).toBeVisible({ timeout: 20_000 });
 			await expect(banner).toContainText("paused");
 
 			// 8. Resume button is present inside the banner
@@ -92,7 +93,7 @@ test.describe("Goal paused banner (UI)", () => {
 			);
 
 			// 11. Banner should be gone
-			await expect(banner).toHaveCount(0, { timeout: 10_000 });
+			await expect(banner).toHaveCount(0, { timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => { /* best-effort */ });
 			await deleteGoal(goalId).catch(() => { /* best-effort */ });

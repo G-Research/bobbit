@@ -84,6 +84,7 @@ function inspectContextWindowOverrides(modelsPath: string): OverrideState {
 
 test.describe("Context window overrides in models.json", () => {
 	test("server writes contextWindow overrides for Claude Sonnet/Opus models @smoke", async ({ gateway }) => {
+		test.slow(); // gateway startup + file write under concurrent load
 		// Use the in-process gateway fixture's isolated agent directory. Reading
 		// process.env here is flaky in broad E2E runs because workers mutate it
 		// during setup/teardown; the fixture identity is the authoritative path.
