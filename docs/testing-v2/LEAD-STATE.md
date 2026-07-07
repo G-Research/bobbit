@@ -10,7 +10,12 @@ Open: **concurrency-proof** (pending — see Decisions), then **switchover** →
 Only the LEAD signals gates. Signal from goal HEAD after merging member branches (verification runs from goal.cwd HEAD).
 
 ## Goal HEAD / PR
-- Goal HEAD as of writing: **17d8022b** (may advance). PR mergeable, **0 behind master**.
+- Goal HEAD as of writing: **b51be76a** (command-step seam + concurrency harness merged). PR mergeable, 0 behind master (re-check).
+
+## CONCURRENCY (Option 1) STATUS
+- Command-step DI seam IMPLEMENTED + merged (b51be76a). Validation: contract 13/13, fake specs 35/35 (1 boot, **0 spawns**), real path 10/10, coexistence-isolated, guard-v2 + check green.
+- **code-reviewer-8ba9** (session 6a383bec) auditing prod-safety (fake-unreachable-in-prod / verdict integrity / contract strength / fake fidelity) — runs parallel to clusters.
+- PENDING: (1) address any review findings; (2) QUIET-WINDOW re-measure single + N-way (3/4/5, <600s, 0 flakes) via test-engineer c8bf9a3b — pause both porting clusters for it; (3) update concurrency-proof.md; (4) LEAD signals concurrency-proof gate. Base ledger unchanged; NO spawn-accounting.
 - STANDING USER DIRECTIVES: (1) keep the preview HTML dashboard updated at milestones; (2) keep the PR mergeable + current with master — re-merge origin/master whenever it advances (it moves often; each sync = a coder resolves conflicts + represents new master tests in v2, then I merge+push).
 
 ## Settled decisions (full text in docs/testing-v2/design.md §D7/§D8/§D9; plus:)
