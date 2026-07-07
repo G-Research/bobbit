@@ -1,0 +1,90 @@
+/**
+ * Reproducer / regression test for the resolveAndReadBindingBundle race condition (Issue 4).
+ *
+ * The OLD code pattern (before the resolvingBundlePromises mutex was added) allowed
+ * concurrent reads for the same jobId to each independently call
+ * resolveDiffForBindingTarget. With the mutex, all concurrent callers share one
+ * in-flight promise and the resolver is called exactly once.
+ *
+ * This test:
+ *   - FAILS without the mutex fix (resolveDiff called 3 times; assert expects 1)
+ *   - PASSES with the mutex fix   (resolveDiff called exactly once)
+ *
+ * The failing assertion message contains "got 3", which was the error_pattern used
+ * when this test was submitted to the reproducing-test gate.
+ */
+
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { it } from "node:test";
+
+import { resolveAndReadBindingBundleForTesting } from "../src/server/pr-walkthrough/routes.ts";
+
+it(
+	"resolveAndReadBindingBundle deduplicates concurrent reads: resolveDiff called exactly once (mutex pattern)",
+	async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "prw-race-repro-"));
+		try {
+			let resolveCount = 0;
+
+			// Mock deps: resolveSessionCwd counts invocations then throws to short-circuit
+			// the full resolution (prevents actual git I/O while still testing the guard).
+			const deps = {
+				defaultCwd: stateDir,
+				stateDir,
+				readBody: async () => ({}),
+				resolveSessionCwd: async (_sessionId: string): Promise<string> => {
+					resolveCount++;
+					// Yield so all three concurrent callers can "start" before any saves —
+					// this is the window where the race would occur without the mutex.
+					await new Promise<void>(r => setImmediate(r));
+					throw new Error("mock-stop-after-count: no git ops needed");
+				},
+			} as Parameters<typeof resolveAndReadBindingBundleForTesting>[0];
+
+			// Unique jobId per test run so the module-level resolvingBundlePromises map
+			// doesn't carry state from other tests.
+			const jobId = `repro-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			const binding = {
+				jobId,
+				changesetId: `repro-changeset-${jobId}`,
+				parentSessionId: "owner-session",
+				target: {
+					provider: "local" as const,
+					baseSha: "a".repeat(40),
+					headSha: "b".repeat(40),
+				},
+			} as Parameters<typeof resolveAndReadBindingBundleForTesting>[1];
+
+			const readReq = { mode: "manifest" as const, format: "compact" as const };
+
+			// Three concurrent calls for the SAME jobId — mirrors the three simultaneous
+			// read_pr_walkthrough_bundle calls observed in session cbd17443.
+			const results = await Promise.allSettled([
+				resolveAndReadBindingBundleForTesting(deps, binding, "session-1", readReq),
+				resolveAndReadBindingBundleForTesting(deps, binding, "session-2", readReq),
+				resolveAndReadBindingBundleForTesting(deps, binding, "session-3", readReq),
+			]);
+
+			// All three should reject (the mock throws after counting).
+			for (const r of results) {
+				assert.equal(r.status, "rejected", "Each call should reject due to the mock throwing");
+			}
+
+			// Key assertion: with the mutex, the resolver is entered exactly once.
+			// WITHOUT the mutex fix resolveCount === 3; this assertion would fail with:
+			// "Expected exactly 1 resolve call (deduplicated by mutex) but got 3"
+			assert.equal(
+				resolveCount,
+				1,
+				`Expected exactly 1 resolve call (deduplicated by mutex) but got ${resolveCount}. ` +
+				`Without resolvingBundlePromises guard, concurrent reads each independently invoke ` +
+				`resolveDiffForBindingTarget, risking inconsistent block:N indices in hunk IDs.`,
+			);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	},
+);

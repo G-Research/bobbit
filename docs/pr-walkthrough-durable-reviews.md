@@ -7,6 +7,7 @@ Durable reviews make that flow resilient to compaction, page reloads, reviewer r
 See also:
 
 - [PR Walkthrough Panel](pr-walkthrough-panel.md) for launch and panel behavior.
+- [PR Walkthrough Schema Reference](pr-walkthrough.md) for agent-facing schema, hunk ID semantics, and severity enum.
 - [Extension Host authoring](extension-host-authoring.md#stores--implicit-pack-scoped-persistence-hoststore) for pack-store APIs and quota scopes.
 - [Lifecycle Hub](lifecycle-hub.md) for provider hook dispatch.
 

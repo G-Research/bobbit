@@ -57,6 +57,17 @@ If no exit file exists, Bobbit tries to prove that the recorded PID still belong
 
 Only after that proof does Bobbit reattach file tailers and poll for the exit file until the original deadline. Output written before, during, and after the restart remains in the retained log files and can still be streamed or inspected.
 
+### 2b. Container command steps (durable in-container recovery)
+
+Docker-sandboxed goals run command steps through `docker exec`. Because the container filesystem is separate from the host, the durable evidence lives **inside** the container: the wrapper writes a pidfile, a refreshed heartbeat, and an atomic exit-code file under `/tmp/.bobbit-verif/<signalId>/<stepIndex>.{pid,heartbeat,exit}`. The attached `docker exec` pipe is kept for live output streaming, and the host `docker exec` client is `unref`'d and marked restart-survival so a graceful shutdown does not tear the in-container job down before it records its exit code.
+
+`decideCommandRecoveryMode()` classifies these steps as `container-exec`. On resume, `_resumeContainerCommandStep()` re-attaches via `docker exec` (host `fs` cannot read the in-container files):
+
+- read the in-container exit file (`docker exec … cat <exitFile>`) — if present, finalize from that exit code with the same `expect: failure` / `error_pattern` semantics;
+- otherwise, while the in-container heartbeat is fresh and the deadline has not passed, poll for the exit file;
+- on deadline, kill the in-container process group via `docker exec … kill -TERM/-KILL -- -<pgid>` (a host-side tree-kill of `docker exec` does not reach in-container descendants) and return the timeout result;
+- if the job stopped without a durable verdict, return a retryable pending interrupt — never a fabricated failure.
+
 ### 3. No durable verdict or unsafe identity
 
 If Bobbit cannot recover an exit file and cannot safely prove process identity, it records an explicit restart-interrupted row rather than a failed command verdict. The step remains `status: "waiting"` with output explaining that no durable command verdict was obtained, and the gate status is left `pending` so the team lead can re-signal.
@@ -100,15 +111,41 @@ Team-lead failure notifications list only real failed steps. Skipped downstream 
 
 Restart-safe recovery depends on a detached wrapper that can write durable identity and exit files.
 
-- **Windows without Git Bash** runs command steps through an attached shell. The step still runs, but a gateway restart cannot recover its exit code; recovery leaves the gate pending/retryable with a clear unsupported-path diagnostic.
-- **Container command steps** currently use attached `docker exec`. They are guarded the same way: restart/no-verdict recovery is pending/retryable, not a fabricated command failure.
+- **Windows without Git Bash** runs command steps through an attached `cmd.exe` shell, which cannot execute the bash exit-file wrapper. `decideCommandRecoveryMode()` classifies these as `pending-retry`: the step still runs, but a gateway restart cannot recover its exit code, so recovery leaves the gate **pending/retryable** (re-run on the next signal), never a fabricated verdict and never a hard "unsupported" failure.
+- **Container command steps** are now restart-recoverable via durable in-container files and `docker exec` re-attach (see [§2b](#2b-container-command-steps-durable-in-container-recovery)). Recovery finalizes from the in-container exit code, or falls back to pending/retryable if the in-container job stopped without one.
 - **Host reboot** is outside this guarantee. If the host itself stops, detached children and their heartbeats stop too; Bobbit can only use any exit/log files already written.
+
+## Session-backed steps: cold-reviewer re-run
+
+Reviewer (`llm-review`) and QA (`agent-qa`) steps resume by re-attaching to the restored reviewer session. Under N-way parallel session restore a freshly revived reviewer is *cold* (model + MCP init) and can miss the readiness window, producing reasons like "did not call verification_result after server restart", "timed out while resuming after server restart", or "Session lost during server restart". These are **re-runnable**, not genuine failures.
+
+`shouldRerunSessionStepOnResume(reason)` (in `verification-logic.ts`) recognises these cold-reviewer / readiness / lost-session reasons and returns `true`, so `_resumeOneVerification` **deterministically re-runs the step from scratch** (`_rerunLlmReviewStep` / `_rerunAgentQaStep`) instead of leaving a terminal restart-interrupt. Genuinely unrecoverable reasons (workspace/container removed or deleted) return `false` and keep the pending/re-signal path. The restart-interrupt *suppression* guarantees (`shouldSuppressRestartInterrupt` / `RESTART_INTERRUPT_MARKERS`) are preserved, so a restart still never fabricates a phantom gate failure.
+
+The net effect across all step types — command (incl. Docker), llm-review, agent-qa — is that a gateway restart mid-verification resumes to a real verdict or a clean re-run; the "interrupted by a server restart and could not be recovered" nudge is now the rare exception, not the default.
+
+## Stale verification reconciliation (UI)
+
+Server truth derives whether a verification is `running` live from the in-memory `activeVerifications` map, so it flips the instant an entry is removed. The UI live renderer, by contrast, was a WebSocket state machine whose only exit from `running` was a `gate_verification_complete` event — if that event never arrived (harness died, server restart, dropped WS), it spun forever.
+
+Two changes fix this:
+
+- **Server liveness in the snapshot.** `buildGateVerificationSnapshot()` accepts `isActiveVerificationAlive` (callers pass `areVerificationSessionsAlive(signalId)`). A matching-but-dead active entry is ignored for liveness, the snapshot is flagged `stale: true`, and its top-level `status` is never reported as `running`. `stale` is surfaced on the gate-detail summary and inspect responses.
+- **Client reconciliation.** `GateVerificationLive` reconciles against the authoritative REST snapshot on a repeating interval and on tab-visibility / connectivity regain (not just once at mount). When persisted state says running but the authoritative active-verifications endpoint holds no live entry, the renderer transitions to a terminal **stale** state with a "Re-signal gate" affordance instead of a perpetual spinner. The goal dashboard's live map applies the same reconciliation.
+
+## Slim gate-list payload
+
+`GET /api/goals/:id/gates` (non-summary) previously returned the entire signal history with full inline step output, artifact bodies, and diagnostics — a payload growing unbounded with gates × signals × steps that the dashboard re-serialized every poll tick. `projectGateForList()` (in `gate-status-summary.ts`) now returns a slim projection: step `output` is blanked and `artifact.content` / `diagnostics` are dropped (step metadata and `artifact.contentType`/`metadata` are preserved). Full step text is still fetched lazily on expand via the gate-detail / `gate_inspect` / verification-snapshot paths, which are unchanged. The dashboard's gate poll also compares a compact `gateId:status:updatedAt:signalCount` signature instead of double-`JSON.stringify`, and pauses while the tab is hidden.
 
 ## Code map
 
 | Area | Where to look |
 |---|---|
 | Active verification persistence and resume | `src/server/agent/verification-harness.ts` (`ActiveVerification`, `resumeInterruptedVerifications`, `_resumeCommandStep`) |
+| Container durable recovery | `_resumeContainerCommandStep`, `_dockerExecCapture`, `runCommandStep` container branch |
+| Recovery-mode classification / cold-reviewer re-run | `decideCommandRecoveryMode`, `shouldRerunSessionStepOnResume` (`src/server/agent/verification-logic.ts`) |
+| Verification snapshot liveness / stale flag | `buildGateVerificationSnapshot` (`src/server/gate-verification-snapshot.ts`), `areVerificationSessionsAlive` |
+| Slim gate-list projection | `projectGateForList` (`src/server/gate-status-summary.ts`) |
+| Live renderer reconcile + stale UI | `src/ui/tools/renderers/GateVerificationLive.ts`, `src/app/goal-dashboard.ts` |
 | Command spawn wrapper and file tailing | `runCommandStep`, `_startFileTailers` |
 | Process identity checks | `_readCommandIdentityFile`, `_verifyPersistedCommandIdentity`, `readProcessStartToken` |
 | Timeout/cancel cleanup | `_markPersistedCommandKillIntent`, `_killPersistedCommandSteps`, `_killVerifiedCommandStepForTimeout` |
@@ -116,4 +153,4 @@ Restart-safe recovery depends on a detached wrapper that can write durable ident
 | Pure verification semantics | `src/server/agent/verification-logic.ts` |
 | Retained diagnostics | `src/server/agent/gate-diagnostics.ts`, [gate-diagnostics.md](gate-diagnostics.md) |
 
-Primary regression coverage lives in `tests/verification-command-restart-lifecycle.test.ts`, `tests/verification-command-restart-regression.test.ts`, and `tests/verification-harness-restart.test.ts`.
+Primary regression coverage lives in `tests/verification-command-restart-lifecycle.test.ts`, `tests/verification-command-restart-regression.test.ts`, and `tests/verification-harness-restart.test.ts`. The gate-verification UX fixes (slim projection, snapshot liveness/stale, recovery classification, cold-reviewer re-run) are pinned by `tests/gate-verification-ux.test.ts`, with browser regressions in `tests/e2e/ui/gate-list-slim-projection.spec.ts` and `tests/e2e/ui/gate-verification-stale-reconcile.spec.ts`. Real restart-mid-verification behaviour against a live gateway + Docker belongs in `test:manual`.
