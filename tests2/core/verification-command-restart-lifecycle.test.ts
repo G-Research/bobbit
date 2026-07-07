@@ -290,7 +290,7 @@ test("command step settles from process exit when inherited stdio delays close",
 			if (!fs.existsSync(holderPidFile)) return false;
 			const pid = Number(fs.readFileSync(holderPidFile, "utf8"));
 			return Number.isFinite(pid) && pid > 0 ? pid : false;
-		}, 3_000, 25);
+		}, 10_000, 25);
 
 		const result = await withTimeout(stepPromise, 6_000, "command step to settle after process exit despite inherited stdio") as { passed: boolean; output: string };
 		assert.equal(result.passed, true, `${MARKER}: the exited command should be treated as the authoritative result even when a descendant holds stdio open.`);

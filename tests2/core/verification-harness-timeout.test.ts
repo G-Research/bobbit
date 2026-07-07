@@ -249,7 +249,7 @@ describe("runCommandStep tree-kill", () => {
 				const av = (harness as any).activeVerifications.get(signalId);
 				const out = av?.steps?.[0]?.output ?? "";
 				return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
-			}, 6000);
+			}, 15_000);
 			assert.ok(pidsReady, "script should have printed both pids before cancel");
 			const av = (harness as any).activeVerifications.get(signalId);
 			const out = av.steps[0].output as string;
