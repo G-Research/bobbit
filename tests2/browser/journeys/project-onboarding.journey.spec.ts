@@ -215,4 +215,34 @@ test.describe("Journey: Project Onboarding", () => {
 		await page.keyboard.press("Escape");
 		await expect(modal).toHaveCount(0, { timeout: 15_000 });
 	});
+
+	// Ported from add-project-preflight.spec.ts (audit: project-onboarding GAP):
+	// a path nested inside an existing project must surface a fail row and mark
+	// the preflight panel data-has-fail="1" (which gates Continue).
+	test("nested-in-existing-project path marks preflight data-has-fail=1", async ({ page }, testInfo) => {
+		test.setTimeout(90_000);
+		const parent = uniqueDir("pf-parent");
+		mkdirSync(join(parent, ".bobbit", "config"), { recursive: true });
+		mkdirSync(join(parent, ".bobbit", "state"), { recursive: true });
+		const child = join(parent, "child");
+		mkdirSync(child, { recursive: true });
+
+		const reg = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `pf-parent-${Date.now()}`, rootPath: parent, __e2e_seed_skip__: true }),
+		});
+		if (!reg.ok) { testInfo.skip(true, `Failed to seed parent project: ${reg.status}`); return; }
+
+		await openAddProjectDialog(page);
+		await page.locator(ADD_PROJECT.pickerInput).fill(child);
+
+		const panel = page.locator(ADD_PROJECT.dialog).locator('[data-testid="preflight-panel"]').first();
+		if (!await panel.isVisible({ timeout: 15_000 }).catch(() => false)) {
+			testInfo.skip(true, "preflight panel unavailable (older gateway)");
+			return;
+		}
+		// Nested-in-project is a fail check → panel must report data-has-fail="1".
+		await expect(panel).toHaveAttribute("data-has-fail", "1", { timeout: 15_000 });
+		await expect(page.locator('[data-testid="preflight-blocked"]').first()).toBeVisible({ timeout: 10_000 });
+	});
 });

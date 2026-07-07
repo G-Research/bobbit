@@ -66,4 +66,13 @@ test.describe("Journey: Marketplace Packs", () => {
 		await expect(page.getByTestId("market-sources-panel")).toBeVisible({ timeout: 20_000 });
 		await expect(page.getByTestId("market-add-source")).toBeVisible({ timeout: 15_000 });
 	});
+
+	// Ported from marketplace.spec.ts (audit: marketplace-packs PARTIAL): the
+	// Market page must render the Research Preview banner.
+	test("marketplace renders the research-preview banner", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/market"; });
+		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		await expect(page.getByTestId("market-research-preview-banner")).toBeVisible({ timeout: 20_000 });
+	});
 });

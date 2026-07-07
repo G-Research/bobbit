@@ -23,6 +23,18 @@ test.describe("Journey: App Smoke", () => {
 		expect(title).toBeTruthy();
 	});
 
+	// Ported from page-title.spec.ts (audit: app-smoke PARTIAL). The tab title
+	// must carry the "<project> · Bobbit" suffix — not just be non-empty.
+	test("document title carries the '· Bobbit' suffix", async ({ page }) => {
+		await openApp(page);
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
+		await expect(async () => {
+			const title = await page.title();
+			expect(title, "tab title should contain the interpunct separator").toContain("·");
+			expect(title, "tab title should be suffixed with Bobbit").toContain("Bobbit");
+		}).toPass({ intervals: [250, 500, 1000], timeout: 15_000 });
+	});
+
 	test("settings route navigable from root", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
@@ -170,6 +182,56 @@ test.describe("Journey: Draft Persistence", () => {
 			await expect(async () => {
 				const val = await page.locator("message-editor textarea").first().inputValue();
 				expect(val, "draft must survive page reload").toContain(draftText);
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 20_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+
+	/**
+	 * Server-backed persistence (draft-loss.spec.ts + audit REC): the same-tab
+	 * reload test above can be satisfied by the synchronous sessionStorage mirror
+	 * alone. To prove the draft is genuinely server-backed (survives loss of the
+	 * client mirror — new tab / evicted storage), clear the sessionStorage draft
+	 * mirror before reload so restoration MUST come from loadDraftFromServer.
+	 */
+	test("draft restores from the server after the client draft mirror is cleared", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const draftText = `draft-server-backed-${Date.now()}`;
+			await page.locator("message-editor textarea").first().fill(draftText);
+
+			// Confirm the server has persisted the draft.
+			await expect.poll(async () => {
+				const resp = await apiFetch(`/api/sessions/${sessionId}/draft?type=prompt`);
+				if (!resp.ok) return null;
+				const body = await resp.json() as { data?: { text?: string } };
+				return body?.data?.text ?? null;
+			}, { timeout: 20_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
+
+			// Evict the client-side draft mirror (text + gen) for this session so a
+			// same-tab reload cannot restore synchronously from sessionStorage; the
+			// only remaining source is the server (loadDraftFromServer).
+			await page.evaluate((sid) => {
+				sessionStorage.removeItem(`bobbit_draft_${sid}`);
+				sessionStorage.removeItem(`bobbit_draft_gen_${sid}`);
+				sessionStorage.removeItem(`draft-send-gen-${sid}`);
+			}, sessionId);
+
+			await page.reload();
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			// Restoration must come from the server despite the cleared mirror.
+			await expect(async () => {
+				const val = await page.locator("message-editor textarea").first().inputValue();
+				expect(val, "draft must be restored from the server after mirror eviction").toContain(draftText);
 			}).toPass({ intervals: [500, 1000, 2000], timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => {});

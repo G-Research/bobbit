@@ -144,4 +144,16 @@ test.describe("Journey: Project Assistant", () => {
 		const title = await page.title();
 		expect(title).toBeTruthy();
 	});
+
+	// Ported from settings-model-fallback.spec.ts (audit: project-settings GAP):
+	// the models settings page must expose the session-model-fallback toggle,
+	// defaulting to unchecked.
+	test("models settings exposes the session-model-fallback toggle (default off)", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/settings/system/models"; });
+		await page.waitForFunction(() => window.location.hash.includes("models"), null, { timeout: 20_000 });
+		const toggle = page.locator('[data-testid="allow-session-model-fallback-toggle"]').first();
+		await expect(toggle).toBeVisible({ timeout: 15_000 });
+		await expect(toggle).not.toBeChecked();
+	});
 });

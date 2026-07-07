@@ -115,4 +115,22 @@ test.describe("Journey: Prompt Interaction", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	// Ported from at-mention.spec.ts (audit: prompt-interaction GAP): typing '@'
+	// in the composer opens the @-mention autocomplete menu (.at-menu).
+	test("typing '@' opens the @-mention autocomplete menu", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const textarea = page.locator("message-editor textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 15_000 });
+			await textarea.click();
+			await textarea.type("@");
+			await expect(page.locator(".at-menu").first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
 });

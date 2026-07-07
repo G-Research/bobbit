@@ -248,4 +248,30 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 			await deleteSession(sB).catch(() => {});
 		}
 	});
+
+	// Ported from stories-sessions.spec.ts (S-01, audit GAP): the Send button
+	// must be disabled on an empty composer and enabled once text is entered.
+	test("Send button is disabled when the composer is empty, enabled once typed", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const textarea = page.locator("message-editor textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+			const sendBtn = page.locator('message-editor button[title="Send message"]').first();
+			await expect(sendBtn).toBeVisible({ timeout: 15_000 });
+			// Empty composer → Send disabled.
+			await expect(sendBtn).toBeDisabled({ timeout: 10_000 });
+			// Type → Send enabled.
+			await textarea.fill(`send-enable-${Date.now()}`);
+			await expect(sendBtn).toBeEnabled({ timeout: 10_000 });
+			// Clear → Send disabled again.
+			await textarea.fill("");
+			await expect(sendBtn).toBeDisabled({ timeout: 10_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
 });

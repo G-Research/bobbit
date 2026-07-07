@@ -6,6 +6,7 @@
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 import { createSessionViaUI, sendMessage } from "../_helpers/journey-fixture.js";
+import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 async function waitForProposalSlot(page: import("@playwright/test").Page, type: string): Promise<void> {
 	await page.waitForFunction(
@@ -237,5 +238,20 @@ test.describe("Journey: Proposals — API error handling", () => {
 		});
 		await openApp(page);
 		await expect(page.locator("body")).toBeVisible({ timeout: 15_000 });
+	});
+
+	// Ported from proposal-tools.spec.ts (audit: proposals PARTIAL): the goal
+	// proposal tool card must render an Open button (proposal-open-button).
+	test("goal proposal tool card renders the Open button", async ({ page }) => {
+		test.setTimeout(120_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		// Tool card summary + Open button.
+		await expect(page.getByText("Goal Proposal").first()).toBeVisible({ timeout: 20_000 });
+		await expect(page.locator('[data-testid="proposal-open-button"]').first()).toBeVisible({ timeout: 15_000 });
 	});
 });

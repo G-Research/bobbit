@@ -3,7 +3,7 @@
  * Covers: session switching, sidebar highlight, search/filter
  * Consolidated from: sidebar-navigation.spec.ts, sidebar-filters.spec.ts
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
 
 test.describe("Journey: Sidebar Navigation", () => {
 	test("sidebar and new-session button visible on load", async ({ page }) => {
@@ -169,6 +169,38 @@ test.describe("Journey: Sidebar Navigation", () => {
 				deleteSession(sB).catch(() => {}),
 				deleteSession(sC).catch(() => {}),
 			]);
+		}
+	});
+
+	// Ported from search-e2e.spec.ts SR-01 (audit: sidebar-nav PARTIAL): sidebar
+	// search must match GOAL titles too — a non-matching query hides the goal.
+	test("sidebar search hides a non-matching goal by title", async ({ page }) => {
+		const stamp = Date.now();
+		const goalTitle = `SidebarGoalSearch${stamp}`;
+		const goal = await createGoal({ title: goalTitle });
+		try {
+			await openApp(page);
+			// Goal is visible before filtering.
+			await expect(page.getByText(goalTitle).first()).toBeVisible({ timeout: 20_000 });
+
+			// Focus the sidebar search and enter a query that matches NOTHING.
+			await expect.poll(
+				() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+				{ timeout: 15_000 },
+			).toBe(true);
+			await page.keyboard.press("Control+k");
+			const searchInput = page.locator("input[data-search]");
+			await expect(searchInput).toBeFocused({ timeout: 15_000 });
+			await searchInput.fill(`zzz-no-match-${stamp}`);
+
+			// The goal must be hidden (goal-title filtering).
+			await expect(page.getByText(goalTitle)).not.toBeVisible({ timeout: 15_000 });
+
+			// Searching the goal's own title brings it back.
+			await searchInput.fill(goalTitle);
+			await expect(page.getByText(goalTitle).first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await deleteGoal(goal.id, true).catch(() => {});
 		}
 	});
 });

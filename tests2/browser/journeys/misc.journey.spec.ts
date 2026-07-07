@@ -7,7 +7,8 @@
  *   compaction-*, cost-*, workflow-editor-*, dynamic-panels-*, mobile-*, etc.
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
-import { sendMessage, apiFetch, defaultProject } from "../_helpers/journey-fixture.js";
+import { sendMessage, apiFetch, defaultProject, createGoal, deleteGoal, defaultProjectId } from "../_helpers/journey-fixture.js";
+import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: Notification Policy", () => {
 	test("app renders without notification errors", async ({ page }) => {
@@ -290,5 +291,77 @@ test.describe("Journey: Mobile Layout", () => {
 		await page.setViewportSize({ width: 390, height: 844 });
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+	});
+});
+
+// Ported from cost-popover-cache-hit.spec.ts (audit: misc GAP): the cost popover
+// must render the cache-hit row with the server-derived percentage.
+test.describe("Journey: Cost Cache-Hit", () => {
+	test("goal-dashboard cost popover shows the cache-hit percentage", async ({ page }) => {
+		const aggregate = {
+			totalCost: 1.2345, inputTokens: 1000, outputTokens: 500,
+			cacheReadTokens: 800, cacheWriteTokens: 200, cacheHitRate: 0.75,
+		};
+		await page.route(/\/api\/goals\/[^/]+\/cost(?:\?.*)?$/, async (route, req) => {
+			if (req.method() !== "GET") return route.fallback();
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(aggregate) });
+		});
+		await page.route(/\/api\/goals\/[^/]+\/cost\/breakdown(?:\?.*)?$/, async (route, req) => {
+			if (req.method() !== "GET") return route.fallback();
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ aggregate, sessions: [] }) });
+		});
+		const goal = await createGoal({ title: `v2-cache-hit-${Date.now()}` });
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/goal/${goal.id}`);
+			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
+			await page.locator(".cost-tag").first().click();
+			await expect(page.locator('[data-testid="cost-cache-hit"]').first()).toContainText("75%", { timeout: 15_000 });
+		} finally {
+			await deleteGoal(goal.id, true);
+		}
+	});
+});
+
+// Ported from api-error-modal.spec.ts (audit: misc GAP): a createGoal 400 must
+// surface the server error text + stack disclosure in the error modal.
+test.describe("Journey: API Error Modal", () => {
+	test("createGoal 400 surfaces server error message + stack in the modal", async ({ page }) => {
+		test.setTimeout(120_000);
+		const FAKE_STACK = "Error: Missing title\n    at goalManager.create (server.ts:3137:9)\n    at handleApiRoute (server.ts:42:5)";
+		await page.route("**/api/goals", async (route) => {
+			const req = route.request();
+			if (req.method() !== "POST") return route.continue();
+			await route.fulfill({
+				status: 400, contentType: "application/json",
+				body: JSON.stringify({ error: "Missing title", stack: FAKE_STACK }),
+			});
+		});
+		const targetProjectId = await defaultProjectId();
+		try {
+			await openApp(page);
+			await createGoalAssistantViaUI(page, { timeout: 60_000 });
+			const textarea = page.locator("textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 30_000 });
+			await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+			const titleInput = page.locator("input[placeholder='Goal title']").first();
+			await expect(titleInput).toBeVisible({ timeout: 20_000 });
+			await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+
+			const createGoalBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
+			await expect(createGoalBtn).toBeVisible({ timeout: 5_000 });
+			await createGoalBtn.click();
+
+			// The 400 routes through the error modal (ErrorDetails).
+			const message = page.locator('[data-testid="error-details-message"]').first();
+			await expect(message).toHaveText("Missing title", { timeout: 15_000 });
+			await expect(page.locator('[data-testid="error-details-stack"]').first()).toBeVisible({ timeout: 5_000 });
+			// The generic fallback must NOT be shown when a server message exists.
+			expect(await page.locator("body").innerText()).not.toContain("Failed to create goal: 400");
+		} finally {
+			// Best-effort: no goal is created (POST is stubbed 400).
+			void targetProjectId;
+		}
 	});
 });

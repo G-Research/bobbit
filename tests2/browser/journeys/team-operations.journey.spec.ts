@@ -182,6 +182,39 @@ test.describe("Journey: Dashboard Fanout — behavioral assertions", () => {
 			await deleteGoal(goal.id, true);
 		}
 	});
+
+	// Ported from goal-dashboard-fanout.spec.ts (audit: team-operations PARTIAL):
+	// after a single gate signal the checklist must render the "1 signal" badge
+	// (exact count) — not just the checklist rows.
+	test("gate signal renders '1 signal' badge on the design-doc checklist row", async ({ page }) => {
+		test.setTimeout(90_000);
+		const goal = await createGoal({ title: "v2-gate-signal-badge", workflowId: "test-fast" });
+		try {
+			const signalResp = await apiFetch(`/api/goals/${goal.id}/gates/design-doc/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "# Design\n\nGate-signal badge journey test — one signal for the design-doc gate." }),
+			});
+			expect(signalResp.status).toBe(201);
+
+			await openApp(page);
+			await navigateToHash(page, `#/goal/${goal.id}`);
+			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
+			const designRow = page.locator(".wf-checklist-item").filter({ hasText: "Design Doc" }).first();
+			await expect(designRow).toBeVisible({ timeout: 15_000 });
+
+			// The badge must read exactly "1 signal" for the single signal. A reload
+			// forces the dashboard to re-fetch gate signal history from REST alone.
+			await expect(async () => {
+				await page.reload();
+				await navigateToHash(page, `#/goal/${goal.id}`);
+				const badge = page.locator(".wf-checklist-item").filter({ hasText: "Design Doc" }).locator(".gate-signal-badge").first();
+				await expect(badge).toBeVisible({ timeout: 10_000 });
+				await expect(badge).toHaveText(/^1 signal$/, { timeout: 5_000 });
+			}).toPass({ intervals: [1000, 2000, 3000], timeout: 60_000 });
+		} finally {
+			await deleteGoal(goal.id, true);
+		}
+	});
 });
 
 // Behavioral assertions ported from dashboard-mutation-pending.spec.ts
@@ -425,6 +458,9 @@ test.describe("Journey: Goal Status Widget — behavioral assertions", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 			await expect(pill).toBeVisible({ timeout: 15_000 });
+			// Ported from goal-status-widget.spec.ts (audit: team-operations PARTIAL):
+			// with no pending human sign-offs the pill must report awaiting=false.
+			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "false", { timeout: 15_000 });
 		} finally {
 			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
 			await teardownTeam(goal.id).catch(() => {});
