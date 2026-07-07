@@ -1,29 +1,44 @@
 #!/usr/bin/env node
 /**
- * concurrency-proof.mjs — HONEST proof that N concurrent `test:v2` runs stay
- * green and within budget while the ledger keeps Σworkers ≤ cores (D7).
+ * concurrency-proof.mjs — HONEST multi-worktree proof that N concurrent
+ * `test:v2` runs stay green and within budget while the ledger keeps
+ * Σworkers ≤ cores (D7, Option A).
+ *
+ * WHY MULTI-WORKTREE (Option A): spawning 5 `test:v2` from ONE worktree corrupts
+ * that single node_modules — concurrent npm reify/prune races wipe
+ * node_modules/.bin, and 5 vitest sharing node_modules/.vite corrupts the Vite
+ * dep-optimizer cache. That is a harness artifact, not a product/ledger flake.
+ * Real N-developer concurrency in Bobbit = N separate git worktrees, each with
+ * its own node_modules (warm cache, no .bin race) coordinated by the
+ * cross-process ledger. So this proof provisions N throwaway worktrees, runs one
+ * `test:v2` per worktree, and asserts the same honest bar.
  *
  * D7 acceptance bar (docs/testing-v2/design.md §D7 — SETTLED):
  *   - 5 concurrent `test:v2` runs × 3 reps = 15/15 GREEN, retries:0, ZERO flakes.
  *   - Each run wall ≤ 600 s (10 min) under mutual load.
  *   - Ledger Σworkers ≤ cores (24) at all times.
  *
- * There is NO dry-run and NO downgraded assertion. A run's exit code is the
- * primary signal: each run is spawned with BOBBIT_V2_CONCURRENCY_RUN=1, which
- * switches run-v2's full-scope budget to the under-load per-run cap
- * (budgets.concurrency.perRunMaxWallMs). Therefore `exit 0` ⟺ vitest green AND
- * playwright green AND wall ≤ under-load cap. Any non-zero exit — including a
+ * There is NO dry-run and NO downgraded assertion. Each run is spawned with
+ * BOBBIT_V2_CONCURRENCY_RUN=1, which switches run-v2's budget to the under-load
+ * per-run cap (budgets.concurrency.perRunMaxWallMs). So `exit 0` ⟺ vitest green
+ * AND playwright green AND wall ≤ under-load cap. Any non-zero exit — including a
  * playwright flake — is a HARD failure that fails this proof.
+ *
+ * Provisioning (once, reused across reps; NOT part of the measured wall):
+ *   git worktree add --detach → npm ci (npm_config_package_lock=true) → build dist
+ *   in wt-0 and copy dist/ to the others (dist is relocatable — verified no
+ *   embedded absolute paths). Teardown removes every worktree in a finally block.
  *
  * Default scale is the full spec (5 × 3). Override for a lighter smoke:
  *   CONCURRENCY_PROOF_CONCURRENT=2 CONCURRENCY_PROOF_REPS=1 node scripts/testing-v2/concurrency-proof.mjs
+ *   --keep       leave provisioned worktrees in place (debugging)
  *
  * Outputs:
  *   docs/testing-v2/concurrency-proof.md
  *   .profiles/testing-v2/concurrency-proof/result.json
  */
-import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, cpSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -42,68 +57,195 @@ function budgetsPerRunWallS() {
 		const b = JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "budgets.json"), "utf8"));
 		if (b.concurrency && Number.isFinite(b.concurrency.perRunMaxWallMs)) return Math.round(b.concurrency.perRunMaxWallMs / 1000);
 	} catch {
-		/* fall through to default */
+		/* default */
 	}
 	return 600;
 }
 
-// Under-load per-run wall cap (D7 = 600 s). Env override for experiments only.
 const WALL_BUDGET_S = Number(process.env.CONCURRENCY_PROOF_WALL_S) || budgetsPerRunWallS();
 
 let CONCURRENT = Number(process.env.CONCURRENCY_PROOF_CONCURRENT) || 5;
 let REPS = Number(process.env.CONCURRENCY_PROOF_REPS) || 3;
+let KEEP = false;
 
 for (let i = 2; i < process.argv.length; i++) {
 	const arg = process.argv[i];
 	if (arg === "--concurrent" && process.argv[i + 1]) CONCURRENT = Number(process.argv[++i]);
 	else if (arg === "--reps" && process.argv[i + 1]) REPS = Number(process.argv[++i]);
+	else if (arg === "--keep") KEEP = true;
 	else if (arg.startsWith("--concurrent=")) CONCURRENT = Number(arg.split("=")[1]);
 	else if (arg.startsWith("--reps=")) REPS = Number(arg.split("=")[1]);
 }
 
 const REPORT_DIR = join(REPO_ROOT, "docs", "testing-v2");
 const ARTIFACT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "concurrency-proof");
+// Worktrees live beside the other Bobbit worktrees (same drive → fast git ops),
+// in a throwaway dir keyed by pid so parallel proof invocations never collide.
+const PROOF_WT_ROOT = join(REPO_ROOT, "..", `cc-proof-${process.pid}`);
 
 function npmCmd() {
 	return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
+// npm env that neutralises the repo .npmrc `shrinkwrap=false` (= package-lock=false)
+// for the proof's subprocesses: with the lockfile authoritative, npm never
+// reifies/prunes node_modules on run, so a provisioned tree stays complete.
+const NPM_ENV = { npm_config_package_lock: "true", npm_config_audit: "false", npm_config_fund: "false" };
+
 // ──────────────────────────────── output analysis ────────────────────────────────
 
 /**
- * Parse a run's combined output to attribute failures to a tier. This is
- * DEFENCE-IN-DEPTH on top of the exit code: run-v2 prints an explicit PASS/FAIL
- * line per tier, so we can name which tier broke instead of only "exit 1".
+ * Parse a run's combined output to attribute failures to a tier (defence in
+ * depth on top of the exit code — run-v2 prints an explicit PASS/FAIL line per
+ * tier so we can name which tier broke).
  */
 function analyzeRunOutput(lines) {
 	const text = lines.map(([, l]) => l).join("");
-
 	const vitestMatch = text.match(/\[run-v2\] tier1\/vitest \([^)]+\): (PASS|FAIL)/);
 	const vitestPass = vitestMatch ? vitestMatch[1] === "PASS" : null;
-
 	const playwrightMatch = text.match(/\[run-v2\] tier2\/playwright \([^)]+\): (PASS|FAIL)/);
 	const playwrightPass = playwrightMatch ? playwrightMatch[1] === "PASS" : null;
-
 	const budgetFail = text.includes("[run-v2] BUDGET FAIL");
 	const budgetPass = text.includes("[run-v2] budget PASS");
-
 	const unexpectedMatch = text.match(/"unexpected":\s*(\d+)/);
 	const playwrightUnexpected = unexpectedMatch ? Number(unexpectedMatch[1]) : null;
-
 	const vitestSummaryOk = /Tests\s+\d+ passed/.test(text) || /Test Files\s+\d+ passed/.test(text);
-
 	return { vitestPass, playwrightPass, budgetFail, budgetPass, playwrightUnexpected, vitestSummaryOk };
 }
 
-// ──────────────────────────────── spawn ────────────────────────────────
+// ──────────────────────────────── provisioning ────────────────────────────────
 
-function spawnRun(index, rep, cleanEnv) {
+function run(cmd, args, opts = {}) {
+	const res = spawnSync(cmd, args, {
+		cwd: opts.cwd || REPO_ROOT,
+		env: { ...process.env, ...(opts.env || {}) },
+		stdio: opts.quiet ? ["ignore", "pipe", "pipe"] : "inherit",
+		shell: process.platform === "win32",
+		encoding: "utf8",
+		maxBuffer: 64 * 1024 * 1024,
+	});
+	return { code: res.status ?? (res.signal ? 1 : 0), stdout: res.stdout || "", stderr: res.stderr || "" };
+}
+
+function gitHeadSha() {
+	const r = run("git", ["rev-parse", "HEAD"], { quiet: true });
+	return r.stdout.trim();
+}
+
+function removeWorktree(dir) {
+	if (!existsSync(dir)) return;
+	run("git", ["worktree", "remove", "--force", dir], { quiet: true });
+	if (existsSync(dir)) {
+		try {
+			rmSync(dir, { recursive: true, force: true });
+		} catch {
+			/* ignore */
+		}
+	}
+}
+
+/**
+ * Provision N throwaway worktrees at the current HEAD, each with its own
+ * `npm ci` node_modules and a copy of a freshly-built dist. Returns the worktree
+ * dirs. Throws on any provisioning failure (the proof cannot run without it).
+ */
+async function provisionWorktrees(n, baseSha) {
+	console.log(`\n─── provisioning ${n} worktrees @ ${baseSha.slice(0, 10)} (one-time, not measured) ───`);
+	mkdirSync(PROOF_WT_ROOT, { recursive: true });
+	const dirs = [];
+	// git worktree add mutates the shared .git — do these SEQUENTIALLY.
+	for (let i = 0; i < n; i++) {
+		const dir = join(PROOF_WT_ROOT, `wt-${i}`);
+		removeWorktree(dir);
+		const r = run("git", ["worktree", "add", "--detach", dir, baseSha], { quiet: true });
+		if (r.code !== 0) throw new Error(`git worktree add failed for wt-${i}: ${r.stderr || r.stdout}`);
+		dirs.push(dir);
+		console.log(`  + worktree wt-${i} → ${dir}`);
+	}
+
+	// npm ci per worktree — CONCURRENT (separate node_modules, no cross-race).
+	console.log(`  npm ci ×${n} (package-lock authoritative)…`);
+	const ciResults = await Promise.all(
+		dirs.map(
+			(dir, i) =>
+				new Promise((res) => {
+					const child = spawn(npmCmd(), ["ci"], {
+						cwd: dir,
+						env: { ...process.env, ...NPM_ENV },
+						stdio: ["ignore", "pipe", "pipe"],
+						shell: process.platform === "win32",
+					});
+					let err = "";
+					child.stderr.on("data", (d) => (err += String(d)));
+					child.on("close", (code) => res({ i, code, err }));
+					child.on("error", (e) => res({ i, code: 1, err: String(e) }));
+				}),
+		),
+	);
+	for (const r of ciResults) {
+		if (r.code !== 0) throw new Error(`npm ci failed in wt-${r.i}: ${r.err.slice(-400)}`);
+		// Sanity: the server graph must be loadable (the pi-ai/oauth subpath the
+		// server imports). A broken/pruned tree is caught here, before the run.
+		const oauth = join(dirs[r.i], "node_modules", "@earendil-works", "pi-ai", "dist", "oauth.js");
+		if (!existsSync(oauth)) throw new Error(`wt-${r.i}: incomplete node_modules — missing ${oauth}`);
+	}
+	console.log(`  npm ci complete; pi-ai/oauth present in all ${n} worktrees ✓`);
+
+	// Build dist once in wt-0, then copy to the rest (dist is relocatable —
+	// verified no embedded worktree-absolute paths). Building all N would be a
+	// pointless CPU storm; the copy is byte-identical for the same SHA.
+	console.log(`  building dist in wt-0…`);
+	const build = run(npmCmd(), ["run", "build"], { cwd: dirs[0], env: NPM_ENV, quiet: true });
+	if (build.code !== 0) throw new Error(`dist build failed in wt-0: ${(build.stderr || build.stdout).slice(-800)}`);
+	const distSrc = join(dirs[0], "dist");
+	if (!existsSync(join(distSrc, "server", "cli.js")) || !existsSync(join(distSrc, "ui", "index.html"))) {
+		throw new Error(`wt-0 dist incomplete after build (missing server/cli.js or ui/index.html)`);
+	}
+	for (let i = 1; i < n; i++) {
+		cpSync(distSrc, join(dirs[i], "dist"), { recursive: true });
+	}
+	console.log(`  dist built + copied to ${n} worktrees ✓`);
+	return dirs;
+}
+
+function teardownWorktrees(dirs) {
+	if (KEEP) {
+		console.log(`\n[--keep] leaving worktrees in ${PROOF_WT_ROOT}`);
+		return;
+	}
+	console.log(`\n─── teardown: removing ${dirs.length} worktrees ───`);
+	for (const dir of dirs) removeWorktree(dir);
+	run("git", ["worktree", "prune"], { quiet: true });
+	try {
+		rmSync(PROOF_WT_ROOT, { recursive: true, force: true });
+	} catch {
+		/* ignore */
+	}
+}
+
+// ──────────────────────────────── spawn a run ────────────────────────────────
+
+function spawnRun(index, rep, worktreeDir) {
 	const startWall = performance.now();
 	const lines = [];
+	// Fresh top-level test:v2 in its OWN worktree. Strip inherited ledger parent
+	// env (each run reserves its own bundle); flag under-load; keep the lockfile
+	// authoritative; give playwright a unique cache run-id.
+	const env = {
+		...process.env,
+		...NPM_ENV,
+		BOBBIT_V2_TOTAL_CORES: String(TOTAL_CORES),
+		BOBBIT_V2_CONCURRENCY_RUN: "1",
+		BOBBIT_V2_BROWSER_RUN_ID: `ccwt${index}-rep${rep}`,
+	};
+	delete env.BOBBIT_V2_LEDGER_PARENT;
+	delete env.BOBBIT_V2_SLOTS_VITEST;
+	delete env.BOBBIT_V2_SLOTS_PLAYWRIGHT;
+
 	return new Promise((resolveRun) => {
 		const child = spawn(npmCmd(), ["run", "test:v2"], {
-			cwd: REPO_ROOT,
-			env: cleanEnv,
+			cwd: worktreeDir,
+			env,
 			stdio: ["ignore", "pipe", "pipe"],
 			shell: process.platform === "win32",
 		});
@@ -114,6 +256,7 @@ function spawnRun(index, rep, cleanEnv) {
 				index,
 				rep,
 				pid: child.pid,
+				worktree: worktreeDir,
 				exitCode: code ?? (signal ? 1 : 0),
 				signal,
 				wallMs: Math.round(performance.now() - startWall),
@@ -126,6 +269,7 @@ function spawnRun(index, rep, cleanEnv) {
 				index,
 				rep,
 				pid: child.pid ?? 0,
+				worktree: worktreeDir,
 				exitCode: 1,
 				spawnError: String(error),
 				wallMs: Math.round(performance.now() - startWall),
@@ -150,7 +294,7 @@ async function pollLedger(runPromises) {
 			const total = state.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
 			samples.push({ ts: Date.now(), total, count: state.reservations.length });
 		} catch {
-			/* ledger locked — skip sample */
+			/* locked — skip */
 		}
 	};
 	while (!done) {
@@ -162,9 +306,6 @@ async function pollLedger(runPromises) {
 	return { maxWorkers, samples };
 }
 
-// ──────────────────────────────── failure tail ────────────────────────────────
-
-/** Last ~40 non-empty output lines from a failed run, for the report. */
 function failureTail(run) {
 	const text = run.lines.map(([, l]) => l).join("");
 	const nonEmpty = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
@@ -175,64 +316,59 @@ function failureTail(run) {
 
 async function main() {
 	console.log(`\n╔══════════════════════════════════════════════════════════╗`);
-	console.log(`║            test:v2 concurrency proof (HONEST)            ║`);
+	console.log(`║       test:v2 concurrency proof — multi-worktree (A)     ║`);
 	console.log(`╚══════════════════════════════════════════════════════════╝`);
 	console.log(`  concurrent=${CONCURRENT}  reps=${REPS}  totalRuns=${CONCURRENT * REPS}`);
 	console.log(`  perRunWallCap=${WALL_BUDGET_S}s  cores=${TOTAL_CORES}`);
-	console.log(`  ledger dir: ${ledgerDir()}\n`);
+	console.log(`  ledger dir: ${ledgerDir()}`);
 
-	// Each spawned run is a fresh top-level `test:v2` — strip any inherited ledger
-	// parent env so every run performs its own parent reservation, and flag it as
-	// an under-load run so run-v2 enforces the under-load per-run budget.
-	const cleanEnv = { ...process.env, BOBBIT_V2_CONCURRENCY_RUN: "1" };
-	delete cleanEnv.BOBBIT_V2_LEDGER_PARENT;
-	delete cleanEnv.BOBBIT_V2_SLOTS_VITEST;
-	delete cleanEnv.BOBBIT_V2_SLOTS_PLAYWRIGHT;
-
+	const baseSha = gitHeadSha();
 	const allRunResults = [];
 	const allLedgerPolls = [];
 	const violations = [];
+	let worktrees = [];
 
-	for (let rep = 1; rep <= REPS; rep++) {
-		console.log(`\n─── rep ${rep}/${REPS}: launching ${CONCURRENT} concurrent test:v2 runs ───`);
+	try {
+		worktrees = await provisionWorktrees(CONCURRENT, baseSha);
 
-		const repStart = performance.now();
-		const runPromises = Array.from({ length: CONCURRENT }, (_, i) => spawnRun(i + 1, rep, cleanEnv));
-		const ledgerPoll = pollLedger(runPromises);
+		for (let rep = 1; rep <= REPS; rep++) {
+			console.log(`\n─── rep ${rep}/${REPS}: launching ${CONCURRENT} concurrent test:v2 runs (one per worktree) ───`);
+			const repStart = performance.now();
+			const runPromises = worktrees.map((dir, i) => spawnRun(i + 1, rep, dir));
+			const ledgerPoll = pollLedger(runPromises);
 
-		let progressDone = false;
-		const progressTimer = setInterval(() => {
-			if (progressDone) return;
-			const elapsed = Math.round((performance.now() - repStart) / 1000);
-			console.log(`  [rep ${rep}] ${elapsed}s elapsed…`);
-		}, 30_000);
+			let progressDone = false;
+			const progressTimer = setInterval(() => {
+				if (progressDone) return;
+				console.log(`  [rep ${rep}] ${Math.round((performance.now() - repStart) / 1000)}s elapsed…`);
+			}, 30_000);
 
-		const [repResults, ledgerResult] = await Promise.all([Promise.all(runPromises), ledgerPoll]);
+			const [repResults, ledgerResult] = await Promise.all([Promise.all(runPromises), ledgerPoll]);
+			progressDone = true;
+			clearInterval(progressTimer);
 
-		progressDone = true;
-		clearInterval(progressTimer);
+			const repWall = Math.round(performance.now() - repStart);
+			allRunResults.push(...repResults);
+			allLedgerPolls.push({ rep, ...ledgerResult });
 
-		const repWall = Math.round(performance.now() - repStart);
-		allRunResults.push(...repResults);
-		allLedgerPolls.push({ rep, ...ledgerResult });
-
-		for (const r of repResults) {
-			const a = r.analysis || {};
-			const exitStatus = r.exitCode === 0 ? "PASS" : "FAIL";
-			const vt = a.vitestPass === true ? "vitest✓" : a.vitestPass === false ? "vitest✗" : "vitest?";
-			const pw = a.playwrightPass === true ? "pw✓" : a.playwrightPass === false ? "pw✗" : "pw?";
-			const wallS = (r.wallMs / 1000).toFixed(1);
-			console.log(`  run #${r.index}: ${exitStatus} (${vt} ${pw}) ${wallS}s pid=${r.pid}${r.spawnError ? ` ERROR:${r.spawnError}` : ""}`);
+			for (const r of repResults) {
+				const a = r.analysis || {};
+				const exitStatus = r.exitCode === 0 ? "PASS" : "FAIL";
+				const vt = a.vitestPass === true ? "vitest✓" : a.vitestPass === false ? "vitest✗" : "vitest?";
+				const pw = a.playwrightPass === true ? "pw✓" : a.playwrightPass === false ? "pw✗" : "pw?";
+				console.log(`  run #${r.index}: ${exitStatus} (${vt} ${pw}) ${(r.wallMs / 1000).toFixed(1)}s pid=${r.pid}${r.spawnError ? ` ERROR:${r.spawnError}` : ""}`);
+			}
+			console.log(`  ledger peak Σworkers=${ledgerResult.maxWorkers}/${TOTAL_CORES}`);
+			console.log(`  rep ${rep} wall: ${(repWall / 1000).toFixed(1)}s`);
 		}
-		console.log(`  ledger peak Σworkers=${ledgerResult.maxWorkers}/${TOTAL_CORES}`);
-		console.log(`  rep ${rep} wall: ${(repWall / 1000).toFixed(1)}s`);
+	} finally {
+		if (worktrees.length) teardownWorktrees(worktrees);
 	}
 
 	// ──────────── assertions (all HARD) ────────────
 
 	console.log(`\n─── assertions ───`);
 
-	// A1: every run exits 0 (⟺ vitest green + playwright green + wall ≤ under-load cap).
 	const failedRuns = allRunResults.filter((r) => r.exitCode !== 0);
 	if (failedRuns.length > 0) {
 		violations.push(`A1: ${failedRuns.length}/${allRunResults.length} run(s) exited non-zero: ${failedRuns.map((r) => `rep${r.rep}/#${r.index}(exit ${r.exitCode})`).join(", ")}`);
@@ -241,7 +377,6 @@ async function main() {
 		console.log(`  ✓ A1 PASS — all ${allRunResults.length} runs exited 0`);
 	}
 
-	// A2: tier attribution — no run may report a vitest or playwright FAIL line.
 	const vitestFails = allRunResults.filter((r) => r.analysis?.vitestPass === false);
 	const playwrightFails = allRunResults.filter((r) => r.analysis?.playwrightPass === false);
 	if (vitestFails.length > 0) {
@@ -256,7 +391,6 @@ async function main() {
 		console.log(`  ✓ A2 PASS — every run reported vitest PASS and playwright PASS`);
 	}
 
-	// A3: ledger Σworkers ≤ cores at all times.
 	let a3Bad = false;
 	for (const poll of allLedgerPolls) {
 		if (poll.maxWorkers > TOTAL_CORES) {
@@ -266,37 +400,36 @@ async function main() {
 		}
 	}
 	if (!a3Bad) {
-		const maxSeen = Math.max(...allLedgerPolls.map((p) => p.maxWorkers), 0);
-		console.log(`  ✓ A3 PASS — Σworkers always ≤ ${TOTAL_CORES} (max seen=${maxSeen})`);
+		console.log(`  ✓ A3 PASS — Σworkers always ≤ ${TOTAL_CORES} (max seen=${Math.max(...allLedgerPolls.map((p) => p.maxWorkers), 0)})`);
 	}
 
-	// A4: per-run wall ≤ under-load cap (belt & suspenders on top of run-v2's own gate).
 	const slowRuns = allRunResults.filter((r) => r.wallMs > WALL_BUDGET_S * 1000);
 	if (slowRuns.length > 0) {
 		violations.push(`A4: ${slowRuns.length} run(s) exceeded ${WALL_BUDGET_S}s: ${slowRuns.map((r) => `rep${r.rep}/#${r.index}(${(r.wallMs / 1000).toFixed(1)}s)`).join(", ")}`);
 		console.error(`  ✗ A4 FAIL — ${slowRuns.length} run(s) over ${WALL_BUDGET_S}s`);
 	} else {
-		const maxWall = Math.max(...allRunResults.map((r) => r.wallMs), 0);
-		console.log(`  ✓ A4 PASS — all runs within ${WALL_BUDGET_S}s (max=${(maxWall / 1000).toFixed(1)}s)`);
+		console.log(`  ✓ A4 PASS — all runs within ${WALL_BUDGET_S}s (max=${(Math.max(...allRunResults.map((r) => r.wallMs), 0) / 1000).toFixed(1)}s)`);
 	}
 
-	const pass = violations.length === 0;
+	const pass = violations.length === 0 && allRunResults.length === CONCURRENT * REPS;
 
-	// ──────────── result JSON ────────────
+	// ──────────── result JSON + report ────────────
 
 	const wallMsAll = allRunResults.map((r) => r.wallMs);
 	const result = {
 		pass,
+		model: "multi-worktree",
 		violations,
 		config: {
 			concurrent: CONCURRENT,
 			reps: REPS,
 			perRunWallCapS: WALL_BUDGET_S,
 			totalCores: TOTAL_CORES,
+			baseSha,
 			specConcurrent: 5,
 			specReps: 3,
 			fullSpec: CONCURRENT >= 5 && REPS >= 3,
-			note: CONCURRENT >= 5 && REPS >= 3 ? "Full D7 spec proof (5×3)." : "Reduced-scale smoke; full proof is 5×3 (the default).",
+			note: CONCURRENT >= 5 && REPS >= 3 ? "Full D7 spec proof (5×3), one test:v2 per worktree." : "Reduced-scale smoke; full proof is 5×3 (the default).",
 		},
 		summary: {
 			totalRuns: allRunResults.length,
@@ -320,30 +453,16 @@ async function main() {
 			analysis: r.analysis || null,
 			failureTail: r.exitCode === 0 ? null : failureTail(r),
 		})),
-		ledger: allLedgerPolls.map((p) => ({
-			rep: p.rep,
-			maxWorkers: p.maxWorkers,
-			sampleCount: p.samples.length,
-			withinCoreCount: p.maxWorkers <= TOTAL_CORES,
-			samples: p.samples.slice(0, 40),
-		})),
+		ledger: allLedgerPolls.map((p) => ({ rep: p.rep, maxWorkers: p.maxWorkers, sampleCount: p.samples.length, withinCoreCount: p.maxWorkers <= TOTAL_CORES, samples: p.samples.slice(0, 40) })),
 		createdAt: new Date().toISOString(),
 	};
 
-	// ──────────── write artifacts ────────────
-
 	mkdirSync(ARTIFACT_DIR, { recursive: true });
 	mkdirSync(REPORT_DIR, { recursive: true });
-
-	const resultJsonPath = join(ARTIFACT_DIR, "result.json");
-	writeFileSync(resultJsonPath, `${JSON.stringify(result, null, 2)}\n`);
-	console.log(`\n  artifact: ${resultJsonPath}`);
-
-	const mdPath = join(REPORT_DIR, "concurrency-proof.md");
-	writeFileSync(mdPath, buildMarkdown(result));
-	console.log(`  report:   ${mdPath}`);
-
-	// ──────────── final verdict ────────────
+	writeFileSync(join(ARTIFACT_DIR, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
+	writeFileSync(join(REPORT_DIR, "concurrency-proof.md"), buildMarkdown(result));
+	console.log(`\n  artifact: ${join(ARTIFACT_DIR, "result.json")}`);
+	console.log(`  report:   ${join(REPORT_DIR, "concurrency-proof.md")}`);
 
 	console.log(`\n${"═".repeat(60)}`);
 	if (pass) {
@@ -353,7 +472,6 @@ async function main() {
 		for (const v of violations) console.error(`  • ${v}`);
 	}
 	console.log(`${"═".repeat(60)}\n`);
-
 	process.exit(pass ? 0 : 1);
 }
 
@@ -369,30 +487,22 @@ function buildMarkdown(result) {
 	for (const rep of repNums) {
 		const repRuns = runs.filter((r) => r.rep === rep);
 		const le = ledger.find((l) => l.rep === rep);
-		repTables += `\n### Rep ${rep}\n\n`;
-		repTables += `| Run | PID | Exit | Wall (s) | Vitest | Playwright |\n`;
-		repTables += `|-----|-----|------|----------|--------|------------|\n`;
+		repTables += `\n### Rep ${rep}\n\n| Run | PID | Exit | Wall (s) | Vitest | Playwright |\n|-----|-----|------|----------|--------|------------|\n`;
 		for (const r of repRuns) {
 			const a = r.analysis || {};
 			const vt = a.vitestPass === true ? "✅" : a.vitestPass === false ? "❌" : "?";
 			const pw = a.playwrightPass === true ? "✅" : a.playwrightPass === false ? "❌" : "?";
 			const ob = r.overWallCap ? `⚠ ${r.wallS}` : `${r.wallS}`;
-			const exit = r.exitCode === 0 ? "0 ✅" : `${r.exitCode} ❌`;
-			repTables += `| ${r.index} | ${r.pid || "—"} | ${exit} | ${ob} | ${vt} | ${pw} |\n`;
+			repTables += `| ${r.index} | ${r.pid || "—"} | ${r.exitCode === 0 ? "0 ✅" : `${r.exitCode} ❌`} | ${ob} | ${vt} | ${pw} |\n`;
 		}
-		if (le) {
-			const ledgerIcon = le.withinCoreCount ? "✅" : "❌";
-			repTables += `\n**Ledger peak Σworkers:** ${le.maxWorkers}/${config.totalCores} ${ledgerIcon}  (${le.sampleCount} samples)\n`;
-		}
+		if (le) repTables += `\n**Ledger peak Σworkers:** ${le.maxWorkers}/${config.totalCores} ${le.withinCoreCount ? "✅" : "❌"}  (${le.sampleCount} samples)\n`;
 	}
 
 	let violationsSection = "";
 	if (violations.length > 0) {
 		violationsSection = `\n## Violations\n\n`;
 		for (const v of violations) violationsSection += `- ❌ ${v}\n`;
-		// Attach failure tails for any failed run.
-		const failed = runs.filter((r) => r.failureTail);
-		for (const r of failed) {
+		for (const r of runs.filter((x) => x.failureTail)) {
 			violationsSection += `\n<details><summary>rep${r.rep}/run#${r.index} (exit ${r.exitCode}) — last output</summary>\n\n\`\`\`\n${r.failureTail}\n\`\`\`\n</details>\n`;
 		}
 	}
@@ -401,6 +511,8 @@ function buildMarkdown(result) {
 
 **Generated:** ${ts}  
 **Result:** ${icon}  
+**Model:** multi-worktree (Option A) — one \`test:v2\` per throwaway git worktree, each with its own \`node_modules\` (\`npm ci\`) + copied \`dist\`, coordinated by the cross-process ledger.  
+**Base commit:** \`${config.baseSha}\`  
 **Scale:** ${config.concurrent} concurrent × ${config.reps} rep(s) = ${summary.totalRuns} total runs${config.fullSpec ? " (full D7 spec)" : " (reduced smoke — default is 5×3)"}  
 
 > **Acceptance bar (D7):** ${config.specConcurrent} concurrent × ${config.specReps} reps = ${config.specConcurrent * config.specReps} runs, all green, \`retries: 0\`, zero flakes, each run ≤ ${config.perRunWallCapS}s under mutual load, ledger Σworkers ≤ cores. Playwright flakes under load are HARD failures.
@@ -410,12 +522,10 @@ function buildMarkdown(result) {
 | Metric | Value | Target | Status |
 |--------|-------|--------|--------|
 | Runs green (exit 0) | ${summary.green}/${summary.totalRuns} | ${summary.totalRuns}/${summary.totalRuns} | ${summary.green === summary.totalRuns ? "✅" : "❌"} |
-| Runs exit non-zero | ${summary.exitNonZero} | 0 | ${summary.exitNonZero === 0 ? "✅" : "❌"} |
 | Vitest tier failures | ${summary.vitestFails} | 0 | ${summary.vitestFails === 0 ? "✅" : "❌"} |
 | Playwright tier failures | ${summary.playwrightFails} | 0 | ${summary.playwrightFails === 0 ? "✅" : "❌"} |
 | Max wall time | ${summary.maxWallS}s | ≤ ${config.perRunWallCapS}s | ${summary.maxWallS <= config.perRunWallCapS ? "✅" : "❌"} |
-| Avg wall time | ${summary.avgWallS}s | — | — |
-| Min wall time | ${summary.minWallS}s | — | — |
+| Avg / min wall | ${summary.avgWallS}s / ${summary.minWallS}s | — | — |
 | Max Σworkers (ledger) | ${summary.maxLedgerWorkers} | ≤ ${config.totalCores} | ${summary.maxLedgerWorkers <= config.totalCores ? "✅" : "❌"} |
 
 ## Assertions
@@ -423,7 +533,7 @@ function buildMarkdown(result) {
 | # | Assertion | Status |
 |---|-----------|--------|
 | A1 | Every run exits 0 (vitest green + playwright green + wall ≤ cap) | ${summary.exitNonZero === 0 ? "✅ PASS" : `❌ FAIL — ${summary.exitNonZero} non-zero`} |
-| A2 | No vitest or playwright tier FAIL line in any run | ${summary.vitestFails === 0 && summary.playwrightFails === 0 ? "✅ PASS" : `❌ FAIL — vitest ${summary.vitestFails}, playwright ${summary.playwrightFails}`} |
+| A2 | No vitest or playwright tier FAIL in any run | ${summary.vitestFails === 0 && summary.playwrightFails === 0 ? "✅ PASS" : `❌ FAIL — vitest ${summary.vitestFails}, playwright ${summary.playwrightFails}`} |
 | A3 | Ledger Σworkers ≤ ${config.totalCores} at all times | ${summary.maxLedgerWorkers <= config.totalCores ? "✅ PASS" : `❌ FAIL — peak ${summary.maxLedgerWorkers}`} |
 | A4 | Per-run wall ≤ ${config.perRunWallCapS}s | ${summary.maxWallS <= config.perRunWallCapS ? "✅ PASS" : `❌ FAIL — max ${summary.maxWallS}s`} |
 ${violationsSection}
@@ -431,26 +541,20 @@ ${violationsSection}
 ${repTables}
 ## What This Proves
 
-1. **Zero-flake concurrency.** ${summary.green}/${summary.totalRuns} concurrent \`test:v2\` runs completed green with \`retries: 0\`. A single flake — in either tier — would flip a run's exit code and fail this proof; there are no downgraded assertions and no dry-run.
+1. **Zero-flake concurrency (realistic model).** ${summary.green}/${summary.totalRuns} concurrent \`test:v2\` runs — each in its own worktree, exactly how Bobbit runs agents — completed green with \`retries: 0\`. A single flake in either tier flips a run's exit code and fails this proof; no downgraded assertions, no dry-run.
 
-2. **CPU exhaustion is bounded by the ledger (the D7 mechanism).** Peak Σworkers across all concurrent runs was ${summary.maxLedgerWorkers}/${config.totalCores}. The ledger counts pending peers during the coalescing window, so ${config.concurrent} simultaneous runs each receive ~\`floor(${config.totalCores}/${config.concurrent})\` slots instead of grabbing the full 12-slot bundle and oversubscribing to ~${config.concurrent * 12} on ${config.totalCores} cores.
+2. **CPU exhaustion bounded by the ledger (the D7 mechanism).** Peak Σworkers = ${summary.maxLedgerWorkers}/${config.totalCores}. The ledger counts pending peers during coalescing, so ${config.concurrent} simultaneous runs each get ~\`floor(${config.totalCores}/${config.concurrent})\` slots instead of grabbing the full 12-slot bundle and oversubscribing to ~${config.concurrent * 12} on ${config.totalCores} cores.
 
-3. **Under-load wall budget honoured.** Slowest run: ${summary.maxWallS}s ≤ ${config.perRunWallCapS}s cap (D7 under-load bar). Each run enforces this itself via \`BOBBIT_V2_CONCURRENCY_RUN=1\` → run-v2's under-load full-scope budget.
+3. **Under-load wall budget honoured.** Slowest run: ${summary.maxWallS}s ≤ ${config.perRunWallCapS}s cap (D7 under-load bar), enforced per-run via \`BOBBIT_V2_CONCURRENCY_RUN=1\` → run-v2's under-load budget.
 
 ## Reproduce
 
 \`\`\`bash
-# Full D7 proof (default scale):
+# Full D7 proof (default 5×3); provisions + tears down worktrees automatically:
 node scripts/testing-v2/concurrency-proof.mjs
 
 # Lighter smoke:
 CONCURRENCY_PROOF_CONCURRENT=2 CONCURRENCY_PROOF_REPS=1 node scripts/testing-v2/concurrency-proof.mjs
-\`\`\`
-
-## Configuration
-
-\`\`\`json
-${JSON.stringify(config, null, 2)}
 \`\`\`
 `;
 }
