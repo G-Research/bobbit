@@ -14,10 +14,14 @@
     "adapter": 268,
     "codemod": 505,
     "relocate": 45,
-    "retire-with-mapping": 153,
+    "legacy-pending": 151,
     "rewrite": 144
   },
   "v2Native": [
+    {
+      "path": "tests2/browser/fixtures/children-tool-renderers.spec.ts",
+      "reason": "Playwright renderer tests for nine Children tools — uses real Chromium DOM; parallel to tests2/dom/ vitest rewrite. Tracked here to prevent orphan detection false positive."
+    },
     {
       "path": "tests2/core/cli-real-deps.test.ts",
       "reason": "DI contract: cli.ts passes no test doubles (default-real wiring)."
@@ -2844,19 +2848,17 @@
       "file": "tests/e2e/ui/api-error-modal.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-notification-policy.",
-      "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
-      ]
+      "rationale": "v2-browser: legacy-pending - behavioral assertions (API error modal + stack trace + page.route interception) need a dedicated journey test; covered by legacy suite until switchover.",
+      "replacement": ["tests2/browser/journeys/misc.journey.spec.ts"],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/archive-child-cascade.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-team-delegate.",
-      "replacement": [
-        "tests2/browser/journeys/team-operations.journey.spec.ts"
-      ]
+      "rationale": "v2-browser: legacy-pending - cascade modal child enumeration needs dedicated journey assertions; covered by legacy suite until switchover.",
+      "replacement": ["tests2/browser/journeys/team-operations.journey.spec.ts"],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/archived-blob.spec.ts",
@@ -2884,10 +2886,9 @@
       "file": "tests/e2e/ui/artifacts-pack.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-marketplace-packs.",
-      "replacement": [
-        "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
-      ]
+      "rationale": "v2-browser: legacy-pending - pack install + tool API + artifact-pill rendering needs dedicated journey test; covered by legacy suite until switchover.",
+      "replacement": ["tests2/browser/journeys/marketplace-packs.journey.spec.ts"],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/ask-user-choices-ui.spec.ts",
@@ -2938,10 +2939,9 @@
       "file": "tests/e2e/ui/bg-process-persistence.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-bg-wait-steer.",
-      "replacement": [
-        "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"
-      ]
+      "rationale": "v2-browser: legacy-pending - streaming bg-process restart/exit-code/dismiss lifecycle needs dedicated real-restart journey; bg-wait journey covers steer/abort only; covered by legacy suite until switchover.",
+      "replacement": ["tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts"],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/bg-wait-no-dup.spec.ts",
@@ -3037,10 +3037,9 @@
       "file": "tests/e2e/ui/dormant-revive-live-reply.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
-      "replacement": [
-        "tests2/browser/daily/crash-restart.journey.spec.ts"
-      ]
+      "rationale": "v2-browser: legacy-pending - dormant/revive/live-reply without page.reload is distinct from crash-restart; needs dedicated v2 journey test; covered by legacy suite until switchover.",
+      "replacement": ["tests2/browser/daily/crash-restart.journey.spec.ts"],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/draft-loss.spec.ts",
@@ -3084,10 +3083,9 @@
       "file": "tests/e2e/ui/failed-goal-proposal-ux.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-proposals.",
-      "replacement": [
-        "tests2/browser/journeys/proposals.journey.spec.ts"
-      ]
+      "rationale": "v2-browser: legacy-pending - missing-workflow failure UX (disabled Create, error card, available workflows list) needs dedicated journey test; covered by legacy suite until switchover.",
+      "replacement": ["tests2/browser/journeys/proposals.journey.spec.ts"],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/fork-session-history.spec.ts",
@@ -3142,10 +3140,9 @@
       "file": "tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-assistant.",
-      "replacement": [
-        "tests2/browser/journeys/project-settings.journey.spec.ts"
-      ]
+      "rationale": "v2-browser: legacy-pending - 400 interception + error dialog + sessionId preservation needs dedicated journey test; covered by legacy suite until switchover.",
+      "replacement": ["tests2/browser/journeys/project-settings.journey.spec.ts"],
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/goal-archive-always-on.spec.ts",
