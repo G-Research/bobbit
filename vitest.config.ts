@@ -47,7 +47,10 @@ const singleForkFiles = [
 	"tests2/core/extension-host-isolation-config-invariant.test.ts",
 	"tests2/core/extension-host-module-isolation.test.ts",
 	"tests2/core/extension-host-route-dispatcher.test.ts",
-	// env-bleed stragglers: BOBBIT_DIR / HOME / agent-dir recorded at module-top
+	// env-bleed stragglers: BOBBIT_DIR / HOME / agent-dir recorded at module-top,
+	// or a pinned module singleton (globalAgentDir) that a sibling file in the same
+	// fork can initialise first — needs a fresh process for deterministic state.
+	"tests2/core/bobbit-dir-agent-dir.test.ts",
 	"tests2/core/container-path-translation.test.ts",
 	"tests2/core/goal-metadata-edges.test.ts",
 	"tests2/core/lifecycle-hub.test.ts",
