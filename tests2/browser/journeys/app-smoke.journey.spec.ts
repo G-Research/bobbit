@@ -88,7 +88,7 @@ test.describe("Journey: Session Sharing", () => {
 		}
 	});
 
-	test.skip("copy-link button copies URL to clipboard", async ({ page }) => {
+	test.skip("copy-link button copies URL to clipboard", async () => {
 		// Skipped: clipboard assertions require https context or explicit permission grants
 		// that are unreliable across headless environments.
 		// The button presence is verified in the test above.
