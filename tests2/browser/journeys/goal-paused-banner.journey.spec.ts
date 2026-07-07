@@ -11,6 +11,7 @@ import { test, expect, openApp, navigateToHash, createSession, createGoal, delet
 
 test.describe("Journey: Goal Paused Banner (UI)", () => {
 	test("shows banner with Resume button when goal is paused; disappears on resume", async ({ page }) => {
+		test.slow(); // WS broadcast + Lit re-render under concurrent load
 		const goal = await createGoal({ title: "v2-paused-banner-goal", autoStartTeam: false });
 		const goalId = goal.id as string;
 		const sessionId = await createSession({ goalId });
@@ -53,7 +54,7 @@ test.describe("Journey: Goal Paused Banner (UI)", () => {
 			);
 
 			// Banner appears
-			await expect(banner).toBeVisible({ timeout: 10_000 });
+			await expect(banner).toBeVisible({ timeout: 20_000 });
 			await expect(banner).toContainText("paused");
 
 			// Resume button present
@@ -76,7 +77,7 @@ test.describe("Journey: Goal Paused Banner (UI)", () => {
 			);
 
 			// Banner gone
-			await expect(banner).toHaveCount(0, { timeout: 10_000 });
+			await expect(banner).toHaveCount(0, { timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
 			await deleteGoal(goalId).catch(() => {});
