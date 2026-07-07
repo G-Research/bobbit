@@ -60,25 +60,6 @@ const singleForkFiles = [
 	"tests2/core/transcript-sanitizer-agent-dir.test.ts",
 ];
 
-// FEASIBILITY STUDY (task 144a0853): the ~6 heaviest gateway-integration specs
-// that deterministically starve under concurrent load. When
-// BOBBIT_V2_RELOCATE_HEAVY=1 they are excluded from the v2-integration tier
-// (simulating a move to the daily lane) so 4-way concurrency can be measured
-// with vs without them. This gate is temporary/study-only and defaults OFF —
-// with the env unset the config is byte-for-behaviour identical to before.
-const relocateHeavyFiles = [
-	"tests2/integration/gate-reset-api.test.ts",
-	"tests2/integration/gates-api-heavy.test.ts",
-	"tests2/integration/verification-core.test.ts",
-	"tests2/integration/maintenance-api.test.ts",
-	"tests2/integration/gate-signal-progress.test.ts",
-	"tests2/integration/gate-resign-cancel.test.ts",
-];
-const RELOCATE_HEAVY = process.env.BOBBIT_V2_RELOCATE_HEAVY === "1";
-if (RELOCATE_HEAVY) {
-	console.log(`[vitest.config] RELOCATE_HEAVY=1 — excluding ${relocateHeavyFiles.length} heavy integration specs from v2-integration tier (study mode)`);
-}
-
 const MAX_FORKS = resolveMaxForks();
 console.log(
 	`[vitest.config] maxForks=${MAX_FORKS} (source: ${
@@ -171,7 +152,6 @@ export default defineConfig({
 					name: "v2-integration",
 					environment: "node",
 					include: ["tests2/integration/**/*.test.ts"],
-					exclude: RELOCATE_HEAVY ? relocateHeavyFiles : [],
 					// Integration tests each boot a real gateway + verification harness;
 					// under concurrent load they can take >30 s, so override the default.
 					testTimeout: 60_000,
