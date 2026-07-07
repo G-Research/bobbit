@@ -106,8 +106,8 @@ need prefs**, so this is safe to run in the server route (it also already has `c
 **`resolveDiffForBindingTarget` (with-SHA github branch):**
 
 ```ts
-// derive the host: canonical target.host, else parse target.prUrl (reuse bindingTargetHost-style logic)
-const host = normalizeGithubHostFromTarget(target); // "github.com" fallback
+// derive the host from the shared helper (see below); "github.com" fallback
+const host = hostFromTarget(target) ?? "github.com";
 const auth = await resolveGithubExportAuth({ cwd }, host);
 return {
   changeset: { ...resolved.changeset, provider: "github", externalUrl: target.prUrl, prUrl: target.prUrl,
@@ -125,9 +125,13 @@ apply the same change — compute `auth = await resolveGithubExportAuth({ cwd },
 `gh?.host ?? "github.com"`, set `export: { provider:"github", available: auth.available,
 ...(auth.reason?{reason:auth.reason}:{}) }`, and **remove `previewOnly: true`**.
 
-Add a small helper (or reuse `bindingTargetHost`) `normalizeGithubHostFromTarget(target)`
-that returns `target.host?.toLowerCase().replace(/\.$/,"")` else the host from `target.prUrl`
-else `"github.com"`.
+**Do NOT introduce a parallel `normalizeGithubHostFromTarget`** (finding: duplicate host
+semantics risk divergence). Instead **extract the host-derivation already inside
+`bindingTargetHost(target)`** (routes.ts ~1224 — normalized `target.host`, else parsed from
+`target.prUrl`) into a shared `hostFromTarget(target): string | undefined`, and have
+`bindingTargetHost` call it. Reuse `hostFromTarget` in `resolveDiffForBindingTarget`,
+`resolveWalkthrough` (via `gh?.host`), the new submit route, and `submitExport`, so all host
+derivation stays single-source.
 
 The no-SHA path (`resolveGithubPr`) is already correct after 4a.1.
 
@@ -136,6 +140,14 @@ Export a testing hook next to the existing `resolveAndReadBindingBundleForTestin
 ```ts
 export const resolveDiffForBindingTargetForTesting = resolveDiffForBindingTarget;
 ```
+
+**Latency caveat (design-review [low]).** `resolveDiffForBindingTarget` runs on every
+`bundle` recompute; adding `await resolveGithubExportAuth({ cwd }, host)` there adds one
+`gh auth token` subprocess per recompute. `gh auth token` is fast (~tens of ms) and this is
+acceptable; if it ever shows up in profiling, memoize per `(host, cwd)` for a short TTL
+(e.g. 30 s) inside the adapter. The pack `bundle` route computes availability separately via
+its own in-worker `ghAuthAvailable` (below); the two are independent by design (worker has no
+prefs) and both are advisory — the authoritative gate is the server submit route.
 
 ### 4a.3 `export-mapper.ts` — `submitGithubReview` posts through `gh`
 
@@ -183,6 +195,10 @@ New helper (imports `execFileSafe` from `../exec-file-safe.js`, mirrors
 `githubCliAuthToken`'s spawn options + `BOBBIT_GH_COMMAND`):
 
 ```ts
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 async function submitGithubReviewViaGh(
   payload: Record<string, unknown>,
   target: GithubReviewTarget,
@@ -190,13 +206,16 @@ async function submitGithubReviewViaGh(
 ): Promise<GithubReviewSubmitResult> {
   const command = cleanString(process.env.BOBBIT_GH_COMMAND) || "gh";
   const host = cleanString(opts.ghHost);
+  const dir = await mkdtemp(join(tmpdir(), "bobbit-ghreview-"));
+  const file = join(dir, "review.json");
+  await writeFile(file, JSON.stringify(payload), "utf8");
   const args = ["api",
     `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}/reviews`,
-    "--method", "POST", "--input", "-"];
+    "--method", "POST", "--input", file];
   if (host && host !== "github.com" && host !== "www.github.com") args.push("--hostname", host);
   try {
     const { stdout } = await execFileSafe(command, args, {
-      cwd: opts.cwd, input: JSON.stringify(payload), encoding: "utf8",
+      cwd: opts.cwd, encoding: "utf8",
       timeout: 20_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024,
       ...(process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command) ? { shell: true } : {}),
     });
@@ -212,15 +231,19 @@ async function submitGithubReviewViaGh(
                ? "GitHub review submission failed: run `gh auth login` to post reviews."
                : `GitHub review submission via gh failed: ${message}`,
              warnings: opts.warnings };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => { /* temp cleanup best-effort */ });
   }
 }
 ```
 
 Notes:
-- `execFileSafe` must support an `input` (stdin) option; if it does not today, extend it
-  minimally (it wraps `child_process.execFile`, which accepts no stdin — use `spawn`-with-stdin
-  or write via the returned child). Prefer adding an `input?: string` to `execFileSafe`'s
-  options and piping it to `child.stdin`. Keep this change small and covered by a unit test.
+- **No `execFileSafe` change (RESOLVED design decision).** `execFileSafe` wraps
+  `promisify(execFileCb)`, which returns only `{stdout,stderr}` and does **not** expose the
+  child process — there is no `.stdin` to pipe to, and `child_process.execFile` has no
+  built-in stdin mechanism. So the design uses the **temp-file** approach shown above:
+  `mkdtemp` a dir, write `JSON.stringify(payload)` to `review.json`, invoke
+  `gh api … --input <file>`, and `rm` the dir in a `finally`. `execFileSafe` stays untouched.
 - The `BOBBIT_TEST_NO_EXTERNAL` guard stays on the **fetch** path only; the `gh` path never
   hits the network in tests because tests stub `BOBBIT_GH_COMMAND` with a fake `gh`.
 - Local (non-GitHub) changesets are unreachable here (`preview.target` is undefined → the
@@ -239,46 +262,65 @@ return submitGithubReview(preview, { confirm: true, event: body.event },
                           { ghHost: host, cwd: body.cwd /* optional */ });
 ```
 
-The **pack (binding-routed)** flow needs its own trust-gated submit route, because the
-sandboxed panel can only reach pack routes and the reviewer child is read-only. Add a new
-**binding-routed** internal route that mirrors `submit-yaml` exactly:
+The **pack flow** needs a trust-gated submit the sandboxed panel can reach.
 
-**`POST /api/internal/pr-walkthrough/submit-review`**
+**Auth constraint (VERIFIED — resolves the design-review [high] finding):** the pack route
+worker (`src/server/extension-host/module-host-worker.ts`, ~line 229) is a `worker_threads`
+Worker created **with no `env` option — it inherits the GATEWAY process env, NOT the reviewer
+session's env**. Therefore `process.env.BOBBIT_SESSION_SECRET` is *not* the reviewer's secret
+in `routes.mjs`, and the session-secret-gated `/api/internal/*` routes (which use
+`verifyCallerSession`) **cannot be authenticated from the worker**. (The reviewer's *agent*
+tools in `extension.ts` do have the secret because they run in the agent process spawned by
+`rpc-bridge.ts` with `-e BOBBIT_SESSION_SECRET=…`; the route worker is a different process.)
+
+So add a **bearer-authenticated PUBLIC route** — same auth tier as the existing
+`/api/pr-walkthrough/:id/export/submit`, which *already* posts to GitHub with only the
+gateway bearer token — routed by **`jobId`** (which the worker legitimately holds from its own
+binding). `verifyCallerSession` is documented in `routes.ts` as routing-only, not a security
+boundary (single-user trust domain); jobId + the single-user bearer token are sufficient here,
+and `assertTrustedBindingTarget` remains the real gate.
+
+**`POST /api/pr-walkthrough/submit-review`**
 
 ```
-body: { draft: PrWalkthroughReviewDraft, event?: GithubReviewEvent, confirm?: boolean, probe?: boolean }
+body: { jobId: string, draft: PrWalkthroughReviewDraft, event?: GithubReviewEvent, confirm?: boolean, probe?: boolean }
 ```
 
-Handler (in `handlePrWalkthroughApiRoute`, next to the `submit-yaml` branch):
+Handler (in `handlePrWalkthroughApiRoute`, a public `/api/pr-walkthrough/…` branch):
 
-1. `authSessionId = verifyCallerSession(req, deps, fail)` (REQUIRED session secret).
-2. sandbox-scope check (`deps.sandboxScope.sessionIds.has(authSessionId)`), as submit-yaml.
-3. `binding = (await resolvePrwReviewerBinding(store, authSessionId))?.binding` → 403
-   `WALKTHROUGH_NOT_BOUND` if absent.
-4. **`if (!assertTrustedBindingTarget(binding, deps, fail)) return true;`** — the trust
-   chokepoint (reads `githubTrustedHosts` via `deps.preferencesStore`). This is the only
-   place trust is enforced for posting.
-5. `if (binding.target?.provider !== "github")` → 400 `EXPORT_UNAVAILABLE`
+1. `const jobId = stringValue(body.jobId);` → 400 if missing.
+2. Resolve the **authoritative** binding + target from the pack store BY jobId (do **not**
+   trust a caller-supplied target). Add a server helper `resolveBindingByJobId(store, jobId)`
+   that lists `reviews/<jobId>/binding/*` (mirroring routes.mjs `authorizeReviewAccess`'s
+   scoped-key scan) and returns the first binding carrying a `target`; else the legacy
+   `binding/*` scan. → 404 `WALKTHROUGH_NOT_BOUND` if none.
+3. **`if (!assertTrustedBindingTarget(binding, deps, fail)) return true;`** — the trust
+   chokepoint (reads `githubTrustedHosts` via `deps.preferencesStore`). Only place trust is
+   enforced for the pack post.
+4. `if (binding.target?.provider !== "github")` → 400 `EXPORT_UNAVAILABLE`
    ("Local changesets can be previewed but not submitted to GitHub.").
-6. `const host = bindingTargetHost(binding.target);`
+5. `const host = hostFromTarget(binding.target);` (shared helper from §4a.2).
+6. `const cwd = await resolveBindingCwd(deps, binding.parentSessionId ?? binding.childSessionId);`
+   — `resolveBindingCwd` already exists (routes.ts ~1328).
 7. **Probe mode** (`body.probe === true`): return
-   `json(await resolveGithubExportAuth({ cwd: await resolveBindingCwd(deps, authSessionId) }, host ?? "github.com"))`
-   → `{ available, reason? }`. Used by the panel to enable/disable the button + show the reason.
+   `json(await resolveGithubExportAuth({ cwd }, host ?? "github.com"))` → `{ available, reason? }`.
+   NOTE: the probe runs *after* the trust gate, so a **403 from probe means the host is
+   UNTRUSTED** (a hard server error the panel surfaces distinctly) — not the soft
+   `{ available:false }` "gh not authenticated" state. The panel treats a 403 as "needs trust"
+   and a `{available:false,reason}` body as "needs `gh auth login`".
 8. **Submit mode**: require `body.confirm === true` (else 400 `CONFIRMATION_REQUIRED`).
-   - `cwd = await resolveBindingCwd(deps, authSessionId)`.
-   - Resolve the walkthrough **cards + changeset** for this binding. Prefer the finalized
-     payload the pack stored (`packStore.get(PRW_PACK_ID, prwFinalPayloadKey(binding.jobId))`
-     → `{ changeset, cards }`); if absent, fall back to
-     `resolveDiffForBindingTarget(binding.target, cwd, deps)` + `synthesizeFallbackCards`.
+   - Cards + changeset: prefer the pack-stored finalized payload
+     (`getPackStore().get(PRW_PACK_ID, prwFinalPayloadKey(jobId))` → `{ changeset, cards }`);
+     else `resolveDiffForBindingTarget(binding.target, cwd, deps)` + `synthesizeFallbackCards`.
    - `const { buildGithubReviewPreview, submitGithubReview } = await optionalPrModule("export-mapper");`
    - `const preview = buildGithubReviewPreview(body.draft, cards, changeset);`
    - `const result = await submitGithubReview(preview, { confirm: true, event: body.event },
        { ghHost: host, cwd });`
    - `json(result, result.ok ? 200 : (typeof result.status === "number" ? result.status : 400));`
 
-This route runs `gh` **server-side** (via `submitGithubReview`'s gh path), behind
-`assertTrustedBindingTarget`, exactly per the goal's "gh invocation and trusted-host
-enforcement stay server-side at the binding-routed submit route".
+This runs `gh` **server-side** (via `submitGithubReview`'s gh path), behind
+`assertTrustedBindingTarget` (prefs-backed) — exactly per the goal's "gh invocation and
+trusted-host enforcement stay server-side". No session secret is needed.
 
 ### 4a.5 Pack worker (`routes.mjs`) — availability on `bundle`, proxy `submitReview`
 
@@ -300,34 +342,37 @@ The panel reads dynamic data only through `host.callRoute` (pack routes). Two ad
   `exit 0 && stdout.trim().length > 0`. Note: this is **availability only** — the
   authoritative trust gate is still `assertTrustedBindingTarget` at submit.
 
-- **`submitReview` route** (new) — the panel's submit entry point. It forwards to the
-  server-side binding-routed route so trust + gh stay server-side:
+- **`submitReview` route** (new) — the panel's submit entry point. `routes.mjs` is
+  **hand-authored and served as-is (NOT bundled** — see `scripts/build-market-packs.mjs`,
+  which bundles `panel.js`/`yaml-to-cards.js` but explicitly leaves `lib/routes.mjs`
+  hand-authored), so it **cannot import `tools/_shared/gateway.ts`**. It reads gateway creds
+  itself with ambient `node:fs` (a ~10-line `readGatewayCredsFromDisk()` helper added to
+  `routes.mjs`, mirroring `readGatewayCreds`: disk `state/token` + `state/gateway-url`, env
+  `BOBBIT_TOKEN`/`BOBBIT_GATEWAY_URL` fallback), then calls the **bearer-gated public** route
+  with the jobId from its own binding — **no session secret**:
 
   ```js
   submitReview: async (ctx, req) => {
     const body = (req && req.body) || {};
-    const creds = readGatewayCreds();               // shared gateway helper (disk→env)
+    const binding = await loadReviewerBinding(ctx.host.store, strOf(ctx.sessionId));
+    if (!binding || !strOf(binding.jobId)) return { ok: false, code: "PRW_MISSING_BINDING", error: "Caller is not a bound PR-walkthrough reviewer." };
+    const creds = readGatewayCredsFromDisk();        // ambient node:fs helper defined in routes.mjs
     if ("error" in creds) return { ok: false, error: creds.error, code: "NO_GATEWAY" };
-    const sessionSecret = process.env.BOBBIT_SESSION_SECRET ?? "";
-    return await apiCall(creds, "POST", "/api/internal/pr-walkthrough/submit-review", {
-      draft: body.draft, event: body.event, confirm: body.confirm === true, probe: body.probe === true,
-    }, { extraHeaders: { "X-Bobbit-Session-Secret": sessionSecret } });
+    const res = await fetch(`${creds.baseUrl}/api/pr-walkthrough/submit-review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${creds.token}` },
+      body: JSON.stringify({ jobId: binding.jobId, draft: body.draft, event: body.event,
+                            confirm: body.confirm === true, probe: body.probe === true }),
+    });
+    return await res.json();
   },
   ```
 
-  This mirrors how the reviewer's agent tools already call `/api/internal/pr-walkthrough/*`
-  (see `tools/pr-walkthrough/extension.ts` + `tools/_shared/gateway.ts`). The worker is
-  trusted server code (git/gh ambient) so a loopback call is consistent with existing tool
-  behaviour; the "packs never raw-fetch the gateway" rule constrains the **client panel**,
-  which still only uses `host.callRoute`.
-
-  **Risk / fallback:** if `BOBBIT_SESSION_SECRET` is not present in the worker process env,
-  `verifyCallerSession` 403s. Mitigation: the reviewer child already carries
-  `BOBBIT_SESSION_SECRET` (used by its tools); the worker route runs in that session's
-  context. If, in practice, the secret is not on the worker env, fall back to invoking the
-  submit through the reviewer agent tool path (a `submit_pr_walkthrough_review` tool posting
-  the same body) — the server route is identical either way. Confirm secret availability
-  during implementation; keep the server route the single sink.
+  `fetch` is available in the Node worker (Node ≥18). The bearer token is the single-user
+  gateway token — the same credential the reviewer's tools already read from disk. The worker
+  never reads prefs or runs `gh`; the server route does both. The "packs never raw-fetch the
+  gateway" rule constrains the **client panel** (which still only uses `host.callRoute`); the
+  trusted worker making a loopback gateway call is consistent with existing pack-server code.
 
 ### 4a.6 Panel (`market-packs/pr-walkthrough/{src,lib}/panel.js`)
 
@@ -336,7 +381,7 @@ Edit `src/panel.js` (source of truth; `lib/panel.js` is the built artifact — r
 
 - The **"Submit review"** button (`data-testid="pr-walkthrough-submit-review"`) currently
   only opens the export preview dialog. Keep the preview; add a **"Post to GitHub"** action
-  inside `renderExportDialog` that is:
+  (`data-testid="pr-walkthrough-post-github"`) inside `renderExportDialog` that is:
   - **enabled** iff `entry.bundle.export?.available === true` (from the enriched `bundle`);
   - **disabled with the reason** (`entry.bundle.export?.reason`) otherwise. The existing
     `pr-walkthrough-export-unavailable` warning slot renders the reason text.
@@ -440,16 +485,18 @@ export async function ensureGithubHostTrusted(host: string): Promise<boolean> {
   if (!ok) return false;
 
   const next = normalizeTrustedHosts([...managed, normalized]);
+  // PUT is the persist step: only a PUT failure aborts. A readback failure must NOT abort
+  // (the host is already persisted — fixes the design-review [medium] finding).
   try {
-    await gatewayFetch("/api/preferences", { method: "PUT", body: JSON.stringify({ githubTrustedHosts: next }) });
-    // Readback so a server-side normalize drop is caught before we proceed.
-    const res = await gatewayFetch("/api/preferences");
-    if (res.ok) {
-      const persisted = normalizeTrustedHosts((await res.json()).githubTrustedHosts);
-      return isTrustedExternalHost(normalized, persisted);
-    }
+    const put = await gatewayFetch("/api/preferences", { method: "PUT", body: JSON.stringify({ githubTrustedHosts: next }) });
+    if (!put.ok) return false;
   } catch { return false; }
-  return false;
+  // Best-effort readback to catch a server-side normalize drop; on readback error, trust the PUT.
+  try {
+    const res = await gatewayFetch("/api/preferences");
+    if (res.ok) return isTrustedExternalHost(normalized, normalizeTrustedHosts((await res.json()).githubTrustedHosts));
+  } catch { /* readback failed but PUT succeeded */ }
+  return true;
 }
 ```
 
@@ -529,11 +576,20 @@ Verify with: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
    `--hostname github.example.com`.
 5. **gh not authenticated**: fake `gh` exits non-zero → `{ ok:false, status:401 }`,
    `message` matches `/gh auth login/`.
-6. **Existing token/fetch tests unchanged**: "submits only after confirm=true with
-   credentials", "never submits without explicit confirmation",
-   "BOBBIT_TEST_NO_EXTERNAL blocks unmocked GitHub review submission",
-   "route submit builds a preview before mocked GitHub submission" — all still pass (token
-   present → fetch path). `execFileSafe` `input` support gets a focused unit test if extended.
+6. **Test-churn from removing the no-token 401 guard (design-review [medium] — be explicit).**
+   Removing the `if (!token) return 401` short-circuit means any "no credentials" case now
+   falls through to the `gh` path and would invoke the REAL `gh` (ENOENT/real network) unless
+   `BOBBIT_GH_COMMAND` is stubbed. So:
+   - Token/env-token cases stay on the **fetch** path unchanged: "submits only after
+     confirm=true with credentials", "never submits without explicit confirmation" (confirm
+     guard is *before* the token check — unaffected), "BOBBIT_TEST_NO_EXTERNAL blocks unmocked
+     GitHub review submission" (token present → fetch), "route submit builds a preview before
+     mocked GitHub submission".
+   - **Any existing test that previously asserted the 401 "Set GITHUB_TOKEN or GH_TOKEN…"
+     message with NO token MUST be updated**: stub `BOBBIT_GH_COMMAND` to a failing fake and
+     assert the new message matches `/gh auth login/` (status 401), OR, if it must stay a pure
+     no-subprocess unit, stub `BOBBIT_GH_COMMAND` to a non-existent binary and assert the
+     ENOENT-classified 401. Enumerate and fix each such case; do not claim "zero churn".
 
 ### Unit — `routes.ts`
 
@@ -576,12 +632,15 @@ Verify with: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
     `export.available === false`, `export.reason` matches `/gh auth login/`, and
     `export.previewOnly === undefined`; submit → `EXPORT_UNAVAILABLE`. Add a companion case
     with `BOBBIT_GH_COMMAND` stubbed → `export.available === true`.
-13. **New**: binding-routed `POST /api/internal/pr-walkthrough/submit-review` (mirror the
-    existing internal-route E2E setup — seed a reviewer binding in the pack store, send the
-    `X-Bobbit-Session-Secret` header). Assert: untrusted host → 403 `untrusted_github_host`;
-    trusted host + stubbed `gh` + `confirm:true` → `submitted:true` and the fake `gh`
-    recorded a `pulls/42/reviews POST`; `confirm` omitted → `CONFIRMATION_REQUIRED`;
-    `probe:true` → `{ available, reason }`.
+13. **New**: bearer-gated public `POST /api/pr-walkthrough/submit-review` (seed a reviewer
+    binding under `reviews/<jobId>/binding/*` in the pack store; authenticate with the gateway
+    bearer token — **no `X-Bobbit-Session-Secret`**; route by `jobId` in the body). Assert:
+    untrusted host → 403 `untrusted_github_host`; trusted host + stubbed `gh` + `confirm:true`
+    → `submitted:true` and the fake `gh` recorded a `pulls/42/reviews POST` (assert it read the
+    `--input <file>` payload); `confirm` omitted → `CONFIRMATION_REQUIRED`; `probe:true` on a
+    trusted host → `{ available, reason }`; missing `jobId` → 400; unknown `jobId` → 404
+    `WALKTHROUGH_NOT_BOUND`. Also cover the worker `submitReview` route resolving jobId from
+    its binding + `readGatewayCredsFromDisk` (unit, mocking `fetch`).
 
 ### Browser E2E — trust prompt (`tests/e2e/ui/*.spec.ts`)
 
@@ -616,5 +675,21 @@ Verify with: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
   preserves every existing token-based test and routes enterprise / gh-only github.com
   accounts through `gh`, satisfying "works for whatever host/account the user authenticated
   with `gh auth login`". The actual POST always runs **server-side** behind the trusted-host
-  gate (REST `submitExport` for the standalone flow; the new binding-routed
-  `/api/internal/pr-walkthrough/submit-review` for the pack flow).
+  gate (REST `submitExport` for the standalone flow; the new bearer-gated public
+  `/api/pr-walkthrough/submit-review` (jobId-routed, no session secret — the pack route worker
+  inherits the gateway env, not the reviewer's, so it authenticates with the disk bearer token)
+  for the pack flow).
+
+### Resolved design-review findings
+
+- **[high] `execFileSafe` stdin** → temp-file (`gh api … --input <file>`); `execFileSafe`
+  untouched (§4a.3).
+- **[high] `BOBBIT_SESSION_SECRET` in the worker** → confirmed absent (worker inherits gateway
+  env); switched the pack submit to a bearer-gated public route routed by jobId (§4a.4/§4a.5).
+- **[medium] test churn** → enumerated the no-token cases and the `BOBBIT_GH_COMMAND` stub
+  requirement (test-plan item 6).
+- **[medium] client readback** → PUT-failure aborts, readback-failure trusts the PUT (§4b.3).
+- **[medium] duplicate host helper** → reuse/extract `hostFromTarget` from `bindingTargetHost`
+  (§4a.2).
+- **[low] `bundle` gh latency / probe-403 semantics / post-button `data-testid` /
+  `resolveBindingCwd` exists** → noted inline (§4a.2 latency caveat, §4a.4 probe, §4a.6).
