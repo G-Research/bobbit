@@ -10,7 +10,6 @@ import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import { gatewayFetch } from "../../app/api.js";
-import { showHeaderToast } from "../../app/render.js";
 import { listLauncherEntrypoints, runLauncherEntrypoint } from "../../app/pack-entrypoints.js";
 import "./AttachmentTile.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -277,19 +276,23 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
-	private _showLauncherFeedback(message: string, kind: "pending" | "error"): void {
+	private _showLauncherFeedback(message: string, kind: "pending" | "error" | "resolved"): void {
+		// Dispatch-only: the persistent launcher-feedback element in render.ts owns
+		// the UI. Do NOT also call showHeaderToast here (the transient 2500ms toast
+		// would double-fire and auto-clear a state meant to persist until resolved).
 		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", { detail: { kind, message } }));
-		try {
-			showHeaderToast(message);
-		} catch { /* best-effort */ }
 	}
 
 	private _showLauncherError(message: string): void {
 		this._showLauncherFeedback(message, "error");
 	}
 
-	private _showLauncherPending(message = "Starting PR walkthrough…"): void {
+	private _showLauncherPending(message = "Starting…"): void {
 		this._showLauncherFeedback(message, "pending");
+	}
+
+	private _showLauncherResolved(): void {
+		this._showLauncherFeedback("", "resolved");
 	}
 
 	private _selectSlashSkill(skill: SlashSkillInfo) {
@@ -309,7 +312,7 @@ export class MessageEditor extends LitElement {
 		textarea.setSelectionRange(newPos, newPos);
 	}
 
-	private _packSlashLaunchFromText(text: string): { entrypointId: string; body: Record<string, unknown> } | undefined {
+	private _packSlashLaunchFromText(text: string): { entrypointId: string; label: string; body: Record<string, unknown> } | undefined {
 		const trimmed = text.trim();
 		const match = trimmed.match(/^\/([A-Za-z0-9_.-]+)(?:\s+([\s\S]+))?$/);
 		if (!match) return undefined;
@@ -319,15 +322,15 @@ export class MessageEditor extends LitElement {
 		if (!launcher) return undefined;
 
 		const arg = (match[2] ?? "").trim();
-		if (!arg) return { entrypointId: launcher.key, body: {} };
+		if (!arg) return { entrypointId: launcher.key, label: launcher.label, body: {} };
 
 		// PR walkthrough's run route already accepts these argument fields.
 		if (launcher.packId === "pr-walkthrough" || launcher.id === "pr-walkthrough") {
-			if (/^\d+$/.test(arg)) return { entrypointId: launcher.key, body: { prNumber: Number(arg) } };
-			return { entrypointId: launcher.key, body: { prUrl: arg } };
+			if (/^\d+$/.test(arg)) return { entrypointId: launcher.key, label: launcher.label, body: { prNumber: Number(arg) } };
+			return { entrypointId: launcher.key, label: launcher.label, body: { prUrl: arg } };
 		}
 
-		return { entrypointId: launcher.key, body: { input: arg } };
+		return { entrypointId: launcher.key, label: launcher.label, body: { input: arg } };
 	}
 
 	/** Fetch the file list for the current `@` query from the server (debounced).
@@ -740,9 +743,10 @@ export class MessageEditor extends LitElement {
 			this._savedDraft = "";
 			void this.addToHistory(text);
 
-			this._showLauncherPending();
+			this._showLauncherPending(`Starting ${packSlashLaunch.label}…`);
 			runLauncherEntrypoint(packSlashLaunch.entrypointId, (r) => {
-				if (!r.ok) this._showLauncherError(r.error || "Could not start the PR walkthrough.");
+				if (r.ok) this._showLauncherResolved();
+				else this._showLauncherError(r.error || `Could not start ${packSlashLaunch.label}.`);
 			}, { body: packSlashLaunch.body });
 			return;
 		}

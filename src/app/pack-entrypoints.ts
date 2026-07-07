@@ -386,7 +386,7 @@ async function runSpawnLauncher(
 	inFlightSpawnLaunch.add(l.key);
 	try {
 		const host = getLauncherHost(l.packId, l.id, options?.sessionId);
-		if (!host?.capabilities?.callRoute) { onResult?.({ ok: false, error: "PR Walkthrough is unavailable." }); return; }
+		if (!host?.capabilities?.callRoute) { onResult?.({ ok: false, error: `${l.label} is unavailable.` }); return; }
 		let res: { ok?: boolean; childSessionId?: string; error?: string; code?: string } | undefined;
 		try {
 			res = await host.callRoute(target.route, { method: "POST", body: options?.body ?? {} });

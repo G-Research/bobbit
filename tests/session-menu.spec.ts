@@ -136,9 +136,12 @@ test.describe("pack launcher session-menu surfaces", () => {
 			const w = window as any;
 			w.__resolveSpawnSuccess();
 			await w.__flush();
-			return { feedback: w.__feedbackText(), panels: w.__openPanelCalls() };
+			return { feedback: w.__feedbackText(), events: w.__feedbackEvents(), panels: w.__openPanelCalls() };
 		});
-		expect(success.feedback).toMatch(/PR walkthrough|Started|Opening/i);
+		// Item 2: success emits a `resolved` event that clears the persistent pending feedback
+		// (the panel opening is the confirmation) rather than leaving lingering text.
+		expect(success.events).toContainEqual({ kind: "resolved", message: "" });
+		expect(success.feedback).toBe("");
 		expect(success.panels).toEqual([{ panelId: "demo.viewer", sessionId: "child-prw" }]);
 	});
 

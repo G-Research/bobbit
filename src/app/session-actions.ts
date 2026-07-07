@@ -409,7 +409,10 @@ function buildSessionMenuLauncherActions(sessionId: string, onRefreshStateChange
 				if (isSpawn) emitLauncherFeedback("pending", `Starting ${launcher.label}…`);
 				try {
 					runResolvedLauncherEntrypoint(launcher, (result) => {
-						if (result.ok) return;
+						if (result.ok) {
+							emitLauncherFeedback("resolved", "");
+							return;
+						}
 						emitLauncherFeedback("error", launcherFailureMessage(launcher.label, result));
 						onRefreshStateChanged?.();
 					}, { sessionId });
@@ -434,7 +437,7 @@ function launcherFailureMessage(label: string, result: LauncherDispatchResult): 
 	return `Could not start ${label}.`;
 }
 
-function emitLauncherFeedback(kind: "pending" | "error", message: string): void {
+function emitLauncherFeedback(kind: "pending" | "error" | "resolved", message: string): void {
 	try {
 		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", { detail: { kind, message } }));
 	} catch {
