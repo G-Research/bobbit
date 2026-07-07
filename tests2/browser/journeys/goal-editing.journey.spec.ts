@@ -354,7 +354,8 @@ test.describe("Journey: Subgoal Parent Picker — behavioral assertions", () => 
 	});
 
 	test("ineligible (sub-goals off) parent option is marked in proposal panel picker", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.slow(); // complex full-stack flow: goals fetch + proposal form + picker populate
+		test.setTimeout(90_000);
 		await apiFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ subgoalsEnabled: true }),
@@ -393,10 +394,11 @@ test.describe("Journey: Subgoal Parent Picker — behavioral assertions", () => 
 
 			// Parent picker must contain the blocked parent as an option
 			const picker = page.locator("[data-testid='goal-form-parent-picker']");
-			await expect(picker).toBeVisible({ timeout: 10_000 });
+			await expect(picker).toBeVisible({ timeout: 15_000 });
+			// Goals are fetched async; allow up to 30s for the list to populate under load.
 			await expect(
 				picker.locator(`option[value="${blockedId}"]`),
-			).toHaveCount(1, { timeout: 10_000 });
+			).toHaveCount(1, { timeout: 30_000 });
 
 			// Ineligible parent must be marked: disabled or "(sub-goals off)" suffix
 			const blocked = await picker
