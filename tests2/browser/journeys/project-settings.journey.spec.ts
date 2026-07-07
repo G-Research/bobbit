@@ -243,6 +243,34 @@ test.describe("Journey: Settings Maintenance — worktree cleanup", () => {
 		});
 	}
 
+	// Ported from settings-agent-dir.spec.ts (audit: project-settings GAP,
+	// mutant BR53): the System → Maintenance page exposes the Agent Directory
+	// section, and entering a valid path enables the Validate control.
+	test("agent-dir maintenance section enables Validate after a path is entered", async ({ page }) => {
+		test.setTimeout(90_000);
+		const dir = uniqueProjectDir();
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 15_000 });
+
+		await page.getByRole("button", { name: "Maintenance" }).click();
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toContain("/maintenance");
+
+		const section = page.locator('[data-testid="agent-dir-settings"]').first();
+		await expect(section).toBeVisible({ timeout: 15_000 });
+		await expect(section.getByRole("heading", { name: /Agent Directory/i })).toBeVisible({ timeout: 10_000 });
+
+		const input = section.locator('[data-testid="agent-dir-path-input"]').first();
+		await expect(input).toBeVisible({ timeout: 10_000 });
+		await expect(input).toBeEnabled({ timeout: 10_000 });
+		await input.fill(dir);
+		await expect(input).toHaveValue(dir);
+
+		// The Validate control (mutant target) must be present and enabled once a
+		// path is entered.
+		await expect(section.locator('[data-testid="agent-dir-validate"]').first()).toBeEnabled({ timeout: 15_000 });
+	});
+
 	test("maintenance page renders worktree-cleanup card and scan shows ready count", async ({ page }) => {
 		const scan = scanResponse([
 			worktreeItem({ id: "arch-ready", classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", sources: ["archived-session", "git-worktree"], willDeleteBranch: true }),

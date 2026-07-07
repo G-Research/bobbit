@@ -282,6 +282,52 @@ test.describe("Journey: Subgoal Existing Goal Settings — behavioral assertions
 			await deleteGoal(goal.id, true);
 		}
 	});
+
+	// Ported from subgoal-existing-goal-settings.spec.ts (audit: goal-editing GAP,
+	// mutant BR50): the Children-tab Sub-goal settings control lets a human enable
+	// sub-goals on an existing parent that started with subgoalsAllowed:false, and
+	// the operator-authorized PATCH persists (toggle reflects the ON state).
+	test("Children-tab allow-toggle enables subgoals on an existing parent and persists", async ({ page }) => {
+		test.setTimeout(90_000);
+		await apiFetch("/api/preferences", { method: "PUT", body: JSON.stringify({ subgoalsEnabled: true }) });
+		const spec = "Parent goal for the existing-goal sub-goal settings journey — padded to satisfy the spec minimum length validator.";
+		const parent = await createGoal({ title: `v2-existing-subgoal-${Date.now()}`, spec, team: false, subgoalsAllowed: false });
+		const parentId = parent.id as string;
+		try {
+			// Starting state: sub-goals OFF on the parent.
+			const before = await (await apiFetch(`/api/goals/${parentId}`)).json();
+			expect(before.subgoalsAllowed).toBe(false);
+
+			await openApp(page);
+			await navigateToHash(page, `#/goal/${parentId}`);
+			await expect(page.locator(".dashboard-container").first()).toBeVisible({ timeout: 20_000 });
+
+			const childrenTab = page.locator('[data-testid="tab-children"]').first();
+			await expect(childrenTab).toBeVisible({ timeout: 15_000 });
+			await childrenTab.click();
+
+			const settings = page.locator('[data-testid="goal-subgoal-settings"]').first();
+			await expect(settings).toBeVisible({ timeout: 15_000 });
+
+			const allowToggle = page.locator('[data-testid="goal-subgoal-settings-allow-toggle"]').first();
+			await expect(allowToggle).toBeVisible({ timeout: 10_000 });
+			await expect(allowToggle).not.toBeChecked();
+
+			// Toggle ON — browser-driven so the human cookie authorizes the PATCH.
+			await allowToggle.check();
+
+			// Server persisted the change (operator auth succeeded — not a 403).
+			await expect.poll(async () => {
+				const g = await (await apiFetch(`/api/goals/${parentId}`)).json();
+				return g.subgoalsAllowed;
+			}, { timeout: 15_000 }).toBe(true);
+
+			// Live UI reflects the persisted ON state.
+			await expect(allowToggle).toBeChecked({ timeout: 10_000 });
+		} finally {
+			await deleteGoal(parentId, true).catch(() => {});
+		}
+	});
 });
 
 // Behavioral assertions ported from subgoal-nesting-limit.spec.ts

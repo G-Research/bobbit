@@ -321,3 +321,60 @@ test.describe("Journey: Goal Proposal — Sub-goals prefill", () => {
 			.toHaveAttribute("aria-pressed", "false", { timeout: 5_000 });
 	});
 });
+
+// Ported from proposal-edit-flow.spec.ts (audit: proposals GAP, mutant BR54):
+// an editable project proposal panel exposes its Apply/Accept button via the
+// accept-label testid, and applying the (live-edited) proposal persists.
+test.describe("Journey: Editable Project Proposal", () => {
+	test("edit_proposal updates the slot live; Apply (accept-label) persists edited value", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		// Initial propose_project → slot populates with build_command="echo old".
+		await sendMessage(page, "EDITABLE_PROPOSAL_INITIAL");
+		await page.waitForFunction(
+			() => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return s?.activeProposals?.project?.fields?.build_command === "echo old";
+			},
+			null,
+			{ timeout: 20_000 },
+		);
+		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 15_000 });
+
+		// Surgical edit → slot flips live to "echo new" with no re-emit.
+		await sendMessage(page, "EDITABLE_PROPOSAL_EDIT");
+		await page.waitForFunction(
+			() => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return s?.activeProposals?.project?.fields?.build_command === "echo new";
+			},
+			null,
+			{ timeout: 15_000 },
+		);
+
+		// The Apply button is located via the accept-label testid (the mutant target).
+		const acceptLabel = panel.locator('[data-testid="accept-label"]').first();
+		await expect(acceptLabel).toBeVisible({ timeout: 15_000 });
+		// Accept is gated by `streaming`; wait for the agent to go idle so the
+		// button reflects its enabled (name-present) state.
+		await page.waitForFunction(
+			() => ((window as any).bobbitState ?? (window as any).__bobbitState)?.remoteAgent?.state?.status === "idle",
+			null,
+			{ timeout: 20_000 },
+		);
+		const applyBtn = panel.locator("button", { has: page.locator('[data-testid="accept-label"]') }).first();
+		await expect(applyBtn).toBeEnabled({ timeout: 10_000 });
+		await applyBtn.click();
+
+		// Slot clears and panel disappears once the edited config is applied.
+		await page.waitForFunction(
+			() => !((window as any).bobbitState ?? (window as any).__bobbitState)?.activeProposals?.project,
+			null,
+			{ timeout: 15_000 },
+		);
+		await expect(panel).toBeHidden({ timeout: 10_000 });
+	});
+});

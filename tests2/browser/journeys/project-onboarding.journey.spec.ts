@@ -27,7 +27,34 @@ const ADD_PROJECT = {
 	browseList:   '[data-testid="add-project-browse-list"]',
 	continue:     '[data-testid="add-project-continue"]',
 	createDirectory: '[data-testid="add-project-create-directory"]',
+	preflightPanel:'[data-testid="preflight-panel"]',
+	step:         '[data-testid="add-project-step"]',
+	scanChecklist:'[data-testid="add-project-scan-checklist"]',
+	selectAll:    '[data-testid="add-project-select-all"]',
+	deselectAll:  '[data-testid="add-project-deselect-all"]',
+	selectedCount:'[data-testid="add-project-selected-count"]',
+	scanCheckboxFor: (id: string) => `[data-testid="add-project-scan-checkbox-${id}"]`,
 } as const;
+
+/** Preflight endpoint availability probe (older gateways lack it). */
+async function preflightAvailable(): Promise<boolean> {
+	try {
+		const res = await apiFetch("/api/projects/preflight?path=" + encodeURIComponent(tmpdir()));
+		return res.status !== 404;
+	} catch {
+		return false;
+	}
+}
+
+/** Build a multi-repo fixture: root with N child dirs, each with its own .git/. */
+function makeMultiRepoFixture(label: string, names: readonly string[]): string {
+	const root = uniqueDir(`multirepo-${label}`);
+	for (const name of names) {
+		mkdirSync(join(root, name, ".git"), { recursive: true });
+		writeFileSync(join(root, name, "README.md"), `# ${name}\n`);
+	}
+	return root;
+}
 
 let _dirCounter = 0;
 function uniqueDir(label: string): string {
@@ -298,6 +325,51 @@ test.describe("Journey: Project Onboarding", () => {
 			).toBeGreaterThanOrEqual(1);
 		} finally {
 			try { rmSync(parent, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	});
+
+	// Ported from add-project-select-all.spec.ts (audit: project-onboarding GAP,
+	// mutant BR55): a multi-repo scan renders the checklist with a selected-count
+	// readout; Deselect all / Select all drive the count text and Continue state.
+	test("multi-repo scan selected-count reflects deselect-all / select-all", async ({ page }, testInfo) => {
+		test.setTimeout(90_000);
+		if (!(await preflightAvailable())) { testInfo.skip(true, "preflight endpoint unavailable"); return; }
+		const root = makeMultiRepoFixture("selectall", ["one", "two", "three"]);
+		try {
+			await openApp(page);
+			await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
+			await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+			await openAddProjectDialog(page);
+
+			await page.locator(ADD_PROJECT.pickerInput).fill(root);
+			const preflight = page.locator(ADD_PROJECT.preflightPanel);
+			await expect(preflight).toBeVisible({ timeout: 15_000 });
+			await expect.poll(
+				async () => (await preflight.getAttribute("data-has-fail")) ?? "loading",
+				{ timeout: 15_000 },
+			).toBe("0");
+
+			// Path → scan.
+			await page.locator("button").filter({ hasText: "Continue" }).first().click();
+			await expect(page.locator(ADD_PROJECT.scanChecklist)).toBeVisible({ timeout: 15_000 });
+			await expect(page.locator(ADD_PROJECT.step)).toHaveText("scan", { timeout: 10_000 });
+
+			const items = ["repo:one", "repo:two", "repo:three"] as const;
+			for (const id of items) {
+				await expect(page.locator(ADD_PROJECT.scanCheckboxFor(id))).toBeChecked({ timeout: 10_000 });
+			}
+			// selected-count readout (mutant target) starts at all-selected.
+			await expect(page.locator(ADD_PROJECT.selectedCount)).toHaveText("Selected 3 of 3", { timeout: 10_000 });
+
+			// Deselect all → count drops to 0 of 3.
+			await page.locator(ADD_PROJECT.deselectAll).click();
+			await expect(page.locator(ADD_PROJECT.selectedCount)).toHaveText("Selected 0 of 3", { timeout: 10_000 });
+
+			// Select all → count returns to 3 of 3.
+			await page.locator(ADD_PROJECT.selectAll).click();
+			await expect(page.locator(ADD_PROJECT.selectedCount)).toHaveText("Selected 3 of 3", { timeout: 10_000 });
+		} finally {
+			try { rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
 });

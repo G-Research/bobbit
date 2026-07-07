@@ -63,5 +63,69 @@
     "expectedV2Catchers": [
       "tests2/browser/journeys/project-onboarding.journey.spec.ts"
     ]
+  },
+  {
+    "id": "BR50",
+    "area": "goal-editing-existing-subgoal-settings",
+    "file": "src/app/goal-dashboard-children-tab.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-subgoal-settings-allow-toggle\"",
+    "replace": "data-testid=\"goal-subgoal-settings-allow-toggle-mut\"",
+    "description": "The dashboard Children-tab 'Allow sub-goals' settings toggle loses its testid. Legacy subgoal-existing-goal-settings.spec.ts drives it to enable subgoals on an existing parent + persist; goal-editing journey only asserts tab-children presence (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/subgoal-existing-goal-settings.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR53",
+    "area": "project-settings-agent-dir",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"agent-dir-validate\"",
+    "replace": "data-testid=\"agent-dir-validate-mut\"",
+    "description": "The Agent Directory maintenance Validate button loses its testid. Legacy settings-agent-dir.spec.ts asserts the validate control enables after a path is entered; project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/settings-agent-dir.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR54",
+    "area": "proposals-editable-accept",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"accept-label\"",
+    "replace": "data-testid=\"accept-label-mut\"",
+    "description": "The editable-proposal Apply/Accept button label loses its testid. Legacy proposal-edit-flow.spec.ts locates the Apply button via accept-label; proposals journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/proposal-edit-flow.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR55",
+    "area": "project-onboarding-select-all",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"add-project-selected-count\"",
+    "replace": "data-testid=\"add-project-selected-count-mut\"",
+    "description": "The multi-repo scan checklist selected-count readout loses its testid. Legacy add-project-select-all.spec.ts asserts the count text through select/deselect; project-onboarding journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-select-all.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
   }
 ]
