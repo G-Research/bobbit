@@ -12,11 +12,11 @@ contract the legacy spec actually asserts).
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants) | 36 |
-| Clean substitutions (journey already held) | 13 |
+| Behaviours mutation-tested (content mutants) | 43 |
+| Clean substitutions (journey already held) | 14 |
 | v2-stronger (legacy missed, v2 caught) | 1 |
-| **Real holes found** | **21** |
-| **Real holes CLOSED (ported + re-verified)** | **21** |
+| **Real holes found** | **27** |
+| **Real holes CLOSED (ported + re-verified)** | **27** |
 | Real holes open | 0 |
 | Both-missed (tracked justification) | 1 |
 
@@ -47,6 +47,20 @@ caught:
 | BR34 | stories-registry | settings "Show Headquarters in project lists" toggle (by label) |
 | BR35 | sidebar-nav | archive + Show Archived → `grayscale(1)`-dimmed row |
 | BR36 | project-settings | `#/roles` exposes a "New Role" button |
+
+## Batch 3 (BR37–BR43) — 6 holes closed
+
+7 behaviours; 6 real holes closed, 1 clean (BR42 subgoals-enabled toggle already
+covered). Ported + re-verified caught:
+
+| Mutant | Domain | Ported journey assertion |
+|---|---|---|
+| BR37 | app-smoke | settings replace-bobbit-with-text toggle |
+| BR38 | team-operations | goal-widget gate-bypass control on a failed gate row (route-mocked gates) |
+| BR39 | project-settings | settings customise-system-prompt control |
+| BR40 | staff-debug | staff edit-page role select |
+| BR41 | goal-editing | Sub-goals-tab parent picker (subgoals enabled) |
+| BR43 | proposals | MISSING_WORKFLOW → goal-proposal-workflow-error row |
 
 ## Both-missed (tracked, not consolidation regressions)
 
