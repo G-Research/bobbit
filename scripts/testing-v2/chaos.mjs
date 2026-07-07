@@ -481,12 +481,75 @@ function createEphemeralWorktree(label) {
   }
 }
 
+// Remove the `node_modules` reparse point (junction/symlink) WITHOUT following
+// it. On Windows both `git worktree remove --force` and Node's recursive
+// `fs.rmSync` can descend THROUGH a directory junction and delete the target's
+// contents (the shared node_modules tree) instead of just unlinking the link —
+// the node_modules-corruption bug (see docs/testing-v2/node-modules-corruption-
+// rca.md). We therefore unlink the link itself, non-recursively, first.
+function unlinkNodeModulesJunction(worktreePath) {
+  const link = path.join(worktreePath, "node_modules");
+  let st;
+  try { st = fs.lstatSync(link); } catch { return; } // absent — nothing to do
+
+  // GUARD (fail loud): the junction target must live OUTSIDE the worktree we are
+  // about to delete. If it were inside, unlinking wouldn't protect it and a
+  // recursive delete would wipe it — refuse rather than risk the shared tree.
+  try {
+    const rawTarget = fs.readlinkSync(link); // throws if not a link
+    const resolvedTarget = path.resolve(path.dirname(link), rawTarget);
+    const resolvedRoot = path.resolve(worktreePath);
+    const rel = path.relative(resolvedRoot, resolvedTarget);
+    const targetInsideRoot = rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    if (targetInsideRoot) {
+      throw new Error(
+        `[chaos] REFUSING to remove worktree: node_modules junction target\n` +
+        `  (${resolvedTarget}) is INSIDE the removal path (${resolvedRoot}).\n` +
+        `  A recursive delete would wipe the shared tree. Aborting to protect it.`,
+      );
+    }
+  } catch (err) {
+    // A genuine guard violation must propagate; a non-link (readlink ENOENT/
+    // EINVAL) just means there's nothing junction-shaped to unlink here.
+    if (/REFUSING to remove worktree/.test(err.message)) throw err;
+  }
+
+  // Unlink the reparse point ONLY (never recursive). Try the variants Node uses
+  // for links on different platforms; each removes just the link, not the target.
+  const attempts = [
+    () => fs.unlinkSync(link),                       // POSIX symlink / Windows file-symlink
+    () => fs.rmdirSync(link),                        // Windows directory junction
+    () => fs.rmSync(link, { recursive: false, force: true }),
+  ];
+  for (const attempt of attempts) {
+    try { attempt(); return; } catch { /* try next */ }
+  }
+  // If every non-recursive unlink failed the link is still present; do NOT fall
+  // back to a recursive delete (that is the exact footgun). Warn loudly.
+  if (fs.existsSync(link)) {
+    console.warn(`[chaos] WARNING: could not unlink node_modules junction at ${link} non-recursively; skipping worktree delete to avoid deleting through it.`);
+    throw new Error(`[chaos] node_modules junction at ${link} could not be safely unlinked`);
+  }
+}
+
 function removeEphemeralWorktree(worktreePath) {
+  // 1. Unlink the node_modules junction FIRST so neither `git worktree remove`
+  //    nor the fs.rmSync fallback can descend through it into the shared tree.
+  try {
+    unlinkNodeModulesJunction(worktreePath);
+  } catch (err) {
+    // Guard violation or un-unlinkable junction: leave the worktree in place
+    // rather than risk corrupting the shared node_modules tree.
+    console.error(err.message);
+    return;
+  }
+  // 2. Now it is safe to remove the worktree directory.
   try {
     execFileSync("git", ["worktree", "remove", "--force", worktreePath],
       { cwd: REPO_ROOT, stdio: "pipe" });
   } catch {
-    // Best-effort cleanup — rm if git worktree remove fails
+    // Best-effort cleanup — rm if git worktree remove fails. Safe now: the
+    // node_modules reparse point has already been unlinked above.
     try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }
