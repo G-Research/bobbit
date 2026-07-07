@@ -47,7 +47,10 @@ const singleForkFiles = [
 	"tests2/core/extension-host-isolation-config-invariant.test.ts",
 	"tests2/core/extension-host-module-isolation.test.ts",
 	"tests2/core/extension-host-route-dispatcher.test.ts",
-	// env-bleed stragglers: BOBBIT_DIR / HOME / agent-dir recorded at module-top
+	// env-bleed stragglers: BOBBIT_DIR / HOME / agent-dir recorded at module-top,
+	// or a pinned module singleton (globalAgentDir) that a sibling file in the same
+	// fork can initialise first — needs a fresh process for deterministic state.
+	"tests2/core/bobbit-dir-agent-dir.test.ts",
 	"tests2/core/container-path-translation.test.ts",
 	"tests2/core/goal-metadata-edges.test.ts",
 	"tests2/core/lifecycle-hub.test.ts",
@@ -55,6 +58,21 @@ const singleForkFiles = [
 	"tests2/core/sandbox-wiring-goal-provisioned.test.ts",
 	"tests2/core/session-recovery-agent-dir.test.ts",
 	"tests2/core/transcript-sanitizer-agent-dir.test.ts",
+];
+
+// Heavy gateway-integration specs whose command steps are only a "verification
+// that passes / fails with a known code" stand-in (no durable-recovery / real
+// tree-kill assertions). They run in the dedicated `v2-integration-fake` project
+// with the non-spawning fake command-step runner injected, removing the cmd.exe/
+// Git-Bash spawns that oversubscribe the box under concurrent load. Durability/
+// cancel-fidelity + verification-core stay on the real path in v2-integration.
+// See docs/testing-v2/gateway-cost-feasibility.md.
+const fakeCommandStepFiles = [
+	"tests2/integration/gate-reset-api.test.ts",
+	"tests2/integration/gates-api-heavy.test.ts",
+	"tests2/integration/maintenance-api.test.ts",
+	"tests2/integration/gate-signal-progress.test.ts",
+	"tests2/integration/gate-resign-cancel.test.ts",
 ];
 
 const MAX_FORKS = resolveMaxForks();
@@ -149,8 +167,28 @@ export default defineConfig({
 					name: "v2-integration",
 					environment: "node",
 					include: ["tests2/integration/**/*.test.ts"],
+					// The fake-command-step specs run in the dedicated fake project below.
+					exclude: [...fakeCommandStepFiles],
 					// Integration tests each boot a real gateway + verification harness;
 					// under concurrent load they can take >30 s, so override the default.
+					testTimeout: 60_000,
+					hookTimeout: 90_000,
+				},
+			},
+			// Heavy verification specs with the NON-SPAWNING fake command-step runner.
+			// Dedicated single fork (isolate:false so the gateway boots once and is
+			// shared across these files) — kept OUT of the real-runner forks so the
+			// fake-injection flag never crosses into verification-core / durability
+			// tests. setupFiles sets the flag before the per-fork gateway boots.
+			{
+				test: {
+					...shared,
+					name: "v2-integration-fake",
+					environment: "node",
+					setupFiles: ["tests2/integration/_e2e/fake-cmd-setup.ts"],
+					include: [...fakeCommandStepFiles],
+					pool: "forks" as const,
+					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
 				},

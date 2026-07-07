@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
+import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
 function isPidAlive(pid: number): boolean {
@@ -2235,6 +2236,8 @@ export class VerificationHarness {
 
 	private readonly broadcastFn: (goalId: string, event: any) => void;
 	private readonly commandRunner: CommandRunner;
+	/** Executor for verification command STEPS (default = real durable spawn). */
+	private readonly commandStepRunner: VerificationCommandRunner;
 	private readonly clock: Clock;
 	private readonly skipLlmReview: boolean;
 
@@ -2250,9 +2253,10 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; clock?: Clock; skipLlmReview?: boolean } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; skipLlmReview?: boolean } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
+		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
 		this.clock = deps.clock ?? realClock;
 		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
@@ -4738,20 +4742,33 @@ export class VerificationHarness {
 			//   pending-retry → not durable here (Windows w/o Git Bash); a restart
 			//                   is a retryable pending interruption, never a verdict
 			//   unsupported   → no streaming context; not recoverable
-			const recoveryMode: CommandRecoveryMode = decideCommandRecoveryMode({
+			const recoveryMode0: CommandRecoveryMode = decideCommandRecoveryMode({
 				containerId,
 				hasStreamCtx: !!streamCtx,
 				platform: process.platform,
 				hasGitBash: !!GIT_BASH,
 			});
+			// A non-durable command-step runner (tier-1 fake) cannot drive the
+			// detached pid/exit-file wrapper or a durable in-container job. Downgrade
+			// any durable mode to the attached, restart→pending/retryable path so NONE
+			// of the durable file machinery (wrapper, pidFile, readProcessStartToken,
+			// file tailers) runs against a fake. Production (real runner) is never
+			// nonDurable, so this is a strict no-op there.
+			const runnerNonDurable = !!this.commandStepRunner.nonDurable;
+			const recoveryMode: CommandRecoveryMode =
+				runnerNonDurable && (recoveryMode0 === "detached" || recoveryMode0 === "container-exec") && !!streamCtx
+					? "pending-retry"
+					: recoveryMode0;
 			let useDetached = recoveryMode === "detached";
 			const useContainerDurable = recoveryMode === "container-exec" && !!streamCtx;
 			let restartRecoveryUnsupportedReason: string | undefined =
 				recoveryMode === "pending-retry"
-					? "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path is not durable, so a gateway restart leaves the step pending/retryable (it is re-run on the next signal), never a fabricated verdict."
+					? (runnerNonDurable
+						? "Command step executed via an injected non-durable command-step runner (tier-1 fake); the attached path is not durable, so a gateway restart leaves the step pending/retryable (re-run on the next signal), never a fabricated verdict."
+						: "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path is not durable, so a gateway restart leaves the step pending/retryable (it is re-run on the next signal), never a fabricated verdict.")
 					: undefined;
 
-			if (recoveryMode === "pending-retry" && !VerificationHarness._warnedCmdExeDetached) {
+			if (recoveryMode === "pending-retry" && !runnerNonDurable && !VerificationHarness._warnedCmdExeDetached) {
 				VerificationHarness._warnedCmdExeDetached = true;
 				console.warn("[verification] Git Bash not found on Windows — durable detached command mode unavailable (cmd.exe cannot run the bash exit-file wrapper). A gateway restart mid-verification will leave command steps pending/retryable rather than recovered.");
 			}
@@ -4965,18 +4982,25 @@ export class VerificationHarness {
 						},
 					});
 				} else if (useDetached) {
-					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
+					// Host durable path routed through the command-step seam (default =
+					// realVerificationCommandRunner → the identical spawnTracked call).
+					tracked = this.commandStepRunner.spawn({
+						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
 						stdio: ["ignore", "ignore", "ignore"],
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
+						useDetached: true,
 					});
 				} else {
-					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
+					// Host attached path routed through the seam (default = real spawn).
+					tracked = this.commandStepRunner.spawn({
+						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
+						useDetached: false,
 					});
 				}
 				child = tracked.child;

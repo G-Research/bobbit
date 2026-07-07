@@ -2,6 +2,7 @@ import { execFileSync as nodeExecFileSync, spawn as nodeSpawn, type ChildProcess
 import fs from "node:fs";
 import { execFileSafe } from "./exec-file-safe.js";
 import type { RpcBridgeFactory } from "./agent/rpc-bridge.js";
+import { realVerificationCommandRunner, type VerificationCommandRunner } from "./agent/verification-command-runner.js";
 
 export type { ExecFileOptions, ExecFileSyncOptions, SpawnOptions } from "node:child_process";
 
@@ -29,6 +30,12 @@ export interface CommandRunner {
 export interface GatewayDeps {
 	clock?: Clock;
 	commandRunner?: CommandRunner;
+	/**
+	 * Executor for verification COMMAND steps (separate from `commandRunner`,
+	 * which handles git/gh/docker). Defaults to the real durable spawn path;
+	 * tier-1 injects a non-spawning fake. See agent/verification-command-runner.ts.
+	 */
+	commandStepRunner?: VerificationCommandRunner;
 	fetchImpl?: typeof fetch;
 	agentBridgeFactory?: RpcBridgeFactory;
 	fsImpl?: FsLike;
@@ -37,6 +44,7 @@ export interface GatewayDeps {
 export interface ResolvedGatewayDeps {
 	clock: Clock;
 	commandRunner: CommandRunner;
+	commandStepRunner: VerificationCommandRunner;
 	fetchImpl: typeof fetch;
 	agentBridgeFactory: RpcBridgeFactory;
 	fsImpl: FsLike;
@@ -95,6 +103,7 @@ export function resolveGatewayDeps(deps: GatewayDeps = {}): ResolvedGatewayDeps 
 	return {
 		clock: deps.clock ?? realClock,
 		commandRunner: deps.commandRunner ?? realCommandRunner,
+		commandStepRunner: deps.commandStepRunner ?? realVerificationCommandRunner,
 		fetchImpl: deps.fetchImpl ?? realFetch,
 		agentBridgeFactory: deps.agentBridgeFactory ?? defaultRpcBridgeFactory,
 		fsImpl: deps.fsImpl ?? realFs,

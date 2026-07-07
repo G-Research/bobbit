@@ -34,6 +34,7 @@ import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../tests/e2e/seed-work
 import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
 import { createFencedFetch } from "./fenced-fetch.js";
+import { createFakeVerificationCommandRunner } from "./fake-verification-command-runner.js";
 
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
@@ -239,12 +240,21 @@ async function boot(): Promise<BootedGateway> {
 	};
 
 	const clock = createManualClock();
+	// Command-STEP executor seam: default is the real durable spawn path (same as
+	// production). A fork whose vitest project opts in (globalThis flag set by the
+	// v2-integration-fake setup file) injects the non-spawning fake so verification
+	// command steps produce their observable verdict WITHOUT cmd.exe/Git-Bash
+	// spawns. Everything else (verification-core, durability/cancel tests) keeps
+	// the real path. See docs/testing-v2/gateway-cost-feasibility.md.
+	const useFakeCommandStep = (globalThis as { __BOBBIT_V2_FAKE_CMD_STEP__?: boolean }).__BOBBIT_V2_FAKE_CMD_STEP__ === true;
 	const deps: GatewayDeps = {
 		clock,
 		commandRunner: createFencedCommandRunner(),
 		fetchImpl: createFencedFetch(),
 		agentBridgeFactory,
+		...(useFakeCommandStep ? { commandStepRunner: createFakeVerificationCommandRunner() } : {}),
 	};
+	if (useFakeCommandStep) console.log(`[tests2/gateway] fork ${process.pid}: injecting FAKE verification command-step runner (no shell spawns)`);
 
 	const gw = createGateway({
 		host: "127.0.0.1",
