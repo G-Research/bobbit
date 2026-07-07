@@ -591,5 +591,117 @@
     "expectedV2Catchers": [
       "tests2/browser/journeys/project-settings.journey.spec.ts"
     ]
+  },
+  {
+    "id": "BR37",
+    "area": "app-smoke-replace-bobbit",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"general-replace-bobbit-with-text\"",
+    "replace": "data-testid=\"general-replace-bobbit-with-text-mut\"",
+    "description": "Replace-bobbit-with-text settings toggle loses its testid. Legacy replace-bobbit-text.spec.ts asserts the sprite<->text toggle; app-smoke journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/replace-bobbit-text.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR38",
+    "area": "misc-gate-bypass",
+    "file": "src/ui/components/GoalStatusWidget.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-widget-gate-bypass\"",
+    "replace": "data-testid=\"goal-widget-gate-bypass-mut\"",
+    "description": "Gate-bypass control loses its testid. Legacy gate-bypass.spec.ts drives the human-only bypass form; misc journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/gate-bypass.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/misc.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR39",
+    "area": "project-settings-sysprompt",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"general-customise-system-prompt\"",
+    "replace": "data-testid=\"general-customise-system-prompt-mut\"",
+    "description": "Customise-system-prompt control loses its testid. Legacy system-prompt-customise.spec.ts asserts the Created flow; project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/system-prompt-customise.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR40",
+    "area": "staff-debug-role",
+    "file": "src/app/staff-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"staff-role-select\"",
+    "replace": "data-testid=\"staff-role-select-mut\"",
+    "description": "Staff role select loses its testid. Legacy staff-role.spec.ts asserts role select + accessory prefill; staff-debug journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/staff-role.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/staff-debug.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR41",
+    "area": "goal-editing-parent-picker",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-form-parent-picker\"",
+    "replace": "data-testid=\"goal-form-parent-picker-mut\"",
+    "description": "Goal-form parent picker loses its testid. Legacy subgoal-parent-picker-repro.spec.ts asserts eligibility marking; goal-editing journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/subgoal-parent-picker-repro.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR42",
+    "area": "goal-editing-subgoals-toggle",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"general-subgoals-enabled\"",
+    "replace": "data-testid=\"general-subgoals-enabled-mut\"",
+    "description": "Subgoals-enabled settings toggle loses its testid. Legacy subgoals-experimental-toggle.spec.ts asserts default-off + PUT + reload; goal-editing journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/subgoals-experimental-toggle.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR43",
+    "area": "proposals-workflow-error",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-proposal-workflow-error\"",
+    "replace": "data-testid=\"goal-proposal-workflow-error-mut\"",
+    "description": "Goal-proposal workflow-error row loses its testid. Legacy failed-goal-proposal-ux.spec.ts asserts 'Workflow is required' + Create disabled; proposals journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/failed-goal-proposal-ux.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
   }
 ]
