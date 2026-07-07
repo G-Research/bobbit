@@ -1,6 +1,6 @@
 # Browser-dimension Chaos Comparison — Test Suite v2
 
-Generated: 2026-07-07T23:24:09.044Z  |  Run duration: 12.8 min
+Generated: 2026-07-07T23:49:49.330Z  |  Run duration: 15.9 min
 
 Adversarial proof that the consolidated v2 **journeys** catch every browser-only
 mutant the retired 184-spec **legacy** suite catches. Both tiers run the targeted
@@ -10,9 +10,9 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 
 | Metric | Legacy suite | V2 journeys |
 |--------|-------------|-------------|
-| Content mutants | 6 | 6 |
-| With targeted catchers | 6 | 6 |
-| Caught | 6 | 6 |
+| Content mutants | 8 | 8 |
+| With targeted catchers | 8 | 8 |
+| Caught | 8 | 8 |
 | Missed | 0 | 0 |
 | Invalid (did not compile) | 0 | 0 |
 | Error (harness/env) | 0 | 0 |
@@ -23,9 +23,9 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 ## Acceptance Criteria
 
 - **Every legacy-caught mutant is also journey-caught (no REAL hole):** ✅ PASS
-- **V2 ≥ legacy overall (kill count):** ✅ PASS (v2 6 vs legacy 6)
+- **V2 ≥ legacy overall (kill count):** ✅ PASS (v2 8 vs legacy 8)
 - **Both-missed gaps:** ✅ None
-- **All journey kills attributed to a specific test:** ✅ PASS (6/6)
+- **All journey kills attributed to a specific test:** ✅ PASS (8/8)
 
 ## Per-area Comparison (v2 journeys ≥ legacy is the verdict)
 
@@ -37,6 +37,8 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 | misc-preview-newtab | 1 | 1 | 1 | — | — | ✅ |
 | misc-compaction-card | 1 | 1 | 1 | — | — | ✅ |
 | sidebar-full-search-nav | 1 | 1 | 1 | — | — | ✅ |
+| app-smoke-open-new-window | 1 | 1 | 1 | — | — | ✅ |
+| prompt-at-mention-chip | 1 | 1 | 1 | — | — | ✅ |
 
 **Per-area v2 ≥ legacy:** ✅ PASS (no area has a real journey miss; ✅* = has env-inconclusive to re-run)
 
@@ -44,13 +46,15 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 
 | ID | Area | File | Op | Legacy | V2 | Killed by (v2 test) | Duration |
 |----|------|------|----|--------|-----|---------------------|----------|
-| BR50-null-A *(null)* | harness-integrity | `src/app/workflow-page.ts` | no-op | ⚪ missed | ⚪ missed | — | 52.4s |
-| BR46 | misc-workflow-editor | `src/app/workflow-page.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Workflow Editor › workflow editor ` | 232.3s |
-| BR48 | misc-role-tabs | `src/app/proposal-panels.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Goal Proposal Roles Tab › Roles ta` | 86.6s |
-| BR51 | misc-prompt-stats | `src/ui/components/AgentInterface.ts` | attribute-rename | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Prompt Stats › stats bar shows mod` | 113.3s |
-| BR52 | misc-preview-newtab | `src/app/render.ts` | behavioural | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Preview Artifacts › preview mount ` | 52.4s |
-| BR53 | misc-compaction-card | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Compaction › seeded compaction sid` | 97.5s |
-| BR54 | sidebar-full-search-nav | `src/app/sidebar.ts` | behavioural | 🔴 caught | 🔴 caught | `tests2\browser\journeys\sidebar-nav.journey.spec.ts › Journey: Sidebar Navigation › Full S` | 51.7s |
+| BR50-null-A *(null)* | harness-integrity | `src/app/workflow-page.ts` | no-op | ⚪ missed | ⚪ missed | — | 51.3s |
+| BR46 | misc-workflow-editor | `src/app/workflow-page.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Workflow Editor › workflow editor ` | 234.1s |
+| BR48 | misc-role-tabs | `src/app/proposal-panels.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Goal Proposal Roles Tab › Roles ta` | 90.0s |
+| BR51 | misc-prompt-stats | `src/ui/components/AgentInterface.ts` | attribute-rename | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Prompt Stats › stats bar shows mod` | 112.1s |
+| BR52 | misc-preview-newtab | `src/app/render.ts` | behavioural | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Preview Artifacts › preview mount ` | 52.1s |
+| BR53 | misc-compaction-card | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\misc.journey.spec.ts › Journey: Compaction › seeded compaction sid` | 101.3s |
+| BR54 | sidebar-full-search-nav | `src/app/sidebar.ts` | behavioural | 🔴 caught | 🔴 caught | `tests2\browser\journeys\sidebar-nav.journey.spec.ts › Journey: Sidebar Navigation › Full S` | 50.6s |
+| BR55 | app-smoke-open-new-window | `src/app/session-actions.ts` | behavioural | 🔴 caught | 🔴 caught | `tests2\browser\journeys\app-smoke.journey.spec.ts › Journey: Open in New Window › session ` | 61.8s |
+| BR56 | prompt-at-mention-chip | `src/ui/components/FileMentionChip.ts` | class-rename | 🔴 caught | 🔴 caught | `tests2\browser\journeys\prompt-interaction.journey.spec.ts › Journey: Prompt Interaction ›` | 110.3s |
 
 **Icons:** 🔴 caught | ⚪ missed | — skipped | ⚠️ error (harness/env) | ⛔ invalid (did not compile)
 
