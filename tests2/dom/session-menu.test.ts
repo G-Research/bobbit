@@ -27,6 +27,7 @@ let lastActions: SessionActionDescriptor[] = [];
 let activePopover: HTMLElement | null = null;
 let currentSurface: "sidebar" | "header" | null = null;
 let feedbackText = "";
+const feedbackEvents: Array<{ kind?: string; message?: string }> = [];
 let activeSessionId = "active-session";
 let sidebarSessionId = "sidebar-session";
 
@@ -251,7 +252,8 @@ const gitHasPaletteOpener = () => !!document.querySelector("#git-status-dropdown
 const gitDropdownText = () => normalizeLabel(document.querySelector("#git-status-dropdown")?.textContent);
 
 function resolveSpawnSuccess(): void {
-	feedbackText = "PR walkthrough opened";
+	// Let the real `resolved` feedback event (from session-actions.ts) drive the
+	// cleared state rather than stamping feedbackText by hand.
 	resolveSpawnRoute?.({ ok: true, childSessionId: "child-prw" });
 	renderFixture();
 }
@@ -264,7 +266,10 @@ function setSessionIds(active: string, sidebar: string): void {
 
 const onFeedback = (ev: Event) => {
 	const detail = (ev as CustomEvent<any>).detail ?? {};
-	feedbackText = String(detail.message ?? detail.error ?? detail.code ?? detail.status ?? "");
+	feedbackEvents.push({ kind: detail.kind, message: detail.message });
+	// `resolved` clears any active launcher feedback (mirrors render.ts).
+	if (detail.kind === "resolved") feedbackText = "";
+	else feedbackText = String(detail.message ?? detail.error ?? detail.code ?? detail.status ?? "");
 	renderFixture();
 };
 
@@ -272,6 +277,7 @@ function reset(): void {
 	dismissMenuSync();
 	document.querySelectorAll("git-status-widget, #git-status-dropdown").forEach((el) => el.remove());
 	feedbackText = "";
+	feedbackEvents.length = 0;
 	callRouteCalls = [];
 	openPanelCalls = [];
 	resolveSpawnRoute = null;
@@ -384,7 +390,10 @@ describe("pack launcher session-menu surfaces", () => {
 
 		resolveSpawnSuccess();
 		await flush();
-		expect(feedbackTextValue()).toMatch(/PR walkthrough|Started|Opening/i);
+		// Item 2: success emits a `resolved` event that clears the persistent pending
+		// feedback (the panel opening is the confirmation) rather than leaving text.
+		expect(feedbackEvents).toContainEqual({ kind: "resolved", message: "" });
+		expect(feedbackTextValue()).toBe("");
 		expect(openPanelCalls).toEqual([{ panelId: "demo.viewer", sessionId: "child-prw" }]);
 	});
 

@@ -1,3 +1,9 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { execFileSafe } from "../exec-file-safe.js";
+
 export type GithubReviewEvent = "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
 export type GithubReviewSide = "RIGHT" | "LEFT";
 
@@ -128,6 +134,10 @@ export interface SubmitGithubReviewOptions {
 	apiBaseUrl?: string;
 	token?: string;
 	noExternal?: boolean;
+	/** Host for `gh --hostname` on the gh path (omit / "github.com" → no flag). */
+	ghHost?: string;
+	/** git cwd for gh (server route worktree), forwarded to the gh subprocess. */
+	cwd?: string;
 }
 
 export interface GithubReviewSubmitResult {
@@ -239,12 +249,19 @@ export async function submitGithubReview(
 		return { ok: false, status: 400, submitted: false, message: "No GitHub pull request target is available for this review preview.", warnings: preview.warnings };
 	}
 
+	const payload = createGithubReviewPayload(preview, confirmation.event ?? "COMMENT");
 	const token = cleanString(confirmation.token) ?? cleanString(options.token) ?? cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
+
 	if (!token) {
-		return { ok: false, status: 401, submitted: false, message: "Set GITHUB_TOKEN or GH_TOKEN before submitting a GitHub review.", warnings: preview.warnings };
+		// No bearer token → post via the local gh CLI (carries the host-scoped
+		// credential the user logged in with, incl. enterprise via --hostname).
+		return submitGithubReviewViaGh(payload, preview.target, {
+			ghHost: cleanString(options.ghHost),
+			cwd: cleanString(options.cwd),
+			warnings: preview.warnings,
+		});
 	}
 
-	const payload = createGithubReviewPayload(preview, confirmation.event ?? "COMMENT");
 	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? "https://api.github.com";
 	if (options.noExternal && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
 		return { ok: false, status: 403, submitted: false, message: `External GitHub API access is disabled in tests: ${apiBaseUrl}`, warnings: preview.warnings };
@@ -278,6 +295,62 @@ export async function submitGithubReview(
 		response: json,
 		warnings: preview.warnings,
 	};
+}
+
+async function submitGithubReviewViaGh(
+	payload: Record<string, unknown>,
+	target: GithubReviewTarget,
+	opts: { ghHost?: string; cwd?: string; warnings?: WalkthroughExportWarning[] },
+): Promise<GithubReviewSubmitResult> {
+	const command = cleanString(process.env.BOBBIT_GH_COMMAND) || "gh";
+	const host = cleanString(opts.ghHost);
+	const dir = await mkdtemp(join(tmpdir(), "bobbit-ghreview-"));
+	const file = join(dir, "review.json");
+	try {
+		await writeFile(file, JSON.stringify(payload), "utf8");
+		const args = [
+			"api",
+			`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}/reviews`,
+			"--method", "POST",
+			"--input", file,
+		];
+		if (host && host !== "github.com" && host !== "www.github.com") args.push("--hostname", host);
+		const { stdout } = await execFileSafe(command, args, {
+			cwd: opts.cwd,
+			encoding: "utf8",
+			timeout: 20_000,
+			windowsHide: true,
+			maxBuffer: 4 * 1024 * 1024,
+			...(process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command) ? { shell: true } : {}),
+		});
+		let json: unknown = {};
+		try { json = JSON.parse(stdout || "{}"); } catch { /* non-JSON success */ }
+		return {
+			ok: true,
+			status: 200,
+			submitted: true,
+			message: "GitHub review submitted via gh.",
+			reviewUrl: reviewUrlFromResponse(json),
+			response: json,
+			warnings: opts.warnings,
+		};
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		// gh missing / not authenticated → an actionable auth reason (401); any other
+		// gh failure surfaces the underlying stderr (502).
+		const notAuthed = /not (?:logged in|authenticated)|no accounts|command not found|ENOENT/i.test(message);
+		return {
+			ok: false,
+			status: notAuthed ? 401 : 502,
+			submitted: false,
+			message: notAuthed
+				? "GitHub review submission failed: run `gh auth login` to post reviews."
+				: `GitHub review submission via gh failed: ${message}`,
+			warnings: opts.warnings,
+		};
+	} finally {
+		await rm(dir, { recursive: true, force: true }).catch(() => { /* temp cleanup best-effort */ });
+	}
 }
 
 export function createGithubReviewPayload(preview: GithubReviewPreview, event: GithubReviewEvent = "COMMENT"): Record<string, unknown> {

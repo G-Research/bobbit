@@ -373,9 +373,9 @@ The ready state is intentionally dense:
   one saved line or card comment.
 - The audit card renders the generated draft and copy affordance. The Submit button
   unlocks only when all non-audit review cards are complete, then opens the
-  export-preview dialog; when direct provider submission is unavailable, the dialog
-  explains that clearly and keeps the GitHub submit button disabled while leaving
-  copy/preview available.
+  export-preview dialog; the dialog's **Post to GitHub** action posts through the local
+  `gh` CLI when available, and otherwise shows an actionable reason (run `gh auth login`)
+  while leaving copy/preview available.
 
 Recovery is part of parity, not a separate fallback UI. Malformed or incomplete
 hunk/header data must degrade to warnings or unmapped suggestions rather than
@@ -801,19 +801,29 @@ Preview behavior:
 Submit behavior:
 
 - Requires a GitHub walkthrough target and an available export capability.
-- Requires `GITHUB_TOKEN` or `GH_TOKEN` at submit time.
+- Posts through the **local `gh` CLI** when no explicit/env token is present, and via a
+  bearer token (`GITHUB_TOKEN` / `GH_TOKEN`) otherwise. Availability is derived from real
+  auth (`gh auth token [--hostname]` or an env token), so an authenticated `gh` is
+  sufficient — see [Posting reviews to GitHub via local `gh`](pr-walkthrough.md#posting-reviews-to-github-via-local-gh).
 - Uses the current draft event as **Request changes** when there are comments or disliked cards; otherwise it submits an approval.
 - Returns the GitHub review URL when GitHub provides one.
 
 Unavailable cases still show a safe preview/copy path. Local changesets,
-unauthenticated GitHub walkthroughs, missing adapters, invalid tokens, insufficient
-permissions, and unmappable-only drafts do not silently submit.
+unauthenticated GitHub walkthroughs (no `gh` auth and no env token), missing adapters,
+invalid tokens, insufficient permissions, and unmappable-only drafts do not silently
+submit.
 
 In the first-party pack shell, the compact header Submit button opens the same
-visible preview/unavailable workflow after all non-audit cards are reviewed. Until
-a pack-compatible direct submit route is available, that dialog renders the local
-fallback draft, maps line/card rows as valid or unmappable, keeps `Submit to
-GitHub` disabled, and leaves `Copy draft` available.
+visible preview/unavailable workflow after all non-audit cards are reviewed. The
+export-preview dialog exposes a **Post to GitHub** action
+(`data-testid="pr-walkthrough-post-github"`) that posts the assembled review to the real
+PR through the local `gh` CLI — via the pack `submitReview` route → the bearer-gated
+public `POST /api/pr-walkthrough/submit-review` → the server-side trusted-host gate →
+`gh`. It is enabled whenever `gh` (or an env token) is authenticated for the PR's host
+and otherwise disabled with an actionable "run `gh auth login`" reason. The legacy
+`pr-walkthrough-export-submit` button stays disabled, and `Copy draft` remains available
+as an offline fallback. See
+[Posting reviews to GitHub via local `gh`](pr-walkthrough.md#posting-reviews-to-github-via-local-gh).
 
 ## Edge states and warnings
 
@@ -1019,6 +1029,14 @@ The host trust check is enforced server-side on `/launch` and `/resolve`: a targ
 host that is neither in the baseline nor the managed allowlist is rejected **before**
 any job is created, returning HTTP `400` with body `{ code: "untrusted_github_host", host }`.
 
+**Launch-time trust prompt.** When a walkthrough is launched against a host that is
+neither in the baseline nor the managed list, the launcher **prompts** the user to add
+it rather than silently failing: the `run` route returns `HOST_NOT_TRUSTED` (host +
+resolved `prUrl`) **without spawning**, and the client offers to persist the host to
+`githubTrustedHosts` and continue (accept) or abort cleanly (decline). `github.com` /
+`www.github.com` never prompt. See
+[Trusting an unknown remote host at launch](pr-walkthrough.md#trusting-an-unknown-remote-host-at-launch).
+
 ### Enterprise host identity and token scoping
 
 Trusted non-`github.com` hosts are carried through identity and credentials
@@ -1051,10 +1069,10 @@ differently from github.com:
 - **`PR_WALKTHROUGH_BUNDLE_MISSING` or unusable bundle** — the launch-time analysis bundle artifact is missing, corrupt, or no longer readable. This is retryable, but submission will not re-fetch the diff; rerun the walkthrough so Bobbit resolves and persists a fresh bundle.
 - **Private PR fails or shows permission errors** — set `GITHUB_TOKEN` or `GH_TOKEN` with repository read and pull request review permissions, then retry.
 - **Rate limited** — configure a token or wait for GitHub's rate limit reset.
-- **Export button only shows copy/preview** — the walkthrough is local, unauthenticated, missing a GitHub target, or export capability was disabled by the resolver.
+- **Export button only shows copy/preview** — the walkthrough is local, missing a GitHub target, or export capability was disabled by the resolver. When it is unauthenticated (no `gh` auth and no env token), the dialog's **Post to GitHub** action explains it: run `gh auth login` (or set `GITHUB_TOKEN` / `GH_TOKEN`).
 - **Some comments are unmappable** — check whether the comment is card-level, attached to a binary/truncated file, or anchored to a line GitHub cannot review.
 - **Reload loses comments after a PR update** — the card checksum changed, so Bobbit intentionally avoids restoring comments onto a different diff. Re-run the walkthrough and review the updated cards.
-- **GitHub Enterprise URL is rejected** — add the host under System → General → Trusted GitHub hosts, and configure the matching API base URL.
+- **GitHub Enterprise URL is rejected** — launching against an untrusted host now prompts to add it; accept to persist it to Trusted GitHub hosts and continue. You can also pre-add the host (and the matching API base URL) under System → General → Trusted GitHub hosts.
 - **The PR-walkthrough viewer is missing entirely** — the built-in first-party pack may be disabled. Re-enable it from the Market built-in section (see [docs/marketplace.md](marketplace.md#built-in-first-party-packs)); a disabled pack removes the launcher, deep-link, and panel by design.
 
 ## Testing notes
@@ -1167,6 +1185,12 @@ Bobbit fetch repository and PR content from that host, and offered **Add & conti
 **Cancel**. The server-side host trust check on `/launch` and `/resolve` is
 [retained](#trusted-github-hosts); only this client dialog and its one-shot retry were
 removed with the rest of the client launch flow.
+
+**Reintroduced for the pack launch flow.** A launch-time trust prompt was later restored
+for the pack's spawn-on-click launch: the `run` route returns `HOST_NOT_TRUSTED` (host +
+resolved `prUrl`, no spawn) and the client prompts, persists to `githubTrustedHosts`, and
+retries once. See
+[Trusting an unknown remote host at launch](pr-walkthrough.md#trusting-an-unknown-remote-host-at-launch).
 
 ### Deleted standalone-tab resize behavior
 

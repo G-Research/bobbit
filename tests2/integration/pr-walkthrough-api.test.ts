@@ -280,7 +280,13 @@ test.describe("PR walkthrough REST API", () => {
 		}
 	});
 
-	test("GitHub PR resolve can be faked from local SHAs and remains preview-only without credentials", async () => {
+	// Master #946 dropped the blanket `previewOnly` denial: a with-SHA github target
+	// now reports availability from local gh auth. In the v2 fenced gateway the gh
+	// probe is blocked (fail-closed CommandRunner), so this deterministically lands on
+	// the "no credentials" branch — available:false + an actionable gh-auth reason,
+	// previewOnly GONE. The gh-authenticated (available:true) + gh-posting variants are
+	// unit-pinned in tests2/core/pr-walkthrough-export-mapper.test.ts (fake gh, no fence).
+	test("GitHub PR resolve faked from local SHAs reports gh-auth availability (no previewOnly)", async () => {
 		const fixture = makeGitFixture();
 		try {
 			const prUrl = "https://github.com/acme/widgets/pull/42";
@@ -294,7 +300,10 @@ test.describe("PR walkthrough REST API", () => {
 			expect(result.changeset.provider).toBe("github");
 			expect(result.changeset.prUrl).toBe(prUrl);
 			expect(result.changeset.externalUrl).toBe(prUrl);
-			expect(result.export.previewOnly).toBe(true);
+			// No creds (gh fenced) → not available, actionable reason, and previewOnly is GONE.
+			expect(result.export.available).toBe(false);
+			expect(result.export.reason).toMatch(/gh auth login/);
+			expect(result.export.previewOnly).toBeUndefined();
 
 			const submitResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
 				method: "POST",
@@ -304,6 +313,58 @@ test.describe("PR walkthrough REST API", () => {
 			expect((await submitResp.json()).code).toBe("EXPORT_UNAVAILABLE");
 		} finally {
 			await fixture.cleanup();
+		}
+	});
+
+	// Bearer-gated public /submit-review route — trust + validation gating (design
+	// docs/design/pr-walkthrough-gh-posting.md §4b). The gh POST itself is unit-pinned
+	// in tests2/core (fake gh); here the fenced gateway proves the route's structural
+	// gates fire BEFORE any gh invocation: bad request, unknown job, untrusted host,
+	// and confirm-required — none of which reach gh.
+	test("bearer-gated public submit-review enforces jobId + trust + confirm before any gh call", async () => {
+		const { getPackStore } = await import("../../src/server/extension-host/pack-store.js");
+		const PACK_ID = "pr-walkthrough";
+		const store = getPackStore();
+		const prUrl = "https://github.com/acme/widgets/pull/42";
+		const trustedJob = "prw-submit-review-trusted";
+		const untrustedJob = "prw-submit-review-untrusted";
+		const changeset = {
+			baseSha: "aaaaaaa", headSha: "bbbbbbb", provider: "github", prUrl, externalUrl: prUrl,
+			prNumber: 42, prTitle: "Post via gh", title: "PR #42: Post via gh",
+		};
+		const cards = [{ id: "card-1", phaseId: "significant", title: "Card", summary: "s", diffBlocks: [] }];
+		await store.put(PACK_ID, `reviews/${trustedJob}/binding/prw-session-sr-1`, {
+			jobId: trustedJob, parentSessionId: "owner-sr-1",
+			target: { provider: "github", prUrl, owner: "acme", repo: "widgets", number: 42, host: "github.com", canonicalKey: "github:acme/widgets#42" },
+		});
+		await store.put(PACK_ID, `reviews/${trustedJob}/final/payload`, { changeset, cards });
+		await store.put(PACK_ID, `reviews/${untrustedJob}/binding/prw-session-sr-2`, {
+			jobId: untrustedJob, parentSessionId: "owner-sr-2",
+			target: { provider: "github", prUrl: "https://github.example.com/acme/widgets/pull/42", owner: "acme", repo: "widgets", number: 42, host: "github.example.com", canonicalKey: "github:github.example.com/acme/widgets#42" },
+		});
+		try {
+			// missing jobId → 400
+			const missing = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ confirm: true }) });
+			expect(missing.status).toBe(400);
+			expect((await missing.json()).code).toBe("INVALID_SUBMIT_REVIEW_REQUEST");
+
+			// unknown jobId → 404
+			const unknown = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: "prw-nope", confirm: true }) });
+			expect(unknown.status).toBe(404);
+			expect((await unknown.json()).code).toBe("WALKTHROUGH_NOT_BOUND");
+
+			// untrusted host → 403 (trust gate fires before gh)
+			const untrusted = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: untrustedJob, confirm: true, draft: { comments: [] } }) });
+			expect(untrusted.status).toBe(403);
+			expect((await untrusted.json()).code).toBe("untrusted_github_host");
+
+			// confirm omitted on a trusted host → CONFIRMATION_REQUIRED (still before gh)
+			const noConfirm = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: trustedJob, draft: { comments: [] } }) });
+			expect(noConfirm.status).toBe(400);
+			expect((await noConfirm.json()).code).toBe("CONFIRMATION_REQUIRED");
+		} finally {
+			await store.deletePrefix(PACK_ID, `reviews/${trustedJob}/`);
+			await store.deletePrefix(PACK_ID, `reviews/${untrustedJob}/`);
 		}
 	});
 

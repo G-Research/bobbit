@@ -14,7 +14,7 @@ import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
 import type { WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
 import { WalkthroughAnalysisBundleStore, analysisBundleToParsedDiff, createAnalysisBundleFromParsedDiff, type PrWalkthroughAnalysisBundle, type ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
-import { resolveGithubPr } from "./github-adapter.js";
+import { resolveGithubPr, resolveGithubExportAuth } from "./github-adapter.js";
 import { resolveLocalChangeset } from "./git-changeset.js";
 import { validatePrWalkthroughYaml, type WalkthroughParsedDiffForYamlMapping } from "./walkthrough-yaml-schema.js";
 import type { PrWalkthroughJobRecord, PrWalkthroughTarget } from "./walkthrough-agent-store.js";
@@ -302,6 +302,73 @@ export async function handlePrWalkthroughApiRoute(
 			return true;
 		}
 
+		// Bearer-gated PUBLIC pack submit route (same auth tier as export/submit).
+		// Routed by jobId (the worker holds it from its own binding); the server
+		// resolves the authoritative binding+target, enforces the prefs-backed
+		// trusted-host gate, and posts via gh SERVER-SIDE. No session secret: the
+		// pack route worker inherits the gateway env, not the reviewer's, so it
+		// authenticates with the disk bearer token instead.
+		if (url.pathname === "/api/pr-walkthrough/submit-review" && req.method === "POST") {
+			const body = await deps.readBody(req);
+			if (!body || typeof body !== "object") {
+				fail(400, "Invalid submit-review request");
+				return true;
+			}
+			const jobId = stringValue(body.jobId);
+			if (!jobId) {
+				fail(400, "Missing required field: jobId", { code: "INVALID_SUBMIT_REVIEW_REQUEST" });
+				return true;
+			}
+			const store = deps.packStore ?? getPackStore();
+			const resolved = await resolveBindingByJobId(store, jobId);
+			if (!resolved) {
+				fail(404, `No PR-walkthrough binding found for job: ${jobId}`, { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
+				return true;
+			}
+			const { binding } = resolved;
+			// Trust chokepoint — the only place host trust is enforced for the pack post.
+			if (!assertTrustedBindingTarget(binding, deps, fail)) return true;
+			if (binding.target?.provider !== "github") {
+				fail(400, "Local changesets can be previewed but not submitted to GitHub.", { code: "EXPORT_UNAVAILABLE" });
+				return true;
+			}
+			const host = hostFromTarget(binding.target);
+			const cwd = await resolveBindingCwd(deps, resolved.sessionId ?? binding.parentSessionId ?? "");
+			// Probe mode runs AFTER the trust gate: a 403 above means UNTRUSTED, while
+			// this body means "needs gh auth login".
+			if (body.probe === true) {
+				json(await resolveGithubExportAuth({ cwd, commandRunner: deps.commandRunner ?? realCommandRunner }, host ?? "github.com"));
+				return true;
+			}
+			if (body.confirm !== true) {
+				fail(400, "Explicit confirmation is required before submitting a GitHub review", { code: "CONFIRMATION_REQUIRED" });
+				return true;
+			}
+			// Cards + changeset: prefer the pack-stored finalized payload; else recompute.
+			const finalized = await store.get(PRW_PACK_ID, prwFinalPayloadKey(jobId));
+			let cards: WalkthroughCard[];
+			let changeset: WalkthroughChangeset;
+			if (finalized && typeof finalized === "object" && Array.isArray((finalized as any).cards) && (finalized as any).changeset) {
+				cards = (finalized as any).cards as WalkthroughCard[];
+				changeset = (finalized as any).changeset as WalkthroughChangeset;
+			} else {
+				const parsed = await resolveDiffForBindingTarget(binding.target, cwd, deps);
+				changeset = parsed.changeset as unknown as WalkthroughChangeset;
+				cards = synthesizeFallbackCards(changeset, flattenDiffBlocks(parsed.files as unknown as any[]), parsed.warnings as WalkthroughWarning[]);
+			}
+			const module = await optionalPrModule("export-mapper");
+			const buildGithubReviewPreview = module?.buildGithubReviewPreview;
+			const submitGithubReview = module?.submitGithubReview;
+			if (typeof buildGithubReviewPreview !== "function" || typeof submitGithubReview !== "function") {
+				fail(500, "GitHub review submission adapter is unavailable", { code: "EXPORT_ADAPTER_UNAVAILABLE" });
+				return true;
+			}
+			const preview = buildGithubReviewPreview(body.draft, cards, changeset);
+			const result = await submitGithubReview(preview, { confirm: true, event: body.event }, { ghHost: host, cwd });
+			json(result, result.ok ? 200 : typeof result.status === "number" ? result.status : 400);
+			return true;
+		}
+
 		const previewMatch = url.pathname.match(/^\/api\/pr-walkthrough\/(.+)\/export\/preview$/);
 		if (previewMatch && req.method === "POST") {
 			const changesetId = decodeURIComponent(previewMatch[1]);
@@ -380,6 +447,9 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 		const title = prTitle
 			? (number != null && !/^PR\s+#/i.test(prTitle) ? `PR #${number}: ${prTitle}` : prTitle)
 			: gh ? `PR #${gh.number}: ${local.changeset.title ?? "Walkthrough"}` : local.changeset.title;
+		// Availability from local gh auth (no prefs needed); the blanket previewOnly
+		// denial is dropped so a real GitHub PR can be posted via gh.
+		const auth = await resolveGithubExportAuth({ cwd, commandRunner: deps.commandRunner ?? realCommandRunner }, gh?.host ?? "github.com");
 		return {
 			...local,
 			changesetId,
@@ -393,7 +463,7 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 				externalUrl: gh?.url,
 				title,
 			},
-			export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires adapter credentials; preview is available." },
+			export: { provider: "github", available: auth.available, ...(auth.reason ? { reason: auth.reason } : {}) },
 		};
 	}
 
@@ -818,7 +888,10 @@ async function submitExport(changesetId: string, payload: WalkthroughResolveResu
 	const submitGithubReview = module?.submitGithubReview;
 	if (typeof buildGithubReviewPreview === "function" && typeof submitGithubReview === "function") {
 		const preview = buildGithubReviewPreview(body.draft, payload.cards, payload.changeset);
-		return submitGithubReview(preview, { confirm: true, event: body.event }, { noExternal: deps.noExternal });
+		// Derive the host from the stored changeset so the gh path (used when no env
+		// token is present) targets the right host (`--hostname` for enterprise).
+		const host = hostFromUrl(stringValue(payload.changeset.prUrl) ?? stringValue(payload.changeset.externalUrl));
+		return submitGithubReview(preview, { confirm: true, event: body.event }, { ghHost: host, cwd: stringValue(body.cwd), noExternal: deps.noExternal });
 	}
 	return { ok: false, error: "GitHub review submission adapter is unavailable", code: "EXPORT_ADAPTER_UNAVAILABLE" };
 }
@@ -1182,6 +1255,34 @@ async function resolvePrwReviewerBinding(
 }
 
 /**
+ * Resolve the authoritative binding + target for a jobId from the pack store (the
+ * caller-supplied target is NEVER trusted). Scans the scoped
+ * `reviews/<jobId>/binding/*` keys first (mirroring authorizeReviewAccess), then
+ * the legacy flat `binding/*` keys, returning the first binding carrying a target.
+ * `sessionId` is the childSessionId parsed from the key, used to resolve the cwd.
+ */
+async function resolveBindingByJobId(
+	store: PackStore,
+	jobId: string,
+): Promise<{ binding: PrWalkthroughBinding; sessionId?: string } | undefined> {
+	const scopedPrefix = `${prwReviewPrefix(jobId)}binding/`;
+	for (const key of await store.list(PRW_PACK_ID, scopedPrefix)) {
+		const binding = await store.get<PrWalkthroughBinding>(PRW_PACK_ID, key);
+		if (binding && typeof binding === "object" && binding.target) {
+			return { binding, sessionId: key.slice(scopedPrefix.length) || undefined };
+		}
+	}
+	const legacyPrefix = "binding/";
+	for (const key of await store.list(PRW_PACK_ID, legacyPrefix)) {
+		const binding = await store.get<PrWalkthroughBinding>(PRW_PACK_ID, key);
+		if (binding && typeof binding === "object" && binding.target && binding.jobId === jobId) {
+			return { binding, sessionId: key.slice(legacyPrefix.length) || undefined };
+		}
+	}
+	return undefined;
+}
+
+/**
  * Resolve the AUTHENTIC caller session id from the REQUIRED `X-Bobbit-Session-Secret`
  * header (Decision C). Routing/correctness, not a security boundary (single-user trust
  * domain) — but REQUIRED for the binding-routed submit-yaml/bundle paths: every
@@ -1242,6 +1343,16 @@ function assertTrustedBindingTarget(
  * fall back to parsing `prUrl` when an older persisted binding lacks it.
  */
 function bindingTargetHost(target: PrWalkthroughTarget): string | undefined {
+	return hostFromTarget(target);
+}
+
+/**
+ * Single-source host derivation for a walkthrough target: prefer the canonical
+ * `host` field (set by the pack `run` route's `canonicalizeTarget`); fall back to
+ * parsing `prUrl`. Reused by `bindingTargetHost`, `resolveDiffForBindingTarget`,
+ * the pack submit route, and `submitExport` so host semantics never diverge.
+ */
+function hostFromTarget(target: { host?: unknown; prUrl?: unknown }): string | undefined {
 	if (typeof target.host === "string" && target.host.trim()) {
 		return target.host.trim().replace(/\.$/, "").toLowerCase();
 	}
@@ -1251,6 +1362,14 @@ function bindingTargetHost(target: PrWalkthroughTarget): string | undefined {
 		} catch { return undefined; }
 	}
 	return undefined;
+}
+
+/** Derive a host from a bare URL string (undefined when absent/unparseable). */
+function hostFromUrl(value: string | undefined): string | undefined {
+	if (!value || !value.trim()) return undefined;
+	try {
+		return new URL(value.trim()).hostname.replace(/\.$/, "").toLowerCase();
+	} catch { return undefined; }
 }
 
 /**
@@ -1365,6 +1484,11 @@ async function resolveDiffForBindingTarget(
 		const resolved = await resolveLocalChangeset({ cwd, baseSha: target.baseSha, headSha: target.headSha });
 		const prTitle = stringValue(target.prTitle);
 		const prBody = typeof target.prBody === "string" ? target.prBody : "";
+		// Availability comes from local gh auth (no prefs needed), NOT launch-time
+		// metadata — a with-SHA GitHub target has owner/repo/prNumber/prUrl, which is
+		// sufficient to post via gh. The blanket previewOnly denial is dropped.
+		const host = hostFromTarget(target) ?? "github.com";
+		const auth = await resolveGithubExportAuth({ cwd, commandRunner: deps.commandRunner ?? realCommandRunner }, host);
 		return {
 			changeset: {
 				...resolved.changeset,
@@ -1379,7 +1503,7 @@ async function resolveDiffForBindingTarget(
 			files: resolved.files,
 			warnings: resolved.warnings,
 			limits: resolved.limits as WalkthroughParsedDiffForYamlMapping["limits"],
-			export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires launch-time GitHub metadata; preview is available." },
+			export: { provider: "github", available: auth.available, ...(auth.reason ? { reason: auth.reason } : {}) } as WalkthroughParsedDiffForYamlMapping["export"],
 		};
 	}
 	if (typeof deps.preflightGithubLaunch === "function") {
@@ -1419,6 +1543,7 @@ function parseGithubRef(prUrl: string | undefined, prNumber: string | number | u
 export const resolveWalkthroughForTesting = resolveWalkthrough;
 export const parseGithubRefForTesting = parseGithubRef;
 export const resolveAndReadBindingBundleForTesting = resolveAndReadBindingBundle;
+export const resolveDiffForBindingTargetForTesting = resolveDiffForBindingTarget;
 
 function fixtureWalkthrough(): WalkthroughResolveResult {
 	const changeset: WalkthroughChangeset = {

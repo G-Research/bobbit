@@ -1443,6 +1443,73 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		try { await globalThis.navigator?.clipboard?.writeText(exportBodyFor(entry)); patchEntry(host, paramKey, { exportCopied: true, exportError: undefined }); }
 		catch (error) { patchEntry(host, paramKey, { exportCopied: false, exportError: msgOf(error) }); }
 	};
+	// Reverse-map a saved line-comment key back to its diff block + line anchor so
+	// the assembled draft carries diffBlockId/lineId (mirrors lineCommentTargetFor,
+	// but returns the server-side anchor ids buildGithubReviewPreview indexes by).
+	const lineAnchorFor = (card, key) => {
+		for (const block of arrayOf(card && card.diffBlocks)) {
+			for (const hunk of arrayOf(block && block.hunks)) {
+				for (const line of arrayOf(hunk && hunk.lines)) {
+					if (lineKey(card, block, line) === key) {
+						return {
+							diffBlockId: asText(block && block.id) || undefined,
+							lineId: asText(line && (line.id || line.lineId || line.line || line.newLine || line.oldLine)) || undefined,
+						};
+					}
+				}
+			}
+		}
+		return undefined;
+	};
+
+	// Assemble the PrWalkthroughReviewDraft the server-side buildGithubReviewPreview
+	// expects (decisions + comments the panel already tracks). Card-level comments
+	// carry no anchor (they land in the review body); line comments carry the diff
+	// block + line ids for GitHub inline placement.
+	const buildReviewDraft = (entry) => {
+		const changeset = (entry.bundle && entry.bundle.changeset) || {};
+		const now = new Date().toISOString();
+		const decisions = {};
+		const comments = [];
+		for (const card of reviewCardsOf(entry)) {
+			const cardCommentIds = [];
+			for (const [index, comment] of savedCardCommentsForCard(entry, card).entries()) {
+				const id = `${card.id}::card::${index}`;
+				comments.push({ id, cardId: card.id, body: String(comment), source: "custom", createdAt: now });
+				cardCommentIds.push(id);
+			}
+			for (const [key, list] of savedLineCommentsForCard(entry, card)) {
+				const anchor = lineAnchorFor(card, key) || {};
+				for (const [index, comment] of arrayOf(list).filter((value) => asText(value).trim()).entries()) {
+					const id = `${key}::${index}`;
+					comments.push({ id, cardId: card.id, diffBlockId: anchor.diffBlockId, lineId: anchor.lineId, body: String(comment), source: "custom", createdAt: now });
+					cardCommentIds.push(id);
+				}
+			}
+			const status = (entry.reviewStatus || {})[card.id];
+			if (status === "liked" || status === "disliked") {
+				decisions[card.id] = { cardId: card.id, value: status, commentIds: cardCommentIds, updatedAt: now };
+			}
+		}
+		return { changeset, decisions, comments, completedCardIds: [...completedCardIds(entry)], updatedAt: now };
+	};
+
+	const postReviewToGithub = async (entry, host, paramKey) => {
+		if (!host || !host.callRoute) return;
+		patchEntry(host, paramKey, { exportPosting: true, exportPostError: undefined, exportPosted: undefined, exportReviewUrl: undefined });
+		try {
+			const draft = buildReviewDraft(entry);
+			const result = await host.callRoute("submitReview", { method: "POST", body: { draft, event: "COMMENT", confirm: true } });
+			if (!result || result.ok === false) {
+				patchEntry(host, paramKey, { exportPosting: false, exportPostError: structuredRouteMessage(result, "GitHub review submission failed."), exportPosted: undefined });
+				return;
+			}
+			patchEntry(host, paramKey, { exportPosting: false, exportPosted: msgOf(result.message || "GitHub review submitted."), exportReviewUrl: asText(result.reviewUrl) || undefined, exportPostError: undefined });
+		} catch (error) {
+			patchEntry(host, paramKey, { exportPosting: false, exportPostError: msgOf(error) });
+		}
+	};
+
 	const renderExportRows = (entry) => {
 		const rows = exportPreviewRowsFor(entry);
 		if (!rows.length) return html`<div class="export-empty" data-testid="pr-walkthrough-export-row" data-valid="false"><strong>No comment rows</strong><span>No saved card or line comments are available for export.</span></div>`;
@@ -1457,7 +1524,17 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	};
 	const renderExportDialog = (entry, host, paramKey) => {
 		if (!entry.exportPreviewOpen) return nothing;
-		return html`<div class="export-backdrop" role="presentation"><div class="export-dialog" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview"><header><div><div class="phase-label">Review export preview</div><h2>Review export preview</h2></div><button class="secondary" type="button" @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: false })}>Close</button></header><div class="warning" data-testid="pr-walkthrough-export-unavailable">Export unavailable in this pack fixture. Copy the local fallback draft below; publish is disabled until a pack-compatible export route is available.</div>${entry.exportError ? html`<div class="export-error" data-testid="pr-walkthrough-export-error">Copy failed: ${entry.exportError}</div>` : nothing}${entry.exportCopied ? html`<div class="export-result" data-testid="pr-walkthrough-export-result">Draft copied to clipboard.</div>` : nothing}${renderExportRows(entry)}<pre class="export-body" data-testid="pr-walkthrough-export-body">${exportBodyFor(entry)}</pre><footer><button class="secondary" type="button" @click=${() => copyExportDraft(entry, host, paramKey)}>Copy draft</button><button class="primary" data-testid="pr-walkthrough-export-submit" type="button" disabled>Submit to GitHub</button></footer></div></div>`;
+		// Post availability comes from the enriched bundle `export` descriptor (gh auth
+		// on the gateway host). When absent/unavailable the Post button is disabled and
+		// the reason is surfaced; the trust gate stays server-side at submit.
+		const exp = (entry.bundle && entry.bundle.export) || {};
+		const canPost = exp.available === true;
+		const unavailableMsg = canPost
+			? undefined
+			: (msgOf(exp.reason || "") || "Export unavailable: run `gh auth login` (or set GITHUB_TOKEN/GH_TOKEN) on the gateway host to post this review.");
+		return html`<div class="export-backdrop" role="presentation"><div class="export-dialog" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview"><header><div><div class="phase-label">Review export preview</div><h2>Review export preview</h2></div><button class="secondary" type="button" @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: false })}>Close</button></header>${canPost
+			? html`<div class="export-ready" data-testid="pr-walkthrough-export-unavailable">Ready to post this review to GitHub.</div>`
+			: html`<div class="warning" data-testid="pr-walkthrough-export-unavailable">${unavailableMsg}</div>`}${entry.exportError ? html`<div class="export-error" data-testid="pr-walkthrough-export-error">Copy failed: ${entry.exportError}</div>` : nothing}${entry.exportCopied ? html`<div class="export-result" data-testid="pr-walkthrough-export-result">Draft copied to clipboard.</div>` : nothing}${entry.exportPostError ? html`<div class="export-error" data-testid="pr-walkthrough-post-error">Post failed: ${entry.exportPostError}</div>` : nothing}${entry.exportPosted ? html`<div class="export-result" data-testid="pr-walkthrough-post-result">${entry.exportPosted}${entry.exportReviewUrl ? html` <a href=${entry.exportReviewUrl} target="_blank" rel="noreferrer">View review</a>` : nothing}</div>` : nothing}${renderExportRows(entry)}<pre class="export-body" data-testid="pr-walkthrough-export-body">${exportBodyFor(entry)}</pre><footer><button class="secondary" type="button" @click=${() => copyExportDraft(entry, host, paramKey)}>Copy draft</button><button class="primary" data-testid="pr-walkthrough-export-submit" type="button" disabled>Submit to GitHub</button><button class="primary" data-testid="pr-walkthrough-post-github" type="button" ?disabled=${!canPost || Boolean(entry.exportPosting)} @click=${() => postReviewToGithub(entry, host, paramKey)}>${entry.exportPosting ? "Posting…" : "Post to GitHub"}</button></footer></div></div>`;
 	};
 
 	const renderBundle = (entry, host, paramKey, displayJob) => {

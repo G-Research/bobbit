@@ -65,7 +65,7 @@ Header control rules:
 
 - Appears in the existing slash autocomplete with label/description such as `Open Terminal`.
 - Dispatch only on send, matching pack composer-slash semantics.
-- Should not create a chat user message with terminal output; it is a launcher side effect. The composer may clear the slash command and show header toast/launcher feedback if opening fails.
+- Should not create a chat user message with terminal output; it is a launcher side effect. The composer may clear the slash command and emit `bobbit-launcher-feedback` (the dedicated persistent launcher-feedback surface, `data-testid="launcher-feedback"`) if opening fails — a `pending` message while it opens, then a dismissible `error` on failure or `resolved` on success. See [docs/extension-host-authoring.md § launcher feedback](../extension-host-authoring.md) for the contract.
 
 ### Channel identity
 

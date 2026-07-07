@@ -616,7 +616,9 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		const resp = await runResp;
 		expect(resp.status(), `run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
 		await expect(textarea, "sending the completed slash command should consume the composer value").toHaveValue("");
-		await expect(page.getByTestId("header-toast")).toContainText(/No open GitHub PR/i, { timeout: 10_000 });
+		// Launcher errors now surface via the persistent launcher-feedback element
+		// (dispatch-only from MessageEditor), not the transient header toast.
+		await expect(page.getByTestId("launcher-feedback")).toContainText(/No open GitHub PR/i, { timeout: 10_000 });
 	});
 
 	// ── T-2: a NO_PR launch from the shared session actions menu surfaces a visible
@@ -653,7 +655,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		expect(resp.status(), `run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
 
 		await expect(page.locator("sidebar-actions-popover"), "session-menu launcher failures must not leave the menu wedged open").toHaveCount(0, { timeout: 5_000 });
-		await expect(page.locator('[data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="launcher-feedback"], [data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
 		expect(runPosts, "the launcher must call `run` exactly once").toHaveLength(1);
 
 		const reviewerSpawned = (gateway.sessionManager?.getAllSessionsRaw?.() ?? []).some((s: any) => {
@@ -694,7 +696,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		expect(JSON.parse(resp.request().postData() || "{}").sessionId, "inactive-row launcher route body must target the row session").toBe(ownerSid);
 		expect(resp.status(), `inactive launch run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
 
-		await expect(page.locator('[data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="launcher-feedback"], [data-testid="header-toast"], [role="status"], [data-testid="session-menu-launcher-error"]').filter({ hasText: /No open GitHub PR/i }).first()).toBeVisible({ timeout: 10_000 });
 		const sidAfter = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
 		expect(sidAfter, "a failed inactive-row PR walkthrough launch must stay on the currently selected session").toBe(activeSid);
 	});

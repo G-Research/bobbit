@@ -3643,6 +3643,28 @@
       "v2Path": "tests2/browser/daily/pr-walkthrough-pack.spec.ts"
     },
     {
+      "file": "tests/e2e/ui/extension-panel-ux.spec.ts",
+      "bucket": "daily",
+      "method": "adapter",
+      "replacement": [
+        "tests2/browser/daily/extension-panel-ux.spec.ts"
+      ],
+      "rationale": "NEW in master #945. Full-gateway browser E2E (launcher-feedback persistence + fullscreen side-panel geometry via getBoundingClientRect) â€” needs Chromium real-browser fidelity; carried into the daily tier verbatim.",
+      "migrated": true,
+      "v2Path": "tests2/browser/daily/extension-panel-ux.spec.ts"
+    },
+    {
+      "file": "tests/e2e/ui/pr-walkthrough-trust-prompt.spec.ts",
+      "bucket": "daily",
+      "method": "adapter",
+      "replacement": [
+        "tests2/browser/daily/pr-walkthrough-trust-prompt.spec.ts"
+      ],
+      "rationale": "NEW in master #946. Full-gateway browser E2E (launch trust-prompt: real client launcher â†’ confirm â†’ PUT /api/preferences â†’ retry chain, run route stubbed via page.route) â€” needs Chromium; carried into the daily tier verbatim.",
+      "migrated": true,
+      "v2Path": "tests2/browser/daily/pr-walkthrough-trust-prompt.spec.ts"
+    },
+    {
       "file": "tests/e2e/ui/pre-compaction-history.spec.ts",
       "bucket": "daily",
       "method": "adapter",
@@ -6894,6 +6916,24 @@
       "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
       "migrated": true,
       "v2Path": "tests2/core/pr-walkthrough-export-mapper.test.ts"
+    },
+    {
+      "file": "tests/pr-walkthrough-run-trust-gate.test.ts",
+      "bucket": "v2-core",
+      "method": "codemod",
+      "replacement": [],
+      "rationale": "NEW in master #946 (pack run route trust pre-check). node:test default import mapped to vitest `test` by hand; pure logic (mock host ctx), node env.",
+      "migrated": true,
+      "v2Path": "tests2/core/pr-walkthrough-run-trust-gate.test.ts"
+    },
+    {
+      "file": "tests/pr-walkthrough-trust-client.test.ts",
+      "bucket": "v2-core",
+      "method": "codemod",
+      "replacement": [],
+      "rationale": "NEW in master #946 (client trust flow, injected fetch/confirm seams). node:test named imports codemodded to vitest; node env.",
+      "migrated": true,
+      "v2Path": "tests2/core/pr-walkthrough-trust-client.test.ts"
     },
     {
       "file": "tests/pr-walkthrough-hunk-id-roundtrip.test.ts",

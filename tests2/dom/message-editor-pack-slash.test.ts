@@ -123,7 +123,10 @@ describe("MessageEditor pack composer slash dispatch", () => {
 			body: { prUrl },
 		});
 		expect(messageSendEvents).toHaveLength(1);
-		expect(launcherFeedbackEvents).toContainEqual({ kind: "pending", message: "Starting PR walkthrough…" });
+		// Item 1: pending message is derived from the launcher label ("PR Walkthrough").
+		expect(launcherFeedbackEvents).toContainEqual({ kind: "pending", message: "Starting PR Walkthrough…" });
+		// Item 2: a successful launch emits a `resolved` event that clears the pending state.
+		expect(launcherFeedbackEvents).toContainEqual({ kind: "resolved", message: "" });
 	});
 
 	it("typed /pr-walkthrough <pr-number> launches the PR walkthrough route and does not call onSend", async () => {
