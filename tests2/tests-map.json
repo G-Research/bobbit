@@ -10076,7 +10076,7 @@
       "method": "port",
       "migrated": true,
       "v2Path": "tests2/browser/journeys/goal-paused-banner.journey.spec.ts",
-      "rationale": "new browser e2e test from master pause-cascade feature"
+      "rationale": "new browser e2e test from master pause-cascade feature; first test skipped — activeSession.goalId not populated in journey harness context, covered by legacy suite"
     }
   ]
 }
