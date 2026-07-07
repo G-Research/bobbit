@@ -20,9 +20,9 @@ re-run to confirm v2-caught. `retries: 0`.
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants) | 6 |
-| Real holes found | 6 |
-| **Real holes CLOSED (ported + re-verified v2-caught)** | **6** |
+| Behaviours mutation-tested (content mutants) | 8 |
+| Real holes found | 8 |
+| **Real holes CLOSED (ported + re-verified v2-caught)** | **8** |
 | Null-mutant integrity checks passed | 1 (BR50-null-A) |
 
 > **Report freshness:** the committed `browser-chaos-report-clusterA.md` reflects
@@ -73,11 +73,26 @@ Clean-passed on unmutated dist first.
 Mutation results (via `--ids BR53,BR54`): legacy 2/2, v2 2/2, 0 real holes.
 A1+A2 authoritative report committed separately (4/4 v2-caught).
 
+## Batch A4 (BR55, BR56) — 2 holes closed
+
+Both confirmed real holes, ported + re-verified `v2: caught` (0 holes).
+Clean-passed on unmutated dist first (BR56's first port drafted a live-composer
+chip assertion that was wrong — the chip only renders in a SENT message via the
+snapshot path; fixed to send + reload before asserting).
+
+| Mutant | Domain | File | Ported journey assertion |
+|---|---|---|---|
+| BR55 | app-smoke (open new window) | `src/app/session-actions.ts` | session row hover → actions trigger → popover menu item `open-new-window` → click → `window.open` captured `{url: <deepLink>, target: "_blank", features: "noopener"}` |
+| BR56 | prompt-interaction (@-mention chip) | `src/ui/components/FileMentionChip.ts` | send `@notes.md` → user bubble contains `@notes.md` → reload → `.file-mention-chip-pill` chip visible |
+
+Mutation results (via `--ids BR55,BR56`): legacy 2/2, v2 2/2, 0 real holes.
+
 ## Resume point
 
-- **Last committed batch:** A3 (BR53, BR54) ports committed; corpus has
-  `BR50-null-A, BR46, BR48, BR51, BR52, BR53, BR54` (all closed/passing).
-- **Next behaviours to mutation-test:** app-smoke (palette-session,
-  open-session-new-window), sidebar-nav (sidebar-session-actions), prompt-interaction
-  (queue-ui, at-mention chip), stories-registry (stories-sidebar Ctrl+K filter,
-  stories-projects PR-10) per the audit REC entries.
+- **Last committed batch:** A4 (BR55, BR56) ports committed; corpus has
+  `BR50-null-A, BR46, BR48, BR51, BR52, BR53, BR54, BR55, BR56` (all closed/passing).
+- **Next behaviours to mutation-test:** sidebar-nav (sidebar-session-actions
+  New/rename/terminate), stories-registry (stories-sessions S-01 empty/Send-disabled
+  is BR24-done → try stories-projects delete-row / stories-streaming stop-pill),
+  prompt-interaction (queue-ui pill when busy), app-smoke (palette-session) per
+  the audit REC entries.
