@@ -365,3 +365,52 @@ test.describe("Journey: API Error Modal", () => {
 		}
 	});
 });
+
+// Ported from auto-retry-banner.spec.ts (audit: misc GAP): an injected
+// auto_retry_pending event renders the banner with its data-* attributes.
+test.describe("Journey: Auto-Retry Banner", () => {
+	test("auto_retry_pending renders the banner with reason/attempt/delay", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const banner = page.locator('[data-testid="auto-retry-banner"]');
+			await expect(banner).toHaveCount(0);
+			// Inject the same event the server broadcasts from maybeAutoRetryTransient.
+			await page.evaluate(() => {
+				(window as any).__bobbitState.remoteAgent.handleAgentEvent({
+					type: "auto_retry_pending", reason: "provider-overload",
+					retryDelayMs: 4000, attempt: 3, scheduledAt: Date.now(), error: "overloaded_error",
+				});
+			});
+			await expect(banner).toBeVisible({ timeout: 10_000 });
+			await expect(banner).toHaveAttribute("data-reason", "provider-overload");
+			await expect(banner).toHaveAttribute("data-attempt", "3");
+			await expect(banner).toHaveAttribute("data-retry-delay-ms", "4000");
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+});
+
+// Ported from image-model-selector-lock.spec.ts (audit: misc GAP): the footer
+// exposes the resolved image-model id (default gpt-image-2).
+test.describe("Journey: Footer Image Model", () => {
+	test("footer shows the resolved image-model id (default gpt-image-2)", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			const footer = page.locator("[data-testid='footer-image-model-id']").first();
+			await expect(footer).toBeVisible({ timeout: 15_000 });
+			await expect(footer).toHaveText("gpt-image-2", { timeout: 10_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+});

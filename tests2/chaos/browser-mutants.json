@@ -550,9 +550,9 @@
     "file": "src/app/settings-page.ts",
     "target": "ui",
     "operator": "dropped-testid",
-    "search": "data-testid=\"headquarters-visibility-setting\"",
-    "replace": "data-testid=\"headquarters-visibility-setting-mut\"",
-    "description": "Headquarters visibility setting loses its testid. Legacy headquarters.spec.ts asserts the Show-Headquarters toggle persistence; the stories-registry journey does not (GAP).",
+    "search": "Show Headquarters in project lists",
+    "replace": "Show HQ in project lists",
+    "description": "The 'Show Headquarters in project lists' toggle label is renamed. Legacy headquarters.spec.ts selects it via getByLabel('Show Headquarters in project lists'); the stories-registry journey does not (GAP). (Retargeted from the testid, which the legacy spec does not assert.)",
     "expectedLegacyCatchers": [
       "tests/e2e/ui/headquarters.spec.ts"
     ],
@@ -566,9 +566,9 @@
     "file": "src/app/render-helpers.ts",
     "target": "ui",
     "operator": "dropped-testid",
-    "search": "data-testid=\"sidebar-archived-divider\"",
-    "replace": "data-testid=\"sidebar-archived-divider-mut\"",
-    "description": "Sidebar Archived divider loses its testid. Legacy sidebar-archived-layout.spec.ts asserts the archived section appears under Show Archived; the sidebar-nav journey does not (GAP).",
+    "search": "filter:grayscale(1); opacity:0.75;",
+    "replace": "filter:grayscale(0); opacity:0.75;",
+    "description": "Archived sidebar rows lose their grayscale dimming. Legacy sidebar-archived-layout.spec.ts asserts a [style*='grayscale(1)'] element after Show Archived; the sidebar-nav journey does not (GAP). (Retargeted from the divider testid, which the legacy spec does not assert.)",
     "expectedLegacyCatchers": [
       "tests/e2e/ui/sidebar-archived-layout.spec.ts"
     ],

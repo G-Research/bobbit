@@ -275,3 +275,20 @@ test.describe("Journey: Draft Persistence", () => {
 		}
 	});
 });
+
+// Ported from github-trusted-hosts.spec.ts (audit: app-smoke GAP): adding a
+// trusted GitHub host renders its row in settings.
+test.describe("Journey: GitHub Trusted Hosts", () => {
+	test("adding a trusted GitHub host renders its row", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+		const input = page.locator('[data-testid="github-trusted-host-input"]');
+		await expect(input).toBeVisible({ timeout: 15_000 });
+		const host = `ghe-${Date.now()}.example.com`;
+		await input.fill(host);
+		await page.locator('[data-testid="github-trusted-host-add"]').click();
+		await expect(
+			page.locator(`[data-testid="github-trusted-host-row"][data-host="${host}"]`),
+		).toBeVisible({ timeout: 10_000 });
+	});
+});

@@ -76,3 +76,17 @@ test.describe("Journey: Marketplace Packs", () => {
 		await expect(page.getByTestId("market-research-preview-banner")).toBeVisible({ timeout: 20_000 });
 	});
 });
+
+// Ported from market-activation.spec.ts (audit: marketplace-packs GAP): the
+// Installed tab opens the installed-panel.
+test.describe("Journey: Marketplace Installed Panel", () => {
+	test("Installed tab opens the installed-panel", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/market"; });
+		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		const tab = page.getByTestId("market-tab-installed");
+		await expect(tab).toBeVisible({ timeout: 20_000 });
+		await tab.click();
+		await expect(page.getByTestId("market-installed-panel")).toBeVisible({ timeout: 15_000 });
+	});
+});

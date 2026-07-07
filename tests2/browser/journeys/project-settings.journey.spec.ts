@@ -156,4 +156,13 @@ test.describe("Journey: Project Assistant", () => {
 		await expect(toggle).toBeVisible({ timeout: 15_000 });
 		await expect(toggle).not.toBeChecked();
 	});
+
+	// Ported from role-assistant-new.spec.ts (audit: project-settings GAP): the
+	// #/roles page exposes a "New Role" button.
+	test("roles page exposes a 'New Role' button", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/roles"; });
+		await page.waitForFunction(() => window.location.hash.includes("roles"), null, { timeout: 20_000 });
+		await expect(page.locator("button").filter({ hasText: "New Role" }).first()).toBeVisible({ timeout: 15_000 });
+	});
 });

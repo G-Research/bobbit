@@ -3,8 +3,7 @@
  * Covers: journey-staff, journey-debug-tools
  * Consolidated from: staff-inbox, debug-panel, api-error-modal, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
-import { sendMessage } from "../../../tests/e2e/ui/ui-helpers.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, defaultProject } from "../_helpers/journey-fixture.js";
 
 test.describe("Journey: Staff", () => {
 	test("settings staff section navigable", async ({ page }) => {
@@ -80,6 +79,33 @@ test.describe("Journey: Debug Tools", () => {
 			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId);
+		}
+	});
+});
+
+// Ported from staff-sub-section.spec.ts (audit: staff-debug PARTIAL): a project
+// with a staff agent renders the per-project Staff header in the sidebar.
+test.describe("Journey: Staff Sidebar Header", () => {
+	test("creating a staff agent renders the sidebar Staff header", async ({ page }) => {
+		const project = await defaultProject();
+		let staffId = "";
+		try {
+			const resp = await apiFetch("/api/staff", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `v2-staff-${Date.now()}`,
+					systemPrompt: "You are a sidebar test bot.",
+					cwd: project.rootPath, projectId: project.id,
+				}),
+			});
+			expect(resp.status).toBe(201);
+			staffId = (await resp.json()).id;
+
+			await openApp(page);
+			const header = page.locator(`[data-testid='sidebar-staff-header'][data-nav-id="staff-header:${project.id}"]`).first();
+			await expect(header).toBeVisible({ timeout: 20_000 });
+		} finally {
+			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 });
