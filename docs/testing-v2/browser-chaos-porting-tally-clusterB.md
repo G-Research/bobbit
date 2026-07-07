@@ -43,6 +43,21 @@ window; re-run after all-clear was clean).
 |---|---|---|
 | BR57 | proposals | `MULTI_COMPONENT_PROPOSAL` project proposal → Components view `component-card-api/web`; Workflows tab `workflow-card-feature-api/web/all-components` |
 
+## Tracked justifications (attempted, not counted as holes)
+
+- **invalid-workflow normalization** (proposals; legacy
+  `goal-proposal-invalid-workflow.spec.ts`) — attempted BR58 (disable the
+  assistant-panel phantom→first `_selectedWorkflowId` normalization). Result:
+  **both-missed**, so reverted (mutant + weak port removed). The desync does NOT
+  surface via `select.inputValue()` — a `<select>` bound to a project-absent id
+  visually falls back to the first option, so the value still reads as a valid
+  workflow. The real symptom is the **create-time submission** using the stale
+  phantom id, which the legacy test only exposes by explicitly re-selecting a
+  target then asserting `POST /api/goals body.workflowId`. That is a
+  create-flow-wiring contract, not cleanly isolable by a single-line normalize
+  mutant; deferred (would need a full create+select+intercept port). No hole
+  claimed.
+
 ## Next behaviours (queue)
 proposals: dismiss-reload, invalid-workflow, revision-autoupdate,
 spec-survives-navigate (behavioural mutants, not dropped-testid); project-settings:
