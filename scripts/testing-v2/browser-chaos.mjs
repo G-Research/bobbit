@@ -16,6 +16,7 @@
  * assertions (do NOT delete the mutant), then re-run.
  *
  *   node scripts/testing-v2/browser-chaos.mjs [--id BR01] [--ids BR01,BR02] [--all]
+ *   node scripts/testing-v2/browser-chaos.mjs --all --resume  # reuse prior results, run only the rest
  *   node scripts/testing-v2/browser-chaos.mjs --dry-run   # list mutants, don't run
  *   node scripts/testing-v2/browser-chaos.mjs --regen-report
  *
@@ -162,10 +163,12 @@ const args = process.argv.slice(2);
 let targetIds = null;
 let dryRun = false;
 let keepWorktree = false;
+let resume = false;
 for (let i = 0; i < args.length; i++) {
 	if (args[i] === "--all") targetIds = null;
 	else if (args[i] === "--dry-run") dryRun = true;
 	else if (args[i] === "--keep-worktree") keepWorktree = true;
+	else if (args[i] === "--resume") resume = true;
 	else if (args[i] === "--id" && args[i + 1]) targetIds = [args[++i]];
 	else if (args[i] === "--ids" && args[i + 1]) targetIds = args[++i].split(",");
 }
@@ -773,7 +776,21 @@ async function main() {
 	}
 	console.log(`Worktree:       ${worktreePath}`);
 
+	// --resume: reuse conclusive results from a prior (e.g. restart-interrupted)
+	// run so the campaign continues instead of restarting. Each mutant is
+	// independent, so a completed result is still valid.
 	const results = [];
+	let priorById = new Map();
+	if (resume) {
+		try {
+			const prev = JSON.parse(fs.readFileSync(REPORT_JSON, "utf-8"));
+			for (const r of prev.results || []) priorById.set(r.id, r);
+			console.log(`[browser-chaos] --resume: loaded ${priorById.size} prior result(s) from ${REPORT_JSON}`);
+		} catch {
+			console.log(`[browser-chaos] --resume: no prior report to resume from (${REPORT_JSON}); running all.`);
+		}
+	}
+
 	try {
 		ensureNodeModulesJunction(worktreePath);
 
@@ -798,11 +815,22 @@ async function main() {
 		const ordered = [...mutants].sort((a, b) => targetsFor(a).join().localeCompare(targetsFor(b).join()));
 		let distDirty = new Set(); // dist targets currently carrying a mutation
 
+		// Seed reused prior results (in corpus order) so the streamed report stays
+		// complete, then run only the not-yet-completed mutants.
 		for (const mutant of ordered) {
+			if (priorById.has(mutant.id)) results.push(priorById.get(mutant.id));
+		}
+		const todo = ordered.filter(m => !priorById.has(m.id));
+		if (resume && todo.length < ordered.length) {
+			console.log(`[browser-chaos] --resume: skipping ${ordered.length - todo.length} completed mutant(s); running ${todo.length}.`);
+		}
+
+		for (const mutant of todo) {
 			const { result, distDirty: nd } = runMutant(mutant, worktreePath, distDirty);
 			distDirty = nd;
 			results.push(result);
-			// Stream partial report after every mutant.
+			// Stream partial report after every mutant (keep corpus order).
+			results.sort((a, b) => ordered.findIndex(m => m.id === a.id) - ordered.findIndex(m => m.id === b.id));
 			writeReports(results, { date: new Date().toISOString(), totalDurationMs: Date.now() - totalStart, partial: true, runner: "browser-chaos.mjs" });
 		}
 	} finally {

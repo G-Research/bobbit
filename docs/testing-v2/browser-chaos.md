@@ -87,7 +87,19 @@ npm run test:v2:browser-chaos -- --all
 node scripts/testing-v2/browser-chaos.mjs --ids BR01,BR02
 node scripts/testing-v2/browser-chaos.mjs --dry-run       # list, don't run
 node scripts/testing-v2/browser-chaos.mjs --regen-report  # rebuild MD from JSON
+
+# Resume an interrupted campaign (e.g. after a server restart): reuse the
+# conclusive results already streamed to the JSON report, run only the rest.
+node scripts/testing-v2/browser-chaos.mjs --all --resume
 ```
+
+Note on the toolchain: browser tests build against `dist`, so the runner needs a
+COMPLETE `node_modules` (playwright + typescript + vite + `@earendil-works/pi-ai`
++ its provider SDKs, sentinel `@anthropic-ai/sdk`). It auto-selects the fullest
+same-goal worktree's `node_modules` via a read-only junction; the primary repo /
+goal-branch installs are often partially pruned on Windows and are skipped. Build
+tools are invoked by their JS entry points (not `npm`/`.bin`) to avoid the
+Windows junction `.bin` PATH flake.
 
 Outputs:
 - `.profiles/chaos/browser-comparison-report.json` — full per-mutant matrix (streamed after each mutant).
