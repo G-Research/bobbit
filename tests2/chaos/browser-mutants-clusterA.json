@@ -47,5 +47,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/misc.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR51",
+		"area": "misc-prompt-stats",
+		"file": "src/ui/components/AgentInterface.ts",
+		"target": "ui",
+		"operator": "attribute-rename",
+		"search": "title=\"Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextWindow)} tokens (${pct}%)\"",
+		"replace": "title=\"Ctx: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextWindow)} tokens (${pct}%)\"",
+		"description": "Stats-bar context tooltip loses its 'Context:' prefix. Legacy prompt-stats-e2e.spec.ts asserts span[title*='Context:'] + title=/Context:.*tokens/; misc journey previously had best-effort cost only (GAP). Ported into misc.journey.spec.ts (Journey: Prompt Stats).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/prompt-stats-e2e.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR52",
+		"area": "misc-preview-newtab",
+		"file": "src/app/render.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": ": `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`;",
+		"replace": ": `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${state.previewPanelMtime}`;",
+		"description": "Open-in-new-tab preview href gains a cache-buster it must never carry. Legacy preview-happy-path.spec.ts asserts the new-tab href has no ?mtime=; misc journey previously checked only the live iframe src (PARTIAL). Ported into misc.journey.spec.ts (Journey: Preview Artifacts — new-tab href + refresh).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/preview-happy-path.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
 	}
 ]

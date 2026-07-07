@@ -187,6 +187,17 @@ test.describe("Journey: Preview Artifacts", () => {
 			await expect(iframe).toBeVisible({ timeout: 20_000 });
 			const src = await iframe.getAttribute("src");
 			expect(src).toMatch(/^\/preview\/[a-f0-9-]+\/journey\.html\?mtime=\d+$/);
+			// Ported from preview-happy-path.spec.ts (BR52): the open-in-new-tab
+			// anchor href must NOT carry a cache-buster; Refresh must bump the mtime.
+			const link = page.locator('a[title="Open preview in new tab"]').first();
+			await expect(link).toBeVisible({ timeout: 10_000 });
+			const href = await link.getAttribute("href");
+			expect(href).toMatch(/^\/preview\/[a-f0-9-]+\/journey\.html$/);
+			expect(href).not.toMatch(/[?#]mtime=/);
+			const refresh = page.locator('button[title="Refresh preview"]').first();
+			await expect(refresh).toBeVisible({ timeout: 10_000 });
+			await refresh.click();
+			await expect.poll(async () => await iframe.getAttribute("src"), { timeout: 5_000 }).not.toEqual(src);
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -203,6 +214,35 @@ test.describe("Journey: Compaction", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId);
+		}
+	});
+});
+
+// Ported from prompt-stats-e2e.spec.ts (audit: misc GAP / BR51): after an agent
+// response, the stats bar must show the model name, a context-usage tooltip
+// prefixed "Context:" with a percentage, and a "$" cost. The journey previously
+// only best-effort probed a cost element.
+test.describe("Journey: Prompt Stats", () => {
+	test("stats bar shows model name, context %, and cost after a response", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			await sendMessage(page, "Full stats test");
+			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+			const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
+			await expect(statsBar).toBeVisible({ timeout: 15_000 });
+			await expect(statsBar).toContainText("mock-model", { timeout: 20_000 });
+			const contextSpan = page.locator("span[title*='Context:']");
+			await expect(contextSpan).toBeVisible({ timeout: 15_000 });
+			await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
+			await expect(contextSpan).toHaveAttribute("title", /Context:.*tokens/, { timeout: 10_000 });
+			await expect(statsBar).toContainText("$", { timeout: 15_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
 		}
 	});
 });
