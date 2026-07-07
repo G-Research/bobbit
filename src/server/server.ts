@@ -11776,6 +11776,13 @@ async function handleApiRoute(
 			return;
 		}
 
+		// Pause guard: reject prompts to paused goals before membership check.
+		const teamPromptGoal = getGoalAcrossProjects(goalId);
+		if (teamPromptGoal?.paused) {
+			json({ error: "Goal is paused — resume it before sending prompts", code: "GOAL_PAUSED", goalId }, 409);
+			return;
+		}
+
 		// Validate target is a team agent OR a direct-child team-lead OR an owned helper child.
 		const agents = teamManager.listAgents(goalId);
 		let allowed = !!agents.find(a => a.sessionId === body.sessionId);
@@ -12238,6 +12245,16 @@ async function handleApiRoute(
 		if (!callerAllowedTools.some((tool) => tool.toLowerCase() === "session_prompt")) {
 			json({ error: 'Tool "session_prompt" is not allowed for this session', code: "SESSION_PROMPT_NOT_ALLOWED" }, 403);
 			return;
+		}
+		// Pause guard: reject if the target session's goal is paused.
+		const sessionPromptTarget = sessionManager.getSession(targetSessionId);
+		const sessionPromptGoalId = sessionPromptTarget?.goalId ?? sessionPromptTarget?.teamGoalId;
+		if (sessionPromptGoalId) {
+			const sessionPromptGoal = getGoalAcrossProjects(sessionPromptGoalId);
+			if (sessionPromptGoal?.paused) {
+				json({ error: "Goal is paused — resume it before sending prompts", code: "GOAL_PAUSED", goalId: sessionPromptGoalId }, 409);
+				return;
+			}
 		}
 		try {
 			const result = await deliverSessionPrompt({
