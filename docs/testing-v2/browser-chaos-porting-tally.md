@@ -1,0 +1,71 @@
+# Browser-chaos porting pass — running tally
+
+Comprehensive porting pass driven by the browser-mutation campaign
+(`scripts/testing-v2/browser-chaos.mjs`) against the assertion-parity audit
+(`consolidation-assertion-parity.md`). For each audit-flagged behaviour: add a
+mutant → run → if it's a **real hole** (legacy-caught, journey-missed), port the
+assertion into the owning journey → re-run to confirm caught. No assertions
+weakened; no mutants dropped (mis-targeted mutants are *retargeted* to the
+contract the legacy spec actually asserts).
+
+## Cumulative tally
+
+| | Count |
+|---|------:|
+| Behaviours mutation-tested (content mutants) | 36 |
+| Clean substitutions (journey already held) | 13 |
+| v2-stronger (legacy missed, v2 caught) | 1 |
+| **Real holes found** | **21** |
+| **Real holes CLOSED (ported + re-verified)** | **21** |
+| Real holes open | 0 |
+| Both-missed (tracked justification) | 1 |
+
+## Batch 1 (BR01–BR28) — 13 holes closed
+
+13 clean substitutions; 1 v2-stronger (BR07 unseen dot); **13 real holes closed**
+(BR11 sidebar goal-title search, BR13 draft server-restore, BR17 page-title
+suffix, BR18 api-error-modal, BR19 cost-cache-hit, BR20 gate-signal-badge, BR21
+awaiting-signoffs, BR22 proposal-open-button, BR23 @-mention, BR24 send-disabled,
+BR25 model-fallback toggle, BR27 preflight gating, BR28 research-preview banner);
+1 both-missed (BR26 staff-trigger `Wake prompt (required)` label — pre-existing
+legacy gap, tracked). Full authoritative re-run confirmed 0 real holes across all
+28. See `browser-chaos-report.md`.
+
+## Batch 2 (BR29–BR36) — 8 holes closed
+
+All 8 confirmed real holes (2 of them, BR34/BR35, after retargeting from testids
+the legacy specs don't assert to the contracts they do). Ported + re-verified
+caught:
+
+| Mutant | Domain | Ported journey assertion |
+|---|---|---|
+| BR29 | misc | inject `auto_retry_pending` → banner + `data-reason/attempt/retry-delay-ms` |
+| BR30 | app-smoke | add GitHub trusted host → `github-trusted-host-row` renders |
+| BR31 | staff-debug | create staff agent → `sidebar-staff-header` renders |
+| BR32 | misc | footer `footer-image-model-id` = `gpt-image-2` |
+| BR33 | marketplace-packs | Installed tab → `market-installed-panel` |
+| BR34 | stories-registry | settings "Show Headquarters in project lists" toggle (by label) |
+| BR35 | sidebar-nav | archive + Show Archived → `grayscale(1)`-dimmed row |
+| BR36 | project-settings | `#/roles` exposes a "New Role" button |
+
+## Both-missed (tracked, not consolidation regressions)
+
+- **BR26** (staff-debug) — goal-trigger `Wake prompt (required)` label: asserted by
+  neither the legacy `staff-triggers.spec.ts` nor the journey. Add a
+  staff-trigger-editor assertion when that editor flow is journey-covered.
+
+## Domains remaining (next batches)
+
+Still under the audit's high-flag counts, behaviours not yet mutation-tested:
+app-smoke (palette, replace-bobbit, keyboard-nav, notification team-suppression,
+goal-metadata), misc (compaction card, gate-bypass, review Approve/Reject,
+prompt-stats, workflow-editor), sidebar-nav (rapid-switch, refresh-agent,
+child-loading, full-search navigation), prompt-interaction (queue-ui,
+escape-aborts, ask Escape/keyboard, session delete), project-settings
+(restart-button, system-prompt-customise, agent-dir, maintenance), stories
+(goal-routing, streaming, resilience), goal-editing (subgoal picker/toggle),
+team-operations (verify-card — likely manual/integration tier), proposals
+(failed-workflow, revision-autoupdate, subgoal-prefill).
+
+bg-wait-multi-repo + crash-restart remain covered by dedicated tier-1/2/3 specs
+(not journey extensions) — see the audit reconciliation section.
