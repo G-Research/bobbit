@@ -14,11 +14,16 @@ Disjoint corpus: `tests2/chaos/browser-mutants-clusterB.json`; report:
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants) | 9 |
-| Real holes found | 9 |
-| **Real holes CLOSED (ported + re-verified caught)** | **9** |
+| Behaviours mutation-tested (content mutants) | 10 |
+| Real holes found | 10 |
+| **Real holes CLOSED (ported + re-verified caught)** | **10** |
 | Real holes OPEN | 0 |
 | Null-mutant harness-integrity in corpus | 1 (BR00-null) |
+
+> **Authoritative full run:** `--corpus clusterB --all` (10 content mutants) →
+> **10/10 legacy-caught, 10/10 v2-caught, 0 real holes**; null-mutant integrity
+> **PASSED** (no suite caught the no-op patch). Report:
+> `docs/testing-v2/browser-chaos-report-clusterB.md`.
 
 ## Batch 3 — 2 holes closed (BR52, BR56)
 
@@ -31,6 +36,12 @@ window; re-run after all-clear was clean).
 |---|---|---|
 | BR52 | project-onboarding | ghost `.bobbit/` dir → preflight panel + `bobbit.existing` check row + `preflight-archive-cta` visible |
 | BR56 | team-operations | non-goal terminate modal enumerates child agents BY NAME ("its 2 child agents: …CascadeChildAlpha…CascadeChildBeta") |
+
+## Batch 4 — 1 hole closed (BR57)
+
+| Mutant | Domain / journey | Ported assertion |
+|---|---|---|
+| BR57 | proposals | `MULTI_COMPONENT_PROPOSAL` project proposal → Components view `component-card-api/web`; Workflows tab `workflow-card-feature-api/web/all-components` |
 
 ## Next behaviours (queue)
 proposals: dismiss-reload, invalid-workflow, revision-autoupdate,
