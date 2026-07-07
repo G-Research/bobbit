@@ -203,6 +203,12 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
 		process.env.BOBBIT_TEST_NO_REMOTE = "1";
 		process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
+		// Reduce post-exit stdio flush grace from 2000ms to 100ms so that fast
+		// commands (e.g. `echo ok`) complete their verification step in ~100ms
+		// instead of ~2000ms. Without this, sequential gate verifications in
+		// tests like gate-reset-api can take 12+ seconds, exceeding waitForGateStatus
+		// timeouts under concurrent test load. See contract/fixtures/gateway.ts.
+		process.env.BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS = "100";
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
 		// Skip outbound network probes and per-prompt title-generation calls.

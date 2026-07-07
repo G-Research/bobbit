@@ -1254,6 +1254,15 @@ function bindingTargetHost(target: PrWalkthroughTarget): string | undefined {
 }
 
 /**
+ * In-flight promise map used by resolveAndReadBindingBundle to deduplicate concurrent
+ * lazy bundle resolutions for the same jobId. Without this guard, three concurrent
+ * reads (as seen in session cbd17443) all pass the !bundleStore.load() check before
+ * any one of them completes, then each independently resolves+saves — last write wins
+ * and may produce inconsistent block indices if git yields different file ordering.
+ */
+const resolvingBundlePromises = new Map<string, Promise<void>>();
+
+/**
  * Lazily resolve the analysis bundle for a reviewer binding from its TARGET via the
  * EXISTING server pipeline (github-adapter for GitHub PRs, git-changeset for local),
  * cache it in WalkthroughAnalysisBundleStore keyed by jobId, then serve the requested
@@ -1280,12 +1289,21 @@ async function resolveAndReadBindingBundle(
 		cwd: "",
 	} as unknown as PrWalkthroughJobRecord;
 	// Resolve + cache lazily on first read; subsequent reads hit the cached bundle.
+	// resolvingBundlePromises deduplicates concurrent reads for the same jobId so
+	// only one call ever runs the resolution+save path (see comment above the map).
 	if (!bundleStore.load(binding.jobId)) {
-		const cwd = await resolveBindingCwd(deps, sessionId);
-		jobLike.cwd = cwd;
-		const parsedDiff = await resolveDiffForBindingTarget(binding.target, cwd, deps);
-		const bundle = createAnalysisBundleFromParsedDiff(jobLike, parsedDiff);
-		bundleStore.save(binding.jobId, bundle);
+		if (!resolvingBundlePromises.has(binding.jobId)) {
+			const p = (async () => {
+				if (bundleStore.load(binding.jobId)) return; // double-check after acquiring
+				const cwd = await resolveBindingCwd(deps, sessionId);
+				jobLike.cwd = cwd;
+				const parsedDiff = await resolveDiffForBindingTarget(binding.target, cwd, deps);
+				const bundle = createAnalysisBundleFromParsedDiff(jobLike, parsedDiff);
+				bundleStore.save(binding.jobId, bundle);
+			})().finally(() => resolvingBundlePromises.delete(binding.jobId));
+			resolvingBundlePromises.set(binding.jobId, p);
+		}
+		await resolvingBundlePromises.get(binding.jobId)!;
 	}
 	const bundle = bundleStore.load(binding.jobId);
 	if (bundle) await persistPrwFinalizationBundleEvidence(deps.packStore ?? getPackStore(), binding.jobId, bundle);
@@ -1400,6 +1418,7 @@ function parseGithubRef(prUrl: string | undefined, prNumber: string | number | u
 
 export const resolveWalkthroughForTesting = resolveWalkthrough;
 export const parseGithubRefForTesting = parseGithubRef;
+export const resolveAndReadBindingBundleForTesting = resolveAndReadBindingBundle;
 
 function fixtureWalkthrough(): WalkthroughResolveResult {
 	const changeset: WalkthroughChangeset = {
