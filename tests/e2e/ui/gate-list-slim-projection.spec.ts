@@ -23,7 +23,7 @@
  * Marker: GATE_LIST_SLIM_PROJECTION
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal, defaultProjectId, createSession, connectWs, signalAndWaitForGate } from "../e2e-setup.js";
 import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
 
 // A fast command whose stdout is a large, unmistakable marker string. If the
@@ -66,22 +66,15 @@ async function deleteWorkflow(workflowId: string): Promise<void> {
 	await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => { /* best-effort */ });
 }
 
-/** Poll the gate-list endpoint until the gate has a signal with terminal steps. */
-async function waitForCompletedSignal(goalId: string): Promise<any> {
-	for (let i = 0; i < 60; i++) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates`);
-		if (res.status === 200) {
-			const gates = await res.json();
-			const gate = (Array.isArray(gates) ? gates : gates.gates ?? []).find((g: any) => g.gateId === GATE_ID || g.id === GATE_ID);
-			const sig = gate?.signals?.[0];
-			const step = sig?.verification?.steps?.[0];
-			if (step && (step.status === "passed" || step.status === "failed" || step.passed === true)) {
-				return { gates, gate, sig, step };
-			}
-		}
-		await new Promise(r => setTimeout(r, 1000));
-	}
-	throw new Error("GATE_LIST_SLIM_PROJECTION: timed out waiting for a completed signal");
+/** Fetch the gate-list payload once and extract the gate/signal/step for GATE_ID. */
+async function fetchGateFromList(goalId: string): Promise<any> {
+	const res = await apiFetch(`/api/goals/${goalId}/gates`);
+	expect(res.status, "GATE_LIST_SLIM_PROJECTION: /gates list must respond 200").toBe(200);
+	const gates = await res.json();
+	const gate = (Array.isArray(gates) ? gates : gates.gates ?? []).find((g: any) => g.gateId === GATE_ID || g.id === GATE_ID);
+	const sig = gate?.signals?.[0];
+	const step = sig?.verification?.steps?.[0];
+	return { gates, gate, sig, step };
 }
 
 test.describe("Gate-list slim projection (Issue #1) — GATE_LIST_SLIM_PROJECTION", () => {
@@ -94,15 +87,15 @@ test.describe("Gate-list slim projection (Issue #1) — GATE_LIST_SLIM_PROJECTIO
 		const goalId = goal.id;
 
 		try {
-			// Signal the gate and wait for the command step to finish + persist
-			// its (large) output.
-			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/${GATE_ID}/signal`, {
-				method: "POST",
-				body: JSON.stringify({}),
-			});
-			expect(signalResp.status, "GATE_LIST_SLIM_PROJECTION: signal POST must succeed").toBe(201);
+			// Signal the gate and wait — event-driven — for its command step to
+			// finish and persist its (large) output. A goal-scoped WS connection
+			// lets us await the terminal gate_status_changed instead of polling.
+			const sessionId = await createSession({ goalId });
+			const conn = await connectWs(sessionId);
+			await signalAndWaitForGate(conn, goalId, GATE_ID, {}, ["passed", "failed"], 60_000);
 
-			const { gates, sig, step } = await waitForCompletedSignal(goalId);
+			const { gates, sig, step } = await fetchGateFromList(goalId);
+			expect(step, "GATE_LIST_SLIM_PROJECTION: gate must have a completed signal step").toBeTruthy();
 
 			// ── AC #1: the LIST payload must be SLIM ─────────────────────────
 			// Step metadata preserved…
