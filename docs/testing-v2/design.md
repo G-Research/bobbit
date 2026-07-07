@@ -877,3 +877,20 @@ Safety rules:
 - `scripts/testing-v2/check-no-test-flags.mjs` finds no test-only env flags or `NODE_ENV === "test"` conditionals in `src/` at switchover.
 - `docs/testing-v2/chaos-report.md` shows v2 catches 100% of legacy-caught mutants, matches/exceeds kill rate overall and per area, passes the null-mutant check, includes the ≥5 full-v2 sample, and remediates or justifies every both-missed mutant.
 - `npm run test:daily` has one full green evidence artifact, the staff-agent daily trigger exists, `docs/testing-v2.md` documents the runbook, and the 14-green legacy-retirement counter is persisted.
+
+## D8 — Browser-consolidation coverage confidence is a switchover prerequisite (SETTLED with user)
+
+The chaos mutation proof is node-tier only (0/54 mutants touch the browser/Playwright dimension), and
+parity-proof checks only aggregated per-area line+branch coverage — neither adversarially validates the
+184→~35 browser-e2e journey consolidation (151 `legacy-pending` specs "covered by" journeys). Before the
+gate is flipped to v2 (switchover), ALL THREE must pass and be committed:
+
+1. **Browser-dimension adversarial mutation** — inject mutants into code covered only by browser e2e; run
+   the targeted legacy spec(s) AND the replacement journey(s); any legacy-caught-but-journey-missed mutant
+   is a real hole to close by strengthening the journey. v2 (journeys) ≥ legacy per area, 0 unexplained misses.
+2. **Assertion-parity audit of the 151 consolidated specs** — for each `legacy-pending` spec, confirm its
+   replacement journey asserts the same behaviors (not just executes the code); add missing assertions.
+3. **Per-file coverage-delta report** — parity emits per-FILE line/branch deltas (not just per-area
+   aggregate) so localized drops in consolidated journeys are surfaced.
+
+Switchover is BLOCKED until 1–3 pass. Legacy remains the gate until then.
