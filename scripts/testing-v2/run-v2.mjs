@@ -77,30 +77,46 @@ async function main() {
 	// 2) Start the whole-run CPU sampler.
 	const sampler = createCpuSampler(process.pid, { intervalMs: 1000 });
 
-	// 3) Spawn tier children with ledger-granted worker counts.
-	const runs = [];
-
+	// 3) Decide which tiers to run.
+	const tierSpecs = [];
 	if (scripts["test:v2:core"]) {
-		runs.push(runScript("test:v2:core", { ...reservation.childEnv }, "tier1/vitest"));
+		tierSpecs.push(["test:v2:core", "tier1/vitest"]);
 	} else {
 		console.warn("[run-v2] SKIP tier-1: package.json has no `test:v2:core` script yet.");
 	}
-
 	const tier2Ready = scripts["test:v2:browser"] && hasPlaywrightConfig();
 	if (tier2Ready) {
-		runs.push(runScript("test:v2:browser", { ...reservation.childEnv }, "tier2/playwright"));
+		tierSpecs.push(["test:v2:browser", "tier2/playwright"]);
 	} else if (!scripts["test:v2:browser"]) {
 		console.warn("[run-v2] SKIP tier-2: package.json has no `test:v2:browser` script yet.");
 	} else {
 		console.warn("[run-v2] SKIP tier-2: no playwright-v2 config found (migration in progress).");
 	}
-
-	if (runs.length === 0) {
+	if (tierSpecs.length === 0) {
 		console.warn("[run-v2] nothing to run — neither tier script is available yet.");
 	}
 
-	// 4) Wait for all children.
-	const results = await Promise.all(runs);
+	// 4) Run the tiers.
+	//
+	// Under N-way concurrent load (BOBBIT_V2_CONCURRENCY_RUN=1, set by the
+	// concurrency proof) run tier-1 and tier-2 SEQUENTIALLY: vitest's
+	// gateway-booting integration tests and playwright's browser+gateway boots
+	// otherwise STACK within each run, and across N runs that doubles the peak
+	// concurrent gateway count — starving the heavy integration tests past their
+	// 60 s timeout. Sequencing the tiers keeps peak gateway boots per run to one
+	// tier at a time. An ISOLATED run (flag unset) keeps the tiers CONCURRENT so
+	// the single-run wall stays under the 300 s D7 isolation cap.
+	const sequentialTiers = process.env.BOBBIT_V2_CONCURRENCY_RUN && process.env.BOBBIT_V2_CONCURRENCY_RUN !== "0";
+	let results;
+	if (sequentialTiers) {
+		console.log("[run-v2] under-load mode: running tiers SEQUENTIALLY (no tier-1/tier-2 gateway-boot overlap)");
+		results = [];
+		for (const [script, label] of tierSpecs) {
+			results.push(await runScript(script, { ...reservation.childEnv }, label));
+		}
+	} else {
+		results = await Promise.all(tierSpecs.map(([script, label]) => runScript(script, { ...reservation.childEnv }, label)));
+	}
 	const sample = sampler.stop();
 	reservation.release();
 

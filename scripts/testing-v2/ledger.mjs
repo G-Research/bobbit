@@ -351,15 +351,13 @@ export function splitBundle(grant) {
 		const playwright = PLAYWRIGHT_CAP;
 		return { vitest, playwright, total: vitest + playwright };
 	}
-	// Contended (bundle 4..11, i.e. 2+ concurrent runs): exactly 1 playwright worker
-	// AND deliberately UNDER-allocate vitest (~half the bundle) to leave idle cores.
-	// Measured: v2-integration tests boot a real gateway each; at full utilization
-	// (Σ=cores) the transient gateway-boot CPU bursts across many concurrent
-	// integration test files starve each other past the 60 s test timeout. Leaving
-	// headroom (e.g. 3-way → 4v+1p, Σ=15/24) absorbs those bursts. Fork count is the
-	// dominant driver of integration starvation (6 forks/run failed fewer than 7).
-	const playwright = 1;
-	const vitest = clamp(Math.ceil(total / 2), 1, Math.min(VITEST_CAP, total - playwright));
+	// Contended (bundle 4..11, i.e. 2+ concurrent runs). Because run-v2 runs the
+	// tiers SEQUENTIALLY under load (see run-v2.mjs), vitest and playwright never
+	// execute at the same time within a run — so each phase can take a fuller share
+	// of the bundle without stacking gateway boots: ~1/3 playwright, the rest
+	// vitest. Anchors: 8→6v+2p (3-way), 6→4v+2p (4-way), 4→3v+1p (5-way).
+	const playwright = total >= 6 ? clamp(Math.floor(total / 3), 2, PLAYWRIGHT_CAP) : 1;
+	const vitest = clamp(total - playwright, 1, VITEST_CAP);
 	return { vitest, playwright, total: vitest + playwright };
 }
 
@@ -663,8 +661,8 @@ function cliSelftest() {
 	const s12 = splitBundle(12);
 	// Under contention (bundle 4/8 = 5-way/3-way) exactly ONE playwright worker so
 	// concurrent browsers stay minimal; a single run (bundle 12) keeps 8v+4p.
-	assert(s4.vitest === 2 && s4.playwright === 1, `split(4)=2v+1p got ${s4.vitest}+${s4.playwright}`);
-	assert(s8.vitest === 4 && s8.playwright === 1, `split(8)=4v+1p got ${s8.vitest}+${s8.playwright}`);
+	assert(s4.vitest === 3 && s4.playwright === 1, `split(4)=3v+1p got ${s4.vitest}+${s4.playwright}`);
+	assert(s8.vitest === 6 && s8.playwright === 2, `split(8)=6v+2p got ${s8.vitest}+${s8.playwright}`);
 	assert(s12.vitest === 8 && s12.playwright === 4, `split(12)=8v+4p got ${s12.vitest}+${s12.playwright}`);
 	for (let g = 2; g <= MAX_BUNDLE; g++) {
 		const s = splitBundle(g);
@@ -673,7 +671,7 @@ function cliSelftest() {
 		assert(s.vitest <= VITEST_CAP && s.playwright <= PLAYWRIGHT_CAP, `splitBundle(${g}) within caps, got v=${s.vitest} pw=${s.playwright}`);
 		assert(s.vitest >= 1 && s.playwright >= 1, `splitBundle(${g}) both kinds ≥1, got v=${s.vitest} pw=${s.playwright}`);
 	}
-	console.log("  splitBundle(4)=2v+1p ✓  splitBundle(8)=4v+1p ✓  splitBundle(12)=8v+4p ✓  no-overshoot 2..12 ✓");
+	console.log("  splitBundle(4)=3v+1p ✓  splitBundle(8)=6v+2p ✓  splitBundle(12)=8v+4p ✓  no-overshoot 2..12 ✓");
 
 	// 6) Pending-contention: seed 4 live pending markers (distinct runs) so a fresh
 	//    reserve sees activeParents=5 → target=floor(24/5)=4. This is the core
