@@ -77,7 +77,7 @@ import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
-import { buildGateStatusSummary } from "./gate-status-summary.js";
+import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
 	GateArtifactResolutionError,
@@ -10040,7 +10040,10 @@ async function handleApiRoute(
 			json({ gates: summaryGates, ...counts, summary });
 			return;
 		}
-		json({ gates: enriched });
+		// Slim the list payload: strip inline step output / artifact bodies /
+		// diagnostics. Full step text is fetched lazily on expand via the
+		// gate-detail + verification-snapshot paths below.
+		json({ gates: enriched.map(g => projectGateForList(g)) });
 		return;
 	}
 
@@ -10076,6 +10079,7 @@ async function handleApiRoute(
 					signalId: latestSignal.id,
 					verification: latestSignal.verification,
 					activeVerification: verificationHarness.getActiveVerification(latestSignal.id),
+					isActiveVerificationAlive: verificationHarness.areVerificationSessionsAlive(latestSignal.id),
 					selectionOptions: { implicitDefault: true },
 				}) : undefined;
 				slim.latestSignal = {
@@ -10088,6 +10092,7 @@ async function handleApiRoute(
 						summary: verificationSnapshot.summary,
 						counts: verificationSnapshot.counts,
 						active: verificationSnapshot.active,
+						stale: verificationSnapshot.stale,
 						steps: verificationSnapshot.steps,
 						selection: verificationSnapshot.selection,
 					} : undefined,
@@ -10176,6 +10181,7 @@ async function handleApiRoute(
 					signalId: resolved.signal.id,
 					verification: resolved.signal.verification,
 					activeVerification: verificationHarness.getActiveVerification(resolved.signal.id),
+					isActiveVerificationAlive: verificationHarness.areVerificationSessionsAlive(resolved.signal.id),
 					selectionOptions,
 					stepName,
 				});
@@ -10187,6 +10193,7 @@ async function handleApiRoute(
 					summary: snapshot.summary,
 					counts: snapshot.counts,
 					active: snapshot.active,
+					stale: snapshot.stale,
 					steps: snapshot.steps,
 					selection: snapshot.selection,
 				});

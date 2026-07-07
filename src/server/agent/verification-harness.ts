@@ -158,6 +158,9 @@ import {
 	shouldRetryVerificationStep,
 	isRestartInterruptError,
 	isRestartInterruptedStep,
+	decideCommandRecoveryMode,
+	shouldRerunSessionStepOnResume,
+	type CommandRecoveryMode,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
@@ -823,7 +826,7 @@ export interface ActiveVerification {
 		/** Original command deadline in epoch milliseconds. */
 		deadlineMs?: number;
 		/** Restart recovery support mode for this command execution path. */
-		restartRecoveryMode?: "detached" | "unsupported";
+		restartRecoveryMode?: CommandRecoveryMode;
 		/** Clear diagnostic when the command path cannot be recovered after restart. */
 		restartRecoveryUnsupportedReason?: string;
 		/** bootEpoch of the harness that started this step (Layer 2). */
@@ -1749,11 +1752,16 @@ export class VerificationHarness {
 			if (!this._isResumeStillActive(v)) return;
 
 			// If resume failed with a transient error and this is an llm-review or agent-qa step,
-			// re-run from scratch rather than giving up
+			// re-run from scratch rather than giving up. A COLD reviewer that missed
+			// the readiness window after a restart (session lost / not-ready / RPC
+			// timeout) is also re-runnable — deterministically re-run it from
+			// scratch instead of leaving it a terminal "could not be recovered"
+			// restart-interrupt (shouldRerunSessionStepOnResume).
 			const isTransient = step.type === "agent-qa"
 					? isTransientQaError(resumeResult?.output || "")
 					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
-			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && isTransient) {
+			const rerunnable = isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || "");
+			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && rerunnable) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
 				let rerunResult: typeof resumeResult | null = null;
 				if (step.type === "agent-qa") {
@@ -4716,23 +4724,29 @@ export class VerificationHarness {
 			// commands that need the full interactive PATH (npm, pytest, gh, etc.).
 			const { shell: shellBin, args: shellArgs } = getVerificationShell(command);
 
-			// Decide execution mode.
-			let useDetached = !containerId && !!streamCtx;
-			let restartRecoveryUnsupportedReason: string | undefined = containerId
-				? "Container command steps currently run through attached docker exec; durable restart recovery is not available for this path."
-				: undefined;
+			// Decide execution/recovery mode (see decideCommandRecoveryMode).
+			//   detached      → host bash exit-file wrapper (durable host identity)
+			//   container-exec→ attached docker exec + durable IN-CONTAINER exit/pid
+			//                   files, re-attached via `docker exec` on resume
+			//   pending-retry → not durable here (Windows w/o Git Bash); a restart
+			//                   is a retryable pending interruption, never a verdict
+			//   unsupported   → no streaming context; not recoverable
+			const recoveryMode: CommandRecoveryMode = decideCommandRecoveryMode({
+				containerId,
+				hasStreamCtx: !!streamCtx,
+				platform: process.platform,
+				hasGitBash: !!GIT_BASH,
+			});
+			let useDetached = recoveryMode === "detached";
+			const useContainerDurable = recoveryMode === "container-exec" && !!streamCtx;
+			let restartRecoveryUnsupportedReason: string | undefined =
+				recoveryMode === "pending-retry"
+					? "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path is not durable, so a gateway restart leaves the step pending/retryable (it is re-run on the next signal), never a fabricated verdict."
+					: undefined;
 
-			// On Windows without Git Bash, the resolved shell is cmd.exe which
-			// cannot execute the bash exit-file wrapper. Explicitly mark the step
-			// non-restart-recoverable so a restart becomes a pending/retryable
-			// interruption, not a fabricated command verdict.
-			if (useDetached && process.platform === "win32" && !GIT_BASH) {
-				if (!VerificationHarness._warnedCmdExeDetached) {
-					VerificationHarness._warnedCmdExeDetached = true;
-					console.warn("[verification] Git Bash not found on Windows — detached command mode disabled (cmd.exe cannot run the bash exit-file wrapper). Verification command steps will not survive a gateway restart.");
-				}
-				restartRecoveryUnsupportedReason = "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path cannot be recovered after gateway restart.";
-				useDetached = false;
+			if (recoveryMode === "pending-retry" && !VerificationHarness._warnedCmdExeDetached) {
+				VerificationHarness._warnedCmdExeDetached = true;
+				console.warn("[verification] Git Bash not found on Windows — durable detached command mode unavailable (cmd.exe cannot run the bash exit-file wrapper). A gateway restart mid-verification will leave command steps pending/retryable rather than recovered.");
 			}
 			let outFile: string | undefined;
 			let errFile: string | undefined;
@@ -4790,6 +4804,19 @@ export class VerificationHarness {
 				}
 			}
 
+			// Container durable recovery: persist exit/pid/heartbeat paths INSIDE
+			// the container. The host cannot read them via `fs`; resume reads them
+			// with `docker exec`. Host stdout/stderr streaming (outFile/errFile,
+			// the pipe path) is unchanged so live output still works.
+			let containerStateDir: string | undefined;
+			if (useContainerDurable && streamCtx) {
+				containerStateDir = `/tmp/.bobbit-verif/${streamCtx.signalId}`;
+				exitFile = `${containerStateDir}/${streamCtx.stepIndex}.exit`;
+				pidFile = `${containerStateDir}/${streamCtx.stepIndex}.pid`;
+				heartbeatFile = `${containerStateDir}/${streamCtx.stepIndex}.heartbeat`;
+				pidNonce = randomUUID();
+			}
+
 			const stampActiveCommandStep = (patch: Partial<ActiveVerification["steps"][number]>) => {
 				if (!streamCtx) return;
 				const av = this.activeVerifications.get(streamCtx.signalId);
@@ -4799,6 +4826,7 @@ export class VerificationHarness {
 			};
 
 			if (streamCtx) {
+				const durable = useDetached || useContainerDurable;
 				stampActiveCommandStep({
 					outFile,
 					errFile,
@@ -4807,13 +4835,13 @@ export class VerificationHarness {
 					pidNonce,
 					heartbeatFile,
 					containerId,
-					bootEpoch: useDetached ? this.bootEpoch : undefined,
+					bootEpoch: durable ? this.bootEpoch : undefined,
 					timeoutSec,
 					expectFailure,
 					errorPattern,
 					commandCwd: normalizedCwd,
-					restartRecoveryMode: useDetached ? "detached" : "unsupported",
-					restartRecoveryUnsupportedReason: useDetached ? undefined : (restartRecoveryUnsupportedReason ?? "Attached command execution cannot be recovered after gateway restart."),
+					restartRecoveryMode: recoveryMode,
+					restartRecoveryUnsupportedReason: durable ? undefined : (restartRecoveryUnsupportedReason ?? "Attached command execution cannot be recovered after gateway restart."),
 				});
 			}
 
@@ -4887,9 +4915,26 @@ export class VerificationHarness {
 					// Wrap the command so the in-container shell writes its PID
 					// to a temp file. On timeout, we kill that PID's process
 					// group — scoped to this step's subtree, not container-wide.
+					// When durable recovery is enabled, the PID file is the
+					// persisted in-container path and the wrapper also writes a
+					// heartbeat + atomic exit-code file so a resume after gateway
+					// restart can finalize from the exit code (or re-attach by
+					// process group) instead of fabricating a verdict.
 					const stepKillId = randomUUID().slice(0, 8);
-					const pidFile = `/tmp/.bobbit-step-${stepKillId}.pid`;
-					const wrappedCmd = `echo $$ > ${pidFile}; ${command}`;
+					const killPidFile = useContainerDurable && pidFile ? pidFile : `/tmp/.bobbit-step-${stepKillId}.pid`;
+					let wrappedCmd: string;
+					if (useContainerDurable && containerStateDir && exitFile && heartbeatFile) {
+						const qDir = shellSingleQuote(containerStateDir);
+						const qPid = shellSingleQuote(killPidFile);
+						const qHb = shellSingleQuote(heartbeatFile);
+						const qExit = shellSingleQuote(exitFile);
+						// POSIX sh; stdout/stderr intentionally NOT redirected so the
+						// docker exec pipe keeps streaming live output to the host.
+						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; printf %s "$__ec" > ${qExit}.tmp && mv ${qExit}.tmp ${qExit}; exit $__ec`;
+					} else {
+						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
+					}
+					const pidFileForKill = killPidFile;
 					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
@@ -4902,9 +4947,10 @@ export class VerificationHarness {
 							// processes (agent sessions, other verification steps,
 							// bg-processes) untouched.
 							try {
+								const qp = shellSingleQuote(pidFileForKill);
 								const killer = spawn("docker", [
 									"exec", containerId, "/bin/sh", "-c",
-									`p=$(cat ${pidFile} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${pidFile} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null; rm -f ${pidFile}`,
+									`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null; rm -f ${qp}`,
 								], { stdio: "ignore" });
 								killer.on("error", () => { /* docker missing — best-effort */ });
 							} catch { /* ignore */ }
@@ -4971,6 +5017,34 @@ export class VerificationHarness {
 				// Mark for restart-survival so killAllTracked (called from
 				// shutdown()) skips this entry. The next boot resumes via
 				// _resumeCommandStep using durable identity + exit files.
+				tracked!.markSurvival();
+			} else if (useContainerDurable && streamCtx) {
+				// Container durable path: the host `docker exec` client's pid is
+				// not the in-container process, so we do not stamp `pid` (resume
+				// re-attaches via `docker exec` reading the in-container pid/exit
+				// files). Stamp timing + mark survival so a graceful shutdown does
+				// not tear down the client and (potentially) the in-container job
+				// before it writes its exit file.
+				const startTimeMs = Date.now();
+				stampActiveCommandStep({
+					startTimeMs,
+					deadlineMs: startTimeMs + timeoutSec * 1000,
+					containerId,
+					outFile,
+					errFile,
+					exitFile,
+					pidFile,
+					pidNonce,
+					heartbeatFile,
+					bootEpoch: this.bootEpoch,
+					timeoutSec,
+					expectFailure,
+					errorPattern,
+					commandCwd: normalizedCwd,
+					restartRecoveryMode: "container-exec",
+					restartRecoveryUnsupportedReason: undefined,
+				});
+				try { child.unref(); } catch { /* ignore */ }
 				tracked!.markSurvival();
 			}
 
@@ -5296,6 +5370,15 @@ export class VerificationHarness {
 			return timeoutResult();
 		}
 
+		// Container durable recovery: the exit/pid/heartbeat files live INSIDE the
+		// container and are read via `docker exec`, so the host `fs.existsSync`
+		// Case A above never matched them. Re-attach by finalizing from the
+		// in-container exit file, or by verifying the in-container process is
+		// still alive (fresh heartbeat) and polling for its exit.
+		if (step.restartRecoveryMode === "container-exec" && step.containerId && step.exitFile) {
+			return await this._resumeContainerCommandStep(v, step, { finalize, timeoutResult, restartInterrupted });
+		}
+
 		const unsupportedRecoveryReason = (): string | undefined => {
 			if (step.restartRecoveryUnsupportedReason) return step.restartRecoveryUnsupportedReason;
 			if (step.containerId) return `Container command step for docker container "${step.containerId}" used attached docker exec; durable restart recovery is unsupported for this path.`;
@@ -5380,6 +5463,113 @@ export class VerificationHarness {
 		} finally {
 			if (stopTail) stopTail();
 		}
+	}
+
+	/**
+	 * Run a short `docker exec … /bin/sh -c <cmd>` and capture stdout. Best-effort:
+	 * resolves `{ code: null }` on spawn error / timeout so resume logic can fall
+	 * back gracefully. Used only by the container command resume path.
+	 */
+	private _dockerExecCapture(containerId: string, shellCmd: string, timeoutMs = 5_000): Promise<{ code: number | null; stdout: string }> {
+		return new Promise(resolve => {
+			let out = "";
+			let done = false;
+			let child: ReturnType<typeof spawn> | undefined;
+			const finish = (code: number | null) => {
+				if (done) return;
+				done = true;
+				try { child?.kill?.(); } catch { /* ignore */ }
+				resolve({ code, stdout: out });
+			};
+			try {
+				child = spawn("docker", ["exec", containerId, "/bin/sh", "-c", shellCmd], { stdio: ["ignore", "pipe", "ignore"] });
+			} catch {
+				resolve({ code: null, stdout: "" });
+				return;
+			}
+			const timer = setTimeout(() => finish(null), timeoutMs);
+			timer.unref?.();
+			child.stdout?.on("data", (d: Buffer) => {
+				out += d.toString();
+				if (out.length > 65_536) out = out.slice(-65_536);
+			});
+			child.on("error", () => { clearTimeout(timer); finish(null); });
+			child.on("close", (code: number | null) => { clearTimeout(timer); finish(code); });
+		});
+	}
+
+	/**
+	 * Resume a container command step after a gateway restart. The durable
+	 * exit/pid/heartbeat files live inside the container, so re-attachment is
+	 * done via `docker exec`:
+	 *   1. Exit file present → finalize from the recovered exit code (honours
+	 *      expectFailure/errorPattern), same as the host detached path.
+	 *   2. Otherwise, while the in-container heartbeat is fresh and the deadline
+	 *      has not passed, poll for the exit file.
+	 *   3. On deadline → kill the in-container process group via `docker exec`
+	 *      and return the timeout result.
+	 *   4. Heartbeat stale and no exit file → the job stopped without a durable
+	 *      verdict; return a retryable pending interrupt (never a fabricated
+	 *      failure), matching the host detached semantics.
+	 */
+	private async _resumeContainerCommandStep(
+		v: ActiveVerification,
+		step: ActiveVerification["steps"][number],
+		helpers: {
+			finalize: (code: number | null) => ResumedVerificationStep;
+			timeoutResult: () => ResumedVerificationStep;
+			restartInterrupted: (reason?: string) => ResumedVerificationStep;
+		},
+	): Promise<ResumedVerificationStep | null> {
+		const cid = step.containerId!;
+		const readExit = async (): Promise<number | null> => {
+			const r = await this._dockerExecCapture(cid, `cat ${shellSingleQuote(step.exitFile!)} 2>/dev/null`);
+			const n = parseInt(r.stdout.trim(), 10);
+			return Number.isFinite(n) ? n : null;
+		};
+		const heartbeatFresh = async (): Promise<boolean> => {
+			if (!step.heartbeatFile) return false;
+			const r = await this._dockerExecCapture(cid, `cat ${shellSingleQuote(step.heartbeatFile)} 2>/dev/null`);
+			const m = r.stdout.match(/"ts":(\d+)/);
+			if (!m) return false;
+			const tsMs = parseInt(m[1], 10) * 1000;
+			return Number.isFinite(tsMs) && (Date.now() - tsMs) < 15_000;
+		};
+
+		// 1. Already finished.
+		let code = await readExit();
+		if (code !== null) return helpers.finalize(code);
+
+		const deadline = step.deadlineMs ?? ((step.startTimeMs ?? step.startedAt) + (step.timeoutSec ?? 300) * 1000);
+
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: container step "${step.name}" — polling in-container exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
+
+		// 2. Poll while the in-container process is alive (fresh heartbeat).
+		while (this._isResumeStillActive(v) && Date.now() < deadline) {
+			if (!(await heartbeatFresh())) break;
+			await new Promise(r => setTimeout(r, 1_000));
+			code = await readExit();
+			if (code !== null) return helpers.finalize(code);
+		}
+		if (!this._isResumeStillActive(v)) return null;
+
+		code = await readExit();
+		if (code !== null) return helpers.finalize(code);
+
+		// 3. Deadline elapsed → kill the in-container process group, then timeout.
+		if (Date.now() >= deadline) {
+			if (step.pidFile) {
+				const qp = shellSingleQuote(step.pidFile);
+				await this._dockerExecCapture(
+					cid,
+					`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null`,
+				).catch(() => undefined);
+			}
+			return helpers.timeoutResult();
+		}
+
+		// 4. Stopped without a durable verdict → retryable pending interrupt.
+		return helpers.restartInterrupted("The in-container command process stopped after restart without writing a durable exit status.");
 	}
 	// ── Nested goals (subgoal verify-step) ───────────────────────────────
 	// `runSubgoalStep` is the single integration point. Stamp-immediately,
