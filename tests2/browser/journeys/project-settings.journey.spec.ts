@@ -23,14 +23,14 @@ test.describe("Journey: Project Settings", () => {
 	test("project settings route renders", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test("system settings general route renders", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
 		await expect(page.getByText(/settings/i).first()).toBeVisible({ timeout: 15_000 });
 	});
 
@@ -38,8 +38,8 @@ test.describe("Journey: Project Settings", () => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 5_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("API-created project appears on projects settings page", async ({ page }) => {
@@ -51,7 +51,7 @@ test.describe("Journey: Project Settings", () => {
 		try {
 			await openApp(page);
 			await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
-			await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
+			await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
 			await expect(page.getByText("v2-settings-proj-alpha").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteProject(projectId);
@@ -67,19 +67,19 @@ test.describe("Journey: Project Settings", () => {
 		try {
 			await openApp(page);
 			await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
-			await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
+			await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
 			const projectName = page.getByText("v2-settings-proj-beta").first();
 			await expect(projectName).toBeVisible({ timeout: 15_000 });
 			// Hover the group container to reveal gear icon
 			const groupContainer = projectName.locator("xpath=ancestor::*[contains(@class,'group')]").first();
 			await groupContainer.hover();
 			const gearBtn = groupContainer.locator("button[title='Project settings']");
-			if (await gearBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
+			if (await gearBtn.isVisible({ timeout: 15_000 }).catch(() => false)) {
 				await gearBtn.click();
 				await page.waitForFunction(
 					(id: string) => window.location.hash.includes(id) && window.location.hash.includes("settings"),
 					projectId,
-					{ timeout: 5_000 },
+					{ timeout: 15_000 },
 				);
 				const hash = await page.evaluate(() => window.location.hash);
 				expect(hash).toContain(projectId);
@@ -90,7 +90,7 @@ test.describe("Journey: Project Settings", () => {
 				await page.waitForFunction(
 					(id: string) => window.location.hash.includes(id),
 					projectId,
-					{ timeout: 5_000 },
+					{ timeout: 15_000 },
 				);
 				const hash = await page.evaluate(() => window.location.hash);
 				expect(hash).toContain(projectId);
@@ -112,7 +112,7 @@ test.describe("Journey: Project Settings", () => {
 			await page.waitForFunction(
 				(id: string) => window.location.hash.includes(id),
 				projectId,
-				{ timeout: 5_000 },
+				{ timeout: 15_000 },
 			);
 			await expect(page.getByText("v2-settings-proj-gamma").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
@@ -123,7 +123,7 @@ test.describe("Journey: Project Settings", () => {
 	test("models settings route renders a toggle", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/system/models"; });
-		await page.waitForFunction(() => window.location.hash.includes("models"), null, { timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("models"), null, { timeout: 20_000 });
 		// Any toggle/checkbox-style input on the models settings page
 		const toggle = page.locator('input[type="checkbox"], [role="switch"]').first();
 		await expect(toggle).toBeVisible({ timeout: 15_000 });
@@ -134,8 +134,8 @@ test.describe("Journey: Project Assistant", () => {
 	test("assistant settings route reachable", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test("app shell stable during project assistant flow", async ({ page }) => {

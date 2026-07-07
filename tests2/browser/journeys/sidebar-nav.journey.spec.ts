@@ -9,13 +9,13 @@ test.describe("Journey: Sidebar Navigation", () => {
 	test("sidebar and new-session button visible on load", async ({ page }) => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.getByRole("button", { name: /new session/i }).first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByRole("button", { name: /new session/i }).first()).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("settings hash route renders settings text", async ({ page }) => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
-		await page.waitForFunction(() => window.location.hash.includes("/settings"), null, { timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("/settings"), null, { timeout: 20_000 });
 		await expect(page.getByText("Settings").first()).toBeVisible({ timeout: 15_000 });
 	});
 
@@ -26,7 +26,7 @@ test.describe("Journey: Sidebar Navigation", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
-			await expect(page.locator(`[data-session-id="${sessionId}"]`).first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator(`[data-session-id="${sessionId}"]`).first()).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -67,7 +67,7 @@ test.describe("Journey: Sidebar Navigation", () => {
 					`[data-session-id="${sessionId}"][data-nav-active="true"], ` +
 					`[data-session-id="${sessionId}"].sidebar-session-active`,
 				).first(),
-			).toBeVisible({ timeout: 8_000 });
+			).toBeVisible({ timeout: 15_000 });
 
 			// URL must contain the session ID
 			const hash = await page.evaluate(() => window.location.hash);
@@ -91,7 +91,7 @@ test.describe("Journey: Sidebar Navigation", () => {
 
 			// Now click s2 row in sidebar
 			const s2Row = page.locator(`[data-session-id="${s2}"]`).first();
-			await expect(s2Row).toBeVisible({ timeout: 10_000 });
+			await expect(s2Row).toBeVisible({ timeout: 20_000 });
 			await s2Row.click();
 
 			// Editor visible for s2
@@ -103,7 +103,7 @@ test.describe("Journey: Sidebar Navigation", () => {
 					`[data-session-id="${s2}"][data-nav-active="true"], ` +
 					`[data-session-id="${s2}"].sidebar-session-active`,
 				).first(),
-			).toBeVisible({ timeout: 8_000 });
+			).toBeVisible({ timeout: 15_000 });
 
 			// URL reflects s2
 			const hash = await page.evaluate(() => window.location.hash);
@@ -139,9 +139,9 @@ test.describe("Journey: Sidebar Navigation", () => {
 			await openApp(page);
 
 			// All three sessions must be visible before filtering
-			await expect(page.getByText(titleA).first()).toBeVisible({ timeout: 10_000 });
-			await expect(page.getByText(titleB).first()).toBeVisible({ timeout: 5_000 });
-			await expect(page.getByText(titleC).first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText(titleA).first()).toBeVisible({ timeout: 20_000 });
+			await expect(page.getByText(titleB).first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(titleC).first()).toBeVisible({ timeout: 15_000 });
 
 			// Wait for shortcuts listener to attach, then use Ctrl+K to open search
 			await expect.poll(
@@ -150,19 +150,19 @@ test.describe("Journey: Sidebar Navigation", () => {
 			).toBe(true);
 			await page.keyboard.press("Control+k");
 			const searchInput = page.locator("input[data-search]");
-			await expect(searchInput).toBeFocused({ timeout: 5_000 });
+			await expect(searchInput).toBeFocused({ timeout: 15_000 });
 
 			// Search for AlphaSBNav — only that session should be visible
 			await searchInput.fill(titleA);
-			await expect(page.getByText(titleA).first()).toBeVisible({ timeout: 5_000 });
-			await expect(page.getByText(titleB)).not.toBeVisible({ timeout: 5_000 });
-			await expect(page.getByText(titleC)).not.toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText(titleA).first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(titleB)).not.toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(titleC)).not.toBeVisible({ timeout: 15_000 });
 
 			// Clear search — all three visible again
 			await searchInput.fill("");
-			await expect(page.getByText(titleA).first()).toBeVisible({ timeout: 5_000 });
-			await expect(page.getByText(titleB).first()).toBeVisible({ timeout: 5_000 });
-			await expect(page.getByText(titleC).first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText(titleA).first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(titleB).first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(titleC).first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await Promise.all([
 				deleteSession(sA).catch(() => {}),

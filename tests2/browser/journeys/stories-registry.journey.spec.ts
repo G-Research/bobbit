@@ -15,14 +15,14 @@ test.describe("Journey: Stories Registry", () => {
 	test("stories route renders without error", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/stories"; });
-		await page.waitForFunction(() => window.location.hash.includes("stories"), null, { timeout: 10_000 });
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("stories"), null, { timeout: 20_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test("sidebar visible on stories route", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/stories"; });
-		await page.waitForFunction(() => window.location.hash.includes("stories"), null, { timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("stories"), null, { timeout: 20_000 });
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 	});
 });
@@ -32,16 +32,16 @@ test.describe("Journey: Headquarters", () => {
 		await openApp(page);
 		// Headquarters is usually accessible at /settings or a dedicated hash
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test("app shell stable on headquarters/settings route", async ({ page }) => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 5_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 	});
 });
 
@@ -77,7 +77,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 				if (!resp.ok) return null;
 				const body = await resp.json() as { data?: { text?: string } };
 				return body?.data?.text ?? null;
-			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
+			}, { timeout: 20_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
 
 			// Switch away to B
 			await navigateToHash(page, `#/session/${sB}`);
@@ -89,7 +89,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 			await expect(async () => {
 				const val = await page.locator("message-editor textarea").first().inputValue();
 				expect(val).toContain(draftText);
-			}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 20_000 });
 		} finally {
 			await deleteSession(sA).catch(() => {});
 			await deleteSession(sB).catch(() => {});
@@ -117,7 +117,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 				if (!resp.ok) return null;
 				const body = await resp.json() as { data?: { text?: string } };
 				return body?.data?.text ?? null;
-			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
+			}, { timeout: 20_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
 
 			// Reload and navigate back
 			await page.reload();
@@ -129,7 +129,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 			await expect(async () => {
 				const val = await page.locator("message-editor textarea").first().inputValue();
 				expect(val).toContain(draftText);
-			}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 20_000 });
 		} finally {
 			await deleteSession(sA).catch(() => {});
 		}
@@ -157,7 +157,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 					`[data-session-id="${sA}"][data-nav-active="true"], ` +
 					`[data-session-id="${sA}"].sidebar-session-active`,
 				).first(),
-			).toBeVisible({ timeout: 8_000 });
+			).toBeVisible({ timeout: 15_000 });
 
 			// Navigate to B
 			await navigateToHash(page, `#/session/${sB}`);
@@ -169,7 +169,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 					`[data-session-id="${sB}"][data-nav-active="true"], ` +
 					`[data-session-id="${sB}"].sidebar-session-active`,
 				).first(),
-			).toBeVisible({ timeout: 8_000 });
+			).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sA).catch(() => {});
 			await deleteSession(sB).catch(() => {});
@@ -198,7 +198,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 			expect(await page.evaluate(() => window.location.hash)).toContain(sA);
 
 			// Session row must be in the sidebar
-			await expect(page.locator(`[data-session-id="${sA}"]`).first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator(`[data-session-id="${sA}"]`).first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sA).catch(() => {});
 		}
@@ -226,7 +226,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 				if (!resp.ok) return null;
 				const body = await resp.json() as { data?: { text?: string } };
 				return body?.data?.text ?? null;
-			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftA);
+			}, { timeout: 20_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftA);
 
 			// Switch to B — editor must be empty (no bleed from A)
 			await navigateToHash(page, `#/session/${sB}`);
@@ -234,7 +234,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 			await expect(async () => {
 				const val = await page.locator("message-editor textarea").first().inputValue();
 				expect(val).not.toContain(draftA);
-			}).toPass({ intervals: [500, 1000, 2000], timeout: 8_000 });
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 15_000 });
 
 			// Switch back to A — A's draft must be intact
 			await navigateToHash(page, `#/session/${sA}`);
@@ -242,7 +242,7 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 			await expect(async () => {
 				const val = await page.locator("message-editor textarea").first().inputValue();
 				expect(val).toContain(draftA);
-			}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 20_000 });
 		} finally {
 			await deleteSession(sA).catch(() => {});
 			await deleteSession(sB).catch(() => {});

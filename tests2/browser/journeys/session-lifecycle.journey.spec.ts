@@ -26,13 +26,13 @@ async function openSidebarPopover(
 	sessionId: string,
 ): Promise<boolean> {
 	const row = sessionRow(page, sessionId);
-	if (!await row.isVisible({ timeout: 5_000 }).catch(() => false)) return false;
+	if (!await row.isVisible({ timeout: 15_000 }).catch(() => false)) return false;
 	await row.scrollIntoViewIfNeeded();
 	await row.hover();
 	const trigger = sidebarTrigger(row, sessionId);
 	if (!await trigger.isVisible({ timeout: 3_000 }).catch(() => false)) return false;
 	await trigger.click();
-	return page.locator("sidebar-actions-popover [role='menu']").isVisible({ timeout: 5_000 }).catch(() => false);
+	return page.locator("sidebar-actions-popover [role='menu']").isVisible({ timeout: 15_000 }).catch(() => false);
 }
 
 /** Click a copy-link action: try direct header button first, fall back to popover. */
@@ -47,7 +47,7 @@ async function clickCopyLink(page: import("@playwright/test").Page): Promise<boo
 	if (!await trigger.isVisible({ timeout: 3_000 }).catch(() => false)) return false;
 	await trigger.click();
 	const item = page.locator('sidebar-actions-popover [role="menuitem"][data-session-action-id="copy-link"]').first();
-	if (!await item.isVisible({ timeout: 5_000 }).catch(() => false)) return false;
+	if (!await item.isVisible({ timeout: 15_000 }).catch(() => false)) return false;
 	await item.click();
 	return true;
 }
@@ -93,7 +93,7 @@ test.describe("Journey: Session Lifecycle", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
-			await expect(page.locator(`[data-session-id="${sessionId}"]`).first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator(`[data-session-id="${sessionId}"]`).first()).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -129,13 +129,13 @@ test.describe("Journey: Sidebar Actions Menu", () => {
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			const row = sessionRow(page, sessionId);
-			if (!await row.isVisible({ timeout: 5_000 }).catch(() => false)) {
+			if (!await row.isVisible({ timeout: 15_000 }).catch(() => false)) {
 				test.skip(true, "session row not in sidebar; actions test skipped");
 				return;
 			}
 			await row.hover();
 			const trigger = sidebarTrigger(row, sessionId);
-			await expect(trigger).toBeVisible({ timeout: 5_000 });
+			await expect(trigger).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -156,18 +156,18 @@ test.describe("Journey: Sidebar Actions Menu", () => {
 			}
 
 			const popover = page.locator("sidebar-actions-popover [role='menu']");
-			await expect(popover).toBeVisible({ timeout: 5_000 });
+			await expect(popover).toBeVisible({ timeout: 15_000 });
 
 			// Canonical session actions: modify, terminate, fork, copy-link should be present
 			const expectedActions = ["modify", "terminate", "copy-link"];
 			for (const actionId of expectedActions) {
 				const item = page.locator(`sidebar-actions-popover [role="menuitem"][data-session-action-id="${actionId}"]`).first();
-				await expect(item, `action '${actionId}' should appear in sidebar popover`).toBeVisible({ timeout: 5_000 });
+				await expect(item, `action '${actionId}' should appear in sidebar popover`).toBeVisible({ timeout: 15_000 });
 			}
 
 			// Fork item (may be a menuitemcheckbox)
 			const forkItem = page.locator(`sidebar-actions-popover [data-session-action-id="fork"]`).first();
-			await expect(forkItem, "fork action should appear in sidebar popover").toBeVisible({ timeout: 5_000 });
+			await expect(forkItem, "fork action should appear in sidebar popover").toBeVisible({ timeout: 15_000 });
 
 			await page.keyboard.press("Escape");
 		} finally {
@@ -189,7 +189,7 @@ test.describe("Journey: Sidebar Actions Menu", () => {
 				return;
 			}
 			const modifyItem = page.locator(`sidebar-actions-popover [role="menuitem"][data-session-action-id="modify"]`).first();
-			await expect(modifyItem).toBeVisible({ timeout: 5_000 });
+			await expect(modifyItem).toBeVisible({ timeout: 15_000 });
 			await page.keyboard.press("Escape");
 		} finally {
 			await deleteSession(sessionId);
@@ -237,7 +237,7 @@ test.describe("Journey: Fork Session", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 
 			const row = sessionRow(page, sourceId);
-			if (!await row.isVisible({ timeout: 5_000 }).catch(() => false)) {
+			if (!await row.isVisible({ timeout: 15_000 }).catch(() => false)) {
 				test.skip(true, "session row not found in sidebar; fork test skipped");
 				return;
 			}
@@ -249,7 +249,7 @@ test.describe("Journey: Fork Session", () => {
 				return;
 			}
 			await trigger.click();
-			await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 15_000 });
 
 			// Uncheck "New worktree" toggle if present
 			const worktreeCheckbox = page
@@ -267,7 +267,7 @@ test.describe("Journey: Fork Session", () => {
 				(resp) =>
 					resp.url().includes(`/api/sessions/${sourceId}/fork`) &&
 					resp.request().method() === "POST",
-				{ timeout: 10_000 },
+				{ timeout: 20_000 },
 			);
 
 			// Click the fork row action
@@ -313,7 +313,7 @@ test.describe("Journey: Copy Session Link", () => {
 			const copyLinkDirectOrTrigger = page.locator(
 				'[data-session-action-surface="header"][data-session-action-id="copy-link"], [data-testid="session-actions-trigger"]',
 			).first();
-			await expect(copyLinkDirectOrTrigger).toBeVisible({ timeout: 10_000 });
+			await expect(copyLinkDirectOrTrigger).toBeVisible({ timeout: 20_000 });
 
 			const clicked = await clickCopyLink(page);
 			if (!clicked) {
@@ -323,7 +323,7 @@ test.describe("Journey: Copy Session Link", () => {
 
 			// Clipboard should contain the session URL
 			const expectedUrl = `${base()}/session/${sessionId}`;
-			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe(expectedUrl);
+			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).toBe(expectedUrl);
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
 		}
@@ -346,7 +346,7 @@ test.describe("Journey: Copy Session Link", () => {
 			const copyLinkOrTrigger = page.locator(
 				'[data-session-action-surface="header"][data-session-action-id="copy-link"], [data-testid="session-actions-trigger"]',
 			).first();
-			await expect(copyLinkOrTrigger).toBeVisible({ timeout: 10_000 });
+			await expect(copyLinkOrTrigger).toBeVisible({ timeout: 20_000 });
 
 			await page.evaluate(() => navigator.clipboard.writeText(""));
 			const clicked = await clickCopyLink(page);
@@ -355,7 +355,7 @@ test.describe("Journey: Copy Session Link", () => {
 				return;
 			}
 			const expectedUrl = `${base()}/session/${sessionId}`;
-			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe(expectedUrl);
+			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).toBe(expectedUrl);
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
 		}

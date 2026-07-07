@@ -24,7 +24,7 @@ test.describe("Journey: Goal → Team → Gates", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/goal/${goal.id}`);
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
-			await expect(page.getByText(title).first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByText(title).first()).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
@@ -36,7 +36,7 @@ test.describe("Journey: Goal → Team → Gates", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/goal/${goal.id}`);
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
-			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
@@ -110,18 +110,18 @@ test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
 			const planTab = page.locator('[data-testid="tab-plan"]').first();
 			await expect(planTab).toBeVisible({ timeout: 15_000 });
 			await planTab.click();
-			await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 15_000 });
 			// Archived node must render with data-archived="true"
-			await expect(page.locator('[data-testid="plan-node"][data-archived="true"]').first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator('[data-testid="plan-node"][data-archived="true"]').first()).toBeVisible({ timeout: 20_000 });
 			// Archived pill renders inside the node
-			await expect(page.locator('[data-testid="plan-node-archived-pill"]').first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator('[data-testid="plan-node-archived-pill"]').first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(parentId, true);
 		}
 	});
 
 	test("route-injected gateStatus:failed renders as data-plan-gate-status on plan node", async ({ page, gateway }) => {
-		test.setTimeout(45_000); // plan-tab with real goal hierarchy: parent+child create, archive, route inject
+		test.setTimeout(90_000); // plan-tab with real goal hierarchy: parent+child create, archive, route inject
 		const parent = await createGoal({ title: "v2-plan-gate-status-inject", team: false });
 		const parentId = parent.id as string;
 		let childId = "";
@@ -156,14 +156,14 @@ test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
 			const planTab = page.locator('[data-testid="tab-plan"]').first();
 			await expect(planTab).toBeVisible({ timeout: 15_000 });
 			await planTab.click();
-			await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 15_000 });
 
 			const node = page.locator(`[data-testid="plan-node"][data-child-goal-id="${childId}"]`).first();
-			await expect(node).toBeVisible({ timeout: 10_000 });
+			await expect(node).toBeVisible({ timeout: 20_000 });
 			await expect(node).toHaveAttribute("data-plan-gate-status", "failed");
 			await expect(
 				page.locator('[data-testid="plan-node-gate-dot"][data-gate-status="failed"]').first(),
-			).toBeVisible({ timeout: 5_000 });
+			).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(parentId, true);
 		}

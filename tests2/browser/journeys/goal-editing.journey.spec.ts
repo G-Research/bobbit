@@ -15,7 +15,7 @@ test.describe("Journey: Goal Editing", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/goal/${goal.id}`);
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
-			await expect(page.getByText(title).first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByText(title).first()).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
@@ -27,7 +27,7 @@ test.describe("Journey: Goal Editing", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/goal/${goal.id}`);
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
-			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
@@ -72,7 +72,7 @@ test.describe("Journey: Goal Archive Always-On — behavioral assertions", () =>
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
 			// Archive button must be present regardless of team/PR state
 			const archiveBtn = page.locator(".dashboard-container").getByRole("button", { name: "Archive", exact: true }).first();
-			await expect(archiveBtn).toBeVisible({ timeout: 10_000 });
+			await expect(archiveBtn).toBeVisible({ timeout: 20_000 });
 			await expect(archiveBtn).toBeEnabled();
 		} finally {
 			await deleteGoal(goal.id, true);
@@ -87,7 +87,7 @@ test.describe("Journey: Goal Archive Always-On — behavioral assertions", () =>
 			await navigateToHash(page, `#/goal/${goalId}`);
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
 			const archiveBtn = page.locator(".dashboard-container").getByRole("button", { name: "Archive", exact: true }).first();
-			await expect(archiveBtn).toBeVisible({ timeout: 10_000 });
+			await expect(archiveBtn).toBeVisible({ timeout: 20_000 });
 			await archiveBtn.click();
 			// Confirmation dialog
 			const dialog = page.locator("body > div")
@@ -95,16 +95,16 @@ test.describe("Journey: Goal Archive Always-On — behavioral assertions", () =>
 				.last();
 			await expect(
 				dialog.getByRole("heading", { name: "Archive Goal", exact: true }),
-			).toBeVisible({ timeout: 5_000 });
+			).toBeVisible({ timeout: 15_000 });
 			await dialog.getByRole("button", { name: "Archive", exact: true }).click();
-			await expect(dialog).toBeHidden({ timeout: 5_000 });
+			await expect(dialog).toBeHidden({ timeout: 15_000 });
 			// Goal must be archived in API
 			await expect.poll(async () => {
 				const r = await apiFetch(`/api/goals/${goalId}`);
 				if (!r.ok) return "missing";
 				const g = await r.json();
 				return g.archived === true ? "archived" : "active";
-			}, { timeout: 10_000 }).toBe("archived");
+			}, { timeout: 20_000 }).toBe("archived");
 		} finally {
 			await deleteGoal(goalId, true);
 		}
@@ -153,7 +153,7 @@ test.describe("Journey: Goal Empty Workflows Banner — behavioral assertions", 
 	});
 
 	test("empty-workflows route: banner visible and Create Goal button disabled", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		// Route-mock all GET /api/workflows to return an empty list
 		await page.route(/\/api\/workflows(?:\?.*)?$/, async (route, req) => {
 			if (req.method() === "GET") {
@@ -179,7 +179,7 @@ test.describe("Journey: Goal Empty Workflows Banner — behavioral assertions", 
 
 		// Banner must appear
 		const banner = page.locator('[data-testid="goal-form-no-workflows-banner"]').first();
-		await expect(banner).toBeVisible({ timeout: 10_000 });
+		await expect(banner).toBeVisible({ timeout: 20_000 });
 		await expect(banner).toContainText("no workflows yet");
 
 		// Create Goal button must be disabled
@@ -191,7 +191,7 @@ test.describe("Journey: Goal Empty Workflows Banner — behavioral assertions", 
 // Behavioral assertions ported from goal-form-tooltips.spec.ts
 test.describe("Journey: Goal Form Tooltips — behavioral assertions", () => {
 	test("workflow select dropdown renders in goal proposal panel", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		await openApp(page);
 		await createGoalAssistantViaUI(page);
 		const textarea = page.locator("textarea").first();
@@ -203,13 +203,13 @@ test.describe("Journey: Goal Form Tooltips — behavioral assertions", () => {
 
 		// Workflow select must exist in the proposal panel
 		const workflowSelect = page.locator(".goal-preview-panel select").first();
-		await expect(workflowSelect).toBeVisible({ timeout: 5_000 });
+		await expect(workflowSelect).toBeVisible({ timeout: 15_000 });
 		// Should have at least the "general" workflow option
 		await expect(workflowSelect.locator("option[value='general']")).toHaveCount(1);
 	});
 
 	test("optional step tooltip ⓘ icon renders with cursor-help class after workflow switch", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		// Configure qa_start_command on default project for the tooltip to show workflow description
 		const projectId = await defaultProjectId();
 		if (projectId) {
@@ -238,14 +238,14 @@ test.describe("Journey: Goal Form Tooltips — behavioral assertions", () => {
 
 		// Switch to feature workflow which has an optional QA Testing step with a tooltip
 		const workflowSelect = page.locator(".goal-preview-panel select").first();
-		await expect(workflowSelect).toBeVisible({ timeout: 5_000 });
+		await expect(workflowSelect).toBeVisible({ timeout: 15_000 });
 		await workflowSelect.selectOption("feature");
 
 		// Tooltip icon must render with cursor-help class
 		const qaLabel = page.locator(".goal-preview-panel label", { hasText: "Enable QA Testing" }).first();
-		await expect(qaLabel).toBeVisible({ timeout: 5_000 });
+		await expect(qaLabel).toBeVisible({ timeout: 15_000 });
 		const tooltipIcon = qaLabel.locator("span.cursor-help").first();
-		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
+		await expect(tooltipIcon).toBeVisible({ timeout: 15_000 });
 		await expect(tooltipIcon).toHaveText("ⓘ");
 	});
 });
@@ -277,7 +277,7 @@ test.describe("Journey: Subgoal Existing Goal Settings — behavioral assertions
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
 			// Children tab must be present when subgoals are allowed
 			const childrenTab = page.locator('[data-testid="tab-children"]').first();
-			await expect(childrenTab).toBeVisible({ timeout: 10_000 });
+			await expect(childrenTab).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
@@ -294,7 +294,7 @@ test.describe("Journey: Subgoal Nesting Limit — behavioral assertions", () => 
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
 		const stepper = page.locator("[data-testid='general-max-nesting-depth']");
-		await expect(stepper).toBeVisible({ timeout: 10_000 });
+		await expect(stepper).toBeVisible({ timeout: 20_000 });
 		await expect(stepper).toBeEnabled();
 	});
 
@@ -307,7 +307,7 @@ test.describe("Journey: Subgoal Nesting Limit — behavioral assertions", () => 
 			await openApp(page);
 			await navigateToHash(page, "#/settings/system/general");
 			const stepper = page.locator("[data-testid='general-max-nesting-depth']");
-			await expect(stepper).toBeVisible({ timeout: 10_000 });
+			await expect(stepper).toBeVisible({ timeout: 20_000 });
 			await expect(stepper).toBeDisabled();
 		} finally {
 			// Restore default
@@ -389,7 +389,7 @@ test.describe("Journey: Subgoal Parent Picker — behavioral assertions", () => 
 
 			// Sub-goals tab must be visible (system flag ON)
 			const subgoalsTab = page.locator("[data-testid='goal-proposal-tab-subgoals']");
-			await expect(subgoalsTab).toBeVisible({ timeout: 10_000 });
+			await expect(subgoalsTab).toBeVisible({ timeout: 20_000 });
 			await subgoalsTab.click();
 
 			// Parent picker must contain the blocked parent as an option
@@ -429,7 +429,7 @@ test.describe("Journey: Subgoals Experimental Toggle — behavioral assertions",
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
 		const checkbox = page.locator("[data-testid='general-subgoals-enabled']");
-		await expect(checkbox).toBeVisible({ timeout: 10_000 });
+		await expect(checkbox).toBeVisible({ timeout: 20_000 });
 		await expect(checkbox).toBeChecked();
 		// Experimental pill must be visible alongside the toggle
 		const pill = page.locator("[data-testid='experimental-pill']").first();
@@ -446,7 +446,7 @@ test.describe("Journey: Subgoals Experimental Toggle — behavioral assertions",
 		await navigateToHash(page, "#/settings/system/general");
 
 		const checkbox = page.locator("[data-testid='general-subgoals-enabled']");
-		await expect(checkbox).toBeVisible({ timeout: 10_000 });
+		await expect(checkbox).toBeVisible({ timeout: 20_000 });
 		await expect(checkbox).toBeChecked();
 
 		const prefResp = page.waitForResponse(

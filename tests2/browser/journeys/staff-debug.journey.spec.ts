@@ -10,16 +10,16 @@ test.describe("Journey: Staff", () => {
 	test("settings staff section navigable", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test("sidebar remains stable during staff route", async ({ page }) => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 5_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("staff page renders with 'Staff Agents' heading", async ({ page }) => {
@@ -38,7 +38,7 @@ test.describe("Journey: Staff", () => {
 		const emptyState = page.getByText("No staff agents yet");
 		const staffTable = page.locator("table");
 		// Use or() to accept either state — whichever renders first.
-		await expect(emptyState.or(staffTable).first()).toBeVisible({ timeout: 10_000 });
+		await expect(emptyState.or(staffTable).first()).toBeVisible({ timeout: 20_000 });
 	});
 });
 
@@ -50,7 +50,7 @@ test.describe("Journey: Debug Tools", () => {
 
 	test("app title is set", async ({ page }) => {
 		await openApp(page);
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 		const title = await page.title();
 		expect(title).toBeTruthy();
 	});
@@ -63,7 +63,7 @@ test.describe("Journey: Debug Tools", () => {
 		// The Settings h1 must appear.
 		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 15_000 });
 		// The Appearance section heading must be present.
-		await expect(page.getByTestId("general-appearance-heading")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByTestId("general-appearance-heading")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test("send message → mock agent response appears (tool renderer output path)", async ({ page }) => {

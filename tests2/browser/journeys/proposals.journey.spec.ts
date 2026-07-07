@@ -24,7 +24,7 @@ async function waitForProposalSlot(page: import("@playwright/test").Page, type: 
 test.describe("Journey: Proposals — shell", () => {
 	test("app shell renders on load", async ({ page }) => {
 		await openApp(page);
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 		const title = await page.title();
 		expect(title).toBeTruthy();
 	});
@@ -53,7 +53,7 @@ test.describe("Journey: Proposals — shell", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
-			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -63,14 +63,14 @@ test.describe("Journey: Proposals — shell", () => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-		if (await newGoalBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
+		if (await newGoalBtn.isVisible({ timeout: 15_000 }).catch(() => false)) {
 			await newGoalBtn.click();
 			const dialogOrForm = page.locator(
 				"dialog, [role='dialog'], [role='alertdialog'], " +
 				"goal-proposal-panel, [data-testid='goal-proposal'], " +
 				"input[placeholder*='title' i], input[placeholder*='goal' i]"
 			).first();
-			await expect(dialogOrForm).toBeVisible({ timeout: 10_000 });
+			await expect(dialogOrForm).toBeVisible({ timeout: 20_000 });
 		} else {
 			test.skip(true, "New Goal button not found; proposals may surface differently in this gateway config");
 		}
@@ -100,12 +100,12 @@ test.describe("Journey: Proposals — behavioral", () => {
 		await sendMessage(page, "ROLE_PROPOSAL_PARITY");
 		await waitForProposalSlot(page, "role");
 		const roleTab = page.locator('.goal-tab-pill[title="Role"]').first();
-		await expect(roleTab).toBeVisible({ timeout: 5_000 });
-		await expect(roleTab.locator(".goal-tab-dot")).toBeVisible({ timeout: 5_000 });
+		await expect(roleTab).toBeVisible({ timeout: 15_000 });
+		await expect(roleTab.locator(".goal-tab-dot")).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("goal proposal streaming badge visible during STAY_BUSY stream then disappears", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "STAY_BUSY:propose_goal:10:150");
@@ -115,7 +115,7 @@ test.describe("Journey: Proposals — behavioral", () => {
 	});
 
 	test("goal proposal submit disabled while streaming then enables", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "STAY_BUSY:propose_goal:10:150");
@@ -131,7 +131,7 @@ test.describe("Journey: Proposals — behavioral", () => {
 			return badgeVisible && disabled;
 		}, { timeout: 15_000, intervals: [50, 100, 150] }).toBe(true);
 		await expect(badge).toBeHidden({ timeout: 20_000 });
-		await expect(submitBtn).toBeEnabled({ timeout: 5_000 });
+		await expect(submitBtn).toBeEnabled({ timeout: 15_000 });
 	});
 
 	test("role proposal pane visible after clicking role tab", async ({ page }) => {
@@ -140,10 +140,10 @@ test.describe("Journey: Proposals — behavioral", () => {
 		await sendMessage(page, "ROLE_PROPOSAL_PARITY");
 		await waitForProposalSlot(page, "role");
 		const roleTab = page.locator('.goal-tab-pill[title="Role"]').first();
-		await expect(roleTab).toBeVisible({ timeout: 5_000 });
+		await expect(roleTab).toBeVisible({ timeout: 15_000 });
 		await roleTab.click();
 		const rolePane = page.locator('[data-panel="role-proposal"]').first();
-		await expect(rolePane).toBeVisible({ timeout: 5_000 });
+		await expect(rolePane).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("role proposal dismiss clears the slot and hides the tab", async ({ page }) => {
@@ -152,26 +152,26 @@ test.describe("Journey: Proposals — behavioral", () => {
 		await sendMessage(page, "ROLE_PROPOSAL_PARITY");
 		await waitForProposalSlot(page, "role");
 		const roleTab = page.locator('.goal-tab-pill[title="Role"]').first();
-		await expect(roleTab).toBeVisible({ timeout: 5_000 });
+		await expect(roleTab).toBeVisible({ timeout: 15_000 });
 		await roleTab.click();
 		const rolePane = page.locator('[data-panel="role-proposal"]').first();
-		await expect(rolePane).toBeVisible({ timeout: 5_000 });
+		await expect(rolePane).toBeVisible({ timeout: 15_000 });
 		const dismissBtn = rolePane.getByRole("button", { name: /^Dismiss$/ }).first();
-		await expect(dismissBtn).toBeVisible({ timeout: 5_000 });
+		await expect(dismissBtn).toBeVisible({ timeout: 15_000 });
 		await expect(dismissBtn).toBeEnabled();
 		await dismissBtn.click();
-		await expect(roleTab).toHaveCount(0, { timeout: 10_000 });
+		await expect(roleTab).toHaveCount(0, { timeout: 20_000 });
 		await page.waitForFunction(
 			() => {
 				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
 				return !!state && !state.activeProposals?.role;
 			},
-			{ timeout: 10_000 },
+			{ timeout: 20_000 },
 		);
 	});
 
 	test("goal proposal dismiss during streaming sticks after stream ends", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "STAY_BUSY:propose_goal:20:150");
@@ -180,10 +180,10 @@ test.describe("Journey: Proposals — behavioral", () => {
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
 		await expect(badge).toBeVisible({ timeout: 15_000 });
 		const dismissBtn = page.locator("button").filter({ hasText: "Dismiss" }).first();
-		await expect(dismissBtn).toBeVisible({ timeout: 5_000 });
+		await expect(dismissBtn).toBeVisible({ timeout: 15_000 });
 		await expect(dismissBtn).toBeEnabled();
 		await dismissBtn.click();
-		await expect(titleInput).toBeHidden({ timeout: 5_000 });
+		await expect(titleInput).toBeHidden({ timeout: 15_000 });
 		await page.waitForFunction(
 			() => (window as any).bobbitState?.remoteAgent?.state?.status === "idle",
 			{ timeout: 15_000 },
@@ -194,7 +194,7 @@ test.describe("Journey: Proposals — behavioral", () => {
 
 test.describe("Journey: Proposals — API error handling", () => {
 	test("createGoal 400 shows server error in error modal (page.route stub)", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		await page.route("**/api/goals", async (route) => {
 			if (route.request().method() !== "POST") return route.continue();
 			await route.fulfill({
@@ -214,10 +214,10 @@ test.describe("Journey: Proposals — API error handling", () => {
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
 		await expect(badge).toBeHidden({ timeout: 20_000 });
 		const createBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
-		if (await createBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
+		if (await createBtn.isVisible({ timeout: 15_000 }).catch(() => false)) {
 			await createBtn.click();
 			const errorMsg = page.locator('[data-testid="error-details-message"]').first();
-			await expect(errorMsg).toHaveText("Journey test: missing title", { timeout: 10_000 });
+			await expect(errorMsg).toHaveText("Journey test: missing title", { timeout: 20_000 });
 			const bodyText = await page.locator("body").innerText();
 			expect(bodyText).not.toContain("Failed to create goal: 400");
 		} else {

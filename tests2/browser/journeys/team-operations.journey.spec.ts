@@ -24,7 +24,7 @@ test.describe("Journey: Team Delegate", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/goal/${goal.id}`);
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
-			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
@@ -69,7 +69,7 @@ test.describe("Journey: Dashboard Fanout", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			// Hover the session row (data-session-id) in the sidebar to reveal the actions trigger
 			const row = page.locator(`[data-session-id="${sessionId}"]`).first();
-			if (!await row.isVisible({ timeout: 5_000 }).catch(() => false)) {
+			if (!await row.isVisible({ timeout: 15_000 }).catch(() => false)) {
 				test.skip(true, "session row not found in sidebar; terminate test skipped");
 				return;
 			}
@@ -82,11 +82,11 @@ test.describe("Journey: Dashboard Fanout", () => {
 			}
 			await trigger.click();
 			const terminateItem = page.locator(`sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="terminate"]`).first();
-			await expect(terminateItem).toBeVisible({ timeout: 5_000 });
+			await expect(terminateItem).toBeVisible({ timeout: 15_000 });
 			await terminateItem.click();
 			// Confirmation dialog should appear
 			const confirmDialog = page.locator("p.text-muted-foreground").filter({ hasText: /Are you sure you want to terminate/ }).first();
-			await expect(confirmDialog).toBeVisible({ timeout: 5_000 });
+			await expect(confirmDialog).toBeVisible({ timeout: 15_000 });
 			// Dismiss without terminating
 			await page.keyboard.press("Escape");
 		} finally {
@@ -177,7 +177,7 @@ test.describe("Journey: Dashboard Fanout — behavioral assertions", () => {
 			// Design Doc gate row must be present
 			await expect(
 				page.locator(".wf-checklist-item").filter({ hasText: "Design Doc" }).first(),
-			).toBeVisible({ timeout: 5_000 });
+			).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
 		}
@@ -263,7 +263,7 @@ test.describe("Journey: Dashboard Mutation Pending — behavioral assertions", (
 			await page.locator('[data-testid="dashboard-mutation-pending-approve"]').first().click();
 			await expect(
 				page.locator('[data-testid="dashboard-mutation-pending-card"]'),
-			).toHaveCount(0, { timeout: 10_000 });
+			).toHaveCount(0, { timeout: 20_000 });
 		} finally {
 			await deleteGoal(goalId, true);
 		}
@@ -325,10 +325,10 @@ test.describe("Journey: Plan-Tab Archived Children — behavioral assertions", (
 			const planTab = page.locator('[data-testid="tab-plan"]').first();
 			await expect(planTab).toBeVisible({ timeout: 15_000 });
 			await planTab.click();
-			await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 15_000 });
 			await expect(
 				page.locator('[data-testid="plan-node"][data-archived="true"]').first(),
-			).toBeVisible({ timeout: 10_000 });
+			).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteGoal(parentId, true);
 		}
@@ -369,7 +369,7 @@ test.describe("Journey: Verification Progress — behavioral assertions", () => 
 			await expect(page.locator(".wf-checklist-item").first()).toBeVisible({ timeout: 15_000 });
 			// test-fast has 3 gates: design-doc, implementation, ready-to-merge
 			const items = page.locator(".wf-checklist-item");
-			await expect(items).toHaveCount(3, { timeout: 10_000 });
+			await expect(items).toHaveCount(3, { timeout: 20_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
 		}

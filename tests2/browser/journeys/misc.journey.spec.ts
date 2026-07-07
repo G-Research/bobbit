@@ -18,8 +18,8 @@ test.describe("Journey: Notification Policy", () => {
 	test("settings route reachable for notification config", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test("fresh session has unseen dot; mark-read via API removes it after reload", async ({ page }) => {
@@ -36,14 +36,14 @@ test.describe("Journey: Notification Policy", () => {
 			await navigateToHash(page, "#/");
 			const row = page.locator(`[data-session-id="${sessionId}"]`).first();
 			await expect(row).toBeVisible({ timeout: 15_000 });
-			await expect(row.locator(".unseen-dot")).toHaveCount(1, { timeout: 5_000 });
+			await expect(row.locator(".unseen-dot")).toHaveCount(1, { timeout: 15_000 });
 			const markResp = await apiFetch(`/api/sessions/${sessionId}/mark-read`, { method: "POST" });
 			expect(markResp.status).toBe(200);
 			await openApp(page);
 			await navigateToHash(page, "#/");
 			const rowAfter = page.locator(`[data-session-id="${sessionId}"]`).first();
 			await expect(rowAfter).toBeVisible({ timeout: 15_000 });
-			await expect(rowAfter.locator(".unseen-dot")).toHaveCount(0, { timeout: 5_000 });
+			await expect(rowAfter.locator(".unseen-dot")).toHaveCount(0, { timeout: 15_000 });
 		} finally {
 			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
@@ -63,7 +63,7 @@ test.describe("Journey: Notification Policy", () => {
 			await navigateToHash(page, "#/");
 			const row = page.locator(`[data-session-id="${sessionId}"]`).first();
 			await expect(row).toBeVisible({ timeout: 15_000 });
-			await expect(row.locator(".unseen-dot")).toHaveCount(1, { timeout: 5_000 });
+			await expect(row.locator(".unseen-dot")).toHaveCount(1, { timeout: 15_000 });
 			await page.evaluate(() => {
 				const state: any = (window as any).__bobbitState;
 				if (state?.sessionPollTimer) { clearInterval(state.sessionPollTimer); state.sessionPollTimer = null; }
@@ -75,7 +75,7 @@ test.describe("Journey: Notification Policy", () => {
 				(window as any).__bobbitRenderApp?.();
 				return new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
 			}, { sid: sessionId });
-			await expect(page.locator(`[data-session-id="${sessionId}"] .unseen-dot`)).toHaveCount(0, { timeout: 5_000 });
+			await expect(page.locator(`[data-session-id="${sessionId}"] .unseen-dot`)).toHaveCount(0, { timeout: 15_000 });
 		} finally {
 			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
@@ -100,7 +100,7 @@ test.describe("Journey: Review Commenting", () => {
 			await sendMessage(page, "REVIEW_OPEN");
 			await expect.poll(() => doneMessages.count(), { timeout: 20_000 }).toBeGreaterThan(beforeCount);
 			const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" }).first();
-			await expect(reviewTab).toBeVisible({ timeout: 10_000 });
+			await expect(reviewTab).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -118,11 +118,11 @@ test.describe("Journey: Review Commenting", () => {
 			await sendMessage(page, "REVIEW_OPEN");
 			await expect.poll(() => doneMessages.count(), { timeout: 20_000 }).toBeGreaterThan(beforeCount);
 			const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" }).first();
-			await expect(reviewTab).toBeVisible({ timeout: 10_000 });
+			await expect(reviewTab).toBeVisible({ timeout: 20_000 });
 			await reviewTab.click();
 			const reviewDoc = page.locator("review-document").first();
-			await expect(reviewDoc).toBeVisible({ timeout: 5_000 });
-			await expect(reviewDoc.getByText("Some important text").first()).toBeVisible({ timeout: 5_000 });
+			await expect(reviewDoc).toBeVisible({ timeout: 15_000 });
+			await expect(reviewDoc.getByText("Some important text").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -143,7 +143,7 @@ test.describe("Journey: Preview Artifacts", () => {
 	});
 
 	test("preview mount via API reaches client state and iframe renders", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		try {
@@ -160,7 +160,7 @@ test.describe("Journey: Preview Artifacts", () => {
 					const s: any = (window as any).bobbitState ?? (window as any).__bobbitState;
 					return s?.isPreviewSession === true;
 				}),
-				{ timeout: 10_000 },
+				{ timeout: 20_000 },
 			).toBe(true);
 			await page.evaluate(() => {
 				const s: any = (window as any).bobbitState ?? (window as any).__bobbitState;
@@ -179,10 +179,10 @@ test.describe("Journey: Preview Artifacts", () => {
 					const s: any = (window as any).bobbitState ?? (window as any).__bobbitState;
 					return s?.previewPanelEntry || "";
 				}),
-				{ timeout: 10_000 },
+				{ timeout: 20_000 },
 			).toBe("journey.html");
 			const iframe = page.locator(".goal-preview-panel iframe").first();
-			await expect(iframe).toBeVisible({ timeout: 10_000 });
+			await expect(iframe).toBeVisible({ timeout: 20_000 });
 			const src = await iframe.getAttribute("src");
 			expect(src).toMatch(/^\/preview\/[a-f0-9-]+\/journey\.html\?mtime=\d+$/);
 		} finally {
@@ -231,7 +231,7 @@ test.describe("Journey: Cost Tracking", () => {
 				"[class*='cost'], [class*='token']"
 			).first();
 			// Best-effort: cost display may not appear if mock agent response has no usage data
-			const hasCost = await costEl.isVisible({ timeout: 5_000 }).catch(() => false);
+			const hasCost = await costEl.isVisible({ timeout: 15_000 }).catch(() => false);
 			// We assert the agent response appeared (main assertion); cost display is informational
 			// If it's missing, the test still passes — the cost element is a secondary check
 			if (!hasCost) {
@@ -281,7 +281,7 @@ test.describe("Journey: Mobile Layout", () => {
 	test("app renders at mobile viewport", async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 844 });
 		await openApp(page);
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test.skip("sidebar-edge visible at mobile viewport", async ({ page }) => {

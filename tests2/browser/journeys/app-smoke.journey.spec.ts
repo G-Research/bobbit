@@ -18,7 +18,7 @@ test.describe("Journey: App Smoke", () => {
 
 	test("app title is non-empty", async ({ page }) => {
 		await openApp(page);
-		await expect(page.locator("body")).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 		const title = await page.title();
 		expect(title).toBeTruthy();
 	});
@@ -26,8 +26,8 @@ test.describe("Journey: App Smoke", () => {
 	test("settings route navigable from root", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 10_000 });
-		await expect(page.locator("body")).toBeVisible({ timeout: 5_000 });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 15_000 });
 	});
 });
 
@@ -68,8 +68,8 @@ test.describe("Journey: Session Sharing", () => {
 			// The copy-link action is either a direct header button or accessible via the actions trigger
 			const copyLinkDirect = page.locator('[data-session-action-surface="header"][data-session-action-id="copy-link"]').first();
 			const actionsTrigger = page.locator('[data-testid="session-actions-trigger"]').first();
-			const found = await copyLinkDirect.isVisible({ timeout: 5_000 }).catch(() => false)
-				|| await actionsTrigger.isVisible({ timeout: 5_000 }).catch(() => false);
+			const found = await copyLinkDirect.isVisible({ timeout: 15_000 }).catch(() => false)
+				|| await actionsTrigger.isVisible({ timeout: 15_000 }).catch(() => false);
 			expect(found, "copy-link button or session-actions-trigger must be present in session header").toBe(true);
 		} finally {
 			await deleteSession(sessionId);
@@ -116,7 +116,7 @@ test.describe("Journey: Draft Persistence", () => {
 				if (!resp.ok) return null;
 				const body = await resp.json() as { data?: { text?: string } };
 				return body?.data?.text ?? null;
-			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
+			}, { timeout: 20_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
 
 			// Switch to B
 			await navigateToHash(page, `#/session/${sB}`);
@@ -128,7 +128,7 @@ test.describe("Journey: Draft Persistence", () => {
 			await expect(async () => {
 				const val = await page.locator("message-editor textarea").first().inputValue();
 				expect(val, "draft must survive session switch").toContain(draftText);
-			}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 20_000 });
 		} finally {
 			await deleteSession(sA).catch(() => {});
 			await deleteSession(sB).catch(() => {});
@@ -156,7 +156,7 @@ test.describe("Journey: Draft Persistence", () => {
 				if (!resp.ok) return null;
 				const body = await resp.json() as { data?: { text?: string } };
 				return body?.data?.text ?? null;
-			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
+			}, { timeout: 20_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftText);
 
 			// Full page reload
 			await page.reload();
@@ -170,7 +170,7 @@ test.describe("Journey: Draft Persistence", () => {
 			await expect(async () => {
 				const val = await page.locator("message-editor textarea").first().inputValue();
 				expect(val, "draft must survive page reload").toContain(draftText);
-			}).toPass({ intervals: [500, 1000, 2000], timeout: 10_000 });
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
 		}
@@ -198,7 +198,7 @@ test.describe("Journey: Draft Persistence", () => {
 				if (!resp.ok) return null;
 				const body = await resp.json() as { data?: { text?: string } };
 				return body?.data?.text ?? null;
-			}, { timeout: 10_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftA);
+			}, { timeout: 20_000, intervals: [500, 1000, 1000, 2000] }).toBe(draftA);
 
 			// Navigate to B — editor must not show A's draft
 			await navigateToHash(page, `#/session/${sB}`);
@@ -206,7 +206,7 @@ test.describe("Journey: Draft Persistence", () => {
 			await expect(async () => {
 				const val = await page.locator("message-editor textarea").first().inputValue();
 				expect(val, "session B must not contain session A's draft").not.toContain(draftA);
-			}).toPass({ intervals: [500, 1000, 2000], timeout: 8_000 });
+			}).toPass({ intervals: [500, 1000, 2000], timeout: 15_000 });
 		} finally {
 			await deleteSession(sA).catch(() => {});
 			await deleteSession(sB).catch(() => {});

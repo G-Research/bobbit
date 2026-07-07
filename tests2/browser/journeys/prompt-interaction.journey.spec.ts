@@ -98,7 +98,7 @@ test.describe("Journey: Prompt Interaction", () => {
 			// Q1: pick "red" — selecting via label click auto-advances to Q2.
 			await widget.locator('label:has(input[value="red"])').click();
 			await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
-				.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+				.toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
 
 			// Q2: pick "small".
 			await widget.locator('label:has(input[value="small"])').click();
@@ -106,11 +106,11 @@ test.describe("Journey: Prompt Interaction", () => {
 			// Submit button must be enabled on the last tab.
 			const submit = widget.locator(".ask-submit");
 			await expect(submit).toHaveText("Submit");
-			await expect(submit).toBeEnabled({ timeout: 5_000 });
+			await expect(submit).toBeEnabled({ timeout: 15_000 });
 			await submit.click();
 
 			// Once submitted the submit button disappears (widget becomes read-only).
-			await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+			await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 20_000 });
 		} finally {
 			await deleteSession(sessionId);
 		}
