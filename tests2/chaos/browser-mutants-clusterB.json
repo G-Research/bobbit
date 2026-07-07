@@ -209,6 +209,22 @@
     ]
   },
   {
+    "id": "BR64",
+    "area": "project-onboarding-multi-repo-subset",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "dropped-filter",
+    "search": "selectedIds: scanItems.filter((it) => scanSelection.has(it.id)).map((it) => it.id),",
+    "replace": "selectedIds: scanItems.map((it) => it.id),",
+    "description": "The multi-repo scan Continue-with-assistant autoPrompt sends ALL scan item ids instead of only the user-selected subset. Legacy add-project-multi-repo-subset.spec.ts asserts the autoPrompt JSON selectedIds equals the chosen subset; project-onboarding journey never inspects the autoPrompt (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-multi-repo-subset.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
     "id": "BR57",
     "area": "proposals-project-workflow-views",
     "file": "src/app/project-proposal-views.ts",
