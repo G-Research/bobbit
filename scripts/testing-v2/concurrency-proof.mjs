@@ -72,12 +72,18 @@ const TARGET_REPS = Number.isFinite(BUDGET_CONC.reps) ? BUDGET_CONC.reps : 3;
 let CONCURRENT = Number(process.env.CONCURRENCY_PROOF_CONCURRENT) || TARGET_RUNS;
 let REPS = Number(process.env.CONCURRENCY_PROOF_REPS) || TARGET_REPS;
 let KEEP = false;
+// STUDY: --reuse skips provisioning and reuses worktrees already present under
+// the (stable) wt-root, so several configs (baseline vs relocated, different N)
+// can be measured against ONE provisioned set without re-running npm ci ×N +
+// build each time. Requires a stable wt-root via CONCURRENCY_PROOF_WT_ROOT.
+let REUSE = false;
 
 for (let i = 2; i < process.argv.length; i++) {
 	const arg = process.argv[i];
 	if (arg === "--concurrent" && process.argv[i + 1]) CONCURRENT = Number(process.argv[++i]);
 	else if (arg === "--reps" && process.argv[i + 1]) REPS = Number(process.argv[++i]);
 	else if (arg === "--keep") KEEP = true;
+	else if (arg === "--reuse") REUSE = true;
 	else if (arg.startsWith("--concurrent=")) CONCURRENT = Number(arg.split("=")[1]);
 	else if (arg.startsWith("--reps=")) REPS = Number(arg.split("=")[1]);
 }
@@ -86,7 +92,7 @@ const REPORT_DIR = join(REPO_ROOT, "docs", "testing-v2");
 const ARTIFACT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "concurrency-proof");
 // Worktrees live beside the other Bobbit worktrees (same drive → fast git ops),
 // in a throwaway dir keyed by pid so parallel proof invocations never collide.
-const PROOF_WT_ROOT = join(REPO_ROOT, "..", `cc-proof-${process.pid}`);
+const PROOF_WT_ROOT = process.env.CONCURRENCY_PROOF_WT_ROOT || join(REPO_ROOT, "..", `cc-proof-${process.pid}`);
 
 function npmCmd() {
 	return process.platform === "win32" ? "npm.cmd" : "npm";
@@ -334,7 +340,23 @@ async function main() {
 	let worktrees = [];
 
 	try {
-		worktrees = await provisionWorktrees(CONCURRENT, baseSha);
+		const reuseDirs = [];
+		if (REUSE) {
+			for (let i = 0; i < CONCURRENT; i++) {
+				const dir = join(PROOF_WT_ROOT, `wt-${i}`);
+				const ok = existsSync(join(dir, "node_modules", ".bin")) && existsSync(join(dir, "dist", "server", "cli.js")) && existsSync(join(dir, "dist", "ui", "index.html"));
+				if (!ok) break;
+				reuseDirs.push(dir);
+			}
+		}
+		if (REUSE && reuseDirs.length === CONCURRENT) {
+			worktrees = reuseDirs;
+			KEEP = true; // never tear down a reused set implicitly
+			console.log(`\n─── REUSE: using ${CONCURRENT} pre-provisioned worktrees under ${PROOF_WT_ROOT} (skipping npm ci + build) ───`);
+		} else {
+			if (REUSE) console.log(`\n─── REUSE requested but ${reuseDirs.length}/${CONCURRENT} usable worktrees found — provisioning fresh ───`);
+			worktrees = await provisionWorktrees(CONCURRENT, baseSha);
+		}
 
 		for (let rep = 1; rep <= REPS; rep++) {
 			console.log(`\n─── rep ${rep}/${REPS}: launching ${CONCURRENT} concurrent test:v2 runs (one per worktree) ───`);
