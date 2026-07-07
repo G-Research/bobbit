@@ -822,6 +822,51 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (last < source.length) parts.push(html`${source.slice(last)}`);
 		return parts;
 	};
+	// Intraline highlighting policy — mirrors how GitHub / git's `delta` decide
+	// when a per-character highlight actually helps. We diff the two lines at word
+	// granularity and paint only the tokens that changed. When almost the whole
+	// row was rewritten (a "line-distance" above MAX_INTRALINE_CHANGE_RATIO) we
+	// suppress the inline highlight entirely: the add/del background already says
+	// "this line changed", and smearing nearly every character on top is just noise.
+	const MAX_INTRALINE_CHANGE_RATIO = 0.8; // suppress once the changed span dominates the row
+	const MERGE_UNCHANGED_GAP = 2; // fuse changed spans split only by a tiny common run
+	const WORD_DIFF_MATRIX_CAP = 250000; // O(n*m) guard for pathological (e.g. minified) lines
+	const WORD_DIFF_TOKEN = /\s+|[A-Za-z0-9_$]+|[^\sA-Za-z0-9_$]/g;
+	const tokenizeForDiff = (text) => {
+		const tokens = [];
+		for (const match of asText(text).matchAll(WORD_DIFF_TOKEN)) tokens.push({ text: match[0], start: match.index || 0 });
+		return tokens;
+	};
+	// Mark which tokens of `a` survive in the longest common subsequence with `b`
+	// (i.e. are unchanged). Everything else on `a` is a genuine change to highlight.
+	const commonTokenMask = (a, b) => {
+		const n = a.length;
+		const m = b.length;
+		const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+		for (let i = n - 1; i >= 0; i -= 1) {
+			for (let j = m - 1; j >= 0; j -= 1) {
+				dp[i][j] = a[i].text === b[j].text ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+			}
+		}
+		const mask = new Array(n).fill(false);
+		let i = 0;
+		let j = 0;
+		while (i < n && j < m) {
+			if (a[i].text === b[j].text) { mask[i] = true; i += 1; j += 1; }
+			else if (dp[i + 1][j] >= dp[i][j + 1]) i += 1;
+			else j += 1;
+		}
+		return mask;
+	};
+	// Fallback for pathological lines: common prefix/suffix trim into a single span.
+	const prefixSuffixRanges = (text, other) => {
+		let start = 0;
+		while (start < text.length && start < other.length && text[start] === other[start]) start += 1;
+		let end = text.length;
+		let otherEnd = other.length;
+		while (end > start && otherEnd > start && text[end - 1] === other[otherEnd - 1]) { end -= 1; otherEnd -= 1; }
+		return end > start ? [{ start, end }] : [];
+	};
 	const changedRangeForPair = (line, peer) => {
 		if (!line || !peer) return [];
 		const kind = normKind(line);
@@ -829,15 +874,31 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (!((kind === "add" && peerKind === "del") || (kind === "del" && peerKind === "add"))) return [];
 		const text = asText(line.text);
 		const other = asText(peer.text);
-		let start = 0;
-		while (start < text.length && start < other.length && text[start] === other[start]) start += 1;
-		let end = text.length;
-		let otherEnd = other.length;
-		while (end > start && otherEnd > start && text[end - 1] === other[otherEnd - 1]) {
-			end -= 1;
-			otherEnd -= 1;
+		if (!text.length || !other.length) return [];
+		let ranges;
+		const a = tokenizeForDiff(text);
+		const b = tokenizeForDiff(other);
+		if (a.length * b.length > WORD_DIFF_MATRIX_CAP) {
+			ranges = prefixSuffixRanges(text, other);
+		} else {
+			const mask = commonTokenMask(a, b);
+			ranges = [];
+			for (let i = 0; i < a.length; i += 1) {
+				if (mask[i]) continue;
+				const start = a[i].start;
+				const end = start + a[i].text.length;
+				const last = ranges[ranges.length - 1];
+				if (last && start - last.end <= MERGE_UNCHANGED_GAP) last.end = end;
+				else ranges.push({ start, end });
+			}
 		}
-		return end > start ? [{ start, end }] : [];
+		if (!ranges.length) return [];
+		const changed = ranges.reduce((sum, range) => sum + (range.end - range.start), 0);
+		// Near-total rewrite, or a highlight that would cover the whole row: the
+		// background colour already communicates it, so skip the inline highlight.
+		if (changed / text.length > MAX_INTRALINE_CHANGE_RATIO) return [];
+		if (ranges.length === 1 && ranges[0].start === 0 && ranges[0].end === text.length) return [];
+		return ranges;
 	};
 	const renderHighlightedLine = (text, ranges = []) => {
 		const source = asText(text);
