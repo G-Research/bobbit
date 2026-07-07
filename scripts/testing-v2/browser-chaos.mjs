@@ -80,33 +80,73 @@ function findPrimaryFromWorktreeGit(repoRoot) {
 
 const PRIMARY_REPO = findPrimaryFromWorktreeGit(REPO_ROOT);
 
-// Locate a node_modules that actually contains the Playwright CLI. Prefer this
-// worktree, then the primary repo, then sibling worktrees under the shared -wt
-// root — never a sibling repo whose Playwright version could differ.
-function hasPlaywright(nm) {
-	try { return fs.existsSync(path.join(nm, "playwright", "cli.js")); } catch { return false; }
-}
+// Locate a COMPLETE node_modules for building + running browser tests. A browser
+// mutation run needs the full toolchain: playwright (run specs), typescript +
+// vite (build dist), AND the workspace dep @earendil-works/pi-ai (the server
+// graph imports it — a node_modules missing it fails tsc with "Cannot find
+// module '@earendil-works/pi-ai'"). The primary repo's node_modules is often
+// INCOMPLETE on Windows (deps installed per-worktree), so — like chaos.mjs — we
+// search this worktree, the primary, then sibling worktrees under the shared -wt
+// root, and prefer a COMPLETE install. Never a sibling *repo* whose versions
+// could differ. Sibling GOAL worktrees are preferred over pool/session ones as
+// they track the same package-lock most closely.
+function hasPlaywright(nm) { try { return fs.existsSync(path.join(nm, "playwright", "cli.js")); } catch { return false; } }
+function hasTsc(nm) { try { return fs.existsSync(path.join(nm, "typescript", "bin", "tsc")); } catch { return false; } }
+function hasVite(nm) { try { return fs.existsSync(path.join(nm, "vite", "bin", "vite.js")); } catch { return false; } }
+function hasPiAi(nm) { try { return fs.existsSync(path.join(nm, "@earendil-works", "pi-ai")); } catch { return false; } }
+// @anthropic-ai/sdk is a sentinel for pi-ai's provider SDK set (anthropic,
+// openai, @google/genai, @aws-sdk/*, @mistralai/*, …). vite/rolldown follows
+// pi-ai into the client bundle, so a node_modules missing these fails build:ui
+// with "Rolldown failed to resolve @anthropic-ai/sdk". Some per-worktree installs
+// on Windows are PARTIAL (pi-ai present, its provider SDKs pruned) — those look
+// runnable to vitest/esbuild but cannot build dist. Require the sentinel too.
+function hasProviderSdks(nm) { try { return fs.existsSync(path.join(nm, "@anthropic-ai", "sdk")); } catch { return false; } }
+function isCompleteNodeModules(nm) { return hasPlaywright(nm) && hasTsc(nm) && hasVite(nm) && hasPiAi(nm) && hasProviderSdks(nm); }
+function entryCount(nm) { try { return fs.readdirSync(nm).length; } catch { return 0; } }
+
 function resolveToolchain() {
 	const stable = [
 		path.join(REPO_ROOT, "node_modules"),
 		path.join(PRIMARY_REPO, "node_modules"),
 	];
-	const siblings = [];
+	// This goal's id token (8-hex), e.g. "6c956ecf" from "goal-6c956ecf-coder-9092".
+	const goalId = (path.basename(REPO_ROOT).match(/[0-9a-f]{8}/) || [])[0] || "";
+	// Rank: (0) stable (this worktree / primary), (1) the goal-branch worktree
+	// (name ENDS with the goal id), (2) same-goal role worktrees, (3) other goal
+	// worktrees, (4) pool/session/other. Within a rank, prefer the FULLEST install
+	// (max node_modules entry count) so partially-pruned trees lose.
+	const candidates = stable.map((nm) => ({ nm, rank: 0 }));
 	try {
 		const wtRoot = path.dirname(REPO_ROOT);
 		for (const name of fs.readdirSync(wtRoot)) {
 			const nm = path.join(wtRoot, name, "node_modules");
-			if (!stable.includes(nm)) siblings.push(nm);
+			if (stable.includes(nm)) continue;
+			const rank =
+				goalId && name.endsWith(goalId) ? 1 :
+				goalId && name.includes(goalId) ? 2 :
+				name.startsWith("goal-") ? 3 : 4;
+			candidates.push({ nm, rank });
 		}
 	} catch { /* ignore */ }
-	const candidates = [...stable, ...siblings];
-	const chosen = candidates.find(hasPlaywright) || path.join(PRIMARY_REPO, "node_modules");
-	return { nm: chosen, hasPlaywright: !!candidates.find(hasPlaywright), stable, siblingCount: siblings.length };
+	// Sort by rank asc, then entry count desc (fullest install wins within a rank).
+	const complete = candidates.filter((c) => isCompleteNodeModules(c.nm));
+	complete.sort((a, b) => a.rank - b.rank || entryCount(b.nm) - entryCount(a.nm));
+	const anyPlaywright = candidates.find((c) => hasPlaywright(c.nm));
+	const chosen = (complete[0] && complete[0].nm) || (anyPlaywright && anyPlaywright.nm) || path.join(PRIMARY_REPO, "node_modules");
+	return { nm: chosen, complete: complete.length > 0, hasPlaywright: !!anyPlaywright, siblingCount: candidates.length - stable.length };
 }
 
 const TOOLCHAIN = resolveToolchain();
+const TOOLCHAIN_COMPLETE = TOOLCHAIN.complete;
 const PRIMARY_NODE_MODULES = TOOLCHAIN.nm;
 const PLAYWRIGHT_CLI = path.join(PRIMARY_NODE_MODULES, "playwright", "cli.js");
+// Build tools invoked by their JS entry points, NOT via npm/.bin. On Windows the
+// worktree's node_modules/.bin is a junction and npm's injected PATH resolution
+// of `tsc`/`vite` through it is flaky ("'tsc' is not recognized"); invoking the
+// JS entry directly (`node <entry>`) is deterministic — same principle chaos.mjs
+// uses for vitest.
+const TSC_ENTRY = path.join(PRIMARY_NODE_MODULES, "typescript", "bin", "tsc");
+const VITE_ENTRY = path.join(PRIMARY_NODE_MODULES, "vite", "bin", "vite.js");
 
 const MUTANTS_FILE = path.join(REPO_ROOT, "tests2", "chaos", "browser-mutants.json");
 const REPORT_JSON = path.join(REPO_ROOT, ".profiles", "chaos", "browser-comparison-report.json");
@@ -167,18 +207,54 @@ function applyMutation(filePath, search, replace) {
 	return content;
 }
 
-function buildTarget(worktreePath, target) {
-	const script = target === "ui" ? "build:ui" : "build:server";
-	const t0 = Date.now();
-	const result = spawnSync("npm", ["run", script], {
+// Run a `node <entry> <args>` build step (no npm, no .bin shim). Returns
+// { ok, stdout, stderr }.
+function runNode(worktreePath, entryAndArgs, timeoutMs = 480_000) {
+	const result = spawnSync("node", entryAndArgs, {
 		cwd: worktreePath,
 		encoding: "utf-8",
-		timeout: 480_000,
-		shell: process.platform === "win32",
+		timeout: timeoutMs,
+		shell: false,
 		env: { ...process.env, NODE_DISABLE_COMPILE_CACHE: "1" },
 	});
-	const ok = (result.status ?? 1) === 0;
-	return { ok, durationMs: Date.now() - t0, stderr: (result.stderr || "").slice(-800), status: result.status, signal: result.signal };
+	const ok = (result.status ?? 1) === 0 && !result.error && !result.signal;
+	return { ok, stdout: result.stdout || "", stderr: (result.stderr || "") + (result.error ? String(result.error) : ""), status: result.status, signal: result.signal };
+}
+
+// Replicate `npm run build:packs` — never a per-mutant target (market-packs are
+// not mutated), built once at campaign init.
+function buildPacks(worktreePath) {
+	return runNode(worktreePath, [path.join("scripts", "build-market-packs.mjs")]);
+}
+
+// Replicate `npm run build:server` deterministically:
+//   tsc -p tsconfig.server.json && chmod +x cli.js && rm -rf defaults && copy-defaults
+//   && rm -rf builtin-packs && copy-builtin-packs
+function buildServer(worktreePath) {
+	const tsc = runNode(worktreePath, [TSC_ENTRY, "-p", "tsconfig.server.json"]);
+	if (!tsc.ok) return { ...tsc, step: "tsc" };
+	// chmod +x is a no-op on Windows; best-effort elsewhere.
+	try { fs.chmodSync(path.join(worktreePath, "dist", "server", "cli.js"), 0o755); } catch { /* ignore */ }
+	try { fs.rmSync(path.join(worktreePath, "dist", "server", "defaults"), { recursive: true, force: true }); } catch { /* ignore */ }
+	const cd = runNode(worktreePath, [path.join("scripts", "copy-defaults.mjs")]);
+	if (!cd.ok) return { ...cd, step: "copy-defaults" };
+	try { fs.rmSync(path.join(worktreePath, "dist", "server", "builtin-packs"), { recursive: true, force: true }); } catch { /* ignore */ }
+	const cp = runNode(worktreePath, [path.join("scripts", "copy-builtin-packs.mjs")]);
+	if (!cp.ok) return { ...cp, step: "copy-builtin-packs" };
+	return { ok: true, stdout: tsc.stdout, stderr: "" };
+}
+
+// Replicate `npm run build:ui` — `vite build`.
+function buildUi(worktreePath) {
+	return runNode(worktreePath, [VITE_ENTRY, "build"]);
+}
+
+function buildTarget(worktreePath, target) {
+	const t0 = Date.now();
+	const r = target === "ui" ? buildUi(worktreePath) : buildServer(worktreePath);
+	// tsc/esbuild write errors to stdout; surface both.
+	const combined = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+	return { ok: r.ok, durationMs: Date.now() - t0, stderr: combined.slice(-1000), status: r.status, signal: r.signal, step: r.step };
 }
 
 // ── Playwright invocation + JSON report parsing ────────────────────────────────
@@ -664,12 +740,26 @@ async function main() {
 	console.log(`Repo root:      ${REPO_ROOT}`);
 	console.log(`Primary repo:   ${PRIMARY_REPO}`);
 	console.log(`toolchain nm:   ${PRIMARY_NODE_MODULES}`);
+	console.log(`toolchain complete (playwright+tsc+vite+pi-ai): ${TOOLCHAIN_COMPLETE ? "✓ yes" : "✗ NO"}`);
 	console.log(`playwright cli: ${fs.existsSync(PLAYWRIGHT_CLI) ? "✓ " + PLAYWRIGHT_CLI : "✗ MISSING"}`);
 	console.log(`Mutants:        ${mutants.length} (of ${ALL_MUTANTS.length})`);
+	if (!TOOLCHAIN_COMPLETE) {
+		console.error("\n[browser-chaos] ❌ ABORT: no COMPLETE node_modules found (need playwright + typescript + vite + @earendil-works/pi-ai in ONE tree).");
+		console.error(`  Chosen: ${PRIMARY_NODE_MODULES}  [playwright=${hasPlaywright(PRIMARY_NODE_MODULES)?"Y":"N"} tsc=${hasTsc(PRIMARY_NODE_MODULES)?"Y":"N"} vite=${hasVite(PRIMARY_NODE_MODULES)?"Y":"N"} pi-ai=${hasPiAi(PRIMARY_NODE_MODULES)?"Y":"N"}]`);
+		console.error("  The primary repo's node_modules is often incomplete on Windows; run from a worktree with a full install, or `npm ci` one.");
+		process.exit(1);
+	}
 
-	if (!fs.existsSync(PLAYWRIGHT_CLI)) {
-		console.error("\n[browser-chaos] ERROR: playwright/cli.js not found in any candidate node_modules.");
-		console.error("  Run in an environment with playwright installed (primary repo or a worktree with `npm ci`).");
+	console.log(`tsc entry:      ${fs.existsSync(TSC_ENTRY) ? "✓" : "✗ MISSING"}  ${TSC_ENTRY}`);
+	console.log(`vite entry:     ${fs.existsSync(VITE_ENTRY) ? "✓" : "✗ MISSING"}  ${VITE_ENTRY}`);
+	const missing = [
+		[PLAYWRIGHT_CLI, "playwright/cli.js"],
+		[TSC_ENTRY, "typescript/bin/tsc"],
+		[VITE_ENTRY, "vite/bin/vite.js"],
+	].filter(([p]) => !fs.existsSync(p));
+	if (missing.length) {
+		console.error(`\n[browser-chaos] ERROR: required toolchain entry point(s) not found: ${missing.map(([, n]) => n).join(", ")}`);
+		console.error("  Run in an environment with playwright + typescript + vite installed (primary repo or a worktree with `npm ci`).");
 		process.exit(1);
 	}
 
@@ -687,18 +777,20 @@ async function main() {
 	try {
 		ensureNodeModulesJunction(worktreePath);
 
-		// Initial full build so dist/server + dist/ui exist and are CLEAN.
+		// Initial full build so dist/server + dist/ui exist and are CLEAN. Each
+		// step invokes its JS entry directly (no npm/.bin) for determinism.
 		console.log(`\n[browser-chaos] initial full build (packs + server + ui)…`);
-		const initBuild = spawnSync("npm", ["run", "build"], {
-			cwd: worktreePath, encoding: "utf-8", timeout: 900_000,
-			shell: process.platform === "win32",
-			env: { ...process.env, NODE_DISABLE_COMPILE_CACHE: "1" },
-		});
-		if ((initBuild.status ?? 1) !== 0) {
-			console.error(`[browser-chaos] initial build FAILED — cannot run browser mutation campaign.`);
-			console.error((initBuild.stderr || "").slice(-1200));
-			removeEphemeralWorktree(worktreePath);
-			process.exit(1);
+		for (const [label, fn] of [["packs", buildPacks], ["server", buildServer], ["ui", buildUi]]) {
+			const t0 = Date.now();
+			process.stdout.write(`  build:${label} … `);
+			const r = fn(worktreePath);
+			console.log(r.ok ? `ok (${((Date.now() - t0) / 1000).toFixed(1)}s)` : `FAILED (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+			if (!r.ok) {
+				console.error(`[browser-chaos] initial build:${label} FAILED — cannot run browser mutation campaign.`);
+				console.error(((r.stdout || "") + "\n" + (r.stderr || "")).slice(-1500));
+				if (!keepWorktree) removeEphemeralWorktree(worktreePath);
+				process.exit(1);
+			}
 		}
 		console.log(`[browser-chaos] initial build ok. dist is clean.`);
 
