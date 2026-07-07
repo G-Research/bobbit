@@ -4,7 +4,7 @@
  * Consolidated from: goal-proposal-*, project-proposal-*, proposal-panel-*,
  *   proposal-open-all-types, proposal-panel-streaming, api-error-modal, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
 import { createSessionViaUI, sendMessage } from "../_helpers/journey-fixture.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
@@ -267,5 +267,57 @@ test.describe("Journey: Failed Goal Proposal", () => {
 		const workflowError = page.locator('[data-testid="goal-proposal-workflow-error"]').first();
 		await expect(workflowError).toBeVisible({ timeout: 20_000 });
 		await expect(workflowError).toContainText(/Workflow is required/i, { timeout: 10_000 });
+	});
+});
+
+// Ported from goal-proposal-subgoal-prefill.spec.ts (audit: proposals GAP,
+// mutant BR45): an agent can pre-fill everything a human sets on the goal
+// proposal's Sub-goals tab. syncProposalFormState() seeds the form controls
+// from subgoalsAllowed/maxNestingDepth/divergencePolicy/maxConcurrentChildren
+// so the panel opens with the agent's choices already selected.
+test.describe("Journey: Goal Proposal — Sub-goals prefill", () => {
+	async function setSubgoals(value: boolean): Promise<void> {
+		const resp = await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ subgoalsEnabled: value }),
+		});
+		expect(resp.status).toBe(200);
+	}
+
+	test.afterEach(async () => { await setSubgoals(true); });
+
+	test("Sub-goals tab reflects agent-prefilled depth/concurrency/policy", async ({ page }) => {
+		test.setTimeout(90_000);
+		await setSubgoals(true);
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "Please GOAL_PROPOSAL_SUBGOAL_PREFILL now");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("Prefilled Goal", { timeout: 15_000 });
+
+		const subgoalsTab = page.locator("[data-testid='goal-proposal-tab-subgoals']");
+		await expect(subgoalsTab).toBeVisible({ timeout: 10_000 });
+		await subgoalsTab.click();
+
+		// Allow-subgoals is pre-checked (agent set subgoalsAllowed: true).
+		const toggle = page.locator("[data-testid='goal-form-subgoals-toggle']");
+		await expect(toggle).toBeVisible({ timeout: 10_000 });
+		await expect(toggle).toBeChecked();
+
+		// Max-depth control retains its testid AND reflects the agent's value (2).
+		await expect(page.locator("[data-testid='goal-form-max-depth']"))
+			.toHaveValue("2", { timeout: 10_000 });
+
+		// Concurrency reflects the agent's value (4).
+		await expect(page.locator("[data-testid='goal-form-max-concurrent-children']"))
+			.toHaveValue("4", { timeout: 10_000 });
+
+		// Divergence policy 'autonomous' is the pressed segment.
+		await expect(page.locator("[data-testid='goal-form-divergence-autonomous']"))
+			.toHaveAttribute("aria-pressed", "true", { timeout: 10_000 });
+		await expect(page.locator("[data-testid='goal-form-divergence-balanced']"))
+			.toHaveAttribute("aria-pressed", "false", { timeout: 5_000 });
 	});
 });

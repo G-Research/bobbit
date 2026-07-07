@@ -1,0 +1,67 @@
+[
+  {
+    "id": "BR00-null",
+    "area": "harness-integrity",
+    "file": "src/app/goal-dashboard-plan-tab.ts",
+    "target": "ui",
+    "operator": "no-op",
+    "nullMutant": true,
+    "search": "\t\tcase \"passed\": return \"var(--positive)\";",
+    "replace": "\t\tcase \"passed\":  return \"var(--positive)\";",
+    "description": "NULL mutant — inserts an extra space in a whitespace-insensitive location. Behaviourally identical; both the legacy spec and the v2 journey MUST still pass. Guards against a broken harness that reports false kills (e.g. a build failure counted as 'caught').",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/plan-tab-gate-status.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR45",
+    "area": "proposals-subgoal-prefill",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-form-max-depth\"",
+    "replace": "data-testid=\"goal-form-max-depth-mut\"",
+    "description": "Goal-form max-depth control loses its testid. Legacy goal-proposal-subgoal-prefill.spec.ts asserts prefilled subgoal controls; proposals journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-proposal-subgoal-prefill.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR47",
+    "area": "project-settings-maintenance",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"worktree-cleanup-maintenance\"",
+    "replace": "data-testid=\"worktree-cleanup-maintenance-mut\"",
+    "description": "Worktree-cleanup maintenance card loses its testid. Legacy settings-maintenance-archived-worktrees.spec.ts asserts counts + cleanup POST; project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR49",
+    "area": "project-onboarding-typeahead",
+    "file": "src/ui/components/DirectoryPicker.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"directory-picker-suggestions\"",
+    "replace": "data-testid=\"directory-picker-suggestions-mut\"",
+    "description": "Directory-picker typeahead suggestions container loses its testid. Legacy add-project-typeahead.spec.ts asserts the suggestion overlay; project-onboarding journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-typeahead.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  }
+]
