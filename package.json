@@ -31,6 +31,8 @@
     "test:v2:changed": "vitest --config vitest.config.ts --changed",
     "test:v2:browser": "playwright test --config playwright-v2.config.ts && node scripts/testing-v2/assert-budget.mjs browser --report .profiles/testing-v2/budgets/playwright-report.json",
     "test:daily": "node scripts/testing-v2/run-daily.mjs",
+    "test:v2:coverage-delta": "node scripts/testing-v2/coverage-delta.mjs",
+    "test:v2:browser-chaos": "node scripts/testing-v2/browser-chaos.mjs",
     "pretest:unit": "node -e \"require('fs').existsSync('dist/server')||require('child_process').execSync('npm run build:server',{stdio:'inherit'})\"",
     "test:unit": "node scripts/run-unit.mjs",
     "test:bundle": "npm run build:ui && npx tsx --test tests/bundle-size.test.ts",
