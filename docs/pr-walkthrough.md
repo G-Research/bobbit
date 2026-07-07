@@ -1,11 +1,121 @@
 # PR Walkthrough — Agent Schema Reference
 
-Reference for the reviewer agent's submission schema, hunk ID semantics, and the
-`resolveAndReadBindingBundle` race-condition fix. This complements the higher-level
-docs:
+Reference for the reviewer agent's submission schema and hunk ID semantics, plus how a
+finalized review reaches the real PR (posting via local `gh`), the launch-time trust
+prompt for unknown remote hosts, and the `resolveAndReadBindingBundle` race-condition
+fix. This complements the higher-level docs:
 
 - [PR Walkthrough Panel](pr-walkthrough-panel.md) — launch flow, panel behavior, reviewer lifecycle.
 - [PR Walkthrough Durable Reviews](pr-walkthrough-durable-reviews.md) — chunk submission, store layout, finalization, coverage model.
+- [Post via local `gh` + trust-prompt (design)](design/pr-walkthrough-gh-posting.md) — deep architecture behind the two sections below.
+
+---
+
+## Posting reviews to GitHub via local `gh`
+
+Once a reviewer finalizes a walkthrough, the human can post the assembled review — body
+plus per-line comments — straight to the real PR from the panel's **Post to GitHub**
+action (`data-testid="pr-walkthrough-post-github"` in the export-preview dialog). Bobbit
+posts by shelling out to the **local `gh` CLI on the gateway host**, so it works for
+whatever host and account the user authenticated with `gh auth login`, including GitHub
+Enterprise.
+
+### Availability
+
+The post action is shown whenever posting is possible. The underlying credential is
+resolved with a single cascade (`resolveGithubExportAuth` in `github-adapter.ts`):
+
+1. an explicit token passed by the caller, then
+2. `GITHUB_TOKEN` / `GH_TOKEN` from the environment — **github.com only**, an optional
+   override, and never forwarded to an enterprise host, then
+3. `gh auth token [--hostname <host>]` — the canonical path.
+
+If any of these yields a credential, `export.available` is `true`. When none do, the
+action stays visible but explains itself with an actionable reason: **"No GitHub
+credentials found. Run `gh auth login` (or set GITHUB_TOKEN/GH_TOKEN) to post a
+review."** This replaced the older, misleading "Set GITHUB_TOKEN or GH_TOKEN" message
+that never mentioned `gh`.
+
+**Why availability is gh-aware, not just token-presence:** previously `export.available`
+was `Boolean(env token)`, and the pack's normal with-SHA launch path hardcoded
+`available: false, previewOnly: true` — so a real GitHub PR reviewed through the pack
+could never be posted even with a working `gh` login. Availability is now derived from
+real auth on both the no-SHA and with-SHA resolution paths, so a normally-launched
+walkthrough offers posting whenever `gh` can authenticate to the PR's host.
+
+**Enterprise hosts** work via `gh auth login` to that host; posting adds
+`--hostname <host>` so `gh` uses the host-scoped credential (the github.com env token is
+never sent to an enterprise host). `BOBBIT_GH_COMMAND` overrides the `gh` binary and is
+used by tests to stub it.
+
+### Flow and why it is server-side
+
+Posting must satisfy two orthogonal checks that live in different places:
+
+- **Auth availability** — "is `gh` (or a token) authenticated for this host?" needs no
+  gateway prefs, so it can be computed anywhere `gh` is on `PATH` (the server route or
+  the confined pack worker).
+- **Host trust** — "is this host allowed to be contacted at all?" reads the
+  `githubTrustedHosts` preference, which **only the server** can access.
+
+The end-to-end path:
+
+```text
+panel "Post to GitHub"
+  → pack worker `submitReview` route (proxies with the gateway bearer token)
+    → POST /api/pr-walkthrough/submit-review   (bearer-gated public route, routed by jobId)
+      → assertTrustedBindingTarget            (server-side, prefs-backed trust gate)
+      → submitGithubReview → gh api …/pulls/<n>/reviews --method POST
+```
+
+The `gh` invocation and the trust check stay **server-side** for two reasons: the
+confined pack worker cannot read `githubTrustedHosts`, and the pack route worker inherits
+the *gateway* process environment — not the reviewer session's — so it holds no session
+secret to authenticate the internal tool endpoints. The worker therefore proxies to a
+**bearer-authenticated public route** (`POST /api/pr-walkthrough/submit-review`, the same
+auth tier as the existing export/submit route) routed by the `jobId` it holds from its
+own binding. The server resolves the authoritative binding + target from that `jobId`,
+enforces the trust gate, and only then posts.
+
+Posting is a real external write, so it is double-gated: `submitGithubReview` requires
+`confirm: true`, and the trusted-host check must pass. Local-only (non-GitHub)
+changesets remain non-postable with their existing reason.
+
+For the full architecture and rationale (temp-file `gh api --input`, the jobId-routed
+binding resolution, and why no session secret is needed), see
+[PR Walkthrough — Post via local `gh`](design/pr-walkthrough-gh-posting.md).
+
+---
+
+## Trusting an unknown remote host at launch
+
+Launching a walkthrough against a host that is **not** already trusted now **prompts**
+the user to add it, instead of silently failing later with a 403.
+
+- `github.com` / `www.github.com` are always trusted and never prompt.
+- The `run` route resolves the PR's host before spawning; for a non-default host with no
+  acknowledgement it returns `HOST_NOT_TRUSTED` (carrying the resolved host + `prUrl`)
+  **without spawning** anything.
+- The client checks the host against the managed trusted list. If already trusted it
+  re-invokes silently. Otherwise it prompts: on **accept** it persists the normalized
+  host to the `githubTrustedHosts` preference (via `PUT /api/preferences`, the same write
+  path Settings uses) and re-invokes the launch; on **decline** it aborts with a readable
+  cancel message and nothing is spawned or persisted.
+
+**Why prompt at launch rather than fail later:** the target host is only known after
+`run` resolves the current-branch PR, and only the server can read the trusted list — so
+the client cannot pre-check it. Returning `HOST_NOT_TRUSTED` from `run` hands the
+resolved host back to the client (which owns the trusted-hosts UI) to make the decision.
+The acknowledgement only governs whether the *harmless, read-only reviewer child* is
+spawned; the real security boundary stays the server-side, prefs-backed trust check
+applied when the diff is read and the review is posted, so a stale or forged ack cannot
+widen data access.
+
+Extra trusted hosts are managed in **System → General → Trusted GitHub hosts** (persisted
+under `githubTrustedHosts`). See
+[Trusted GitHub hosts](pr-walkthrough-panel.md#trusted-github-hosts) for the allowlist
+model and [the design doc](design/pr-walkthrough-gh-posting.md) for the launch
+trust-prompt mechanism.
 
 ---
 
