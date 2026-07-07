@@ -84,10 +84,30 @@ const shared = {
 	teardownTimeout: 30_000,
 };
 
+/**
+ * V8 coverage configuration for --scope all parity proof.
+ * Output: .profiles/testing-v2/coverage/coverage-summary.json
+ * Used by scripts/testing-v2/parity.mjs to compare per-area line+branch
+ * coverage against the baselines in tests2/v2-baseline-coverage.json.
+ */
+const coverage = {
+	provider: "v8" as const,
+	reporter: ["json-summary"] as const,
+	reportsDirectory: ".profiles/testing-v2/coverage",
+	include: ["src/**/*.ts", "src/**/*.js"],
+	exclude: [
+		"src/**/*.d.ts",
+		"src/**/*.spec.ts",
+		"src/**/*.test.ts",
+		"src/**/__mocks__/**",
+	],
+};
+
 export default defineConfig({
 	test: {
 		...shared,
 		reporters: ["default"],
+		coverage,
 		projects: [
 			{
 				test: {

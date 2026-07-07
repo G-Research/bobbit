@@ -1,0 +1,41 @@
+{
+	"generatedAt": "2026-07-07T03:38:41.883Z",
+	"areas": {
+		"src/server": {
+			"lines": {
+				"total": 80833,
+				"covered": 58826,
+				"pct": 72.77473309168285
+			},
+			"branches": {
+				"total": 29362,
+				"covered": 22417,
+				"pct": 76.34697908861794
+			}
+		},
+		"src/app": {
+			"lines": {
+				"total": 39548,
+				"covered": 9432,
+				"pct": 23.849499342571054
+			},
+			"branches": {
+				"total": 4007,
+				"covered": 2854,
+				"pct": 71.22535562765161
+			}
+		},
+		"src/ui": {
+			"lines": {
+				"total": 25761,
+				"covered": 9841,
+				"pct": 38.201156787391795
+			},
+			"branches": {
+				"total": 3856,
+				"covered": 2664,
+				"pct": 69.08713692946058
+			}
+		}
+	}
+}
