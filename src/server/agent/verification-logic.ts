@@ -167,6 +167,97 @@ export function shouldSuppressRestartInterrupt(steps: ReadonlyArray<{ passed: bo
 }
 
 /**
+ * How a command verification step can be recovered after a gateway restart.
+ *
+ * - `detached`   — host process spawned via the bash exit-file wrapper; the
+ *                  wrapper owns a durable pidfile/heartbeat/exit-file on the
+ *                  host, so resume re-attaches by verified process identity.
+ * - `container-exec` — the command runs inside a docker container; the wrapper
+ *                  persists an in-container pidfile + exit-file and resume
+ *                  re-attaches (or finalizes) via `docker exec`. Durable, same
+ *                  as `detached` but the process identity lives in the
+ *                  container namespace.
+ * - `pending-retry` — the execution path cannot be made durable on this host
+ *                  right now (e.g. Windows without Git Bash → cmd.exe cannot
+ *                  run the bash wrapper). A restart is a RETRYABLE pending
+ *                  interruption, never a fabricated verdict.
+ * - `unsupported` — no streaming context at all (fire-and-forget command with
+ *                  nowhere to persist identity). Not restart-recoverable.
+ */
+export type CommandRecoveryMode = "detached" | "container-exec" | "pending-retry" | "unsupported";
+
+/**
+ * Decide the restart-recovery mode for a command verification step from the
+ * execution environment. Pure and side-effect-free so it can be unit-tested
+ * without spawning anything.
+ *
+ * Precedence (first match wins):
+ *   1. No streaming context     → `unsupported` (nowhere to persist identity).
+ *   2. Runs inside a container  → `container-exec` (durable in-container
+ *      pidfile/exit-file + `docker exec` re-attach).
+ *   3. Windows without Git Bash → `pending-retry` (cmd.exe can't run the bash
+ *      exit-file wrapper; treat a restart as retryable, not a hard failure).
+ *   4. Otherwise                → `detached` (host bash exit-file wrapper).
+ */
+export function decideCommandRecoveryMode(opts: {
+	containerId?: string;
+	hasStreamCtx: boolean;
+	platform: NodeJS.Platform;
+	hasGitBash: boolean;
+}): CommandRecoveryMode {
+	if (!opts.hasStreamCtx) return "unsupported";
+	if (opts.containerId) return "container-exec";
+	if (opts.platform === "win32" && !opts.hasGitBash) return "pending-retry";
+	return "detached";
+}
+
+/**
+ * Reasons that indicate a SESSION-backed step (llm-review / agent-qa) could
+ * not be re-attached after a restart because the reviewer agent was still cold
+ * (model + MCP init) or its session was lost — i.e. RE-RUNNABLE from scratch,
+ * not a genuine verification failure and not permanently unrecoverable. These
+ * mirror (a subset of) RESTART_INTERRUPT_MARKERS plus readiness-timeout
+ * phrasings.
+ */
+const SESSION_RESUME_RERUNNABLE_MARKERS: readonly string[] = [
+	"did not call verification_result after server restart",
+	"timed out while resuming after server restart",
+	"Session lost during server restart",
+	"Step was interrupted by server restart",
+	"Step was running but had no session ID",
+	"Agent process exited unexpectedly",
+	"Reviewer agent process died",
+	"not ready",
+	"did not become ready",
+];
+
+/**
+ * Reasons that are GENUINELY unrecoverable — re-running would be pointless
+ * because the substrate the step needs is gone. Checked first so that, e.g.,
+ * "container removed" is never treated as a benign cold-reviewer re-run.
+ */
+const SESSION_RESUME_UNRECOVERABLE_MARKERS: readonly string[] = [
+	"removed",
+	"deleted",
+	"workspace deleted",
+	"container removed",
+];
+
+/**
+ * Return true iff a session-backed step's resume failure `reason` describes a
+ * cold-reviewer / readiness / lost-session condition that should be RE-RUN
+ * from scratch on resume rather than declared "could not be recovered".
+ *
+ * Genuinely unrecoverable reasons (workspace/container removed or deleted)
+ * return false and keep the terminal restart-interrupt handling.
+ */
+export function shouldRerunSessionStepOnResume(reason: string): boolean {
+	if (!reason) return false;
+	if (SESSION_RESUME_UNRECOVERABLE_MARKERS.some(m => reason.includes(m))) return false;
+	return SESSION_RESUME_RERUNNABLE_MARKERS.some(m => reason.includes(m));
+}
+
+/**
  * Regex patterns for LLM streaming / tool-argument JSON glitches.
  *
  * Fresh runs of these almost always succeed — the model's streamed
