@@ -60,6 +60,14 @@ export interface GateVerificationSnapshot {
 	summary: string;
 	selection: TextSelectionMetadata & { truncationReason?: string };
 	active: boolean;
+	/**
+	 * True when a matching active verification entry existed but its backing
+	 * sessions/process were no longer alive (dead-but-not-removed). The dead
+	 * entry is ignored for liveness and the top-level `status` is never
+	 * reported as `running`; the UI renders a terminated/stale state with a
+	 * re-signal affordance instead of a perpetual spinner.
+	 */
+	stale?: boolean;
 }
 
 type GateVerificationOutputSource = NonNullable<GateVerificationSnapshotStep["diagnostics"]>["outputSource"];
@@ -359,17 +367,31 @@ export function buildGateVerificationSnapshot(input: {
 	selectionOptions?: TextSelectionOptions;
 	stepName?: string;
 	now?: number;
+	/**
+	 * Liveness of the matching active verification's backing sessions/process.
+	 * Defaults to `true` (back-compat). When explicitly `false`, a matching
+	 * active entry is treated as dead-but-not-removed: it is ignored for
+	 * liveness, the snapshot is flagged `stale`, and the top-level status is
+	 * never reported as `running`. Callers should pass
+	 * `verificationHarness.areVerificationSessionsAlive(signalId)`.
+	 */
+	isActiveVerificationAlive?: boolean;
 }): GateVerificationSnapshot {
 	const now = input.now ?? Date.now();
 	const selectionOptions = gateVerificationDefaultSelection(input.selectionOptions ?? { implicitDefault: true });
 	const explicitInspectMode = input.selectionOptions?.mode !== undefined;
 	const includeDiagnostics = explicitInspectMode && input.selectionOptions?.includeDiagnostics !== false;
-	const active = input.activeVerification
+	const matchedActive = input.activeVerification
 		&& input.activeVerification.goalId === input.goalId
 		&& input.activeVerification.gateId === input.gateId
 		&& input.activeVerification.signalId === input.signalId
 		? input.activeVerification
 		: undefined;
+	// A matching-but-dead active entry (`isActiveVerificationAlive === false`)
+	// is stale: ignore it for all liveness/step derivation and flag the
+	// snapshot so the UI shows a terminated state instead of a spinner.
+	const stale = !!matchedActive && input.isActiveVerificationAlive === false;
+	const active = stale ? undefined : matchedActive;
 	const persistedSteps = input.verification?.steps ?? [];
 	const activeByName = new Map((active?.steps ?? []).map(step => [step.name, step]));
 	let priorFailure = false;
@@ -487,8 +509,17 @@ export function buildGateVerificationSnapshot(input: {
 	};
 	for (const step of finalSteps) counts[step.status]++;
 
+	let overallStatus: GateVerificationSnapshot["status"] = active?.overallStatus ?? input.verification?.status;
+	// A stale (dead-but-not-removed) verification must never read as running:
+	// coerce a residual running/undefined overall status to "cancelled" (a
+	// terminal, not-running value) so the UI drops the spinner and offers a
+	// re-signal. The `stale` flag is the authoritative UI signal.
+	if (stale && (overallStatus === "running" || overallStatus === undefined)) {
+		overallStatus = "cancelled";
+	}
+
 	return {
-		status: active?.overallStatus ?? input.verification?.status,
+		status: overallStatus,
 		steps: finalSteps,
 		counts,
 		summary: buildSummary(counts),
@@ -499,5 +530,6 @@ export function buildGateVerificationSnapshot(input: {
 			truncationReason: aggregate.truncationReason,
 		},
 		active: !!active,
+		...(stale ? { stale: true } : {}),
 	};
 }
