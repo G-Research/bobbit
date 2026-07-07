@@ -77,6 +77,10 @@ let KEEP = false;
 // can be measured against ONE provisioned set without re-running npm ci ×N +
 // build each time. Requires a stable wt-root via CONCURRENCY_PROOF_WT_ROOT.
 let REUSE = false;
+// STUDY: --provision-only builds + keeps the worktree set (npm ci ×N + build)
+// and exits WITHOUT measuring, so provisioning (load-insensitive) can overlap
+// coder activity and the machine-quiet window is spent only on measured runs.
+let PROVISION_ONLY = false;
 
 for (let i = 2; i < process.argv.length; i++) {
 	const arg = process.argv[i];
@@ -84,6 +88,7 @@ for (let i = 2; i < process.argv.length; i++) {
 	else if (arg === "--reps" && process.argv[i + 1]) REPS = Number(process.argv[++i]);
 	else if (arg === "--keep") KEEP = true;
 	else if (arg === "--reuse") REUSE = true;
+	else if (arg === "--provision-only") PROVISION_ONLY = true;
 	else if (arg.startsWith("--concurrent=")) CONCURRENT = Number(arg.split("=")[1]);
 	else if (arg.startsWith("--reps=")) REPS = Number(arg.split("=")[1]);
 }
@@ -334,6 +339,14 @@ async function main() {
 	console.log(`  ledger dir: ${ledgerDir()}`);
 
 	const baseSha = gitHeadSha();
+
+	if (PROVISION_ONLY) {
+		KEEP = true;
+		const dirs = await provisionWorktrees(CONCURRENT, baseSha);
+		console.log(`\n✅ provisioned ${dirs.length} worktrees under ${PROOF_WT_ROOT} (kept). Re-run with --reuse to measure.`);
+		process.exit(0);
+	}
+
 	const allRunResults = [];
 	const allLedgerPolls = [];
 	const violations = [];
