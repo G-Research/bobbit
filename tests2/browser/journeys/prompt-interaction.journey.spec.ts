@@ -156,4 +156,49 @@ test.describe("Journey: Prompt Interaction", () => {
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
+
+	// Ported from at-mention.spec.ts (audit: prompt-interaction GAP / BR56):
+	// selecting a file from the @-menu inserts "@<path> " and renders a live
+	// file-mention chip (.file-mention-chip-pill) in the composer.
+	test("selecting an @-mention inserts the path and renders a file chip", async ({ page }) => {
+		const cwd = join(tmpdir(), `bobbit-v2-atchip-${process.env.E2E_PORT ?? "0"}-${Date.now()}`);
+		mkdirSync(cwd, { recursive: true });
+		writeFileSync(join(cwd, "notes.md"), "# notes\n");
+		writeFileSync(join(cwd, "readme.txt"), "readme\n");
+		let sessionId = "";
+		let projectId = "";
+		try {
+			const projResp = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: `v2-atchip-${Date.now()}`, rootPath: cwd }),
+			});
+			expect(projResp.status).toBe(201);
+			projectId = (await projResp.json()).id;
+			const created = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd, projectId, worktree: false }),
+			});
+			expect(created.status).toBe(201);
+			sessionId = (await created.json()).id;
+
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const textarea = page.locator("message-editor textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 15_000 });
+			await textarea.click();
+			await textarea.pressSequentially("@");
+			await expect(page.locator(".at-menu").first()).toBeVisible({ timeout: 15_000 });
+			// Filter to notes.md and select it (mousedown-driven selection inserts "@notes.md ").
+			await textarea.pressSequentially("notes");
+			const item = page.locator('[data-testid="file-mention-notes.md"]').first();
+			await expect(item).toBeVisible({ timeout: 10_000 });
+			await item.click();
+			await expect(page.locator(".at-menu")).toHaveCount(0, { timeout: 10_000 });
+			// A live file-mention chip must render in the composer.
+			await expect(page.locator(".file-mention-chip-pill").first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
 });

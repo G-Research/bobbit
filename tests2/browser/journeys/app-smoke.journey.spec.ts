@@ -276,6 +276,53 @@ test.describe("Journey: Draft Persistence", () => {
 	});
 });
 
+// Ported from open-session-new-window.spec.ts (audit: app-smoke GAP / BR55): the
+// session row's actions popover has an "Open in new window" item that calls
+// window.open(deepLink, "_blank", "noopener").
+test.describe("Journey: Open in New Window", () => {
+	test("session actions menu opens the deep link in a new window", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await page.setViewportSize({ width: 1280, height: 900 });
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			const row = page.locator(`[data-session-id="${sessionId}"]`).first();
+			await expect(row).toBeVisible({ timeout: 10_000 });
+			const deepLink = await page.evaluate((id) => `${location.origin}/session/${id}`, sessionId);
+			// Capture window.open (stub applied right before the action so a render
+			// pass cannot restore the native impl between hover and click).
+			await page.evaluate(() => {
+				(window as any).__opened = [];
+				window.open = ((u?: string | URL, t?: string, f?: string) => {
+					(window as any).__opened.push({
+						url: u === undefined ? undefined : String(u),
+						target: t === undefined ? undefined : String(t),
+						features: f === undefined ? undefined : String(f),
+					});
+					return { opener: null } as any;
+				}) as any;
+			});
+			const trigger = row.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="session"][data-sidebar-actions-id="${sessionId}"]`).first();
+			await row.hover();
+			await expect(trigger).toBeVisible({ timeout: 5_000 });
+			await trigger.click();
+			await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+			const item = page.locator(`sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="open-new-window"]`).first();
+			await expect(item).toBeVisible({ timeout: 5_000 });
+			await expect(item).toContainText("Open in new window");
+			await item.click();
+			await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });
+			await expect.poll(() => page.evaluate(() => (window as any).__opened)).toEqual([
+				{ url: deepLink, target: "_blank", features: "noopener" },
+			]);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+});
+
 // Ported from github-trusted-hosts.spec.ts (audit: app-smoke GAP): adding a
 // trusted GitHub host renders its row in settings.
 test.describe("Journey: GitHub Trusted Hosts", () => {

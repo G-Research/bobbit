@@ -111,5 +111,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR55",
+		"area": "app-smoke-open-new-window",
+		"file": "src/app/session-actions.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "const opened = window.open(url, \"_blank\", \"noopener\");",
+		"replace": "const opened = window.open(url, \"_self\", \"noopener\");",
+		"description": "The session actions 'Open in new window' item opens the deep link in the SAME tab (_self) instead of a new window (_blank). Legacy open-session-new-window.spec.ts asserts window.open captured {target:'_blank', features:'noopener'}; app-smoke journey never exercised it (GAP). Ported into app-smoke.journey.spec.ts (Journey: Open in New Window).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/open-session-new-window.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/app-smoke.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR56",
+		"area": "prompt-at-mention-chip",
+		"file": "src/ui/components/FileMentionChip.ts",
+		"target": "ui",
+		"operator": "class-rename",
+		"search": "class=\"file-mention-chip-pill inline-flex items-center gap-1 align-baseline px-2 py-0.5 rounded-md",
+		"replace": "class=\"file-mention-chip-pill-mut inline-flex items-center gap-1 align-baseline px-2 py-0.5 rounded-md",
+		"description": "The file-mention chip pill loses its stable class. Legacy at-mention.spec.ts selects a file from the @-menu and asserts a live .file-mention-chip-pill renders; the prompt-interaction journey only opened the .at-menu (GAP). Ported into prompt-interaction.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/at-mention.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
 	}
 ]
