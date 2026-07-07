@@ -54,3 +54,22 @@ half-wipes the shared tree.
 - Infra: the goal worktree is periodically hard-reset to `origin/<goal-branch>` (local merges
   must be **pushed**, not just merged), and gate verification **caches command steps by commit
   sha** (a fresh commit is needed to bust a stale/poisoned cached result).
+
+## Update: the pi-ai "reproducibility" issue was corruption collateral, not a bad package
+
+Confirmed via `npm view @earendil-works/pi-ai@0.79.6`: the registry package **does** declare
+`"./oauth": { "import": "./dist/oauth.js" }` and ships it. The primary worktree's normally-installed
+copy has `dist/oauth.js` and works. A clean `npm ci` (no concurrent chaos run) yields a COMPLETE,
+loadable tree — `npm ci`/reproducibility is fine.
+
+Therefore the earlier "goal worktree pi-ai missing dist/oauth.js" and "test-engineer worktree has
+vitest but no pi-ai" were **the same chaos.mjs junction-delete-through bug** deleting individual
+files out of whichever `node_modules` the chaos resolver junctioned (it searches sibling worktrees
+for a "complete" tree, junctions it, then a worktree-removal traversal deletes through it). This is
+one unified root cause behind every node_modules-corruption symptom in this goal, including the
+original primary-worktree agent-spawn brick the user reported.
+
+**Implication:** fixing the chaos.mjs junction/removal safety (unlink the reparse point before any
+recursive delete; never junction a shared tree that a force-delete can traverse) resolves the entire
+class. No package.json/lock change is needed for pi-ai. Concurrency Option A (per-run worktrees via
+`npm ci`) will produce stable complete trees once chaos can no longer corrupt sibling node_modules.
