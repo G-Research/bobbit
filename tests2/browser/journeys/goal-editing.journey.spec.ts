@@ -392,10 +392,16 @@ test.describe("Journey: Subgoal Parent Picker — behavioral assertions", () => 
 			await expect(subgoalsTab).toBeVisible({ timeout: 20_000 });
 			await subgoalsTab.click();
 
+			// Wait for state.goals to include blockedId (goals are fetched async;
+			// the picker renders from state.goals — ensure it's populated first).
+			await page.waitForFunction(
+				(id: string) => ((window as any).__bobbitState?.goals ?? []).some((g: any) => g.id === id),
+				blockedId,
+				{ timeout: 30_000 },
+			);
 			// Parent picker must contain the blocked parent as an option
 			const picker = page.locator("[data-testid='goal-form-parent-picker']");
-			await expect(picker).toBeVisible({ timeout: 15_000 });
-			// Goals are fetched async; allow up to 30s for the list to populate under load.
+			await expect(picker).toBeVisible({ timeout: 20_000 });
 			await expect(
 				picker.locator(`option[value="${blockedId}"]`),
 			).toHaveCount(1, { timeout: 30_000 });
