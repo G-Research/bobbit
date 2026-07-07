@@ -127,5 +127,37 @@
     "expectedV2Catchers": [
       "tests2/browser/journeys/project-onboarding.journey.spec.ts"
     ]
+  },
+  {
+    "id": "BR52",
+    "area": "project-onboarding-post-archive",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"preflight-archive-cta\"",
+    "replace": "data-testid=\"preflight-archive-cta-mut\"",
+    "description": "The add-project preflight archive-CTA (surfaced when a ghost .bobbit/ dir is detected) loses its testid. Legacy add-project-post-archive.spec.ts drives the CTA; project-onboarding journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-post-archive.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR56",
+    "area": "team-operations-archive-child-cascade",
+    "file": "src/app/session-manager.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": "child agent${childCount === 1 ? \"\" : \"s\"}: ${namesText}.",
+    "replace": "child agent${childCount === 1 ? \"\" : \"s\"}.",
+    "description": "The non-goal terminate confirmation drops the enumerated child-agent NAMES (keeps only the count). Legacy archive-child-cascade.spec.ts asserts each child title appears in the modal; team-operations journey only checks the children-count API, not the modal names (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/archive-child-cascade.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/team-operations.journey.spec.ts"
+    ]
   }
 ]
