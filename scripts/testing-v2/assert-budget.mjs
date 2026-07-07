@@ -59,6 +59,27 @@ export function resolveCaps(scope, pilot = false) {
 	const budgets = readBudgets();
 	const caps = budgets.tiers[tier];
 	if (!caps) throw new Error(`assert-budget: tests2/budgets.json has no tier "${tier}"`);
+
+	// Under-load budget switch (D7): a `test:v2` run (and its vitest/playwright
+	// tiers) under N-way concurrent contention legitimately runs longer than the
+	// isolated caps. When the concurrency-proof harness sets
+	// BOBBIT_V2_CONCURRENCY_RUN=1, EVERY scope's wall cap switches to the under-load
+	// per-run cap (budgets.concurrency.perRunMaxWallMs) and CPU stops gating
+	// (measurement is unreliable under contention — see assertBudget). This keeps
+	// run-v2's exit code an HONEST pass/fail signal for the proof (exit 0 ⇺ tests
+	// green AND wall ≤ under-load cap) with no downgraded assertions in the proof.
+	const underLoad = process.env.BOBBIT_V2_CONCURRENCY_RUN && process.env.BOBBIT_V2_CONCURRENCY_RUN !== "0";
+	if (underLoad && budgets.concurrency) {
+		const c = budgets.concurrency;
+		return {
+			tier,
+			maxWallMs: Number.isFinite(c.perRunMaxWallMs) ? c.perRunMaxWallMs : caps.maxWallMs,
+			maxCpuMs: Number.isFinite(c.perRunMaxCpuMs) ? c.perRunMaxCpuMs : caps.maxCpuMs,
+			label: `${caps.label} (under-load)`,
+			pilot: !!pilot,
+			underLoad: true,
+		};
+	}
 	return { tier, maxWallMs: caps.maxWallMs, maxCpuMs: caps.maxCpuMs, label: caps.label, pilot: !!pilot };
 }
 
@@ -248,7 +269,14 @@ export function assertBudget({ scope, wallMs = null, cpuMs = null, pilot = false
 	if (Number.isFinite(wallMs) && wallMs > caps.maxWallMs) {
 		violations.push(`wall ${(wallMs / 1000).toFixed(1)}s > cap ${(caps.maxWallMs / 1000).toFixed(1)}s`);
 	}
-	if (Number.isFinite(cpuMs) && cpuMs > caps.maxCpuMs) {
+	// CPU-min is OBSERVABILITY, not a hard gate under contention. The process-tree
+	// sampler sums per-PID cumulative CPU across the whole run; on a shared, busy
+	// box it demonstrably over-counts past the physical ceiling (cores × wall) via
+	// PID churn / ppid misattribution, and under N-way concurrency each run's
+	// sampler sees its siblings' descendants. D7 makes wall + zero-flakes the
+	// acceptance bar (CPU-min was the superseded ≤13-CPU-min goal). So we only gate
+	// CPU when NOT under load, and even then against an honest physical-ceiling cap.
+	if (!caps.underLoad && Number.isFinite(cpuMs) && cpuMs > caps.maxCpuMs) {
 		violations.push(`cpu ${(cpuMs / 60000).toFixed(2)} CPU-min > cap ${(caps.maxCpuMs / 60000).toFixed(2)} CPU-min`);
 	}
 

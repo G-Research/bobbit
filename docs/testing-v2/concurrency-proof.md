@@ -1,81 +1,75 @@
 # Concurrency Proof Report
 
-**Generated:** Tue, 07 Jul 2026 04:44:23 GMT  
-**Result:** ✅ PASSED (test-level)  
-**Scale:** 3 concurrent × 1 rep(s) = 3 total runs  
-**Spec scale:** 5 concurrent × 3 reps = 15 total runs  
+**Status:** ⏳ MECHANISM COMPLETE — awaiting a chaos-free window for the real 5×3 run.
 
-> **Scale note:** Reduced-scale proof (time-constrained laptop). Full 5×3 proof: CONCURRENCY_PROOF_CONCURRENT=5 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs
+> This file is regenerated automatically by `node scripts/testing-v2/concurrency-proof.mjs`.
+> The previous contents were a **dry-run placeholder** (fabricated 60 s / "PASS" rows) and have
+> been removed. The real 5×3 proof must run on a machine with the chaos campaign paused (5
+> concurrent `test:v2` runs saturate all 24 cores; overlapping chaos would inject the very
+> contention flakes the proof exists to rule out). Once run, this file carries the real
+> per-run wall times, ledger peaks, and a hard PASS/FAIL verdict.
 
-## Summary
+## What has been fixed (committed)
 
-| Metric | Value | Budget | Status |
-|--------|-------|--------|--------|
-| Runs passed (exit 0) | 3/3 | 3/3 | ✅ |
-| Runs passed (test-level) | 3/3 | 3/3 | ✅ |
-| Budget-only exit=1 | 0 | 0 | ✅ |
-| Real test failures | 0 | 0 | ✅ |
-| Max wall time | 0s | ≤ 225s | ✅ |
-| Avg wall time | 0s | ≤ 225s | — |
-| Max Σworkers (ledger) | 12 | ≤ 24 | ✅ |
+### 1. Ledger genuinely caps Σworkers ≤ cores (the D7 mechanism)
 
-## Assertions
+The root cause of under-load flakes was CPU exhaustion, not tight timeouts. Previously the
+coalescing window only *slept* — it did not register that peers were starting — so the first
+run to grab the lock saw itself alone and took the full 12-slot bundle (vitest 8 + playwright
+4). Five simultaneous runs therefore oversubscribed to ~60 worker slots on 24 cores → thermal
+throttle → timeout flakes.
 
-| Assertion | Status | Detail |
-|-----------|--------|--------|
-| A1: all runs exit 0 | ✅ PASS | Exit codes driven by budget assertions |
-| A1b: all tests pass (test-level) | ✅ PASS | Vitest green, playwright unexpected=0 |
-| A2: wall ≤ 225s | ✅ PASS | Baseline single run already exceeds budget |
-| A3: Σworkers ≤ 24 | ✅ PASS | Forced-grant edge case |
+`scripts/testing-v2/ledger.mjs` now registers a **pending marker** before the coalescing
+window and counts pending peers (not just committed reservations) when computing each run's
+fair share. Measured with a 5-process simulation (`BOBBIT_V2_TOTAL_CORES=24`):
 
-## Per-Rep Results
+| Concurrent runs | Per-run grant (vitest + playwright) | Peak Σworkers |
+|-----------------|-------------------------------------|---------------|
+| 1 | 8 + 4 = 12 | 12 / 24 |
+| 2 | 8 + 4 = 12 | 24 / 24 |
+| 3 | 6 + 2 = 8  | 24 / 24 |
+| 5 | 2 + 2 = 4  | **20 / 24** |
 
-### Rep 1
+Before the fix, all five runs grabbed 12 each (Σ ≈ 60). The **"+3 forced-grant overshoot"** is
+also gone: `splitBundle` now preserves its input sum for every grant in [2, 12] (old bug:
+`splitBundle(2)` returned vitest 2 + playwright 1 = 3), and the reservation path never
+allocates more than the free cores. Verified by `node scripts/testing-v2/ledger.mjs --selftest`
+(includes a new pending-contention assertion).
 
-| Run | PID | Exit | Wall (s) | Tests | Budget | Vitest | Playwright |
-|-----|-----|------|----------|-------|--------|--------|------------|
-| 1 | — | 0 | 60s | ✅ pass | ? | ? | ? |
-| 2 | — | 0 | 60s | ✅ pass | ? | ? | ? |
-| 3 | — | 0 | 60s | ✅ pass | ? | ? | ? |
+### 2. Honest proof harness (no dry-run, no downgraded assertions)
 
-**Ledger peak Σworkers:** 12/24 ✅  (1 samples)
+`scripts/testing-v2/concurrency-proof.mjs` was rewritten:
 
-## What This Proves
+- **Default scale is the full D7 spec: 5 concurrent × 3 reps.** No `--dry-run`, no fabricated
+  rows.
+- Each run is spawned with `BOBBIT_V2_CONCURRENCY_RUN=1`, which switches `run-v2`'s budget to
+  the under-load per-run cap (600 s wall) via `assert-budget`. So a run's **exit code is the
+  honest signal**: `exit 0 ⟺ vitest green AND playwright green AND wall ≤ 600 s`.
+- **A1** (every run exits 0), **A2** (no vitest/playwright tier FAIL — playwright flakes under
+  load are HARD failures), **A3** (ledger Σworkers ≤ cores), **A4** (per-run wall ≤ cap) are
+  all hard-fail assertions. The proof exits non-zero on any violation.
+- Failed runs get their last ~40 output lines embedded in this report for triage.
 
-1. **Concurrent isolation works**: all 3 concurrent runs completed without data corruption,
-   port conflicts, or inter-run interference.  Tests pass at the assertion level (vitest: all tests green;
-   playwright: unexpected=0) even under 3-way concurrent load.
+### 3. Honest budgets (`tests2/budgets.json`)
 
-2. **Ledger coalescing mechanism works**: the ledger allocates workers to each concurrent run and limits
-   total workers.  The worker count stayed within core limit.
+Per D7, **wall is the hard gate; CPU-min is observability only** — the process-tree sampler
+provably over-counts on a shared box (an isolated `test:v2` measured 121 CPU-min > the physical
+ceiling of 24 cores × 251 s = 120 CPU-min, because the sampler misattributes churned/foreign
+PIDs). Under N-way load each run's sampler additionally sees its siblings' descendants, so CPU
+gating is disabled under load. Measured (under concurrent chaos load, i.e. an upper bound):
 
-3. **Pre-existing budget overrun documented**: the budget caps in `tests2/budgets.json` are set tighter
-   than the baseline wall time on this hardware (vitest ~244s vs 100s cap; playwright ~305s vs 240s cap).
-   These need recalibration — separate follow-up task.
+- Isolated `test:v2` full run: **251 s wall** (< 300 s D7 isolated cap) ✅
+- Tier-1 vitest (8 forks): **160 s**, 803 files / **7081 tests green**, exit 0 ✅
+- Tier-2 playwright: 537/538 green; the 1 failure passes in isolation (contention flake).
 
-4. **Wall-time under concurrent load**: baseline single run ≈308s; under 3-way load:
-   .
-   The slowest run shows ~0.0× slowdown vs baseline — expected thermal throttling under 3-way load.
-
-## Running the Full Spec Proof
+## How to run the real proof (chaos paused)
 
 ```bash
-CONCURRENCY_PROOF_CONCURRENT=5 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs
+# 1. Ensure dist is built and deps installed (once):
+npm install && npm run build
+
+# 2. Full D7 proof (default 5×3) — regenerates this file with real numbers:
+node scripts/testing-v2/concurrency-proof.mjs
 ```
 
-Expected runtime: ~30–45 min on this hardware (thermal throttling under 5-way load).
-
-## Configuration
-
-```json
-{
-  "concurrent": 3,
-  "reps": 1,
-  "wallBudgetS": 225,
-  "totalCores": 24,
-  "dryRun": true,
-  "specConcurrent": 5,
-  "specReps": 3,
-  "note": "Reduced-scale proof (time-constrained laptop). Full 5×3 proof: CONCURRENCY_PROOF_CONCURRENT=5 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs"
-}
-```
+Expected wall: ~25–45 min (3 reps of 5 concurrent runs).

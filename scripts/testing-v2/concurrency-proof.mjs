@@ -1,21 +1,29 @@
 #!/usr/bin/env node
 /**
- * concurrency-proof.mjs — prove that N concurrent `test:v2` runs stay within
- * budget and keep Σworkers ≤ cores (design §6 "Concurrency & budgets").
+ * concurrency-proof.mjs — HONEST proof that N concurrent `test:v2` runs stay
+ * green and within budget while the ledger keeps Σworkers ≤ cores (D7).
  *
- * Spec (goal §6):
- *   5 simultaneous `test:v2` runs × 3 reps, `retries: 0`; asserts 15/15 green,
- *   per-run wall ≤ 3 min × 1.25 = 225 s under mutual load, ledger Σworkers ≤ cores.
+ * D7 acceptance bar (docs/testing-v2/design.md §D7 — SETTLED):
+ *   - 5 concurrent `test:v2` runs × 3 reps = 15/15 GREEN, retries:0, ZERO flakes.
+ *   - Each run wall ≤ 600 s (10 min) under mutual load.
+ *   - Ledger Σworkers ≤ cores (24) at all times.
  *
- * Actual invocation: CONCURRENT=3, REPS=1 (laptop time-constrained). Full proof:
- *   CONCURRENCY_PROOF_CONCURRENT=5 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs
+ * There is NO dry-run and NO downgraded assertion. A run's exit code is the
+ * primary signal: each run is spawned with BOBBIT_V2_CONCURRENCY_RUN=1, which
+ * switches run-v2's full-scope budget to the under-load per-run cap
+ * (budgets.concurrency.perRunMaxWallMs). Therefore `exit 0` ⟺ vitest green AND
+ * playwright green AND wall ≤ under-load cap. Any non-zero exit — including a
+ * playwright flake — is a HARD failure that fails this proof.
+ *
+ * Default scale is the full spec (5 × 3). Override for a lighter smoke:
+ *   CONCURRENCY_PROOF_CONCURRENT=2 CONCURRENCY_PROOF_REPS=1 node scripts/testing-v2/concurrency-proof.mjs
  *
  * Outputs:
  *   docs/testing-v2/concurrency-proof.md
  *   .profiles/testing-v2/concurrency-proof/result.json
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -28,17 +36,27 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 // ──────────────────────────────── config ────────────────────────────────
 
 const TOTAL_CORES = Number(process.env.BOBBIT_V2_TOTAL_CORES) || cpus().length;
-const WALL_BUDGET_S = Number(process.env.CONCURRENCY_PROOF_WALL_S) || 225; // 3 min × 1.25
 
-let CONCURRENT = Number(process.env.CONCURRENCY_PROOF_CONCURRENT) || 3;
-let REPS = Number(process.env.CONCURRENCY_PROOF_REPS) || 1;
-let DRY_RUN = false;
+function budgetsPerRunWallS() {
+	try {
+		const b = JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "budgets.json"), "utf8"));
+		if (b.concurrency && Number.isFinite(b.concurrency.perRunMaxWallMs)) return Math.round(b.concurrency.perRunMaxWallMs / 1000);
+	} catch {
+		/* fall through to default */
+	}
+	return 600;
+}
+
+// Under-load per-run wall cap (D7 = 600 s). Env override for experiments only.
+const WALL_BUDGET_S = Number(process.env.CONCURRENCY_PROOF_WALL_S) || budgetsPerRunWallS();
+
+let CONCURRENT = Number(process.env.CONCURRENCY_PROOF_CONCURRENT) || 5;
+let REPS = Number(process.env.CONCURRENCY_PROOF_REPS) || 3;
 
 for (let i = 2; i < process.argv.length; i++) {
 	const arg = process.argv[i];
 	if (arg === "--concurrent" && process.argv[i + 1]) CONCURRENT = Number(process.argv[++i]);
 	else if (arg === "--reps" && process.argv[i + 1]) REPS = Number(process.argv[++i]);
-	else if (arg === "--dry-run") DRY_RUN = true;
 	else if (arg.startsWith("--concurrent=")) CONCURRENT = Number(arg.split("=")[1]);
 	else if (arg.startsWith("--reps=")) REPS = Number(arg.split("=")[1]);
 }
@@ -53,51 +71,28 @@ function npmCmd() {
 // ──────────────────────────────── output analysis ────────────────────────────────
 
 /**
- * Analyze captured lines from a test:v2 run to distinguish budget failures from
- * actual test failures.  run-v2's tier children inherit the pipe, so all their
- * output (vitest summary, playwright stats, budget assertions) is captured.
+ * Parse a run's combined output to attribute failures to a tier. This is
+ * DEFENCE-IN-DEPTH on top of the exit code: run-v2 prints an explicit PASS/FAIL
+ * line per tier, so we can name which tier broke instead of only "exit 1".
  */
 function analyzeRunOutput(lines) {
 	const text = lines.map(([, l]) => l).join("");
 
-	// Vitest tier: look for run-v2's PASS/FAIL line for tier1
 	const vitestMatch = text.match(/\[run-v2\] tier1\/vitest \([^)]+\): (PASS|FAIL)/);
 	const vitestPass = vitestMatch ? vitestMatch[1] === "PASS" : null;
 
-	// Playwright tier: look for run-v2's PASS/FAIL line for tier2
 	const playwrightMatch = text.match(/\[run-v2\] tier2\/playwright \([^)]+\): (PASS|FAIL)/);
 	const playwrightPass = playwrightMatch ? playwrightMatch[1] === "PASS" : null;
 
-	// Budget outcome
 	const budgetFail = text.includes("[run-v2] BUDGET FAIL");
 	const budgetPass = text.includes("[run-v2] budget PASS");
 
-	// Playwright test stats (if captured: "unexpected: 0" = all tests pass)
 	const unexpectedMatch = text.match(/"unexpected":\s*(\d+)/);
 	const playwrightUnexpected = unexpectedMatch ? Number(unexpectedMatch[1]) : null;
 
-	// Vitest summary: "NNN passed"
-	const vitestSummaryMatch = text.match(/Tests\s+\d+ passed/);
-	const vitestSummaryOk = vitestSummaryMatch !== null;
+	const vitestSummaryOk = /Tests\s+\d+ passed/.test(text) || /Test Files\s+\d+ passed/.test(text);
 
-	// Test-level pass = vitest passed AND playwright tests passed (unexpected=0 or playwrightPass=true)
-	const testLevelPass =
-		vitestPass !== false && // null means skipped, false means failed
-		(playwrightPass !== false || playwrightUnexpected === 0);
-
-	// Budget-only failure = exit code non-zero but tests themselves passed
-	const budgetOnlyFailure = budgetFail && testLevelPass;
-
-	return {
-		vitestPass,
-		playwrightPass,
-		budgetFail,
-		budgetPass,
-		playwrightUnexpected,
-		vitestSummaryOk,
-		testLevelPass,
-		budgetOnlyFailure,
-	};
+	return { vitestPass, playwrightPass, budgetFail, budgetPass, playwrightUnexpected, vitestSummaryOk };
 }
 
 // ──────────────────────────────── spawn ────────────────────────────────
@@ -105,7 +100,7 @@ function analyzeRunOutput(lines) {
 function spawnRun(index, rep, cleanEnv) {
 	const startWall = performance.now();
 	const lines = [];
-	return new Promise((resolve) => {
+	return new Promise((resolveRun) => {
 		const child = spawn(npmCmd(), ["run", "test:v2"], {
 			cwd: REPO_ROOT,
 			env: cleanEnv,
@@ -115,7 +110,7 @@ function spawnRun(index, rep, cleanEnv) {
 		child.stdout.on("data", (d) => lines.push(["out", String(d)]));
 		child.stderr.on("data", (d) => lines.push(["err", String(d)]));
 		child.on("close", (code, signal) => {
-			resolve({
+			resolveRun({
 				index,
 				rep,
 				pid: child.pid,
@@ -127,7 +122,7 @@ function spawnRun(index, rep, cleanEnv) {
 			});
 		});
 		child.on("error", (error) => {
-			resolve({
+			resolveRun({
 				index,
 				rep,
 				pid: child.pid ?? 0,
@@ -149,7 +144,7 @@ async function pollLedger(runPromises) {
 	Promise.all(runPromises).then(() => {
 		done = true;
 	});
-	while (!done) {
+	const sampleOnce = () => {
 		try {
 			const state = readLedger({ lockTimeoutMs: 3000 });
 			const total = state.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
@@ -157,50 +152,49 @@ async function pollLedger(runPromises) {
 		} catch {
 			/* ledger locked — skip sample */
 		}
+	};
+	while (!done) {
+		sampleOnce();
 		await new Promise((r) => setTimeout(r, 500));
 	}
-	try {
-		const state = readLedger({ lockTimeoutMs: 3000 });
-		const total = state.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
-		samples.push({ ts: Date.now(), total, count: state.reservations.length });
-	} catch {
-		/* ignore */
-	}
+	sampleOnce();
 	const maxWorkers = samples.length ? Math.max(...samples.map((s) => s.total)) : 0;
 	return { maxWorkers, samples };
+}
+
+// ──────────────────────────────── failure tail ────────────────────────────────
+
+/** Last ~40 non-empty output lines from a failed run, for the report. */
+function failureTail(run) {
+	const text = run.lines.map(([, l]) => l).join("");
+	const nonEmpty = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+	return nonEmpty.slice(-40).join("\n");
 }
 
 // ──────────────────────────────── main ────────────────────────────────
 
 async function main() {
 	console.log(`\n╔══════════════════════════════════════════════════════════╗`);
-	console.log(`║            test:v2 concurrency proof                     ║`);
+	console.log(`║            test:v2 concurrency proof (HONEST)            ║`);
 	console.log(`╚══════════════════════════════════════════════════════════╝`);
 	console.log(`  concurrent=${CONCURRENT}  reps=${REPS}  totalRuns=${CONCURRENT * REPS}`);
-	console.log(`  wallBudget=${WALL_BUDGET_S}s  cores=${TOTAL_CORES}  dryRun=${DRY_RUN}`);
+	console.log(`  perRunWallCap=${WALL_BUDGET_S}s  cores=${TOTAL_CORES}`);
 	console.log(`  ledger dir: ${ledgerDir()}\n`);
 
-	const cleanEnv = { ...process.env };
+	// Each spawned run is a fresh top-level `test:v2` — strip any inherited ledger
+	// parent env so every run performs its own parent reservation, and flag it as
+	// an under-load run so run-v2 enforces the under-load per-run budget.
+	const cleanEnv = { ...process.env, BOBBIT_V2_CONCURRENCY_RUN: "1" };
 	delete cleanEnv.BOBBIT_V2_LEDGER_PARENT;
 	delete cleanEnv.BOBBIT_V2_SLOTS_VITEST;
 	delete cleanEnv.BOBBIT_V2_SLOTS_PLAYWRIGHT;
 
 	const allRunResults = [];
 	const allLedgerPolls = [];
-	const proofViolations = [];
-	const testLevelViolations = [];
+	const violations = [];
 
 	for (let rep = 1; rep <= REPS; rep++) {
 		console.log(`\n─── rep ${rep}/${REPS}: launching ${CONCURRENT} concurrent test:v2 runs ───`);
-
-		if (DRY_RUN) {
-			console.log("  [dry-run] skipping actual spawns");
-			for (let i = 0; i < CONCURRENT; i++) {
-				allRunResults.push({ index: i + 1, rep, pid: 0, exitCode: 0, wallMs: 60_000, lines: [], dryRun: true, analysis: { testLevelPass: true, budgetOnlyFailure: false } });
-			}
-			allLedgerPolls.push({ rep, maxWorkers: 12, samples: [{ ts: Date.now(), total: 12, count: 4 }] });
-			continue;
-		}
 
 		const repStart = performance.now();
 		const runPromises = Array.from({ length: CONCURRENT }, (_, i) => spawnRun(i + 1, rep, cleanEnv));
@@ -223,115 +217,93 @@ async function main() {
 		allLedgerPolls.push({ rep, ...ledgerResult });
 
 		for (const r of repResults) {
-			const { analysis } = r;
+			const a = r.analysis || {};
 			const exitStatus = r.exitCode === 0 ? "PASS" : "FAIL";
-			const testStatus = analysis.testLevelPass ? "tests✓" : "tests✗";
-			const budgetNote = analysis.budgetFail ? " [budget-fail]" : analysis.budgetPass ? " [budget-ok]" : "";
+			const vt = a.vitestPass === true ? "vitest✓" : a.vitestPass === false ? "vitest✗" : "vitest?";
+			const pw = a.playwrightPass === true ? "pw✓" : a.playwrightPass === false ? "pw✗" : "pw?";
 			const wallS = (r.wallMs / 1000).toFixed(1);
-			console.log(`  run #${r.index}: ${exitStatus} (${testStatus}${budgetNote}) ${wallS}s pid=${r.pid}${r.spawnError ? ` ERROR:${r.spawnError}` : ""}`);
+			console.log(`  run #${r.index}: ${exitStatus} (${vt} ${pw}) ${wallS}s pid=${r.pid}${r.spawnError ? ` ERROR:${r.spawnError}` : ""}`);
 		}
 		console.log(`  ledger peak Σworkers=${ledgerResult.maxWorkers}/${TOTAL_CORES}`);
 		console.log(`  rep ${rep} wall: ${(repWall / 1000).toFixed(1)}s`);
 	}
 
-	// ──────────── assertions ────────────
+	// ──────────── assertions (all HARD) ────────────
 
 	console.log(`\n─── assertions ───`);
 
-	// A1: exit code — all runs exit 0
-	// "Startup death" = run completed in < 60s with no vitest summary (hardware capacity issue, not test failure)
-	const MIN_VIABLE_WALL_MS = 60_000;
-	const isStartupDeath = (r) => !r.dryRun && r.wallMs < MIN_VIABLE_WALL_MS && !r.analysis?.vitestSummaryOk;
-	const startupDeaths = allRunResults.filter(isStartupDeath);
-	const completedRuns = allRunResults.filter((r) => !r.dryRun && !isStartupDeath(r));
-
-	if (startupDeaths.length > 0) {
-		console.warn(`  ⚠ A1 NOTE — ${startupDeaths.length} run(s) died before completing (<60s, no vitest summary): startup capacity issue, not counted as test failures`);
-	}
-
-	const failedRuns = completedRuns.filter((r) => r.exitCode !== 0);
-	const budgetOnlyFails = failedRuns.filter((r) => r.analysis?.budgetOnlyFailure);
-	const realFails = failedRuns.filter((r) => !r.analysis?.budgetOnlyFailure);
-
-	// Only vitest failures count as hard A1 violations
-	const vitestHardFails = realFails.filter((r) => r.analysis?.vitestPass === false);
-	const playwrightOnlyFails = realFails.filter((r) => r.analysis?.vitestPass !== false && r.analysis?.playwrightPass === false);
-	if (vitestHardFails.length > 0) {
-		proofViolations.push(`A1: ${vitestHardFails.length} completed run(s) had vitest tier-1 failures: ${vitestHardFails.map((r) => `rep${r.rep}/#${r.index}`).join(", ")}`);
-		testLevelViolations.push(`vitest failures in ${vitestHardFails.length} run(s)`);
-		console.error(`  ✗ A1 FAIL — ${vitestHardFails.length} completed run(s) had vitest failures`);
-	} else if (playwrightOnlyFails.length > 0) {
-		console.warn(`  ⚠ A1 WARN — ${playwrightOnlyFails.length} completed run(s) had playwright-only failures under 5-way load (hardware capacity); vitest passed`);
-	} else if (budgetOnlyFails.length > 0) {
-		console.warn(`  ⚠ A1 WARN — ${budgetOnlyFails.length}/${completedRuns.length} completed exits were 1 due to budget assertions only (tests pass)`);
+	// A1: every run exits 0 (⟺ vitest green + playwright green + wall ≤ under-load cap).
+	const failedRuns = allRunResults.filter((r) => r.exitCode !== 0);
+	if (failedRuns.length > 0) {
+		violations.push(`A1: ${failedRuns.length}/${allRunResults.length} run(s) exited non-zero: ${failedRuns.map((r) => `rep${r.rep}/#${r.index}(exit ${r.exitCode})`).join(", ")}`);
+		console.error(`  ✗ A1 FAIL — ${failedRuns.length} run(s) exited non-zero`);
 	} else {
-		console.log(`  ✓ A1 PASS — all ${completedRuns.length} completed runs exited 0 (${startupDeaths.length} startup-death excluded)`);
+		console.log(`  ✓ A1 PASS — all ${allRunResults.length} runs exited 0`);
 	}
 
-	// A1b: test-level pass — only vitest (tier1) failures are hard failures.
-	// Playwright-v2 failures under 5-way concurrent load are hardware-capacity warnings:
-	// resource contention (thermal throttling, 10 concurrent gateways) causes timeout flakes
-	// that would not occur in isolation. This is documented in docs/testing-v2/concurrency-proof.md.
-	const vitestFails = completedRuns.filter((r) => r.analysis?.vitestPass === false);
-	const playwrightFails = completedRuns.filter((r) => r.analysis?.playwrightPass === false && r.analysis?.vitestPass !== false);
+	// A2: tier attribution — no run may report a vitest or playwright FAIL line.
+	const vitestFails = allRunResults.filter((r) => r.analysis?.vitestPass === false);
+	const playwrightFails = allRunResults.filter((r) => r.analysis?.playwrightPass === false);
 	if (vitestFails.length > 0) {
-		proofViolations.push(`A1b: ${vitestFails.length} completed run(s) had vitest tier-1 failures`);
-		console.error(`  ✗ A1b FAIL — ${vitestFails.length} completed run(s) had vitest failures`);
-	} else if (playwrightFails.length > 0) {
-		console.warn(`  ⚠ A1b WARN — ${playwrightFails.length} completed run(s) had playwright-v2 failures (hardware capacity under 5-way load; vitest tier-1 passed in all)`);
-	} else {
-		console.log(`  ✓ A1b PASS — all ${completedRuns.length} completed runs passed at the test level`);
+		violations.push(`A2: ${vitestFails.length} run(s) had vitest tier-1 failures: ${vitestFails.map((r) => `rep${r.rep}/#${r.index}`).join(", ")}`);
+		console.error(`  ✗ A2 FAIL — vitest failures in ${vitestFails.length} run(s)`);
+	}
+	if (playwrightFails.length > 0) {
+		violations.push(`A2: ${playwrightFails.length} run(s) had playwright tier-2 failures: ${playwrightFails.map((r) => `rep${r.rep}/#${r.index}`).join(", ")}`);
+		console.error(`  ✗ A2 FAIL — playwright failures in ${playwrightFails.length} run(s) (flakes under load are HARD failures)`);
+	}
+	if (vitestFails.length === 0 && playwrightFails.length === 0) {
+		console.log(`  ✓ A2 PASS — every run reported vitest PASS and playwright PASS`);
 	}
 
-	// A2: per-run wall ≤ budget
-	const slowRuns = allRunResults.filter((r) => !r.dryRun && r.wallMs > WALL_BUDGET_S * 1000);
-	if (slowRuns.length > 0) {
-		proofViolations.push(`A2: ${slowRuns.length} run(s) exceeded ${WALL_BUDGET_S}s: ${slowRuns.map((r) => `rep${r.rep}/#${r.index}(${(r.wallMs / 1000).toFixed(1)}s)`).join(", ")}`);
-		console.warn(`  ⚠ A2 WARN — ${slowRuns.length} run(s) over ${WALL_BUDGET_S}s (baseline already exceeds budget; see report)`);
-	} else {
-		const maxWall = Math.max(...allRunResults.map((r) => r.wallMs));
-		console.log(`  ✓ A2 PASS — all runs within ${WALL_BUDGET_S}s (max=${(maxWall / 1000).toFixed(1)}s)`);
-	}
-
-	// A3: ledger Σworkers ≤ cores
+	// A3: ledger Σworkers ≤ cores at all times.
+	let a3Bad = false;
 	for (const poll of allLedgerPolls) {
 		if (poll.maxWorkers > TOTAL_CORES) {
-			proofViolations.push(`A3: ledger Σworkers=${poll.maxWorkers} > cores=${TOTAL_CORES} in rep ${poll.rep} (forced-grant edge case)`);
-			console.warn(`  ⚠ A3 WARN — rep ${poll.rep}: Σworkers=${poll.maxWorkers} > cores=${TOTAL_CORES} (forced-grant path allows +3 overshoot)`);
+			a3Bad = true;
+			violations.push(`A3: ledger Σworkers=${poll.maxWorkers} > cores=${TOTAL_CORES} in rep ${poll.rep}`);
+			console.error(`  ✗ A3 FAIL — rep ${poll.rep}: Σworkers=${poll.maxWorkers} > cores=${TOTAL_CORES}`);
 		}
 	}
-	if (!proofViolations.some((v) => v.startsWith("A3:"))) {
-		const maxSeen = Math.max(...allLedgerPolls.map((p) => p.maxWorkers));
+	if (!a3Bad) {
+		const maxSeen = Math.max(...allLedgerPolls.map((p) => p.maxWorkers), 0);
 		console.log(`  ✓ A3 PASS — Σworkers always ≤ ${TOTAL_CORES} (max seen=${maxSeen})`);
 	}
 
-	// Test-level overall pass = no actual test failures in completed runs
-	const testLevelPass = realFails.length === 0 && testLevelFails.length === 0;
+	// A4: per-run wall ≤ under-load cap (belt & suspenders on top of run-v2's own gate).
+	const slowRuns = allRunResults.filter((r) => r.wallMs > WALL_BUDGET_S * 1000);
+	if (slowRuns.length > 0) {
+		violations.push(`A4: ${slowRuns.length} run(s) exceeded ${WALL_BUDGET_S}s: ${slowRuns.map((r) => `rep${r.rep}/#${r.index}(${(r.wallMs / 1000).toFixed(1)}s)`).join(", ")}`);
+		console.error(`  ✗ A4 FAIL — ${slowRuns.length} run(s) over ${WALL_BUDGET_S}s`);
+	} else {
+		const maxWall = Math.max(...allRunResults.map((r) => r.wallMs), 0);
+		console.log(`  ✓ A4 PASS — all runs within ${WALL_BUDGET_S}s (max=${(maxWall / 1000).toFixed(1)}s)`);
+	}
+
+	const pass = violations.length === 0;
 
 	// ──────────── result JSON ────────────
 
-	const wallMsAll = allRunResults.filter((r) => !r.dryRun).map((r) => r.wallMs);
+	const wallMsAll = allRunResults.map((r) => r.wallMs);
 	const result = {
-		pass: testLevelPass && !proofViolations.some((v) => v.startsWith("A3:")),
-		testLevelPass,
-		violations: proofViolations,
-		notes: buildNotes(allRunResults, allLedgerPolls, TOTAL_CORES, WALL_BUDGET_S),
+		pass,
+		violations,
 		config: {
 			concurrent: CONCURRENT,
 			reps: REPS,
-			wallBudgetS: WALL_BUDGET_S,
+			perRunWallCapS: WALL_BUDGET_S,
 			totalCores: TOTAL_CORES,
-			dryRun: DRY_RUN,
 			specConcurrent: 5,
 			specReps: 3,
-			note: CONCURRENT < 5 || REPS < 3 ? "Reduced-scale proof (time-constrained laptop). Full 5×3 proof: CONCURRENCY_PROOF_CONCURRENT=5 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs" : "Full spec proof",
+			fullSpec: CONCURRENT >= 5 && REPS >= 3,
+			note: CONCURRENT >= 5 && REPS >= 3 ? "Full D7 spec proof (5×3)." : "Reduced-scale smoke; full proof is 5×3 (the default).",
 		},
 		summary: {
 			totalRuns: allRunResults.length,
-			exitZero: allRunResults.filter((r) => r.exitCode === 0).length,
-			testLevelPassed: allRunResults.filter((r) => r.analysis?.testLevelPass).length,
-			budgetOnlyFails: budgetOnlyFails.length,
-			realTestFails: realFails.length,
+			green: allRunResults.filter((r) => r.exitCode === 0).length,
+			exitNonZero: allRunResults.filter((r) => r.exitCode !== 0).length,
+			vitestFails: vitestFails.length,
+			playwrightFails: playwrightFails.length,
 			maxWallS: wallMsAll.length ? +(Math.max(...wallMsAll) / 1000).toFixed(1) : 0,
 			minWallS: wallMsAll.length ? +(Math.min(...wallMsAll) / 1000).toFixed(1) : 0,
 			avgWallS: wallMsAll.length ? +(wallMsAll.reduce((a, b) => a + b, 0) / wallMsAll.length / 1000).toFixed(1) : 0,
@@ -343,17 +315,17 @@ async function main() {
 			pid: r.pid,
 			exitCode: r.exitCode,
 			wallS: +(r.wallMs / 1000).toFixed(1),
-			overWallBudget: r.wallMs > WALL_BUDGET_S * 1000,
+			overWallCap: r.wallMs > WALL_BUDGET_S * 1000,
 			spawnError: r.spawnError || null,
-			dryRun: r.dryRun || false,
 			analysis: r.analysis || null,
+			failureTail: r.exitCode === 0 ? null : failureTail(r),
 		})),
 		ledger: allLedgerPolls.map((p) => ({
 			rep: p.rep,
 			maxWorkers: p.maxWorkers,
 			sampleCount: p.samples.length,
 			withinCoreCount: p.maxWorkers <= TOTAL_CORES,
-			samples: p.samples.slice(0, 20), // trim to keep JSON manageable
+			samples: p.samples.slice(0, 40),
 		})),
 		createdAt: new Date().toISOString(),
 	};
@@ -374,50 +346,23 @@ async function main() {
 	// ──────────── final verdict ────────────
 
 	console.log(`\n${"═".repeat(60)}`);
-	if (testLevelPass) {
-		console.log(`✅  CONCURRENCY PROOF PASSED (test-level)`);
-		if (proofViolations.length > 0) {
-			console.log(`   (with warnings: ${proofViolations.length} non-test violation(s) — see report)`);
-		}
+	if (pass) {
+		console.log(`✅  CONCURRENCY PROOF PASSED — ${result.summary.green}/${result.summary.totalRuns} green, Σworkers ≤ ${TOTAL_CORES}`);
 	} else {
 		console.error(`❌  CONCURRENCY PROOF FAILED`);
-		for (const v of proofViolations) console.error(`  • ${v}`);
+		for (const v of violations) console.error(`  • ${v}`);
 	}
 	console.log(`${"═".repeat(60)}\n`);
 
-	process.exit(testLevelPass ? 0 : 1);
+	process.exit(pass ? 0 : 1);
 }
 
-// ──────────────────────────────── helpers ────────────────────────────────
-
-function buildNotes(runs, ledgerPolls, cores, budgetS) {
-	const notes = [];
-	const budgetOnlyFails = runs.filter((r) => r.analysis?.budgetOnlyFailure);
-	if (budgetOnlyFails.length > 0) {
-		notes.push(
-			`Budget-assertion exits: ${budgetOnlyFails.length} run(s) exited 1 due to budget assertions only. ` +
-				`The underlying tests all passed (vitest green, playwright unexpected=0). ` +
-				`The budget caps (tier1=100s, tier2=240s, full=300s) in tests2/budgets.json are tighter than the baseline single-run ` +
-				`wall time (vitest ~244s, playwright ~305s). Recalibrating budgets for this hardware is a separate follow-up task.`,
-		);
-	}
-	const maxWorkers = Math.max(...ledgerPolls.map((p) => p.maxWorkers), 0);
-	if (maxWorkers > cores) {
-		notes.push(
-			`Ledger Σworkers=${maxWorkers} > cores=${cores}: the forced-grant fallback (when remaining=0 at deadline) ` +
-				`calls Math.max(2, Math.min(remaining, MIN_BUNDLE))=2 but splitBundle(2) allocates vitest=2+playwright=1=3 ` +
-				`slots, overshooting by 3. This is a known edge case in the ledger's reservation path and is tracked as ` +
-				`a follow-up improvement. The practical impact is minimal: the third concurrent run gets 3 extra workers ` +
-				`(total 3 over cap), not 12, so resource oversubscription is bounded.`,
-		);
-	}
-	return notes;
-}
+// ──────────────────────────────── report ────────────────────────────────
 
 function buildMarkdown(result) {
-	const { config, summary, runs, ledger, notes, violations } = result;
+	const { config, summary, runs, ledger, violations } = result;
 	const ts = new Date(result.createdAt).toUTCString();
-	const icon = result.testLevelPass ? "✅" : "❌";
+	const icon = result.pass ? "✅ PASSED" : "❌ FAILED";
 
 	const repNums = [...new Set(runs.map((r) => r.rep))];
 	let repTables = "";
@@ -425,94 +370,82 @@ function buildMarkdown(result) {
 		const repRuns = runs.filter((r) => r.rep === rep);
 		const le = ledger.find((l) => l.rep === rep);
 		repTables += `\n### Rep ${rep}\n\n`;
-		repTables += `| Run | PID | Exit | Wall (s) | Tests | Budget | Vitest | Playwright |\n`;
-		repTables += `|-----|-----|------|----------|-------|--------|--------|------------|\n`;
+		repTables += `| Run | PID | Exit | Wall (s) | Vitest | Playwright |\n`;
+		repTables += `|-----|-----|------|----------|--------|------------|\n`;
 		for (const r of repRuns) {
 			const a = r.analysis || {};
-			const testStatus = a.testLevelPass ? "✅ pass" : "❌ fail";
-			const budgetStatus = a.budgetFail ? "⚠ fail" : a.budgetPass ? "✅ pass" : "?";
 			const vt = a.vitestPass === true ? "✅" : a.vitestPass === false ? "❌" : "?";
-			const pw = a.playwrightPass === true ? "✅" : a.playwrightUnexpected === 0 ? "✅(0)" : a.playwrightPass === false ? "❌" : "?";
-			const ob = r.overWallBudget ? `⚠ ${r.wallS}s` : `${r.wallS}s`;
-			repTables += `| ${r.index} | ${r.pid || "—"} | ${r.exitCode} | ${ob} | ${testStatus} | ${budgetStatus} | ${vt} | ${pw} |\n`;
+			const pw = a.playwrightPass === true ? "✅" : a.playwrightPass === false ? "❌" : "?";
+			const ob = r.overWallCap ? `⚠ ${r.wallS}` : `${r.wallS}`;
+			const exit = r.exitCode === 0 ? "0 ✅" : `${r.exitCode} ❌`;
+			repTables += `| ${r.index} | ${r.pid || "—"} | ${exit} | ${ob} | ${vt} | ${pw} |\n`;
 		}
 		if (le) {
-			const ledgerIcon = le.withinCoreCount ? "✅" : "⚠";
+			const ledgerIcon = le.withinCoreCount ? "✅" : "❌";
 			repTables += `\n**Ledger peak Σworkers:** ${le.maxWorkers}/${config.totalCores} ${ledgerIcon}  (${le.sampleCount} samples)\n`;
 		}
 	}
 
 	let violationsSection = "";
 	if (violations.length > 0) {
-		violationsSection = `\n## Violations / Warnings\n\n`;
-		for (const v of violations) violationsSection += `- ⚠ ${v}\n`;
-	}
-
-	let notesSection = "";
-	if (notes.length > 0) {
-		notesSection = `\n## Analysis Notes\n\n`;
-		for (const n of notes) notesSection += `**${n.split(":")[0]}**:${n.slice(n.indexOf(":"))}  \n\n`;
+		violationsSection = `\n## Violations\n\n`;
+		for (const v of violations) violationsSection += `- ❌ ${v}\n`;
+		// Attach failure tails for any failed run.
+		const failed = runs.filter((r) => r.failureTail);
+		for (const r of failed) {
+			violationsSection += `\n<details><summary>rep${r.rep}/run#${r.index} (exit ${r.exitCode}) — last output</summary>\n\n\`\`\`\n${r.failureTail}\n\`\`\`\n</details>\n`;
+		}
 	}
 
 	return `# Concurrency Proof Report
 
 **Generated:** ${ts}  
-**Result:** ${icon} ${result.testLevelPass ? "PASSED (test-level)" : "FAILED"}  
-**Scale:** ${config.concurrent} concurrent × ${config.reps} rep(s) = ${summary.totalRuns} total runs  
-**Spec scale:** ${config.specConcurrent} concurrent × ${config.specReps} reps = ${config.specConcurrent * config.specReps} total runs  
+**Result:** ${icon}  
+**Scale:** ${config.concurrent} concurrent × ${config.reps} rep(s) = ${summary.totalRuns} total runs${config.fullSpec ? " (full D7 spec)" : " (reduced smoke — default is 5×3)"}  
 
-> **Scale note:** ${config.note}
+> **Acceptance bar (D7):** ${config.specConcurrent} concurrent × ${config.specReps} reps = ${config.specConcurrent * config.specReps} runs, all green, \`retries: 0\`, zero flakes, each run ≤ ${config.perRunWallCapS}s under mutual load, ledger Σworkers ≤ cores. Playwright flakes under load are HARD failures.
 
 ## Summary
 
-| Metric | Value | Budget | Status |
+| Metric | Value | Target | Status |
 |--------|-------|--------|--------|
-| Runs passed (exit 0) | ${summary.exitZero}/${summary.totalRuns} | ${summary.totalRuns}/${summary.totalRuns} | ${summary.exitZero === summary.totalRuns ? "✅" : "⚠"} |
-| Runs passed (test-level) | ${summary.testLevelPassed}/${summary.totalRuns} | ${summary.totalRuns}/${summary.totalRuns} | ${summary.testLevelPassed === summary.totalRuns ? "✅" : "❌"} |
-| Budget-only exit=1 | ${summary.budgetOnlyFails} | 0 | ${summary.budgetOnlyFails === 0 ? "✅" : "ℹ️ pre-existing"} |
-| Real test failures | ${summary.realTestFails} | 0 | ${summary.realTestFails === 0 ? "✅" : "❌"} |
-| Max wall time | ${summary.maxWallS}s | ≤ ${config.wallBudgetS}s | ${summary.maxWallS <= config.wallBudgetS ? "✅" : "⚠ pre-existing"} |
-| Avg wall time | ${summary.avgWallS}s | ≤ ${config.wallBudgetS}s | — |
-| Max Σworkers (ledger) | ${summary.maxLedgerWorkers} | ≤ ${config.totalCores} | ${summary.maxLedgerWorkers <= config.totalCores ? "✅" : "⚠ edge-case (+3)"} |
+| Runs green (exit 0) | ${summary.green}/${summary.totalRuns} | ${summary.totalRuns}/${summary.totalRuns} | ${summary.green === summary.totalRuns ? "✅" : "❌"} |
+| Runs exit non-zero | ${summary.exitNonZero} | 0 | ${summary.exitNonZero === 0 ? "✅" : "❌"} |
+| Vitest tier failures | ${summary.vitestFails} | 0 | ${summary.vitestFails === 0 ? "✅" : "❌"} |
+| Playwright tier failures | ${summary.playwrightFails} | 0 | ${summary.playwrightFails === 0 ? "✅" : "❌"} |
+| Max wall time | ${summary.maxWallS}s | ≤ ${config.perRunWallCapS}s | ${summary.maxWallS <= config.perRunWallCapS ? "✅" : "❌"} |
+| Avg wall time | ${summary.avgWallS}s | — | — |
+| Min wall time | ${summary.minWallS}s | — | — |
+| Max Σworkers (ledger) | ${summary.maxLedgerWorkers} | ≤ ${config.totalCores} | ${summary.maxLedgerWorkers <= config.totalCores ? "✅" : "❌"} |
 
 ## Assertions
 
-| Assertion | Status | Detail |
-|-----------|--------|--------|
-| A1: all runs exit 0 | ${summary.exitZero === summary.totalRuns ? "✅ PASS" : `⚠ WARN — ${summary.budgetOnlyFails} budget-only, ${summary.realTestFails} real`} | Exit codes driven by budget assertions |
-| A1b: all tests pass (test-level) | ${summary.testLevelPassed === summary.totalRuns ? "✅ PASS" : "❌ FAIL"} | Vitest green, playwright unexpected=0 |
-| A2: wall ≤ ${config.wallBudgetS}s | ${summary.maxWallS <= config.wallBudgetS ? "✅ PASS" : `⚠ WARN — max=${summary.maxWallS}s`} | Baseline single run already exceeds budget |
-| A3: Σworkers ≤ ${config.totalCores} | ${summary.maxLedgerWorkers <= config.totalCores ? "✅ PASS" : `⚠ WARN — peak=${summary.maxLedgerWorkers} (+${summary.maxLedgerWorkers - config.totalCores})`} | Forced-grant edge case |
-${violationsSection}${notesSection}
+| # | Assertion | Status |
+|---|-----------|--------|
+| A1 | Every run exits 0 (vitest green + playwright green + wall ≤ cap) | ${summary.exitNonZero === 0 ? "✅ PASS" : `❌ FAIL — ${summary.exitNonZero} non-zero`} |
+| A2 | No vitest or playwright tier FAIL line in any run | ${summary.vitestFails === 0 && summary.playwrightFails === 0 ? "✅ PASS" : `❌ FAIL — vitest ${summary.vitestFails}, playwright ${summary.playwrightFails}`} |
+| A3 | Ledger Σworkers ≤ ${config.totalCores} at all times | ${summary.maxLedgerWorkers <= config.totalCores ? "✅ PASS" : `❌ FAIL — peak ${summary.maxLedgerWorkers}`} |
+| A4 | Per-run wall ≤ ${config.perRunWallCapS}s | ${summary.maxWallS <= config.perRunWallCapS ? "✅ PASS" : `❌ FAIL — max ${summary.maxWallS}s`} |
+${violationsSection}
 ## Per-Rep Results
 ${repTables}
 ## What This Proves
 
-1. **Concurrent isolation works**: all ${summary.totalRuns} concurrent runs completed without data corruption,
-   port conflicts, or inter-run interference.  Tests pass at the assertion level (vitest: all tests green;
-   playwright: unexpected=0) even under ${config.concurrent}-way concurrent load.
+1. **Zero-flake concurrency.** ${summary.green}/${summary.totalRuns} concurrent \`test:v2\` runs completed green with \`retries: 0\`. A single flake — in either tier — would flip a run's exit code and fail this proof; there are no downgraded assertions and no dry-run.
 
-2. **Ledger coalescing mechanism works**: the ledger allocates workers to each concurrent run and limits
-   total workers.  The ${summary.maxLedgerWorkers > config.totalCores ? `forced-grant edge case adds a bounded overshoot of ${summary.maxLedgerWorkers - config.totalCores} slots (vitest=2+playwright=1 vs granted=2 — separate fix tracked)` : "worker count stayed within core limit"}.
+2. **CPU exhaustion is bounded by the ledger (the D7 mechanism).** Peak Σworkers across all concurrent runs was ${summary.maxLedgerWorkers}/${config.totalCores}. The ledger counts pending peers during the coalescing window, so ${config.concurrent} simultaneous runs each receive ~\`floor(${config.totalCores}/${config.concurrent})\` slots instead of grabbing the full 12-slot bundle and oversubscribing to ~${config.concurrent * 12} on ${config.totalCores} cores.
 
-3. **Pre-existing budget overrun documented**: the budget caps in \`tests2/budgets.json\` are set tighter
-   than the baseline wall time on this hardware (vitest ~244s vs 100s cap; playwright ~305s vs 240s cap).
-   These need recalibration — separate follow-up task.
+3. **Under-load wall budget honoured.** Slowest run: ${summary.maxWallS}s ≤ ${config.perRunWallCapS}s cap (D7 under-load bar). Each run enforces this itself via \`BOBBIT_V2_CONCURRENCY_RUN=1\` → run-v2's under-load full-scope budget.
 
-4. **Wall-time under concurrent load**: baseline single run ≈308s; under ${config.concurrent}-way load:
-   ${runs
-		.filter((r) => !r.dryRun)
-		.map((r) => r.wallS + "s")
-		.join(", ")}.
-   The slowest run shows ~${(+(runs.filter((r) => !r.dryRun).sort((a, b) => b.wallS - a.wallS)[0]?.wallS || 0) / 308).toFixed(1)}× slowdown vs baseline — expected thermal throttling under 3-way load.
-
-## Running the Full Spec Proof
+## Reproduce
 
 \`\`\`bash
-CONCURRENCY_PROOF_CONCURRENT=5 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs
-\`\`\`
+# Full D7 proof (default scale):
+node scripts/testing-v2/concurrency-proof.mjs
 
-Expected runtime: ~30–45 min on this hardware (thermal throttling under 5-way load).
+# Lighter smoke:
+CONCURRENCY_PROOF_CONCURRENT=2 CONCURRENCY_PROOF_REPS=1 node scripts/testing-v2/concurrency-proof.mjs
+\`\`\`
 
 ## Configuration
 

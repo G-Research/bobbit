@@ -67,6 +67,7 @@ import { spawnSync } from "node:child_process";
 
 const LEDGER_DIRNAME = "bobbit-test-v2-ledger";
 const LOCK_STALE_MS = 30_000;
+const PENDING_STALE_MS = 60_000;
 const HEARTBEAT_MS = 2_000;
 const DEFAULT_COALESCE_MS = 1_500;
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
@@ -198,12 +199,17 @@ function readRaw(cores) {
 	try {
 		const parsed = JSON.parse(readFileSync(reservationsPath(), "utf8"));
 		if (parsed && Array.isArray(parsed.reservations)) {
-			return { totalCores: parsed.totalCores || cores, generation: parsed.generation || 0, reservations: parsed.reservations };
+			return {
+				totalCores: parsed.totalCores || cores,
+				generation: parsed.generation || 0,
+				reservations: parsed.reservations,
+				pending: Array.isArray(parsed.pending) ? parsed.pending : [],
+			};
 		}
 	} catch {
 		/* missing/corrupt — start fresh */
 	}
-	return { totalCores: cores, generation: 0, reservations: [] };
+	return { totalCores: cores, generation: 0, reservations: [], pending: [] };
 }
 
 function heartbeatFresh(id) {
@@ -242,6 +248,21 @@ function sweep(state, ownIds = new Set()) {
 	return dropped;
 }
 
+/**
+ * Drop pending markers whose owner PID is dead or that have out-lived the
+ * coalescing+grant window. Pending markers exist ONLY so simultaneously-starting
+ * runs count each other while deciding a fair per-run share; they carry no
+ * worker slots and must never linger to deflate a later run's grant.
+ */
+function sweepPending(state) {
+	if (!Array.isArray(state.pending)) {
+		state.pending = [];
+		return;
+	}
+	const now = Date.now();
+	state.pending = state.pending.filter((p) => pidAlive(p.pid) && now - Date.parse(p.at || 0) < PENDING_STALE_MS);
+}
+
 function writeState(state) {
 	state.generation = (state.generation || 0) + 1;
 	writeFileSync(reservationsPath(), `${JSON.stringify(state, null, 2)}\n`);
@@ -275,28 +296,56 @@ function newId(kind) {
 
 // ─────────────────────────── grant + split ───────────────────────────
 
-function computeGrant(reservations, myParentRunId, cores) {
-	const others = reservations.filter((r) => r.parentRunId !== myParentRunId);
-	const parents = new Set(others.map((r) => r.parentRunId));
-	parents.add(myParentRunId);
-	const activeParents = parents.size;
-	const used = others.reduce((s, r) => s + (r.workerSlots || 0), 0);
+/**
+ * Compute a fair, non-oversubscribing grant for `myParentRunId`.
+ *
+ * `activeParents` counts every distinct run currently competing for the machine:
+ * both committed reservations AND pending markers (peers still inside their
+ * coalescing window). This is the fix that keeps Σworkers ≤ cores under N-way
+ * load: without counting pending peers, the first run to grab the lock sees
+ * itself alone and takes the full MAX_BUNDLE (12), starving the rest and forcing
+ * an overshoot. With pending counted, five simultaneous runs each see
+ * activeParents=5 → target=floor(24/5)=4 → 5×4=20 ≤ 24.
+ *
+ * `grant` is additionally clamped to the cores that are actually free
+ * (`remaining`), so a commit can never push the committed total over the cap.
+ */
+function computeGrant(state, myParentRunId, cores) {
+	const parentSet = new Set();
+	for (const r of state.reservations) parentSet.add(r.parentRunId);
+	for (const p of state.pending || []) parentSet.add(p.parentRunId);
+	parentSet.add(myParentRunId);
+	const activeParents = Math.max(1, parentSet.size);
+	const used = state.reservations.filter((r) => r.parentRunId !== myParentRunId).reduce((s, r) => s + (r.workerSlots || 0), 0);
 	const remaining = cores - used;
 	const target = clamp(Math.floor(cores / activeParents), MIN_BUNDLE, MAX_BUNDLE);
-	const grant = Math.min(target, remaining);
+	const grant = Math.max(0, Math.min(target, remaining));
 	return { grant, remaining, target, activeParents, used };
 }
 
-/** Split a committed parent bundle: 4→2+2, 12→8+4; cap vitest 8 / playwright 4. */
+/**
+ * Split a committed parent bundle into vitest + playwright worker counts.
+ * Anchors (verified by selftest): 4→2+2, 6→4+2, 8→6+2, 12→8+4.
+ *
+ * The invariant that matters most: `vitest + playwright === input` for every
+ * input in [2, MAX_BUNDLE]. splitBundle NEVER returns a total larger than its
+ * grant — that was the old "+3 overshoot" bug (splitBundle(2) returned 2+1=3).
+ * Sum-preservation is what lets the caller clamp grant ≤ remaining and be sure
+ * the committed reservation stays within the free-core budget.
+ */
 export function splitBundle(grant) {
-	let playwright = clamp(Math.floor(grant / 3), 2, PLAYWRIGHT_CAP);
-	let vitest = grant - playwright;
-	if (vitest > VITEST_CAP) vitest = VITEST_CAP;
-	if (vitest < 2) {
-		vitest = Math.min(2, grant);
-		playwright = Math.max(1, grant - vitest);
+	const total = clamp(Math.floor(grant) || 0, 1, MAX_BUNDLE);
+	if (total < 2) return { vitest: 1, playwright: 0, total: 1 };
+	let playwright = total >= 4 ? clamp(Math.floor(total / 3), 2, PLAYWRIGHT_CAP) : 1;
+	let vitest = total - playwright;
+	if (vitest > VITEST_CAP) {
+		vitest = VITEST_CAP;
+		playwright = total - vitest;
 	}
-	playwright = Math.min(playwright, PLAYWRIGHT_CAP);
+	if (vitest < 1) {
+		vitest = 1;
+		playwright = total - 1;
+	}
 	return { vitest, playwright, total: vitest + playwright };
 }
 
@@ -307,14 +356,61 @@ export function splitBundle(grant) {
  * at least MIN_BUNDLE slots are available or the grant timeout elapses. Returns
  * the created reservation records + total granted.
  */
+function removePending(state, parentRunId) {
+	if (Array.isArray(state.pending)) {
+		state.pending = state.pending.filter((p) => !(p.parentRunId === parentRunId && p.pid === process.pid));
+	}
+}
+
+function registerPending(parentRunId, opts) {
+	withLock(() => {
+		const cores = totalCores(opts);
+		const state = readRaw(cores);
+		state.totalCores = cores;
+		sweep(state);
+		sweepPending(state);
+		if (!state.pending.some((p) => p.parentRunId === parentRunId && p.pid === process.pid)) {
+			state.pending.push({ parentRunId, pid: process.pid, at: new Date().toISOString() });
+		}
+		writeState(state);
+	}, opts);
+}
+
 function reserveBundle(kinds, opts = {}) {
 	const cores = totalCores(opts);
 	const coalesceMs = opts.coalesceMs ?? DEFAULT_COALESCE_MS;
 	const grantDeadline = Date.now() + (opts.grantTimeoutMs ?? DEFAULT_GRANT_TIMEOUT_MS);
 	const parentRunId = opts.parentRunId || newId("parent");
+	const twoKind = kinds.length === 2;
+	// Two-kind (full run) wants at least MIN_BUNDLE so vitest+playwright each get a
+	// useful share; single-kind (standalone core/browser) only needs ≥2.
+	const preferredMin = twoKind ? MIN_BUNDLE : 2;
+	const floorCommit = twoKind ? 2 : 1;
 
-	// Coalescing window: let simultaneously-starting suites register before we
-	// compute the shared budget, so no early runner over-allocates.
+	// Best-effort cleanup: if we exit before committing, drop our pending marker so
+	// we never deflate peers' fair share.
+	const cleanupPending = () => {
+		try {
+			withLock(
+				() => {
+					const s = readRaw(totalCores(opts));
+					removePending(s, parentRunId);
+					writeState(s);
+				},
+				{ lockTimeoutMs: 2000 },
+			);
+		} catch {
+			/* sweeper reclaims on PID liveness */
+		}
+	};
+
+	// 1) Register a pending marker so simultaneously-starting peers count us while
+	//    computing their own fair share.
+	registerPending(parentRunId, opts);
+	process.once("exit", cleanupPending);
+
+	// 2) Coalescing window: let peers register their pending markers before anyone
+	//    computes the shared budget, so no early runner over-allocates.
 	sleepSync(coalesceMs);
 
 	for (;;) {
@@ -322,21 +418,27 @@ function reserveBundle(kinds, opts = {}) {
 			const state = readRaw(cores);
 			state.totalCores = cores;
 			sweep(state);
-			const { grant, remaining } = computeGrant(state.reservations, parentRunId, cores);
+			sweepPending(state);
+			const { grant, remaining, target } = computeGrant(state, parentRunId, cores);
 
 			let usableGrant = grant;
-			if (usableGrant < MIN_BUNDLE) {
-				// Cannot receive the minimum. If time is up, take a floor grant from
-				// whatever remains (never deadlock a suite); otherwise wait/retry.
-				if (Date.now() > grantDeadline) {
-					usableGrant = Math.max(2, Math.min(remaining, MIN_BUNDLE));
-					if (usableGrant < 1) usableGrant = 1;
+			if (grant < preferredMin) {
+				// Not enough free cores for a fair share yet. Only take a reduced grant
+				// once the deadline passes (never deadlock); otherwise wait for a peer to
+				// finish. This is backpressure, not oversubscription.
+				if (remaining >= floorCommit && Date.now() > grantDeadline) {
+					usableGrant = Math.min(remaining, target || remaining, MAX_BUNDLE);
 				} else {
 					return { retry: true };
 				}
 			}
 
+			// Hard invariant: never allocate more than the free cores.
+			usableGrant = Math.min(usableGrant, remaining, MAX_BUNDLE);
+			if (usableGrant < floorCommit) return { retry: true };
+
 			const records = allocateKinds(kinds, usableGrant);
+			removePending(state, parentRunId);
 			const startedAt = new Date().toISOString();
 			for (const rec of records) {
 				state.reservations.push({
@@ -455,8 +557,10 @@ export function readLedger(opts = {}) {
 	if (!existsSync(reservationsPath())) return { totalCores: cores, generation: 0, reservations: [] };
 	return withLock(() => {
 		const state = readRaw(cores);
+		const before = (state.pending || []).length;
 		const dropped = sweep(state);
-		if (dropped.length) writeState(state);
+		sweepPending(state);
+		if (dropped.length || (state.pending || []).length !== before) writeState(state);
 		return state;
 	}, opts);
 }
@@ -539,12 +643,50 @@ function cliSelftest() {
 	assert(afterRelease.reservations.length === 0, `all reservations released, found ${afterRelease.reservations.length}`);
 	console.log("  release() clears reservations ✓");
 
-	// 5) splitBundle spot-checks.
+	// 5) splitBundle spot-checks + sum-preservation across the whole range.
 	const s4 = splitBundle(4);
 	const s12 = splitBundle(12);
 	assert(s4.vitest === 2 && s4.playwright === 2, `split(4)=2+2 got ${s4.vitest}+${s4.playwright}`);
 	assert(s12.vitest === 8 && s12.playwright === 4, `split(12)=8+4 got ${s12.vitest}+${s12.playwright}`);
-	console.log("  splitBundle(4)=2+2 ✓  splitBundle(12)=8+4 ✓");
+	for (let g = 2; g <= MAX_BUNDLE; g++) {
+		const s = splitBundle(g);
+		assert(s.total === g, `splitBundle(${g}) must preserve sum, got ${s.vitest}+${s.playwright}=${s.total}`);
+		assert(s.vitest <= VITEST_CAP && s.playwright <= PLAYWRIGHT_CAP, `splitBundle(${g}) within caps, got v=${s.vitest} pw=${s.playwright}`);
+		assert(s.vitest >= 1 && s.playwright >= 1, `splitBundle(${g}) both kinds ≥1, got v=${s.vitest} pw=${s.playwright}`);
+	}
+	console.log("  splitBundle(4)=2+2 ✓  splitBundle(12)=8+4 ✓  sum-preserving 2..12 ✓");
+
+	// 6) Pending-contention: seed 4 live pending markers (distinct runs) so a fresh
+	//    reserve sees activeParents=5 → target=floor(24/5)=4. This is the core
+	//    Σworkers≤cores fix — the reserve must NOT grab the full MAX_BUNDLE.
+	try {
+		rmSync(reservationsPath(), { force: true });
+		rmSync(lockPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+	const nowIso = new Date().toISOString();
+	writeFileSync(
+		reservationsPath(),
+		JSON.stringify(
+			{
+				totalCores: totalCores(),
+				generation: 1,
+				reservations: [],
+				pending: [1, 2, 3, 4].map((n) => ({ parentRunId: `peer-${n}`, pid: process.pid, at: nowIso })),
+			},
+			null,
+			2,
+		),
+	);
+	const contended = reserveParentBundle({ coalesceMs: 0 });
+	console.log(`  under 4 pending peers -> vitest=${contended.vitest} playwright=${contended.playwright} total=${contended.total}`);
+	assert(contended.total <= Math.floor(totalCores() / 5), `contended grant ${contended.total} must be ≤ floor(cores/5)=${Math.floor(totalCores() / 5)}`);
+	const afterContended = readLedger();
+	const sum3 = afterContended.reservations.reduce((s, r) => s + r.workerSlots, 0);
+	assert(sum3 <= totalCores(), `sum(workerSlots)=${sum3} ≤ cores=${totalCores()} under contention`);
+	contended.release();
+	console.log("  pending-contention caps per-run grant ✓");
 
 	try {
 		rmSync(reservationsPath(), { force: true });
