@@ -1,0 +1,51 @@
+[
+	{
+		"id": "BR50-null-A",
+		"area": "harness-integrity",
+		"file": "src/app/workflow-page.ts",
+		"target": "ui",
+		"operator": "no-op",
+		"nullMutant": true,
+		"search": "data-testid=\"wf-step-type\" .value=${stepType}",
+		"replace": "data-testid=\"wf-step-type\"  .value=${stepType}",
+		"description": "NULL mutant (clusterA) — inserts an extra space between two attributes in a lit template (whitespace-insensitive). Behaviourally identical; both the legacy spec and the v2 journey MUST still pass. Guards against a broken harness that reports false kills.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/workflow-editor.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR46",
+		"area": "misc-workflow-editor",
+		"file": "src/app/workflow-page.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "data-testid=\"wf-step-type\"",
+		"replace": "data-testid=\"wf-step-type-mut\"",
+		"description": "Workflow-editor step-type control loses its testid. Legacy workflow-editor.spec.ts asserts step-type options + round-trip; misc journey does not (GAP). Ported into misc.journey.spec.ts (Journey: Workflow Editor).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/workflow-editor.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR48",
+		"area": "misc-role-tabs",
+		"file": "src/app/proposal-panels.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "data-testid=\"goal-proposal-role-reset\"",
+		"replace": "data-testid=\"goal-proposal-role-reset-mut\"",
+		"description": "Goal-proposal Roles-tab reset control loses its testid. Legacy goal-role-tabs-wiring.spec.ts asserts the Roles tab editor; misc journey does not (GAP). Ported into misc.journey.spec.ts (Journey: Goal Proposal Roles Tab).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/goal-role-tabs-wiring.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	}
+]

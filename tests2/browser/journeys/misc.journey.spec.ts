@@ -9,6 +9,7 @@
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 import { sendMessage, apiFetch, defaultProject, createGoal, deleteGoal, defaultProjectId } from "../_helpers/journey-fixture.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
+import { rawApiFetch } from "../e2e-setup.js";
 
 test.describe("Journey: Notification Policy", () => {
 	test("app renders without notification errors", async ({ page }) => {
@@ -250,6 +251,59 @@ test.describe("Journey: Workflow Editor", () => {
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 	});
 
+	// Ported from workflow-editor.spec.ts (audit: misc GAP / BR46): the workflow
+	// editor's verify-step type control must expose its testid AND list all four
+	// step types (command/llm-review/agent-qa/human-signoff). PR #644 regressed the
+	// human-signoff option; the journey previously asserted none of this.
+	test("workflow editor exposes the step-type control with all four types", async ({ page }) => {
+		test.setTimeout(90_000);
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		const wfId = "v2-wf-step-type-" + Date.now();
+		const res = await rawApiFetch("/api/workflows", {
+			method: "POST",
+			body: JSON.stringify({
+				projectId,
+				id: wfId,
+				name: `Test Workflow ${wfId}`,
+				description: "editor parity",
+				gates: [{ id: "g1", name: "Gate 1", depends_on: [], verify: [{ name: "Step", type: "command", run: "echo ok" }] }],
+			}),
+		});
+		expect(res.status).toBe(201);
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/settings/${projectId}/workflows`);
+			const tab = page.locator("[data-testid='workflows-tab']").first();
+			await expect(tab).toBeVisible({ timeout: 15_000 });
+			await tab.getByText(`Test Workflow ${wfId}`).first().click();
+			await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 15_000 });
+			// Expand the first gate.
+			const gateCard = page.locator(".wf-edit-container .wf-artifacts-list > .wf-gate-card").first();
+			await expect(gateCard).toBeVisible({ timeout: 10_000 });
+			await gateCard.scrollIntoViewIfNeeded();
+			if (!(await gateCard.evaluate((el) => el.classList.contains("expanded")))) {
+				await gateCard.locator(".wf-gate-header .wf-gate-chevron").click();
+			}
+			await expect(gateCard).toHaveClass(/(?:^|\s)expanded(?:\s|$)/, { timeout: 5_000 });
+			// Expand the first verify-step.
+			const stepCard = page.locator("[data-testid='wf-vstep-card']").first();
+			await expect(stepCard).toBeVisible({ timeout: 10_000 });
+			if (!((await stepCard.getAttribute("class"))?.includes("vstep-expanded"))) {
+				await stepCard.locator(".wf-vstep-collapsed-header").click();
+			}
+			await expect(stepCard).toHaveClass(/vstep-expanded/, { timeout: 5_000 });
+			// The step-type control must be present and list all four types.
+			const select = page.locator("[data-testid='wf-step-type']").first();
+			await expect(select).toBeVisible({ timeout: 10_000 });
+			const optionValues = await select.locator("option").evaluateAll((els) =>
+				(els as HTMLOptionElement[]).map((o) => o.value));
+			expect(optionValues).toEqual(["command", "llm-review", "agent-qa", "human-signoff"]);
+		} finally {
+			await apiFetch(`/api/workflows/${wfId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("page.route() workflow GET stub still lets app load gracefully", async ({ page }) => {
 		await page.route("**/api/workflows*", async (route) => {
 			if (route.request().method() !== "GET") return route.continue();
@@ -398,6 +452,28 @@ test.describe("Journey: Auto-Retry Banner", () => {
 
 // Ported from image-model-selector-lock.spec.ts (audit: misc GAP): the footer
 // exposes the resolved image-model id (default gpt-image-2).
+// Ported from goal-role-tabs-wiring.spec.ts (audit: misc GAP / BR48): the
+// goal-proposal Roles tab must load a role editor, and clicking Customize must
+// reveal the reset-to-default control (proving per-goal role customization is
+// wired, not an enabled no-op).
+test.describe("Journey: Goal Proposal Roles Tab", () => {
+	test("Roles tab Customize reveals the reset-to-default control", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+		await page.locator("[data-testid='goal-proposal-tab-roles']").click();
+		await expect(page.locator("[data-testid='goal-proposal-panel-roles']")).toBeVisible({ timeout: 10_000 });
+		const customize = page.locator("[data-testid='goal-proposal-role-customize']");
+		await expect(customize).toBeVisible({ timeout: 15_000 });
+		await customize.click();
+		await expect(page.locator("[data-testid='goal-proposal-role-reset']")).toBeVisible({ timeout: 10_000 });
+	});
+});
+
 test.describe("Journey: Footer Image Model", () => {
 	test("footer shows the resolved image-model id (default gpt-image-2)", async ({ page }) => {
 		const sessionId = await createSession();
