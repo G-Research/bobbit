@@ -20,8 +20,8 @@
 		"operator": "inverted-boolean",
 		"search": "const isArchived = !!n.childGoal?.archived;",
 		"replace": "const isArchived = false;",
-		"description": "Plan-tab DAG never marks a node archived — data-archived stays 'false' and the archived pill/dashed border never render. The journey's archived-child assertions (data-archived=\"true\", plan-node-archived-pill) must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/plan-tab-gate-status.spec.ts"],
+		"description": "Plan-tab DAG never marks a node archived — data-archived stays 'false' and the archived pill/dashed border never render. The journey's archived-child assertions (data-archived=\"true\", plan-node-archived-pill) must fail. Legacy home is the dedicated archived-children spec (the gate-status spec only reads the attribute on live nodes, never asserts =\"true\").",
+		"expectedLegacyCatchers": ["tests/e2e/ui/plan-tab-archived-children.spec.ts"],
 		"expectedV2Catchers": ["tests2/browser/journeys/goal-team-gates.journey.spec.ts"]
 	},
 	{
@@ -152,8 +152,8 @@
 		"operator": "forced-false",
 		"search": "visible: canForkSession(session),",
 		"replace": "visible: false,",
-		"description": "The Fork action is never visible in the sidebar-actions popover. The journey's 'sidebar actions popover contains expected action items' assertion (fork action visible) must fail.",
-		"expectedLegacyCatchers": ["tests/e2e/ui/sidebar-actions-menu.spec.ts"],
+		"description": "The Fork action is never visible in the sidebar-actions popover. The journey's 'sidebar actions popover contains expected action items' assertion (fork action visible) must fail. Legacy home is session-actions.spec.ts (sidebar-actions-menu.spec.ts's fork test is test.skip'd as fixture-covered).",
+		"expectedLegacyCatchers": ["tests/e2e/ui/session-actions.spec.ts"],
 		"expectedV2Catchers": ["tests2/browser/journeys/session-lifecycle.journey.spec.ts"]
 	},
 	{
