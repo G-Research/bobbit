@@ -163,6 +163,8 @@ Size mode is a three-level ladder: `collapsed` (closed), `split` (beside chat), 
 
 A toolbar control must not jump directly between `fullscreen` and `collapsed`; that jump is reserved for the explicit `Ctrl+#` fullscreen toggle. Labels reflect the target: `Expand` moves upward, `Collapse` moves downward, and `Restore split view` returns from fullscreen to split instead of closing the panel.
 
+The composer is only present in `split` and `collapsed` modes. In `fullscreen` the panel occupies the full area down to the bottom edge and the composer is hidden — there is no reserved prompt strip beneath the panel. The rationale: fullscreen means the user is focused on the panel content, so surrendering the whole area to it (rather than reserving a cramped prompt dock) is the more useful layout; to type they collapse back to `split` (or `collapsed`) via the window controls or `Ctrl+]`. `split` and `collapsed` layouts are unchanged.
+
 Keyboard shortcuts target the active side panel, regardless of kind, and use the same level model:
 
 - expand: `collapsed -> split -> fullscreen`;
