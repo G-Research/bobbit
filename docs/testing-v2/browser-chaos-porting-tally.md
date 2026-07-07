@@ -12,13 +12,17 @@ contract the legacy spec actually asserts).
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants) | 43 |
-| Clean substitutions (journey already held) | 14 |
+| Behaviours mutation-tested (content mutants) | 49 |
+| Clean substitutions (journey already held) | 15 |
 | v2-stronger (legacy missed, v2 caught) | 1 |
-| **Real holes found** | **27** |
+| **Real holes found** | **32** |
 | **Real holes CLOSED (ported + re-verified)** | **27** |
-| Real holes open | 0 |
+| **Real holes OPEN (confirmed, ports pending)** | **5 (BR45–BR49)** |
 | Both-missed (tracked justification) | 1 |
+
+> HANDOFF checkpoint — see `browser-porting-handoff.md`. Batch 4 mutants BR45–BR49
+> are confirmed real holes with researched port instructions but are NOT yet
+> ported (handed off to fresh coder(s)).
 
 ## Batch 1 (BR01–BR28) — 13 holes closed
 
@@ -61,6 +65,17 @@ covered). Ported + re-verified caught:
 | BR40 | staff-debug | staff edit-page role select |
 | BR41 | goal-editing | Sub-goals-tab parent picker (subgoals enabled) |
 | BR43 | proposals | MISSING_WORKFLOW → goal-proposal-workflow-error row |
+
+## Batch 4 (BR44–BR49) — 1 clean, 5 holes CONFIRMED (ports pending, handed off)
+
+BR44 (max-nesting-depth) clean — goal-editing already covered it. BR45–BR49 are
+confirmed real holes (legacy-caught, journey-missed); port instructions are in
+`browser-porting-handoff.md` §2:
+- BR45 proposals `goal-form-max-depth` (SUBGOAL_PREFILL)
+- BR46 misc `wf-step-type` (workflow editor)
+- BR47 project-settings `worktree-cleanup-maintenance`
+- BR48 misc `goal-proposal-role-reset` (proposal Roles tab)
+- BR49 project-onboarding `directory-picker-suggestions` (typeahead)
 
 ## Both-missed (tracked, not consolidation regressions)
 
