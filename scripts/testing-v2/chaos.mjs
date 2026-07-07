@@ -99,23 +99,22 @@ function hasTsx(nm) {
   } catch { return false; }
 }
 function resolveToolchainNodeModules() {
+  // IMPORTANT: only consider node_modules belonging to THIS project (the primary
+  // repo + its worktrees under the shared -wt root). Do NOT scan sibling repos
+  // (e.g. dirname(PRIMARY_REPO) may contain unrelated projects like pi-mono whose
+  // vitest/plugin versions would break both tiers). tsx is resolved separately
+  // via `npx --no-install tsx`, so we only need a project-matching vitest here.
   const candidates = [
     path.join(PRIMARY_REPO, "node_modules"),
     path.join(REPO_ROOT, "node_modules"),
   ];
-  // Sibling worktrees (…-wt/<branch>/node_modules) and sibling repos.
-  for (const base of [path.dirname(REPO_ROOT), path.dirname(PRIMARY_REPO)]) {
-    try {
-      for (const name of fs.readdirSync(base)) {
-        candidates.push(path.join(base, name, "node_modules"));
-      }
-    } catch { /* ignore */ }
-  }
-  // Prefer a node_modules that has BOTH tiers (so the legacy tier can run);
-  // fall back to vitest-only (v2 tier still works, legacy will report 'error').
-  for (const nm of candidates) {
-    if (hasVitest(nm) && hasTsx(nm)) return nm;
-  }
+  // Sibling WORKTREES only (…-wt/<branch>/node_modules) — same project, same deps.
+  try {
+    const wtRoot = path.dirname(REPO_ROOT);
+    for (const name of fs.readdirSync(wtRoot)) {
+      candidates.push(path.join(wtRoot, name, "node_modules"));
+    }
+  } catch { /* ignore */ }
   for (const nm of candidates) {
     if (hasVitest(nm)) return nm;
   }
@@ -244,6 +243,10 @@ function runCommand(file, cliArgs, cwd, timeoutMs = 120_000) {
       BOBBIT_V2_CHAOS: "1",
       // Don't try to start a gateway in targeted unit tests
       BOBBIT_SKIP_AIGW_DISCOVERY: "1",
+      // Force plain (uncolored) reporter output so test-name attribution parsing
+      // is deterministic regardless of inherited FORCE_COLOR / TTY state.
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
     },
   });
   return result;
@@ -252,22 +255,50 @@ function runCommand(file, cliArgs, cwd, timeoutMs = 120_000) {
 // ── Test-name attribution parsers ─────────────────────────────────────────────
 
 /**
- * Parse node:test TAP output for the specific FAILING test case names.
- * Lines look like `not ok 1 - <name>` (optionally indented for subtests).
- * `# SKIP` / `# TODO` directives are not real failures — ignore them.
+ * Parse node:test output for the specific FAILING test case names, handling
+ * BOTH reporter formats node emits:
+ *   - TAP:  `not ok 1 - <name>` (indented for subtests). `# SKIP`/`# TODO` are
+ *     directives, not failures.
+ *   - spec: `    ✖ <name> (1.23ms)` (node's default reporter; used here even when
+ *     piped). The `✖ failing tests:` section header has no `(Nms)` suffix and is
+ *     ignored. Deeper-indented (leaf) failures are returned first so attribution
+ *     names the specific test case, not just its parent suite.
  */
+// Strip ANSI SGR/CSI escape sequences — node's spec reporter colorizes output
+// intermittently (env-dependent FORCE_COLOR/TTY state), which would otherwise
+// break the anchored failure-line regexes and drop kill attribution.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\u001b\[[0-9;]*[A-Za-z]/g;
+function stripAnsi(s) { return s.replace(ANSI_RE, ""); }
+
 function parseTapFailures(stdout) {
-  const names = [];
-  for (const raw of (stdout || "").split(/\r?\n/)) {
-    const m = /^\s*not ok \d+ - (.+?)\s*$/.exec(raw);
-    if (!m) continue;
-    let name = m[1];
-    if (/#\s*(SKIP|TODO)\b/i.test(name)) continue;
-    // Strip a trailing `# ...` directive/duration comment if present.
-    name = name.replace(/\s+#\s.*$/, "").trim();
-    if (name) names.push(name);
+  const found = [];
+  const lines = (stdout || "").split(/\r?\n/).map(stripAnsi);
+  for (const raw of lines) {
+    // TAP failure line.
+    const tap = /^\s*not ok \d+ - (.+?)\s*$/.exec(raw);
+    if (tap) {
+      let name = tap[1];
+      if (/#\s*(SKIP|TODO)\b/i.test(name)) continue;
+      name = name.replace(/\s+#\s.*$/, "").trim();
+      if (name) found.push({ name, indent: 0 });
+      continue;
+    }
+    // spec-reporter failure line: <indent> ✖|✗|× <name> (<duration>ms)
+    const spec = /^(\s*)(?:\u2716|\u2717|\u00d7)\s+(.+?)\s+\(\d+(?:\.\d+)?ms\)\s*$/.exec(raw);
+    if (spec) {
+      const name = spec[2].trim();
+      if (name) found.push({ name, indent: spec[1].length });
+    }
   }
-  return [...new Set(names)];
+  // Leaf (deepest-indented) failures first; dedupe by name, preserve that order.
+  found.sort((a, b) => b.indent - a.indent);
+  const seen = new Set();
+  const out = [];
+  for (const f of found) {
+    if (!seen.has(f.name)) { seen.add(f.name); out.push(f.name); }
+  }
+  return out;
 }
 
 /**
@@ -309,15 +340,27 @@ function runTargetedTest(worktreePath, testFile, tier) {
   }
 
   if (tier === "legacy") {
-    // Legacy node:test suite — uses the tsx loader (cross-platform JS entry).
-    if (!TSX_ENTRY) {
-      return { exitCode: -1, stdout: "", stderr: "tsx not installed in the toolchain node_modules — legacy tier cannot run here (run in the in-container tier-1 environment)", timedOut: false, failingTests: [], failingFiles: [] };
-    }
+    // Legacy node:test suite — mirrors scripts/run-unit.mjs's tsx invocation.
     const cssStub = path.join(worktreePath, "tests", "helpers", "css-stub-loader.mjs");
     const importArgs = fs.existsSync(cssStub) ? ["--import", "./tests/helpers/css-stub-loader.mjs"] : [];
-    const cliArgs = [TSX_ENTRY, ...importArgs, "--test", "--test-force-exit", testFile];
-    const result = runCommand("node", cliArgs, worktreePath);
+    const testArgs = [...importArgs, "--test", "--test-force-exit", testFile];
+    // Prefer the resolved tsx JS entry (`node tsx/dist/cli.mjs`); fall back to
+    // `npx --no-install tsx` (from cache, no network) when tsx is undeclared /
+    // not present under node_modules — this is how run-unit.mjs actually runs it.
+    let result;
+    if (TSX_ENTRY) {
+      result = runCommand("node", [TSX_ENTRY, ...testArgs], worktreePath, 180_000);
+    } else {
+      result = runCommand("npx", ["--no-install", "tsx", ...testArgs], worktreePath, 180_000);
+    }
     const stdout = result.stdout || "";
+    if (process.env.BOBBIT_CHAOS_DEBUG) {
+      try {
+        const dbg = path.join(REPO_ROOT, ".profiles", "chaos", `debug-legacy-${path.basename(testFile)}.txt`);
+        fs.mkdirSync(path.dirname(dbg), { recursive: true });
+        fs.writeFileSync(dbg, `STATUS=${result.status} SIGNAL=${result.signal}\nERROR=${result.error}\n--- STDOUT ---\n${stdout}\n--- STDERR ---\n${result.stderr || ""}\n`, "utf-8");
+      } catch { /* ignore */ }
+    }
     return {
       exitCode: result.status ?? (result.error ? 1 : 0),
       stdout,
@@ -831,17 +874,13 @@ async function main() {
   console.log(`Mutants:      ${mutants.length} (of ${ALL_MUTANTS.length} total)`);
   console.log(`toolchain nm: ${PRIMARY_NODE_MODULES}`);
   console.log(`vitest entry: ${fs.existsSync(VITEST_ENTRY) ? "✓ " + VITEST_ENTRY : "✗ MISSING"}`);
-  console.log(`tsx entry:    ${TSX_ENTRY ? "✓ " + TSX_ENTRY : "✗ not installed — legacy tier will report 'error'"}`);
+  console.log(`tsx entry:    ${TSX_ENTRY ? "✓ " + TSX_ENTRY : "(node_modules/tsx absent) → falling back to `npx --no-install tsx`"}`);
 
   // Preflight: ensure the v2 toolchain (vitest) is resolvable.
   if (!fs.existsSync(VITEST_ENTRY)) {
     console.error("\n[chaos] ERROR: Could not locate vitest/vitest.mjs in any candidate node_modules.");
     console.error("  Run this in the tier-1 toolchain environment (in-container) or a worktree with a full `npm ci`.");
     process.exit(1);
-  }
-  if (!TSX_ENTRY) {
-    console.warn("\n[chaos] WARNING: tsx is not installed here — the LEGACY tier cannot run, so the");
-    console.warn("  legacy-vs-v2 comparison will be incomplete. Run the full campaign in-container.");
   }
 
   fs.mkdirSync(path.dirname(REPORT_JSON), { recursive: true });
