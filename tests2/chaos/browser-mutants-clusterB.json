@@ -175,5 +175,21 @@
     "expectedV2Catchers": [
       "tests2/browser/journeys/proposals.journey.spec.ts"
     ]
+  },
+  {
+    "id": "BR58",
+    "area": "proposals-invalid-workflow-normalize",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "disabled-guard",
+    "search": "if (!ids.has(_selectedWorkflowId) && !preserveInvalid) _selectedWorkflowId = first;",
+    "replace": "if (false && !ids.has(_selectedWorkflowId) && !preserveInvalid) _selectedWorkflowId = first;",
+    "description": "The assistant goal-proposal panel stops normalizing a phantom (project-absent) workflow id to the first valid workflow, leaving the <select> desynced (empty/phantom value). Legacy goal-proposal-invalid-workflow.spec.ts pins the normalization; proposals journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
   }
 ]

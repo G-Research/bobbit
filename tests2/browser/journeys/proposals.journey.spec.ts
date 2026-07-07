@@ -403,3 +403,44 @@ test.describe("Journey: Editable Project Proposal", () => {
 		await expect(panel.locator('[data-testid="workflow-card-all-components"]')).toBeVisible({ timeout: 10_000 });
 	});
 });
+
+// Ported from goal-proposal-invalid-workflow.spec.ts (audit: proposals GAP,
+// mutant BR58): the assistant goal-proposal panel must normalize a phantom
+// (project-absent) workflow id to a valid configured workflow so the <select>
+// never desyncs to an empty/phantom value.
+test.describe("Journey: Goal Proposal — invalid workflow normalization", () => {
+	const PHANTOM_WORKFLOW = "__does_not_exist_wf__";
+
+	test("assistant panel normalizes a phantom workflow to a valid default", async ({ page }) => {
+		test.setTimeout(120_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+		const select = page.locator(".goal-preview-panel select").first();
+		await expect(select).toBeVisible({ timeout: 15_000 });
+		const options = await select.locator("option").evaluateAll(
+			(opts) => (opts as HTMLOptionElement[]).map((o) => o.value),
+		);
+		expect(options.length, "harness project must expose multiple workflows").toBeGreaterThan(1);
+
+		// Inject a phantom workflow into the assistant panel's imperative state
+		// and force a re-render — normalizeWorkflowSelections must repair it.
+		await page.evaluate((phantom) => {
+			(window as any).__bobbitSetSelectedWorkflowId?.(phantom);
+			(window as any).__bobbitRenderApp?.();
+		}, PHANTOM_WORKFLOW);
+
+		// The displayed option must be a real configured workflow — never empty
+		// (the desync symptom) and never the phantom id.
+		await expect.poll(async () => select.inputValue(), { timeout: 8_000 }).not.toBe("");
+		const fallbackValue = await select.inputValue();
+		expect(options).toContain(fallbackValue);
+		expect(fallbackValue).not.toBe(PHANTOM_WORKFLOW);
+	});
+});
