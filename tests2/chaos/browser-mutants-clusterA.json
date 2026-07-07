@@ -143,5 +143,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR57",
+		"area": "app-smoke-goal-metadata",
+		"file": "src/app/proposal-panels.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "data-testid=\"goal-metadata-add\"",
+		"replace": "data-testid=\"goal-metadata-add-mut\"",
+		"description": "The goal-proposal Metadata tab loses its add-row control testid. Legacy goal-metadata.spec.ts drives the Metadata tab and adds/edits/removes rows; the app-smoke journey covered none of the proposal Metadata tab (GAP). Ported into app-smoke.journey.spec.ts (Journey: Goal Proposal Metadata Tab).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/goal-metadata.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/app-smoke.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR58",
+		"area": "sidebar-show-read-filter",
+		"file": "src/ui/components/sidebar-filters.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "id: \"read\",",
+		"replace": "id: \"read-mut\",",
+		"description": "The Filters popover 'Show Read' toggle row loses its stable testid (data-testid is built from the row id). Legacy sidebar-filters.spec.ts targets [data-testid='sidebar-filter-read']; the sidebar-nav journey never opened the Filters popover's Read toggle (GAP). Ported into sidebar-nav.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/sidebar-filters.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
 	}
 ]

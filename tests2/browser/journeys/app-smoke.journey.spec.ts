@@ -3,7 +3,8 @@
  * Covers: journey-app-smoke, journey-session-sharing, journey-draft-persistence
  * Consolidated from: basic-load-*, session-sharing-*, pr-preview-*, draft-loss-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, sendMessage } from "../_helpers/journey-fixture.js";
+import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: App Smoke", () => {
 	test("app loads and sidebar is visible", async ({ page }) => {
@@ -273,6 +274,31 @@ test.describe("Journey: Draft Persistence", () => {
 			await deleteSession(sA).catch(() => {});
 			await deleteSession(sB).catch(() => {});
 		}
+	});
+});
+
+// Ported from goal-metadata.spec.ts (audit: app-smoke GAP / BR57): the goal
+// proposal Metadata tab must expose an add-row control that appends an editable
+// key/value row.
+test.describe("Journey: Goal Proposal Metadata Tab", () => {
+	test("Metadata tab add button appends an editable metadata row", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+		const tab = page.locator("[data-testid='goal-proposal-tab-metadata']");
+		await expect(tab).toBeVisible({ timeout: 15_000 });
+		await tab.click();
+		const panel = page.locator("[data-testid='goal-proposal-panel-metadata']");
+		await expect(panel).toBeVisible({ timeout: 10_000 });
+		const before = await page.locator("[data-testid='goal-metadata-row']").count();
+		await page.locator("[data-testid='goal-metadata-add']").click();
+		await expect(page.locator("[data-testid='goal-metadata-row']")).toHaveCount(before + 1, { timeout: 10_000 });
+		await expect(page.locator("[data-testid='goal-metadata-key']").last()).toBeVisible();
+		await expect(page.locator("[data-testid='goal-metadata-value']").last()).toBeVisible();
 	});
 });
 

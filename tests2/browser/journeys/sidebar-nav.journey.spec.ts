@@ -4,7 +4,7 @@
  * Consolidated from: sidebar-navigation.spec.ts, sidebar-filters.spec.ts
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
-import { filtersButton, clickShowArchivedToggle } from "../../../tests/e2e/ui/utils/sidebar-filters.js";
+import { filtersButton, clickShowArchivedToggle, openFiltersPopover } from "../../../tests/e2e/ui/utils/sidebar-filters.js";
 
 test.describe("Journey: Sidebar Navigation", () => {
 	test("sidebar and new-session button visible on load", async ({ page }) => {
@@ -204,6 +204,17 @@ test.describe("Journey: Sidebar Navigation", () => {
 			await deleteGoal(goal.id, true).catch(() => {});
 		}
 	});
+	// Ported from sidebar-filters.spec.ts (audit: sidebar-nav GAP / BR58): the
+	// Filters popover exposes a "Show Read" toggle row with its stable testid.
+	test("Filters popover exposes the Show Read toggle", async ({ page }) => {
+		await openApp(page);
+		await expect(filtersButton(page)).toBeVisible({ timeout: 10_000 });
+		await openFiltersPopover(page);
+		const readToggle = page.locator("[data-testid='sidebar-filter-read']").first();
+		await expect(readToggle).toBeVisible({ timeout: 10_000 });
+		await expect(readToggle.locator("input[type='checkbox']")).toHaveCount(1);
+	});
+
 	// Ported from sidebar-archived-layout.spec.ts (audit: sidebar-nav GAP): an
 	// archived session/goal renders under Show Archived with grayscale dimming.
 	test("Show Archived reveals an archived item with grayscale dimming", async ({ page }) => {
