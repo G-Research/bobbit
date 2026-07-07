@@ -20,9 +20,9 @@ re-run to confirm v2-caught. `retries: 0`.
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants) | 4 |
-| Real holes found | 4 |
-| **Real holes CLOSED (ported + re-verified v2-caught)** | **4** |
+| Behaviours mutation-tested (content mutants) | 6 |
+| Real holes found | 6 |
+| **Real holes CLOSED (ported + re-verified v2-caught)** | **6** |
 | Null-mutant integrity checks passed | 1 (BR50-null-A) |
 
 > **Report freshness:** the committed `browser-chaos-report-clusterA.md` reflects
@@ -60,17 +60,24 @@ first.
 Mutation results (via `--ids BR51,BR52`): legacy caught 2/2, v2 caught 2/2, 0
 real holes.
 
+## Batch A3 (BR53, BR54) — 2 holes closed
+
+Both confirmed real holes, ported + re-verified `v2: caught` (0 holes).
+Clean-passed on unmutated dist first.
+
+| Mutant | Domain | File | Ported journey assertion |
+|---|---|---|---|
+| BR53 | misc (compaction) | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` | seed a success compaction sidecar under `gateway.bobbitDir/state/compaction-sidecar/<sid>.jsonl` → `[data-testid='compaction-summary-card']` count 1 + `data-state="complete"`, survives full reload |
+| BR54 | sidebar-nav (full search) | `src/app/sidebar.ts` | fill `input[data-search]` = "testquery" → click "Full Search" → hash contains `#/search` and `testquery` |
+
+Mutation results (via `--ids BR53,BR54`): legacy 2/2, v2 2/2, 0 real holes.
+A1+A2 authoritative report committed separately (4/4 v2-caught).
+
 ## Resume point
 
-- **Last committed batch:** A2 (BR51, BR52) ports committed; corpus has
-  `BR50-null-A, BR46, BR48, BR51, BR52` (all closed/passing).
-- **On resume, first action:** `node scripts/testing-v2/browser-chaos.mjs
-  --corpus clusterA --all` to regenerate the authoritative 5-entry report, then
-  commit it.
-- **Next behaviour to mutation-test:** misc `compaction-summary-card`
-  (`compaction-persistence.spec.ts` → seed sidecar via `gateway.bobbitDir`,
-  assert card count 1 + `data-state="complete"` + survives reload). Then continue
-  through app-smoke (palette-session, sidebar-keyboard-nav, open-session-new-window),
-  sidebar-nav (search goal-title match / Full Search nav), prompt-interaction
+- **Last committed batch:** A3 (BR53, BR54) ports committed; corpus has
+  `BR50-null-A, BR46, BR48, BR51, BR52, BR53, BR54` (all closed/passing).
+- **Next behaviours to mutation-test:** app-smoke (palette-session,
+  open-session-new-window), sidebar-nav (sidebar-session-actions), prompt-interaction
   (queue-ui, at-mention chip), stories-registry (stories-sidebar Ctrl+K filter,
   stories-projects PR-10) per the audit REC entries.
