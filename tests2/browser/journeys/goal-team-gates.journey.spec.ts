@@ -1,8 +1,9 @@
 /**
  * Journey: Goal → Team → Gates — v2 browser smoke
  */
-import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch, defaultProjectId } from "../_helpers/journey-fixture.js";
-import { seedTeamLeadHeader } from "../e2e-setup.js";
+import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch, defaultProjectId, createSession } from "../_helpers/journey-fixture.js";
+import { seedTeamLeadHeader, connectWs, signalAndWaitForGate } from "../e2e-setup.js";
+import { navigateToGoalDashboard } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: Goal → Team → Gates", () => {
 	test("goal dashboard renders after navigation", async ({ page }) => {
@@ -166,6 +167,145 @@ test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
 			).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(parentId, true);
+		}
+	});
+});
+
+// ── Behavioral assertions ported from the master gate-verification-UX specs ──
+// Sources: tests/e2e/ui/gate-list-slim-projection.spec.ts (Issue #1) and
+// tests/e2e/ui/gate-verification-stale-reconcile.spec.ts (Issue #2 alive-path
+// baseline). The stale-death scenario in the source spec is `test.fixme` there
+// (needs an un-built server hook to kill an active verification without a
+// completion event); only the runnable alive baseline is ported here.
+test.describe("Journey: Gate-verification UX — slim projection + stale-reconcile baseline", () => {
+	const SLIM_GATE_ID = "slim-gate";
+	const SLIM_GATE_NAME = "Slim Projection Gate";
+	const BIG_MARKER = "SLIM_PROJECTION_BIG_OUTPUT_MARKER_" + "X".repeat(2000);
+	const BIG_OUTPUT_CMD = `node -e "process.stdout.write('${BIG_MARKER}');process.exit(0)"`;
+	const STALE_GATE_ID = "stale-gate";
+	const STALE_GATE_NAME = "Stale Reconcile Gate";
+	const FAST_CMD = `node -e "process.exit(0)"`;
+
+	function makeWorkflowId(prefix: string): string {
+		return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	}
+
+	async function createCommandWorkflow(
+		workflowId: string,
+		projectId: string,
+		gateId: string,
+		gateName: string,
+		stepName: string,
+		cmd: string,
+	): Promise<void> {
+		const res = await apiFetch("/api/workflows", {
+			method: "POST",
+			body: JSON.stringify({
+				projectId,
+				id: workflowId,
+				name: "Gate-UX Journey Test",
+				description: "One command gate for gate-verification UX journey coverage.",
+				gates: [
+					{ id: gateId, name: gateName, dependsOn: [], verify: [{ name: stepName, type: "command", run: cmd }] },
+				],
+			}),
+		});
+		expect(res.status, "gate-UX journey: workflow creation must succeed").toBe(201);
+	}
+
+	async function deleteWorkflow(workflowId: string): Promise<void> {
+		await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => { /* best-effort */ });
+	}
+
+	// Issue #1: the gate-LIST endpoint returns a slim projection (inline step
+	// output stripped) while the lazy detail/inspect path still carries the full
+	// output — no behavioural regression on expand.
+	test("gate-list endpoint strips inline step output; full output remains available lazily", async ({ page }) => {
+		const workflowId = makeWorkflowId("slim-projection");
+		const projectId = await defaultProjectId();
+		expect(projectId, "must resolve a default projectId").toBeTruthy();
+		await createCommandWorkflow(workflowId, projectId as string, SLIM_GATE_ID, SLIM_GATE_NAME, "Big output", BIG_OUTPUT_CMD);
+		const goal = await createGoal({ title: `Slim Projection ${Date.now()}`, workflowId, projectId });
+		const goalId = goal.id as string;
+		try {
+			const sessionId = await createSession({ goalId });
+			const conn = await connectWs(sessionId);
+			await signalAndWaitForGate(conn, goalId, SLIM_GATE_ID, {}, ["passed", "failed"], 60_000);
+
+			const listRes = await apiFetch(`/api/goals/${goalId}/gates`);
+			expect(listRes.status, "/gates list must respond 200").toBe(200);
+			const gates = await listRes.json();
+			const gateArr = (Array.isArray(gates) ? gates : gates.gates ?? []) as any[];
+			const gate = gateArr.find((g: any) => g.gateId === SLIM_GATE_ID || g.id === SLIM_GATE_ID);
+			const step = gate?.signals?.[0]?.verification?.steps?.[0];
+			expect(step, "gate must have a completed signal step").toBeTruthy();
+			expect(step.name, "step name preserved in slim projection").toBe("Big output");
+			expect(["passed", "failed"]).toContain(step.status);
+
+			// The heavy inline output must be stripped from the LIST payload.
+			expect(
+				JSON.stringify(gates).includes(BIG_MARKER),
+				"/gates list payload MUST NOT contain full inline step output (Issue #1 slow-load root cause).",
+			).toBe(false);
+			expect(step.output ?? "", "slim projection blanks step.output").not.toContain(BIG_MARKER);
+
+			// …but the full output must remain available via the lazy detail path.
+			const detailRes = await apiFetch(
+				`/api/goals/${goalId}/gates/${SLIM_GATE_ID}/inspect?section=verification&signal_index=-1&mode=full`,
+			);
+			expect(detailRes.status, "verification inspect endpoint must respond 200").toBe(200);
+			expect(
+				(await detailRes.text()).includes(BIG_MARKER),
+				"full step output MUST remain available via the lazy detail path (no regression).",
+			).toBe(true);
+
+			// DOM smoke: dashboard still renders the gate row.
+			await openApp(page);
+			await navigateToGoalDashboard(page, goalId);
+			await expect(
+				page.locator(".wf-checklist-item").filter({ hasText: SLIM_GATE_NAME }),
+			).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await deleteGoal(goalId, true);
+			await deleteWorkflow(workflowId);
+		}
+	});
+
+	// Issue #2 (alive-path baseline): a verification that runs to normal
+	// completion must report a terminal status and must NOT be flagged stale —
+	// the stale-reconcile fix must not over-eagerly coerce a healthy verification.
+	test("a completed (alive) verification is not flagged stale", async ({ page }) => {
+		const workflowId = makeWorkflowId("stale-reconcile");
+		const projectId = await defaultProjectId();
+		expect(projectId, "must resolve a default projectId").toBeTruthy();
+		await createCommandWorkflow(workflowId, projectId as string, STALE_GATE_ID, STALE_GATE_NAME, "Slow step", FAST_CMD);
+		const goal = await createGoal({ title: `Stale Reconcile ${Date.now()}`, workflowId, projectId });
+		const goalId = goal.id as string;
+		try {
+			await openApp(page);
+			await navigateToGoalDashboard(page, goalId);
+			await expect(
+				page.locator(".wf-checklist-item").filter({ hasText: STALE_GATE_NAME }),
+			).toBeVisible({ timeout: 15_000 });
+
+			const sessionId = await createSession({ goalId });
+			const conn = await connectWs(sessionId);
+			await signalAndWaitForGate(conn, goalId, STALE_GATE_ID, {}, ["passed", "failed"], 60_000);
+
+			const sumRes = await apiFetch(`/api/goals/${goalId}/gates/${STALE_GATE_ID}?view=summary`);
+			expect(sumRes.status, "gate summary must respond 200").toBe(200);
+			const summary = await sumRes.json();
+			expect(
+				["passed", "failed"],
+				"completed verification must report a terminal status",
+			).toContain(summary?.latestSignal?.verification?.status);
+			expect(
+				Boolean(summary?.latestSignal?.verification?.stale),
+				"a healthy completed verification must NOT be flagged stale",
+			).toBe(false);
+		} finally {
+			await deleteGoal(goalId, true);
+			await deleteWorkflow(workflowId);
 		}
 	});
 });

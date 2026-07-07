@@ -86,7 +86,8 @@ The current end-to-end flow:
   `reviews/<jobId>/final/payload`. Per-review quota scopes keep old reviews from
   filling the shared pack store, and shutdown cleanup removes the review prefix
   with real `deletePrefix`. See
-  [PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md).
+  [PR Walkthrough durable reviews](pr-walkthrough-durable-reviews.md) and
+  [PR Walkthrough Schema Reference](pr-walkthrough.md) for agent schema details.
 
 The **agent-side toolchain** that actually produces the YAML now uses compact
 bundle reads and durable incremental submission: `readonly_bash`,
