@@ -521,7 +521,7 @@ test.describe("Journey: Gate Bypass", () => {
 		];
 		let sessionId = "";
 		try {
-			await page.route(new RegExp(`/api/goals/${goalId}/gates(?:\?.*)?$`), async (route) => {
+			await page.route(new RegExp(`/api/goals/${goalId}/gates(?:\\?.*)?$`), async (route) => {
 				if (route.request().method() !== "GET") return route.fallback();
 				const summary = route.request().url().includes("view=summary");
 				const body = summary
@@ -529,7 +529,7 @@ test.describe("Journey: Gate Bypass", () => {
 					: { gates: gates.map(g => ({ gateId: g.gateId, name: g.name, status: g.status, signals: [] })) };
 				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 			});
-			await page.route(new RegExp(`/api/goals/${goalId}/verifications/active(?:\?.*)?$`), async (route) => {
+			await page.route(new RegExp(`/api/goals/${goalId}/verifications/active(?:\\?.*)?$`), async (route) => {
 				if (route.request().method() !== "GET") return route.fallback();
 				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ verifications: [] }) });
 			});
