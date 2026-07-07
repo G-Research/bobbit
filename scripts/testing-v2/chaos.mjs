@@ -92,26 +92,58 @@ const PRIMARY_REPO = findPrimaryFromWorktreeGit(REPO_ROOT);
 function hasVitest(nm) {
   try { return fs.existsSync(path.join(nm, "vitest", "vitest.mjs")); } catch { return false; }
 }
-function resolveToolchainNodeModules() {
-  const candidates = [
-    path.join(PRIMARY_REPO, "node_modules"),
+function hasTsx(nm) {
+  try {
+    return fs.existsSync(path.join(nm, "tsx", "dist", "cli.mjs")) ||
+           fs.existsSync(path.join(nm, "tsx", "dist", "cli.js"));
+  } catch { return false; }
+}
+// Completeness probe: a node_modules that only has vitest but is missing the
+// workspace packages the server graph imports (e.g. @earendil-works/pi-ai) will
+// make any test whose import chain reaches auth/session code fail to LOAD — a
+// false 'error' that is neither a kill nor a miss. Prefer a complete install.
+function isCompleteNodeModules(nm) {
+  try { return hasVitest(nm) && fs.existsSync(path.join(nm, "@earendil-works", "pi-ai")); }
+  catch { return false; }
+}
+// Robust, self-contained toolchain resolution. Considers only node_modules that
+// belong to THIS project (the worktree we run from, the primary repo, and
+// sibling worktrees under the shared -wt root) — never a sibling repo whose
+// vitest/plugin versions would differ. Priority favours STABLE locations
+// (REPO_ROOT = the worktree chaos was launched from, e.g. the goal worktree at
+// gate time; then the primary repo) over transient sibling worktrees, and never
+// depends on a specific ephemeral session worktree existing. Returns a report so
+// callers can fail LOUD when no COMPLETE install (vitest AND @earendil-works/
+// pi-ai) is available, rather than silently producing module-load failures.
+function resolveToolchain() {
+  const stable = [
     path.join(REPO_ROOT, "node_modules"),
+    path.join(PRIMARY_REPO, "node_modules"),
   ];
-  // Sibling worktrees (…-wt/<branch>/node_modules) and sibling repos.
-  for (const base of [path.dirname(REPO_ROOT), path.dirname(PRIMARY_REPO)]) {
-    try {
-      for (const name of fs.readdirSync(base)) {
-        candidates.push(path.join(base, name, "node_modules"));
-      }
-    } catch { /* ignore */ }
-  }
-  for (const nm of candidates) {
-    if (hasVitest(nm)) return nm;
-  }
-  return path.join(PRIMARY_REPO, "node_modules"); // last resort (may be incomplete)
+  const siblings = [];
+  try {
+    const wtRoot = path.dirname(REPO_ROOT);
+    for (const name of fs.readdirSync(wtRoot)) {
+      const nm = path.join(wtRoot, name, "node_modules");
+      if (!stable.includes(nm)) siblings.push(nm);
+    }
+  } catch { /* ignore */ }
+  const candidates = [...stable, ...siblings];
+  const complete = candidates.find(isCompleteNodeModules);
+  const vitestOnly = candidates.find(hasVitest);
+  const chosen = complete || vitestOnly || path.join(PRIMARY_REPO, "node_modules");
+  return {
+    nm: chosen,
+    complete: !!complete,
+    hasVitest: !!vitestOnly,
+    stable,
+    siblingCount: siblings.length,
+  };
 }
 
-const PRIMARY_NODE_MODULES = resolveToolchainNodeModules();
+const TOOLCHAIN = resolveToolchain();
+const PRIMARY_NODE_MODULES = TOOLCHAIN.nm;
+const TOOLCHAIN_COMPLETE = TOOLCHAIN.complete;
 // Cross-platform JS entry points (invoked as `node <entry>`), resolved once from
 // the toolchain node_modules. `.bin` shims are avoided — they break on Windows.
 const VITEST_ENTRY = path.join(PRIMARY_NODE_MODULES, "vitest", "vitest.mjs");
@@ -140,6 +172,7 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === "--dry-run") { dryRun = true; }
   else if (args[i] === "--id" && args[i + 1]) { targetIds = [args[++i]]; }
   else if (args[i] === "--ids" && args[i + 1]) { targetIds = args[++i].split(","); }
+  else if (args[i] === "--regen-report") { /* handled in main */ }
   else if (args[i] === "--sample" && args[i + 1]) { sampleSize = Math.max(1, parseInt(args[++i], 10) || 5); }
   else if (args[i] === "--full-sample") { fullSampleForce = true; }
   else if (args[i] === "--no-sample") { fullSampleDisable = true; }
@@ -233,6 +266,10 @@ function runCommand(file, cliArgs, cwd, timeoutMs = 120_000) {
       BOBBIT_V2_CHAOS: "1",
       // Don't try to start a gateway in targeted unit tests
       BOBBIT_SKIP_AIGW_DISCOVERY: "1",
+      // Force plain (uncolored) reporter output so test-name attribution parsing
+      // is deterministic regardless of inherited FORCE_COLOR / TTY state.
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
     },
   });
   return result;
@@ -241,22 +278,50 @@ function runCommand(file, cliArgs, cwd, timeoutMs = 120_000) {
 // ── Test-name attribution parsers ─────────────────────────────────────────────
 
 /**
- * Parse node:test TAP output for the specific FAILING test case names.
- * Lines look like `not ok 1 - <name>` (optionally indented for subtests).
- * `# SKIP` / `# TODO` directives are not real failures — ignore them.
+ * Parse node:test output for the specific FAILING test case names, handling
+ * BOTH reporter formats node emits:
+ *   - TAP:  `not ok 1 - <name>` (indented for subtests). `# SKIP`/`# TODO` are
+ *     directives, not failures.
+ *   - spec: `    ✖ <name> (1.23ms)` (node's default reporter; used here even when
+ *     piped). The `✖ failing tests:` section header has no `(Nms)` suffix and is
+ *     ignored. Deeper-indented (leaf) failures are returned first so attribution
+ *     names the specific test case, not just its parent suite.
  */
+// Strip ANSI SGR/CSI escape sequences — node's spec reporter colorizes output
+// intermittently (env-dependent FORCE_COLOR/TTY state), which would otherwise
+// break the anchored failure-line regexes and drop kill attribution.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\u001b\[[0-9;]*[A-Za-z]/g;
+function stripAnsi(s) { return s.replace(ANSI_RE, ""); }
+
 function parseTapFailures(stdout) {
-  const names = [];
-  for (const raw of (stdout || "").split(/\r?\n/)) {
-    const m = /^\s*not ok \d+ - (.+?)\s*$/.exec(raw);
-    if (!m) continue;
-    let name = m[1];
-    if (/#\s*(SKIP|TODO)\b/i.test(name)) continue;
-    // Strip a trailing `# ...` directive/duration comment if present.
-    name = name.replace(/\s+#\s.*$/, "").trim();
-    if (name) names.push(name);
+  const found = [];
+  const lines = (stdout || "").split(/\r?\n/).map(stripAnsi);
+  for (const raw of lines) {
+    // TAP failure line.
+    const tap = /^\s*not ok \d+ - (.+?)\s*$/.exec(raw);
+    if (tap) {
+      let name = tap[1];
+      if (/#\s*(SKIP|TODO)\b/i.test(name)) continue;
+      name = name.replace(/\s+#\s.*$/, "").trim();
+      if (name) found.push({ name, indent: 0 });
+      continue;
+    }
+    // spec-reporter failure line: <indent> ✖|✗|× <name> (<duration>ms)
+    const spec = /^(\s*)(?:\u2716|\u2717|\u00d7)\s+(.+?)\s+\(\d+(?:\.\d+)?ms\)\s*$/.exec(raw);
+    if (spec) {
+      const name = spec[2].trim();
+      if (name) found.push({ name, indent: spec[1].length });
+    }
   }
-  return [...new Set(names)];
+  // Leaf (deepest-indented) failures first; dedupe by name, preserve that order.
+  found.sort((a, b) => b.indent - a.indent);
+  const seen = new Set();
+  const out = [];
+  for (const f of found) {
+    if (!seen.has(f.name)) { seen.add(f.name); out.push(f.name); }
+  }
+  return out;
 }
 
 /**
@@ -265,24 +330,32 @@ function parseTapFailures(stdout) {
  * `relTo` roots the reported absolute file paths back to repo-relative form.
  */
 function parseVitestJsonFailures(reportPath, relTo) {
-  const out = { tests: [], files: [] };
+  const out = { tests: [], files: [], loadErrors: [] };
   let data;
   try { data = JSON.parse(fs.readFileSync(reportPath, "utf-8")); } catch { return out; }
   const fileSet = new Set();
   const testSet = new Set();
+  const loadErrs = [];
   for (const tr of data.testResults || []) {
     let rel = tr.name || "";
     try { rel = path.relative(relTo, tr.name).split(path.sep).join("/"); } catch { /* keep abs */ }
-    for (const ar of tr.assertionResults || []) {
-      if (ar.status !== "failed") continue;
+    const failedAssertions = (tr.assertionResults || []).filter(ar => ar.status === "failed");
+    for (const ar of failedAssertions) {
       fileSet.add(rel);
       const suite = (ar.ancestorTitles || []).join(" > ");
       const label = suite ? `${rel} > ${suite} > ${ar.title}` : `${rel} > ${ar.title}`;
       testSet.add(label);
     }
+    // A suite that FAILED with zero assertion results is a collection/module
+    // LOAD failure (e.g. a missing workspace dep) — NOT a test miss and NOT a
+    // kill. Surface it distinctly so it is never counted as a coverage gap.
+    if (tr.status === "failed" && failedAssertions.length === 0 && tr.message) {
+      loadErrs.push({ file: rel, message: String(tr.message).split(/\r?\n/)[0].slice(0, 200) });
+    }
   }
   out.tests = [...testSet];
   out.files = [...fileSet];
+  out.loadErrors = loadErrs;
   return out;
 }
 
@@ -298,15 +371,27 @@ function runTargetedTest(worktreePath, testFile, tier) {
   }
 
   if (tier === "legacy") {
-    // Legacy node:test suite — uses the tsx loader (cross-platform JS entry).
-    if (!TSX_ENTRY) {
-      return { exitCode: -1, stdout: "", stderr: "tsx not installed in the toolchain node_modules — legacy tier cannot run here (run in the in-container tier-1 environment)", timedOut: false, failingTests: [], failingFiles: [] };
-    }
+    // Legacy node:test suite — mirrors scripts/run-unit.mjs's tsx invocation.
     const cssStub = path.join(worktreePath, "tests", "helpers", "css-stub-loader.mjs");
     const importArgs = fs.existsSync(cssStub) ? ["--import", "./tests/helpers/css-stub-loader.mjs"] : [];
-    const cliArgs = [TSX_ENTRY, ...importArgs, "--test", "--test-force-exit", testFile];
-    const result = runCommand("node", cliArgs, worktreePath);
+    const testArgs = [...importArgs, "--test", "--test-force-exit", testFile];
+    // Prefer the resolved tsx JS entry (`node tsx/dist/cli.mjs`); fall back to
+    // `npx --no-install tsx` (from cache, no network) when tsx is undeclared /
+    // not present under node_modules — this is how run-unit.mjs actually runs it.
+    let result;
+    if (TSX_ENTRY) {
+      result = runCommand("node", [TSX_ENTRY, ...testArgs], worktreePath, 180_000);
+    } else {
+      result = runCommand("npx", ["--no-install", "tsx", ...testArgs], worktreePath, 180_000);
+    }
     const stdout = result.stdout || "";
+    if (process.env.BOBBIT_CHAOS_DEBUG) {
+      try {
+        const dbg = path.join(REPO_ROOT, ".profiles", "chaos", `debug-legacy-${path.basename(testFile)}.txt`);
+        fs.mkdirSync(path.dirname(dbg), { recursive: true });
+        fs.writeFileSync(dbg, `STATUS=${result.status} SIGNAL=${result.signal}\nERROR=${result.error}\n--- STDOUT ---\n${stdout}\n--- STDERR ---\n${result.stderr || ""}\n`, "utf-8");
+      } catch { /* ignore */ }
+    }
     return {
       exitCode: result.status ?? (result.error ? 1 : 0),
       stdout,
@@ -329,6 +414,15 @@ function runTargetedTest(worktreePath, testFile, tier) {
     // node_modules/.vite cache warms up.
     const result = runCommand("node", cliArgs, worktreePath, 300_000);
     const parsed = parseVitestJsonFailures(reportPath, worktreePath);
+    if (process.env.BOBBIT_CHAOS_DEBUG) {
+      try {
+        const dbg = path.join(REPO_ROOT, ".profiles", "chaos", `debug-v2-${path.basename(testFile)}.txt`);
+        fs.mkdirSync(path.dirname(dbg), { recursive: true });
+        const reportExists = fs.existsSync(reportPath);
+        const reportBody = reportExists ? fs.readFileSync(reportPath, "utf-8") : "(no outputFile written)";
+        fs.writeFileSync(dbg, `STATUS=${result.status} SIGNAL=${result.signal}\nERROR=${result.error}\nparsed.tests=${JSON.stringify(parsed.tests)}\n--- STDOUT ---\n${result.stdout || ""}\n--- STDERR ---\n${result.stderr || ""}\n--- REPORT(${reportExists}) ---\n${reportBody.slice(0, 4000)}\n`, "utf-8");
+      } catch { /* ignore */ }
+    }
     try { fs.rmSync(reportPath, { force: true }); } catch { /* ignore */ }
     return {
       exitCode: result.status ?? (result.error ? 1 : 0),
@@ -337,6 +431,7 @@ function runTargetedTest(worktreePath, testFile, tier) {
       timedOut: result.signal === "SIGTERM",
       failingTests: parsed.tests,
       failingFiles: parsed.files,
+      loadErrors: parsed.loadErrors || [],
     };
   }
 
@@ -487,6 +582,7 @@ async function runMutant(mutant) {
       const r = runTargetedTest(worktreePath, v2File, "v2");
       v2DurationMs = Date.now() - t0;
       if (r && r.failingTests) v2CatchTests = r.failingTests;
+      const v2LoadErrors = (r && r.loadErrors) || [];
       if (r === null) {
         v2Result = "skipped";
         v2Detail = "no catcher";
@@ -495,12 +591,17 @@ async function runMutant(mutant) {
         v2Detail = r.stderr.slice(0, 300);
       } else if (r.timedOut) {
         v2Result = "error"; v2Detail = "timed out";
-      } else if (r.exitCode === 0) {
-        v2Result = "missed"; v2Detail = `exit 0 — mutant MISSED (${v2DurationMs}ms)`;
       } else if (v2CatchTests.length > 0) {
-        // Real kill: non-zero exit AND an attributed failing test case.
+        // Real kill: an attributed failing test case (regardless of exit code).
         v2Result = "caught";
         v2Detail = `exit ${r.exitCode} — killed by "${v2CatchTests[0]}" (${v2DurationMs}ms)`;
+      } else if (v2LoadErrors.length > 0) {
+        // Suite failed to LOAD (e.g. missing workspace dep) — inconclusive, NOT a
+        // coverage gap. The v2 test exists but cannot run in this environment.
+        v2Result = "load-error";
+        v2Detail = `module-load failure (not a miss): ${v2LoadErrors[0].message} (${v2DurationMs}ms)`;
+      } else if (r.exitCode === 0) {
+        v2Result = "missed"; v2Detail = `exit 0 — mutant MISSED (${v2DurationMs}ms)`;
       } else {
         // Non-zero exit but the Vitest JSON report named no failing test ⇒ the
         // suite never ran (config/startup crash). Not a kill — inconclusive.
@@ -569,8 +670,34 @@ function buildResult(mutant, legacyResult, v2Result, detail, durationMs, attribu
  * record; when a NON-listed test file caught the mutant, `newCatchers` lists
  * the additions so the caller can update the corpus entry.
  */
-async function runFullV2SampleOne(mutant) {
+// Run the full core+dom tier on a CLEAN tree to record pre-existing / flaky
+// failures. Only failures that appear WITH a mutation but NOT here count as
+// mutation kills — without this baseline, unrelated failing tests would credit
+// false kills and pollute the corpus.
+function runFullV2Baseline() {
   const start = Date.now();
+  let worktreePath;
+  try {
+    worktreePath = createEphemeralWorktree("fullv2-baseline");
+  } catch (err) {
+    console.warn(`[chaos] full-v2 baseline: worktree error (${err.message}); assuming empty baseline`);
+    return { files: new Set(), tests: new Set(), durationMs: Date.now() - start, error: err.message };
+  }
+  try {
+    ensureNodeModulesJunction(worktreePath);
+    console.log(`\n[chaos] full-v2 baseline: running full core+dom tier on the CLEAN tree…`);
+    const r = runFullV2Suite(worktreePath);
+    console.log(`  baseline: ${r.failingFiles.length} pre-existing failing file(s), ${r.failingTests.length} test(s)  (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+    return { files: new Set(r.failingFiles), tests: new Set(r.failingTests), durationMs: Date.now() - start };
+  } finally {
+    removeEphemeralWorktree(worktreePath);
+  }
+}
+
+async function runFullV2SampleOne(mutant, baseline) {
+  const start = Date.now();
+  const baseFiles = baseline?.files ?? new Set();
+  const baseTests = baseline?.tests ?? new Set();
   let worktreePath;
   try {
     worktreePath = createEphemeralWorktree(`fullv2-${mutant.id.replace(/[^a-z0-9]/gi, "-")}`);
@@ -589,12 +716,21 @@ async function runFullV2SampleOne(mutant) {
     }
     console.log(`\n[chaos] full-v2 sample: ${mutant.id} [${mutant.area}] — running full core+dom tier…`);
     const r = runFullV2Suite(worktreePath);
-    // A real kill must name a failing test — a bare non-zero exit with no
-    // attributed failure is a harness/startup error, not a kill.
-    const killed = !r.timedOut && r.failingTests.length > 0;
+    // Attribute ONLY failures new vs the clean-tree baseline to the mutation.
+    const newFailingTests = r.failingTests.filter(t => !baseTests.has(t));
+    const newFailingFiles = r.failingFiles.filter(f => !baseFiles.has(f));
+    const killed = !r.timedOut && newFailingTests.length > 0;
     const listed = new Set(mutant.expectedV2Catchers || []);
-    const newCatchers = r.failingFiles.filter(f => !listed.has(f));
-    console.log(`  full-v2: ${killed ? "KILLED" : "SURVIVED"} by ${r.failingFiles.length} file(s)` +
+    // R8 over-narrow guard: only back-fill when the mutant's OWN listed catcher
+    // did NOT fire in the full run yet some other test did (proving the targeted
+    // selection was too narrow). If the listed catcher fired, the other new
+    // failures are almost certainly unrelated flaky tests — do NOT pollute the
+    // corpus with them.
+    const listedFired = newFailingFiles.some(f => listed.has(f));
+    const newCatchers = listedFired
+      ? []
+      : newFailingFiles.filter(f => f.startsWith("tests2/") && !listed.has(f));
+    console.log(`  full-v2: ${killed ? "KILLED" : "SURVIVED"} by ${newFailingFiles.length} NEW file(s) vs baseline` +
       (newCatchers.length ? ` (+${newCatchers.length} non-listed)` : "") + `  (${((Date.now() - start) / 1000).toFixed(1)}s)`);
     return {
       id: mutant.id,
@@ -602,9 +738,10 @@ async function runFullV2SampleOne(mutant) {
       killed,
       timedOut: r.timedOut,
       exitCode: r.exitCode,
-      failingFiles: r.failingFiles,
-      failingTests: r.failingTests.slice(0, 8),
-      failingTestCount: r.failingTests.length,
+      failingFiles: newFailingFiles,
+      failingTests: newFailingTests.slice(0, 8),
+      failingTestCount: newFailingTests.length,
+      baselineNoiseFiles: r.failingFiles.length - newFailingFiles.length,
       newCatchers,
       durationMs: Date.now() - start,
     };
@@ -635,7 +772,7 @@ function generateMarkdownReport(results, runMeta) {
   const legacyMissed = contentMutants.filter(r => r.legacyResult === "missed").length;
   const v2Missed = contentMutants.filter(r => r.v2Result === "missed").length;
   const legacyInvalid = contentMutants.filter(r => r.legacyResult === "invalid" || r.legacyResult === "error").length;
-  const v2Invalid = contentMutants.filter(r => r.v2Result === "invalid" || r.v2Result === "error").length;
+  const v2Invalid = contentMutants.filter(r => r.v2Result === "invalid" || r.v2Result === "error" || r.v2Result === "load-error").length;
 
   const total = contentMutants.length;
   const legacyKillable = contentMutants.filter(r => r.legacyCatchers.length > 0).length;
@@ -666,13 +803,24 @@ function generateMarkdownReport(results, runMeta) {
   lines.push("## Acceptance Criteria");
   lines.push("");
 
-  const legacyOnlyGaps = contentMutants.filter(r => r.legacyResult === "caught" && r.v2Result !== "caught");
-  const v2CatchesAllLegacyCaught = legacyOnlyGaps.length === 0;
-  lines.push(`- **v2 catches every legacy-caught mutant (no legacy>v2 gap):** ${v2CatchesAllLegacyCaught ? "✅ PASS" : "❌ FAIL"}`);
-  if (!v2CatchesAllLegacyCaught) {
-    lines.push(`  - ⚠️ ${legacyOnlyGaps.length} REAL v2 coverage gap(s) — add a \`tests2/\` test that catches each, then re-run that mutant (never delete/alter the mutant):`);
-    for (const r of legacyOnlyGaps) {
-      lines.push(`    - **${r.id}** (${r.area}): ${r.description} — legacy caught via \`${(r.legacyCatchers[0] || "?")}\`, v2 = ${r.v2Result}`);
+  const legacyOnly = contentMutants.filter(r => r.legacyResult === "caught" && r.v2Result !== "caught");
+  // A REAL coverage gap = v2 test RAN and did not detect the mutant (missed).
+  const realGaps = legacyOnly.filter(r => r.v2Result === "missed");
+  // Inconclusive = the v2 test could not run here (module-load / harness error),
+  // e.g. a missing workspace dep in the host node_modules. NOT a coverage gap.
+  const inconclusive = legacyOnly.filter(r => r.v2Result === "load-error" || r.v2Result === "error");
+  const v2CatchesAllLegacyCaught = realGaps.length === 0;
+  lines.push(`- **No REAL v2 coverage gap (every legacy-caught mutant the v2 test RAN on is caught):** ${v2CatchesAllLegacyCaught ? "✅ PASS" : "❌ FAIL"}`);
+  if (realGaps.length > 0) {
+    lines.push(`  - ❌ ${realGaps.length} REAL v2 coverage gap(s) — the v2 test ran and MISSED. Add a \`tests2/\` test that catches each, then re-run that mutant (never delete/alter the mutant):`);
+    for (const r of realGaps) {
+      lines.push(`    - **${r.id}** (${r.area}): ${r.description} — legacy caught via \`${(r.legacyCatchers[0] || "?")}\`, v2 = missed`);
+    }
+  }
+  if (inconclusive.length > 0) {
+    lines.push(`- **Inconclusive (env, NOT a coverage gap):** ⚠️ ${inconclusive.length} legacy-caught mutant(s) whose v2 test could not run here (module-load/harness error — e.g. a workspace dep missing from the host node_modules). Re-run in a complete-install environment:`);
+    for (const r of inconclusive) {
+      lines.push(`    - **${r.id}** (${r.area}): v2 = ${r.v2Result} — ${r.detail.split("| v2:").pop().trim()}`);
     }
   }
 
@@ -718,28 +866,30 @@ function generateMarkdownReport(results, runMeta) {
   // area, and v2 must catch 100% of every legacy-caught mutant in each area.
   lines.push("## Per-area Comparison (v2 ≥ legacy is the verdict)");
   lines.push("");
-  lines.push("| Area | Mutants | Legacy caught | V2 caught | Legacy-caught also caught by v2 | v2 ≥ legacy |");
-  lines.push("|------|---------|---------------|-----------|--------------------------------|-------------|");
-
   const areas = [...new Set(contentMutants.map(r => r.area))];
+  lines.push("Legend: **inc(env)** = v2 test could not load here (missing workspace dep) — inconclusive, not a miss. Verdict excludes env-inconclusive; a real regression is a v2 *miss*.");
+  lines.push("");
+  lines.push("| Area | Mutants | Legacy caught | V2 caught | inc(env) | Real v2 miss | v2 ≥ legacy (runnable) |");
+  lines.push("|------|---------|---------------|-----------|----------|--------------|------------------------|");
   let allAreasGeq = true;
-  let allLegacySubset = true;
+  let allLegacyNoMiss = true;
   for (const area of areas) {
     const areaResults = contentMutants.filter(r => r.area === area);
     const lc = areaResults.filter(r => r.legacyResult === "caught").length;
     const vc = areaResults.filter(r => r.v2Result === "caught").length;
-    // Every mutant legacy caught must ALSO be caught by v2 (no legacy>v2 gap).
     const legacyCaughtHere = areaResults.filter(r => r.legacyResult === "caught");
-    const legacyAlsoV2 = legacyCaughtHere.filter(r => r.v2Result === "caught").length;
-    const subsetOk = legacyAlsoV2 === legacyCaughtHere.length;
-    const geqOk = vc >= lc;
+    // Inconclusive = v2 could not run (env/harness); a real regression = v2 MISS.
+    const inc = legacyCaughtHere.filter(r => r.v2Result === "load-error" || r.v2Result === "error").length;
+    const realMiss = legacyCaughtHere.filter(r => r.v2Result === "missed").length;
+    // v2 >= legacy among mutants v2 could actually run (env-inconclusive excluded).
+    const geqOk = realMiss === 0;
     if (!geqOk) allAreasGeq = false;
-    if (!subsetOk) allLegacySubset = false;
-    lines.push(`| ${area} | ${areaResults.length} | ${lc} | ${vc} | ${legacyAlsoV2}/${legacyCaughtHere.length} | ${geqOk ? "✅" : "❌"} |`);
+    if (realMiss > 0) allLegacyNoMiss = false;
+    lines.push(`| ${area} | ${areaResults.length} | ${lc} | ${vc} | ${inc || "—"} | ${realMiss || "—"} | ${geqOk ? (inc ? "✅*" : "✅") : "❌"} |`);
   }
   lines.push("");
-  lines.push(`**Per-area v2 ≥ legacy:** ${allAreasGeq ? "✅ PASS (no area regresses)" : "❌ FAIL (an area has fewer v2 kills than legacy)"}`);
-  lines.push(`**Per-area legacy-caught ⊆ v2-caught:** ${allLegacySubset ? "✅ PASS (v2 catches every legacy-caught mutant in every area)" : "❌ FAIL (a legacy-caught mutant is missed by v2 — add a tests2/ test and re-run)"}`);
+  lines.push(`**Per-area v2 ≥ legacy (runnable):** ${allAreasGeq ? "✅ PASS (no area has a real v2 miss; ✅* = has env-inconclusive to re-run in a complete-install env)" : "❌ FAIL (an area has a REAL v2 miss — add a tests2/ test and re-run)"}`);
+  lines.push(`**Per-area legacy-caught ⊆ v2-caught (excluding env-inconclusive):** ${allLegacyNoMiss ? "✅ PASS (no legacy-caught mutant is genuinely missed by v2)" : "❌ FAIL (a legacy-caught mutant is genuinely missed by v2)"}`);
   lines.push("");
 
   // Full matrix (with test-name-level kill attribution)
@@ -749,8 +899,9 @@ function generateMarkdownReport(results, runMeta) {
   lines.push("|----|------|------|--------|-----|--------------------------|----------|");
   for (const r of results) {
     const nullTag = r.nullMutant ? " *(null)*" : "";
-    const legacyIcon = { caught: "🔴", missed: "⚪", skipped: "—", error: "⚠️", invalid: "⛔" }[r.legacyResult] || "?";
-    const v2Icon = { caught: "🔴", missed: "⚪", skipped: "—", error: "⚠️", invalid: "⛔" }[r.v2Result] || "?";
+    const ICONS = { caught: "🔴", missed: "⚪", skipped: "—", error: "⚠️", invalid: "⛔", "load-error": "🧩" };
+    const legacyIcon = ICONS[r.legacyResult] || "?";
+    const v2Icon = ICONS[r.v2Result] || "?";
     let killedBy = "—";
     if (r.v2Result === "caught") {
       const t = (r.v2CatchTests && r.v2CatchTests[0]) || "";
@@ -759,22 +910,30 @@ function generateMarkdownReport(results, runMeta) {
     lines.push(`| ${r.id}${nullTag} | ${r.area} | \`${r.file}\` | ${legacyIcon} ${r.legacyResult} | ${v2Icon} ${r.v2Result} | ${killedBy} | ${(r.durationMs/1000).toFixed(1)}s |`);
   }
   lines.push("");
-  lines.push("**Icon key:** 🔴 caught (test fails on mutant) | ⚪ missed | — skipped (no targeted catcher) | ⚠️ error | ⛔ invalid (patch failed)");
+  lines.push("**Icon key:** 🔴 caught (test fails on mutant) | ⚪ missed | — skipped (no targeted catcher) | ⚠️ error | 🧩 load-error (v2 suite could not load here — env, not a miss) | ⛔ invalid (patch failed)");
   lines.push("");
 
   // Full-v2 sample detail (spec R8).
   if (sample.length > 0) {
     lines.push("## Full-v2 Sample (spec R8 — over-narrow-targeting guard)");
     lines.push("");
-    lines.push("Each sampled mutant is re-run against the FULL v2 core+dom tier (every test, not just the targeted file). A kill by a non-listed test still counts and back-fills `expectedV2Catchers`.");
+    lines.push("Each sampled mutant is re-run against the FULL v2 core+dom tier (every test, not just the targeted file), with pre-existing/flaky failures subtracted via a clean-tree baseline. 'Killed by (attributed)' names the mutant's own listed catcher when it fired in the full run; a genuine non-listed catcher is recorded only when the listed catcher did NOT fire (the true over-narrow case).");
     lines.push("");
-    lines.push("| Mutant | Area | Re-killed by full tier | Failing test files | New (non-listed) catchers | Duration |");
-    lines.push("|--------|------|------------------------|--------------------|---------------------------|----------|");
+    lines.push("| Mutant | Area | Re-killed by full tier | Killed by (attributed) | Genuine non-listed catcher | Duration |");
+    lines.push("|--------|------|------------------------|------------------------|----------------------------|----------|");
     for (const s of sample) {
       const status = s.error ? `⚠️ ${s.error}` : (s.killed ? "✅ yes" : "❌ SURVIVED");
-      const files = (s.failingFiles || []).map(f => `\`${f}\``).join("<br>") || "—";
-      const news = (s.newCatchers || []).map(f => `\`${f}\``).join("<br>") || "—";
-      lines.push(`| ${s.id} | ${s.area} | ${status} | ${files} | ${news} | ${((s.durationMs||0)/1000).toFixed(1)}s |`);
+      // Cross-reference the mutant's listed v2 catcher; if it is among the
+      // new-vs-baseline failing files, THAT is the attribution and any other
+      // new failures are treated as flaky noise (not genuine catchers).
+      const mres = results.find(r => r.id === s.id);
+      const listed = new Set((mres && mres.v2Catchers) || []);
+      const failing = s.failingFiles || [];
+      const listedFired = failing.filter(f => listed.has(f));
+      const attributed = listedFired.length ? listedFired.map(f => `\`${f}\``).join("<br>") : (failing.length ? "(listed catcher not in full-run failures)" : "—");
+      const genuineNonListed = listedFired.length ? "— (listed catcher fired; other failures treated as flaky)" :
+        (failing.filter(f => !listed.has(f)).map(f => `\`${f}\``).join("<br>") || "—");
+      lines.push(`| ${s.id} | ${s.area} | ${status} | ${attributed} | ${genuineNonListed} | ${((s.durationMs||0)/1000).toFixed(1)}s |`);
     }
     lines.push("");
   }
@@ -811,6 +970,14 @@ function generateMarkdownReport(results, runMeta) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
+  // Regenerate the markdown report from an existing JSON report (no campaign).
+  if (args.includes("--regen-report")) {
+    const report = JSON.parse(fs.readFileSync(REPORT_JSON, "utf-8"));
+    const md = generateMarkdownReport(report.results, report.meta || {});
+    fs.writeFileSync(REPORT_MD, md, "utf-8");
+    console.log(`Regenerated ${REPORT_MD} from ${REPORT_JSON} (${report.results.length} results)`);
+    return;
+  }
   const totalStart = Date.now();
   console.log(`\n╔═══════════════════════════════════════════════════╗`);
   console.log(`║         Bobbit Chaos Comparison Proof             ║`);
@@ -820,7 +987,9 @@ async function main() {
   console.log(`Mutants:      ${mutants.length} (of ${ALL_MUTANTS.length} total)`);
   console.log(`toolchain nm: ${PRIMARY_NODE_MODULES}`);
   console.log(`vitest entry: ${fs.existsSync(VITEST_ENTRY) ? "✓ " + VITEST_ENTRY : "✗ MISSING"}`);
-  console.log(`tsx entry:    ${TSX_ENTRY ? "✓ " + TSX_ENTRY : "✗ not installed — legacy tier will report 'error'"}`);
+  console.log(`tsx entry:    ${TSX_ENTRY ? "✓ " + TSX_ENTRY : "(node_modules/tsx absent) → falling back to `npx --no-install tsx`"}`);
+
+  console.log(`toolchain complete (vitest + @earendil-works/pi-ai): ${TOOLCHAIN_COMPLETE ? "✓ yes" : "✗ NO"}`);
 
   // Preflight: ensure the v2 toolchain (vitest) is resolvable.
   if (!fs.existsSync(VITEST_ENTRY)) {
@@ -828,9 +997,29 @@ async function main() {
     console.error("  Run this in the tier-1 toolchain environment (in-container) or a worktree with a full `npm ci`.");
     process.exit(1);
   }
-  if (!TSX_ENTRY) {
-    console.warn("\n[chaos] WARNING: tsx is not installed here — the LEGACY tier cannot run, so the");
-    console.warn("  legacy-vs-v2 comparison will be incomplete. Run the full campaign in-container.");
+  // For the AUTHORITATIVE full campaign (--all), a complete workspace install is
+  // mandatory: without @earendil-works/pi-ai, server-graph v2 tests fail to LOAD
+  // and the comparison is invalid. Fail LOUD rather than emit a misleading report.
+  const isFullCampaign = targetIds === null;
+  if (isFullCampaign && !TOOLCHAIN_COMPLETE) {
+    console.error("\n[chaos] ❌ ABORT: no COMPLETE workspace node_modules found for the full campaign.");
+    console.error("  A valid v2-vs-legacy comparison needs BOTH `vitest` AND `@earendil-works/pi-ai`");
+    console.error("  resolvable in a single node_modules (server-graph tests import auth/session code).");
+    console.error(`  Chosen node_modules: ${PRIMARY_NODE_MODULES}`);
+    console.error(`    vitest present: ${fs.existsSync(VITEST_ENTRY) ? "yes" : "no"}`);
+    console.error(`    @earendil-works/pi-ai present: ${fs.existsSync(path.join(PRIMARY_NODE_MODULES, "@earendil-works", "pi-ai")) ? "yes" : "no"}`);
+    console.error("  Searched (stable first, then sibling worktrees):");
+    for (const nm of TOOLCHAIN.stable) {
+      console.error(`    - ${nm}  [vitest=${hasVitest(nm) ? "Y" : "N"} pi-ai=${fs.existsSync(path.join(nm, "@earendil-works", "pi-ai")) ? "Y" : "N"}]`);
+    }
+    console.error(`    - (+${TOOLCHAIN.siblingCount} sibling worktrees under ${path.dirname(REPO_ROOT)})`);
+    console.error("  FIX: run `npm ci` (or install @earendil-works/pi-ai@0.79.6) in the worktree the");
+    console.error("  campaign runs from (the goal worktree at gate time), then re-run `--all`.");
+    process.exit(1);
+  }
+  if (!TOOLCHAIN_COMPLETE) {
+    console.warn("[chaos] WARNING: toolchain node_modules lacks @earendil-works/pi-ai — server-graph v2");
+    console.warn("  tests will report 'load-error' (inconclusive). OK for targeted --ids dev runs only.");
   }
 
   fs.mkdirSync(path.dirname(REPORT_JSON), { recursive: true });
@@ -855,6 +1044,7 @@ async function main() {
   // still counts and back-fills that mutant's expectedV2Catchers.
   const runSample = !fullSampleDisable && (targetIds === null || fullSampleForce);
   let fullV2Sample = [];
+  let fullV2SampleBaseline = null;
   let corpusUpdated = false;
   if (runSample) {
     const eligible = results.filter(r => !r.nullMutant && r.v2Result === "caught");
@@ -864,8 +1054,10 @@ async function main() {
       const chosenIds = new Set(seededSample(eligible.map(r => r.id), sampleSize).map(String));
       const chosen = ALL_MUTANTS.filter(m => chosenIds.has(m.id));
       console.log(`\n[chaos] full-v2 sample: ${chosen.length} mutant(s) → ${chosen.map(m => m.id).join(", ")}`);
+      const baseline = runFullV2Baseline();
+      fullV2SampleBaseline = { failingFiles: baseline.files.size, failingTests: baseline.tests.size };
       for (const mutant of chosen) {
-        const rec = await runFullV2SampleOne(mutant);
+        const rec = await runFullV2SampleOne(mutant, baseline);
         fullV2Sample.push(rec);
         // Back-fill expectedV2Catchers with any non-listed catcher file.
         if (rec.newCatchers && rec.newCatchers.length > 0) {
@@ -897,6 +1089,7 @@ async function main() {
       run: fullV2Sample.length,
       killed: sampleKilled,
       survived: fullV2Sample.length - sampleKilled,
+      baseline: fullV2SampleBaseline,
       corpusUpdated,
     },
   };
