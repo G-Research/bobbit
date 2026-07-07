@@ -1,6 +1,6 @@
 # Browser-dimension Chaos Comparison — Test Suite v2
 
-Generated: 2026-07-07T22:31:07.690Z  |  Run duration: 6.1 min
+Generated: 2026-07-07T22:44:39.940Z  |  Run duration: 5.8 min
 
 Adversarial proof that the consolidated v2 **journeys** catch every browser-only
 mutant the retired 184-spec **legacy** suite catches. Both tiers run the targeted
@@ -10,9 +10,9 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 
 | Metric | Legacy suite | V2 journeys |
 |--------|-------------|-------------|
-| Content mutants | 3 | 3 |
-| With targeted catchers | 3 | 3 |
-| Caught | 3 | 3 |
+| Content mutants | 4 | 4 |
+| With targeted catchers | 4 | 4 |
+| Caught | 4 | 4 |
 | Missed | 0 | 0 |
 | Invalid (did not compile) | 0 | 0 |
 | Error (harness/env) | 0 | 0 |
@@ -23,17 +23,18 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 ## Acceptance Criteria
 
 - **Every legacy-caught mutant is also journey-caught (no REAL hole):** ✅ PASS
-- **V2 ≥ legacy overall (kill count):** ✅ PASS (v2 3 vs legacy 3)
+- **V2 ≥ legacy overall (kill count):** ✅ PASS (v2 4 vs legacy 4)
 - **Both-missed gaps:** ✅ None
-- **All journey kills attributed to a specific test:** ✅ PASS (3/3)
+- **All journey kills attributed to a specific test:** ✅ PASS (4/4)
 
 ## Per-area Comparison (v2 journeys ≥ legacy is the verdict)
 
 | Area | Mutants | Legacy caught | V2 caught | Real journey miss | Inconclusive | v2 ≥ legacy (runnable) |
 |------|---------|---------------|-----------|-------------------|--------------|------------------------|
-| proposals-subgoal-prefill | 1 | 1 | 1 | — | — | ✅ |
-| project-settings-maintenance | 1 | 1 | 1 | — | — | ✅ |
-| project-onboarding-typeahead | 1 | 1 | 1 | — | — | ✅ |
+| goal-editing-existing-subgoal-settings | 1 | 1 | 1 | — | — | ✅ |
+| project-settings-agent-dir | 1 | 1 | 1 | — | — | ✅ |
+| proposals-editable-accept | 1 | 1 | 1 | — | — | ✅ |
+| project-onboarding-select-all | 1 | 1 | 1 | — | — | ✅ |
 
 **Per-area v2 ≥ legacy:** ✅ PASS (no area has a real journey miss; ✅* = has env-inconclusive to re-run)
 
@@ -41,9 +42,10 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 
 | ID | Area | File | Op | Legacy | V2 | Killed by (v2 test) | Duration |
 |----|------|------|----|--------|-----|---------------------|----------|
-| BR45 | proposals-subgoal-prefill | `src/app/proposal-panels.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\proposals.journey.spec.ts › Journey: Goal Proposal — Sub-goals pre` | 69.7s |
-| BR47 | project-settings-maintenance | `src/app/settings-page.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\project-settings.journey.spec.ts › Journey: Settings Maintenance —` | 103.6s |
-| BR49 | project-onboarding-typeahead | `src/ui/components/DirectoryPicker.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\project-onboarding.journey.spec.ts › Journey: Project Onboarding ›` | 68.4s |
+| BR50 | goal-editing-existing-subgoal-settings | `src/app/goal-dashboard-children-tab.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\goal-editing.journey.spec.ts › Journey: Subgoal Existing Goal Sett` | 73.6s |
+| BR53 | project-settings-agent-dir | `src/app/settings-page.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\project-settings.journey.spec.ts › Journey: Settings Maintenance —` | 53.6s |
+| BR54 | proposals-editable-accept | `src/app/proposal-panels.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\proposals.journey.spec.ts › Journey: Editable Project Proposal › e` | 73.6s |
+| BR55 | project-onboarding-select-all | `src/app/dialogs.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\project-onboarding.journey.spec.ts › Journey: Project Onboarding ›` | 45.0s |
 
 **Icons:** 🔴 caught | ⚪ missed | — skipped | ⚠️ error (harness/env) | ⛔ invalid (did not compile)
 
