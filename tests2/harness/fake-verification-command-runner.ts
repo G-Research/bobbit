@@ -1,0 +1,196 @@
+/**
+ * Tier-1 FAKE for the verification command-step executor (D4 seam).
+ *
+ * Reproduces the OBSERVABLE contract of the real durable runner WITHOUT
+ * spawning an OS shell:
+ *   - streamed stdout/stderr chunks (via the child's stdout/stderr emitters),
+ *   - exit-code → verdict (child "exit"/"close" with a scripted code),
+ *   - step timeout (marks timedOut + closes when the scripted delay exceeds the
+ *     harness timeout), and
+ *   - cancellation (killTree → prompt close so the harness sees the cancelled
+ *     tracked key), and the restart→pending/retryable state (declared via
+ *     `nonDurable`, which routes the harness onto the attached path).
+ *
+ * It NEVER spawns a process, so it removes the cmd.exe/Git-Bash spawns that
+ * uncounted-oversubscribe the box under concurrent test:v2 load. It is reachable
+ * ONLY when a test fixture injects it via GatewayDeps.commandStepRunner; the
+ * real durable path is the production default and is never touched here.
+ *
+ * The command interpreter models exactly the primitive shapes the migrated
+ * fake-target specs use (echo, node -e console.log/process.exit/setTimeout,
+ * true/false). Fidelity vs the real runner is pinned by the contract test
+ * tests2/core/verification-command-runner-contract.test.ts; anything the real
+ * shell would do differently is caught there.
+ */
+import { EventEmitter } from "node:events";
+import type {
+	VerificationCommandRunner,
+	VerificationCommandSpawnSpec,
+} from "../../src/server/agent/verification-command-runner.js";
+import type { TrackedChild } from "../../src/server/agent/spawn-tree.js";
+
+interface ScriptedResult {
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+	/** Wall delay before the (scripted) process completes. Preserves timing-
+	 *  sensitive observations (running/waiting windows, cancel-mid-flight). */
+	delayMs: number;
+}
+
+/**
+ * Deterministically interpret the handful of primitive command shapes the
+ * fake-target verification specs use. Anything unrecognised is treated as a
+ * no-op success (exit 0, no output) — matching an `echo`/`true`-style pass
+ * stand-in. The contract test pins these against the real shell.
+ */
+export function interpretFakeCommand(command: string): ScriptedResult {
+	const cmd = command.trim();
+	const res: ScriptedResult = { exitCode: 0, stdout: "", stderr: "", delayMs: 0 };
+
+	// `true` / `false`
+	if (cmd === "true") return res;
+	if (cmd === "false") return { ...res, exitCode: 1 };
+
+	// `echo <text>` (single echo; no pipes/chains in the fake-target set)
+	const echo = /^echo\s+(.*)$/s.exec(cmd);
+	if (echo) {
+		let text = echo[1];
+		// Strip one layer of surrounding quotes if present (bash would too).
+		const q = /^"(.*)"$/s.exec(text) || /^'(.*)'$/s.exec(text);
+		if (q) text = q[1];
+		return { ...res, stdout: `${text}\n` };
+	}
+
+	// `node -e "<script>"` / `node -e '<script>'` / `node -e <script>`
+	const nodeE = /^node\s+-e\s+(.*)$/s.exec(cmd);
+	if (nodeE) {
+		let script = nodeE[1].trim();
+		const sq = /^"([\s\S]*)"$/.exec(script) || /^'([\s\S]*)'$/.exec(script);
+		if (sq) script = sq[1];
+		return interpretNodeEval(script);
+	}
+
+	// Unrecognised → no-op success (pass stand-in).
+	return res;
+}
+
+function interpretNodeEval(script: string): ScriptedResult {
+	const res: ScriptedResult = { exitCode: 0, stdout: "", stderr: "", delayMs: 0 };
+
+	// setTimeout(() => ..., MS) — the body runs after MS; capture the delay.
+	const st = /setTimeout\s*\(\s*\(\)\s*=>\s*([\s\S]*?)\s*,\s*(\d+)\s*\)/.exec(script);
+	let body = script;
+	if (st) {
+		res.delayMs = parseInt(st[2], 10) || 0;
+		body = st[1]; // e.g. "process.exit(0)" or "{console.log('done');process.exit(0)}"
+	}
+
+	// console.log('X') / console.log("X") — collect all, newline-joined (Node
+	// prints one line per call).
+	const logRe = /console\.log\(\s*(['"])([\s\S]*?)\1\s*\)/g;
+	let m: RegExpExecArray | null;
+	const logs: string[] = [];
+	while ((m = logRe.exec(body)) !== null) logs.push(m[2]);
+	if (logs.length) res.stdout = logs.map((l) => `${l}\n`).join("");
+
+	// process.exit(N) — default 0 when the script just logs / falls off the end.
+	const ex = /process\.exit\(\s*(\d+)\s*\)/.exec(body);
+	if (ex) res.exitCode = parseInt(ex[1], 10) || 0;
+
+	return res;
+}
+
+/** A fake ChildProcess-shaped emitter with the surface runCommandStep consumes. */
+class FakeChild extends EventEmitter {
+	readonly stdout = Object.assign(new EventEmitter(), { destroy() {} });
+	readonly stderr = Object.assign(new EventEmitter(), { destroy() {} });
+	readonly pid: number;
+	constructor(pid: number) {
+		super();
+		this.pid = pid;
+	}
+	unref(): void {}
+	kill(): boolean { return true; }
+}
+
+let _fakePidCounter = 900_000;
+
+function makeFakeTracked(spec: VerificationCommandSpawnSpec): TrackedChild {
+	const child = new FakeChild(++_fakePidCounter);
+	const script = interpretFakeCommand(spec.command);
+	let closed = false;
+	let killed = false;
+	let timedOut = false;
+	let completionTimer: ReturnType<typeof setTimeout> | undefined;
+	let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+
+	const clearTimers = () => {
+		if (completionTimer) clearTimeout(completionTimer);
+		if (timeoutTimer) clearTimeout(timeoutTimer);
+		completionTimer = undefined;
+		timeoutTimer = undefined;
+	};
+
+	const emitClose = (code: number | null, signal: NodeJS.Signals | null) => {
+		if (closed) return;
+		closed = true;
+		clearTimers();
+		child.emit("exit", code, signal);
+		child.emit("close", code, signal);
+	};
+
+	// Stream scripted output on the next tick (before completion), mirroring the
+	// attached-pipe live-output path so step_output events + accumulated output
+	// are produced exactly as a real child would.
+	const emitOutput = () => {
+		if (script.stdout) child.stdout.emit("data", Buffer.from(script.stdout));
+		if (script.stderr) child.stderr.emit("data", Buffer.from(script.stderr));
+	};
+
+	// Timeout: the scripted delay exceeds the harness-provided step timeout.
+	if (Number.isFinite(spec.timeoutMs) && spec.timeoutMs > 0 && script.delayMs > spec.timeoutMs) {
+		timeoutTimer = setTimeout(() => {
+			if (closed || killed) return;
+			timedOut = true;
+			emitOutput();
+			emitClose(null, "SIGTERM");
+		}, spec.timeoutMs);
+		timeoutTimer.unref?.();
+	} else {
+		completionTimer = setTimeout(() => {
+			if (closed || killed) return;
+			emitOutput();
+			emitClose(script.exitCode, null);
+		}, script.delayMs);
+		completionTimer.unref?.();
+	}
+
+	const tracked: TrackedChild = {
+		child: child as unknown as TrackedChild["child"],
+		killed: () => killed,
+		timedOut: () => timedOut,
+		markSurvival: () => { /* fake children never survive shutdown */ },
+		killTree: (_signal, _graceMsOverride) => {
+			if (closed) return;
+			killed = true;
+			// Close promptly so cancellation is observable (real path escalates
+			// SIGTERM→SIGKILL; the fake just ends the "process"). The harness has
+			// already recorded the cancelled tracked key before calling killTree.
+			setTimeout(() => emitClose(null, "SIGTERM"), 0).unref?.();
+		},
+	};
+	return tracked;
+}
+
+/**
+ * Create a fake command-step runner. `nonDurable:true` makes the harness route
+ * every command step through the attached, restart→pending/retryable path, so
+ * none of the durable pid/exit-file machinery runs against the fake.
+ */
+export function createFakeVerificationCommandRunner(): VerificationCommandRunner {
+	return {
+		nonDurable: true,
+		spawn: (spec) => makeFakeTracked(spec),
+	};
+}

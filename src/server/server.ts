@@ -3052,7 +3052,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	}
 
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);

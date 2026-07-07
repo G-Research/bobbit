@@ -40,6 +40,10 @@
       "reason": "DI contract: constructing without deps uses real timers/exec/fetch/fs."
     },
     {
+      "path": "tests2/core/verification-command-runner-contract.test.ts",
+      "reason": "DI seam contract: fake verification command-step runner is observably equivalent to the real durable runner; seam defaults to real; cli wires no fake."
+    },
+    {
       "path": "tests2/core/store-fsimpl-contract.test.ts",
       "reason": "DI contract: store fsImpl defaults to node:fs; memfs override works."
     },
