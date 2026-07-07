@@ -894,3 +894,16 @@ gate is flipped to v2 (switchover), ALL THREE must pass and be committed:
    aggregate) so localized drops in consolidated journeys are surfaced.
 
 Switchover is BLOCKED until 1–3 pass. Legacy remains the gate until then.
+
+## D9 — Concurrency target capped at 3 (5-way spun off) (SETTLED with user)
+
+Measured on the 24-core dev box: a single test:v2 run is 251s (green); but 5 concurrent FULL runs hit
+~800–960s/run and one integration test starves past its 60/90s timeout. Root cause is per-test/per-fork
+GATEWAY BOOT cost (each integration + browser test boots a full real gateway), NOT worker/fork count — so
+the ledger worker-cap cannot bring 5 full suites under the 600s bar. This is deterministic CPU starvation,
+not a flake.
+
+Decision: the concurrency-proof target is **3 concurrent** for now (honest, fits <600s, retries:0, Σ≤24, 0
+flakes). Restoring 5-way is deferred to a **spin-off goal** that reduces per-test gateway cost (e.g. share a
+gateway across integration tests / cut boot cost). No assertions weakened, no timeouts padded. Supersedes the
+"5 concurrent" figure in requirement #2 for this goal's acceptance.
