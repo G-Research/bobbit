@@ -14,35 +14,28 @@ Disjoint corpus: `tests2/chaos/browser-mutants-clusterB.json`; report:
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants) | 7 |
-| Real holes found | 7 |
-| **Real holes CLOSED (ported + re-verified caught)** | **7** |
-| Ported + clean-passed, mutation re-verify PENDING | 2 (BR52, BR56) |
+| Behaviours mutation-tested (content mutants) | 9 |
+| Real holes found | 9 |
+| **Real holes CLOSED (ported + re-verified caught)** | **9** |
 | Real holes OPEN | 0 |
 | Null-mutant harness-integrity in corpus | 1 (BR00-null) |
 
-## Batch 3 — 2 holes ported, re-verify PENDING (BR52, BR56)
+## Batch 3 — 2 holes closed (BR52, BR56)
 
-Both ports authored + **clean-passed on unmutated dist (2/2 green)** and
-committed. The `--corpus clusterB --ids BR52,BR56` mutation re-run crashed
-transiently on a Playwright `loadConfigFromFile` error in the ephemeral
-worktree (machine paused for a concurrency study mid-run) — BR52 legacy=caught,
-v2=**error/not-run**, BR56 not reached. NOT a confirmed hole; re-verify pending
-the machine all-clear. Neither port weakens or is dropped.
+Both ports clean-passed on unmutated dist, then `--corpus clusterB --ids
+BR52,BR56` re-verified **v2-caught 2/2, 0 real holes** (an earlier attempt
+crashed transiently on a Playwright `loadConfigFromFile` error during the paused
+window; re-run after all-clear was clean).
 
 | Mutant | Domain / journey | Ported assertion |
 |---|---|---|
 | BR52 | project-onboarding | ghost `.bobbit/` dir → preflight panel + `bobbit.existing` check row + `preflight-archive-cta` visible |
 | BR56 | team-operations | non-goal terminate modal enumerates child agents BY NAME ("its 2 child agents: …CascadeChildAlpha…CascadeChildBeta") |
 
-### RESUME POINT
-Last committed batch: **batch 3 ports** (commit 955682e4). Next action on
-all-clear: `node scripts/testing-v2/browser-chaos.mjs --corpus clusterB --ids
-BR52,BR56` to confirm v2-caught; then a final `--corpus clusterB --all` for the
-authoritative 0-holes report. After that, next behaviours to mutation-test:
-proposals (dismiss-reload, invalid-workflow, revision-autoupdate,
-spec-survives-navigate — behavioural, not dropped-testid), project-settings
-(settings-restart-button, goal-accept-failure, goal-reattempt, project-assistant).
+## Next behaviours (queue)
+proposals: dismiss-reload, invalid-workflow, revision-autoupdate,
+spec-survives-navigate (behavioural mutants, not dropped-testid); project-settings:
+settings-restart-button, goal-accept-failure, goal-reattempt, project-assistant.
 Flagged (do NOT force): add-project-symlink (Windows EPERM → both suites skip),
 team-operations verification-progress verify-card (manual/integration tier).
 

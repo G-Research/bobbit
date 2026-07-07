@@ -1,6 +1,6 @@
 # Browser-dimension Chaos Comparison — Test Suite v2
 
-Generated: 2026-07-07T22:49:43.725Z  |  Run duration: 1.8 min
+Generated: 2026-07-07T22:58:42.704Z  |  Run duration: 3.2 min
 
 Adversarial proof that the consolidated v2 **journeys** catch every browser-only
 mutant the retired 184-spec **legacy** suite catches. Both tiers run the targeted
@@ -12,29 +12,27 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 |--------|-------------|-------------|
 | Content mutants | 2 | 2 |
 | With targeted catchers | 2 | 2 |
-| Caught | 1 | 0 |
+| Caught | 2 | 2 |
 | Missed | 0 | 0 |
-| Invalid (did not compile) | 1 | 1 |
-| Error (harness/env) | 0 | 1 |
-| **Kill rate (of killable)** | **50.0%** | **0.0%** |
+| Invalid (did not compile) | 0 | 0 |
+| Error (harness/env) | 0 | 0 |
+| **Kill rate (of killable)** | **100.0%** | **100.0%** |
 
 **Null-mutant integrity:** — (no null mutant this run)
 
 ## Acceptance Criteria
 
 - **Every legacy-caught mutant is also journey-caught (no REAL hole):** ✅ PASS
-- **Inconclusive (env/harness, NOT a hole):** ⚠️ 1 legacy-caught mutant(s) whose journey run errored/failed-to-build. Re-run:
-    - **BR52** (project-onboarding-post-archive): v2 = error
-- **V2 ≥ legacy overall (kill count):** ❌ FAIL (v2 0 vs legacy 1)
+- **V2 ≥ legacy overall (kill count):** ✅ PASS (v2 2 vs legacy 2)
 - **Both-missed gaps:** ✅ None
-- **All journey kills attributed to a specific test:** ✅ PASS (0/0)
+- **All journey kills attributed to a specific test:** ✅ PASS (2/2)
 
 ## Per-area Comparison (v2 journeys ≥ legacy is the verdict)
 
 | Area | Mutants | Legacy caught | V2 caught | Real journey miss | Inconclusive | v2 ≥ legacy (runnable) |
 |------|---------|---------------|-----------|-------------------|--------------|------------------------|
-| project-onboarding-post-archive | 1 | 1 | 0 | — | 1 | ✅* |
-| team-operations-archive-child-cascade | 1 | 0 | 0 | — | — | ✅ |
+| project-onboarding-post-archive | 1 | 1 | 1 | — | — | ✅ |
+| team-operations-archive-child-cascade | 1 | 1 | 1 | — | — | ✅ |
 
 **Per-area v2 ≥ legacy:** ✅ PASS (no area has a real journey miss; ✅* = has env-inconclusive to re-run)
 
@@ -42,8 +40,8 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 
 | ID | Area | File | Op | Legacy | V2 | Killed by (v2 test) | Duration |
 |----|------|------|----|--------|-----|---------------------|----------|
-| BR52 | project-onboarding-post-archive | `src/app/dialogs.ts` | dropped-testid | 🔴 caught | ⚠️ error | — | 18.1s |
-| BR56 | team-operations-archive-child-cascade | `src/app/session-manager.ts` | dropped-value | ⛔ invalid | ⛔ invalid | — | 0.0s |
+| BR52 | project-onboarding-post-archive | `src/app/dialogs.ts` | dropped-testid | 🔴 caught | 🔴 caught | `tests2\browser\journeys\project-onboarding.journey.spec.ts › Journey: Project Onboarding ›` | 53.9s |
+| BR56 | team-operations-archive-child-cascade | `src/app/session-manager.ts` | dropped-value | 🔴 caught | 🔴 caught | `tests2\browser\journeys\team-operations.journey.spec.ts › Journey: Archive Child Cascade —` | 60.2s |
 
 **Icons:** 🔴 caught | ⚪ missed | — skipped | ⚠️ error (harness/env) | ⛔ invalid (did not compile)
 
