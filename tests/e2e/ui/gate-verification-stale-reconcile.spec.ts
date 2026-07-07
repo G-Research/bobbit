@@ -43,11 +43,12 @@
  * Marker: GATE_VERIFICATION_STALE_RECONCILE
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal, defaultProjectId, createSession, connectWs, signalAndWaitForGate } from "../e2e-setup.js";
 import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
 
-// Long-running command so the verification stays observably in-flight while we
-// exercise reconcile. (~60s; the test asserts reconcile behaviour long before.)
+// Fast command for the deterministic alive→completed baseline.
+const FAST_CMD = `node -e "process.exit(0)"`;
+// Long-running command for the (fixme) in-flight death scenario. (~60s.)
 const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),60000)"`;
 const GATE_ID = "stale-gate";
 const GATE_NAME = "Stale Reconcile Gate";
@@ -56,20 +57,20 @@ function makeWorkflowId(): string {
 	return `stale-reconcile-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function createWorkflow(workflowId: string, projectId: string): Promise<void> {
+async function createWorkflow(workflowId: string, projectId: string, cmd: string = SLOW_CMD): Promise<void> {
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
 		body: JSON.stringify({
 			projectId,
 			id: workflowId,
 			name: "Stale Reconcile Test",
-			description: "One slow command gate for stale-verification reconcile coverage.",
+			description: "One command gate for stale-verification reconcile coverage.",
 			gates: [
 				{
 					id: GATE_ID,
 					name: GATE_NAME,
 					dependsOn: [],
-					verify: [{ name: "Slow step", type: "command", run: SLOW_CMD }],
+					verify: [{ name: "Slow step", type: "command", run: cmd }],
 				},
 			],
 		}),
@@ -82,32 +83,46 @@ async function deleteWorkflow(workflowId: string): Promise<void> {
 }
 
 test.describe("Gate verification stale reconcile (Issue #2) — GATE_VERIFICATION_STALE_RECONCILE", () => {
-	// Baseline that CAN run today: a live verification renders the running
-	// spinner (per-step chips). Guards the alive path the fix must not break.
-	test("live verification renders the running spinner (alive-path baseline)", async ({ page }) => {
+	// Baseline that CAN run today: a verification that runs to normal completion
+	// (its sessions were alive throughout) must be reported terminal and NOT
+	// flagged stale. Guards that the stale-reconcile fix does not over-eagerly
+	// coerce a healthy verification to stale. Deterministic (fast command +
+	// event-driven wait); a light DOM smoke confirms the gate row renders.
+	test("a completed (alive) verification is not flagged stale (alive-path baseline)", async ({ page }) => {
 		const workflowId = makeWorkflowId();
 		const projectId = await defaultProjectId();
 		expect(projectId, "must resolve a default projectId").toBeTruthy();
-		await createWorkflow(workflowId, projectId as string);
+		await createWorkflow(workflowId, projectId as string, FAST_CMD);
 		const goal = await createGoal({ title: `Stale Reconcile ${Date.now()}`, workflowId, projectId });
 		const goalId = goal.id;
 
 		try {
+			// DOM smoke: the gate row renders on the dashboard.
 			await openApp(page);
 			await navigateToGoalDashboard(page, goalId);
 			await expect(
 				page.locator(".wf-checklist-item").filter({ hasText: GATE_NAME }),
 			).toBeVisible({ timeout: 15_000 });
 
-			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/${GATE_ID}/signal`, {
-				method: "POST",
-				body: JSON.stringify({}),
-			});
-			expect(signalResp.status, "signal POST must succeed").toBe(201);
+			// Signal and await the terminal gate status (event-driven).
+			const sessionId = await createSession({ goalId });
+			const conn = await connectWs(sessionId);
+			await signalAndWaitForGate(conn, goalId, GATE_ID, {}, ["passed", "failed"], 60_000);
 
-			// A running verification is visible (the alive path). The fix must
-			// preserve this behaviour.
-			await expect(page.locator(".verify-card").first()).toBeVisible({ timeout: 20_000 });
+			// The authoritative summary must report a terminal (not-running,
+			// not-cancelled) verification that is NOT flagged stale — the fix must
+			// not coerce a healthy, alive-throughout verification to stale.
+			const sumRes = await apiFetch(`/api/goals/${goalId}/gates/${GATE_ID}?view=summary`);
+			expect(sumRes.status, "gate summary must respond 200").toBe(200);
+			const summary = await sumRes.json();
+			expect(
+				["passed", "failed"],
+				"completed verification must report a terminal status",
+			).toContain(summary?.latestSignal?.verification?.status);
+			expect(
+				Boolean(summary?.latestSignal?.verification?.stale),
+				"GATE_VERIFICATION_STALE_RECONCILE: a healthy completed verification must NOT be flagged stale",
+			).toBe(false);
 		} finally {
 			await deleteGoal(goalId);
 			await deleteWorkflow(workflowId);

@@ -1325,10 +1325,14 @@ export class VerificationHarness {
 				if (session) return true;
 				continue;
 			}
-			// Command step: only alive when THIS process started it AND pid is still running.
-			// Persisted-running steps from a previous server lifetime have no bootEpoch match
-			// and are treated as dead so duplicate-detection can reclaim the gate.
-			if (step.bootEpoch === this.bootEpoch && typeof step.pid === "number") {
+			// Command step: alive when THIS process started it (bootEpoch match).
+			// A just-started step may not have stamped its pid yet — that startup
+			// window is not a zombie, so a current-boot running step is treated as
+			// alive until its pid is known dead. Persisted-running steps from a
+			// previous server lifetime have no bootEpoch match and are treated as
+			// dead so duplicate-detection / stale-reconcile can reclaim the gate.
+			if (step.bootEpoch === this.bootEpoch) {
+				if (typeof step.pid !== "number") return true; // pid not yet stamped — starting, not dead
 				if (isPidAlive(step.pid)) return true;
 			}
 		}

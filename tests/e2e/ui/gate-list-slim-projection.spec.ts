@@ -113,13 +113,14 @@ test.describe("Gate-list slim projection (Issue #1) — GATE_LIST_SLIM_PROJECTIO
 			expect(step.output ?? "", "slim projection blanks step.output").not.toContain(BIG_MARKER);
 
 			// ── AC #2: full output remains available lazily ──────────────────
-			// The detail / inspect / verification-snapshot path (used by the
-			// live renderer's _fetchAndReconcile) must still return full output.
+			// The inspect path (used for full step output) must still return the
+			// complete output — the slimming is list-only, no behavioural
+			// regression on expand.
+			void sig;
 			const detailRes = await apiFetch(
-				`/api/goals/${goalId}/gates/${GATE_ID}/signals/${sig.id}/verification?mode=full`,
+				`/api/goals/${goalId}/gates/${GATE_ID}/inspect?section=verification&signal_index=-1&mode=full`,
 			);
-			// Endpoint shape may differ; accept any 2xx that carries the marker.
-			expect(detailRes.status, "GATE_LIST_SLIM_PROJECTION: verification detail endpoint must respond 2xx").toBeLessThan(300);
+			expect(detailRes.status, "GATE_LIST_SLIM_PROJECTION: verification inspect endpoint must respond 200").toBe(200);
 			const detailText = await detailRes.text();
 			expect(
 				detailText.includes(BIG_MARKER),
