@@ -703,5 +703,101 @@
     "expectedV2Catchers": [
       "tests2/browser/journeys/proposals.journey.spec.ts"
     ]
+  },
+  {
+    "id": "BR44",
+    "area": "goal-editing-nesting",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"general-max-nesting-depth\"",
+    "replace": "data-testid=\"general-max-nesting-depth-mut\"",
+    "description": "Max-nesting-depth stepper loses its testid. Legacy subgoal-nesting-limit.spec.ts asserts default/edit/persist; goal-editing journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/subgoal-nesting-limit.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR45",
+    "area": "proposals-subgoal-prefill",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-form-max-depth\"",
+    "replace": "data-testid=\"goal-form-max-depth-mut\"",
+    "description": "Goal-form max-depth control loses its testid. Legacy goal-proposal-subgoal-prefill.spec.ts asserts prefilled subgoal controls; proposals journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-proposal-subgoal-prefill.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR46",
+    "area": "misc-workflow-editor",
+    "file": "src/app/workflow-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"wf-step-type\"",
+    "replace": "data-testid=\"wf-step-type-mut\"",
+    "description": "Workflow-editor step-type control loses its testid. Legacy workflow-editor.spec.ts asserts step-type options + round-trip; misc journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/workflow-editor.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/misc.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR47",
+    "area": "project-settings-maintenance",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"worktree-cleanup-maintenance\"",
+    "replace": "data-testid=\"worktree-cleanup-maintenance-mut\"",
+    "description": "Worktree-cleanup maintenance card loses its testid. Legacy settings-maintenance-archived-worktrees.spec.ts asserts counts + cleanup POST; project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR48",
+    "area": "misc-role-tabs",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-proposal-role-reset\"",
+    "replace": "data-testid=\"goal-proposal-role-reset-mut\"",
+    "description": "Goal-proposal Roles-tab reset control loses its testid. Legacy goal-role-tabs-wiring.spec.ts asserts the Roles tab editor; misc journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-role-tabs-wiring.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/misc.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR49",
+    "area": "project-onboarding-typeahead",
+    "file": "src/ui/components/DirectoryPicker.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"directory-picker-suggestions\"",
+    "replace": "data-testid=\"directory-picker-suggestions-mut\"",
+    "description": "Directory-picker typeahead suggestions container loses its testid. Legacy add-project-typeahead.spec.ts asserts the suggestion overlay; project-onboarding journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-typeahead.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
   }
 ]
