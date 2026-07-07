@@ -2,6 +2,17 @@
 
 This document is the authoritative architecture for the Test Suite v2 migration. It implements the settled decisions D1-D6 from the goal spec without reopening them: vitest forks with `isolate:false`, happy-dom for non-geometry component fixtures, one source-booted gateway per worker, hybrid IO with fenced command/fetch plus store `fsImpl`, browser-E2E consolidation, and automated review gates only.
 
+## D7 — Budget / reliability decision (SETTLED with the user; supersedes the ≤3 min / ≤13 CPU-min figure)
+
+The user accepted a budget increase in exchange for rock-solid reliability. The acceptance bar is now:
+
+- **Single isolated `npm run test:v2` run: < 5 min wall (300 s).**
+- **5 concurrent runs × 3 reps = 15/15 green, ZERO flakes, `retries: 0`, each run < 10 min wall (600 s) under mutual load.** Playwright flakes under load are HARD failures — that reliability is the point of the increase.
+- `tests2/budgets.json` caps = honest measured stable values with modest headroom. **Never** padded with `test.slow()`/long timeouts, **never** met by relaxing/downgrading assertions or by dry-run proofs.
+- **Primary mechanism to remove under-load flakes = reduce CPU exhaustion, not timeout padding.** The ledger must genuinely cap Σworkers ≤ cores (24) across all concurrent runs so 5-way load gives each run ~4 vitest / ~2 playwright workers instead of oversubscribing (~60 slots). Correct capping makes the suite both more reliable and faster under load.
+
+(User quotes: "We can accept the budget increase if there are 0 flakes under load." / "High reliability, runs under 5 minutes in isolation, runs under 10 mins under load with 0 flakes." / "Eliminate flakes by reducing cpu exhaustion — this keeps the test performant when run in parallel and increases reliability and speed.") The goal-spec prose was not machine-editable from the team-lead sandbox token; this section is the authoritative record.
+
 Authoritative inputs:
 
 - Inventory: [`docs/testing-v2/inventory.md`](./inventory.md)
