@@ -38,6 +38,10 @@ import { openPackPanel, getLauncherHost } from "./pack-panels.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { isSupportedEntrypointIconId, type EntrypointIconId } from "../shared/entrypoint-icons.js";
 import type { PanelTarget, RouteTarget } from "../shared/extension-host/host-api.js";
+// Type-only import (erased at build) — the runtime module is LAZY-imported inside
+// runSpawnLauncher ONLY on a HOST_NOT_TRUSTED result, so non-walkthrough packs
+// never load the trust flow.
+import type { SpawnRouteOutcome } from "./pr-walkthrough-trust.js";
 
 /** Launcher kinds (a clickable surface) PLUS the routable `route` kind (a
  *  deep-linkable client route with NO clickable surface). */
@@ -387,13 +391,31 @@ async function runSpawnLauncher(
 	try {
 		const host = getLauncherHost(l.packId, l.id, options?.sessionId);
 		if (!host?.capabilities?.callRoute) { onResult?.({ ok: false, error: `${l.label} is unavailable.` }); return; }
-		let res: { ok?: boolean; childSessionId?: string; error?: string; code?: string } | undefined;
+		let res: SpawnRouteOutcome | undefined;
 		try {
-			res = await host.callRoute(target.route, { method: "POST", body: options?.body ?? {} });
+			res = await host.callRoute<SpawnRouteOutcome>(target.route, { method: "POST", body: options?.body ?? {} });
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
 			onResult?.({ ok: false, error: message });
 			return;
+		}
+		// A non-default remote host is not yet in the user's trusted list: the `run`
+		// route returned HOST_NOT_TRUSTED WITHOUT spawning. Prompt to trust + persist,
+		// then re-invoke `run` ONCE with a trustedHostAck (design §4b.3). Lazy-import so
+		// non-walkthrough packs never load the trust flow.
+		if (res?.code === "HOST_NOT_TRUSTED" && typeof res.host === "string") {
+			const { callSpawnRouteWithTrust } = await import("./pr-walkthrough-trust.js");
+			const outcome = await callSpawnRouteWithTrust({
+				route: target.route,
+				body: options?.body ?? {},
+				first: res,
+				callRoute: (route, init) => host.callRoute<SpawnRouteOutcome>(route, init),
+			});
+			if (outcome.cancelledHost) {
+				onResult?.({ ok: false, error: `Walkthrough cancelled \u2014 \u201c${outcome.cancelledHost}\u201d was not added to your trusted hosts.` });
+				return;
+			}
+			res = outcome.res;
 		}
 		if (!res || res.ok === false) { onResult?.({ ok: false, error: res?.error, code: res?.code }); return; }
 		// ok:true → open the panel in the returned child session (selects + switches).

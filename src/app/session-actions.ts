@@ -434,6 +434,9 @@ function isSpawnLaunchTarget(target: unknown): target is SpawnLaunchTarget {
 function launcherFailureMessage(label: string, result: LauncherDispatchResult): string {
 	if (result.error) return result.error;
 	if (result.code === "NO_PR") return "No pull request found for this branch.";
+	// Fallback only — runSpawnLauncher normally resolves HOST_NOT_TRUSTED (prompt +
+	// retry) and reports its own readable cancel message before this is reached.
+	if (result.code === "HOST_NOT_TRUSTED") return "The pull request's remote host is not in your trusted hosts.";
 	return `Could not start ${label}.`;
 }
 
