@@ -78,7 +78,29 @@ mutating (file-changing) tool.
 - **Model inheritance** — the child inherits **your current model** (and thinking level)
   unless you pass `model` / `thinking_level`. (The old `delegate` silently dropped to the
   system default; that bug is gone.)
+- **Role injection (`role: X`)** — the child carries role X's **`promptTemplate`** (its
+  system prompt, with the usual `{{AGENT_ID}}` / `{{GOAL_BRANCH}}` / prompt-conditional
+  substitution) **and** its **`accessory`** (the sidebar badge, respecting the `"none"`
+  convention; an explicit caller-supplied accessory still wins). The role resolves through
+  the **config cascade** (project→server→builtin→market-packs), so a market-pack role works
+  for `team_delegate` just like a stored role. Earlier, a role-carrying delegate got only the
+  role's *tools* — a generic system prompt and no accessory; now prompt, accessory, and tools
+  all come from one resolution pipeline. A role-**less** `team_delegate` is unchanged (no role
+  prompt, no accessory, inherits your stripped tools).
 - **Timeout** — blocking-mode default is 10 minutes.
+
+> **One shared role pipeline (no ad-hoc per-path code).** The bare delegate path
+> (`session-manager.ts::createDelegateSession`) now threads `role` / `roleName` / `rolePrompt`
+> into its `SessionSetupPlan`, so the **same** role-prompt + role-accessory application in
+> `session-setup.ts` runs for both `team_delegate` (bare) and `team_spawn` / full `createSession`.
+> Role injection **never widens tools**: the child's `allowedTools` are still the spawn-verb-
+> and (for `read_only`) mutating-tool-stripped set from `OrchestrationCore.childAllowedTools`,
+> and role resolution does not re-add spawn verbs. Sandbox / project (credential) scope
+> inheritance is unchanged. When a `role` spawn cannot resolve the role's tool grants the spawn
+> fails closed with `ROLE_TOOLS_UNRESOLVED` rather than inheriting the owner's broader tools.
+> Market-pack roles becoming usable by team leads inside goals (`team_spawn` +
+> `{{AVAILABLE_ROLES}}`) rides the same cascade — see
+> [docs/marketplace.md § Team-lead and delegate role resolution](marketplace.md#team-lead-and-delegate-role-resolution).
 
 The System Prompt Inspector treats the child's persisted `instructions` and optional `context` as a durable **Delegate Task**. Prompt-section refreshes, including provider `before-prompt` hooks and restart restore, rebuild that task from the session record so the viewer keeps the same task-oriented section the model received. Delegate instructions should appear in that Task section only, not duplicated into both Goal and Task.
 
