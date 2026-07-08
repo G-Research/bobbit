@@ -103,7 +103,7 @@ in-scope, not yet mutated. **EXCL** = excluded (reason).
 
 Status per domain (updated each batch):
 
-### app-smoke (20 specs) — in-scope 9
+### app-smoke (20 specs) — in-scope 8
 | spec | class | status | id / reason |
 |---|---|---|---|
 | draft-loss | PARTIAL | HELD | BR13 |
@@ -113,7 +113,7 @@ Status per domain (updated each batch):
 | open-session-new-window | GAP | HOLE-CLOSED | BR55 |
 | page-title | PARTIAL | HOLE-CLOSED | BR17 |
 | replace-bobbit-text | GAP | HOLE-CLOSED | BR37 |
-| git-status-untracked-race | GAP | TODO | route-mock |
+| git-status-untracked-race | GAP | EXCL | needs a git-init'd project + a timing-race (late summary-only refresh not hiding untracked); dedicated regression tier |
 | sidebar-keyboard-nav | GAP | TODO | Ctrl+Arrow data-nav walk |
 | base-ref-detect | GAP | EXCL | needs real git-init'd project + server-side ref detection (git-integration tier) |
 | base-ref-settings | GAP | EXCL | validation rows are server-side git-ref checks on git-init'd projects (git-integration tier) |
@@ -180,7 +180,7 @@ Status per domain (updated each batch):
 | session-interactions | PARTIAL | HELD | send/OK is mock-driven (not a mutable src contract); switch/reload covered by sidebar-nav + stories CT-05; delete covered by BR64 terminate |
 | escape-aborts-anywhere | GAP | TODO | STAY_BUSY |
 | queue-ui | GAP | TODO | STAY_BUSY |
-| tool-ask-policy | GAP | TODO | tool_ask |
+| tool-ask-policy | GAP | HOLE-CLOSED | BR67 (permission card + Allow-just grant) |
 | session-prompt-grant-replay | GAP | EXCL | mis-mapped (permission suite) |
 | steer-during-bash-tool-abort-toolend | GAP | EXCL | env-flag repro (MOCK_ABORT_TOOL_END) — keep legacy |
 | steer-during-bash-tool-busy-race | GAP | EXCL | env-flag repro (MOCK_ABORT_BUSY) — keep legacy |
@@ -196,19 +196,22 @@ Status per domain (updated each batch):
 | stories-projects | PARTIAL | HELD | reload-navigability core covered by the journey's CT-05/S-07 reload test (framework, not a distinct mutable UI contract) |
 | stories-sidebar | GAP | HELD | Ctrl+K sidebar search-filter is the same contract journey-covered in sidebar-nav (cross-journey duplicate) |
 | stories-goal-routing | GAP | TODO | multi-project |
-| stories-resilience | GAP | TODO | RE-07 disconnect+reload |
-| stories-streaming | GAP | TODO | STAY_BUSY lifecycle |
+| stories-resilience | GAP | HELD | RE-07 message-survives-reload is core snapshot/reload behaviour (covered by CT-05 reload test + shared user-message rendering); crash/restart variants are daily-tier |
+| stories-streaming | GAP | HELD | streaming stop/idle lifecycle is the same contract mutation-proven by BR65/BR66 in prompt-interaction (cross-journey) |
 
 ### Denominator roll-up
 
 | Domain | in-scope N | mutated M | remaining TODO |
 |---|--:|--:|--:|
-| app-smoke | 9 | 7 | 2 |
+| app-smoke | 8 | 7 | 1 |
 | misc | 14 | 14 | 0 |
 | sidebar-nav | 8 | 6 | 2 |
-| prompt-interaction | 6 | 3 | 3 |
-| stories-registry | 8 | 5 | 3 |
-| **TOTAL** | **45** | **35** | **10** |
+| prompt-interaction | 6 | 6 | 0 |
+| stories-registry | 8 | 7 | 1 |
+| **TOTAL** | **44** | **40** | **4** |
+
+#### Batch A9 (BR65 queue-pill, BR66 escape-abort) — 2 prompt holes.  Batch A10 (BR67 tool-ask-policy) — **prompt fully closed 6/6**.
+Remaining 4 TODO: app-smoke `sidebar-keyboard-nav`; sidebar-nav `search-result-navigation`, `sidebar-archived-per-project`; stories `stories-goal-routing`.
 
 _HELD split: mutation-proven (BRxx caught by the journey) vs held-by-existing-coverage (same contract already pinned elsewhere / mock-driven / cross-journey duplicate). Both are legitimate “held” outcomes; the latter are annotated in the reason column._
 
