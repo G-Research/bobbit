@@ -3,7 +3,7 @@
  * Covers: journey-app-smoke, journey-session-sharing, journey-draft-persistence
  * Consolidated from: basic-load-*, session-sharing-*, pr-preview-*, draft-loss-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, sendMessage } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, sendMessage, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: App Smoke", () => {
@@ -299,6 +299,43 @@ test.describe("Journey: Goal Proposal Metadata Tab", () => {
 		await expect(page.locator("[data-testid='goal-metadata-row']")).toHaveCount(before + 1, { timeout: 10_000 });
 		await expect(page.locator("[data-testid='goal-metadata-key']").last()).toBeVisible();
 		await expect(page.locator("[data-testid='goal-metadata-value']").last()).toBeVisible();
+	});
+});
+
+// Ported from sidebar-keyboard-nav.spec.ts (audit: app-smoke GAP / BR69):
+// Ctrl+ArrowDown walks the sidebar's data-nav-id rows forward in DOM order.
+test.describe("Journey: Sidebar Keyboard Nav", () => {
+	test("Ctrl+ArrowDown advances keyboard-nav through rows in DOM order", async ({ page }) => {
+		test.setTimeout(90_000);
+		const goal = await createGoal({ title: `KbdNav${Date.now()}`, worktree: false });
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+			const domOrder: string[] = await page.evaluate(() =>
+				Array.from(document.querySelectorAll("[data-nav-id]")).map((el) => el.getAttribute("data-nav-id") || ""));
+			expect(domOrder.length, "sidebar must emit multiple data-nav-id rows").toBeGreaterThan(1);
+			const pressDown = () => page.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "ArrowDown", code: "ArrowDown", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			})));
+			const activeId = () => page.evaluate(() => (window as any).__bobbitState?.keyboardNavActiveId ?? null);
+			await pressDown();
+			await expect.poll(activeId, { timeout: 5_000 }).not.toBeNull();
+			const id1 = await activeId();
+			await pressDown();
+			await expect.poll(activeId, { timeout: 5_000 }).not.toBe(id1);
+			const id2 = await activeId();
+			// The two visited rows must be a forward step in DOM order (Ctrl+ArrowDown
+			// moves DOWN, not up).
+			const i1 = domOrder.indexOf(id1 as string);
+			const i2 = domOrder.indexOf(id2 as string);
+			expect(i1, "first nav id in DOM order").toBeGreaterThanOrEqual(0);
+			expect(i2, "second nav id must be the next row forward (wrap allowed)").toBe((i1 + 1) % domOrder.length);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+			await deleteGoal(goal.id, true).catch(() => {});
+		}
 	});
 });
 

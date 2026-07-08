@@ -319,5 +319,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR68",
+		"area": "sidebar-search-result-nav",
+		"file": "src/app/search-page.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "setHashRoute(\"goal-dashboard\", result.id);",
+		"replace": "setHashRoute(\"goal-dashboard\", \"x\");",
+		"description": "A full-search goal result navigates to the wrong goal id. Legacy search-result-navigation.spec.ts clicks a goal result card and asserts the hash contains the goal id; sidebar-nav journey never opened full-search results (GAP). Ported into sidebar-nav.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/search-result-navigation.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR69",
+		"area": "app-smoke-keyboard-nav",
+		"file": "src/app/main.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "handler: () => { navigateSidebar(\"down\"); },",
+		"replace": "handler: () => { navigateSidebar(\"up\"); },",
+		"description": "Ctrl+ArrowDown walks the sidebar the WRONG direction (up). Legacy sidebar-keyboard-nav.spec.ts asserts Ctrl+ArrowDown visits data-nav-id rows in DOM order; app-smoke journey never exercised keyboard nav (GAP). Ported into app-smoke.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/sidebar-keyboard-nav.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/app-smoke.journey.spec.ts"
+		]
 	}
 ]

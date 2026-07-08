@@ -205,6 +205,33 @@ test.describe("Journey: Sidebar Navigation", () => {
 			await deleteGoal(goal.id, true).catch(() => {});
 		}
 	});
+	// Ported from search-result-navigation.spec.ts (audit: sidebar-nav GAP / BR68):
+	// a full-search goal result card navigates to that goal.
+	test("full-search goal result card navigates to the goal", async ({ page }) => {
+		test.setTimeout(90_000);
+		const token = `NavTok${Date.now().toString(36)}`;
+		const goal = await createGoal({ title: `${token} NavGoal` });
+		try {
+			// Wait until the search indexer has the goal.
+			await expect.poll(async () => {
+				const resp = await apiFetch(`/api/search?q=${encodeURIComponent(token)}&limit=50`);
+				if (!resp.ok) return false;
+				const data = await resp.json() as any;
+				const results = data.results || data;
+				return Array.isArray(results) && results.some((r: any) => r.type === "goal" && r.id === goal.id);
+			}, { timeout: 30_000, intervals: [500, 1000, 2000] }).toBe(true);
+
+			await openApp(page);
+			await page.evaluate((q) => { window.location.hash = `#/search?q=${encodeURIComponent(q)}`; }, token);
+			const goalCard = page.locator('[data-role="result-group"][data-kind="goal"]').filter({ hasText: `${token} NavGoal` });
+			await expect(goalCard).toBeVisible({ timeout: 15_000 });
+			await goalCard.locator("button").first().click();
+			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(goal.id);
+		} finally {
+			await deleteGoal(goal.id, true).catch(() => {});
+		}
+	});
+
 	// Ported from sidebar-goal-staff.spec.ts (audit: sidebar-nav GAP / BR63): the
 	// sidebar New Goal button opens a goal-assistant session.
 	test("New Goal button opens a goal-assistant session", async ({ page }) => {
