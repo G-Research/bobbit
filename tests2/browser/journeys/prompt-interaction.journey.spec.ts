@@ -200,4 +200,47 @@ test.describe("Journey: Prompt Interaction", () => {
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
+
+	// Ported from queue-ui.spec.ts (audit: prompt-interaction GAP / BR65): a
+	// follow-up typed mid-turn queues as a .queue-pill with a .steer-btn.
+	test("typing during streaming queues a follow-up pill with a steer button", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const textarea = page.locator("message-editor textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 15_000 });
+			await sendMessage(page, "STAY_BUSY:3000 working");
+			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await textarea.fill("steer me now");
+			await textarea.press("Enter");
+			await expect(page.locator(".queue-pill").first()).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator(".steer-btn")).toHaveCount(1, { timeout: 5_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+
+	// Ported from escape-aborts-anywhere.spec.ts (audit: prompt-interaction GAP / BR66):
+	// Escape in the composer aborts a streaming agent (Stop button disappears).
+	test("Escape in the composer aborts a streaming agent", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const textarea = page.locator("message-editor textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 15_000 });
+			await sendMessage(page, "STAY_BUSY:30000 working");
+			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await textarea.focus();
+			await textarea.press("Escape");
+			await expect(page.locator("button[title='Stop streaming']")).toHaveCount(0, { timeout: 10_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
 });

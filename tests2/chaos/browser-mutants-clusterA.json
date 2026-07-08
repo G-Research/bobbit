@@ -271,5 +271,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR65",
+		"area": "prompt-queue-ui",
+		"file": "src/ui/components/MessageEditor.ts",
+		"target": "ui",
+		"operator": "class-rename",
+		"search": "class=\"queue-pill flex items-center gap-1.5",
+		"replace": "class=\"queue-pill-x flex items-center gap-1.5",
+		"description": "A follow-up queued mid-turn loses its .queue-pill styling hook. Legacy queue-ui.spec.ts asserts a .queue-pill + .steer-btn appear when a message is queued during streaming; prompt-interaction journey had no queue coverage (GAP). Ported into prompt-interaction.journey.spec.ts (STAY_BUSY).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/queue-ui.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR66",
+		"area": "prompt-escape-abort",
+		"file": "src/ui/components/MessageEditor.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "e.key === \"Escape\" && this.isStreaming",
+		"replace": "e.key === \"Escapexx\" && this.isStreaming",
+		"description": "Escape in the composer no longer aborts a streaming agent. Legacy escape-aborts-anywhere.spec.ts asserts Escape aborts (Stop button disappears); prompt-interaction journey had no abort coverage (GAP). Ported into prompt-interaction.journey.spec.ts (STAY_BUSY → Escape → stop cleared).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/escape-aborts-anywhere.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
 	}
 ]
