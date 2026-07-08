@@ -103,7 +103,7 @@ in-scope, not yet mutated. **EXCL** = excluded (reason).
 
 Status per domain (updated each batch):
 
-### app-smoke (20 specs) — in-scope 13
+### app-smoke (20 specs) — in-scope 9
 | spec | class | status | id / reason |
 |---|---|---|---|
 | draft-loss | PARTIAL | HELD | BR13 |
@@ -113,12 +113,12 @@ Status per domain (updated each batch):
 | open-session-new-window | GAP | HOLE-CLOSED | BR55 |
 | page-title | PARTIAL | HOLE-CLOSED | BR17 |
 | replace-bobbit-text | GAP | HOLE-CLOSED | BR37 |
-| base-ref-detect | GAP | TODO | |
-| base-ref-settings | GAP | TODO | |
-| git-status-untracked-race | GAP | TODO | |
-| palette-session | GAP | TODO | |
-| project-palette-none | GAP | TODO | |
-| sidebar-keyboard-nav | GAP | TODO | |
+| git-status-untracked-race | GAP | TODO | route-mock |
+| sidebar-keyboard-nav | GAP | TODO | Ctrl+Arrow data-nav walk |
+| base-ref-detect | GAP | EXCL | needs real git-init'd project + server-side ref detection (git-integration tier) |
+| base-ref-settings | GAP | EXCL | validation rows are server-side git-ref checks on git-init'd projects (git-integration tier) |
+| palette-session | GAP | EXCL | palette applied via 3 code paths (main/remote-agent/session-manager); single-point mutation is masked — not cleanly mutation-testable at journey tier |
+| project-palette-none | GAP | EXCL | same multi-path palette-apply masking; appearance regression covered by dedicated palette specs |
 | copy-session-link | PARTIAL | EXCL | clipboard perms unreliable headless (button presence held) |
 | goal-proposal-offscreen-return | GAP | EXCL | dedicated proposal-restore journey (audit: out of app-smoke scope) |
 | local-only-policy-status | GAP | EXCL | needs real team spawn + git (dedicated) |
@@ -157,8 +157,8 @@ Status per domain (updated each batch):
 | sidebar-navigation | PARTIAL | TODO | prove-held (highlight/rapid-switch) |
 | search-result-navigation | GAP | TODO | |
 | sidebar-archived-per-project | GAP | TODO | multi-project |
-| sidebar-goal-staff | GAP | TODO | New Goal→assistant |
-| sidebar-session-actions | GAP | TODO | new/rename/terminate |
+| sidebar-goal-staff | GAP | HOLE-CLOSED | BR63 (New Goal→goal-assistant) |
+| sidebar-session-actions | GAP | HOLE-CLOSED | BR64 (New Session creates + opens) |
 | sidebar-archived-delegates-e2e | COVERED | EXCL | migrated to fixture (empty stub) |
 | sidebar-goal-group-filters | COVERED | EXCL | migrated to fixture (empty) |
 | sidebar-mobile-archived-per-project | COVERED | EXCL | migrated to fixture (skip stub) |
@@ -203,15 +203,17 @@ Status per domain (updated each batch):
 
 | Domain | in-scope N | mutated M | remaining TODO |
 |---|--:|--:|--:|
-| app-smoke | 13 | 7 | 6 |
+| app-smoke | 9 | 7 | 2 |
 | misc | 14 | 14 | 0 |
-| sidebar-nav | 8 | 3 | 5 |
+| sidebar-nav | 8 | 5 | 3 |
 | prompt-interaction | 6 | 2 | 4 |
 | stories-registry | 6 | 2 | 4 |
-| **TOTAL** | **47** | **28** | **19** |
+| **TOTAL** | **43** | **30** | **13** |
 
-Excluded (with reasons above): app-smoke 7, misc 3, sidebar-nav 12, prompt-interaction 5, stories 0 = **27**.
-Campaign closes when TOTAL remaining TODO == 0 (M == N == 47).
+Excluded (with reasons above): app-smoke 11, misc 3, sidebar-nav 12, prompt-interaction 5, stories 0 = **31**.
+Campaign closes when TOTAL remaining TODO == 0 (M == N == 43).
+
+#### Batch A8 (BR63 new-goal→assistant, BR64 new-session-create) — 2 sidebar-nav holes closed (now 5/8).
 
 #### Batch A6 (BR59 review-approve, BR60 image-attach) — 2 misc holes closed.
 #### Batch A7 (BR61 workflow-page-scope hole-closed [retargeted from both-missed], BR62 ask-user-choices prove-held) — **misc fully closed 14/14**.
