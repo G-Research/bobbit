@@ -102,14 +102,17 @@ function npmCmd() {
 	return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
-function run(command, args, { env = {}, label } = {}) {
+function run(command, args, { env = {}, label, shell } = {}) {
 	const startWall = performance.now();
 	return new Promise((resolveRun) => {
 		const child = spawn(command, args, {
 			cwd: REPO_ROOT,
 			env: { ...process.env, ...env },
 			stdio: "inherit",
-			shell: process.platform === "win32",
+			// Default: shell on Windows (needed for npm.cmd/npx.cmd). Callers that
+			// spawn an absolute exe with spaces (e.g. process.execPath under
+			// "C:\Program Files\…") pass shell:false so the path isn't word-split.
+			shell: shell ?? (process.platform === "win32"),
 		});
 		child.on("close", (code, signal) => {
 			resolveRun({ label, code: code ?? (signal ? 1 : 0), signal, wallMs: Math.round(performance.now() - startWall) });
@@ -122,10 +125,19 @@ function run(command, args, { env = {}, label } = {}) {
 
 // Fail-closed external-service env for ALL groups (belt-and-braces on top of the
 // e2e config's own defaults; the browser daily config does not set them itself).
+//
+// NO_EXTERNAL + NO_REMOTE => skipNonLocalRemoteGit: any git op against a
+// NON-local remote (real origin / GitHub) and all outbound non-loopback HTTP are
+// rejected. This is the external-service-free guarantee.
+//
+// We deliberately DO NOT set BOBBIT_TEST_NO_PUSH: the realpush-fidelity specs
+// (e.g. goal-archive-branch-cleanup) push to a LOCAL BARE repo on disk (a file
+// path, never a network remote) — that is exactly the real-fidelity behaviour
+// this tier exists to cover, and it is still external-free. NO_PUSH would
+// wrongly disable it and mask the very fidelity we want.
 const EXTERNAL_FREE_ENV = {
 	BOBBIT_TEST_NO_EXTERNAL: "1",
 	BOBBIT_TEST_NO_REMOTE: "1",
-	BOBBIT_TEST_NO_PUSH: "1",
 };
 
 async function runGroupA(specs) {
@@ -151,13 +163,21 @@ async function runGroupB(specs) {
 async function runGroupC(specs) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
 	// playwright-v2 config, browser-v2-daily project (retries:0 from config).
+	// We run the WHOLE project (its testDir IS tests2/browser/daily — the physical
+	// browser-daily bucket) rather than passing individual spec paths: Playwright's
+	// `--project` is variadic and would swallow trailing positional file filters as
+	// extra project names. The daily dir is the source of truth for this bucket
+	// (it also carries crash-restart.journey, which tier-2 `test:v2` ignores).
 	const localCli = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
 	const usesLocal = existsSync(localCli);
 	const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
 	const pre = usesLocal ? [localCli] : ["playwright"];
-	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-daily", ...specs], {
+	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-daily"], {
 		env: { ...EXTERNAL_FREE_ENV },
 		label: "C/adapter-browser",
+		// node.exe path may contain spaces (C:\Program Files\nodejs); spawn it
+		// directly without a shell so the path isn't word-split.
+		shell: usesLocal ? false : (process.platform === "win32"),
 	});
 }
 
