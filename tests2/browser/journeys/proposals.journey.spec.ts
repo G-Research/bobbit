@@ -270,6 +270,47 @@ test.describe("Journey: Failed Goal Proposal", () => {
 	});
 });
 
+// Ported from proposal-spec-survives-navigate.spec.ts (audit: proposals GAP,
+// mutant BR70): the goal-proposal spec body must survive navigating away to
+// another session and back (reconcileGoalSlotIntoFormMirror restores it).
+test.describe("Journey: Goal Proposal — spec survives navigate", () => {
+	test("spec body persists after nav to another session and back", async ({ page }) => {
+		test.setTimeout(120_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+		await expect(page.locator('[data-panel="goal-proposal"]').first()).toBeVisible({ timeout: 15_000 });
+
+		const getSpec = () => page.evaluate(() => {
+			const cm = document.querySelector("commentable-markdown") as any;
+			return (cm?.markdown as string) ?? "";
+		});
+		const originalSpec = await getSpec();
+		expect(originalSpec.length, "proposal spec must be non-empty before nav").toBeGreaterThan(20);
+
+		const sidA = await page.evaluate(() => (window as any).bobbitState?.selectedSessionId as string);
+		expect(sidA).toBeTruthy();
+		const sidB = await createSession();
+		try {
+			await navigateToHash(page, `#/session/${sidB}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await navigateToHash(page, `#/session/${sidA}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.locator('[data-panel="goal-proposal"]').first()).toBeVisible({ timeout: 15_000 });
+
+			// The rendered spec must equal the pre-nav body (not empty).
+			await expect.poll(getSpec, { timeout: 15_000, intervals: [500, 1000, 2000] }).toBe(originalSpec);
+		} finally {
+			await deleteSession(sidB).catch(() => {});
+		}
+	});
+});
+
 // Ported from goal-proposal-revision-autoupdate.spec.ts (audit: proposals GAP,
 // mutant BR69): an edit_proposal revision must auto-update the goal-assistant
 // panel form-mirror (previewSpec) in place, with no "Open proposal" click.
