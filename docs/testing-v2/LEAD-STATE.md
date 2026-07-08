@@ -1,5 +1,15 @@
 # TEAM-LEAD RESUME STATE (read this first after any compaction/restart)
 
+## 🔴 CRITICAL INCIDENT (2026-07-08): e2e:v2 KILLED node_modules → SERVER DIED
+- **Root cause:** running the **e2e:v2 real-fidelity tier** (worktree/pool specs: continue-archived-worktree*, *-pool, pool-flow, etc.) tore down a worktree **through its node_modules JUNCTION**, deleting the shared node_modules → gateway (runs from primary worktree) lost its deps → server died. SAME hazard class as the chaos.mjs bug (fixed via `unlinkNodeModulesJunction`), but the **e2e:v2 / legacy-e2e worktree teardown was never made junction-safe**.
+- **Damage:** node_modules `.bin` wiped across goal (no vitest/playwright) + primary (no tsx). Gateway degraded/port-fluxing (3001/3002) post-restart.
+- **DO NOT re-run e2e:v2 (test:e2e:v2 / the worktree-pool specs) until the teardown is JUNCTION-SAFE** — it will kill the server again. This is now a HARD prerequisite before any e2e:v2 run.
+- **Recovery needed:** (1) restore node_modules — `npm ci` (primary = operator/infra, I must not touch it + shouldn't npm-ci a running gateway; goal worktree I can); (2) CODE FIX: apply junction-safe teardown (unlink reparse point before recursive delete, + fail-loud guard) to the e2e:v2 worktree path / the worktree-pool spec teardown, mirroring the chaos.mjs fix; (3) THEN re-run e2e:v2.
+- Agent test-engineer-d5bb's in-progress e2e:v2 work is PRESERVED uncommitted in its worktree (run-e2e-v2.mjs, e2e-setup.ts nonGitCwd-heal, no-new-sleeps guard, spec-framework.ts/story-registry.ts). Do NOT lose it.
+- goal HEAD intact at 873c1dd6; no goal-branch corruption — this is an ENV/node_modules incident, not a code-history loss.
+
+
+
 Goal: **Sub-3-min test suite rebuild** (id `6c956ecf-...`). Branch `goal/sub-3-min-test-6c956ecf`.
 PR **#935** (base master). This doc is the lead's source of truth; the preview dashboard is only a user summary.
 Update this doc whenever state materially changes.
