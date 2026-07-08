@@ -102,7 +102,15 @@ const DEFAULT_GRANT_TIMEOUT_MS = 180_000;
 const MIN_BUNDLE = 4;
 const MAX_BUNDLE = 12;
 const VITEST_CAP = 8;
-const PLAYWRIGHT_CAP = 4;
+// Chromium is IO/gateway-bound, not CPU-parallelism-bound: measured 2 playwright
+// workers ≈ 4 workers throughput (~276 s vs ~297 s), while 1 worker DOUBLES wall
+// (~550–710 s). So 2 is the sweet spot — enough to avoid the 1-worker wall
+// penalty, few enough to keep concurrent Chromium (the tier-2 contention driver)
+// bounded. This cap + the ledger's Σworkers≤cores invariant is the "gate total
+// Chromium" half of the global concurrency budget (the gateway-boot lease is the
+// other half). Was 4 (single-run fast path); dropped to 2 after N-way flake
+// analysis showed 4 concurrent browser tiers over-contend on this box.
+const PLAYWRIGHT_CAP = 2;
 
 // ─── gateway-boot lease pool (global concurrency budget) ───
 const LEASES_FILENAME = "leases.json";
@@ -358,41 +366,26 @@ function computeGrant(state, myParentRunId, cores) {
 
 /**
  * Split a committed parent bundle into vitest + playwright worker counts.
- * Anchors (verified by selftest): 12→8v+4p, 8→7v+1p, 6→5v+1p, 4→3v+1p.
+ * Anchors (verified by selftest): 12→8v+2p, 8→6v+2p, 4→2v+2p, 2→1v+1p.
  *
- * PLAYWRIGHT IS THE HEAVY TIER. Measured: 3 concurrent `test:v2:core` (tier-1
- * only) pass cleanly, but adding the browser tier (2 playwright workers/run × 3
- * = 6 chromium + per-test gateways) starves tier-1's gateway-booting integration
- * tests into timeouts. So under contention we allocate exactly ONE playwright
- * worker per run and give the rest of the bundle to vitest: this minimises the
- * count of simultaneous browsers (the tier-1 starvation driver) while keeping
- * tier-1 fast. A single, uncontended run (bundle ≥ 12) still gets the full
- * 8v+4p so isolated `test:v2` stays < 300 s.
+ * GLOBAL BUDGET MODEL (post gateway-boot-lease): the transient boot CPU bursts
+ * that used to force a 1-playwright / vitest-under-allocation hack are now
+ * serialised by the cross-process gateway-boot lease (see acquireGatewayBootLease
+ * + the gateway fixtures). So the split no longer needs to starve either tier for
+ * burst headroom. It targets PLAYWRIGHT_CAP (=2) chromium workers per run — the
+ * measured IO-bound sweet spot (2 ≈ 4 workers, 1 doubles wall) — and gives the
+ * rest of the grant to vitest. Total concurrent Chromium is thereby ≤ 2×N and,
+ * with computeGrant's target=floor(cores/N), Σworkers stays ≤ cores.
  *
- * Invariant: `vitest + playwright ≤ grant` for every input, and both ≥ 1 for a
- * two-kind bundle. NEVER returns a total larger than its grant (that was the old
- * "+3 overshoot" bug), so the caller can clamp grant ≤ remaining and stay within
- * the free-core budget. Under-allocating (leaving a core idle) is allowed and
- * safe; it only happens at bundle sizes floor(cores/n) never actually produces.
+ * Invariant: `vitest + playwright ≤ grant`, both ≥ 1 for a two-kind bundle, never
+ * an overshoot. Under-allocation (idle core) is allowed + safe.
  */
 export function splitBundle(grant) {
 	const total = clamp(Math.floor(grant) || 0, 1, MAX_BUNDLE);
 	if (total < 2) return { vitest: 1, playwright: 0, total: 1 };
-	// Uncontended (single/near-single run): full playwright parallelism for speed.
-	if (total >= 12) {
-		const vitest = VITEST_CAP;
-		const playwright = PLAYWRIGHT_CAP;
-		return { vitest, playwright, total: vitest + playwright };
-	}
-	// Contended (bundle 4..11, i.e. 2+ concurrent runs): exactly 1 playwright worker
-	// AND deliberately UNDER-allocate vitest (~half the bundle) to leave idle cores.
-	// Measured: v2-integration tests boot a real gateway each; at full utilization
-	// (Σ=cores) the transient gateway-boot CPU bursts across many concurrent
-	// integration test files starve each other past the 60 s test timeout. Leaving
-	// headroom (e.g. 3-way → 4v+1p, Σ=15/24) absorbs those bursts. Fork count is the
-	// dominant driver of integration starvation (6 forks/run failed fewer than 7).
-	const playwright = 1;
-	const vitest = clamp(Math.ceil(total / 2), 1, Math.min(VITEST_CAP, total - playwright));
+	// Aim for PLAYWRIGHT_CAP chromium workers, but never leave vitest with 0.
+	const playwright = clamp(Math.min(PLAYWRIGHT_CAP, total - 1), 1, PLAYWRIGHT_CAP);
+	const vitest = clamp(total - playwright, 1, VITEST_CAP);
 	return { vitest, playwright, total: vitest + playwright };
 }
 
@@ -828,11 +821,11 @@ function cliSelftest() {
 	const s4 = splitBundle(4);
 	const s8 = splitBundle(8);
 	const s12 = splitBundle(12);
-	// Under contention (bundle 4/8 = 5-way/3-way) exactly ONE playwright worker so
-	// concurrent browsers stay minimal; a single run (bundle 12) keeps 8v+4p.
-	assert(s4.vitest === 2 && s4.playwright === 1, `split(4)=2v+1p got ${s4.vitest}+${s4.playwright}`);
-	assert(s8.vitest === 4 && s8.playwright === 1, `split(8)=4v+1p got ${s8.vitest}+${s8.playwright}`);
-	assert(s12.vitest === 8 && s12.playwright === 4, `split(12)=8v+4p got ${s12.vitest}+${s12.playwright}`);
+	// Target 2 chromium workers per run (PLAYWRIGHT_CAP=2, the IO-bound sweet
+	// spot); the rest of the grant goes to vitest. total>=12 → 8v+2p (vitest capped).
+	assert(s4.vitest === 2 && s4.playwright === 2, `split(4)=2v+2p got ${s4.vitest}+${s4.playwright}`);
+	assert(s8.vitest === 6 && s8.playwright === 2, `split(8)=6v+2p got ${s8.vitest}+${s8.playwright}`);
+	assert(s12.vitest === 8 && s12.playwright === 2, `split(12)=8v+2p got ${s12.vitest}+${s12.playwright}`);
 	for (let g = 2; g <= MAX_BUNDLE; g++) {
 		const s = splitBundle(g);
 		// Never overshoot the grant; under-allocation (idle core) is allowed + safe.
@@ -840,7 +833,7 @@ function cliSelftest() {
 		assert(s.vitest <= VITEST_CAP && s.playwright <= PLAYWRIGHT_CAP, `splitBundle(${g}) within caps, got v=${s.vitest} pw=${s.playwright}`);
 		assert(s.vitest >= 1 && s.playwright >= 1, `splitBundle(${g}) both kinds ≥1, got v=${s.vitest} pw=${s.playwright}`);
 	}
-	console.log("  splitBundle(4)=2v+1p ✓  splitBundle(8)=4v+1p ✓  splitBundle(12)=8v+4p ✓  no-overshoot 2..12 ✓");
+	console.log("  splitBundle(4)=2v+2p ✓  splitBundle(8)=6v+2p ✓  splitBundle(12)=8v+2p ✓  no-overshoot 2..12 ✓");
 
 	// 6) Pending-contention: seed 4 live pending markers (distinct runs) so a fresh
 	//    reserve sees activeParents=5 → target=floor(24/5)=4. This is the core
