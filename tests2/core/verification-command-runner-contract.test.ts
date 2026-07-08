@@ -16,7 +16,7 @@ import {
 	type VerificationCommandRunner,
 	type VerificationCommandSpawnSpec,
 } from "../../src/server/agent/verification-command-runner.js";
-import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
+import { createFakeVerificationCommandRunner, interpretFakeCommand } from "../harness/fake-verification-command-runner.js";
 import { getVerificationShell } from "../../src/server/agent/shell-util.js";
 import { resolveGatewayDeps } from "../../src/server/gateway-deps.js";
 
@@ -80,6 +80,15 @@ describe("verification command-step runner: default-real wiring", () => {
 		expect(fake.nonDurable).toBe(true);
 	});
 
+	it("fake interpreter is FAIL-CLOSED (throws on an unmodelled command)", () => {
+		// Recognised shapes do not throw.
+		expect(() => interpretFakeCommand("echo ok")).not.toThrow();
+		expect(() => interpretFakeCommand(`node -e "process.exit(0)"`)).not.toThrow();
+		// An unmodelled real command must NOT be silently green-lit.
+		expect(() => interpretFakeCommand("npm run build")).toThrow(/unrecognised command/i);
+		expect(() => interpretFakeCommand("pytest -q")).toThrow(/refusing to fabricate/i);
+	});
+
 	it("cli.ts wires no command-step fake (production is always real)", async () => {
 		const { readFileSync } = await import("node:fs");
 		const { fileURLToPath } = await import("node:url");
@@ -100,6 +109,8 @@ describe("verification command-step runner: fake ⇔ real observable contract", 
 		{ name: "node exit 7", command: `node -e "process.exit(7)"`, timeoutMs: 30_000 },
 		{ name: "node delayed exit", command: `node -e "setTimeout(()=>process.exit(0),300)"`, timeoutMs: 30_000 },
 		{ name: "node delayed log+exit", command: `node -e "setTimeout(()=>{console.log('done');process.exit(0)},200)"`, timeoutMs: 30_000 },
+		// Error channel: nonzero exit WITH stderr output — pins the stderr contract.
+		{ name: "node stderr + exit 3", command: `node -e "console.error('boom'); process.exit(3)"`, timeoutMs: 30_000 },
 	];
 
 	for (const c of cases) {
@@ -110,6 +121,7 @@ describe("verification command-step runner: fake ⇔ real observable contract", 
 			]);
 			expect(faked.code, `${c.name}: exit code`).toBe(real.code);
 			expect(norm(faked.stdout), `${c.name}: stdout`).toBe(norm(real.stdout));
+			expect(norm(faked.stderr), `${c.name}: stderr`).toBe(norm(real.stderr));
 			expect(faked.timedOut, `${c.name}: timedOut`).toBe(real.timedOut);
 		});
 	}

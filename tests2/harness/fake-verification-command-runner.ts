@@ -39,10 +39,14 @@ interface ScriptedResult {
 }
 
 /**
- * Deterministically interpret the handful of primitive command shapes the
- * fake-target verification specs use. Anything unrecognised is treated as a
- * no-op success (exit 0, no output) — matching an `echo`/`true`-style pass
- * stand-in. The contract test pins these against the real shell.
+ * FAIL-CLOSED interpreter for the primitive command shapes the fake-target
+ * verification specs use (`echo …`, `true`/`false`, `node -e "…"`). Anything
+ * outside these shapes THROWS — it is never silently green-lit. This matches the
+ * goal's fail-closed DI philosophy: a future fake-target spec that introduces a
+ * new command (especially an expected-FAIL one) must not be masked as a pass;
+ * the throw surfaces as a spawn error → the harness fails the step with the
+ * descriptive message, forcing the interpreter to be extended (and the contract
+ * test to pin the new shape) deliberately.
  */
 export function interpretFakeCommand(command: string): ScriptedResult {
 	const cmd = command.trim();
@@ -71,8 +75,11 @@ export function interpretFakeCommand(command: string): ScriptedResult {
 		return interpretNodeEval(script);
 	}
 
-	// Unrecognised → no-op success (pass stand-in).
-	return res;
+	// Fail-closed: never fabricate a verdict for an unmodelled command.
+	throw new Error(
+		`[fake-verification-command-runner] unrecognised command — refusing to fabricate a verdict: ${JSON.stringify(command)}. ` +
+			`Extend interpretFakeCommand() (and pin the new shape in the contract test), or run this spec on the REAL command-step runner.`,
+	);
 }
 
 function interpretNodeEval(script: string): ScriptedResult {
@@ -87,12 +94,15 @@ function interpretNodeEval(script: string): ScriptedResult {
 	}
 
 	// console.log('X') / console.log("X") — collect all, newline-joined (Node
-	// prints one line per call).
-	const logRe = /console\.log\(\s*(['"])([\s\S]*?)\1\s*\)/g;
-	let m: RegExpExecArray | null;
-	const logs: string[] = [];
-	while ((m = logRe.exec(body)) !== null) logs.push(m[2]);
-	if (logs.length) res.stdout = logs.map((l) => `${l}\n`).join("");
+	// prints one line per call). console.error('Y') → stderr (error channel).
+	const collect = (re: RegExp): string => {
+		let m: RegExpExecArray | null;
+		const lines: string[] = [];
+		while ((m = re.exec(body)) !== null) lines.push(m[2]);
+		return lines.map((l) => `${l}\n`).join("");
+	};
+	res.stdout = collect(/console\.log\(\s*(['"])([\s\S]*?)\1\s*\)/g);
+	res.stderr = collect(/console\.error\(\s*(['"])([\s\S]*?)\1\s*\)/g);
 
 	// process.exit(N) — default 0 when the script just logs / falls off the end.
 	const ex = /process\.exit\(\s*(\d+)\s*\)/.exec(body);

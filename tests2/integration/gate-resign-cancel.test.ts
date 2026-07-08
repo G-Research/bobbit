@@ -8,6 +8,16 @@ import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connect
  * 1. The old verification is cancelled (removed from active verifications)
  * 2. Only the new signal's verification is active/completed
  * 3. The gate status reflects the new signal's result
+ *
+ * TIER-1 FAKE COMMAND-STEP RUNNER: this spec runs in the `v2-integration-fake`
+ * project (see vitest.config.ts). It asserts gate-level resignal/cancel
+ * BOOKKEEPING only — the old verification is dropped from the active set, the
+ * `gate_verification_complete` "cancelled" event fires, and the NEW signal
+ * determines the gate status. It does NOT assert a real OS subprocess-tree kill;
+ * that fidelity is covered on the REAL command-step path by
+ * cancel-verification.test.ts (kept out of the fake set). The fake's killTree()
+ * closes the scripted child so the harness records the cancelled tracked key,
+ * which is exactly the bookkeeping these assertions check.
  */
 
 const SLOW_WORKFLOW_ID = `test-slow-${Date.now()}`;

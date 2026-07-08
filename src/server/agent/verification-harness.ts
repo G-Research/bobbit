@@ -4755,6 +4755,11 @@ export class VerificationHarness {
 			// file tailers) runs against a fake. Production (real runner) is never
 			// nonDurable, so this is a strict no-op there.
 			const runnerNonDurable = !!this.commandStepRunner.nonDurable;
+			// The `container-exec` arm is defensive-only: container steps are dispatched
+			// by the `if (containerId)` branch below via a DIRECT spawnTracked call and
+			// are never routed through this seam, so a fake never reaches container mode
+			// in practice. Kept in the downgrade so that IF a nonDurable runner ever saw
+			// a container step it would still avoid the durable in-container files.
 			const recoveryMode: CommandRecoveryMode =
 				runnerNonDurable && (recoveryMode0 === "detached" || recoveryMode0 === "container-exec") && !!streamCtx
 					? "pending-retry"
