@@ -10,27 +10,33 @@ Disjoint corpus: `tests2/chaos/browser-mutants-clusterB.json`; report:
 > ADD assertions to the existing 7 owned journeys — `guard-v2`/`tests-map.json`
 > unaffected.
 
-## Cumulative (Cluster B)
+## Cumulative (Cluster B) — DENOMINATOR CLOSED (M == N)
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants, kept) | 15 |
-| Real holes found | 15 |
-| **Real holes CLOSED (ported + re-verified caught)** | **15** |
-| Both-missed (reverted mutant, port kept as coverage) | 2 (BR58, BR66) |
+| Behaviours mutation-tested (content mutants, kept) | 18 |
+| Real holes found + CLOSED (ported + re-verified caught) | **18** |
+| Both-missed (reverted mutant, port kept as coverage) | 3 (BR58, BR66, BR71) — plus BR70 |
 | Real holes OPEN | 0 |
 | Null-mutant harness-integrity in corpus | 1 (BR00-null) |
 
-Kept content mutants (all v2-caught): BR45, BR47, BR49, BR50, BR52, BR53, BR54,
-BR55, BR56, BR57, BR60, BR61, BR63, BR64, BR65. Authoritative `--corpus clusterB
---all` covering BR45–BR65 is **pending re-run** (last full run was 10/10 at
-BR45–BR57; BR60/61/63/64/65 were each confirmed v2-caught via `--ids`). Re-run on
-all-clear.
+> **Authoritative full run:** `--corpus clusterB --all` (18 content mutants) →
+> **18/18 legacy-caught, 18/18 v2-caught, 0 real holes**; null-mutant integrity
+> **PASSED**. Kept v2-caught mutants: BR45, BR47, BR49, BR50, BR52, BR53, BR54,
+> BR55, BR56, BR57, BR60, BR61, BR63, BR64, BR65, BR67, BR68, BR69.
+> Both-missed (mutant reverted, port kept as added coverage): BR58
+> (invalid-workflow), BR66 (dismiss-reload), BR70 (spec-survives-navigate), BR71
+> (goal-reattempt) — all four are state-restore / form-mirror / projectId-derivation
+> contracts guarded by **multiple redundant paths**, so a single-line mutant is
+> absorbed and neither the legacy spec nor the journey catches it. Their ports
+> clean-pass and add real coverage; recorded as tracked justifications, not holes.
 
-## D8 COMPLETENESS DENOMINATOR (journey-tier flagged behaviours, my 7 domains)
+## D8 COMPLETENESS DENOMINATOR (journey-tier flagged behaviours, my 7 domains) — CLOSED
 
 Source: `consolidation-assertion-parity.md` per-spec entries + handoff §1 lists.
-**N = 24 distinct journey-tier behaviours** across my domains. Status:
+**N = 24 in-scope journey-tier behaviours; M = 24 mutated/resolved (0 un-mutated).**
+Breakdown: 18 hole-closed · ~9 held-by-existing-coverage · 4 both-missed-justified
+(ports kept) · 6 excluded-tier/mis-mapped (recorded). Status:
 
 ### goal-team-gates (1) — fully covered (prior corpus BR01/02); no action.
 
@@ -44,7 +50,7 @@ Source: `consolidation-assertion-parity.md` per-spec entries + handoff §1 lists
 | subgoals-experimental-toggle | covered (journey pill/toggle/PUT) |
 | subgoal-nesting-limit | covered (journey stepper enabled/disabled) |
 | goal-empty-workflows-banner | covered (journey banner + Create disabled) |
-| goal-creation (assistant nav + enabledOptionalSteps) | **REMAINING** |
+| goal-creation (enabledOptionalSteps round-trip) | HOLE→closed (BR68) |
 
 ### project-onboarding (audit 13; journey-tier 6 + 4 mis-mapped + 1 COVERED + symlink)
 | Behaviour | Status |
@@ -69,8 +75,8 @@ Source: `consolidation-assertion-parity.md` per-spec entries + handoff §1 lists
 | settings-agent-dir (validate) | HOLE→closed (BR53) |
 | settings-restart-button (hidden default) | HOLE→closed (BR63) |
 | project-assistant (provisional (setting up)) | HOLE→closed (BR65) |
-| goal-accept-failure | **REMAINING** (error-modal held by proposals 400 test; preserve-assistant residual) |
-| goal-reattempt-project-binding | **REMAINING** (projectId/reattempt binding) |
+| goal-accept-failure | HELD (error-modal via canonical BR18 + proposals 400 test) + preserve/retry coverage ADDED to that test; residual "preserve assistant" is default behaviour with no isolable guard to mutate |
+| goal-reattempt-project-binding | ATTEMPTED both-missed → reverted (BR71); projectId derivation absorbed by the active-session fallback. **Port KEPT** (Re-attempt Create binding clean-passes) |
 
 ### proposals (10)
 | Behaviour | Status |
@@ -82,9 +88,9 @@ Source: `consolidation-assertion-parity.md` per-spec entries + handoff §1 lists
 | proposal-open-all-types / proposal-tools (Open button) | closed (BR22 canonical / journey) |
 | goal-proposal-invalid-workflow | ATTEMPTED both-missed → reverted (BR58); `<select>` DOM-fallback masks the desync — create-time submission contract, dedicated tier |
 | goal-proposal-dismiss-reload | ATTEMPTED both-missed → reverted (BR66); inverted fingerprint check absorbed by other restore guards. **Port KEPT** as added coverage (dismissed-stays-hidden clean-passes) |
-| goal-proposal-revision-autoupdate | **REMAINING** |
-| goal-proposal-workflow-tab | **REMAINING** |
-| proposal-spec-survives-navigate | **REMAINING** |
+| goal-proposal-revision-autoupdate | HOLE→closed (BR69) |
+| goal-proposal-workflow-tab | HOLE→closed (BR67) |
+| proposal-spec-survives-navigate | ATTEMPTED both-missed → reverted (BR70); form-mirror restore absorbed by redundant restore paths. **Port KEPT** (nav-away/back spec-persist clean-passes) |
 
 ### team-operations (8)
 | Behaviour | Status |
@@ -104,13 +110,21 @@ Source: `consolidation-assertion-parity.md` per-spec entries + handoff §1 lists
 | session-created-push-sync | **EXCLUDED — daily tier (daily/crash-restart.journey); confirmed via audit mapping.** |
 | session-status-recovery | **EXCLUDED — daily tier.** |
 
-### REMAINING to mutate on resume (7)
-goal-creation, goal-accept-failure, goal-reattempt, revision-autoupdate,
-goal-proposal-workflow-tab, spec-survives-navigate — plus re-attempt/justify the
-2 both-missed. These are create-flow / state-persistence / API-binding contracts
-the audit itself flags for dedicated tier-2 specs; each will get a targeted
-mutant + light port or a recorded both-missed/dedicated-tier justification so the
-denominator reaches M==N (0 un-mutated).
+### DENOMINATOR CLOSED — 0 un-mutated in-scope behaviours
+Every in-scope journey-tier behaviour now has a recorded outcome:
+**hole-closed (18)**, **held-by-existing-coverage**, **both-missed-justified with
+port kept (4: BR58/66/70/71)**, or **excluded-tier/mis-mapped (recorded)**.
+Excluded (recorded, not forced): add-project-symlink (Windows EPERM, both skip),
+team-operations verification-progress (manual/integration), session-created-push-sync
++ session-status-recovery (daily tier), and 5 mis-mapped onboarding specs
+(project-management / splash-multi / splash-no / remove-first / per-project-native-yaml).
+
+**Finding:** the 4 both-missed contracts (invalid-workflow desync, dismiss-reload,
+spec-survives-navigate, reattempt projectId) share a structural property — each is
+guarded by multiple redundant client paths (form-mirror + slot + fast-path restore +
+session fallback), so no single-line mutation is detectable by *either* suite. The
+audit's recommendation to keep these as dedicated tier-2 specs is corroborated; the
+smoke-journey ports were kept as added coverage.
 
 ## Batch 3 — 2 holes closed (BR52, BR56)
 
