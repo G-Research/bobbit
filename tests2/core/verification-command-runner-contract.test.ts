@@ -126,6 +126,11 @@ describe("verification command-step runner: fake ⇔ real observable contract", 
 		});
 	}
 
+	// The two cases below spawn a REAL node process for the real runner and wait
+	// on real kill/timeout escalation; under heavy concurrent load that latency can
+	// exceed the 30 s default. A generous per-test timeout keeps the fidelity
+	// assertion intact (retries:0, no weakened assertion) without flaking when the
+	// box is saturated by sibling test:v2 runs.
 	it("matches on TIMEOUT (scripted delay exceeds step timeout)", async () => {
 		const command = `node -e "setTimeout(()=>process.exit(0),5000)"`;
 		const [real, faked] = await Promise.all([
@@ -140,7 +145,7 @@ describe("verification command-step runner: fake ⇔ real observable contract", 
 		// Neither reports a clean self-exit-0 on timeout.
 		expect(real.code === 0, "real not clean-0").toBe(false);
 		expect(faked.code === 0, "fake not clean-0").toBe(false);
-	});
+	}, 90_000);
 
 	it("matches on CANCELLATION (killTree closes the child)", async () => {
 		const command = `node -e "setTimeout(()=>process.exit(0),5000)"`;
@@ -154,5 +159,5 @@ describe("verification command-step runner: fake ⇔ real observable contract", 
 		expect(faked.killedClosed).toBe(true);
 		expect(faked.timedOut).toBe(false);
 		expect(real.timedOut).toBe(false);
-	});
+	}, 90_000);
 });
