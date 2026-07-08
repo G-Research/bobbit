@@ -143,7 +143,7 @@ Status per domain (updated each batch):
 | image-attach-roundtrip | GAP | HOLE-CLOSED | BR60 |
 | review-pane | PARTIAL | HOLE-CLOSED | BR59 |
 | optional-steps | GAP | HELD | proposal title-populate + Create-enabled proven by BR48/BR57 proposal-render mutations |
-| workflow-page-scope | GAP | TODO | |
+| workflow-page-scope | GAP | HOLE-CLOSED | BR61 (mutant retargeted to routing.ts #/workflows parser after a both-missed dead call-site) |
 | compact-cost | GAP | EXCL | needs compaction + cumulative-cost seeding + refreshAfterCompaction (heavy/fragile; dedicated) |
 | mobile-staff-sidebar | COVERED | EXCL | legacy assertion is test.skip (no live behaviour) |
 | gate-bypass | GAP | EXCL | held by BR38 (team-operations journey); cross-journey duplicate |
@@ -176,7 +176,7 @@ Status per domain (updated each batch):
 | spec | class | status | id / reason |
 |---|---|---|---|
 | at-mention | GAP | HOLE-CLOSED | BR23 (menu) + BR56 (chip) |
-| ask-user-choices-ui | PARTIAL | TODO | prove-held (happy path) |
+| ask-user-choices-ui | PARTIAL | HELD | BR62 (prove-held: .ask-submit rename caught by existing widget happy-path test) |
 | session-interactions | PARTIAL | TODO | prove-held / switch-reload-delete |
 | escape-aborts-anywhere | GAP | TODO | STAY_BUSY |
 | queue-ui | GAP | TODO | STAY_BUSY |
@@ -204,16 +204,17 @@ Status per domain (updated each batch):
 | Domain | in-scope N | mutated M | remaining TODO |
 |---|--:|--:|--:|
 | app-smoke | 13 | 7 | 6 |
-| misc | 14 | 13 | 1 |
+| misc | 14 | 14 | 0 |
 | sidebar-nav | 8 | 3 | 5 |
-| prompt-interaction | 6 | 1 | 5 |
+| prompt-interaction | 6 | 2 | 4 |
 | stories-registry | 6 | 2 | 4 |
-| **TOTAL** | **47** | **26** | **21** |
+| **TOTAL** | **47** | **28** | **19** |
 
 Excluded (with reasons above): app-smoke 7, misc 3, sidebar-nav 12, prompt-interaction 5, stories 0 = **27**.
 Campaign closes when TOTAL remaining TODO == 0 (M == N == 47).
 
-#### Batch A6 (BR59 review-approve, BR60 image-attach) — 2 holes closed; misc now 13/14 (only workflow-page-scope left).
+#### Batch A6 (BR59 review-approve, BR60 image-attach) — 2 misc holes closed.
+#### Batch A7 (BR61 workflow-page-scope hole-closed [retargeted from both-missed], BR62 ask-user-choices prove-held) — **misc fully closed 14/14**.
 
 ## Batch A4 (BR55, BR56) — 2 holes closed
 
