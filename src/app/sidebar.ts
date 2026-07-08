@@ -1608,7 +1608,21 @@ function renderNestedNode(
 	`;
 }
 
-function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeModel {
+/**
+ * Build the FULL, pre-search-filter sidebar tree model.
+ *
+ * Returns the `model` exactly as produced by `buildSidebarTree` — i.e. before
+ * `filterSidebarTreeModelGoalsForSearch` prunes non-matching goal nodes while a
+ * search query is active. Reveal-on-nav (`sidebar-reveal.ts`) walks this
+ * unfiltered model's `flatByKey`/`parentKey` chain so ancestor resolution keeps
+ * working even when the sidebar search box is non-empty. `buildDesktopSidebarTree`
+ * applies the goal-search filter on top so rendering behaviour is unchanged.
+ */
+export function buildSidebarTreeModel(sidebarData = getSidebarData()): SidebarTreeModel {
+	return buildSidebarTreeModelWithSearch(sidebarData).model;
+}
+
+function buildSidebarTreeModelWithSearch(sidebarData = getSidebarData()): { model: SidebarTreeModel; visibleSearchGoalIds: Set<string> | null } {
 	const query = state.searchQuery.trim();
 	const q = query.toLowerCase();
 	const bypassFilters = Boolean(query);
@@ -1686,6 +1700,11 @@ function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeMod
 		},
 		expansion: sidebarTreeExpansionInput(),
 	});
+	return { model, visibleSearchGoalIds };
+}
+
+function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeModel {
+	const { model, visibleSearchGoalIds } = buildSidebarTreeModelWithSearch(sidebarData);
 	return visibleSearchGoalIds ? filterSidebarTreeModelGoalsForSearch(model, visibleSearchGoalIds) : model;
 }
 

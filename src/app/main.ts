@@ -35,6 +35,7 @@ import {
 } from "./state.js";
 import { fetchProjects, gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
+import { revealSidebarTargetForRoute } from "./sidebar-reveal.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { selectProposalWorkspaceTab } from "./preview-panel.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
@@ -345,10 +346,12 @@ async function handleHashChange(): Promise<void> {
 			applyProjectPalette(goalForPalette?.projectId);
 			await refreshSessions();
 			await loadDashboardData(route.goalId);
+			revealSidebarTargetForRoute(route);
 		} else if (route.view === "session" && route.sessionId) {
 			clearDashboardState();
 			if (state.selectedSessionId === route.sessionId || state.connectingSessionId === route.sessionId || state.remoteAgent?.gatewaySessionId === route.sessionId) {
 				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
+				revealSidebarTargetForRoute(route);
 				return;
 			}
 			if (state.remoteAgent) {
@@ -361,6 +364,7 @@ async function handleHashChange(): Promise<void> {
 			if (checkRes.ok) {
 				await connectToSession(route.sessionId, true);
 				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
+				revealSidebarTargetForRoute(route);
 			} else {
 				setHashRoute("landing");
 				state.appView = "authenticated";
@@ -431,6 +435,7 @@ async function handleHashChange(): Promise<void> {
 			loadDashboardData(route.goalId);
 			renderApp();
 			await refreshSessions();
+			revealSidebarTargetForRoute(route);
 		} else if (route.view === "roles") {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -738,17 +743,20 @@ async function initApp() {
 			const route = getRouteFromHash();
 			if (route.view === "goal" && route.goalId) {
 				await loadDashboardData(route.goalId);
+				revealSidebarTargetForRoute(route);
 			} else if (route.view === "session" && route.sessionId) {
 				const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 				if (checkRes.ok) {
 					await connectToSession(route.sessionId, true);
 					await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
+					revealSidebarTargetForRoute(route);
 				}
 			} else if (route.view === "goal-dashboard" && route.goalId) {
 				state.goalDashboardId = route.goalId;
 				loadDashboardData(route.goalId);
 				renderApp();
 				await refreshSessions();
+				revealSidebarTargetForRoute(route);
 			} else if (route.view === "ext") {
 				// Slice C1 — cold-load pack deep-link restoration.
 				state.appView = "authenticated";
