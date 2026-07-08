@@ -438,6 +438,18 @@ test.describe("Journey: Workflow Editor", () => {
 		}
 	});
 
+	// Ported from workflow-page-scope.spec.ts (audit: misc GAP / BR61): the
+	// deprecated #/workflows route redirects to the active project's settings
+	// Workflows tab (project-scoped, never the system scope).
+	test("legacy #/workflows redirects to the project-scoped settings Workflows tab", async ({ page }) => {
+		await openApp(page);
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+		await page.evaluate(() => { window.location.hash = "#/workflows"; });
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 })
+			.toMatch(/^#\/settings\/[^/]+\/workflows$/);
+		expect(await page.evaluate(() => window.location.hash)).not.toContain("/system/");
+	});
+
 	test("page.route() workflow GET stub still lets app load gracefully", async ({ page }) => {
 		await page.route("**/api/workflows*", async (route) => {
 			if (route.request().method() !== "GET") return route.continue();

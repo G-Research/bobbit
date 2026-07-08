@@ -207,5 +207,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/misc.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR61",
+		"area": "misc-workflow-page-scope",
+		"file": "src/app/main.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "\t\t\t\t\tsetHashRoute(\"settings\", `${projectId}/workflows`, true);",
+		"replace": "\t\t\t\t\tsetHashRoute(\"settings\", `${projectId}/general`, true);",
+		"description": "The deprecated #/workflows route redirects to the project's settings GENERAL tab instead of its Workflows tab. Legacy workflow-page-scope.spec.ts asserts #/workflows redirects to #/settings/<projectId>/workflows (never system); misc journey never exercised the redirect (GAP). Ported into misc.journey.spec.ts (Journey: Workflow Editor).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/workflow-page-scope.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR62",
+		"area": "prompt-ask-user-choices",
+		"file": "src/ui/components/AskUserChoicesWidget.ts",
+		"target": "ui",
+		"operator": "class-rename",
+		"search": "class=\"ask-submit px-3 py-1 text-xs font-medium rounded",
+		"replace": "class=\"ask-submit-x px-3 py-1 text-xs font-medium rounded",
+		"description": "PROVE-HELD: the ask_user_choices widget submit button loses its .ask-submit class. The prompt-interaction journey already drives the widget happy path (pick → submit → widget read-only) via .ask-submit, so this must be v2-caught with no new port. Confirms the PARTIAL is genuinely held.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/ask-user-choices-ui.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
 	}
 ]
