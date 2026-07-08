@@ -171,6 +171,15 @@ buttons already provide. Mouse behavior is unchanged:
 the keyboard equivalent of clicking a chevron. Nothing about mouse
 interactions was changed by this feature.
 
+## Relationship to reveal-on-nav
+
+Keyboard navigation is independent of the reveal that fires when the app
+navigates to a session or goal *route* (deep-links, clicks, back/forward). Both
+share the `data-nav-id="<kind>:<id>"` row contract, but reveal-on-nav never
+touches `state.keyboardNavActiveId`, `data-nav-active`, `getVisibleNavOrder`, or
+the override-clear listener — it only expands the target's ancestors and scrolls
+the row into view. See [Sidebar reveal on nav](sidebar-reveal-on-nav.md).
+
 ## Internals — file map
 
 - [`src/app/sidebar-nav.ts`](../src/app/sidebar-nav.ts) — `parseNavId`,
