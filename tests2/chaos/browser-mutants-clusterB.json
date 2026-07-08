@@ -209,6 +209,22 @@
     ]
   },
   {
+    "id": "BR69",
+    "area": "proposals-revision-autoupdate",
+    "file": "src/app/session-manager.ts",
+    "target": "ui",
+    "operator": "disabled-guard",
+    "search": "\t\t\t\tif (!state.previewSpecEdited && typeof g.spec === \"string\") state.previewSpec = g.spec;",
+    "replace": "\t\t\t\tif (false && !state.previewSpecEdited && typeof g.spec === \"string\") state.previewSpec = g.spec;",
+    "description": "The unified onProposal path stops mirroring the merged goal spec into the form-mirror (previewSpec), so an edit_proposal revision does not auto-update the assistant panel in place. Legacy goal-proposal-revision-autoupdate.spec.ts asserts the edited spec appears with no 'Open proposal' click; proposals journey never drives a revision (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-proposal-revision-autoupdate.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
     "id": "BR67",
     "area": "proposals-workflow-tab-customise",
     "file": "src/app/proposal-panels.ts",

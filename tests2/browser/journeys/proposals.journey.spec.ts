@@ -270,6 +270,52 @@ test.describe("Journey: Failed Goal Proposal", () => {
 	});
 });
 
+// Ported from goal-proposal-revision-autoupdate.spec.ts (audit: proposals GAP,
+// mutant BR69): an edit_proposal revision must auto-update the goal-assistant
+// panel form-mirror (previewSpec) in place, with no "Open proposal" click.
+test.describe("Journey: Goal Proposal — revision auto-update", () => {
+	const INITIAL_SPEC_TAIL = "It validates the goal creation UI.";
+	const EDITED_SPEC_BODY = "EDITED SPEC BODY for Mode A repro.";
+
+	test("edit_proposal auto-updates the assistant panel form-mirror in place", async ({ page }) => {
+		test.setTimeout(120_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+		// Initial spec is live in the form-mirror.
+		await expect.poll(
+			() => page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? ""),
+			{ timeout: 15_000 },
+		).toContain(INITIAL_SPEC_TAIL);
+
+		// Apply a surgical edit_proposal (not a propose_* tool, so it flows ONLY
+		// through the unified onProposal path — the mutant's target).
+		await sendMessage(page, "Apply GOAL_EDITABLE_EDIT to the spec");
+
+		// The unified slot reflects the edit (proves the server edit landed).
+		await page.waitForFunction(
+			(needle: string) => (((window as any).bobbitState?.activeProposals?.goal?.fields?.spec as string) ?? "").includes(needle),
+			EDITED_SPEC_BODY,
+			{ timeout: 20_000 },
+		);
+
+		// The assistant panel form-mirror (previewSpec) must reflect the edit with
+		// NO manual "Open proposal" click, and drop the replaced sentence.
+		await expect.poll(
+			() => page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? ""),
+			{ timeout: 15_000 },
+		).toContain(EDITED_SPEC_BODY);
+		const previewSpec = await page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? "");
+		expect(previewSpec).not.toContain(INITIAL_SPEC_TAIL);
+	});
+});
+
 // Ported from goal-proposal-workflow-tab.spec.ts (audit: proposals GAP, mutant
 // BR67): the goal-proposal Workflow tab exposes a workflow select + a
 // Customise/Revert toggle (Customise → editor + Revert; Revert → back).
