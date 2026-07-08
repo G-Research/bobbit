@@ -1,0 +1,5 @@
+{
+  "$comment": "Global concurrency budget — per-pool cross-process lease caps (scripts/testing-v2/ledger.mjs). These cap a RESOURCE across ALL concurrent test:v2/e2e runs, independent of per-run worker counts. gateway-boot: max simultaneous in-process gateway boots (transient CPU burst). browser: max simultaneous Chromium browser workers actively rendering the app (the sustained-render contention that drives tier-2 toBeVisible flakes at N-way). Values are STATIC between calibrations; env overrides (BOBBIT_V2_MAX_GATEWAY_BOOTS / BOBBIT_V2_MAX_BROWSER) take precedence for measurement/tuning. Set empirically by the authoritative quiet-box concurrency measurement — see docs/testing-v2/concurrency-proof.md.",
+  "gateway-boot": 4,
+  "browser": 4
+}

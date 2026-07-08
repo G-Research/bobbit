@@ -184,8 +184,36 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	enableDevHarnessRestart: boolean;
 	splitHeadquartersServerRoot: boolean;
 	sameRootProjectAtStartup: boolean;
+	browserRenderLease: void;
 	gateway: GatewayInfo;
 }>({
+	// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): cap the TOTAL number of
+	// Chromium browser workers rendering the app at once across ALL concurrent
+	// test:v2/e2e runs. Each Playwright worker = one Chromium browser; this
+	// worker-scoped lease is acquired at worker startup (BEFORE the gateway boots,
+	// via the `gateway` fixture's dependency on it) and held for the worker's whole
+	// life, so a worker that can't get a slot WAITS holding nothing. This throttles
+	// the sustained multi-browser RENDER contention that drives tier-2 toBeVisible
+	// timeouts at N-way (the residual flake source after the gateway-boot lease).
+	// Gated on BOBBIT_V2_BROWSER_LEASE (set by playwright-v2.config.ts, NEVER by the
+	// legacy e2e config) and fully fail-open: any import/acquire error proceeds
+	// without a lease. Its own large fixture timeout covers a long queue wait — the
+	// wait is charged here, NOT against the 60 s gateway/test timeouts. Cap in
+	// tests2/budget-caps.json ("browser"). See docs/testing-v2/concurrency-proof.md.
+	browserRenderLease: [async ({}, use) => {
+		let release: () => void = () => {};
+		if (process.env.BOBBIT_V2_BROWSER_LEASE === "1") {
+			try {
+				const { acquireBrowserRenderLease } = await import("../../scripts/testing-v2/ledger.mjs");
+				const lease = await acquireBrowserRenderLease();
+				release = () => lease.release();
+			} catch {
+				/* ledger unavailable — render without a lease (fail-open) */
+			}
+		}
+		await use();
+		release();
+	}, { scope: "worker", auto: true, timeout: 1_500_000 }],
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
 	// at the top of a spec file. Playwright groups tests with matching option
 	// values onto the same worker, so each spec file effectively gets its own gateway.
@@ -205,7 +233,11 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// the server run directory before gateway boot.
 	sameRootProjectAtStartup: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup }, use, workerInfo) => {
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, browserRenderLease }, use, workerInfo) => {
+		// Depend on browserRenderLease purely for ordering: the global browser-render
+		// slot must be held BEFORE this worker boots a gateway, so a queued worker
+		// holds no gateway while it waits. The value itself is void.
+		void browserRenderLease;
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
