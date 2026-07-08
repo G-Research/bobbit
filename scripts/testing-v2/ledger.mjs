@@ -404,7 +404,10 @@ function computeGrant(state, myParentRunId, cores) {
 
 /**
  * Split a committed parent bundle into vitest + playwright worker counts.
- * Anchors (verified by selftest): 12→8v+2p (single run), 8→3v+2p, 6→2v+2p, 4→1v+2p.
+ * Anchors (verified by selftest, single run / activeParents=1): 12→8v+2p,
+ * 8→3v+2p, 6→2v+2p, 4→1v+2p. CONTENDED (activeParents≥2): 12→5v+2p (never the
+ * full 8-vitest split — that would oversubscribe at N=2, where each run's
+ * grant=floor(24/2)=12).
  *
  * GLOBAL BUDGET MODEL — two distinct contention sources, two distinct levers:
  *
@@ -419,23 +422,31 @@ function computeGrant(state, myParentRunId, cores) {
  *      the green rate; restoring headroom, Σ≈15/24 at 3-way, is the fix.)
  *
  * Playwright targets PLAYWRIGHT_CAP (=2) chromium workers — the IO-bound sweet
- * spot (2 ≈ 4 workers throughput; 1 doubles isolated wall). A single uncontended
- * run (grant ≥ MAX_BUNDLE) uses the full vitest cap for speed (no peer to starve).
+ * spot (2 ≈ 4 workers throughput; 1 doubles isolated wall).
+ *
+ * FULL-VITEST SPLIT IS GATED ON `activeParents === 1`, NOT on `grant ≥ MAX_BUNDLE`
+ * alone. The bug this fixes: at N=2 each run's fair share is floor(24/2)=12 =
+ * MAX_BUNDLE, so keying the uncontended split off `grant ≥ 12` gave BOTH runs the
+ * full 8-vitest split → 16 vitest workers → CPU oversubscription (measured N=2
+ * WORSE than N=3). The uncontended split is only safe when this run is genuinely
+ * alone (activeParents===1); any concurrent peer forces the contended split even
+ * at grant=12.
  *
  * Invariant: `vitest + playwright ≤ grant`, both ≥ 1 for a two-kind bundle, never
  * an overshoot. Under-allocation (idle cores) is intended headroom, not waste.
  */
-export function splitBundle(grant) {
+export function splitBundle(grant, activeParents = 1) {
 	const total = clamp(Math.floor(grant) || 0, 1, MAX_BUNDLE);
 	if (total < 2) return { vitest: 1, playwright: 0, total: 1 };
 	const playwright = clamp(Math.min(PLAYWRIGHT_CAP, total - 1), 1, PLAYWRIGHT_CAP);
-	// Uncontended (single/near-single run, grant ≥ 12): use the box — full vitest
-	// parallelism for speed; the lone browser tier has ample render headroom anyway.
-	if (total >= MAX_BUNDLE) {
+	// Uncontended (a SINGLE run, activeParents===1, with a full grant): use the
+	// box — full vitest parallelism for speed; the lone browser tier has ample
+	// render headroom anyway. Keyed on activeParents, NOT grant≥12 — see docstring.
+	if (total >= MAX_BUNDLE && activeParents <= 1) {
 		return { vitest: VITEST_CAP, playwright, total: VITEST_CAP + playwright };
 	}
-	// Contended (2+ runs): under-allocate vitest (~half the free-after-playwright
-	// budget) so Σworkers leaves ~a third of the cores idle for browser render.
+	// Contended (2+ runs) OR a sub-max grant: under-allocate vitest (~half the
+	// free-after-playwright budget) so Σworkers leaves cores idle for browser render.
 	const vitest = clamp(Math.ceil(total / 2) - 1, 1, Math.min(VITEST_CAP, total - playwright));
 	return { vitest, playwright, total: vitest + playwright };
 }
@@ -510,7 +521,7 @@ function reserveBundle(kinds, opts = {}) {
 			state.totalCores = cores;
 			sweep(state);
 			sweepPending(state);
-			const { grant, remaining, target } = computeGrant(state, parentRunId, cores);
+			const { grant, remaining, target, activeParents } = computeGrant(state, parentRunId, cores);
 
 			let usableGrant = grant;
 			if (grant < preferredMin) {
@@ -528,7 +539,7 @@ function reserveBundle(kinds, opts = {}) {
 			usableGrant = Math.min(usableGrant, remaining, MAX_BUNDLE);
 			if (usableGrant < floorCommit) return { retry: true };
 
-			const records = allocateKinds(kinds, usableGrant);
+			const records = allocateKinds(kinds, usableGrant, activeParents);
 			removePending(state, parentRunId);
 			const startedAt = new Date().toISOString();
 			for (const rec of records) {
@@ -555,9 +566,9 @@ function reserveBundle(kinds, opts = {}) {
 	}
 }
 
-function allocateKinds(kinds, grant) {
+function allocateKinds(kinds, grant, activeParents = 1) {
 	if (kinds.length === 2) {
-		const { vitest, playwright } = splitBundle(grant);
+		const { vitest, playwright } = splitBundle(grant, activeParents);
 		return [
 			{ id: newId("vitest"), kind: "vitest", workerSlots: vitest },
 			{ id: newId("playwright"), kind: "playwright", workerSlots: playwright },
@@ -903,23 +914,37 @@ function cliSelftest() {
 	console.log("  release() clears reservations ✓");
 
 	// 5) splitBundle spot-checks + sum-preservation across the whole range.
+	// Default (activeParents=1, a single uncontended run): 2 chromium workers +
+	// UNDER-ALLOCATED vitest under contention (headroom for browser render).
+	// 8→3v+2p (Σ15/24 @ 3-way), 4→1v+2p (Σ15/24 @ 5-way). A lone run at a full
+	// grant uses the full vitest cap: 12→8v+2p.
 	const s4 = splitBundle(4);
 	const s8 = splitBundle(8);
 	const s12 = splitBundle(12);
-	// Contended: 2 chromium workers + UNDER-ALLOCATED vitest (headroom for browser
-	// render). 8→3v+2p (Σ15/24 @ 3-way), 4→1v+2p (Σ15/24 @ 5-way). Single run
-	// (grant≥12) uses the full vitest cap: 12→8v+2p.
 	assert(s4.vitest === 1 && s4.playwright === 2, `split(4)=1v+2p got ${s4.vitest}+${s4.playwright}`);
 	assert(s8.vitest === 3 && s8.playwright === 2, `split(8)=3v+2p got ${s8.vitest}+${s8.playwright}`);
-	assert(s12.vitest === 8 && s12.playwright === 2, `split(12)=8v+2p got ${s12.vitest}+${s12.playwright}`);
+	assert(s12.vitest === 8 && s12.playwright === 2, `split(12,solo)=8v+2p got ${s12.vitest}+${s12.playwright}`);
+	// CONTENDED FULL GRANT (the N=2 oversubscription bug): activeParents≥2 at
+	// grant=12 must NOT take the full 8-vitest split — it takes the contended
+	// 5v+2p, so two N=2 runs total 10v+4p=14 ≤ 24 (not 16v+4p=20 that starved the
+	// box and made N=2 measure WORSE than N=3).
+	const s12c = splitBundle(12, 2);
+	assert(s12c.vitest === 5 && s12c.playwright === 2, `split(12,contended)=5v+2p got ${s12c.vitest}+${s12c.playwright}`);
+	assert(2 * s12c.total <= totalCores(), `two N=2 contended grants (${s12c.total} each) must fit cores=${totalCores()}`);
+	// The uncontended full-vitest split fires ONLY at activeParents≤1.
+	assert(splitBundle(12, 1).vitest === VITEST_CAP, "activeParents=1 keeps the full-vitest split");
 	for (let g = 2; g <= MAX_BUNDLE; g++) {
-		const s = splitBundle(g);
-		// Never overshoot the grant; under-allocation (idle core) is allowed + safe.
-		assert(s.total <= g, `splitBundle(${g}) must not exceed grant, got ${s.vitest}+${s.playwright}=${s.total}`);
-		assert(s.vitest <= VITEST_CAP && s.playwright <= PLAYWRIGHT_CAP, `splitBundle(${g}) within caps, got v=${s.vitest} pw=${s.playwright}`);
-		assert(s.vitest >= 1 && s.playwright >= 1, `splitBundle(${g}) both kinds ≥1, got v=${s.vitest} pw=${s.playwright}`);
+		for (const ap of [1, 2, 5]) {
+			const s = splitBundle(g, ap);
+			// Never overshoot the grant; under-allocation (idle core) is allowed + safe.
+			assert(s.total <= g, `splitBundle(${g},${ap}) must not exceed grant, got ${s.vitest}+${s.playwright}=${s.total}`);
+			assert(s.vitest <= VITEST_CAP && s.playwright <= PLAYWRIGHT_CAP, `splitBundle(${g},${ap}) within caps, got v=${s.vitest} pw=${s.playwright}`);
+			assert(s.vitest >= 1 && s.playwright >= 1, `splitBundle(${g},${ap}) both kinds ≥1, got v=${s.vitest} pw=${s.playwright}`);
+			// Contended must never exceed the solo split's vitest at the same grant.
+			if (ap >= 2) assert(s.vitest <= splitBundle(g, 1).vitest, `splitBundle(${g},${ap}) vitest must not exceed solo`);
+		}
 	}
-	console.log("  splitBundle(4)=1v+2p ✓  splitBundle(8)=3v+2p ✓  splitBundle(12)=8v+2p ✓  no-overshoot 2..12 ✓");
+	console.log("  splitBundle(4)=1v+2p ✓  split(8)=3v+2p ✓  split(12,solo)=8v+2p ✓  split(12,contended)=5v+2p ✓  no-overshoot 2..12×ap ✓");
 
 	// 6) Pending-contention: seed 4 live pending markers (distinct runs) so a fresh
 	//    reserve sees activeParents=5 → target=floor(24/5)=4. This is the core
@@ -952,6 +977,31 @@ function cliSelftest() {
 	assert(sum3 <= totalCores(), `sum(workerSlots)=${sum3} ≤ cores=${totalCores()} under contention`);
 	contended.release();
 	console.log("  pending-contention caps per-run grant ✓");
+
+	// 7) N=2 reserve path (the fixed oversubscription bug): with exactly ONE live
+	//    pending peer, a fresh reserve sees activeParents=2 and a full grant
+	//    (floor(24/2)=12=MAX_BUNDLE) — but must take the CONTENDED split (5v+2p), NOT
+	//    the uncontended 8v+2p that made two N=2 runs oversubscribe (16v total).
+	try {
+		rmSync(reservationsPath(), { force: true });
+		rmSync(lockPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+	writeFileSync(
+		reservationsPath(),
+		JSON.stringify(
+			{ totalCores: totalCores(), generation: 1, reservations: [], pending: [{ parentRunId: "n2-peer", pid: process.pid, at: new Date().toISOString() }] },
+			null,
+			2,
+		),
+	);
+	const n2 = reserveParentBundle({ coalesceMs: 0 });
+	console.log(`  N=2 (1 pending peer, grant=12) -> vitest=${n2.vitest} playwright=${n2.playwright} total=${n2.total}`);
+	assert(n2.vitest === 5 && n2.playwright === 2, `N=2 reserve must take contended 5v+2p, got ${n2.vitest}v+${n2.playwright}p`);
+	assert(2 * n2.total <= totalCores(), `two N=2 grants (${n2.total} each) must fit cores=${totalCores()}`);
+	n2.release();
+	console.log("  N=2 reserve path uses contended split (no oversubscription) ✓");
 
 	try {
 		rmSync(reservationsPath(), { force: true });
