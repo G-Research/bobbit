@@ -143,7 +143,14 @@ const EXTERNAL_FREE_ENV = {
 async function runGroupA(specs) {
 	if (specs.length === 0) return { label: "A/node", code: 0, wallMs: 0, skipped: true };
 	// tsx --test, force-exit so lingering handles never hang the lane.
-	const args = ["--test", "--test-force-exit", ...specs];
+	// RESOURCE CAP: node:test defaults to ~CPU-count concurrent FILES. These are
+	// worktree/pool/sandbox specs that each boot a gateway AND create git worktrees
+	// whose setup runs `npm ci` — running many at once spawns a SWARM of concurrent
+	// npm ci + gateway boots that can exhaust the box (suspected cause of the
+	// crash + interrupted-npm-ci node_modules corruption on 2026-07-08). Serialise
+	// by default (override with E2E_V2_NODE_CONCURRENCY).
+	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "1";
+	const args = ["--test", "--test-force-exit", `--test-concurrency=${nodeConc}`, ...specs];
 	return run(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", ...args], {
 		env: { ...EXTERNAL_FREE_ENV, NODE_ENV: "test" },
 		label: "A/node-relocate",
@@ -154,7 +161,10 @@ async function runGroupB(specs) {
 	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
 	// Reuse the project's playwright-e2e runner (cache isolation + external-free
 	// env baked in) at retries:0.
-	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, "--retries=0"], {
+	// RESOURCE CAP: bound Playwright workers so the e2e browser swarm can't
+	// oversubscribe the box (override with E2E_V2_PW_WORKERS).
+	const pwWorkers = process.env.E2E_V2_PW_WORKERS || "2";
+	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=0"], {
 		env: { ...EXTERNAL_FREE_ENV },
 		label: "B/e2e-relocate",
 	});
@@ -172,7 +182,9 @@ async function runGroupC(specs) {
 	const usesLocal = existsSync(localCli);
 	const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
 	const pre = usesLocal ? [localCli] : ["playwright"];
-	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-daily"], {
+	// RESOURCE CAP: bound Playwright workers (override with E2E_V2_PW_WORKERS).
+	const pwWorkersC = process.env.E2E_V2_PW_WORKERS || "2";
+	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-daily", `--workers=${pwWorkersC}`], {
 		env: { ...EXTERNAL_FREE_ENV },
 		label: "C/adapter-browser",
 		// node.exe path may contain spaces (C:\Program Files\nodejs); spawn it
