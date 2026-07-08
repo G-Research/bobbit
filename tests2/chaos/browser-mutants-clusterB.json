@@ -209,22 +209,6 @@
     ]
   },
   {
-    "id": "BR66",
-    "area": "proposals-dismiss-reload",
-    "file": "src/app/proposal-helpers.ts",
-    "target": "ui",
-    "operator": "inverted-boolean",
-    "search": "\t\treturn stored === fingerprint(type, fields);",
-    "replace": "\t\treturn stored !== fingerprint(type, fields);",
-    "description": "The dismissed-proposal fingerprint check is inverted, so a dismissed goal proposal is treated as NOT dismissed and repopulates after reload. Legacy goal-proposal-dismiss-reload.spec.ts asserts the dismissed proposal stays hidden across reload; proposals journey only dismisses same-page (GAP).",
-    "expectedLegacyCatchers": [
-      "tests/e2e/ui/goal-proposal-dismiss-reload.spec.ts"
-    ],
-    "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
-    ]
-  },
-  {
     "id": "BR65",
     "area": "project-settings-project-assistant-provisional",
     "file": "src/app/sidebar.ts",

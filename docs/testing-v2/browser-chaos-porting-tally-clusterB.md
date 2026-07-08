@@ -14,16 +14,103 @@ Disjoint corpus: `tests2/chaos/browser-mutants-clusterB.json`; report:
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants) | 10 |
-| Real holes found | 10 |
-| **Real holes CLOSED (ported + re-verified caught)** | **10** |
+| Behaviours mutation-tested (content mutants, kept) | 15 |
+| Real holes found | 15 |
+| **Real holes CLOSED (ported + re-verified caught)** | **15** |
+| Both-missed (reverted mutant, port kept as coverage) | 2 (BR58, BR66) |
 | Real holes OPEN | 0 |
 | Null-mutant harness-integrity in corpus | 1 (BR00-null) |
 
-> **Authoritative full run:** `--corpus clusterB --all` (10 content mutants) →
-> **10/10 legacy-caught, 10/10 v2-caught, 0 real holes**; null-mutant integrity
-> **PASSED** (no suite caught the no-op patch). Report:
-> `docs/testing-v2/browser-chaos-report-clusterB.md`.
+Kept content mutants (all v2-caught): BR45, BR47, BR49, BR50, BR52, BR53, BR54,
+BR55, BR56, BR57, BR60, BR61, BR63, BR64, BR65. Authoritative `--corpus clusterB
+--all` covering BR45–BR65 is **pending re-run** (last full run was 10/10 at
+BR45–BR57; BR60/61/63/64/65 were each confirmed v2-caught via `--ids`). Re-run on
+all-clear.
+
+## D8 COMPLETENESS DENOMINATOR (journey-tier flagged behaviours, my 7 domains)
+
+Source: `consolidation-assertion-parity.md` per-spec entries + handoff §1 lists.
+**N = 24 distinct journey-tier behaviours** across my domains. Status:
+
+### goal-team-gates (1) — fully covered (prior corpus BR01/02); no action.
+
+### goal-editing (8)
+| Behaviour | Status |
+|---|---|
+| subgoal-existing-goal-settings | HOLE→closed (BR50) |
+| goal-form-tooltips (title attr) | HOLE→closed (BR61) |
+| goal-archive-always-on (read-only banner) | HOLE→closed (BR60) |
+| subgoal-parent-picker (parent picker) | closed earlier (BR41 canonical) + journey covers |
+| subgoals-experimental-toggle | covered (journey pill/toggle/PUT) |
+| subgoal-nesting-limit | covered (journey stepper enabled/disabled) |
+| goal-empty-workflows-banner | covered (journey banner + Create disabled) |
+| goal-creation (assistant nav + enabledOptionalSteps) | **REMAINING** |
+
+### project-onboarding (audit 13; journey-tier 6 + 4 mis-mapped + 1 COVERED + symlink)
+| Behaviour | Status |
+|---|---|
+| add-project-typeahead | HOLE→closed (BR49) |
+| add-project-preflight | closed earlier (BR27 canonical) |
+| add-project-post-archive (CTA) | HOLE→closed (BR52) |
+| add-project-select-all | HOLE→closed (BR55) |
+| add-project-multi-repo-subset (autoPrompt subset) | HOLE→closed (BR64) |
+| add-project-browse-modal | covered (journey browse overlay/Up/Select/Esc) |
+| add-project-symlink | **EXCLUDED — Windows EPERM (symlinkSync requires admin); both suites skip on this box. CI-linux only.** |
+| per-project-native-yaml, project-management, remove-first, splash-multi, splash-no | **MIS-MAPPED (not onboarding) — note+skip per audit** |
+| single-project-sidebar | COVERED (empty stub) |
+
+### project-settings (9)
+| Behaviour | Status |
+|---|---|
+| settings-model-fallback | HOLE→closed (BR25 canonical / journey) |
+| role-assistant-new | HOLE→closed (BR36 canonical / journey) |
+| system-prompt-customise | HOLE→closed (BR39 canonical / journey) |
+| settings-maintenance-archived-worktrees | HOLE→closed (BR47) |
+| settings-agent-dir (validate) | HOLE→closed (BR53) |
+| settings-restart-button (hidden default) | HOLE→closed (BR63) |
+| project-assistant (provisional (setting up)) | HOLE→closed (BR65) |
+| goal-accept-failure | **REMAINING** (error-modal held by proposals 400 test; preserve-assistant residual) |
+| goal-reattempt-project-binding | **REMAINING** (projectId/reattempt binding) |
+
+### proposals (10)
+| Behaviour | Status |
+|---|---|
+| failed-goal-proposal-ux | HOLE→closed (BR43 canonical / journey workflow-error) |
+| goal-proposal-subgoal-prefill | HOLE→closed (BR45) |
+| proposal-edit-flow (accept-label) | HOLE→closed (BR54) |
+| project-proposal structured views | HOLE→closed (BR57) |
+| proposal-open-all-types / proposal-tools (Open button) | closed (BR22 canonical / journey) |
+| goal-proposal-invalid-workflow | ATTEMPTED both-missed → reverted (BR58); `<select>` DOM-fallback masks the desync — create-time submission contract, dedicated tier |
+| goal-proposal-dismiss-reload | ATTEMPTED both-missed → reverted (BR66); inverted fingerprint check absorbed by other restore guards. **Port KEPT** as added coverage (dismissed-stays-hidden clean-passes) |
+| goal-proposal-revision-autoupdate | **REMAINING** |
+| goal-proposal-workflow-tab | **REMAINING** |
+| proposal-spec-survives-navigate | **REMAINING** |
+
+### team-operations (8)
+| Behaviour | Status |
+|---|---|
+| archive-child-cascade (modal child names) | HOLE→closed (BR56) |
+| dashboard-mutation-pending | covered (journey card + approve; reject/reload residual) |
+| goal-dashboard-fanout (gate-signal badge) | closed (BR20 canonical / journey) |
+| goal-status-widget (awaiting-signoffs) | closed (BR21 canonical / journey) |
+| plan-tab-archived-children | covered (journey node data-archived) |
+| plan-archived-children | covered (descendants + archived render) |
+| team-delegate (cards) | covered (journey single + parallel cards) |
+| verification-progress-indicator | **EXCLUDED — manual/integration tier (needs inline slow-multi-step gate); per audit REC.** |
+
+### session-lifecycle (2 — both under daily/crash-restart)
+| Behaviour | Status |
+|---|---|
+| session-created-push-sync | **EXCLUDED — daily tier (daily/crash-restart.journey); confirmed via audit mapping.** |
+| session-status-recovery | **EXCLUDED — daily tier.** |
+
+### REMAINING to mutate on resume (7)
+goal-creation, goal-accept-failure, goal-reattempt, revision-autoupdate,
+goal-proposal-workflow-tab, spec-survives-navigate — plus re-attempt/justify the
+2 both-missed. These are create-flow / state-persistence / API-binding contracts
+the audit itself flags for dedicated tier-2 specs; each will get a targeted
+mutant + light port or a recorded both-missed/dedicated-tier justification so the
+denominator reaches M==N (0 un-mutated).
 
 ## Batch 3 — 2 holes closed (BR52, BR56)
 
