@@ -195,10 +195,16 @@ test.describe("Journey: Proposals — behavioral", () => {
 });
 
 test.describe("Journey: Proposals — API error handling", () => {
+	// Also ports the preserve-assistant + retry contract from
+	// goal-accept-failure-keeps-assistant.spec.ts (audit: project-settings GAP):
+	// on a 400 the assistant stays mounted (title + session route unchanged) and
+	// a second Create re-issues the POST.
 	test("createGoal 400 shows server error in error modal (page.route stub)", async ({ page }) => {
 		test.setTimeout(90_000);
+		let postAttempts = 0;
 		await page.route("**/api/goals", async (route) => {
 			if (route.request().method() !== "POST") return route.continue();
+			postAttempts++;
 			await route.fulfill({
 				status: 400,
 				contentType: "application/json",
@@ -222,6 +228,21 @@ test.describe("Journey: Proposals — API error handling", () => {
 			await expect(errorMsg).toHaveText("Journey test: missing title", { timeout: 20_000 });
 			const bodyText = await page.locator("body").innerText();
 			expect(bodyText).not.toContain("Failed to create goal: 400");
+			await expect.poll(() => postAttempts, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+
+			// Preserve contract: the assistant panel stays mounted and the session
+			// route is unchanged after the failure.
+			await expect(titleInput).toBeVisible();
+			await expect(page).toHaveURL(/#\/session\//);
+
+			// Retry contract: dismissing and clicking Create again re-issues the POST.
+			const okBtn = page.locator("button").filter({ hasText: "OK" }).first();
+			if (await okBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
+				await okBtn.click();
+				await expect(errorMsg).toBeHidden({ timeout: 5_000 });
+				await createBtn.click();
+				await expect.poll(() => postAttempts, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+			}
 		} else {
 			test.skip(true, "Create Goal button not present in this harness config");
 		}

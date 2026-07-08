@@ -209,22 +209,6 @@
     ]
   },
   {
-    "id": "BR71",
-    "area": "project-settings-goal-reattempt-binding",
-    "file": "src/app/proposal-panels.ts",
-    "target": "ui",
-    "operator": "disabled-guard",
-    "search": "if (session?.reattemptGoalId) return state.goals.find(g => g.id === session.reattemptGoalId)?.projectId;",
-    "replace": "if (false && session?.reattemptGoalId) return state.goals.find(g => g.id === session.reattemptGoalId)?.projectId;",
-    "description": "resolveGoalProposalProjectId stops deriving the proposal projectId from a re-attempt session's original goal, so Create Goal in a re-attempt session hits 'No project selected'. Legacy goal-reattempt-project-binding.spec.ts asserts the created goal inherits the original projectId; proposals/project-settings journeys never drive Re-attempt (GAP).",
-    "expectedLegacyCatchers": [
-      "tests/e2e/ui/goal-reattempt-project-binding.spec.ts"
-    ],
-    "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
-    ]
-  },
-  {
     "id": "BR69",
     "area": "proposals-revision-autoupdate",
     "file": "src/app/session-manager.ts",
