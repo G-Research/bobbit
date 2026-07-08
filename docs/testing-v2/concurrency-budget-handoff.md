@@ -15,10 +15,17 @@ do not assume its split changes are kept).
 - **No static worker-split fixes this** (tried 1p/2p/4v+3p) — the bursts are transient and cross-run; static allocation can't prevent them.
 - Browser tier is **gateway/IO-bound, not CPU-parallelism-bound**: 2 playwright workers ≈ 4 workers (~276s vs ~297s); 1 worker DOUBLES it (~550–710s). So don't starve playwright to 1.
 
-## DECISION (user, settled): GLOBAL CONCURRENCY BUDGET
-Implement a **cross-process global resource budget** shared across ALL concurrent `test:v2` runs. Heavy ops **acquire a lease → WAIT if saturated → release**, so the box is never oversubscribed at ANY N. **Accept higher wall-time (queuing) in exchange for near-zero flakes** — reliability > speed (user's explicit tradeoff). This makes flakiness structurally impossible at any N; the concurrency "bar" becomes *acceptable wall-time at N*, not a flake threshold (may revive 5-way / obviate the spin-off).
-- **Gate the real contention sources:** primarily concurrent **gateway boots** (cap global in-flight boots regardless of active-run count); secondarily total **Chromium**. 
-- **Reuse/extend the ledger** (`scripts/testing-v2/ledger.mjs`) — it already has cross-process filesystem registration of active runs. Turn it into a live lease/token pool (acquire/wait/release) rather than static per-run worker allocation.
+## DECISION (user, settled): GLOBAL CONCURRENCY BUDGET — KEEP IT SIMPLE
+Do NOT build a sophisticated dynamic activeRuns-aware lease pool. Start with the simplest thing that works (add dynamism ONLY if measurement proves it necessary):
+
+**Model = category caps + simple cross-process semaphores + a calibration script.**
+- **Categorize tests by the resource they throttle on** — category is IMPLICIT in which fixture/resource a test uses: `gateway` (boots an in-process gateway), `docker` (real container), `browser` (Chromium), `cpu-only` (pure logic). No per-test hand-tagging where the fixture already tells us.
+- **Per-category cross-process COUNTING SEMAPHORE**, size = a fixed cap read from a committed `tests2/budget-caps.json`. The relevant FIXTURE acquires its category token before the heavy op (gateway boot / container start / browser context), WAITS if that category is at cap, releases after. This throttles both within-run and across-run (all concurrent `test:v2`/`e2e` runs share the same category counters). Reuse the ledger's existing filesystem registration mechanism (`scripts/testing-v2/ledger.mjs`) for the cross-process counters — do not reinvent it.
+- **Calibration script** `scripts/testing-v2/calibrate-budget.mjs`: empirically ramp each category's concurrency until flakes/wall blow up, back off to the last clean value, write the caps to `budget-caps.json`. Run periodically / when hardware or the suite changes materially — so caps stay honest without hand-tuning. Caps are STATIC values between refreshes (no live activeRuns math).
+
+**Accept higher wall-time (queuing) for near-zero flakes** — reliability > speed (user's explicit tradeoff). Fixed category caps mean the box is never oversubscribed on any one resource at ANY N; flakiness becomes structurally unlikely and the "bar" becomes *acceptable wall-time at N*, not a flake threshold (may revive 5-way / obviate the spin-off).
+
+Primary category to get right = **gateway** (the transient-boot burst that starved timing-sensitive integration tests). For the e2e tier add **docker** + process/port categories.
 
 ## HARD CONSTRAINTS
 - **Do NOT move ANY coverage to the daily lane** (user: daily = latent bugs). Fix flakes via the global budget + determinism (clock seam / observable-state waits); NEVER by relocation. (The prior agent's multi-repo-goal→daily was reverted / never merged.)
