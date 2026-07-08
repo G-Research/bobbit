@@ -36,6 +36,21 @@ import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
+
+// Load the v2 lease pools from the Playwright process. Importing the ledger
+// (scripts/testing-v2/ledger.mjs) DIRECTLY here is impossible: Playwright
+// mistransforms a .mjs located outside its test root toward CJS, so any form of
+// import (static, dynamic, file:// URL, namespace, re-export) throws "exports is
+// not defined in ES module scope" at eval time — the lease then silently
+// fail-opens and never fires (the bug behind the browser-tier N-way flakes). The
+// co-located ./ledger-lease-bridge.mjs is transformed as native ESM and speaks
+// the SAME leases.json protocol as the ledger, so the browser tier and the
+// vitest tier share the same global caps. Cached after first load; both leases.
+let _ledgerModulePromise: Promise<any> | undefined;
+function loadLedger(): Promise<any> {
+	if (!_ledgerModulePromise) _ledgerModulePromise = import("./ledger-lease-bridge.mjs");
+	return _ledgerModulePromise;
+}
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const STATIC_DIR = resolve(PROJECT_ROOT, "dist", "ui");
 
@@ -204,7 +219,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		let release: () => void = () => {};
 		if (process.env.BOBBIT_V2_BROWSER_LEASE === "1") {
 			try {
-				const { acquireBrowserRenderLease } = await import("../../scripts/testing-v2/ledger.mjs");
+				const { acquireBrowserRenderLease } = await loadLedger();
 				const lease = await acquireBrowserRenderLease();
 				release = () => lease.release();
 			} catch {
@@ -443,7 +458,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		let releaseBootLease: () => void = () => {};
 		if (process.env.BOBBIT_V2_GATEWAY_BOOT_LEASE === "1") {
 			try {
-				const { acquireGatewayBootLease } = await import("../../scripts/testing-v2/ledger.mjs");
+				const { acquireGatewayBootLease } = await loadLedger();
 				const lease = await acquireGatewayBootLease();
 				releaseBootLease = () => lease.release();
 			} catch {
