@@ -180,7 +180,13 @@ describe("getToolDocsForPrompt — MCP tools", () => {
 	it("returns empty string when no tools exist", () => {
 		const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-docs-empty-"));
 		fs.mkdirSync(path.join(emptyDir, "tools"), { recursive: true });
-		const tm = new ToolManager(emptyDir);
+		// ToolManager(configDir) resolves the BUILTIN tool catalogue via
+		// defaultBuiltinToolsDir() (an intentional repo-root/dist fallback so builtins
+		// always load under both dist- and src-boot — otherwise role-carrying spawns
+		// fail closed). To exercise the genuine "no tools exist" case we must opt out
+		// of builtins too, by pointing builtinToolsDir at an empty/nonexistent dir.
+		const noBuiltins = path.join(emptyDir, "no-builtins");
+		const tm = new ToolManager(emptyDir, noBuiltins);
 		const output = tm.getToolDocsForPrompt();
 		assert.equal(output, "");
 		fs.rmSync(emptyDir, { recursive: true, force: true });
