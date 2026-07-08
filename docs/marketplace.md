@@ -519,11 +519,20 @@ Market-pack entities are read-only on those pages (manage them from the Market s
 
 ### Runtime role lookup
 
-Any role returned by `GET /api/roles` is usable anywhere the runtime accepts a role id. Session creation (`POST /api/sessions`), session role assignment (`PATCH /api/sessions/:id`), staff create/update validation, and persisted-session rehydration paths resolve roles through `ConfigCascade.resolveRoles(projectId)` first, then fall back to the legacy `roleManager.getRole(...)` store lookup for compatibility.
+Any role returned by `GET /api/roles` is usable anywhere the runtime accepts a role id. Session creation (`POST /api/sessions`), session role assignment (`PATCH /api/sessions/:id`), staff create/update validation, persisted-session rehydration, **goal-team spawns** (`team_spawn`), and **role-carrying delegates** (`team_delegate(role: X)`) resolve roles through `ConfigCascade.resolveRoles(projectId)` first, then fall back to the legacy `roleManager.getRole(...)` / `RoleStore` lookup for compatibility.
 
 This keeps the API and runtime in sync: a market-pack or built-in first-party pack role shown in the Roles page can be selected for sessions and staff agents. The winning role is the same one the cascade exposes, so existing precedence still applies: project-specific entries win over server/global-user entries, and user-pack overrides win over market packs in the same scope (see [Scopes & precedence](#scopes--precedence)).
 
 Runtime resolution preserves the full role record, including `promptTemplate`, `accessory`, `model`, `thinkingLevel`, and `toolPolicies`, so pack roles can carry prompts, UI accessories, model/thinking defaults, and tool grants into sessions just like hand-written roles.
+
+#### Team-lead and delegate role resolution
+
+Roles inside a goal team, and roles passed to `team_delegate`, resolve through the **same** config cascade — closing two earlier gaps where they only saw the bare in-memory `RoleStore` and so **could not see market-pack roles at all**:
+
+- **Team leads inside goals.** `TeamManager` resolves roles via `resolveRoleSource(goal)` (`team-manager.ts`), a cascade-aware `RoleSource` (see `resolve-role.ts::RoleSource`) that prefers the project's `configCascade.resolveRoles(projectId)` (project→server→builtin→market-packs) and keeps the bare `RoleStore` only as a fallback. So a team lead can `team_spawn` a role installed **only** as a market pack, the `{{AVAILABLE_ROLES}}` list injected into the team-lead prompt lists those pack roles, and the "Role X not found" error enumerates everything actually spawnable. Precedence is unchanged: goal `inlineRoles` first, then the cascade, then the store — de-duplicated by name with cascade first.
+- **`team_delegate(role: X)`.** The delegated child now carries role X's `promptTemplate` (system prompt) **and** `accessory` (sidebar), resolved through the same cascade — previously only the role's tools were applied. `session-manager.ts::createDelegateSession` threads `role`/`roleName`/`rolePrompt` into its `SessionSetupPlan`, so the shared role-prompt + role-accessory application in `session-setup.ts` runs for the bare/delegate spawn exactly as it already did for the full `createSession` path.
+
+**Why:** both spawn paths (bare `createDelegateSession` and full `createSession`) now derive role prompt + accessory + tools from **one** resolution pipeline instead of ad-hoc per-path code — a single source of truth. See [docs/orchestration.md](orchestration.md#team_delegate) for the delegate-side behaviour and the preserved invariants (recursion guard, `read_only` tool stripping, sandbox/credential scope inheritance, `ROLE_TOOLS_UNRESOLVED` fail-closed).
 
 Unknown role ids still fail loudly in REST validation paths, normally as `404`. Callers cannot select a pack identity directly: runtime paths only consume roles already resolved by the config cascade for the target project/scope, which preserves the marketplace security boundary and avoids trusting caller-supplied provenance.
 
