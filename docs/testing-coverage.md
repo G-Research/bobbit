@@ -2,16 +2,34 @@
 
 Per-area notes on what user stories and contracts are covered by which test files. For test architecture and harness APIs, see [testing-strategy.md](testing-strategy.md). For opt-in video capture on top of browser E2E, see [testing-tier-2-5.md](testing-tier-2-5.md).
 
+> **v2 path note.** This project runs **Test Suite v2**. Most `tests/…` paths cited
+> below were migrated at switchover into `tests2/…` (tier-1 vitest core/dom/integration
+> + tier-2 Playwright browser); the authoritative old→new mapping is
+> [`tests2/tests-map.json`](../tests2/tests-map.json) (`v2Path` per entry). Paths that
+> still resolve under `tests/e2e/…` are the **relocate** specs the `e2e:v2`
+> real-fidelity phase runs as-is, plus shared harness/helpers. The behavioural
+> coverage described here is preserved — only the file locations moved. Coverage
+> parity is proven by [`parity.mjs`](../scripts/testing-v2/parity.mjs) + the chaos
+> mutation comparison ([`docs/testing-v2/`](testing-v2/)).
+
 ## Phase invariant
 
-Every test file under `tests/` except `tests/manual-integration/**` runs in exactly one phase — `unit` (node logic via `tsx --test` + `file://` browser fixtures via `tests/playwright.config.ts`) or `e2e` (`playwright-e2e.config.ts`). The only gate-exempt path is `tests/manual-integration/**` (real LLM / Docker). [`tests/test-phase-invariant.test.ts`](../tests/test-phase-invariant.test.ts) pins this: a test claimed by zero phases (orphan) or two (double-claim), or one that breaks the `*.test.ts`⇒node / `*.spec.ts`⇒Playwright runner convention, fails the guard. See [testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first).
+Tests run in one of three buckets: **unit** (`unit:` → `npm run test:unit` → `test:v2`
+= vitest tier-1 `tests2/{core,dom,integration}` + Playwright tier-2 `tests2/browser`),
+**e2e** (`e2e:` → `npm run test:e2e` → `test:e2e:v2` = the real-fidelity remainder —
+real git/worktree/pool/Docker/MCP/spawn/restart at `retries:0`), and **manual-integration**
+(`npm run test:manual`, gate-exempt, real LLM/Docker). Bucket membership is pinned by
+[`tests2/core/guard-v2.test.ts`](../tests2/core/guard-v2.test.ts) + `parity.mjs`
+against [`tests2/tests-map.json`](../tests2/tests-map.json): no orphan `tests2/` file,
+no dangling `v2Path`, no retired-without-replacement. `*.test.ts`⇒vitest,
+`*.spec.ts`⇒Playwright. See [testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first).
 
 ## Build warning regression coverage
 
 - **File**: `tests/clean-build-warnings-regression.test.ts`.
 - **Why it exists**: Vite/Rollup warning output is easy to miss when the build still exits 0, so warning classes that previously hid real issues are pinned as fast unit checks.
 - **What it covers**: browser code cannot use runtime static or dynamic bare imports from `@earendil-works/pi-ai`; dynamic imports of known warning targets must either split a real chunk or have an explicit rationale; expected temp git primary-branch fallbacks stay quiet while origin-backed production-shaped repos still warn once.
-- **Related guard**: `tests/bundle-size.test.ts` still owns the concrete chunk budgets, including the 600 kB raw budget that mirrors Vite's `chunkSizeWarningLimit`.
+- **Related guard**: `tests2/core/bundle-size.test.ts` still owns the concrete chunk budgets, including the 600 kB raw budget that mirrors Vite's `chunkSizeWarningLimit` (run standalone via `npm run test:bundle`).
 
 ## Prompt interactions
 
@@ -67,7 +85,7 @@ Two complementary tests pin the agent's tool-call wiring after the pi 0.70+ `--t
 
 ### Layer 1 — unit contract pin (`npm run test:unit`)
 
-- **File**: `tests/tool-activation-contract.test.ts`. Runs in seconds; no LLM, no Docker.
+- **File**: `tests2/core/tool-activation-contract.test.ts` (runs inside tier-1). Runs in seconds; no LLM, no Docker.
 - **What it pins**: the exact `{ args, env }` shape `computeToolActivationArgs()` (in `src/server/agent/tool-activation.ts`) emits for a representative role config — `--no-builtin-tools`, `--no-extensions`, `--extension <…>/defaults/tools/_builtins/extension.ts` for the re-registered file builtins, plus `env.BOBBIT_BUILTIN_TOOLS` as the sorted, comma-joined builtin list. Asserts the broken pre-fix `--tools` flag is **not** present.
 - **Why a unit test**: the integration canary below is the end-to-end proof but takes minutes and needs a real LLM. The contract test makes a flag-semantics regression fail CI in seconds on every commit, so the integration canary only has to catch genuinely new failure modes.
 
