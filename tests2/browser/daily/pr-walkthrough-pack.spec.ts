@@ -358,6 +358,25 @@ test.afterEach(async () => {
 	// Best-effort: re-enable all toggles so a failed run never leaves the shipped
 	// feature partially disabled for the next test.
 	await resetPrWalkthroughActivation().catch(() => {});
+	// UN-POISON shared state. setupSessionGitRepo git-inits the session's working
+	// dir. For a UI default-project session with no dedicated worktree that dir IS
+	// the SHARED harness default project root. Leaving it a git repo makes EVERY
+	// later session on this worker gateway get an unexpected worktree whose
+	// checkout lacks the untracked `.e2e-workspaces` subdir handed out as a session
+	// cwd → a later `bash_bg` spawn runs in a nonexistent cwd → "spawn bash.exe
+	// ENOENT" (surfaced by tail-chat-real-stream at retries:0; masked in legacy by
+	// retries:3). Restore the non-git contract by removing the `.git` we created.
+	// Discriminate on dir-vs-file: a real repo root has a `.git` DIRECTORY; a git
+	// worktree has a `.git` gitlink FILE (owned by the session/sweeper — leave it).
+	if (repoDir) {
+		try {
+			const gitPath = path.join(repoDir, ".git");
+			if (fs.existsSync(gitPath) && fs.statSync(gitPath).isDirectory()) {
+				fs.rmSync(gitPath, { recursive: true, force: true });
+				fs.rmSync(path.join(repoDir, SYNC_FILE), { force: true });
+			}
+		} catch { /* ignore */ }
+	}
 	repoDir = undefined;
 	if (outsideRepoDir) {
 		try { fs.rmSync(outsideRepoDir, { recursive: true, force: true }); } catch { /* ignore */ }
