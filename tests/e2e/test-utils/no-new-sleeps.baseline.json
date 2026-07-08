@@ -6,6 +6,5 @@
 	"multi-repo-pool.spec.ts": 1,
 	"multi-repo-project.spec.ts": 1,
 	"pool-flow.spec.ts": 4,
-	"thinking-level.spec.ts": 1,
-	"ui/review-annotations-persistence.spec.ts": 1
+	"thinking-level.spec.ts": 1
 }
