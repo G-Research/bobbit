@@ -808,6 +808,11 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			projectRoot: plan.repoPath,
 			taskTitle: "Delegate Task",
 			taskSpec,
+			// Role injection (§Gap 2): a `team_delegate(role: X)` child threads the
+			// role promptTemplate here — same as the normal/worktree branch. A
+			// role-LESS delegate leaves both undefined → byte-identical to before.
+			rolePrompt: plan.rolePrompt,
+			roleName: plan.roleName,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			sectionOrder,

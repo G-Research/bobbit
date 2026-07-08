@@ -2532,6 +2532,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		colorStore,
 		taskManager: new TaskManager(taskStore),
 		roleStore,
+		resolveRoleForProject,
+		resolveRolesForProject: (projectId?: string) => configCascade.resolveRoles(projectId).map(r => r.item),
 		projectContextManager,
 		toolManager,
 		orchestrationCore,

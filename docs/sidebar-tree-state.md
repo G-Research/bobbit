@@ -114,6 +114,8 @@ All goal nodes default collapsed, including top-level goals and sub-goals. The r
 
 Because automatic expansion is non-explicit, an explicit collapsed parent remains collapsed across later polling and restart.
 
+Route navigation reuses the same non-explicit path to reveal a target row's ancestors on deep-links and in-app route changes. See [Sidebar reveal on nav](sidebar-reveal-on-nav.md).
+
 ## Archived and search behavior
 
 Archived visibility and tree expansion are separate preferences:

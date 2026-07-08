@@ -2755,6 +2755,33 @@ export class SessionManager {
 		return this.roleManager?.getRole(name);
 	}
 
+	/**
+	 * Cascade-aware role source for `{{AVAILABLE_ROLES}}` substitution. The bare
+	 * `RoleManager` view only sees stored roles, so a team-lead prompt rebuilt via
+	 * `getPromptParts` (freshly-created sessions never cache promptParts because
+	 * assemblePrompt runs before the session is registered) would drop market-pack
+	 * roles that the real team-manager prompt lists via the config cascade. This
+	 * source merges cascade roles (incl. server/project market packs) over the
+	 * role-manager view so the reconstructed prompt matches the assembled one.
+	 */
+	private availableRolesSource(projectId: string | undefined): { getAll: () => import("./role-store.js").Role[] } {
+		return {
+			getAll: () => {
+				const seen = new Set<string>();
+				const out: import("./role-store.js").Role[] = [];
+				let cascade: import("./role-store.js").Role[] = [];
+				if (this.configCascade) {
+					try { cascade = this.configCascade.resolveRoles(projectId).map(r => r.item); } catch { cascade = []; }
+				}
+				const mgr = this.roleManager?.listRoles?.() ?? [];
+				for (const r of [...cascade, ...mgr]) {
+					if (!seen.has(r.name)) { seen.add(r.name); out.push(r); }
+				}
+				return out;
+			},
+		};
+	}
+
 	/** Generate tool docs and inject into prompt parts before assembly. */
 	private assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
 		return profile("sessionManager.assemblePrompt", () => this._assemblePrompt(sessionId, parts));
@@ -2859,7 +2886,29 @@ export class SessionManager {
 		context?: Record<string, string>;
 		allowedTools?: string[];
 		sectionOrder?: string[];
+		/** Role name for a `team_delegate(role: X)` child — surfaces the role
+		 *  promptTemplate in the reconstructed parts (rolePrompt is not persisted). */
+		role?: string;
+		projectId?: string;
+		goalId?: string;
+		sessionId?: string;
 	}): PromptParts {
+		// Role injection (§Gap 2): re-resolve the role prompt cascade-first so a
+		// role-carrying delegate's reconstructed parts (inspector / prompt-sections)
+		// match the assembled system prompt. Role-less delegates leave it undefined.
+		let rolePrompt: string | undefined;
+		if (opts.role) {
+			const template = this.resolveRolePromptTemplate(opts.role, opts.projectId);
+			if (template) {
+				const goalBranch = opts.goalId ? this.resolveGoal(opts.goalId)?.branch : undefined;
+				rolePrompt = resolveRolePrompt({ promptTemplate: template }, {
+					branch: goalBranch,
+					agentId: `${opts.role}-${(opts.sessionId ?? "").slice(0, 8)}`,
+					roleManager: this.availableRolesSource(opts.projectId) as unknown as RoleManager,
+					subGoalsEnabled: this.isSubgoalsEnabled,
+				});
+			}
+		}
 		return {
 			baseSystemPromptPath: this.systemPromptPath,
 			cwd: opts.cwd,
@@ -2870,6 +2919,8 @@ export class SessionManager {
 			// and never duplicates the instructions across Goal + Task.
 			taskTitle: "Delegate Task",
 			taskSpec: this.buildDelegateTaskSpec(opts.instructions, opts.context),
+			rolePrompt,
+			roleName: rolePrompt ? opts.role : undefined,
 			allowedTools: opts.allowedTools,
 			projectConfigStore: this.projectConfigStore,
 			sectionOrder: opts.sectionOrder,
@@ -2901,6 +2952,10 @@ export class SessionManager {
 				context: persisted.context,
 				allowedTools: session.allowedTools ?? persisted.allowedTools,
 				sectionOrder,
+				role: session.role ?? persisted.role,
+				projectId: session.projectId ?? persisted.projectId,
+				goalId: effectiveGoalId,
+				sessionId: session.id,
 			});
 			parts.dynamicContext = session.promptParts?.dynamicContext;
 			if (this.toolManager && !parts.toolDocs) {
@@ -2972,7 +3027,9 @@ export class SessionManager {
 			const rolePrompt = resolveRolePrompt(tmpl ? { promptTemplate: tmpl } : undefined, {
 				branch: goal?.branch,
 				agentId: `${session.role}-${(session.goalId || session.id).slice(0, 8)}`,
-				roleManager: this.roleManager,
+				// Cascade-aware so {{AVAILABLE_ROLES}} in a rebuilt team-lead prompt
+				// lists market-pack roles (matches the team-manager assembled prompt).
+				roleManager: this.availableRolesSource(session.projectId) as unknown as RoleManager,
 				subGoalsEnabled: this.isSubgoalsEnabled,
 			});
 			const roleName = rolePrompt ? session.role : undefined;
@@ -5367,6 +5424,12 @@ export class SessionManager {
 				context: ps.context,
 				allowedTools: restoredAllowedNames,
 				sectionOrder: restoreSectionOrder,
+				// Re-attach a role-carrying delegate's prompt on restart (rolePrompt is
+				// not persisted). Role-less delegates leave it undefined — unchanged.
+				role: ps.role,
+				projectId: ps.projectId,
+				goalId: ps.teamGoalId,
+				sessionId: ps.id,
 			}));
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
@@ -5923,6 +5986,16 @@ export class SessionManager {
 		 */
 		readOnly?: boolean;
 		/**
+		 * Optional role injection (`team_delegate(role: X)`). Threads the role's
+		 * promptTemplate + accessory through the SHARED session-setup pipeline (via
+		 * plan.role/roleName/rolePrompt), exactly like the full createSession path.
+		 * Tools are NOT recomputed from the role — `effectiveAllowedTools` already
+		 * carries the spawn-verb/read-only-stripped role tools from the caller
+		 * (OrchestrationCore.childAllowedTools). Role injection must never widen
+		 * a delegate's tools.
+		 */
+		role?: string;
+		/**
 		 * NON-SECRET tool-scoping env vars merged into the child process env
 		 * (additive, alongside the gateway-set BOBBIT_SESSION_ID/SECRET). Used by
 		 * tool policies that read process env (e.g. the pr-walkthrough reviewer's
@@ -5990,9 +6063,31 @@ export class SessionManager {
 			? this.scopedGatewayEnvForDirectAgent(id, parentProjectId, parentEffectiveGoalId)
 			: undefined;
 
+		// Role injection (§Gap 2): resolve the role prompt cascade-first, mirroring
+		// createSession, so a `team_delegate(role: X)` child carries role X's
+		// promptTemplate. Tools are left untouched (already stripped by the caller).
+		let resolvedRolePrompt: string | undefined;
+		if (opts.role) {
+			const template = this.resolveRolePromptTemplate(opts.role, parentProjectId);
+			if (template) {
+				const goalBranch = parentEffectiveGoalId ? this.resolveGoal(parentEffectiveGoalId)?.branch : undefined;
+				resolvedRolePrompt = resolveRolePrompt({ promptTemplate: template }, {
+					branch: goalBranch,
+					agentId: `${opts.role}-${id.slice(0, 8)}`,
+					roleManager: this.roleManager ?? undefined,
+					subGoalsEnabled: this.isSubgoalsEnabled,
+				});
+			}
+		}
+
 		const plan: SessionSetupPlan = {
 			id,
 			mode: "delegate",
+			// Role injection: role/roleName drive the shared role-accessory application
+			// in session-setup; rolePrompt reaches assemblePrompt via _resolvePrompt.
+			role: opts.role,
+			roleName: opts.role,
+			rolePrompt: resolvedRolePrompt,
 			title: titleSummary,
 			cwd: opts.cwd,
 			delegateOf: parentSessionId,

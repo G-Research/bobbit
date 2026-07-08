@@ -12,7 +12,7 @@ import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
-import { resolveRole, listAvailableRoles } from "./resolve-role.js";
+import { resolveRole, listAvailableRoles, type RoleSource } from "./resolve-role.js";
 import { GoalPausedError } from "./goal-paused-guard.js";
 import { TeamStore } from "./team-store.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
@@ -249,6 +249,10 @@ export interface TeamManagerConfig {
 	taskManager: TaskManager;
 	/** Role store for looking up role definitions (prompts, accessories, tools) */
 	roleStore?: RoleStore;
+	/** Cascade-aware single-role resolver (project→server→builtin→market-packs). server.ts wires resolveRoleForProject. */
+	resolveRoleForProject?: (roleName: string, projectId?: string) => Role | undefined;
+	/** Cascade-aware all-roles resolver for a project scope. server.ts wires configCascade.resolveRoles(projectId).map(r=>r.item). */
+	resolveRolesForProject?: (projectId?: string) => Role[];
 	/** @deprecated Gate store — resolve per-goal via projectContextManager instead. */
 	gateStore?: GateStore;
 	/** Broadcast a WS event to all clients viewing a goal */
@@ -1660,6 +1664,33 @@ export class TeamManager {
 		return this.taskManager.getTasksForSession(sessionId);
 	}
 
+	/**
+	 * Build a cascade-aware RoleSource scoped to a goal's project. Prefers the
+	 * config-cascade resolvers (project→server→builtin→market-packs) with the
+	 * bare RoleStore as a fallback, de-duplicating by name with cascade
+	 * precedence first. Falls back to the bare RoleStore when no cascade
+	 * resolvers are wired (e.g. in tests).
+	 */
+	private resolveRoleSource(goal: PersistedGoal | undefined): RoleSource {
+		const projectId = goal?.projectId;
+		const one = this.config.resolveRoleForProject;
+		const all = this.config.resolveRolesForProject;
+		if (one || all) {
+			return {
+				get: (name) => one?.(name, projectId) ?? this.config.roleStore?.get(name),
+				getAll: () => {
+					const seen = new Set<string>();
+					const out: Role[] = [];
+					for (const r of [...(all?.(projectId) ?? []), ...(this.config.roleStore?.getAll() ?? [])]) {
+						if (!seen.has(r.name)) { seen.add(r.name); out.push(r); }
+					}
+					return out;
+				},
+			};
+		}
+		return this.config.roleStore ?? { get: () => undefined, getAll: () => [] };
+	}
+
 	/** Resolve a goal across all project contexts. */
 	private resolveGoal(goalId: string): PersistedGoal | undefined {
 		if (this.config.projectContextManager) {
@@ -1726,10 +1757,10 @@ export class TeamManager {
 
 		// Build the Team Lead role prompt with structural placeholders only
 		// Secrets (gateway URL, auth token, goal ID) are passed as env vars, NOT embedded in prompt text
-		const roleStore = this.config.roleStore;
 		// Resolve via the goal's inline-roles snapshot first, then the
-		// project/server/builtin role-store cascade — same precedence as spawnRole().
-		const storedRole = resolveRole(goal, "team-lead", roleStore);
+		// config cascade (project→server→builtin→market-packs) — same precedence as spawnRole().
+		const roleSource = this.resolveRoleSource(goal);
+		const storedRole = resolveRole(goal, "team-lead", roleSource);
 		if (!storedRole) {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
@@ -1738,7 +1769,7 @@ export class TeamManager {
 			teamLeadPromptTemplate
 				.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch || "main")
 				.replace(/\{\{AGENT_ID\}\}/g, `team-lead-${goalId.slice(0, 8)}`)
-				.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(roleStore)),
+				.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(roleSource)),
 			{ subGoalsEnabled: this.sessionManager.isSubgoalsEnabled },
 		);
 
@@ -1907,14 +1938,14 @@ export class TeamManager {
 		task: string,
 		opts?: { workflowGateId?: string; inputGateIds?: string[] },
 	): Promise<{ sessionId: string; worktreePath?: string }> {
-		const roleStore = this.config.roleStore;
 		// Resolve via the goal's inline-roles snapshot first, then the
-		// project/server/builtin role-store cascade. See resolveRole() and the
-		// PersistedGoal.inlineRoles field doc for the precedence rule.
+		// config cascade (project→server→builtin→market-packs). See resolveRole()
+		// and the PersistedGoal.inlineRoles field doc for the precedence rule.
 		const goalForRole = this.resolveGoal(goalId);
-		const storedRoleDef = resolveRole(goalForRole, role, roleStore);
+		const roleSource = this.resolveRoleSource(goalForRole);
+		const storedRoleDef = resolveRole(goalForRole, role, roleSource);
 		if (!storedRoleDef) {
-			const available = listAvailableRoles(goalForRole, roleStore).join(", ") || "none";
+			const available = listAvailableRoles(goalForRole, roleSource).join(", ") || "none";
 			throw new Error(`Role "${role}" not found. Available roles: ${available}`);
 		}
 
