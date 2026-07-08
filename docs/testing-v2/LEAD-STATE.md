@@ -1,6 +1,11 @@
 # TEAM-LEAD RESUME STATE (read this first after any compaction/restart)
 
-## 🔴 CRITICAL INCIDENT (2026-07-08): e2e:v2 KILLED node_modules → SERVER DIED
+## ⚠️ INCIDENT (2026-07-08) — RECOVERED; kill-mechanism NOT confirmed
+- **STATUS: env RECOVERED.** Primary node_modules restored (.bin ~111, healthy for master — tsx/vitest absent there is EXPECTED, they're goal-branch-only). Gateway healthy (gate_list 8/12). GOAL worktree node_modules still gutted (.bin=0) — mine to restore via `npm ci` (non-blocking for orchestration; agents npm-ci their own worktrees).
+- **CORRECTION to earlier claim:** I asserted the e2e:v2 worktree-teardown deleted THROUGH a node_modules junction. On inspection the runner (run-e2e-v2.mjs) + relocated specs show NO node_modules junction logic, and the project's worktrees use real `npm ci` (worktree_setup_command), not junctions. So the junction-delete-through theory is UNSUPPORTED by code. **More likely:** the heavy e2e:v2 run (20+ node + 7 chrome procs) exhausted resources / crashed the server mid-op, INTERRUPTING an npm ci → the 'packages present, .bin empty' corrupted state. Exact root cause UNCERTAIN.
+- **d5bb e2e:v2 WIP PRESERVED** at branch goal/6c956ecf/test-engineer-d5bb @ **d12a3d81** (runner + nonGitCwd-heal + no-new-sleeps + spec-framework/story-registry). Task 7862db76 = BLOCKED.
+- **DO NOT re-run heavy e2e:v2 until:** env is stable AND the run's resource footprint is understood (so it doesn't recrash the box). Not a confirmed code hazard — a resource/stability one.
+- (original incident text below, kept for history) 🔴 e2e:v2 KILLED node_modules → SERVER DIED
 - **Root cause:** running the **e2e:v2 real-fidelity tier** (worktree/pool specs: continue-archived-worktree*, *-pool, pool-flow, etc.) tore down a worktree **through its node_modules JUNCTION**, deleting the shared node_modules → gateway (runs from primary worktree) lost its deps → server died. SAME hazard class as the chaos.mjs bug (fixed via `unlinkNodeModulesJunction`), but the **e2e:v2 / legacy-e2e worktree teardown was never made junction-safe**.
 - **Damage:** node_modules `.bin` wiped across goal (no vitest/playwright) + primary (no tsx). Gateway degraded/port-fluxing (3001/3002) post-restart.
 - **DO NOT re-run e2e:v2 (test:e2e:v2 / the worktree-pool specs) until the teardown is JUNCTION-SAFE** — it will kill the server again. This is now a HARD prerequisite before any e2e:v2 run.
