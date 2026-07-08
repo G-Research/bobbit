@@ -130,6 +130,17 @@ export default {
 				browserName: "chromium" as const,
 			},
 		},
+		{
+			// Real-fidelity browser daily lane (adapter specs + crash/restart journey).
+			// Run only via `test:e2e:v2` / `test:daily` — NOT part of tier-2 `test:v2`.
+			// retries:0 is inherited from the top-level config (no flake budget).
+			name: "browser-v2-daily",
+			testDir: "./tests2/browser/daily",
+			testMatch: ["**/*.spec.ts"],
+			use: {
+				browserName: "chromium" as const,
+			},
+		},
 	],
 	outputDir: "test-results-v2",
 };

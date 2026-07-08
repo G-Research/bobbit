@@ -30,6 +30,7 @@
     "test:v2:core": "vitest run --config vitest.config.ts",
     "test:v2:changed": "vitest --config vitest.config.ts --changed",
     "test:v2:browser": "playwright test --config playwright-v2.config.ts && node scripts/testing-v2/assert-budget.mjs browser --report .profiles/testing-v2/budgets/playwright-report.json",
+    "test:e2e:v2": "npm run build --silent && node scripts/testing-v2/run-e2e-v2.mjs",
     "test:daily": "node scripts/testing-v2/run-daily.mjs",
     "test:v2:coverage-delta": "node scripts/testing-v2/coverage-delta.mjs",
     "test:v2:browser-chaos": "node scripts/testing-v2/browser-chaos.mjs",
