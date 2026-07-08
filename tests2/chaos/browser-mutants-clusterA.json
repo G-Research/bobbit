@@ -211,12 +211,12 @@
 	{
 		"id": "BR61",
 		"area": "misc-workflow-page-scope",
-		"file": "src/app/main.ts",
+		"file": "src/app/routing.ts",
 		"target": "ui",
 		"operator": "behavioural",
-		"search": "\t\t\t\t\tsetHashRoute(\"settings\", `${projectId}/workflows`, true);",
-		"replace": "\t\t\t\t\tsetHashRoute(\"settings\", `${projectId}/general`, true);",
-		"description": "The deprecated #/workflows route redirects to the project's settings GENERAL tab instead of its Workflows tab. Legacy workflow-page-scope.spec.ts asserts #/workflows redirects to #/settings/<projectId>/workflows (never system); misc journey never exercised the redirect (GAP). Ported into misc.journey.spec.ts (Journey: Workflow Editor).",
+		"search": "if (hash === \"#/workflows\") {",
+		"replace": "if (hash === \"#/workflows-x\") {",
+		"description": "The router stops recognising the deprecated #/workflows hash, so the project-scoped redirect never fires. Legacy workflow-page-scope.spec.ts asserts #/workflows redirects to #/settings/<projectId>/workflows (never system); misc journey never exercised the redirect (GAP). Ported into misc.journey.spec.ts (Journey: Workflow Editor). (Retargeted from a dead redirect call-site to the single upstream route parser after a both-missed result.)",
 		"expectedLegacyCatchers": [
 			"tests/e2e/ui/workflow-page-scope.spec.ts"
 		],
