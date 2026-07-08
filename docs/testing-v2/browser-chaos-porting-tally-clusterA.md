@@ -1,3 +1,10 @@
+> **⚠️ SUPERSEDED (historical).** Cluster A closed its denominator (44/44). The
+> corpus `browser-mutants-clusterA.json` is now folded into the canonical
+> `tests2/chaos/browser-mutants.json` (ids `BR50-null`, `BR51..BR70`) and deleted.
+> The reconciled unified completeness table + authoritative run live in
+> [`browser-chaos-report.md`](./browser-chaos-report.md). This file is retained
+> for the per-batch porting audit trail and excluded-tier reasons.
+
 # Browser-chaos porting — Cluster A tally (UI-surface)
 
 Cluster A journeys (STRICT OWNERSHIP): `app-smoke`, `misc`, `sidebar-nav`,

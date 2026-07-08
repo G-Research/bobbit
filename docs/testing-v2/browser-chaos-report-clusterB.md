@@ -1,3 +1,9 @@
+> **⚠️ SUPERSEDED (historical).** This per-cluster report was generated from
+> `browser-mutants-clusterB.json`, which has been folded into the canonical
+> `tests2/chaos/browser-mutants.json` and deleted. The authoritative D8 evidence
+> is the unified run in [`browser-chaos-report.md`](./browser-chaos-report.md)
+> (86-entry corpus, 0 real holes, null PASS). Kept for the per-batch porting audit trail.
+
 # Browser-dimension Chaos Comparison — Test Suite v2
 
 Generated: 2026-07-08T02:17:03.804Z  |  Run duration: 26.4 min
