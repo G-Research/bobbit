@@ -239,5 +239,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR63",
+		"area": "sidebar-new-goal",
+		"file": "src/app/sidebar.ts",
+		"target": "ui",
+		"operator": "label-rename",
+		"search": "New goal${shortcutHint(\"new-goal\")}",
+		"replace": "New gaol${shortcutHint(\"new-goal\")}",
+		"description": "The sidebar New Goal button loses its title, so the New-Goal→goal-assistant flow cannot be reached. Legacy sidebar-goal-staff.spec.ts asserts New Goal opens the goal assistant; sidebar-nav journey never exercised it (GAP). Ported into sidebar-nav.journey.spec.ts via createGoalAssistantViaUI.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/sidebar-goal-staff.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR64",
+		"area": "sidebar-new-session",
+		"file": "src/app/sidebar.ts",
+		"target": "ui",
+		"operator": "label-rename",
+		"search": "title=\"New session in ${project.name}\"",
+		"replace": "title=\"Start session in ${project.name}\"",
+		"description": "The per-project New Session button loses its 'New session' title, so button[title^='New session'] no longer resolves it. Legacy sidebar-session-actions.spec.ts (SB-14) clicks it to create a session; sidebar-nav journey only asserted the button was visible, never clicked (GAP). Ported into sidebar-nav.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/sidebar-session-actions.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
 	}
 ]

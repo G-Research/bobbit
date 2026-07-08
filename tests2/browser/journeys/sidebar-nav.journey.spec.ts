@@ -5,6 +5,7 @@
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
 import { filtersButton, clickShowArchivedToggle, openFiltersPopover } from "../../../tests/e2e/ui/utils/sidebar-filters.js";
+import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: Sidebar Navigation", () => {
 	test("sidebar and new-session button visible on load", async ({ page }) => {
@@ -204,6 +205,30 @@ test.describe("Journey: Sidebar Navigation", () => {
 			await deleteGoal(goal.id, true).catch(() => {});
 		}
 	});
+	// Ported from sidebar-goal-staff.spec.ts (audit: sidebar-nav GAP / BR63): the
+	// sidebar New Goal button opens a goal-assistant session.
+	test("New Goal button opens a goal-assistant session", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		const sid = await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		expect(sid).toBeTruthy();
+		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+		expect(await page.evaluate(() => window.location.hash)).toContain(sid);
+	});
+
+	// Ported from sidebar-session-actions.spec.ts SB-14 (audit: sidebar-nav GAP / BR64):
+	// the per-project New Session button creates and opens a new session.
+	test("New Session button creates and opens a new session", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		const newSessionBtn = page.locator("button[title^='New session']").first();
+		await expect(newSessionBtn).toBeVisible({ timeout: 15_000 });
+		await newSessionBtn.click();
+		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 })
+			.toMatch(/#\/session\/[a-f0-9-]+/i);
+	});
+
 	// Ported from sidebar-filters.spec.ts (audit: sidebar-nav GAP / BR58): the
 	// Filters popover exposes a "Show Read" toggle row with its stable testid.
 	test("Filters popover exposes the Show Read toggle", async ({ page }) => {
