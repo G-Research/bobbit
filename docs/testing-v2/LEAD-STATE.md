@@ -12,6 +12,9 @@ Only the LEAD signals gates. Signal from goal HEAD after merging member branches
 ## Goal HEAD / PR
 - Goal HEAD as of writing: **b51be76a** (command-step seam + concurrency harness merged). PR mergeable, 0 behind master (re-check).
 
+## PENDING MASTER SYNC (deferred until measurement done, to not contaminate quiet-window)
+- Master +2: **#948 Sidebar Reveal On Nav** (src/app/sidebar-reveal.ts new, main.ts, sidebar.ts; test tests/e2e/ui/sidebar-reveal.spec.ts) + **#949 Market-Pack Roles in Teams** (src/server/agent/{resolve-role,session-manager,session-setup,team-manager,orchestration-core}.ts, server.ts; test tests/e2e/market-pack-team-roles.spec.ts). LIKELY CONFLICTS in DI-clock-seam files session-manager.ts/team-manager.ts/server.ts — use established both-or-neither resolution (keep DI seams + master behaviour). REPRESENT 2 new tests in v2 (sidebar-reveal → browser; market-pack-team-roles → integration). Do AFTER: measurement completes → merge budget+browser-lease result → then this sync.
+
 ## CONCURRENCY (Option 1) STATUS
 - Command-step DI seam IMPLEMENTED + merged (b51be76a). Validation: contract 13/13, fake specs 35/35 (1 boot, **0 spawns**), real path 10/10, coexistence-isolated, guard-v2 + check green.
 - **code-reviewer-8ba9** (session 6a383bec) auditing prod-safety (fake-unreachable-in-prod / verdict integrity / contract strength / fake fidelity) — runs parallel to clusters.
