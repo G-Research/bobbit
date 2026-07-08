@@ -313,6 +313,10 @@ export interface OrchestrationSessionView {
 		allowedTools?: string[];
 		initialModel?: string;
 		initialThinkingLevel?: string;
+		/** Optional role injection: threads role prompt + accessory through the
+		 *  shared session-setup pipeline. Tools are NOT recomputed here (they are
+		 *  already the spawn-verb/read-only-stripped role tools from childAllowedTools). */
+		role?: string;
 		/** NON-SECRET tool-scoping env vars (additive; never widens sandbox/project scope). */
 		env?: Record<string, string>;
 		/** Persisted so the source discriminator survives restart (§3). Default "delegate". */
@@ -541,6 +545,7 @@ export class OrchestrationCore {
 				// restart (§3): rebuildIndexFromPersisted reads childKind to reconstruct
 				// e.g. host-agents children instead of mislabelling them "delegate".
 				childKind,
+				role: opts.role,
 				readOnly: opts.readOnly,
 			});
 			childId = child.id;

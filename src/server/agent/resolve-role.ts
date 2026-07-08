@@ -16,7 +16,18 @@
  */
 
 import type { PersistedGoal } from "./goal-store.js";
-import type { Role, RoleStore } from "./role-store.js";
+import type { Role } from "./role-store.js";
+
+/**
+ * Minimal structural role source. `RoleStore` is structurally compatible
+ * (it has `get`/`getAll`), so existing callers keep working, but a
+ * cascade-aware source (project→server→builtin→market-packs) can be passed
+ * in too — see `TeamManager.resolveRoleSource`.
+ */
+export interface RoleSource {
+	get(name: string): Role | undefined;
+	getAll(): Role[];
+}
 
 /**
  * Resolve a role by name for a given goal. Returns the inline definition
@@ -32,7 +43,7 @@ import type { Role, RoleStore } from "./role-store.js";
 export function resolveRole(
 	goal: PersistedGoal | undefined,
 	name: string,
-	roleStore: RoleStore | undefined,
+	roleStore: RoleSource | undefined,
 ): Role | undefined {
 	const inline = goal?.inlineRoles?.[name];
 	if (inline) return inline;
@@ -47,7 +58,7 @@ export function resolveRole(
  */
 export function listAvailableRoles(
 	goal: PersistedGoal | undefined,
-	roleStore: RoleStore | undefined,
+	roleStore: RoleSource | undefined,
 ): string[] {
 	const inline = goal?.inlineRoles ? Object.keys(goal.inlineRoles) : [];
 	const stored = roleStore?.getAll().map(r => r.name) ?? [];
