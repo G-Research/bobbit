@@ -187,7 +187,7 @@ Status per domain (updated each batch):
 | steer-during-bash-tool | GAP | EXCL | env-flag repro (MOCK_ABORT_AS_ERROR) — keep legacy |
 | tool-assistant-system-scope | GAP | EXCL | mis-mapped (tools suite) |
 
-### stories-registry (8 specs) — in-scope 6
+### stories-registry (8 specs) — in-scope 8
 | spec | class | status | id / reason |
 |---|---|---|---|
 | stories-sessions | PARTIAL | HOLE-CLOSED | BR24 |
@@ -207,11 +207,11 @@ Status per domain (updated each batch):
 | misc | 14 | 14 | 0 |
 | sidebar-nav | 8 | 5 | 3 |
 | prompt-interaction | 6 | 2 | 4 |
-| stories-registry | 6 | 2 | 4 |
-| **TOTAL** | **43** | **30** | **13** |
+| stories-registry | 8 | 2 | 6 |
+| **TOTAL** | **45** | **30** | **15** |
 
 Excluded (with reasons above): app-smoke 11, misc 3, sidebar-nav 12, prompt-interaction 5, stories 0 = **31**.
-Campaign closes when TOTAL remaining TODO == 0 (M == N == 43).
+Campaign closes when TOTAL remaining TODO == 0 (M == N == 45).
 
 #### Batch A8 (BR63 new-goal→assistant, BR64 new-session-create) — 2 sidebar-nav holes closed (now 5/8).
 
