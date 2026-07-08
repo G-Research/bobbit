@@ -44,6 +44,33 @@
  *
  * opts (both): { coalesceMs?, totalCores?, lockTimeoutMs?, grantTimeoutMs? }
  *
+ * ─── GLOBAL CONCURRENCY BUDGET — gateway-boot lease pool ───
+ *
+ * The reservation API above bounds the *steady-state* worker count
+ * (ΣworkerSlots ≤ cores). It does NOT bound the *transient* CPU bursts that
+ * happen when many in-process gateways boot at the same instant — the diagnosed
+ * root cause of the N-way flakes (docs/testing-v2/concurrency-proof.md): every
+ * v2-integration test file boots a gateway once per vitest fork, every Playwright
+ * worker boots one at worker startup, so N concurrent `test:v2` runs fire a
+ * cluster of simultaneous boots that spike CPU and starve timing-sensitive
+ * integration tests past their timeouts.
+ *
+ * The lease pool is a SEPARATE cross-process semaphore that gates those heavy
+ * ops regardless of the active-run count. A heavy op acquires a lease → WAITS if
+ * the pool is saturated → releases when the burst is over. This makes the box
+ * un-oversubscribable at ANY N (higher wall via queuing is the accepted tradeoff
+ * — reliability > speed).
+ *
+ *   acquireLease(pool, opts?) -> Promise<{ release, id, forced, pool, cap }>
+ *   acquireGatewayBootLease(opts?) -> Promise<{ release, ... }>  // pool="gateway-boot"
+ *   readLeases(opts?) -> { leases, generation }   leaseCap(pool, opts?) -> int
+ *
+ * Pool caps (per-pool, live-swept on dead PID + max-hold age):
+ *   gateway-boot: BOBBIT_V2_MAX_GATEWAY_BOOTS ?? clamp(floor(cores/6), 2, 8)
+ * Leases are held ONLY for the duration of the boot (release immediately after
+ * gw.start()), never for the whole test run. acquire is fail-open: after
+ * timeoutMs it proceeds anyway (a `forced` lease) so a boot can never deadlock.
+ *
  * All exported reservations MUST be released on process exit; the ledger also
  * self-heals: every read sweeps entries whose owner PID is no longer alive.
  */
@@ -76,6 +103,12 @@ const MIN_BUNDLE = 4;
 const MAX_BUNDLE = 12;
 const VITEST_CAP = 8;
 const PLAYWRIGHT_CAP = 4;
+
+// ─── gateway-boot lease pool (global concurrency budget) ───
+const LEASES_FILENAME = "leases.json";
+const DEFAULT_LEASE_TIMEOUT_MS = 120_000; // fail-open after this (never deadlock a boot)
+const LEASE_MAX_HOLD_MS = 180_000; // a lease older than this is swept even if PID alive
+const LEASE_POLL_MS = 150; // base backoff between saturated-pool retries (jittered)
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
@@ -512,6 +545,132 @@ function releaseRecords(recordIds, heartbeat, opts = {}) {
 	}
 }
 
+// ──────────────────── gateway-boot lease pool (global budget) ────────────────────
+
+function leasesPath() {
+	return join(ledgerDir(), LEASES_FILENAME);
+}
+
+function readLeasesRaw() {
+	try {
+		const parsed = JSON.parse(readFileSync(leasesPath(), "utf8"));
+		if (parsed && Array.isArray(parsed.leases)) {
+			return { leases: parsed.leases, generation: parsed.generation || 0 };
+		}
+	} catch {
+		/* missing/corrupt — start fresh */
+	}
+	return { leases: [], generation: 0 };
+}
+
+/**
+ * Drop leases whose owner PID is dead OR that have out-lived LEASE_MAX_HOLD_MS.
+ * A lease is meant to wrap only a gateway boot (seconds); anything holding one
+ * for >3 min is either a wedged process or a leaked release, and freeing it can
+ * never over-count (leases are advisory backpressure, not a hard core budget).
+ */
+function sweepLeases(state) {
+	const now = Date.now();
+	state.leases = state.leases.filter((l) => pidAlive(l.pid) && now - Date.parse(l.at || 0) < LEASE_MAX_HOLD_MS);
+}
+
+function writeLeases(state) {
+	state.generation = (state.generation || 0) + 1;
+	writeFileSync(leasesPath(), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+/** Resolve the concurrent-holder cap for a lease pool. */
+export function leaseCap(pool, opts = {}) {
+	const fromOpt = Number(opts.cap);
+	if (Number.isFinite(fromOpt) && fromOpt > 0) return Math.floor(fromOpt);
+	if (pool === "gateway-boot") {
+		const env = Number(process.env.BOBBIT_V2_MAX_GATEWAY_BOOTS);
+		if (Number.isFinite(env) && env > 0) return Math.floor(env);
+		// ~1 boot per 6 cores: 24-core box → 4 simultaneous boots. Small enough to
+		// keep the transient boot CPU burst well under the core count at ANY N,
+		// large enough that a single isolated run barely queues.
+		return clamp(Math.floor(totalCores(opts) / 6), 2, 8);
+	}
+	const envKey = `BOBBIT_V2_MAX_${pool.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+	const env = Number(process.env[envKey]);
+	if (Number.isFinite(env) && env > 0) return Math.floor(env);
+	return clamp(Math.floor(totalCores(opts) / 4), 2, MAX_BUNDLE);
+}
+
+const sleepAsync = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Acquire a lease from a cross-process pool, WAITING (async) while the pool is
+ * saturated. Returns once granted; the returned release() removes the lease.
+ * Fail-open: after opts.timeoutMs the lease is granted anyway (`forced:true`)
+ * so a heavy op can never deadlock behind a mis-counted or slow peer.
+ */
+export async function acquireLease(pool, opts = {}) {
+	const id = newId(`lease-${pool}`);
+	const cap = leaseCap(pool, opts);
+	const deadline = Date.now() + (opts.timeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS);
+	let forced = false;
+	for (;;) {
+		const outcome = withLock(() => {
+			const state = readLeasesRaw();
+			sweepLeases(state);
+			const held = state.leases.filter((l) => l.pool === pool).length;
+			const timedOut = Date.now() > deadline;
+			if (held < cap || timedOut) {
+				const wasForced = timedOut && held >= cap;
+				state.leases.push({ id, pool, pid: process.pid, at: new Date().toISOString(), forced: wasForced });
+				writeLeases(state);
+				return { granted: true, forced: wasForced };
+			}
+			// Persist the sweep so a dead holder's slot is freed for peers even when
+			// we ourselves don't get in this round.
+			writeLeases(state);
+			return { granted: false };
+		}, opts);
+		if (outcome.granted) {
+			forced = outcome.forced;
+			break;
+		}
+		await sleepAsync(jitter(LEASE_POLL_MS));
+	}
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		releaseLeaseById(id, opts);
+	};
+	process.once("exit", release);
+	return { release, id, forced, pool, cap };
+}
+
+function releaseLeaseById(id, opts = {}) {
+	try {
+		withLock(() => {
+			const state = readLeasesRaw();
+			state.leases = state.leases.filter((l) => l.id !== id);
+			writeLeases(state);
+		}, { lockTimeoutMs: opts.lockTimeoutMs ?? 5000 });
+	} catch {
+		/* best-effort — the sweeper reclaims on PID liveness / max-hold age */
+	}
+}
+
+/** Convenience wrapper: the primary contention source is gateway boots. */
+export function acquireGatewayBootLease(opts = {}) {
+	return acquireLease("gateway-boot", opts);
+}
+
+export function readLeases(opts = {}) {
+	if (!existsSync(leasesPath())) return { leases: [], generation: 0 };
+	return withLock(() => {
+		const state = readLeasesRaw();
+		const before = state.leases.length;
+		sweepLeases(state);
+		if (state.leases.length !== before) writeLeases(state);
+		return state;
+	}, opts);
+}
+
 // ─────────────────────────────── public ───────────────────────────────
 
 export function reserveParentBundle(opts = {}) {
@@ -590,6 +749,14 @@ function cliStatus() {
 		console.log(`  - ${r.kind.padEnd(11)} slots=${r.workerSlots} pid=${r.pid} parent=${r.parentRunId} id=${r.id}`);
 	}
 	if (!state.reservations.length) console.log("  (no active reservations)");
+
+	const leaseState = readLeases();
+	const gbCap = leaseCap("gateway-boot");
+	const gbHeld = leaseState.leases.filter((l) => l.pool === "gateway-boot").length;
+	console.log(`  leases: gateway-boot ${gbHeld}/${gbCap}`);
+	for (const l of leaseState.leases) {
+		console.log(`    - ${l.pool} pid=${l.pid} at=${l.at}${l.forced ? " (forced)" : ""} id=${l.id}`);
+	}
 }
 
 function assert(cond, msg) {
@@ -843,13 +1010,190 @@ async function cliStress() {
 	process.exit(ok ? 0 : 1);
 }
 
+// ─────────────────────── lease-pool selftest + stress ───────────────────────
+
+/** Reserve a gateway-boot lease, print the live holder count, hold, release. */
+async function cliLeaseHold(holdMs, cap) {
+	const opts = cap ? { cap } : {};
+	const lease = await acquireLease("gateway-boot", opts);
+	const snap = readLeases();
+	const held = snap.leases.filter((l) => l.pool === "gateway-boot").length;
+	const effectiveCap = leaseCap("gateway-boot", opts);
+	console.log(`LEASED pid=${process.pid} held=${held}/${effectiveCap}${lease.forced ? " (forced)" : ""}`);
+	if (held > effectiveCap && !lease.forced) {
+		console.error(`LEASE INVARIANT VIOLATION at acquire: held=${held} > cap=${effectiveCap}`);
+		process.exit(3);
+	}
+	await sleepAsync(holdMs);
+	lease.release();
+	process.exit(0);
+}
+
+/**
+ * cliLeaseStress — spawn N lease-hold children with staggered starts, poll the
+ * lease pool throughout, and assert peak concurrent holders ≤ cap. Proves the
+ * cross-process gateway-boot budget without running the suite (valid on a busy
+ * box). usage: node ledger.mjs --lease-stress [N=8] [staggerMs=50] [holdMs=1500] [cap=3]
+ */
+async function cliLeaseStress() {
+	process.env.BOBBIT_V2_TOTAL_CORES = process.env.BOBBIT_V2_TOTAL_CORES || "24";
+	const N = Number(process.argv[3]) || 8;
+	const staggerMs = Number(process.argv[4]) || 50;
+	const holdMs = Number(process.argv[5]) || 1500;
+	const cap = Number(process.argv[6]) || 3;
+
+	ensureDir();
+	try {
+		rmSync(leasesPath(), { force: true });
+		rmSync(lockPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+
+	console.log(`lease stress: cap=${cap} children=${N} stagger=${staggerMs}ms hold=${holdMs}ms`);
+	const selfPath = fileURLToPath(import.meta.url);
+	let peakHeld = 0;
+	let violated = false;
+
+	const poll = setInterval(() => {
+		try {
+			const state = readLeases({ lockTimeoutMs: 2000 });
+			const held = state.leases.filter((l) => l.pool === "gateway-boot").length;
+			if (held > peakHeld) peakHeld = held;
+			if (held > cap) {
+				violated = true;
+				console.error(`  POLL VIOLATION: held=${held} > cap=${cap}`);
+			}
+		} catch {
+			/* locked — skip */
+		}
+	}, 100);
+
+	const waits = [];
+	for (let i = 0; i < N; i++) {
+		if (i > 0 && staggerMs > 0) await sleepAsync(staggerMs);
+		const child = spawn(process.execPath, [selfPath, "--lease-hold", String(holdMs), String(cap)], {
+			stdio: "inherit",
+			env: { ...process.env, BOBBIT_V2_MAX_GATEWAY_BOOTS: String(cap) },
+		});
+		waits.push(
+			new Promise((resolveChild) => {
+				child.on("close", (code, signal) => resolveChild(code ?? (signal ? 137 : 0)));
+				child.on("error", () => resolveChild(1));
+			}),
+		);
+	}
+
+	const codes = await Promise.all(waits);
+	clearInterval(poll);
+	await sleepAsync(300);
+	const leftover = readLeases().leases.length;
+	const badCodes = codes.filter((c) => c !== 0);
+	console.log(`lease stress: peak held=${peakHeld}/${cap}  leftover=${leftover}  badExits=${badCodes.length}${badCodes.length ? ` (codes=${badCodes.join(",")})` : ""}`);
+
+	let ok = true;
+	if (violated || peakHeld > cap) {
+		console.error("lease stress: FAIL — concurrent holders exceeded cap");
+		ok = false;
+	}
+	if (badCodes.length > 0) {
+		console.error(`lease stress: FAIL — ${badCodes.length} child(ren) exited non-zero (codes=${badCodes.join(",")})`);
+		ok = false;
+	}
+	if (leftover > 0) {
+		console.error(`lease stress: FAIL — ${leftover} lease(s) not released/swept`);
+		ok = false;
+	}
+	console.log(ok ? "lease stress: PASS" : "lease stress: FAILED");
+	process.exit(ok ? 0 : 1);
+}
+
+/** In-process lease selftest: cap enforcement, fail-open, dead-PID sweep. */
+async function cliLeaseSelftest() {
+	process.env.BOBBIT_V2_TOTAL_CORES = process.env.BOBBIT_V2_TOTAL_CORES || "24";
+	ensureDir();
+	try {
+		rmSync(leasesPath(), { force: true });
+		rmSync(lockPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+	console.log("lease selftest: begin");
+
+	// 1) cap resolution: default (24/6=4) and env override.
+	assert(leaseCap("gateway-boot") === 4, `default gateway-boot cap on 24 cores should be 4, got ${leaseCap("gateway-boot")}`);
+	assert(leaseCap("gateway-boot", { cap: 2 }) === 2, `opts.cap overrides, got ${leaseCap("gateway-boot", { cap: 2 })}`);
+
+	// 2) Acquire up to cap; the (cap+1)th must WAIT (not grant immediately),
+	//    then be granted after a holder releases.
+	const cap = 2;
+	const l1 = await acquireLease("gateway-boot", { cap });
+	const l2 = await acquireLease("gateway-boot", { cap });
+	assert(readLeases().leases.length === 2, `two leases held, got ${readLeases().leases.length}`);
+	let l3Granted = false;
+	const l3Promise = acquireLease("gateway-boot", { cap, timeoutMs: 5000 }).then((l) => {
+		l3Granted = true;
+		return l;
+	});
+	await sleepAsync(400);
+	assert(!l3Granted, "3rd lease must WAIT while pool is at cap (backpressure)");
+	l1.release();
+	const l3 = await l3Promise;
+	assert(l3Granted && !l3.forced, "3rd lease granted (not forced) after a holder released");
+	l2.release();
+	l3.release();
+	assert(readLeases().leases.length === 0, `all leases released, found ${readLeases().leases.length}`);
+	console.log("  cap enforcement + wait-then-grant ✓");
+
+	// 3) Fail-open: at cap with a short timeout, acquire proceeds as `forced`.
+	const h1 = await acquireLease("gateway-boot", { cap: 1 });
+	const forcedLease = await acquireLease("gateway-boot", { cap: 1, timeoutMs: 300 });
+	assert(forcedLease.forced, "acquire past deadline must fail-open with forced:true (never deadlock)");
+	h1.release();
+	forcedLease.release();
+	console.log("  fail-open forced lease after timeout ✓");
+
+	// 4) Dead-PID sweep: seed a lease owned by a dead pid; a fresh acquire at cap=1
+	//    must reclaim it rather than block forever.
+	const dead = spawnSync(process.execPath, ["-e", "0"]);
+	writeFileSync(
+		leasesPath(),
+		JSON.stringify({ generation: 1, leases: [{ id: "ghost-lease", pool: "gateway-boot", pid: dead.pid, at: new Date().toISOString() }] }, null, 2),
+	);
+	const reclaimed = await acquireLease("gateway-boot", { cap: 1, timeoutMs: 3000 });
+	assert(!reclaimed.forced, "dead-pid lease should be swept so a fresh acquire is granted normally (not forced)");
+	assert(readLeases().leases.length === 1, `only the live lease remains, got ${readLeases().leases.length}`);
+	reclaimed.release();
+	console.log("  dead-pid lease swept ✓");
+
+	try {
+		rmSync(leasesPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+	console.log("lease selftest: PASS");
+}
+
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
 	const arg = process.argv[2] || "--status";
-	if (arg === "--selftest") cliSelftest();
+	if (arg === "--selftest") {
+		cliSelftest();
+		cliLeaseSelftest().catch((e) => {
+			console.error("lease selftest: fatal:", e);
+			process.exit(1);
+		});
+	} else if (arg === "--lease-selftest") cliLeaseSelftest().catch((e) => {
+		console.error("lease selftest: fatal:", e);
+		process.exit(1);
+	});
 	else if (arg === "--status") cliStatus();
 	else if (arg === "--stress") cliStress().catch((e) => {
 		console.error("ledger stress: fatal:", e);
+		process.exit(1);
+	});
+	else if (arg === "--lease-stress") cliLeaseStress().catch((e) => {
+		console.error("lease stress: fatal:", e);
 		process.exit(1);
 	});
 	else if (arg === "--reserve-hold") {
@@ -857,8 +1201,15 @@ if (isMain) {
 		const holdMs = Number(process.argv[4]) || 6000;
 		const coalesceMs = Number(process.env.BOBBIT_V2_STRESS_COALESCE_MS) || 1500;
 		cliReserveHold(kind, holdMs, coalesceMs);
+	} else if (arg === "--lease-hold") {
+		const holdMs = Number(process.argv[3]) || 1500;
+		const cap = Number(process.argv[4]) || 0;
+		cliLeaseHold(holdMs, cap).catch((e) => {
+			console.error("lease hold: fatal:", e);
+			process.exit(1);
+		});
 	} else {
-		console.log("usage: node scripts/testing-v2/ledger.mjs [--status | --selftest | --stress [N] [staggerMs] [holdMs]]");
+		console.log("usage: node scripts/testing-v2/ledger.mjs [--status | --selftest | --lease-selftest | --stress [N] [staggerMs] [holdMs] | --lease-stress [N] [staggerMs] [holdMs] [cap]]");
 		process.exit(2);
 	}
 }
