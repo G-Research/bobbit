@@ -209,16 +209,16 @@
     ]
   },
   {
-    "id": "BR70",
-    "area": "proposals-spec-survives-navigate",
-    "file": "src/app/session-manager.ts",
+    "id": "BR71",
+    "area": "project-settings-goal-reattempt-binding",
+    "file": "src/app/proposal-panels.ts",
     "target": "ui",
     "operator": "disabled-guard",
-    "search": "state.previewTitle = g.title;\n\tif (!state.previewSpecEdited && typeof g.spec === \"string\") state.previewSpec = g.spec;",
-    "replace": "state.previewTitle = g.title;\n\tif (false && !state.previewSpecEdited && typeof g.spec === \"string\") state.previewSpec = g.spec;",
-    "description": "reconcileGoalSlotIntoFormMirror stops restoring the goal spec into the form-mirror on session (re)attach, so navigating away and back renders the goal-proposal panel with an empty spec. Legacy proposal-spec-survives-navigate.spec.ts asserts the spec body survives nav-away/back; proposals journey never navigates away and back (GAP).",
+    "search": "if (session?.reattemptGoalId) return state.goals.find(g => g.id === session.reattemptGoalId)?.projectId;",
+    "replace": "if (false && session?.reattemptGoalId) return state.goals.find(g => g.id === session.reattemptGoalId)?.projectId;",
+    "description": "resolveGoalProposalProjectId stops deriving the proposal projectId from a re-attempt session's original goal, so Create Goal in a re-attempt session hits 'No project selected'. Legacy goal-reattempt-project-binding.spec.ts asserts the created goal inherits the original projectId; proposals/project-settings journeys never drive Re-attempt (GAP).",
     "expectedLegacyCatchers": [
-      "tests/e2e/ui/proposal-spec-survives-navigate.spec.ts"
+      "tests/e2e/ui/goal-reattempt-project-binding.spec.ts"
     ],
     "expectedV2Catchers": [
       "tests2/browser/journeys/proposals.journey.spec.ts"

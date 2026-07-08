@@ -4,8 +4,9 @@
  * Consolidated from: goal-proposal-*, project-proposal-*, proposal-panel-*,
  *   proposal-open-all-types, proposal-panel-streaming, api-error-modal, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, defaultProjectId } from "../_helpers/journey-fixture.js";
 import { createSessionViaUI, sendMessage } from "../_helpers/journey-fixture.js";
+import { nonGitCwd } from "../e2e-setup.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 async function waitForProposalSlot(page: import("@playwright/test").Page, type: string): Promise<void> {
@@ -267,6 +268,85 @@ test.describe("Journey: Failed Goal Proposal", () => {
 		const workflowError = page.locator('[data-testid="goal-proposal-workflow-error"]').first();
 		await expect(workflowError).toBeVisible({ timeout: 20_000 });
 		await expect(workflowError).toContainText(/Workflow is required/i, { timeout: 10_000 });
+	});
+});
+
+// Ported from goal-reattempt-project-binding.spec.ts (audit: project-settings
+// GAP, mutant BR71): Create Goal in a Re-attempt session must inherit the
+// original goal's projectId (no "No project selected" error).
+test.describe("Journey: Goal Re-attempt — project binding", () => {
+	test("Create Goal in a re-attempt session inherits the original projectId", async ({ page }) => {
+		test.setTimeout(120_000);
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+
+		const origResp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "v2 original goal to re-attempt",
+				spec: "Original spec body for the re-attempt binding journey test.",
+				cwd: nonGitCwd(),
+				worktree: false,
+				autoStartTeam: false,
+				projectId,
+			}),
+		});
+		expect(origResp.status).toBe(201);
+		const origGoal = await origResp.json();
+		let sessionId = "";
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/goal/${origGoal.id}`);
+			const reattemptBtn = page.locator("button").filter({ hasText: "Re-attempt" }).first();
+			await expect(reattemptBtn).toBeVisible({ timeout: 15_000 });
+
+			const sessionCreate = page.waitForResponse(
+				(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
+				{ timeout: 30_000 },
+			);
+			await reattemptBtn.click();
+			sessionId = (await (await sessionCreate).json()).id;
+			expect(sessionId).toBeTruthy();
+			// Server inherited projectId + reattemptGoalId.
+			const sessData = await (await apiFetch(`/api/sessions/${sessionId}`)).json();
+			expect(sessData.projectId).toBe(projectId);
+			expect(sessData.reattemptGoalId).toBe(origGoal.id);
+
+			const textarea = page.locator("textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 20_000 });
+			await textarea.fill("Please create a GOAL_PROPOSAL for the re-attempt");
+			await textarea.press("Enter");
+
+			const titleInput = page.locator("input[placeholder='Goal title']").first();
+			await expect(titleInput).toBeVisible({ timeout: 30_000 });
+			await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+			const createBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
+			await expect(createBtn).toBeEnabled({ timeout: 10_000 });
+			const createPost = page.waitForResponse(
+				(resp) => resp.url().includes("/api/goals") && resp.request().method() === "POST" && resp.ok(),
+				{ timeout: 10_000 },
+			).catch(() => null);
+			await createBtn.click();
+
+			// The re-attempt derivation must prevent the "No project selected" error.
+			await expect(page.getByText("No project selected for this goal")).not.toBeVisible({ timeout: 3_000 });
+			expect(await createPost, "POST /api/goals must fire").not.toBeNull();
+
+			// New goal bound to the original projectId.
+			await expect.poll(async () => {
+				const data = await (await apiFetch("/api/goals")).json();
+				const goals: any[] = Array.isArray(data) ? data : data.goals ?? [];
+				return goals.find((g) => g.id !== origGoal.id && g.title === "E2E Test Goal" && g.projectId === projectId)?.projectId ?? null;
+			}, { timeout: 10_000 }).toBe(projectId);
+		} finally {
+			const data = await (await apiFetch("/api/goals")).json().catch(() => ({ goals: [] }));
+			const goals: any[] = Array.isArray(data) ? data : data.goals ?? [];
+			const fresh = goals.find((g) => g.id !== origGoal.id && g.title === "E2E Test Goal");
+			if (fresh?.id) await apiFetch(`/api/goals/${fresh.id}`, { method: "DELETE" }).catch(() => {});
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			await apiFetch(`/api/goals/${origGoal.id}`, { method: "DELETE" }).catch(() => {});
+		}
 	});
 });
 
