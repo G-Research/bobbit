@@ -127,7 +127,7 @@ Status per domain (updated each batch):
 | repro-h3-snapshot-live-interleave | GAP | EXCL | reducer-race (audit: keep own spec) |
 | tree-cost-rollup | GAP | EXCL | needs goal tree + cost seeding (audit: keep own spec) |
 
-### misc (17 specs) — in-scope 15
+### misc (17 specs) — in-scope 14
 | spec | class | status | id / reason |
 |---|---|---|---|
 | api-error-modal | GAP | HOLE-CLOSED | BR18 |
@@ -140,11 +140,11 @@ Status per domain (updated each batch):
 | preview-happy-path | PARTIAL | HOLE-CLOSED | BR52 |
 | compaction-persistence | GAP | HOLE-CLOSED | BR53 |
 | unseen-activity | PARTIAL | HELD | BR07 |
-| compact-cost | GAP | TODO | |
-| image-attach-roundtrip | GAP | TODO | ECHO_IMAGE_BLOCK |
-| optional-steps | GAP | TODO | |
-| review-pane | PARTIAL | TODO | approve/reject |
+| image-attach-roundtrip | GAP | HOLE-CLOSED | BR60 |
+| review-pane | PARTIAL | HOLE-CLOSED | BR59 |
+| optional-steps | GAP | HELD | proposal title-populate + Create-enabled proven by BR48/BR57 proposal-render mutations |
 | workflow-page-scope | GAP | TODO | |
+| compact-cost | GAP | EXCL | needs compaction + cumulative-cost seeding + refreshAfterCompaction (heavy/fragile; dedicated) |
 | mobile-staff-sidebar | COVERED | EXCL | legacy assertion is test.skip (no live behaviour) |
 | gate-bypass | GAP | EXCL | held by BR38 (team-operations journey); cross-journey duplicate |
 
@@ -204,14 +204,16 @@ Status per domain (updated each batch):
 | Domain | in-scope N | mutated M | remaining TODO |
 |---|--:|--:|--:|
 | app-smoke | 13 | 7 | 6 |
-| misc | 15 | 10 | 5 |
+| misc | 14 | 13 | 1 |
 | sidebar-nav | 8 | 3 | 5 |
 | prompt-interaction | 6 | 1 | 5 |
 | stories-registry | 6 | 2 | 4 |
-| **TOTAL** | **48** | **23** | **25** |
+| **TOTAL** | **47** | **26** | **21** |
 
-Excluded (with reasons above): app-smoke 7, misc 2, sidebar-nav 12, prompt-interaction 5, stories 0 = **26**.
-Campaign closes when TOTAL remaining TODO == 0 (M == N == 48).
+Excluded (with reasons above): app-smoke 7, misc 3, sidebar-nav 12, prompt-interaction 5, stories 0 = **27**.
+Campaign closes when TOTAL remaining TODO == 0 (M == N == 47).
+
+#### Batch A6 (BR59 review-approve, BR60 image-attach) — 2 holes closed; misc now 13/14 (only workflow-page-scope left).
 
 ## Batch A4 (BR55, BR56) — 2 holes closed
 
