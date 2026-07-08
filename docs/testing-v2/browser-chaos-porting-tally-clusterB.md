@@ -1,3 +1,12 @@
+> **⚠️ SUPERSEDED (historical).** Cluster B closed its denominator. The corpus
+> `browser-mutants-clusterB.json` is now folded into the canonical
+> `tests2/chaos/browser-mutants.json` (renumbered to `BR71..BR85`) and deleted.
+> The reconciled unified completeness table — including the **Cluster B arithmetic
+> fix** (corrected in-scope `N = M = 41`; the "~9 held" were canonical-corpus
+> `closed-earlier` hole-closed mutants double-counted) — and the authoritative run
+> live in [`browser-chaos-report.md`](./browser-chaos-report.md). Retained for the
+> per-batch porting audit trail and excluded-tier reasons.
+
 # Browser-chaos porting — Cluster B tally fragment
 
 Cluster B domains (journeys): `proposals`, `goal-editing`, `project-settings`,
