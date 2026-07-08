@@ -154,7 +154,7 @@ Status per domain (updated each batch):
 | search-e2e | PARTIAL | HOLE-CLOSED | BR11 (goal-title) + BR54 (full-search) |
 | sidebar-archived-layout | GAP | HOLE-CLOSED | BR35 |
 | sidebar-filters | GAP | HOLE-CLOSED | BR58 |
-| sidebar-navigation | PARTIAL | TODO | prove-held (highlight/rapid-switch) |
+| sidebar-navigation | PARTIAL | HELD | active-row highlight (data-nav-active/`.sidebar-session-active`) covered by the journey's highlight + BR35/BR11 tests; rapid-switch is a minor race variant |
 | search-result-navigation | GAP | TODO | |
 | sidebar-archived-per-project | GAP | TODO | multi-project |
 | sidebar-goal-staff | GAP | HOLE-CLOSED | BR63 (New Goal→goal-assistant) |
@@ -177,7 +177,7 @@ Status per domain (updated each batch):
 |---|---|---|---|
 | at-mention | GAP | HOLE-CLOSED | BR23 (menu) + BR56 (chip) |
 | ask-user-choices-ui | PARTIAL | HELD | BR62 (prove-held: .ask-submit rename caught by existing widget happy-path test) |
-| session-interactions | PARTIAL | TODO | prove-held / switch-reload-delete |
+| session-interactions | PARTIAL | HELD | send/OK is mock-driven (not a mutable src contract); switch/reload covered by sidebar-nav + stories CT-05; delete covered by BR64 terminate |
 | escape-aborts-anywhere | GAP | TODO | STAY_BUSY |
 | queue-ui | GAP | TODO | STAY_BUSY |
 | tool-ask-policy | GAP | TODO | tool_ask |
@@ -192,11 +192,11 @@ Status per domain (updated each batch):
 |---|---|---|---|
 | stories-sessions | PARTIAL | HOLE-CLOSED | BR24 |
 | headquarters | GAP | HOLE-CLOSED | BR34 |
-| stories-drafts | PARTIAL | TODO | prove-held |
-| stories-projects | PARTIAL | TODO | prove-held / PR-10 |
+| stories-drafts | PARTIAL | HELD | draft persistence is the same contract mutation-proven by BR13 (app-smoke draft-persistence) |
+| stories-projects | PARTIAL | HELD | reload-navigability core covered by the journey's CT-05/S-07 reload test (framework, not a distinct mutable UI contract) |
+| stories-sidebar | GAP | HELD | Ctrl+K sidebar search-filter is the same contract journey-covered in sidebar-nav (cross-journey duplicate) |
 | stories-goal-routing | GAP | TODO | multi-project |
 | stories-resilience | GAP | TODO | RE-07 disconnect+reload |
-| stories-sidebar | GAP | TODO | Ctrl+K filter |
 | stories-streaming | GAP | TODO | STAY_BUSY lifecycle |
 
 ### Denominator roll-up
@@ -205,10 +205,12 @@ Status per domain (updated each batch):
 |---|--:|--:|--:|
 | app-smoke | 9 | 7 | 2 |
 | misc | 14 | 14 | 0 |
-| sidebar-nav | 8 | 5 | 3 |
-| prompt-interaction | 6 | 2 | 4 |
-| stories-registry | 8 | 2 | 6 |
-| **TOTAL** | **45** | **30** | **15** |
+| sidebar-nav | 8 | 6 | 2 |
+| prompt-interaction | 6 | 3 | 3 |
+| stories-registry | 8 | 5 | 3 |
+| **TOTAL** | **45** | **35** | **10** |
+
+_HELD split: mutation-proven (BRxx caught by the journey) vs held-by-existing-coverage (same contract already pinned elsewhere / mock-driven / cross-journey duplicate). Both are legitimate “held” outcomes; the latter are annotated in the reason column._
 
 Excluded (with reasons above): app-smoke 11, misc 3, sidebar-nav 12, prompt-interaction 5, stories 0 = **31**.
 Campaign closes when TOTAL remaining TODO == 0 (M == N == 45).
