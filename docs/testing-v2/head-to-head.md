@@ -1,5 +1,23 @@
 # Head-to-head: legacy vs v2 — measured wall + CPU cost (task 190c7af5)
 
+> ## ⏩ UPDATE (task 7862db76, test-engineer-6d58, 2026-07-08) — e2e:v2 is now GREEN + proven external-free
+>
+> The §4 caveats ("e2e:v2 under-measured, not yet green, no runner") are RESOLVED.
+> A reusable runner (`scripts/testing-v2/run-e2e-v2.mjs`, `npm run test:e2e:v2`)
+> now drives the whole real-fidelity tier from `tests2/tests-map.json`. Read the
+> new **§8 (green e2e:v2)** and **§9 (external-service-free proof)** below; the
+> corrected honest TOTAL from the fair re-measure lands in **§10**.
+>
+> Headline so far (defaults caps: node `--test-concurrency=1`, Playwright
+> `--workers=2`, groups sequential, `retries:0`):
+> **A(node) 61 pass · B(e2e) 43 pass · C(browser) 79 pass / 12 skip → 183 pass /
+> 0 fail**, total wall ~212–229 s. Two spec issues from §4 fixed:
+> `stories-navigation` (missing `spec-framework`/`story-registry` shims — added)
+> and `tail-chat-real-stream` (`spawn bash.exe ENOENT` — a cross-spec cwd-poison,
+> root-caused + fixed; see §8). **Docker is now AVAILABLE on this box** (it was
+> absent for the §1 run), so `sandbox-recovery` runs its Docker paths here —
+> handled symmetrically for both suites in §10.
+
 **What this is:** a clean, apples-to-apples **cost** measurement (not a
 concurrency test) of the whole suite run **both ways, sequentially, back-to-back
 on a quiet box**, with CPU scoped to the **suite's own process subtree** (not the
@@ -197,8 +215,117 @@ sampler on a churny suite should be treated as inflated.**
 npm run test:unit                                   # legacy unit
 BOBBIT_E2E_SKIP_GUARDS=1 npm run test:e2e           # legacy e2e (bypass sleep lint)
 npm run test:v2                                     # v2 unit (tier-1 + tier-2)
-# e2e:v2 (assembled; minus manual-integration, minus full-legacy):
-npx tsx --test --test-force-exit <14 node relocate daily specs>            # Group A
-npm run test:e2e:run -- <18 tests/e2e relocate daily specs> --retries=0    # Group B
-npx playwright test --config playwright-v2-daily.config.ts <13 adapter>    # Group C
+# e2e:v2 — now a single reusable runner (tracks tests-map.json, not a frozen list):
+npm run test:e2e:v2                    # build + A(node) → B(e2e) → C(browser), retries:0
+node scripts/testing-v2/run-e2e-v2.mjs --group A|B|C   # one group at a time
+node scripts/testing-v2/run-e2e-v2.mjs --list          # show classification + exclusions
+```
+
+---
+
+## 8. e2e:v2 is GREEN (task 7862db76)
+
+The real-fidelity tier is now a reusable runner —
+`scripts/testing-v2/run-e2e-v2.mjs` (`npm run test:e2e:v2`) — that classifies the
+`daily`-bucket entries of `tests2/tests-map.json` into three groups, MINUS
+`manual-integration` (the real-LLM/agent lane) and MINUS the "one full legacy
+run" step. So it tracks the map instead of a hand-assembled snapshot.
+
+| group | what | run via | result | wall | peak procs |
+|---|---|---|---|---|---|
+| A / node-relocate | 14 specs: real git worktree pool / sweeper / sandbox-mount / spawn-tree | `tsx --test` | **61 pass / 0 fail** | ~34–40 s | 16 |
+| B / e2e-relocate | 18 specs: real worktree pool / MCP subprocess / port / restart | `test:e2e:run` `--retries=0` | **43 pass / 0 fail** | ~86–100 s | 27 |
+| C / adapter-browser | 13 specs (browser-v2-daily project) | `playwright-v2` `retries:0` | **79 pass / 0 fail / 12 skip** | ~89–91 s | 32 |
+| **total** | | sequential | **183 pass / 0 fail / 12 skip** | **~212–229 s** | 34 |
+
+The 12 skips are `terminal-pack` cases (bash/terminal-gated) — a symmetric,
+environment-honest skip, not a masked failure.
+
+### Resource caps (why this can't re-crash the box)
+A prior heavy e2e:v2 run crashed the server + corrupted `node_modules` (Group A
+ran ~CPU-count worktree specs concurrently → an `npm ci` swarm in worktree setup
+→ resource exhaustion mid-op → interrupted `npm ci` → gutted `.bin`). The runner
+is now capped by default and was monitored throughout this run (process count +
+`node_modules/.bin` integrity on both goal + primary worktrees stayed flat):
+- **Group A node:test serialised** — `--test-concurrency=1` (override
+  `E2E_V2_NODE_CONCURRENCY`); this is the swarm source.
+- **Playwright workers bounded to 2** (override `E2E_V2_PW_WORKERS`).
+- **Groups run sequentially**; external-free env baked in.
+
+### The two §4 spec issues — fixed (retries:0, no weakening, no relocation)
+1. **`stories-navigation.spec.ts`** — aborted collection on a broken
+   `./spec-framework.js` import. Fix: the missing `spec-framework.ts` /
+   `story-registry.ts` shims were added under `tests2/browser/daily/`
+   (re-export from `../fixtures/*`, which shim to `tests/e2e/ui/*`). All
+   N-01…N-10 routing cases now run green.
+2. **`tail-chat-real-stream.spec.ts`** — `spawn C:/Program Files/Git/bin/bash.exe
+   ENOENT`. Root-caused as **cross-spec cwd poisoning**, NOT an environment gap
+   (the shell resolves fine; `spawn <shell> ENOENT` on a valid shell path means
+   the child's `cwd` doesn't exist). `pr-walkthrough-pack`'s dogfood test calls
+   `setupSessionGitRepo` on a UI default-project session whose cwd, absent a
+   dedicated worktree, IS the shared harness default project root — so the
+   `git init` turns that shared root into a repo. Every later session on the
+   worker is then treated as inside-a-repo → the gateway provisions an unexpected
+   worktree whose checkout lacks the untracked `.e2e-workspaces` subdir handed
+   out as a session cwd → a later `bash_bg` spawn (STREAM_BURST → real `sleep`
+   bg-process) runs in a nonexistent cwd → ENOENT. Deterministically reproduced
+   (pr-walkthrough → tail-chat, `workers=1`: 7 pass / 1 fail) and fixed by
+   un-poisoning in `pr-walkthrough-pack`'s `afterEach` (remove the `.git` we
+   created; discriminate dir-vs-file so worktree gitlinks are untouched) → 8/8
+   green. This flake existed latently in **legacy too**, masked by `retries:3`;
+   the same afterEach fix should be ported to `tests/e2e/ui/pr-walkthrough-pack.spec.ts`.
+
+---
+
+## 9. External-service-free — verified empirically (hard user constraint)
+
+**Requirement:** e2e:v2 makes ZERO external-service calls — no real LLM, no real
+GitHub remote, no non-loopback HTTP; real LOCAL ops only + the in-process MOCK
+agent bridge (exactly like legacy e2e).
+
+**Enforcement chain (code):**
+- **Agent turns → in-process MOCK bridge.** `gateway-harness.ts` registers
+  `InProcessMockBridge` via `registerRpcBridgeFactory`, so no turn ever reaches a
+  real provider. The runner never sets real credentials.
+- **`BOBBIT_TEST_NO_EXTERNAL=1` + `BOBBIT_TEST_NO_REMOTE=1`** (baked into every
+  group in `run-e2e-v2.mjs`) →
+  - `testNoExternal` ⇒ `aigw-manager.externalNetworkBlockedForTests()` true ⇒
+    AIGW discovery + provider fetch are hard-refused for non-local URLs
+    (`aigw-manager.ts:867` throws `External AI Gateway discovery is disabled`).
+  - `skipNonLocalRemoteGit` ⇒ `skills/git.ts.shouldSkipRemoteGitForTests()` fails
+    closed on any non-`file://`/non-local git remote (push/fetch/clone/ls-remote).
+  - `skipMcp` default ⇒ no MCP subprocess (specs opt back in only for local MCP).
+- Deliberately **not** `BOBBIT_TEST_NO_PUSH`: the realpush specs push to a LOCAL
+  BARE repo on disk (a file path, never a network remote) — still external-free.
+
+**Empirical proof — a process-tree egress guard:**
+`scripts/testing-v2/fetch-egress-guard.mjs` is preloaded via
+`NODE_OPTIONS=--import …` into EVERY node process of the run (the in-process
+gateway shares the Playwright worker process; node relocate specs; npm/npx
+children; the bg-runner helper). It wraps `globalThis.fetch` and
+`node:http`/`node:https` `request`/`get`, and appends any request whose host is
+**not** loopback/link-local/RFC1918/CGNAT to `$EGRESS_LOG` (JSONL).
+
+- **Full `test:e2e:v2` run under the guard → the egress log was EMPTY (0
+  entries).** No non-loopback HTTP from any group, including npm/git child
+  processes. The run stayed green (A 61 / B 43 / C 79-pass-12-skip).
+- **Positive control (proves the guard is not silently no-op):** a node process
+  preloaded with the same guard that does `fetch('https://api.github.com/')` +
+  `https.get('https://registry.npmjs.org/')` + `fetch('http://127.0.0.1:9/')`
+  logged the two external hosts and correctly IGNORED the loopback one.
+- Corroborating: the B-group logs show `git fetch origin` **failing** on the
+  negative-path specs — i.e. the git fence rejecting real remotes, as designed.
+
+**No e2e:v2 spec reaches out.** The `github.com` URLs present in the
+pr-walkthrough specs are test DATA used to assert fenced / NO_PR behaviour, never
+fetched (confirmed by the empty egress log). Conclusion: e2e:v2 is
+external-service-free, enforced structurally (mock bridge + fail-closed
+fetch/git) and proven empirically.
+
+**Reproduce the proof:**
+```bash
+: > .profiles/testing-v2/egress.jsonl
+EGRESS_LOG="$PWD/.profiles/testing-v2/egress.jsonl" \
+NODE_OPTIONS="--import file://$PWD/scripts/testing-v2/fetch-egress-guard.mjs" \
+  node scripts/testing-v2/run-e2e-v2.mjs      # egress.jsonl must stay empty
 ```
