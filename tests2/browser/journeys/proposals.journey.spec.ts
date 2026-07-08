@@ -270,6 +270,75 @@ test.describe("Journey: Failed Goal Proposal", () => {
 	});
 });
 
+// Ported from goal-proposal-dismiss-reload.spec.ts (audit: proposals GAP,
+// mutant BR66): a dismissed goal proposal must stay hidden after a page reload
+// (the dismissal fingerprint suppresses the restore-path repopulation).
+test.describe("Journey: Goal Proposal — dismiss persists across reload", () => {
+	test("dismissed goal proposal stays hidden after reload (goal-assistant)", async ({ page }) => {
+		test.setTimeout(120_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+		const sid = await page.evaluate(() => (window as any).bobbitState?.selectedSessionId as string);
+		expect(sid).toBeTruthy();
+		await waitForSessionStatus(sid, "idle");
+
+		// The assistant's debounced saveGoalDraft must persist the proposal to the
+		// server so the reload restore-path has something to (wrongly) repopulate.
+		await page.waitForFunction(async (sidArg: string) => {
+			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
+			const token = localStorage.getItem("gateway.token") ?? "";
+			const res = await fetch(`${url}/api/sessions/${sidArg}/draft?type=goal`, { headers: { Authorization: `Bearer ${token}` } });
+			if (!res.ok) return false;
+			const body = await res.json();
+			return !!body?.data?.activeGoalProposal?.title;
+		}, sid, { timeout: 15_000 });
+
+		// Simulate Dismiss: write the dismissal fingerprint (mirroring the
+		// production normalisation — goal spec right-trimmed, keys sorted) and
+		// clear the in-memory slot (the assistant panel has no Dismiss button).
+		await page.evaluate((sidArg: string) => {
+			const s = (window as any).bobbitState;
+			const fields = { ...(s?.activeProposals?.goal?.fields ?? {}) };
+			if (typeof fields.spec === "string") fields.spec = (fields.spec as string).replace(/\s+$/u, "");
+			const ordered: Record<string, unknown> = {};
+			for (const k of Object.keys(fields).sort()) ordered[k] = fields[k];
+			localStorage.setItem(`bobbit-goal-proposal-dismissed-${sidArg}`, JSON.stringify(ordered));
+			delete s.activeProposals.goal;
+			s.assistantHasProposal = false;
+		}, sid);
+
+		// Reload — the restore path runs; the dismissed proposal must stay hidden.
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+		await page.waitForFunction((sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg, sid, { timeout: 15_000 });
+
+		// Negative-condition poll: the slot must NOT repopulate (on the mutant it
+		// reappears within ~hundreds of ms).
+		await page.waitForFunction(
+			() => !!(window as any).bobbitState?.activeProposals?.goal?.fields?.title,
+			null,
+			{ timeout: 5_000 },
+		).catch(() => { /* expected: stays dismissed */ });
+
+		// The title input stays mounted (the assistant always renders its form)
+		// but must NOT be re-populated with the dismissed proposal's value.
+		const titleAfterReload = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleAfterReload).toBeVisible({ timeout: 10_000 });
+		await expect(titleAfterReload).not.toHaveValue("E2E Test Goal", { timeout: 5_000 });
+		// And the in-memory slot must be empty.
+		const slotAfter = await page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal ?? null);
+		expect(slotAfter, "dismissed goal proposal must NOT repopulate state.activeProposals.goal after reload").toBeNull();
+	});
+});
+
 // Ported from goal-proposal-subgoal-prefill.spec.ts (audit: proposals GAP,
 // mutant BR45): an agent can pre-fill everything a human sets on the goal
 // proposal's Sub-goals tab. syncProposalFormState() seeds the form controls
