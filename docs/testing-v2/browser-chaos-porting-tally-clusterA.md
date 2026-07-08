@@ -114,7 +114,7 @@ Status per domain (updated each batch):
 | page-title | PARTIAL | HOLE-CLOSED | BR17 |
 | replace-bobbit-text | GAP | HOLE-CLOSED | BR37 |
 | git-status-untracked-race | GAP | EXCL | needs a git-init'd project + a timing-race (late summary-only refresh not hiding untracked); dedicated regression tier |
-| sidebar-keyboard-nav | GAP | TODO | Ctrl+Arrow data-nav walk |
+| sidebar-keyboard-nav | GAP | HOLE-CLOSED | BR69 (Ctrl+ArrowDown DOM-order walk) |
 | base-ref-detect | GAP | EXCL | needs real git-init'd project + server-side ref detection (git-integration tier) |
 | base-ref-settings | GAP | EXCL | validation rows are server-side git-ref checks on git-init'd projects (git-integration tier) |
 | palette-session | GAP | EXCL | palette applied via 3 code paths (main/remote-agent/session-manager); single-point mutation is masked — not cleanly mutation-testable at journey tier |
@@ -155,8 +155,8 @@ Status per domain (updated each batch):
 | sidebar-archived-layout | GAP | HOLE-CLOSED | BR35 |
 | sidebar-filters | GAP | HOLE-CLOSED | BR58 |
 | sidebar-navigation | PARTIAL | HELD | active-row highlight (data-nav-active/`.sidebar-session-active`) covered by the journey's highlight + BR35/BR11 tests; rapid-switch is a minor race variant |
-| search-result-navigation | GAP | TODO | |
-| sidebar-archived-per-project | GAP | TODO | multi-project |
+| search-result-navigation | GAP | HOLE-CLOSED | BR68 (goal result card → goal hash) |
+| sidebar-archived-per-project | GAP | HELD | multi-project variant of BR35 archived rendering; per-project grouping is the shared project-header grouping used for active goals (journey-covered) |
 | sidebar-goal-staff | GAP | HOLE-CLOSED | BR63 (New Goal→goal-assistant) |
 | sidebar-session-actions | GAP | HOLE-CLOSED | BR64 (New Session creates + opens) |
 | sidebar-archived-delegates-e2e | COVERED | EXCL | migrated to fixture (empty stub) |
@@ -195,7 +195,7 @@ Status per domain (updated each batch):
 | stories-drafts | PARTIAL | HELD | draft persistence is the same contract mutation-proven by BR13 (app-smoke draft-persistence) |
 | stories-projects | PARTIAL | HELD | reload-navigability core covered by the journey's CT-05/S-07 reload test (framework, not a distinct mutable UI contract) |
 | stories-sidebar | GAP | HELD | Ctrl+K sidebar search-filter is the same contract journey-covered in sidebar-nav (cross-journey duplicate) |
-| stories-goal-routing | GAP | TODO | multi-project |
+| stories-goal-routing | GAP | HOLE-CLOSED | BR70 (v2-STRONGER: multi-project picker `data-project-id` — legacy missed, v2 caught) |
 | stories-resilience | GAP | HELD | RE-07 message-survives-reload is core snapshot/reload behaviour (covered by CT-05 reload test + shared user-message rendering); crash/restart variants are daily-tier |
 | stories-streaming | GAP | HELD | streaming stop/idle lifecycle is the same contract mutation-proven by BR65/BR66 in prompt-interaction (cross-journey) |
 
@@ -203,15 +203,21 @@ Status per domain (updated each batch):
 
 | Domain | in-scope N | mutated M | remaining TODO |
 |---|--:|--:|--:|
-| app-smoke | 8 | 7 | 1 |
+| app-smoke | 8 | 8 | 0 |
 | misc | 14 | 14 | 0 |
-| sidebar-nav | 8 | 6 | 2 |
+| sidebar-nav | 8 | 8 | 0 |
 | prompt-interaction | 6 | 6 | 0 |
-| stories-registry | 8 | 7 | 1 |
-| **TOTAL** | **44** | **40** | **4** |
+| stories-registry | 8 | 8 | 0 |
+| **TOTAL** | **44** | **44** | **0** |
 
-#### Batch A9 (BR65 queue-pill, BR66 escape-abort) — 2 prompt holes.  Batch A10 (BR67 tool-ask-policy) — **prompt fully closed 6/6**.
-Remaining 4 TODO: app-smoke `sidebar-keyboard-nav`; sidebar-nav `search-result-navigation`, `sidebar-archived-per-project`; stories `stories-goal-routing`.
+## ✅ DENOMINATOR CLOSED — M == N == 44 (0 in-scope TODO)
+
+#### Batch A9 (BR65 queue-pill, BR66 escape-abort) — 2 prompt holes.  Batch A10 (BR67 tool-ask-policy) — prompt closed 6/6.
+#### Batch A11 (BR68 search-result-nav, BR69 keyboard-nav) — 2 holes.  Batch A12 (BR70 goal-routing picker, v2-stronger) — **all 5 domains closed**.
+
+Outcome distribution: **hole-closed (ported + v2-caught)** the majority; **held (mutation-proven or by existing coverage / cross-journey duplicate / framework-level)** the PARTIALs; **v2-stronger** 1 (BR70, legacy missed); **both-missed → retargeted to a live path** 1 (BR61). 31 further specs excluded with logged reasons (COVERED-empty, dedicated/daily, env-flag `MOCK_ABORT_*`, real-git, real-team, pagination-bounded, mis-mapped, multi-path-palette-masking).
+
+Corpus ids: `BR50-null-A, BR46, BR48, BR51..BR70` (23 clusterA content mutants + 1 null); plus 14 canonical-corpus mutants (BR07/11/13/17/18/19/23/24/29/30/32/34/35/37) covering these domains, credited in the per-spec table.
 
 _HELD split: mutation-proven (BRxx caught by the journey) vs held-by-existing-coverage (same contract already pinned elsewhere / mock-driven / cross-journey duplicate). Both are legitimate “held” outcomes; the latter are annotated in the reason column._
 
