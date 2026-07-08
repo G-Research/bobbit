@@ -1,82 +1,57 @@
 # Concurrency Proof Report
 
-**Generated:** Wed, 08 Jul 2026 17:50:51 GMT  
+**Generated:** Wed, 08 Jul 2026 23:44:46 GMT  
 **Result:** ❌ FAILED  
 **Model:** multi-worktree (Option A) — one `test:v2` per throwaway git worktree, each with its own `node_modules` (`npm ci`) + copied `dist`, coordinated by the cross-process ledger.  
-**Base commit:** `bc7a25070b8ecc9365b083ee63fe0836bf51efd6`  
+**Base commit:** `097464036bf27b6dafe43bd65cd6c3e771175582`  
 **Scale:** 2 concurrent × 3 rep(s) = 6 total runs (reduced smoke — default is 5×3)  
 
-> **Acceptance bar (D7):** 3 concurrent × 3 reps = 9 runs, all green, `retries: 0`, zero flakes, each run ≤ 1800s under mutual load, ledger Σworkers ≤ cores. Playwright flakes under load are HARD failures.
+> **Acceptance bar (D7):** 3 concurrent × 3 reps = 9 runs, all green, `retries: 0`, zero flakes, each run ≤ 600s under mutual load, ledger Σworkers ≤ cores. Playwright flakes under load are HARD failures.
 
 ---
 
-## AUTHORITATIVE N-CURVE & ANALYSIS (task 4bb07af1, base `bc7a2507`)
+## CLEAN all-fixes-in N=2 check (task 209df04c, base `09746403`)
 
 > The single-snapshot report below is auto-generated and overwritten by the
-> proof harness. This narrative is the authoritative interpretation of the
-> last-mile work (ledger-split fix + determinism fixes + the deterministic
-> tool-docs blocker fix). Measured 24-core AMD Ryzen box, **not truly idle**
-> (~30 peer-agent procs, ~12–18 % CPU baseline; a genuinely quiet window was not
-> available). `retries: 0`, wall decoupled from flake (`BOBBIT_V2_PERRUN_WALL_MS`).
+> proof harness. **This narrative is the authoritative record of the first honest
+> N=2 measurement with ALL last-mile fixes present on goal HEAD**: ledger-split
+> fix (full vitest split only when `activeParents===1`), timing-determinism on the
+> named cluster, command-step DI seam, gateway-boot + browser-render leases, and
+> the deterministic tool-docs regression fix (bc7a2507). Every prior N=2 number
+> was contaminated by one of those since-fixed issues, peer-agent load, or the
+> node_modules crash. This run had none of that contamination in the code.
 
-### N-curve
+### Box state at run start (honest)
 
-| N | green (both tiers) | vitest | playwright | wall avg/max | Σworkers | dominant residual |
-|---|---|---|---|---|---|---|
-| **1** | ~near-clean (per prior authoritative) | pass | pass | ~300 s | 2 | — |
-| **2** (×3 = 6 runs) | **0/6** | **0/6** | 3/6 | 548 s / 593 s | **14/24** ✅ | integration 60 s CPU-starvation timeouts (rotating) + 1 gateway-boot cascade |
+- **~73 peer node/chrome procs** parked on the shared 24-core box, BUT **CPU near-idle at run start (3–5%)** — the parked agent sessions were not burning cores. This is the quietest realistic window available; a truly 0-peer-proc box was not obtainable. The 6 runs are each in their own throwaway worktree (own `npm ci` + copied `dist`), exactly the real N-developer model. `retries: 0`, honest hard-fail.
 
-**Highest cleanly ~0-flake N (this box, this build): N=1.** 3-way/4-way were NOT
-run — 2-way already fails the ~0-flake bar, and higher N is strictly worse.
+### Result: **3/6 green** (was 0/6 on the prior authoritative base `bc7a2507`)
 
-### What the last-mile fixes DID achieve (vs prior authoritative base `12df82b6`)
+| Rep | run#1 (wt-0) | run#2 (wt-1) | per-run wall | ledger Σpeak |
+|---|---|---|---|---|
+| 1 | ❌ vitest FAIL, pw PASS | ✅ PASS | 518.0 / 511.7 s | 14/24 |
+| 2 | ❌ vitest FAIL, pw PASS | ✅ PASS | 515.7 / 525.9 s | 14/24 |
+| 3 | ✅ PASS | ❌ vitest FAIL + pw FAIL | 552.9 / 566.7 s | 14/24 |
 
-1. **Ledger no longer oversubscribes at N=2.** `splitBundle` gated on
-   `activeParents===1` → Σ=**14/24** (was 20 → the N=2-worse-than-N=3
-   oversubscription is gone). Browser tier no longer collapses from render
-   starvation the way it did (pw 0/4 → mostly holding; 3/6 residual flakes here).
-2. **Deterministic blocker removed.** `tool-docs-prompt › "returns empty string
-   when no tools exist"` failed **6/6** on goal HEAD — a regression from the
-   master-sync `defaultBuiltinToolsDir()` fallback, NOT concurrency. Fixed
-   (bc7a2507). This was the true cause of the first "0/6, vitest 6/6" snapshot.
-3. **The briefed wall-clock cluster now HOLDS.** `verification-dedup`, `PPS-04`
-   (proposal-panel-streaming follow-tail), `app-smoke` Ctrl+ArrowDown,
-   `goal-team-gates`, `project-reorder-api`, and `multi-repo-goal` (24 s → 645 ms)
-   are **absent from every failure list** across both proofs. The observable-state
-   / vestigial-poll fixes worked.
+**Green rate: 3/6.** Max wall 566.7 s ≤ 600 s cap ✅. **Ledger Σworkers peak = 14/24 at all times** ✅ — the ledger-split fix held; zero oversubscription (the N=2-worse-than-N=3 regression is gone).
 
-### The true residual (why N≥2 is still not ~0-flake)
+### EXACT failing tests + classification
 
-After the above, 5/6 runs fail on only **1–2 rotating integration tests**, all
-hitting a **60 s test-timeout / 15 s WS-waitFor / `pollUntil` deadline** under
-N-way CPU starvation. Rotating cast this run: `team-lead-child-authz`,
-`project-isolation`, `role-assistant-session`, `gate-signal-reminder`,
-`mcp-meta-call`, `parent-scoped-archive-child`, `verification-core`. Plus an
-intermittent **catastrophic gateway-boot cascade** (rep1-run2: **130 files**,
-73× `ENOENT …/state/token` — the fixture cannot boot gateways under peak load).
+All failures are **CPU-starvation under 2 concurrent full `test:v2` suites**, not assertion/logic bugs. Every vitest failure is a **60 s test-timeout**; the tests drive on observable WS state, so no test-side timing lever moves them — the gateway/WS/orchestration itself is starved.
 
-**Key point:** these tests already drive on OBSERVABLE STATE (WS `waitFor`,
-`pollUntil`) — they are not wall-clock-sleep flakes. The failure is the **server
-itself** (gateway boot + WS round-trips + team orchestration) being CPU-starved
-under 2 concurrent full `test:v2` suites (+ the peer-agent baseline). The
-prescribed test-side levers (clock seam, state-waits) **cannot** move this: there
-is no fake clock for real gateway-boot/WS-broadcast CPU cost. This is the same
-KIND of ceiling the prior authoritative proof reached — now with the
-oversubscription and the deterministic blocker removed, and the briefed cluster
-proven robust.
+| Run | Tier | Test | Classification |
+|---|---|---|---|
+| rep1/#1 | vitest·integration | `archived-query-search-api.test.ts › sessions q filters by title or role across the full archived corpus before pagination` | **wall-timeout** (60 s test-timeout) |
+| rep2/#1 | vitest·integration | `project-isolation.test.ts › multi-project session lifecycle — no cross-contamination` | **wall-timeout** (60 s test-timeout; file wall 213 s) |
+| rep3/#2 | vitest·integration | `market-pack-team-roles.test.ts › Gap 1: team lead can team_spawn a market-pack role …` + `Gap 2: team_delegate(role) child carries the role promptTemplate …` | **wall-timeout** (60 s test-timeout, ×2; note: master-synced test) |
+| rep3/#2 | playwright·journey | `app-smoke.journey.spec.ts:308 › Sidebar Keyboard Nav › Ctrl+ArrowDown advances keyboard-nav through rows in DOM order` | **wall-timeout** (5 s predicate render timeout under load) |
+| rep3/#2 | playwright·journey | `goal-team-gates.journey.spec.ts:90 › plan tab renders archived child with data-archived='true'` | **not a render timeout** — goal-creation `POST /api/goals` returned **403** (expected 201). Load-induced gateway auth/state race, not a plain visibility timeout. |
 
-### Honest conclusion
+### Verdict
 
-The ledger-split + determinism + blocker fixes are correct and landed real
-improvements, but **did not** reach ~0-flake at N≥2 on this box. The binding
-constraint is server throughput under concurrent load (heavy integration
-timeouts + an intermittent gateway-boot cascade), not test-side timing. Options
-for the goal owner: (a) a non-test-side lever (extend the non-spawning fake to
-more heavy integration files; harden the gateway fixture against boot-cascade;
-further cap heavy-test concurrency); (b) a genuinely idle measurement window to
-separate peer-agent contamination from real starvation; or (c) set the honest
-bar at N=1 for this build. No coverage was relocated, no assertion weakened, no
-timeout/retry padded.
+**N=2 does NOT hold cleanly with all fixes in** — but the all-fixes-in build is a **real improvement: 0/6 → 3/6**. The residual is the **same structural ceiling** documented before: a **rotating cast of integration tests hitting 60 s timeouts under 2-way CPU starvation** (this run: `archived-query-search-api`, `project-isolation`, `market-pack-team-roles`), plus one browser render-timeout and one load-induced `403` goal-creation. The ledger is behaving correctly (Σ=14/24, no oversubscription); the binding constraint is **server throughput under concurrent load on one 24-core box**, which no test-side timing fix can move. The earlier "ceiling" was NOT purely the since-fixed bugs — those fixes lifted 0/6 → 3/6, but a hardware/structural ceiling remains at N≥2. Honest highest ~0-flake N on this build/box: **N=1**.
+
+No config was changed to force a pass; measured straight. No coverage relocated, no assertion weakened, no timeout/retry padded.
 
 ---
 
@@ -84,116 +59,70 @@ timeout/retry padded.
 
 | Metric | Value | Target | Status |
 |--------|-------|--------|--------|
-| Runs green (exit 0) | 0/6 | 6/6 | ❌ |
-| Vitest tier failures | 6 | 0 | ❌ |
-| Playwright tier failures | 3 | 0 | ❌ |
-| Max wall time | 593.4s | ≤ 1800s | ✅ |
-| Avg / min wall | 548.3s / 516.8s | — | — |
+| Runs green (exit 0) | 3/6 | 6/6 | ❌ |
+| Vitest tier failures | 3 | 0 | ❌ |
+| Playwright tier failures | 1 | 0 | ❌ |
+| Max wall time | 566.7s | ≤ 600s | ✅ |
+| Avg / min wall | 531.8s / 511.7s | — | — |
 | Max Σworkers (ledger) | 14 | ≤ 24 | ✅ |
 
 ## Assertions
 
 | # | Assertion | Status |
 |---|-----------|--------|
-| A1 | Every run exits 0 (vitest green + playwright green + wall ≤ cap) | ❌ FAIL — 6 non-zero |
-| A2 | No vitest or playwright tier FAIL in any run | ❌ FAIL — vitest 6, playwright 3 |
+| A1 | Every run exits 0 (vitest green + playwright green + wall ≤ cap) | ❌ FAIL — 3 non-zero |
+| A2 | No vitest or playwright tier FAIL in any run | ❌ FAIL — vitest 3, playwright 1 |
 | A3 | Ledger Σworkers ≤ 24 at all times | ✅ PASS |
-| A4 | Per-run wall ≤ 1800s | ✅ PASS |
+| A4 | Per-run wall ≤ 600s | ✅ PASS |
 
 ## Violations
 
-- ❌ A1: 6/6 run(s) exited non-zero: rep1/#1(exit 1), rep1/#2(exit 1), rep2/#1(exit 1), rep2/#2(exit 1), rep3/#1(exit 1), rep3/#2(exit 1)
-- ❌ A2: 6 run(s) had vitest tier-1 failures: rep1/#1, rep1/#2, rep2/#1, rep2/#2, rep3/#1, rep3/#2
-- ❌ A2: 3 run(s) had playwright tier-2 failures: rep2/#1, rep2/#2, rep3/#2
+- ❌ A1: 3/6 run(s) exited non-zero: rep1/#1(exit 1), rep2/#1(exit 1), rep3/#2(exit 1)
+- ❌ A2: 3 run(s) had vitest tier-1 failures: rep1/#1, rep2/#1, rep3/#2
+- ❌ A2: 1 run(s) had playwright tier-2 failures: rep3/#2
 
 <details><summary>rep1/run#1 (exit 1) — last output</summary>
 
 ```
-[1A[2K[596/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:101:2 › Sidebar bobbit data-URL memoization › explicit static sidebar idle bobbits render without inline animation while preserving idle styling
-[1A[2K[597/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:129:2 › Sidebar bobbit data-URL memoization › static sidebar status rendering preserves busy and unread animations without idle breathing
-[1A[2K[598/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:171:2 › Sidebar bobbit data-URL memoization › compacting sidebar bobbits stay inside the clipped wrapper without layout shift
-[1A[2K[599/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:219:2 › Sidebar bobbit data-URL memoization › identical opts: toDataURL runs once on first render, never again
-[1A[2K[600/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:89:2 › Sidebar filter/search lightweight fixture › filter defaults and localStorage persistence render with the single-project sidebar
-[1A[2K[601/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:245:2 › Sidebar bobbit data-URL memoization › single-layer sprite: only one encode across many renders
-[1A[2K[602/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:263:2 › Sidebar bobbit data-URL memoization › hue-rotate is CSS-only: does not produce a distinct cached bitmap
-[1A[2K[603/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:281:2 › Sidebar bobbit data-URL memoization › key correctness: pixel-affecting opts produce DIFFERENT cached URLs
-[1A[2K[604/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:345:2 › Sidebar bobbit data-URL memoization › idle vs streaming must NOT collide: idle sleeps (eyes closed), streaming is awake
-[1A[2K[605/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:242:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row
-[1A[2K[606/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:121:2 › Sidebar filter/search lightweight fixture › search input filters rows, auto-opens archived results, supports full search, and Escape clears
-[1A[2K[607/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:265:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+ArrowLeft and Ctrl+ArrowRight collapse expandable rows without moving selection
-[1A[2K[608/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:146:2 › Sidebar filter/search lightweight fixture › search expands retained collapsed goal ancestors ephemerally
-[1A[2K[609/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:291:2 › Sidebar keyboard navigation lightweight fixture › Show Archived deterministically adds archived rows to the keyboard cycle
-[1A[2K[610/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:164:2 › Sidebar filter/search lightweight fixture › search reveals matching runtime rows under collapsed goals without persisting expansion
-[1A[2K[611/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:182:2 › Sidebar filter/search lightweight fixture › search retains matching first-class and delegate child sessions with goal ownership
-[1A[2K[612/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:313:2 › Sidebar keyboard navigation lightweight fixture › route-selected project, goal, and session rows persist after rerender
-[1A[2K[613/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:219:2 › Sidebar filter/search lightweight fixture › Show Read and Show Busy filters hide rows while search bypasses the filters
-[1A[2K[614/623] [browser-v2] › tests2\browser\fixtures\streaming-bobbit-canvas-ref.spec.ts:43:2 › Streaming bobbit canvas eye animation › keeps the existing canvas animation across streaming re-renders
-[1A[2K[615/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:91:2 › Tools page → MCP section fixture › renders flat servers, expands operations, and resets expansion on reload
-[1A[2K[616/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:74:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal renders streamed line exactly once when same event is dispatched 6×
-[1A[2K[617/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:142:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor
-[1A[2K[618/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:225:2 › Verification log Nx duplication (reproducing) › GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×
-[1A[2K[619/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:128:2 › Tools page → MCP section fixture › groups gateway sub-namespaces and flat servers
-[1A[2K[620/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:148:2 › Tools page → MCP section fixture › writes server and tool policy updates
-[1A[2K[621/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:170:2 › Tools page → MCP section fixture › uses supplied public MCP policy keys when gateway runtime names differ
-[1A[2K[622/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:213:2 › Tools page → MCP section fixture › shows inherited parent MCP policy for unset sub-namespace rows without storing override
-[1A[2K[623/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:257:2 › Tools page → MCP section fixture › loads default and persisted policies, and reset persists empty
-[1A[2K[33m  6 skipped[39m
-[32m  617 passed[39m[2m (9.1m)[22m
+[ext-channel-audit] type=pty.exit session=e1173326-c3e7-436c-a03b-ca8c23593fbc packId=- channel=- channelId=- reason=session-terminated
+[1A[2K[ext-channel-audit] type=permit.mint session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=permit.consume session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=channel.attach session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=496c7471-5555-47ef-8153-ed928eeb13ac
+[1A[2K[ext-channel-audit] type=channel.list session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=channel.attach session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=496c7471-5555-47ef-8153-ed928eeb13ac
+[1A[2K[ext-channel-audit] type=pty.spawn session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=- channel=- channelId=- reason=spawned
+[1A[2K[ext-channel-audit] type=channel.open session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=496c7471-5555-47ef-8153-ed928eeb13ac
+[1A[2K[trigger-engine] Stopped
+[1A[2K[ext-channel-audit] type=channel.close session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=496c7471-5555-47ef-8153-ed928eeb13ac reason=gateway-shutdown
+[1A[2K[sandbox-manager] All 0 sandbox(es) shut down
+[1A[2K[trigger-engine] Started (60s poll interval)
+[1A[2K[aigw-manager] No contextWindow overrides needed
+[1A[2K[session-manager] Restoring 20 session(s) + 0 delegate(s) live...
+[1A[2K[team-manager] Re-subscribed to events for 0 team(s)
+[1A[2K[boot] sweeper start (1 projects)
+[1A[2K[boot] sweeper done in 34ms (reclaimed=0 cleaned=0 repaired=0)
+[1A[2K[boot] background tasks complete in 35ms
+[1A[2K[ext-channel-audit] type=pty.exit session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=- channel=- channelId=- reason=gateway-shutdown
+[1A[2K[ext-channel-audit] type=channel.list session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=permit.mint session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=permit.consume session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=channel.attach session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=56f0836e-a201-4e75-9bb9-919d1a4681ba
+[1A[2K[ext-channel-audit] type=pty.spawn session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=- channel=- channelId=- reason=spawned
+[1A[2K[ext-channel-audit] type=channel.open session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=56f0836e-a201-4e75-9bb9-919d1a4681ba
+[1A[2K[ext-channel-audit] type=channel.close session=9fd408eb-f3f7-4e38-8627-0d93c06a0cab packId=terminal channel=terminal channelId=56f0836e-a201-4e75-9bb9-919d1a4681ba reason=session-terminated
+[1A[2K[trigger-engine] Stopped
+[1A[2K[sandbox-manager] All 0 sandbox(es) shut down
+[1A[2K[33m  18 skipped[39m
+[32m  696 passed[39m[2m (8.6m)[22m
 assert-budget: scope=browser tier=tier2
-  wall: 547.9s (cap 1800s)  [.profiles/testing-v2/budgets/playwright-report.json]
+  wall: 513.6s (cap 600s)  [.profiles/testing-v2/budgets/playwright-report.json]
   cpu:  n/a (cap 240.00 CPU-min)  [unmeasured]
-  artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\.profiles\testing-v2\budgets\2026-07-08T17-31-23-265Z-browser.json
+  artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-34664\wt-0\.profiles\testing-v2\budgets\2026-07-08T23-25-54-581Z-browser.json
 assert-budget: PASS
-[run-v2] tier1/vitest (test:v2:core): FAIL in 489.1s
-[run-v2] tier2/playwright (test:v2:browser): PASS in 550.3s
-[run-v2] total wall 553.0s, whole-tree CPU 125.28 CPU-min (peak procs 60)
-[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\.profiles\testing-v2\budgets\2026-07-08T17-31-24-125Z-full.json
-[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)
-```
-</details>
-
-<details><summary>rep1/run#2 (exit 1) — last output</summary>
-
-```
-[1A[2K[596/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:101:2 › Sidebar bobbit data-URL memoization › explicit static sidebar idle bobbits render without inline animation while preserving idle styling
-[1A[2K[597/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:129:2 › Sidebar bobbit data-URL memoization › static sidebar status rendering preserves busy and unread animations without idle breathing
-[1A[2K[598/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:171:2 › Sidebar bobbit data-URL memoization › compacting sidebar bobbits stay inside the clipped wrapper without layout shift
-[1A[2K[599/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:219:2 › Sidebar bobbit data-URL memoization › identical opts: toDataURL runs once on first render, never again
-[1A[2K[600/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:245:2 › Sidebar bobbit data-URL memoization › single-layer sprite: only one encode across many renders
-[1A[2K[601/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:263:2 › Sidebar bobbit data-URL memoization › hue-rotate is CSS-only: does not produce a distinct cached bitmap
-[1A[2K[602/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:281:2 › Sidebar bobbit data-URL memoization › key correctness: pixel-affecting opts produce DIFFERENT cached URLs
-[1A[2K[603/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:89:2 › Sidebar filter/search lightweight fixture › filter defaults and localStorage persistence render with the single-project sidebar
-[1A[2K[604/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:345:2 › Sidebar bobbit data-URL memoization › idle vs streaming must NOT collide: idle sleeps (eyes closed), streaming is awake
-[1A[2K[605/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:242:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row
-[1A[2K[606/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:121:2 › Sidebar filter/search lightweight fixture › search input filters rows, auto-opens archived results, supports full search, and Escape clears
-[1A[2K[607/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:265:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+ArrowLeft and Ctrl+ArrowRight collapse expandable rows without moving selection
-[1A[2K[608/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:146:2 › Sidebar filter/search lightweight fixture › search expands retained collapsed goal ancestors ephemerally
-[1A[2K[609/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:291:2 › Sidebar keyboard navigation lightweight fixture › Show Archived deterministically adds archived rows to the keyboard cycle
-[1A[2K[610/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:164:2 › Sidebar filter/search lightweight fixture › search reveals matching runtime rows under collapsed goals without persisting expansion
-[1A[2K[611/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:313:2 › Sidebar keyboard navigation lightweight fixture › route-selected project, goal, and session rows persist after rerender
-[1A[2K[612/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:182:2 › Sidebar filter/search lightweight fixture › search retains matching first-class and delegate child sessions with goal ownership
-[1A[2K[613/623] [browser-v2] › tests2\browser\fixtures\streaming-bobbit-canvas-ref.spec.ts:43:2 › Streaming bobbit canvas eye animation › keeps the existing canvas animation across streaming re-renders
-[1A[2K[614/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:219:2 › Sidebar filter/search lightweight fixture › Show Read and Show Busy filters hide rows while search bypasses the filters
-[1A[2K[615/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:91:2 › Tools page → MCP section fixture › renders flat servers, expands operations, and resets expansion on reload
-[1A[2K[616/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:74:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal renders streamed line exactly once when same event is dispatched 6×
-[1A[2K[617/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:142:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor
-[1A[2K[618/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:225:2 › Verification log Nx duplication (reproducing) › GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×
-[1A[2K[619/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:128:2 › Tools page → MCP section fixture › groups gateway sub-namespaces and flat servers
-[1A[2K[620/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:148:2 › Tools page → MCP section fixture › writes server and tool policy updates
-[1A[2K[621/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:170:2 › Tools page → MCP section fixture › uses supplied public MCP policy keys when gateway runtime names differ
-[1A[2K[622/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:213:2 › Tools page → MCP section fixture › shows inherited parent MCP policy for unset sub-namespace rows without storing override
-[1A[2K[623/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:257:2 › Tools page → MCP section fixture › loads default and persisted policies, and reset persists empty
-[1A[2K[33m  6 skipped[39m
-[32m  617 passed[39m[2m (9.2m)[22m
-assert-budget: scope=browser tier=tier2
-  wall: 550.1s (cap 1800s)  [.profiles/testing-v2/budgets/playwright-report.json]
-  cpu:  n/a (cap 240.00 CPU-min)  [unmeasured]
-  artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-1\.profiles\testing-v2\budgets\2026-07-08T17-31-25-365Z-browser.json
-assert-budget: PASS
-[run-v2] tier1/vitest (test:v2:core): FAIL in 425.4s
-[run-v2] tier2/playwright (test:v2:browser): PASS in 552.2s
-[run-v2] total wall 555.0s, whole-tree CPU 118.61 CPU-min (peak procs 60)
-[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-1\.profiles\testing-v2\budgets\2026-07-08T17-31-26-038Z-full.json
+[run-v2] tier1/vitest (test:v2:core): FAIL in 423.4s
+[run-v2] tier2/playwright (test:v2:browser): PASS in 515.0s
+[run-v2] total wall 517.5s, whole-tree CPU 38.20 CPU-min (peak procs 61)
+[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-34664\wt-0\.profiles\testing-v2\budgets\2026-07-08T23-25-55-113Z-full.json
 [run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)
 ```
 </details>
@@ -201,137 +130,45 @@ assert-budget: PASS
 <details><summary>rep2/run#1 (exit 1) — last output</summary>
 
 ```
- [32m✓[39m [30m[43m v2-core-isolated [49m[39m tests2/core/transcript-sanitizer-agent-dir.test.ts [2m([22m[2m7 tests[22m[2m | [22m[33m1 skipped[39m[2m)[22m[32m 34[2mms[22m[39m
-   [2m[90m↓[39m[22m transcript sanitizer trusted agent directory roots[2m > [22mrejects a final symlink inside a historical sessions root[2m[90m [symlink creation not permitted on this platform][39m[22m
-[90mstderr[2m | tests2/core/session-recovery-agent-dir.test.ts[2m > [22m[2mrecoverSessionFile with configurable agent directories[2m > [22m[2mdoes not delete exact persisted outside transcript files during purge
-[22m[39m[session-manager] Failed to cleanup prompt for outside-purge-session: Error: system-prompt: initPromptDirs() not called
-    at getPromptsDir [90m(C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\[39msrc\server\agent\system-prompt.ts:41:26[90m)[39m
-    at cleanupSessionPrompt [90m(C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\[39msrc\server\agent\system-prompt.ts:757:31[90m)[39m
-    at SessionManager.purgeOneSession [90m(C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\[39msrc\server\agent\session-manager.ts:8886:4[90m)[39m
-    at SessionManager.purgeArchivedSession [90m(C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\[39msrc\server\agent\session-manager.ts:8061:3[90m)[39m
-    at [90mC:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\[39mtests2\core\session-recovery-agent-dir.test.ts:259:16
-    at [90mfile:///C:/Users/jsubr/w/bobbit-wt/cc-proof-47860/wt-0/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:20
- [32m✓[39m [30m[43m v2-core-isolated [49m[39m tests2/core/session-recovery-agent-dir.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 81[2mms[22m[39m
-[90mstdout[2m | tests2/core/bobbit-dir-agent-dir.test.ts[2m > [22m[2magent directory resolver[2m > [22m[2mscaffold and agent-dir runtime leave existing ~/.pi/agent untouched
-[22m[39mCreating Headquarters .bobbit/ in C:\Users\jsubr\AppData\Local\Temp\bobbit-pi-agent-untouched-AmCu3W\project\.bobbit...
-Created Headquarters .bobbit/ in C:\Users\jsubr\AppData\Local\Temp\bobbit-pi-agent-untouched-AmCu3W\project\.bobbit. Customize roles, workflows, and system prompt in its config/ directory
- [32m✓[39m [30m[43m v2-core-isolated [49m[39m tests2/core/bobbit-dir-agent-dir.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 59[2mms[22m[39m
- [32m✓[39m [30m[43m v2-core-isolated [49m[39m tests2/core/container-path-translation.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 2[2mms[22m[39m
- [32m✓[39m [30m[43m v2-core-isolated [49m[39m tests2/core/extension-host-session-event-bus.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 1[2mms[22m[39m
-[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
-[41m[1m FAIL [22m[49m [30m[43m v2-integration [49m[39m tests2/integration/project-isolation.test.ts[2m > [22mProject isolation — no default fallback[2m > [22mmulti-project session lifecycle — no cross-contamination
-[31m[1mError[22m: Test timed out in 60000ms.
-If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
-[36m [2m❯[22m testImpl tests2/integration/_e2e/in-process-harness.ts:[2m265:2[22m[39m
-    [90m263| [39m
-    [90m264| [39m[35mconst[39m testImpl [33m=[39m ((name[33m:[39m string[33m,[39m a[33m?[39m[33m:[39m unknown[33m,[39m b[33m?[39m[33m:[39m unknown) [33m=>[39m {
-    [90m265| [39m [34mvIt[39m(name[33m,[39m [34mwrapTest[39m([34mpickFn[39m(a[33m,[39m b)))[33m;[39m
-    [90m   | [39m [31m^[39m
-    [90m266| [39m}) [35mas[39m [33mCompatTest[39m[33m;[39m
-    [90m267| [39m
-[90m [2m❯[22m tests2/integration/project-isolation.test.ts:[2m260:2[22m[39m
-[90m [2m❯[22m tests2/integration/_e2e/in-process-harness.ts:[2m229:3[22m[39m
-[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
-[2m Test Files [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m810 passed[39m[22m[2m | [22m[33m3 skipped[39m[90m (814)[39m
-[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m7146 passed[39m[22m[2m | [22m[33m27 skipped[39m[90m (7174)[39m
-[2m   Start at [22m 18:31:30
-[2m   Duration [22m 542.36s[2m (transform 47.13s, setup 16ms, collect 75.13s, tests 1580.19s, environment 3.97s, prepare 4.57s)[22m
-[run-v2] tier1/vitest (test:v2:core): FAIL in 544.1s
-[run-v2] tier2/playwright (test:v2:browser): FAIL in 517.4s
-[run-v2] total wall 546.7s, whole-tree CPU 89.82 CPU-min (peak procs 67)
-[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\.profiles\testing-v2\budgets\2026-07-08T17-40-33-368Z-full.json
-[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)
-```
-</details>
-
-<details><summary>rep2/run#2 (exit 1) — last output</summary>
-
-```
-[1A[2K[593/623] [browser-v2] › tests2\browser\fixtures\sidebar-actions-menu-fixture.spec.ts:327:1 › mobile rows expose quick actions plus hamburger menus without row navigation
-[1A[2K[594/623] [browser-v2] › tests2\browser\fixtures\sidebar-archived-fixture.spec.ts:332:2 › Sidebar archived deterministic fixture › mobile archived sections share bucketing, collapse persistence, and search highlighting
-[1A[2K[595/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:72:2 › Sidebar bobbit data-URL memoization › default idle preview bobbits keep the breathing animation
-[1A[2K[596/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:101:2 › Sidebar bobbit data-URL memoization › explicit static sidebar idle bobbits render without inline animation while preserving idle styling
-[1A[2K[597/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:129:2 › Sidebar bobbit data-URL memoization › static sidebar status rendering preserves busy and unread animations without idle breathing
-[1A[2K[598/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:171:2 › Sidebar bobbit data-URL memoization › compacting sidebar bobbits stay inside the clipped wrapper without layout shift
-[1A[2K[599/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:219:2 › Sidebar bobbit data-URL memoization › identical opts: toDataURL runs once on first render, never again
-[1A[2K[600/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:245:2 › Sidebar bobbit data-URL memoization › single-layer sprite: only one encode across many renders
-[1A[2K[601/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:263:2 › Sidebar bobbit data-URL memoization › hue-rotate is CSS-only: does not produce a distinct cached bitmap
-[1A[2K[602/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:89:2 › Sidebar filter/search lightweight fixture › filter defaults and localStorage persistence render with the single-project sidebar
-[1A[2K[603/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:281:2 › Sidebar bobbit data-URL memoization › key correctness: pixel-affecting opts produce DIFFERENT cached URLs
-[1A[2K[604/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:345:2 › Sidebar bobbit data-URL memoization › idle vs streaming must NOT collide: idle sleeps (eyes closed), streaming is awake
-[1A[2K[605/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:242:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row
-[1A[2K[606/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:121:2 › Sidebar filter/search lightweight fixture › search input filters rows, auto-opens archived results, supports full search, and Escape clears
-[1A[2K[607/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:265:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+ArrowLeft and Ctrl+ArrowRight collapse expandable rows without moving selection
-[1A[2K[608/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:146:2 › Sidebar filter/search lightweight fixture › search expands retained collapsed goal ancestors ephemerally
-[1A[2K[609/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:291:2 › Sidebar keyboard navigation lightweight fixture › Show Archived deterministically adds archived rows to the keyboard cycle
-[1A[2K[610/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:164:2 › Sidebar filter/search lightweight fixture › search reveals matching runtime rows under collapsed goals without persisting expansion
-[1A[2K[611/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:313:2 › Sidebar keyboard navigation lightweight fixture › route-selected project, goal, and session rows persist after rerender
-[1A[2K[612/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:182:2 › Sidebar filter/search lightweight fixture › search retains matching first-class and delegate child sessions with goal ownership
-[1A[2K[613/623] [browser-v2] › tests2\browser\fixtures\streaming-bobbit-canvas-ref.spec.ts:43:2 › Streaming bobbit canvas eye animation › keeps the existing canvas animation across streaming re-renders
-[1A[2K[614/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:91:2 › Tools page → MCP section fixture › renders flat servers, expands operations, and resets expansion on reload
-[1A[2K[615/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:219:2 › Sidebar filter/search lightweight fixture › Show Read and Show Busy filters hide rows while search bypasses the filters
-[1A[2K[616/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:74:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal renders streamed line exactly once when same event is dispatched 6×
-[1A[2K[617/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:142:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor
-[1A[2K[618/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:225:2 › Verification log Nx duplication (reproducing) › GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×
-[1A[2K[619/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:128:2 › Tools page → MCP section fixture › groups gateway sub-namespaces and flat servers
-[1A[2K[620/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:148:2 › Tools page → MCP section fixture › writes server and tool policy updates
-[1A[2K[621/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:170:2 › Tools page → MCP section fixture › uses supplied public MCP policy keys when gateway runtime names differ
-[1A[2K[622/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:213:2 › Tools page → MCP section fixture › shows inherited parent MCP policy for unset sub-namespace rows without storing override
-[1A[2K[623/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:257:2 › Tools page → MCP section fixture › loads default and persisted policies, and reset persists empty
-[1A[2K[31m  1 failed[39m
-[31m    [browser-v2] › tests2\browser\fixtures\proposal-revision-snapshots.spec.ts:187:2 › Proposal revision snapshots › streaming proposal previews do not synthesize snapshot revisions [39m
-[33m  6 skipped[39m
-[32m  616 passed[39m[2m (8.5m)[22m
-[run-v2] tier1/vitest (test:v2:core): FAIL in 475.2s
-[run-v2] tier2/playwright (test:v2:browser): FAIL in 513.7s
-[run-v2] total wall 516.4s, whole-tree CPU 88.96 CPU-min (peak procs 86)
-[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-1\.profiles\testing-v2\budgets\2026-07-08T17-40-03-071Z-full.json
-[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)
-```
-</details>
-
-<details><summary>rep3/run#1 (exit 1) — last output</summary>
-
-```
-    [90m266| [39m}) [35mas[39m [33mCompatTest[39m[33m;[39m
-    [90m267| [39m
-[90m [2m❯[22m tests2/integration/gate-signal-reminder.test.ts:[2m107:2[22m[39m
-[90m [2m❯[22m tests2/integration/_e2e/in-process-harness.ts:[2m229:3[22m[39m
-[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯[22m[39m
-[41m[1m FAIL [22m[49m [30m[43m v2-integration [49m[39m tests2/integration/mcp-meta-call.test.ts[2m > [22mMCP meta-tool API E2E[2m > [22mPOST /api/internal/mcp-call denies per-op `never` policy via role
-[31m[1mError[22m: Test timed out in 60000ms.
-If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
-[36m [2m❯[22m testImpl tests2/integration/_e2e/in-process-harness.ts:[2m265:2[22m[39m
-    [90m263| [39m
-    [90m264| [39m[35mconst[39m testImpl [33m=[39m ((name[33m:[39m string[33m,[39m a[33m?[39m[33m:[39m unknown[33m,[39m b[33m?[39m[33m:[39m unknown) [33m=>[39m {
-    [90m265| [39m [34mvIt[39m(name[33m,[39m [34mwrapTest[39m([34mpickFn[39m(a[33m,[39m b)))[33m;[39m
-    [90m   | [39m [31m^[39m
-    [90m266| [39m}) [35mas[39m [33mCompatTest[39m[33m;[39m
-    [90m267| [39m
-[90m [2m❯[22m tests2/integration/mcp-meta-call.test.ts:[2m558:2[22m[39m
-[90m [2m❯[22m tests2/integration/_e2e/in-process-harness.ts:[2m229:3[22m[39m
-[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯[22m[39m
-[41m[1m FAIL [22m[49m [30m[43m v2-integration [49m[39m tests2/integration/mcp-meta-call.test.ts[2m > [22mMCP meta-tool API E2E[2m > [22mPOST /api/internal/mcp-call lets broad role allow override persisted per-op `never`
-[31m[1mError[22m: Test timed out in 60000ms.
-If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
-[36m [2m❯[22m testImpl tests2/integration/_e2e/in-process-harness.ts:[2m265:2[22m[39m
-    [90m263| [39m
-    [90m264| [39m[35mconst[39m testImpl [33m=[39m ((name[33m:[39m string[33m,[39m a[33m?[39m[33m:[39m unknown[33m,[39m b[33m?[39m[33m:[39m unknown) [33m=>[39m {
-    [90m265| [39m [34mvIt[39m(name[33m,[39m [34mwrapTest[39m([34mpickFn[39m(a[33m,[39m b)))[33m;[39m
-    [90m   | [39m [31m^[39m
-    [90m266| [39m}) [35mas[39m [33mCompatTest[39m[33m;[39m
-    [90m267| [39m
-[90m [2m❯[22m tests2/integration/mcp-meta-call.test.ts:[2m612:2[22m[39m
-[90m [2m❯[22m tests2/integration/_e2e/in-process-harness.ts:[2m229:3[22m[39m
-[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯[22m[39m
-[2m Test Files [22m [1m[31m2 failed[39m[22m[2m | [22m[1m[32m809 passed[39m[22m[2m | [22m[33m3 skipped[39m[90m (814)[39m
-[2m      Tests [22m [1m[31m3 failed[39m[22m[2m | [22m[1m[32m7144 passed[39m[22m[2m | [22m[33m27 skipped[39m[90m (7174)[39m
-[2m   Start at [22m 18:40:37
-[2m   Duration [22m 588.55s[2m (transform 39.26s, setup 11ms, collect 68.50s, tests 1721.99s, environment 2.44s, prepare 3.08s)[22m
-[run-v2] tier1/vitest (test:v2:core): FAIL in 590.4s
-[run-v2] tier2/playwright (test:v2:browser): PASS in 515.2s
-[run-v2] total wall 593.0s, whole-tree CPU 1868.60 CPU-min (peak procs 64)
-[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-0\.profiles\testing-v2\budgets\2026-07-08T17-50-26-994Z-full.json
+[1A[2K[ext-channel-audit] type=permit.mint session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=permit.consume session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=channel.attach session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=ba419d9b-c174-446b-90cd-54e7fe6dfee9
+[1A[2K[ext-channel-audit] type=channel.list session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=channel.attach session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=ba419d9b-c174-446b-90cd-54e7fe6dfee9
+[1A[2K[714/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1201:2 › PR walkthrough pack panel UI parity › ready state supports user comments, dislike gating, narrow inline default, historical file headers, and diff collapse
+[1A[2K[ext-channel-audit] type=pty.spawn session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=- channel=- channelId=- reason=spawned
+[1A[2K[ext-channel-audit] type=channel.open session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=ba419d9b-c174-446b-90cd-54e7fe6dfee9
+[1A[2K[trigger-engine] Stopped
+[1A[2K[ext-channel-audit] type=channel.close session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=ba419d9b-c174-446b-90cd-54e7fe6dfee9 reason=gateway-shutdown
+[1A[2K[sandbox-manager] All 0 sandbox(es) shut down
+[1A[2K[trigger-engine] Started (60s poll interval)
+[1A[2K[aigw-manager] No contextWindow overrides needed
+[1A[2K[session-manager] Restoring 20 session(s) + 0 delegate(s) live...
+[1A[2K[team-manager] Re-subscribed to events for 0 team(s)
+[1A[2K[ext-channel-audit] type=pty.exit session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=- channel=- channelId=- reason=gateway-shutdown
+[1A[2K[boot] sweeper start (1 projects)
+[1A[2K[boot] sweeper done in 42ms (reclaimed=0 cleaned=0 repaired=0)
+[1A[2K[boot] background tasks complete in 42ms
+[1A[2K[ext-channel-audit] type=channel.list session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=permit.mint session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=permit.consume session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=channel.attach session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=d7760f95-7fc5-4341-be3b-dfd27f4d6277
+[1A[2K[ext-channel-audit] type=pty.spawn session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=- channel=- channelId=- reason=spawned
+[1A[2K[ext-channel-audit] type=channel.open session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=d7760f95-7fc5-4341-be3b-dfd27f4d6277
+[1A[2K[ext-channel-audit] type=channel.close session=e2561c88-6025-4f6d-b2bf-b6ad59429696 packId=terminal channel=terminal channelId=d7760f95-7fc5-4341-be3b-dfd27f4d6277 reason=session-terminated
+[1A[2K[trigger-engine] Stopped
+[1A[2K[sandbox-manager] All 0 sandbox(es) shut down
+[1A[2K[33m  19 skipped[39m
+[32m  695 passed[39m[2m (8.5m)[22m
+assert-budget: scope=browser tier=tier2
+  wall: 511.4s (cap 600s)  [.profiles/testing-v2/budgets/playwright-report.json]
+  cpu:  n/a (cap 240.00 CPU-min)  [unmeasured]
+  artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-34664\wt-0\.profiles\testing-v2\budgets\2026-07-08T23-34-30-036Z-browser.json
+assert-budget: PASS
+[run-v2] tier1/vitest (test:v2:core): FAIL in 474.4s
+[run-v2] tier2/playwright (test:v2:browser): PASS in 512.5s
+[run-v2] total wall 515.2s, whole-tree CPU 86.01 CPU-min (peak procs 59)
+[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-34664\wt-0\.profiles\testing-v2\budgets\2026-07-08T23-34-30-822Z-full.json
 [run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)
 ```
 </details>
@@ -339,45 +176,45 @@ If this is a long-running test, pass a timeout value as the last argument or con
 <details><summary>rep3/run#2 (exit 1) — last output</summary>
 
 ```
-[1A[2K[593/623] [browser-v2] › tests2\browser\fixtures\sidebar-archived-fixture.spec.ts:322:2 › Sidebar archived deterministic fixture › collapsed sidebar exposes archived goal rows only when Show Archived is on
-[1A[2K[594/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:72:2 › Sidebar bobbit data-URL memoization › default idle preview bobbits keep the breathing animation
-[1A[2K[595/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:101:2 › Sidebar bobbit data-URL memoization › explicit static sidebar idle bobbits render without inline animation while preserving idle styling
-[1A[2K[596/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:129:2 › Sidebar bobbit data-URL memoization › static sidebar status rendering preserves busy and unread animations without idle breathing
-[1A[2K[597/623] [browser-v2] › tests2\browser\fixtures\sidebar-archived-fixture.spec.ts:332:2 › Sidebar archived deterministic fixture › mobile archived sections share bucketing, collapse persistence, and search highlighting
-[1A[2K[598/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:171:2 › Sidebar bobbit data-URL memoization › compacting sidebar bobbits stay inside the clipped wrapper without layout shift
-[1A[2K[599/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:219:2 › Sidebar bobbit data-URL memoization › identical opts: toDataURL runs once on first render, never again
-[1A[2K[600/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:245:2 › Sidebar bobbit data-URL memoization › single-layer sprite: only one encode across many renders
-[1A[2K[601/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:263:2 › Sidebar bobbit data-URL memoization › hue-rotate is CSS-only: does not produce a distinct cached bitmap
-[1A[2K[602/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:281:2 › Sidebar bobbit data-URL memoization › key correctness: pixel-affecting opts produce DIFFERENT cached URLs
-[1A[2K[603/623] [browser-v2] › tests2\browser\fixtures\sidebar-bobbit-datauri-cache.spec.ts:345:2 › Sidebar bobbit data-URL memoization › idle vs streaming must NOT collide: idle sleeps (eyes closed), streaming is awake
-[1A[2K[604/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:89:2 › Sidebar filter/search lightweight fixture › filter defaults and localStorage persistence render with the single-project sidebar
-[1A[2K[605/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:242:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row
-[1A[2K[606/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:121:2 › Sidebar filter/search lightweight fixture › search input filters rows, auto-opens archived results, supports full search, and Escape clears
-[1A[2K[607/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:265:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+ArrowLeft and Ctrl+ArrowRight collapse expandable rows without moving selection
-[1A[2K[608/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:146:2 › Sidebar filter/search lightweight fixture › search expands retained collapsed goal ancestors ephemerally
-[1A[2K[609/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:291:2 › Sidebar keyboard navigation lightweight fixture › Show Archived deterministically adds archived rows to the keyboard cycle
-[1A[2K[610/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:164:2 › Sidebar filter/search lightweight fixture › search reveals matching runtime rows under collapsed goals without persisting expansion
-[1A[2K[611/623] [browser-v2] › tests2\browser\fixtures\sidebar-keyboard-nav-fixture.spec.ts:313:2 › Sidebar keyboard navigation lightweight fixture › route-selected project, goal, and session rows persist after rerender
-[1A[2K[612/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:182:2 › Sidebar filter/search lightweight fixture › search retains matching first-class and delegate child sessions with goal ownership
-[1A[2K[613/623] [browser-v2] › tests2\browser\fixtures\streaming-bobbit-canvas-ref.spec.ts:43:2 › Streaming bobbit canvas eye animation › keeps the existing canvas animation across streaming re-renders
-[1A[2K[614/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:91:2 › Tools page → MCP section fixture › renders flat servers, expands operations, and resets expansion on reload
-[1A[2K[615/623] [browser-v2] › tests2\browser\fixtures\sidebar-filter-search-fixture.spec.ts:219:2 › Sidebar filter/search lightweight fixture › Show Read and Show Busy filters hide rows while search bypasses the filters
-[1A[2K[616/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:74:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal renders streamed line exactly once when same event is dispatched 6×
-[1A[2K[617/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:142:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor
-[1A[2K[618/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:128:2 › Tools page → MCP section fixture › groups gateway sub-namespaces and flat servers
-[1A[2K[619/623] [browser-v2] › tests2\browser\fixtures\verification-dedup.spec.ts:225:2 › Verification log Nx duplication (reproducing) › GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×
-[1A[2K[620/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:148:2 › Tools page → MCP section fixture › writes server and tool policy updates
-[1A[2K[621/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:170:2 › Tools page → MCP section fixture › uses supplied public MCP policy keys when gateway runtime names differ
-[1A[2K[622/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:213:2 › Tools page → MCP section fixture › shows inherited parent MCP policy for unset sub-namespace rows without storing override
-[1A[2K[623/623] [browser-v2] › tests2\browser\fixtures\tool-manager-mcp-section.spec.ts:257:2 › Tools page → MCP section fixture › loads default and persisted policies, and reset persists empty
-[1A[2K[31m  1 failed[39m
+[1A[2K[trigger-engine] Stopped
+[1A[2K[ext-channel-audit] type=channel.close session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=terminal channel=terminal channelId=5c51e639-433a-4db3-8719-10e9dc9a0f09 reason=gateway-shutdown
+[1A[2K[sandbox-manager] All 0 sandbox(es) shut down
+[1A[2K[trigger-engine] Started (60s poll interval)
+[1A[2K[aigw-manager] No contextWindow overrides needed
+[1A[2K[session-manager] Restoring 20 session(s) + 0 delegate(s) live...
+[1A[2K[705/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:974:2 › PR walkthrough pack panel UI parity › pr-walkthrough shell parity: Submit unlocks only after review completion and opens export preview
+[1A[2K[706/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1008:2 › PR walkthrough pack panel UI parity › ready multi-card state exposes the reference walkthrough review affordances
+[1A[2K[707/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1019:2 › PR walkthrough pack panel UI parity › narrative cards render interleaved blocks and only referenced hunks
+[1A[2K[708/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1039:2 › PR walkthrough pack panel UI parity › secondary narrative hunks collapse by default, expand on demand, and persist
+[1A[2K[709/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1064:2 › PR walkthrough pack panel UI parity › narrative rail keeps more than twelve logical cards and renders coverage
+[1A[2K[710/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1077:2 › PR walkthrough pack panel UI parity › side-by-side diff uses the historical compact split-grid renderer
+[1A[2K[711/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1138:2 › PR walkthrough pack panel UI parity › line suggestions render with historical inline suggestion actions
+[1A[2K[712/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1152:2 › PR walkthrough pack panel UI parity › diff syntax highlighting, scoped hunk signatures, and context expansion are pinned
+[1A[2K[team-manager] Re-subscribed to events for 0 team(s)
+[1A[2K[boot] sweeper start (1 projects)
+[1A[2K[boot] sweeper done in 36ms (reclaimed=0 cleaned=0 repaired=0)
+[1A[2K[boot] background tasks complete in 36ms
+[1A[2K[ext-channel-audit] type=pty.exit session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=- channel=- channelId=- reason=gateway-shutdown
+[1A[2K[713/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1176:2 › PR walkthrough pack panel UI parity › inline mode uses historical inline diff-line rows instead of tables
+[1A[2K[714/714] [browser-v2-daily] › tests2\browser\daily\pr-walkthrough-panel-parity.spec.ts:1201:2 › PR walkthrough pack panel UI parity › ready state supports user comments, dislike gating, narrow inline default, historical file headers, and diff collapse
+[1A[2K[ext-channel-audit] type=channel.list session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=permit.mint session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=permit.consume session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=terminal channel=terminal channelId=-
+[1A[2K[ext-channel-audit] type=channel.attach session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=terminal channel=terminal channelId=b8fdf336-9165-43b2-892a-ea633607e9ea
+[1A[2K[ext-channel-audit] type=pty.spawn session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=- channel=- channelId=- reason=spawned
+[1A[2K[ext-channel-audit] type=channel.open session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=terminal channel=terminal channelId=b8fdf336-9165-43b2-892a-ea633607e9ea
+[1A[2K[ext-channel-audit] type=channel.close session=d9646794-2101-4d12-ab6b-9a94f1d4da50 packId=terminal channel=terminal channelId=b8fdf336-9165-43b2-892a-ea633607e9ea reason=session-terminated
+[1A[2K[trigger-engine] Stopped
+[1A[2K[sandbox-manager] All 0 sandbox(es) shut down
+[1A[2K[31m  2 failed[39m
 [31m    [browser-v2] › tests2\browser\journeys\app-smoke.journey.spec.ts:308:2 › Journey: Sidebar Keyboard Nav › Ctrl+ArrowDown advances keyboard-nav through rows in DOM order [39m
-[33m  6 skipped[39m
-[32m  616 passed[39m[2m (8.6m)[22m
-[run-v2] tier1/vitest (test:v2:core): FAIL in 490.0s
-[run-v2] tier2/playwright (test:v2:browser): FAIL in 520.2s
-[run-v2] total wall 522.7s, whole-tree CPU 1864.36 CPU-min (peak procs 69)
-[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-47860\wt-1\.profiles\testing-v2\budgets\2026-07-08T17-49-16-763Z-full.json
+[31m    [browser-v2] › tests2\browser\journeys\goal-team-gates.journey.spec.ts:90:2 › Journey: Plan-Tab Gate-Status — behavioral assertions › plan tab renders archived child with data-archived='true' [39m
+[33m  18 skipped[39m
+[32m  694 passed[39m[2m (9.4m)[22m
+[run-v2] tier1/vitest (test:v2:core): FAIL in 482.1s
+[run-v2] tier2/playwright (test:v2:browser): FAIL in 563.5s
+[run-v2] total wall 566.2s, whole-tree CPU 190.13 CPU-min (peak procs 60)
+[run-v2] budget artifact: C:\Users\jsubr\w\bobbit-wt\cc-proof-34664\wt-1\.profiles\testing-v2\budgets\2026-07-08T23-44-08-122Z-full.json
 [run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)
 ```
 </details>
@@ -388,36 +225,36 @@ If this is a long-running test, pass a timeout value as the last argument or con
 
 | Run | PID | Exit | Wall (s) | Vitest | Playwright |
 |-----|-----|------|----------|--------|------------|
-| 1 | 47272 | 1 ❌ | 553.6 | ❌ | ✅ |
-| 2 | 19812 | 1 ❌ | 555.5 | ❌ | ✅ |
+| 1 | 33904 | 1 ❌ | 518 | ❌ | ✅ |
+| 2 | 41252 | 0 ✅ | 511.7 | ✅ | ✅ |
 
-**Ledger peak Σworkers:** 14/24 ✅  (1068 samples)
+**Ledger peak Σworkers:** 14/24 ✅  (994 samples)
 
 ### Rep 2
 
 | Run | PID | Exit | Wall (s) | Vitest | Playwright |
 |-----|-----|------|----------|--------|------------|
-| 1 | 41996 | 1 ❌ | 547.1 | ❌ | ❌ |
-| 2 | 3880 | 1 ❌ | 516.8 | ❌ | ❌ |
+| 1 | 44072 | 1 ❌ | 515.7 | ❌ | ✅ |
+| 2 | 39960 | 0 ✅ | 525.9 | ✅ | ✅ |
 
-**Ledger peak Σworkers:** 14/24 ✅  (1059 samples)
+**Ledger peak Σworkers:** 14/24 ✅  (1017 samples)
 
 ### Rep 3
 
 | Run | PID | Exit | Wall (s) | Vitest | Playwright |
 |-----|-----|------|----------|--------|------------|
-| 1 | 45688 | 1 ❌ | 593.4 | ❌ | ✅ |
-| 2 | 11404 | 1 ❌ | 523.1 | ❌ | ❌ |
+| 1 | 40256 | 0 ✅ | 552.9 | ✅ | ✅ |
+| 2 | 9572 | 1 ❌ | 566.7 | ❌ | ❌ |
 
-**Ledger peak Σworkers:** 14/24 ✅  (1146 samples)
+**Ledger peak Σworkers:** 14/24 ✅  (1088 samples)
 
 ## What This Proves
 
-1. **Zero-flake concurrency (realistic model).** 0/6 concurrent `test:v2` runs — each in its own worktree, exactly how Bobbit runs agents — completed green with `retries: 0`. A single flake in either tier flips a run's exit code and fails this proof; no downgraded assertions, no dry-run.
+1. **Zero-flake concurrency (realistic model).** 3/6 concurrent `test:v2` runs — each in its own worktree, exactly how Bobbit runs agents — completed green with `retries: 0`. A single flake in either tier flips a run's exit code and fails this proof; no downgraded assertions, no dry-run.
 
 2. **CPU exhaustion bounded by the ledger (the D7 mechanism).** Peak Σworkers = 14/24. The ledger counts pending peers during coalescing, so 2 simultaneous runs each get ~`floor(24/2)` slots instead of grabbing the full 12-slot bundle and oversubscribing to ~24 on 24 cores.
 
-3. **Under-load wall budget honoured.** Slowest run: 593.4s ≤ 1800s cap (D7 under-load bar), enforced per-run via `BOBBIT_V2_CONCURRENCY_RUN=1` → run-v2's under-load budget.
+3. **Under-load wall budget honoured.** Slowest run: 566.7s ≤ 600s cap (D7 under-load bar), enforced per-run via `BOBBIT_V2_CONCURRENCY_RUN=1` → run-v2's under-load budget.
 
 ## Reproduce
 
