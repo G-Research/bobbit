@@ -20,10 +20,13 @@ re-run to confirm v2-caught. `retries: 0`.
 
 | | Count |
 |---|------:|
-| Behaviours mutation-tested (content mutants) | 8 |
-| Real holes found | 8 |
-| **Real holes CLOSED (ported + re-verified v2-caught)** | **8** |
+| Behaviours mutation-tested (content mutants, clusterA) | 10 |
+| Real holes found | 10 |
+| **Real holes CLOSED (ported + re-verified v2-caught)** | **10** |
 | Null-mutant integrity checks passed | 1 (BR50-null-A) |
+
+See the **COMPLETENESS DENOMINATOR** section below for the exhaustive D8 status
+(N in-scope behaviours across the 5 domains, M mutated, per-spec held/hole/excluded).
 
 > **Report freshness:** the committed `browser-chaos-report-clusterA.md` reflects
 > the batch-A1 `--all` run (null + BR46 + BR48). Batch A2 (BR51, BR52) was verified
@@ -73,6 +76,143 @@ Clean-passed on unmutated dist first.
 Mutation results (via `--ids BR53,BR54`): legacy 2/2, v2 2/2, 0 real holes.
 A1+A2 authoritative report committed separately (4/4 v2-caught).
 
+## Batch A5 (BR57, BR58) — 2 holes closed
+
+Both confirmed real holes, ported + re-verified `v2: caught` (0 holes). Clean-passed first.
+
+| Mutant | Domain | File | Ported journey assertion |
+|---|---|---|---|
+| BR57 | app-smoke (goal-metadata) | `src/app/proposal-panels.ts` | goal proposal → Metadata tab → panel visible → `goal-metadata-add` click appends a `goal-metadata-row` with key/value inputs |
+| BR58 | sidebar-nav (Show Read filter) | `src/ui/components/sidebar-filters.ts` | open Filters popover → `[data-testid='sidebar-filter-read']` toggle visible with a checkbox |
+
+Mutation results (via `--ids BR57,BR58`): legacy 2/2, v2 2/2, 0 real holes.
+
+---
+
+# COMPLETENESS DENOMINATOR (D8 exhaustive bar)
+
+Every distinct journey-tier audit-flagged spec/behaviour in the 5 Cluster-A
+domains (`consolidation-assertion-parity.md`), classified. Goal: **M mutated ==
+N in-scope** (in-scope = flagged − excluded). Excluded = COVERED-empty /
+dedicated-tier / daily / env-flag / mock-limited / cross-journey-duplicate /
+mis-mapped, each with a reason.
+
+Legend: **HOLE-CLOSED** = mutated, was a real hole, ported + v2-caught.
+**HELD** = mutated, journey already covered it (v2-caught, no port). **TODO** =
+in-scope, not yet mutated. **EXCL** = excluded (reason).
+
+Status per domain (updated each batch):
+
+### app-smoke (20 specs) — in-scope 13
+| spec | class | status | id / reason |
+|---|---|---|---|
+| draft-loss | PARTIAL | HELD | BR13 |
+| github-trusted-hosts | GAP | HOLE-CLOSED | BR30 |
+| goal-metadata | GAP | HOLE-CLOSED | BR57 |
+| notification-policy | GAP | HELD | BR07 (unseen dot, misc journey) |
+| open-session-new-window | GAP | HOLE-CLOSED | BR55 |
+| page-title | PARTIAL | HOLE-CLOSED | BR17 |
+| replace-bobbit-text | GAP | HOLE-CLOSED | BR37 |
+| base-ref-detect | GAP | TODO | |
+| base-ref-settings | GAP | TODO | |
+| git-status-untracked-race | GAP | TODO | |
+| palette-session | GAP | TODO | |
+| project-palette-none | GAP | TODO | |
+| sidebar-keyboard-nav | GAP | TODO | |
+| copy-session-link | PARTIAL | EXCL | clipboard perms unreliable headless (button presence held) |
+| goal-proposal-offscreen-return | GAP | EXCL | dedicated proposal-restore journey (audit: out of app-smoke scope) |
+| local-only-policy-status | GAP | EXCL | needs real team spawn + git (dedicated) |
+| mid-session-project-proposal | GAP | EXCL | dedicated project-proposal journey |
+| new-tab-no-duplicate-messages | GAP | EXCL | multi-tab reconnect-dedup (reducer-race, dedicated) |
+| repro-h3-snapshot-live-interleave | GAP | EXCL | reducer-race (audit: keep own spec) |
+| tree-cost-rollup | GAP | EXCL | needs goal tree + cost seeding (audit: keep own spec) |
+
+### misc (17 specs) — in-scope 15
+| spec | class | status | id / reason |
+|---|---|---|---|
+| api-error-modal | GAP | HOLE-CLOSED | BR18 |
+| auto-retry-banner | GAP | HOLE-CLOSED | BR29 |
+| cost-popover-cache-hit | GAP | HOLE-CLOSED | BR19 |
+| image-model-selector-lock | GAP | HOLE-CLOSED | BR32 |
+| workflow-editor | GAP | HOLE-CLOSED | BR46 |
+| goal-role-tabs-wiring | GAP | HOLE-CLOSED | BR48 |
+| prompt-stats-e2e | GAP | HOLE-CLOSED | BR51 |
+| preview-happy-path | PARTIAL | HOLE-CLOSED | BR52 |
+| compaction-persistence | GAP | HOLE-CLOSED | BR53 |
+| unseen-activity | PARTIAL | HELD | BR07 |
+| compact-cost | GAP | TODO | |
+| image-attach-roundtrip | GAP | TODO | ECHO_IMAGE_BLOCK |
+| optional-steps | GAP | TODO | |
+| review-pane | PARTIAL | TODO | approve/reject |
+| workflow-page-scope | GAP | TODO | |
+| mobile-staff-sidebar | COVERED | EXCL | legacy assertion is test.skip (no live behaviour) |
+| gate-bypass | GAP | EXCL | held by BR38 (team-operations journey); cross-journey duplicate |
+
+### sidebar-nav (20 specs) — in-scope 8
+| spec | class | status | id / reason |
+|---|---|---|---|
+| search-e2e | PARTIAL | HOLE-CLOSED | BR11 (goal-title) + BR54 (full-search) |
+| sidebar-archived-layout | GAP | HOLE-CLOSED | BR35 |
+| sidebar-filters | GAP | HOLE-CLOSED | BR58 |
+| sidebar-navigation | PARTIAL | TODO | prove-held (highlight/rapid-switch) |
+| search-result-navigation | GAP | TODO | |
+| sidebar-archived-per-project | GAP | TODO | multi-project |
+| sidebar-goal-staff | GAP | TODO | New Goal→assistant |
+| sidebar-session-actions | GAP | TODO | new/rename/terminate |
+| sidebar-archived-delegates-e2e | COVERED | EXCL | migrated to fixture (empty stub) |
+| sidebar-goal-group-filters | COVERED | EXCL | migrated to fixture (empty) |
+| sidebar-mobile-archived-per-project | COVERED | EXCL | migrated to fixture (skip stub) |
+| sidebar-mobile-archived-search | COVERED | EXCL | migrated to fixture (skip stub) |
+| sidebar-search-filter | COVERED | EXCL | migrated to fixture (empty) |
+| sidebar-spawned-children-dedupe | COVERED | EXCL | migrated to fixture (skip stub) |
+| sidebar-archived-search-repro | GAP | EXCL | pagination-bounded (>50 items); audit: retain legacy |
+| sidebar-child-loading | GAP | EXCL | needs real team spawn (dedicated) |
+| sidebar-refresh-agent | GAP | EXCL | distinct session-action restart contract; audit: retain legacy |
+| sidebar-staff-loading | GAP | EXCL | pre-fetch loader timing regression; audit: retain legacy |
+| sidebar-tree-restart | GAP | EXCL | crash+restart durability (daily/dedicated) |
+| sidebar-unified-tree | GAP | EXCL | needs full team topology (dedicated) |
+
+### prompt-interaction (11 specs) — in-scope 6
+| spec | class | status | id / reason |
+|---|---|---|---|
+| at-mention | GAP | HOLE-CLOSED | BR23 (menu) + BR56 (chip) |
+| ask-user-choices-ui | PARTIAL | TODO | prove-held (happy path) |
+| session-interactions | PARTIAL | TODO | prove-held / switch-reload-delete |
+| escape-aborts-anywhere | GAP | TODO | STAY_BUSY |
+| queue-ui | GAP | TODO | STAY_BUSY |
+| tool-ask-policy | GAP | TODO | tool_ask |
+| session-prompt-grant-replay | GAP | EXCL | mis-mapped (permission suite) |
+| steer-during-bash-tool-abort-toolend | GAP | EXCL | env-flag repro (MOCK_ABORT_TOOL_END) — keep legacy |
+| steer-during-bash-tool-busy-race | GAP | EXCL | env-flag repro (MOCK_ABORT_BUSY) — keep legacy |
+| steer-during-bash-tool | GAP | EXCL | env-flag repro (MOCK_ABORT_AS_ERROR) — keep legacy |
+| tool-assistant-system-scope | GAP | EXCL | mis-mapped (tools suite) |
+
+### stories-registry (8 specs) — in-scope 6
+| spec | class | status | id / reason |
+|---|---|---|---|
+| stories-sessions | PARTIAL | HOLE-CLOSED | BR24 |
+| headquarters | GAP | HOLE-CLOSED | BR34 |
+| stories-drafts | PARTIAL | TODO | prove-held |
+| stories-projects | PARTIAL | TODO | prove-held / PR-10 |
+| stories-goal-routing | GAP | TODO | multi-project |
+| stories-resilience | GAP | TODO | RE-07 disconnect+reload |
+| stories-sidebar | GAP | TODO | Ctrl+K filter |
+| stories-streaming | GAP | TODO | STAY_BUSY lifecycle |
+
+### Denominator roll-up
+
+| Domain | in-scope N | mutated M | remaining TODO |
+|---|--:|--:|--:|
+| app-smoke | 13 | 7 | 6 |
+| misc | 15 | 10 | 5 |
+| sidebar-nav | 8 | 3 | 5 |
+| prompt-interaction | 6 | 1 | 5 |
+| stories-registry | 6 | 2 | 4 |
+| **TOTAL** | **48** | **23** | **25** |
+
+Excluded (with reasons above): app-smoke 7, misc 2, sidebar-nav 12, prompt-interaction 5, stories 0 = **26**.
+Campaign closes when TOTAL remaining TODO == 0 (M == N == 48).
+
 ## Batch A4 (BR55, BR56) — 2 holes closed
 
 Both confirmed real holes, ported + re-verified `v2: caught` (0 holes).
@@ -89,8 +229,10 @@ Mutation results (via `--ids BR55,BR56`): legacy 2/2, v2 2/2, 0 real holes.
 
 ## Resume point
 
-- **Last committed batch:** A4 (BR55, BR56) ports committed; corpus has
-  `BR50-null-A, BR46, BR48, BR51, BR52, BR53, BR54, BR55, BR56` (all closed/passing).
+- **Last committed batch:** A5 (BR57, BR58) ports committed; corpus ids
+  `BR50-null-A, BR46, BR48, BR51..BR58` (all closed/passing).
+- **Now executing the exhaustive D8 denominator** (see section below): 25 in-scope
+  TODO behaviours remaining across the 5 domains; grinding in batches BR59+.
 - **Next behaviours to mutation-test:** sidebar-nav (sidebar-session-actions
   New/rename/terminate), stories-registry (stories-sessions S-01 empty/Send-disabled
   is BR24-done → try stories-projects delete-row / stories-streaming stop-pill),
