@@ -402,13 +402,37 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			staticDir: STATIC_DIR,
 		};
 
+		// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): serialise this worker's
+		// gateway boot through the cross-process gateway-boot lease so that N
+		// concurrent test:v2 runs never fire a cluster of simultaneous browser-tier
+		// boots. Gated on BOBBIT_V2_GATEWAY_BOOT_LEASE (set by playwright-v2.config.ts,
+		// NEVER by the legacy e2e config) and fully fail-open: any import/acquire
+		// error falls back to booting without a lease. Legacy e2e is unaffected.
+		let releaseBootLease: () => void = () => {};
+		if (process.env.BOBBIT_V2_GATEWAY_BOOT_LEASE === "1") {
+			try {
+				const { acquireGatewayBootLease } = await import("../../scripts/testing-v2/ledger.mjs");
+				const lease = await acquireGatewayBootLease();
+				releaseBootLease = () => lease.release();
+			} catch {
+				/* ledger unavailable — boot without a lease (fail-open) */
+			}
+		}
+
 		let gw = createGateway({
 			...gatewayConfig,
 			port: 0,             // OS-assigned port on first boot
 			portExplicit: true,  // Skip auto-increment loop
 		});
 
-		const port = await gw.start();
+		let port: number;
+		try {
+			port = await gw.start();
+		} finally {
+			// Boot CPU burst is over once start() settles — free the lease for the
+			// next queued worker. Remaining setup is gateway-bound, not a CPU burst.
+			releaseBootLease();
+		}
 		const gatewayUrl = `http://127.0.0.1:${port}`;
 
 		// Set env so e2e-setup.ts helpers and in-process mock agents target this worker's server.
