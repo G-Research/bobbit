@@ -9,7 +9,10 @@
  *   CT-03 (sidebar updates)    — active-row highlight after navigation
  *   CT-05 (reload/reconnect)   — session survives page reload
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, registerProject } from "../_helpers/journey-fixture.js";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 test.describe("Journey: Stories Registry", () => {
 	test("stories route renders without error", async ({ page }) => {
@@ -272,6 +275,33 @@ test.describe("Story Contract Coverage (CT-02 / CT-03 / CT-05)", () => {
 			await expect(sendBtn).toBeDisabled({ timeout: 10_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+});
+
+// Ported from stories-goal-routing.spec.ts (audit: stories-registry GAP / BR70):
+// with 2+ projects, the toolbar New Goal opens a project picker; picking a
+// project opens a goal-assistant session scoped to it.
+test.describe("Journey: Goal Routing (multi-project)", () => {
+	test("multi-project New Goal opens the project picker and picking scopes the assistant", async ({ page }) => {
+		test.setTimeout(120_000);
+		const dir = mkdtempSync(join(tmpdir(), `bobbit-v2-route-${process.env.E2E_PORT ?? "0"}-`));
+		const projB = await registerProject({ name: `v2-route-b-${Date.now()}`, rootPath: dir });
+		try {
+			await openApp(page);
+			const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
+			await expect(newGoalBtn).toBeVisible({ timeout: 15_000 });
+			await newGoalBtn.click();
+			// Two visible projects → the picker popover must appear listing project B.
+			const picker = page.locator("project-picker-popover").first();
+			await expect(picker).toBeVisible({ timeout: 10_000 });
+			const projBBtn = picker.locator(`button[data-project-id="${projB.id}"]`);
+			await expect(projBBtn).toBeVisible({ timeout: 5_000 });
+			// Picking project B opens a goal-assistant session.
+			await projBBtn.click();
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+		} finally {
+			await apiFetch(`/api/projects/${projB.id}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 });

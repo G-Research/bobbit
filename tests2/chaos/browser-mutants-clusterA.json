@@ -351,5 +351,21 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/app-smoke.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR70",
+		"area": "stories-goal-routing",
+		"file": "src/ui/components/ProjectPickerPopover.ts",
+		"target": "ui",
+		"operator": "dropped-attr",
+		"search": "data-project-id=${p.id}",
+		"replace": "data-project-idx=${p.id}",
+		"description": "The multi-project New-Goal picker buttons lose their data-project-id, so a project cannot be picked. Legacy stories-goal-routing.spec.ts asserts the toolbar New Goal opens a project picker and the picked project scopes the goal; stories journey never exercised multi-project routing (GAP). Ported into stories-registry.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/stories-goal-routing.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/stories-registry.journey.spec.ts"
+		]
 	}
 ]
