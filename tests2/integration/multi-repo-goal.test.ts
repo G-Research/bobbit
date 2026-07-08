@@ -76,14 +76,16 @@ test("multi-repo goal creates per-repo worktrees", async () => {
 	expect(goalRes.status).toBe(201);
 	const goal = await goalRes.json();
 
-	// Wait briefly for worktree setup.
-	let updated = goal;
-	for (let i = 0; i < 60; i++) {
-		const r = await fetch(`${base()}/api/goals/${goal.id}`, { headers: headers() });
-		updated = await r.json();
-		if (updated.setupStatus === "ready" || updated.setupStatus === "error") break;
-		await new Promise(r => setTimeout(r, 200));
-	}
+	// The Phase-4 TODO below means we only assert the goal was CREATED (multi-repo
+	// worktree creation is covered by the unit layer). Confirm the goal persisted
+	// via a single GET — driving on observable state, not a fixed-delay poll for a
+	// `setupStatus` this test does not assert. That vestigial 60×200 ms (~12 s)
+	// wall-clock loop was the dominant variable cost that pushed this real-git test
+	// past its timeout under N-way CPU load; it never influenced the assertion
+	// (the loop falls through to the same `updated.id` check on timeout anyway).
+	const getRes = await fetch(`${base()}/api/goals/${goal.id}`, { headers: headers() });
+	expect(getRes.status).toBe(200);
+	const updated = await getRes.json();
 
 	// TODO Phase 4 follow-up: end-to-end multi-repo goal worktree creation
 	// requires a few wiring pieces that are not in this commit:

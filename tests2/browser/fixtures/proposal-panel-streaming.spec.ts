@@ -95,7 +95,12 @@ test.describe("Proposal panel streaming UX", () => {
 	});
 
 	test("PPS-04: follow-tail when at bottom", async ({ page }) => {
-		await startStreamingProposal(page, "goal", 10);
+		// Spread the deltas (150 ms cadence, matching PPS-01/PPS-03) so each delta is
+		// a distinct WS event that triggers a mid-stream render where follow-tail
+		// runs. Without a cadence a CPU-starved browser under N-way load batches the
+		// whole stream + agent_end into ONE final render — by which point the
+		// follow-tail flag has cleared, so scrollTop is never reconciled and stays 0.
+		await startStreamingProposal(page, "goal", 10, 150);
 
 		const preview = page.locator(".goal-preview-panel .overflow-y-auto").last();
 		await expect(preview).toBeVisible({ timeout: 15_000 });
@@ -108,26 +113,19 @@ test.describe("Proposal panel streaming UX", () => {
 			return !!el && el.scrollHeight - el.clientHeight > 60;
 		}, null, { timeout: 15_000 });
 
-		// Wait until streaming ends.
+		// follow-tail's OBSERVABLE effect is that it programmatically moves scrollTop
+		// forward while pinned to the bottom. Poll on that state directly rather than
+		// reading scrollTop once after the badge hides — the latter races the
+		// post-agent_end reflow window. This removes the wall-clock dependency: the
+		// moment follow-tail advances scrollTop (which it does on every mid-stream
+		// delta), the assertion holds regardless of CPU scheduling.
+		await expect
+			.poll(() => preview.evaluate((el) => (el as HTMLElement).scrollTop), { timeout: 15_000, intervals: [50, 100, 150] })
+			.toBeGreaterThan(0);
+
+		// And streaming completes cleanly (badge clears at agent_end).
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
 		await expect(badge).toBeHidden({ timeout: 15_000 });
-
-		// At the end, follow-tail should have kept us pinned to the bottom
-		// throughout the stream. We never scrolled up. The final scrollTop
-		// must be > 0 (we made progress) and within tail tolerance.
-		const { tailGap, scrollTop } = await preview.evaluate((el) => {
-			const e = el as HTMLElement;
-			return {
-				tailGap: e.scrollHeight - e.scrollTop - e.clientHeight,
-				scrollTop: e.scrollTop,
-			};
-		});
-		// follow-tail should have programmatically moved scrollTop forward.
-		// We tolerate moderate post-stream layout reflow after agent_end (the
-		// flag clears, so subsequent reflows aren't reconciled — see PPS-04 in
-		// the design doc).
-		expect(scrollTop, "follow-tail should have moved scrollTop > 0").toBeGreaterThan(0);
-		void tailGap;
 	});
 
 	// PPS-06: dismissing a proposal mid-stream must stick. Previously skipped

@@ -313,6 +313,10 @@ test.describe("Journey: Sidebar Keyboard Nav", () => {
 		try {
 			await openApp(page);
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+			// The sidebar edge becoming visible does NOT guarantee the data-nav-id rows
+			// are populated yet (they arrive via WS-driven state). Wait on the OBSERVABLE
+			// row count so a CPU-starved render under N-way load never reads 0/1 rows.
+			await expect.poll(() => page.locator("[data-nav-id]").count(), { timeout: 15_000 }).toBeGreaterThan(1);
 			const domOrder: string[] = await page.evaluate(() =>
 				Array.from(document.querySelectorAll("[data-nav-id]")).map((el) => el.getAttribute("data-nav-id") || ""));
 			expect(domOrder.length, "sidebar must emit multiple data-nav-id rows").toBeGreaterThan(1);

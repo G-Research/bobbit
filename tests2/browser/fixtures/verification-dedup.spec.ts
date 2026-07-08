@@ -89,8 +89,9 @@ test.describe("Verification log Nx duplication (reproducing)", () => {
 			{ goalId: GOAL_ID, gateId: GATE_ID, signalId: SIGNAL_ID, stepIndex: STEP_INDEX },
 		);
 
-		// Allow Lit's `updated()` lifecycle (which seeds _chunks) to run.
-		await page.waitForTimeout(50);
+		// Wait for Lit's `updated()` lifecycle (which seeds _chunks) via the
+		// element's updateComplete promise — observable state, not a fixed delay.
+		await page.evaluate(() => (document.querySelector("verification-output-modal") as any)?.updateComplete);
 
 		// Dispatch the SAME event N times — this models N session-bucket
 		// RemoteAgents in the same tab each receiving the broadcast and
@@ -122,15 +123,14 @@ test.describe("Verification log Nx duplication (reproducing)", () => {
 			},
 		);
 
-		// Let Lit re-render.
-		await page.waitForTimeout(100);
-
 		// The overlay is portaled to document.body (so its `position: fixed`
 		// escapes the chat message-list's `content-visibility` containing block),
 		// so query the body class directly rather than within the host element.
-		const bodyText = await page
-			.locator(".verif-output-body")
-			.innerText();
+		// Wait on the OBSERVABLE render result (the line appearing) rather than a
+		// fixed delay, so CPU-starved re-renders under N-way load never flake.
+		const body = page.locator(".verif-output-body");
+		await expect(body).toContainText(LINE.trim());
+		const bodyText = await body.innerText();
 
 		const occurrences = bodyText.split(LINE.trim()).length - 1;
 		expect(
@@ -166,8 +166,6 @@ test.describe("Verification log Nx duplication (reproducing)", () => {
 			},
 			{ goalId: GOAL_ID, gateId: GATE_ID, signalId: SIGNAL_ID, stepIndex: STEP_INDEX },
 		);
-
-		await page.waitForTimeout(50);
 
 		// The overlay must NOT live inside the host element (which sits inside the
 		// contained ancestor) — it must be portaled to document.body.
@@ -220,7 +218,7 @@ test.describe("Verification log Nx duplication (reproducing)", () => {
 			const el = document.querySelector("verification-output-modal") as any;
 			el.open = false;
 		});
-		await page.waitForTimeout(50);
+		// toHaveCount auto-waits for the portal to be removed — observable state.
 		await expect(page.locator(".verif-output-backdrop")).toHaveCount(0);
 	});
 
@@ -240,7 +238,8 @@ test.describe("Verification log Nx duplication (reproducing)", () => {
 			{ goalId: GOAL_ID, gateId: GATE_ID, signalId: SIGNAL_ID },
 		);
 
-		await page.waitForTimeout(50);
+		// Wait for the component's first render via updateComplete (observable state).
+		await page.evaluate(() => (window as any).__live?.updateComplete);
 
 		await page.evaluate(
 			(args) => {
@@ -269,8 +268,18 @@ test.describe("Verification log Nx duplication (reproducing)", () => {
 			},
 		);
 
-		// The component throttles renders via a 200ms timer — wait for the flush.
-		await page.waitForTimeout(350);
+		// The component throttles renders via a 200ms timer. Wait on the OBSERVABLE
+		// result (the accumulated buffer containing the line) rather than a fixed
+		// delay, so a CPU-starved throttle flush under N-way load never flakes.
+		await page.waitForFunction(
+			(needle) => {
+				const el: any = (window as any).__live;
+				const s: string = el?._stepOutputs?.get(0) || "";
+				return s.includes(needle);
+			},
+			LINE.trim(),
+			{ timeout: 10_000 },
+		);
 
 		// Read the accumulated buffer directly off the component (the public
 		// effect of the bug). Reaching into _stepOutputs is the cleanest way
