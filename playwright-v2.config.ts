@@ -54,9 +54,30 @@ function prepareV2RuntimeCaches(): void {
 
 prepareV2RuntimeCaches();
 
-// Worker count from ledger (cap 4 for Playwright).
-// Falls back to 2 if the ledger call fails.
+// GLOBAL CONCURRENCY BUDGET: opt this run's browser gateway boots into the
+// cross-process gateway-boot lease pool (scripts/testing-v2/ledger.mjs). Set in
+// the config module (the Playwright runner process) so it is inherited by every
+// spawned worker. Only v2 browser runs set it — the legacy e2e config does not,
+// so the shared worker fixture in tests/e2e/gateway-harness.ts is unchanged for
+// legacy runs.
+process.env.BOBBIT_V2_GATEWAY_BOOT_LEASE = "1";
+
+// GLOBAL CONCURRENCY BUDGET (browser-render lease): cap the TOTAL number of
+// Chromium browser workers rendering the app at once across ALL concurrent runs
+// (scripts/testing-v2/ledger.mjs, pool "browser", cap in tests2/budget-caps.json).
+// The gateway-harness worker fixture acquires a browser slot at worker startup
+// (before booting its gateway) and holds it for the worker's whole life; queued
+// workers WAIT holding nothing. This directly targets the sustained multi-browser
+// RENDER contention behind tier-2 toBeVisible flakes at N-way. Only v2 browser
+// runs set this; the legacy e2e config never does, so legacy is unchanged.
+process.env.BOBBIT_V2_BROWSER_LEASE = "1";
+
+// Worker count from ledger (PLAYWRIGHT_CAP=2 chromium workers — the IO-bound
+// sweet spot; the ledger's Σworkers≤cores caps total Chromium across runs).
+// BOBBIT_V2_PLAYWRIGHT_WORKERS overrides for measurement/tuning. Falls back to 2.
 function resolvePlaywrightWorkers(): number {
+	const override = Number(process.env.BOBBIT_V2_PLAYWRIGHT_WORKERS);
+	if (Number.isFinite(override) && override >= 1) return Math.floor(override);
 	try {
 		const req = createRequire(import.meta.url);
 		const { reserveWorkerSlots } = req("./scripts/testing-v2/ledger.mjs") as {

@@ -44,6 +44,41 @@
  *
  * opts (both): { coalesceMs?, totalCores?, lockTimeoutMs?, grantTimeoutMs? }
  *
+ * ─── GLOBAL CONCURRENCY BUDGET — gateway-boot lease pool ───
+ *
+ * The reservation API above bounds the *steady-state* worker count
+ * (ΣworkerSlots ≤ cores). It does NOT bound the *transient* CPU bursts that
+ * happen when many in-process gateways boot at the same instant — the diagnosed
+ * root cause of the N-way flakes (docs/testing-v2/concurrency-proof.md): every
+ * v2-integration test file boots a gateway once per vitest fork, every Playwright
+ * worker boots one at worker startup, so N concurrent `test:v2` runs fire a
+ * cluster of simultaneous boots that spike CPU and starve timing-sensitive
+ * integration tests past their timeouts.
+ *
+ * The lease pool is a SEPARATE cross-process semaphore that gates those heavy
+ * ops regardless of the active-run count. A heavy op acquires a lease → WAITS if
+ * the pool is saturated → releases when the burst is over. This makes the box
+ * un-oversubscribable at ANY N (higher wall via queuing is the accepted tradeoff
+ * — reliability > speed).
+ *
+ *   acquireLease(pool, opts?) -> Promise<{ release, id, forced, pool, cap }>
+ *   acquireGatewayBootLease(opts?) -> Promise<{ release, ... }>  // pool="gateway-boot"
+ *   acquireBrowserRenderLease(opts?) -> Promise<{ release, ... }> // pool="browser"
+ *   readLeases(opts?) -> { leases, generation }   leaseCap(pool, opts?) -> int
+ *
+ * TWO pools, TWO contention sources, TWO hold patterns:
+ *   gateway-boot: caps simultaneous in-process gateway BOOTS (transient CPU
+ *     burst). Held ONLY for the boot (release right after gw.start()). Cap:
+ *     opts.cap ?? BOBBIT_V2_MAX_GATEWAY_BOOTS ?? budget-caps.json ?? floor(cores/6).
+ *   browser: caps simultaneous Chromium browser WORKERS actively rendering the
+ *     app (the sustained tier-2 toBeVisible render contention). Held for a
+ *     Playwright worker's WHOLE life (30-min max-hold backstop vs 3-min for
+ *     gateway-boot). Cap: opts.cap ?? BOBBIT_V2_MAX_BROWSER ?? budget-caps.json
+ *     ?? floor(cores/6).
+ * acquire is fail-open: after timeoutMs it proceeds anyway (a `forced` lease) so
+ * a boot/worker can never deadlock; dead holders are swept immediately on PID
+ * liveness so a crashed run never wedges a slot.
+ *
  * All exported reservations MUST be released on process exit; the ledger also
  * self-heals: every read sweeps entries whose owner PID is no longer alive.
  */
@@ -60,7 +95,7 @@ import {
 	statSync,
 	utimesSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir, cpus } from "node:os";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { spawnSync, spawn } from "node:child_process";
@@ -75,7 +110,51 @@ const DEFAULT_GRANT_TIMEOUT_MS = 180_000;
 const MIN_BUNDLE = 4;
 const MAX_BUNDLE = 12;
 const VITEST_CAP = 8;
-const PLAYWRIGHT_CAP = 4;
+// Chromium is IO/gateway-bound, not CPU-parallelism-bound: measured 2 playwright
+// workers ≈ 4 workers throughput (~276 s vs ~297 s), while 1 worker DOUBLES wall
+// (~550–710 s). So 2 is the sweet spot — enough to avoid the 1-worker wall
+// penalty, few enough to keep concurrent Chromium (the tier-2 contention driver)
+// bounded. This cap + the ledger's Σworkers≤cores invariant is the "gate total
+// Chromium" half of the global concurrency budget (the gateway-boot lease is the
+// other half). Was 4 (single-run fast path); dropped to 2 after N-way flake
+// analysis showed 4 concurrent browser tiers over-contend on this box.
+const PLAYWRIGHT_CAP = 2;
+
+// ─── lease pools (global concurrency budget) ───
+const LEASES_FILENAME = "leases.json";
+const DEFAULT_LEASE_TIMEOUT_MS = 120_000; // fail-open after this (never deadlock a boot)
+const LEASE_MAX_HOLD_MS = 180_000; // gateway-boot: held only for a boot (seconds) → 3-min backstop
+// The browser-render lease is held for a Playwright WORKER's whole life (many
+// tests, minutes) — legitimately far longer than a gateway boot. Its max-hold
+// backstop must exceed any realistic worker lifetime so a LIVE browser lease is
+// never swept out from under an active worker (which would break the cap and let
+// an extra Chromium in). Dead holders are still reclaimed immediately by the
+// PID-liveness sweep; this backstop only guards a leaked release on a hung PID.
+const BROWSER_LEASE_MAX_HOLD_MS = 1_800_000; // 30 min
+// Browser-render acquires WAIT for a free slot (respecting the cap) rather than
+// force-proceeding early — the cap integrity is the whole point. This large
+// timeout is only the ultimate anti-deadlock guard (beyond any realistic queue).
+const DEFAULT_BROWSER_LEASE_TIMEOUT_MS = 1_200_000; // 20 min
+const LEASE_POLL_MS = 150; // base backoff between saturated-pool retries (jittered)
+
+const LEDGER_FILE_DIR = dirname(fileURLToPath(import.meta.url));
+const BUDGET_CAPS_PATH = join(LEDGER_FILE_DIR, "..", "..", "tests2", "budget-caps.json");
+
+/** Per-pool max-hold backstop for the sweep (dead holders are always reclaimed). */
+function leaseMaxHoldMs(pool) {
+	return pool === "browser" ? BROWSER_LEASE_MAX_HOLD_MS : LEASE_MAX_HOLD_MS;
+}
+
+/** Read a committed per-pool cap from tests2/budget-caps.json (missing → null). */
+function budgetCapFromFile(pool) {
+	try {
+		const parsed = JSON.parse(readFileSync(BUDGET_CAPS_PATH, "utf8"));
+		const v = Number(parsed?.[pool]);
+		return Number.isFinite(v) && v > 0 ? Math.floor(v) : null;
+	} catch {
+		return null;
+	}
+}
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
@@ -325,41 +404,39 @@ function computeGrant(state, myParentRunId, cores) {
 
 /**
  * Split a committed parent bundle into vitest + playwright worker counts.
- * Anchors (verified by selftest): 12→8v+4p, 8→7v+1p, 6→5v+1p, 4→3v+1p.
+ * Anchors (verified by selftest): 12→8v+2p (single run), 8→3v+2p, 6→2v+2p, 4→1v+2p.
  *
- * PLAYWRIGHT IS THE HEAVY TIER. Measured: 3 concurrent `test:v2:core` (tier-1
- * only) pass cleanly, but adding the browser tier (2 playwright workers/run × 3
- * = 6 chromium + per-test gateways) starves tier-1's gateway-booting integration
- * tests into timeouts. So under contention we allocate exactly ONE playwright
- * worker per run and give the rest of the bundle to vitest: this minimises the
- * count of simultaneous browsers (the tier-1 starvation driver) while keeping
- * tier-1 fast. A single, uncontended run (bundle ≥ 12) still gets the full
- * 8v+4p so isolated `test:v2` stays < 300 s.
+ * GLOBAL BUDGET MODEL — two distinct contention sources, two distinct levers:
  *
- * Invariant: `vitest + playwright ≤ grant` for every input, and both ≥ 1 for a
- * two-kind bundle. NEVER returns a total larger than its grant (that was the old
- * "+3 overshoot" bug), so the caller can clamp grant ≤ remaining and stay within
- * the free-core budget. Under-allocating (leaving a core idle) is allowed and
- * safe; it only happens at bundle sizes floor(cores/n) never actually produces.
+ *   1. Transient gateway-BOOT CPU bursts → the cross-process gateway-boot lease
+ *      (acquireGatewayBootLease, wired into both gateway fixtures) serialises them.
+ *   2. SUSTAINED CPU contention on tier-2 browser RENDER work → CPU HEADROOM. The
+ *      tier-2 flakes are `toBeVisible` timeouts: the app must render within the
+ *      test timeout, which it can't when N full suites saturate all cores. So
+ *      under contention we DELIBERATELY under-allocate vitest, leaving idle cores
+ *      for the concurrent browser tiers to render into. (A prior iteration that
+ *      filled all cores — Σ=24/24 at 3-way — starved browser render and regressed
+ *      the green rate; restoring headroom, Σ≈15/24 at 3-way, is the fix.)
+ *
+ * Playwright targets PLAYWRIGHT_CAP (=2) chromium workers — the IO-bound sweet
+ * spot (2 ≈ 4 workers throughput; 1 doubles isolated wall). A single uncontended
+ * run (grant ≥ MAX_BUNDLE) uses the full vitest cap for speed (no peer to starve).
+ *
+ * Invariant: `vitest + playwright ≤ grant`, both ≥ 1 for a two-kind bundle, never
+ * an overshoot. Under-allocation (idle cores) is intended headroom, not waste.
  */
 export function splitBundle(grant) {
 	const total = clamp(Math.floor(grant) || 0, 1, MAX_BUNDLE);
 	if (total < 2) return { vitest: 1, playwright: 0, total: 1 };
-	// Uncontended (single/near-single run): full playwright parallelism for speed.
-	if (total >= 12) {
-		const vitest = VITEST_CAP;
-		const playwright = PLAYWRIGHT_CAP;
-		return { vitest, playwright, total: vitest + playwright };
+	const playwright = clamp(Math.min(PLAYWRIGHT_CAP, total - 1), 1, PLAYWRIGHT_CAP);
+	// Uncontended (single/near-single run, grant ≥ 12): use the box — full vitest
+	// parallelism for speed; the lone browser tier has ample render headroom anyway.
+	if (total >= MAX_BUNDLE) {
+		return { vitest: VITEST_CAP, playwright, total: VITEST_CAP + playwright };
 	}
-	// Contended (bundle 4..11, i.e. 2+ concurrent runs): exactly 1 playwright worker
-	// AND deliberately UNDER-allocate vitest (~half the bundle) to leave idle cores.
-	// Measured: v2-integration tests boot a real gateway each; at full utilization
-	// (Σ=cores) the transient gateway-boot CPU bursts across many concurrent
-	// integration test files starve each other past the 60 s test timeout. Leaving
-	// headroom (e.g. 3-way → 4v+1p, Σ=15/24) absorbs those bursts. Fork count is the
-	// dominant driver of integration starvation (6 forks/run failed fewer than 7).
-	const playwright = 1;
-	const vitest = clamp(Math.ceil(total / 2), 1, Math.min(VITEST_CAP, total - playwright));
+	// Contended (2+ runs): under-allocate vitest (~half the free-after-playwright
+	// budget) so Σworkers leaves ~a third of the cores idle for browser render.
+	const vitest = clamp(Math.ceil(total / 2) - 1, 1, Math.min(VITEST_CAP, total - playwright));
 	return { vitest, playwright, total: vitest + playwright };
 }
 
@@ -512,6 +589,164 @@ function releaseRecords(recordIds, heartbeat, opts = {}) {
 	}
 }
 
+// ──────────────────── gateway-boot lease pool (global budget) ────────────────────
+
+function leasesPath() {
+	return join(ledgerDir(), LEASES_FILENAME);
+}
+
+function readLeasesRaw() {
+	try {
+		const parsed = JSON.parse(readFileSync(leasesPath(), "utf8"));
+		if (parsed && Array.isArray(parsed.leases)) {
+			return { leases: parsed.leases, generation: parsed.generation || 0 };
+		}
+	} catch {
+		/* missing/corrupt — start fresh */
+	}
+	return { leases: [], generation: 0 };
+}
+
+/**
+ * Drop leases whose owner PID is dead OR that have out-lived their pool's
+ * max-hold backstop. gateway-boot wraps a boot (seconds) → 3-min backstop;
+ * browser wraps a worker's whole life (minutes) → 30-min backstop. Dead holders
+ * are reclaimed immediately regardless of age (PID liveness), so a crashed run
+ * never wedges a slot; the age backstop only guards a leaked release on a hung
+ * but still-alive PID.
+ */
+function sweepLeases(state) {
+	const now = Date.now();
+	state.leases = state.leases.filter((l) => pidAlive(l.pid) && now - Date.parse(l.at || 0) < leaseMaxHoldMs(l.pool));
+}
+
+function writeLeases(state) {
+	state.generation = (state.generation || 0) + 1;
+	writeFileSync(leasesPath(), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+/**
+ * Resolve the concurrent-holder cap for a lease pool.
+ *
+ * Priority: opts.cap (tests) > env override (tuning) > tests2/budget-caps.json
+ * (committed static value) > built-in default. The env override lets the
+ * authoritative measurement ramp a cap without editing the committed file each
+ * run; the file is the source of truth between calibrations.
+ *   gateway-boot env: BOBBIT_V2_MAX_GATEWAY_BOOTS
+ *   browser     env: BOBBIT_V2_MAX_BROWSER  (generic BOBBIT_V2_MAX_<POOL>)
+ */
+export function leaseCap(pool, opts = {}) {
+	const fromOpt = Number(opts.cap);
+	if (Number.isFinite(fromOpt) && fromOpt > 0) return Math.floor(fromOpt);
+
+	const envKey = pool === "gateway-boot" ? "BOBBIT_V2_MAX_GATEWAY_BOOTS" : `BOBBIT_V2_MAX_${pool.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+	const env = Number(process.env[envKey]);
+	if (Number.isFinite(env) && env > 0) return Math.floor(env);
+
+	const fromFile = budgetCapFromFile(pool);
+	if (fromFile != null) return fromFile;
+
+	if (pool === "gateway-boot") {
+		// ~1 boot per 6 cores: 24-core box → 4 simultaneous boots. Small enough to
+		// keep the transient boot CPU burst well under the core count at ANY N,
+		// large enough that a single isolated run barely queues.
+		return clamp(Math.floor(totalCores(opts) / 6), 2, 8);
+	}
+	if (pool === "browser") {
+		// Sustained Chromium render contention (tier-2 toBeVisible flakes). Default
+		// mirrors gateway-boot (~1 per 6 cores) until the committed budget-caps.json
+		// value / measurement refines it.
+		return clamp(Math.floor(totalCores(opts) / 6), 2, 8);
+	}
+	return clamp(Math.floor(totalCores(opts) / 4), 2, MAX_BUNDLE);
+}
+
+const sleepAsync = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Acquire a lease from a cross-process pool, WAITING (async) while the pool is
+ * saturated. Returns once granted; the returned release() removes the lease.
+ * Fail-open: after opts.timeoutMs the lease is granted anyway (`forced:true`)
+ * so a heavy op can never deadlock behind a mis-counted or slow peer.
+ */
+export async function acquireLease(pool, opts = {}) {
+	const id = newId(`lease-${pool}`);
+	const cap = leaseCap(pool, opts);
+	const deadline = Date.now() + (opts.timeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS);
+	let forced = false;
+	for (;;) {
+		const outcome = withLock(() => {
+			const state = readLeasesRaw();
+			sweepLeases(state);
+			const held = state.leases.filter((l) => l.pool === pool).length;
+			const timedOut = Date.now() > deadline;
+			if (held < cap || timedOut) {
+				const wasForced = timedOut && held >= cap;
+				state.leases.push({ id, pool, pid: process.pid, at: new Date().toISOString(), forced: wasForced });
+				writeLeases(state);
+				return { granted: true, forced: wasForced };
+			}
+			// Persist the sweep so a dead holder's slot is freed for peers even when
+			// we ourselves don't get in this round.
+			writeLeases(state);
+			return { granted: false };
+		}, opts);
+		if (outcome.granted) {
+			forced = outcome.forced;
+			break;
+		}
+		await sleepAsync(jitter(LEASE_POLL_MS));
+	}
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		releaseLeaseById(id, opts);
+	};
+	process.once("exit", release);
+	return { release, id, forced, pool, cap };
+}
+
+function releaseLeaseById(id, opts = {}) {
+	try {
+		withLock(() => {
+			const state = readLeasesRaw();
+			state.leases = state.leases.filter((l) => l.id !== id);
+			writeLeases(state);
+		}, { lockTimeoutMs: opts.lockTimeoutMs ?? 5000 });
+	} catch {
+		/* best-effort — the sweeper reclaims on PID liveness / max-hold age */
+	}
+}
+
+/** Convenience wrapper: the primary contention source is gateway boots. */
+export function acquireGatewayBootLease(opts = {}) {
+	return acquireLease("gateway-boot", opts);
+}
+
+/**
+ * Convenience wrapper for the browser-render pool: caps TOTAL concurrent
+ * Chromium browser workers across ALL runs (the sustained tier-2 render
+ * contention that drives toBeVisible flakes at N-way). Held for a Playwright
+ * worker's whole life (acquire at worker startup, release at teardown), so it
+ * WAITS for a free slot rather than force-proceeding — the cap integrity is the
+ * point. Pass a custom timeoutMs only to relax the anti-deadlock guard.
+ */
+export function acquireBrowserRenderLease(opts = {}) {
+	return acquireLease("browser", { timeoutMs: DEFAULT_BROWSER_LEASE_TIMEOUT_MS, ...opts });
+}
+
+export function readLeases(opts = {}) {
+	if (!existsSync(leasesPath())) return { leases: [], generation: 0 };
+	return withLock(() => {
+		const state = readLeasesRaw();
+		const before = state.leases.length;
+		sweepLeases(state);
+		if (state.leases.length !== before) writeLeases(state);
+		return state;
+	}, opts);
+}
+
 // ─────────────────────────────── public ───────────────────────────────
 
 export function reserveParentBundle(opts = {}) {
@@ -590,6 +825,16 @@ function cliStatus() {
 		console.log(`  - ${r.kind.padEnd(11)} slots=${r.workerSlots} pid=${r.pid} parent=${r.parentRunId} id=${r.id}`);
 	}
 	if (!state.reservations.length) console.log("  (no active reservations)");
+
+	const leaseState = readLeases();
+	const gbCap = leaseCap("gateway-boot");
+	const gbHeld = leaseState.leases.filter((l) => l.pool === "gateway-boot").length;
+	const brCap = leaseCap("browser");
+	const brHeld = leaseState.leases.filter((l) => l.pool === "browser").length;
+	console.log(`  leases: gateway-boot ${gbHeld}/${gbCap}  browser ${brHeld}/${brCap}`);
+	for (const l of leaseState.leases) {
+		console.log(`    - ${l.pool} pid=${l.pid} at=${l.at}${l.forced ? " (forced)" : ""} id=${l.id}`);
+	}
 }
 
 function assert(cond, msg) {
@@ -661,11 +906,12 @@ function cliSelftest() {
 	const s4 = splitBundle(4);
 	const s8 = splitBundle(8);
 	const s12 = splitBundle(12);
-	// Under contention (bundle 4/8 = 5-way/3-way) exactly ONE playwright worker so
-	// concurrent browsers stay minimal; a single run (bundle 12) keeps 8v+4p.
-	assert(s4.vitest === 2 && s4.playwright === 1, `split(4)=2v+1p got ${s4.vitest}+${s4.playwright}`);
-	assert(s8.vitest === 4 && s8.playwright === 1, `split(8)=4v+1p got ${s8.vitest}+${s8.playwright}`);
-	assert(s12.vitest === 8 && s12.playwright === 4, `split(12)=8v+4p got ${s12.vitest}+${s12.playwright}`);
+	// Contended: 2 chromium workers + UNDER-ALLOCATED vitest (headroom for browser
+	// render). 8→3v+2p (Σ15/24 @ 3-way), 4→1v+2p (Σ15/24 @ 5-way). Single run
+	// (grant≥12) uses the full vitest cap: 12→8v+2p.
+	assert(s4.vitest === 1 && s4.playwright === 2, `split(4)=1v+2p got ${s4.vitest}+${s4.playwright}`);
+	assert(s8.vitest === 3 && s8.playwright === 2, `split(8)=3v+2p got ${s8.vitest}+${s8.playwright}`);
+	assert(s12.vitest === 8 && s12.playwright === 2, `split(12)=8v+2p got ${s12.vitest}+${s12.playwright}`);
 	for (let g = 2; g <= MAX_BUNDLE; g++) {
 		const s = splitBundle(g);
 		// Never overshoot the grant; under-allocation (idle core) is allowed + safe.
@@ -673,7 +919,7 @@ function cliSelftest() {
 		assert(s.vitest <= VITEST_CAP && s.playwright <= PLAYWRIGHT_CAP, `splitBundle(${g}) within caps, got v=${s.vitest} pw=${s.playwright}`);
 		assert(s.vitest >= 1 && s.playwright >= 1, `splitBundle(${g}) both kinds ≥1, got v=${s.vitest} pw=${s.playwright}`);
 	}
-	console.log("  splitBundle(4)=2v+1p ✓  splitBundle(8)=4v+1p ✓  splitBundle(12)=8v+4p ✓  no-overshoot 2..12 ✓");
+	console.log("  splitBundle(4)=1v+2p ✓  splitBundle(8)=3v+2p ✓  splitBundle(12)=8v+2p ✓  no-overshoot 2..12 ✓");
 
 	// 6) Pending-contention: seed 4 live pending markers (distinct runs) so a fresh
 	//    reserve sees activeParents=5 → target=floor(24/5)=4. This is the core
@@ -843,13 +1089,217 @@ async function cliStress() {
 	process.exit(ok ? 0 : 1);
 }
 
+// ─────────────────────── lease-pool selftest + stress ───────────────────────
+
+/** Reserve a gateway-boot lease, print the live holder count, hold, release. */
+async function cliLeaseHold(holdMs, cap) {
+	const opts = cap ? { cap } : {};
+	const lease = await acquireLease("gateway-boot", opts);
+	const snap = readLeases();
+	const held = snap.leases.filter((l) => l.pool === "gateway-boot").length;
+	const effectiveCap = leaseCap("gateway-boot", opts);
+	console.log(`LEASED pid=${process.pid} held=${held}/${effectiveCap}${lease.forced ? " (forced)" : ""}`);
+	if (held > effectiveCap && !lease.forced) {
+		console.error(`LEASE INVARIANT VIOLATION at acquire: held=${held} > cap=${effectiveCap}`);
+		process.exit(3);
+	}
+	await sleepAsync(holdMs);
+	lease.release();
+	process.exit(0);
+}
+
+/**
+ * cliLeaseStress — spawn N lease-hold children with staggered starts, poll the
+ * lease pool throughout, and assert peak concurrent holders ≤ cap. Proves the
+ * cross-process gateway-boot budget without running the suite (valid on a busy
+ * box). usage: node ledger.mjs --lease-stress [N=8] [staggerMs=50] [holdMs=1500] [cap=3]
+ */
+async function cliLeaseStress() {
+	process.env.BOBBIT_V2_TOTAL_CORES = process.env.BOBBIT_V2_TOTAL_CORES || "24";
+	const N = Number(process.argv[3]) || 8;
+	const staggerMs = Number(process.argv[4]) || 50;
+	const holdMs = Number(process.argv[5]) || 1500;
+	const cap = Number(process.argv[6]) || 3;
+
+	ensureDir();
+	try {
+		rmSync(leasesPath(), { force: true });
+		rmSync(lockPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+
+	console.log(`lease stress: cap=${cap} children=${N} stagger=${staggerMs}ms hold=${holdMs}ms`);
+	const selfPath = fileURLToPath(import.meta.url);
+	let peakHeld = 0;
+	let violated = false;
+
+	const poll = setInterval(() => {
+		try {
+			const state = readLeases({ lockTimeoutMs: 2000 });
+			const held = state.leases.filter((l) => l.pool === "gateway-boot").length;
+			if (held > peakHeld) peakHeld = held;
+			if (held > cap) {
+				violated = true;
+				console.error(`  POLL VIOLATION: held=${held} > cap=${cap}`);
+			}
+		} catch {
+			/* locked — skip */
+		}
+	}, 100);
+
+	const waits = [];
+	for (let i = 0; i < N; i++) {
+		if (i > 0 && staggerMs > 0) await sleepAsync(staggerMs);
+		const child = spawn(process.execPath, [selfPath, "--lease-hold", String(holdMs), String(cap)], {
+			stdio: "inherit",
+			env: { ...process.env, BOBBIT_V2_MAX_GATEWAY_BOOTS: String(cap) },
+		});
+		waits.push(
+			new Promise((resolveChild) => {
+				child.on("close", (code, signal) => resolveChild(code ?? (signal ? 137 : 0)));
+				child.on("error", () => resolveChild(1));
+			}),
+		);
+	}
+
+	const codes = await Promise.all(waits);
+	clearInterval(poll);
+	await sleepAsync(300);
+	const leftover = readLeases().leases.length;
+	const badCodes = codes.filter((c) => c !== 0);
+	console.log(`lease stress: peak held=${peakHeld}/${cap}  leftover=${leftover}  badExits=${badCodes.length}${badCodes.length ? ` (codes=${badCodes.join(",")})` : ""}`);
+
+	let ok = true;
+	if (violated || peakHeld > cap) {
+		console.error("lease stress: FAIL — concurrent holders exceeded cap");
+		ok = false;
+	}
+	if (badCodes.length > 0) {
+		console.error(`lease stress: FAIL — ${badCodes.length} child(ren) exited non-zero (codes=${badCodes.join(",")})`);
+		ok = false;
+	}
+	if (leftover > 0) {
+		console.error(`lease stress: FAIL — ${leftover} lease(s) not released/swept`);
+		ok = false;
+	}
+	console.log(ok ? "lease stress: PASS" : "lease stress: FAILED");
+	process.exit(ok ? 0 : 1);
+}
+
+/** In-process lease selftest: cap enforcement, fail-open, dead-PID sweep. */
+async function cliLeaseSelftest() {
+	process.env.BOBBIT_V2_TOTAL_CORES = process.env.BOBBIT_V2_TOTAL_CORES || "24";
+	ensureDir();
+	try {
+		rmSync(leasesPath(), { force: true });
+		rmSync(lockPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+	console.log("lease selftest: begin");
+
+	// 1) cap resolution: budget-caps.json (gateway-boot=browser=4) and opts.cap override.
+	assert(leaseCap("gateway-boot") === 4, `gateway-boot cap should be 4 (budget-caps.json/default), got ${leaseCap("gateway-boot")}`);
+	assert(leaseCap("browser") === 4, `browser cap should be 4 (budget-caps.json), got ${leaseCap("browser")}`);
+	assert(leaseCap("gateway-boot", { cap: 2 }) === 2, `opts.cap overrides, got ${leaseCap("gateway-boot", { cap: 2 })}`);
+	assert(leaseCap("browser", { cap: 6 }) === 6, `browser opts.cap overrides, got ${leaseCap("browser", { cap: 6 })}`);
+
+	// 2) Acquire up to cap; the (cap+1)th must WAIT (not grant immediately),
+	//    then be granted after a holder releases.
+	const cap = 2;
+	const l1 = await acquireLease("gateway-boot", { cap });
+	const l2 = await acquireLease("gateway-boot", { cap });
+	assert(readLeases().leases.length === 2, `two leases held, got ${readLeases().leases.length}`);
+	let l3Granted = false;
+	const l3Promise = acquireLease("gateway-boot", { cap, timeoutMs: 5000 }).then((l) => {
+		l3Granted = true;
+		return l;
+	});
+	await sleepAsync(400);
+	assert(!l3Granted, "3rd lease must WAIT while pool is at cap (backpressure)");
+	l1.release();
+	const l3 = await l3Promise;
+	assert(l3Granted && !l3.forced, "3rd lease granted (not forced) after a holder released");
+	l2.release();
+	l3.release();
+	assert(readLeases().leases.length === 0, `all leases released, found ${readLeases().leases.length}`);
+	console.log("  cap enforcement + wait-then-grant ✓");
+
+	// 3) Fail-open: at cap with a short timeout, acquire proceeds as `forced`.
+	const h1 = await acquireLease("gateway-boot", { cap: 1 });
+	const forcedLease = await acquireLease("gateway-boot", { cap: 1, timeoutMs: 300 });
+	assert(forcedLease.forced, "acquire past deadline must fail-open with forced:true (never deadlock)");
+	h1.release();
+	forcedLease.release();
+	console.log("  fail-open forced lease after timeout ✓");
+
+	// 4) Dead-PID sweep: seed a lease owned by a dead pid; a fresh acquire at cap=1
+	//    must reclaim it rather than block forever.
+	const dead = spawnSync(process.execPath, ["-e", "0"]);
+	writeFileSync(
+		leasesPath(),
+		JSON.stringify({ generation: 1, leases: [{ id: "ghost-lease", pool: "gateway-boot", pid: dead.pid, at: new Date().toISOString() }] }, null, 2),
+	);
+	const reclaimed = await acquireLease("gateway-boot", { cap: 1, timeoutMs: 3000 });
+	assert(!reclaimed.forced, "dead-pid lease should be swept so a fresh acquire is granted normally (not forced)");
+	assert(readLeases().leases.length === 1, `only the live lease remains, got ${readLeases().leases.length}`);
+	reclaimed.release();
+	console.log("  dead-pid lease swept ✓");
+
+	// 5) Per-pool max-hold: a LIVE lease aged past the gateway-boot backstop (3
+	//    min) is swept, but a LIVE browser lease of the same age is NOT (30-min
+	//    backstop) — a worker legitimately holds its browser lease for minutes and
+	//    must never have its slot swept out from under it. Seed both owned by THIS
+	//    (live) pid, aged 5 min.
+	const agedIso = new Date(Date.now() - 300_000).toISOString();
+	writeFileSync(
+		leasesPath(),
+		JSON.stringify(
+			{
+				generation: 1,
+				leases: [
+					{ id: "aged-gw", pool: "gateway-boot", pid: process.pid, at: agedIso },
+					{ id: "aged-browser", pool: "browser", pid: process.pid, at: agedIso },
+				],
+			},
+			null,
+			2,
+		),
+	);
+	const afterAgeSweep = readLeases().leases;
+	assert(!afterAgeSweep.some((l) => l.id === "aged-gw"), "live gateway-boot lease aged past 3-min backstop should be swept");
+	assert(afterAgeSweep.some((l) => l.id === "aged-browser"), "live browser lease aged 5 min must NOT be swept (30-min backstop)");
+	console.log("  per-pool max-hold: gateway-boot swept @5min, browser retained ✓");
+
+	try {
+		rmSync(leasesPath(), { force: true });
+	} catch {
+		/* ignore */
+	}
+	console.log("lease selftest: PASS");
+}
+
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
 	const arg = process.argv[2] || "--status";
-	if (arg === "--selftest") cliSelftest();
+	if (arg === "--selftest") {
+		cliSelftest();
+		cliLeaseSelftest().catch((e) => {
+			console.error("lease selftest: fatal:", e);
+			process.exit(1);
+		});
+	} else if (arg === "--lease-selftest") cliLeaseSelftest().catch((e) => {
+		console.error("lease selftest: fatal:", e);
+		process.exit(1);
+	});
 	else if (arg === "--status") cliStatus();
 	else if (arg === "--stress") cliStress().catch((e) => {
 		console.error("ledger stress: fatal:", e);
+		process.exit(1);
+	});
+	else if (arg === "--lease-stress") cliLeaseStress().catch((e) => {
+		console.error("lease stress: fatal:", e);
 		process.exit(1);
 	});
 	else if (arg === "--reserve-hold") {
@@ -857,8 +1307,15 @@ if (isMain) {
 		const holdMs = Number(process.argv[4]) || 6000;
 		const coalesceMs = Number(process.env.BOBBIT_V2_STRESS_COALESCE_MS) || 1500;
 		cliReserveHold(kind, holdMs, coalesceMs);
+	} else if (arg === "--lease-hold") {
+		const holdMs = Number(process.argv[3]) || 1500;
+		const cap = Number(process.argv[4]) || 0;
+		cliLeaseHold(holdMs, cap).catch((e) => {
+			console.error("lease hold: fatal:", e);
+			process.exit(1);
+		});
 	} else {
-		console.log("usage: node scripts/testing-v2/ledger.mjs [--status | --selftest | --stress [N] [staggerMs] [holdMs]]");
+		console.log("usage: node scripts/testing-v2/ledger.mjs [--status | --selftest | --lease-selftest | --stress [N] [staggerMs] [holdMs] | --lease-stress [N] [staggerMs] [holdMs] [cap]]");
 		process.exit(2);
 	}
 }

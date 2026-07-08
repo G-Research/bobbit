@@ -71,9 +71,20 @@ export function resolveCaps(scope, pilot = false) {
 	const underLoad = process.env.BOBBIT_V2_CONCURRENCY_RUN && process.env.BOBBIT_V2_CONCURRENCY_RUN !== "0";
 	if (underLoad && budgets.concurrency) {
 		const c = budgets.concurrency;
+		// MEASUREMENT decoupling: BOBBIT_V2_PERRUN_WALL_MS overrides the under-load
+		// wall cap so the authoritative concurrency measurement can separate the
+		// FLAKE signal (tests pass/fail) from the WALL signal (queuing cost of the
+		// global budget). The whole premise is "accept higher wall for ~0 flakes", so
+		// a run legitimately exceeding the committed 600 s cap is NOT a flake — during
+		// measurement we relax the wall gate and record wall separately, leaving the
+		// honest committed bar (budgets.json perRunMaxWallMs) untouched.
+		const perRunWallOverride = Number(process.env.BOBBIT_V2_PERRUN_WALL_MS);
+		const maxWallMs = Number.isFinite(perRunWallOverride) && perRunWallOverride > 0
+			? perRunWallOverride
+			: (Number.isFinite(c.perRunMaxWallMs) ? c.perRunMaxWallMs : caps.maxWallMs);
 		return {
 			tier,
-			maxWallMs: Number.isFinite(c.perRunMaxWallMs) ? c.perRunMaxWallMs : caps.maxWallMs,
+			maxWallMs,
 			maxCpuMs: Number.isFinite(c.perRunMaxCpuMs) ? c.perRunMaxCpuMs : caps.maxCpuMs,
 			label: `${caps.label} (under-load)`,
 			pilot: !!pilot,

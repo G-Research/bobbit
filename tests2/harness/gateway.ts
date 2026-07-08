@@ -27,9 +27,13 @@ import type WebSocket from "ws";
 import { setProjectRoot } from "../../src/server/bobbit-dir.js";
 import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
 import { loadOrCreateToken } from "../../src/server/auth/token.js";
-import { createGateway } from "../../src/server/server.js";
-import { configureAigwRuntimeFlags } from "../../src/server/agent/aigw-manager.js";
+// createGateway (+ configureAigwRuntimeFlags) pull the WHOLE src/server graph.
+// They are imported DYNAMICALLY inside boot() while holding the gateway-boot
+// lease, so the heavy per-fork transform of that graph is serialised by the
+// global concurrency budget too (not just the runtime boot). See the lease pool
+// in scripts/testing-v2/ledger.mjs.
 import type { GatewayDeps } from "../../src/server/gateway-deps.js";
+import { acquireGatewayBootLease } from "../../scripts/testing-v2/ledger.mjs";
 import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../tests/e2e/seed-workflows.js";
 import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
@@ -239,6 +243,16 @@ async function boot(): Promise<BootedGateway> {
 		return null;
 	};
 
+	// GLOBAL CONCURRENCY BUDGET: serialise the CPU-heavy gateway boot (src/server
+	// graph transform on first import per fork + migration + subsystem init) so
+	// that N concurrent test:v2 runs never fire a cluster of simultaneous boots
+	// that spike CPU and starve timing-sensitive integration tests. Held ONLY for
+	// the boot; released the instant gw.start() resolves. Fail-open (never blocks
+	// a boot indefinitely). See docs/testing-v2/concurrency-proof.md.
+	const bootLease = await acquireGatewayBootLease();
+	const { createGateway } = await import("../../src/server/server.js");
+	const { configureAigwRuntimeFlags } = await import("../../src/server/agent/aigw-manager.js");
+
 	const clock = createManualClock();
 	// Command-STEP executor seam: default is the real durable spawn path (same as
 	// production). A fork whose vitest project opts in (globalThis flag set by the
@@ -280,7 +294,15 @@ async function boot(): Promise<BootedGateway> {
 	// createGateway seeds these from env (all false here); override before start().
 	configureAigwRuntimeFlags({ skipAigwDiscovery: true, testNoExternal: true, e2e: true });
 
-	const port = await gw.start();
+	let port: number;
+	try {
+		port = await gw.start();
+	} finally {
+		// Boot's CPU burst is over once start() settles — free the lease so the
+		// next queued fork/run can boot. The remaining setup (HTTP project
+		// registration + workflow seeding) is gateway-bound, not a CPU burst.
+		bootLease.release();
+	}
 	const baseURL = `http://127.0.0.1:${port}`;
 	const wsBase = `ws://127.0.0.1:${port}`;
 	writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
