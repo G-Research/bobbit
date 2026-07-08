@@ -152,7 +152,16 @@ export const TOOLS_DIR = path.join(bobbitConfigDir(), "tools");
 
 /** Default builtins tools directory: dist/server/defaults/tools/ */
 function defaultBuiltinToolsDir(): string {
-	return path.join(__dirname, "..", "defaults", "tools");
+	// Dist boot: copy-defaults.mjs populates <dist>/server/defaults/tools, which
+	// is module-relative (__dirname = <dist>/server/agent). Prefer it when present.
+	const moduleDefaults = path.join(__dirname, "..", "defaults", "tools");
+	if (fs.existsSync(moduleDefaults)) return moduleDefaults;
+	// Src boot (e.g. the v2 gateway fixture running from src/ under vitest): the
+	// defaults live at the repo root, three levels up from src/server/agent. This
+	// mirrors server.ts::runtimeBuiltinToolsDir so ToolManager.getAvailableTools()
+	// resolves the builtin tool catalogue in src mode too (otherwise every role's
+	// effective tool grant computes empty and role-carrying spawns fail closed).
+	return path.resolve(__dirname, "..", "..", "..", "defaults", "tools");
 }
 
 /**

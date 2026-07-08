@@ -2,16 +2,16 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, then reconciled (migrated/v2Path/v2Native) against tests2/ on disk",
   "note": "Buckets/methods/rationale come from `node scripts/testing-v2/gen-inventory.mjs` (curated overrides live in the generator). The `migrated`/`v2Path` per-entry fields and the top-level `v2Native` allowlist are reconciled against the tests2/ tree and are validated by scripts/testing-v2/parity.mjs and tests2/core/guard-v2.test.ts â€” do not hand-edit them blindly.",
-  "censusTotal": 1123,
+  "censusTotal": 1125,
   "buckets": {
     "daily": 56,
-    "v2-browser": 215,
+    "v2-browser": 216,
     "v2-core": 508,
     "v2-dom": 144,
-    "v2-integration": 200
+    "v2-integration": 201
   },
   "methods": {
-    "adapter": 270,
+    "adapter": 272,
     "codemod": 509,
     "relocate": 45,
     "legacy-pending": 153,
@@ -1756,6 +1756,15 @@
       "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
       "migrated": true,
       "v2Path": "tests2/integration/market-pack-roles-api.test.ts"
+    },
+    {
+      "file": "tests/e2e/market-pack-team-roles.spec.ts",
+      "bucket": "v2-integration",
+      "method": "adapter",
+      "replacement": [],
+      "rationale": "API/integration E2E against a real gateway (team_spawn + team_delegate market-pack role plumbing) — gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/market-pack-team-roles.test.ts"
     },
     {
       "file": "tests/e2e/marketplace-mcp.spec.ts",
@@ -4235,6 +4244,17 @@
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-resize.spec.ts:13 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
       "v2Path": "tests2/browser/fixtures/sidebar-resize.spec.ts"
+    },
+    {
+      "file": "tests/e2e/ui/sidebar-reveal.spec.ts",
+      "bucket": "v2-browser",
+      "method": "adapter",
+      "replacement": [
+        "tests2/browser/fixtures/sidebar-reveal.spec.ts"
+      ],
+      "rationale": "Browser E2E uses getBoundingClientRect()/scrollIntoView/scrollTop geometry against a real gateway — needs Chromium real-browser fidelity.",
+      "migrated": true,
+      "v2Path": "tests2/browser/fixtures/sidebar-reveal.spec.ts"
     },
     {
       "file": "tests/e2e/ui/sidebar-search-filter.spec.ts",
