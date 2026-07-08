@@ -1188,7 +1188,6 @@ export async function tryHandleNestedGoalRoute(
 	// POST /api/goals/:id/pause — cascade required.
 	const pauseMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pause$/);
 	if (pauseMatch && req.method === "POST") {
-		if (!requireSubgoalsEnabled()) return true;
 		const id = pauseMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
@@ -1244,7 +1243,6 @@ export async function tryHandleNestedGoalRoute(
 	// POST /api/goals/:id/resume — cascade required.
 	const resumeMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/resume$/);
 	if (resumeMatch && req.method === "POST") {
-		if (!requireSubgoalsEnabled()) return true;
 		const id = resumeMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }

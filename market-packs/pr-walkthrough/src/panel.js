@@ -822,6 +822,51 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (last < source.length) parts.push(html`${source.slice(last)}`);
 		return parts;
 	};
+	// Intraline highlighting policy — mirrors how GitHub / git's `delta` decide
+	// when a per-character highlight actually helps. We diff the two lines at word
+	// granularity and paint only the tokens that changed. When almost the whole
+	// row was rewritten (a "line-distance" above MAX_INTRALINE_CHANGE_RATIO) we
+	// suppress the inline highlight entirely: the add/del background already says
+	// "this line changed", and smearing nearly every character on top is just noise.
+	const MAX_INTRALINE_CHANGE_RATIO = 0.8; // suppress once the changed span dominates the row
+	const MERGE_UNCHANGED_GAP = 2; // fuse changed spans split only by a tiny common run
+	const WORD_DIFF_MATRIX_CAP = 250000; // O(n*m) guard for pathological (e.g. minified) lines
+	const WORD_DIFF_TOKEN = /\s+|[A-Za-z0-9_$]+|[^\sA-Za-z0-9_$]/g;
+	const tokenizeForDiff = (text) => {
+		const tokens = [];
+		for (const match of asText(text).matchAll(WORD_DIFF_TOKEN)) tokens.push({ text: match[0], start: match.index || 0 });
+		return tokens;
+	};
+	// Mark which tokens of `a` survive in the longest common subsequence with `b`
+	// (i.e. are unchanged). Everything else on `a` is a genuine change to highlight.
+	const commonTokenMask = (a, b) => {
+		const n = a.length;
+		const m = b.length;
+		const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+		for (let i = n - 1; i >= 0; i -= 1) {
+			for (let j = m - 1; j >= 0; j -= 1) {
+				dp[i][j] = a[i].text === b[j].text ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+			}
+		}
+		const mask = new Array(n).fill(false);
+		let i = 0;
+		let j = 0;
+		while (i < n && j < m) {
+			if (a[i].text === b[j].text) { mask[i] = true; i += 1; j += 1; }
+			else if (dp[i + 1][j] >= dp[i][j + 1]) i += 1;
+			else j += 1;
+		}
+		return mask;
+	};
+	// Fallback for pathological lines: common prefix/suffix trim into a single span.
+	const prefixSuffixRanges = (text, other) => {
+		let start = 0;
+		while (start < text.length && start < other.length && text[start] === other[start]) start += 1;
+		let end = text.length;
+		let otherEnd = other.length;
+		while (end > start && otherEnd > start && text[end - 1] === other[otherEnd - 1]) { end -= 1; otherEnd -= 1; }
+		return end > start ? [{ start, end }] : [];
+	};
 	const changedRangeForPair = (line, peer) => {
 		if (!line || !peer) return [];
 		const kind = normKind(line);
@@ -829,15 +874,31 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (!((kind === "add" && peerKind === "del") || (kind === "del" && peerKind === "add"))) return [];
 		const text = asText(line.text);
 		const other = asText(peer.text);
-		let start = 0;
-		while (start < text.length && start < other.length && text[start] === other[start]) start += 1;
-		let end = text.length;
-		let otherEnd = other.length;
-		while (end > start && otherEnd > start && text[end - 1] === other[otherEnd - 1]) {
-			end -= 1;
-			otherEnd -= 1;
+		if (!text.length || !other.length) return [];
+		let ranges;
+		const a = tokenizeForDiff(text);
+		const b = tokenizeForDiff(other);
+		if (a.length * b.length > WORD_DIFF_MATRIX_CAP) {
+			ranges = prefixSuffixRanges(text, other);
+		} else {
+			const mask = commonTokenMask(a, b);
+			ranges = [];
+			for (let i = 0; i < a.length; i += 1) {
+				if (mask[i]) continue;
+				const start = a[i].start;
+				const end = start + a[i].text.length;
+				const last = ranges[ranges.length - 1];
+				if (last && start - last.end <= MERGE_UNCHANGED_GAP) last.end = end;
+				else ranges.push({ start, end });
+			}
 		}
-		return end > start ? [{ start, end }] : [];
+		if (!ranges.length) return [];
+		const changed = ranges.reduce((sum, range) => sum + (range.end - range.start), 0);
+		// Near-total rewrite, or a highlight that would cover the whole row: the
+		// background colour already communicates it, so skip the inline highlight.
+		if (changed / text.length > MAX_INTRALINE_CHANGE_RATIO) return [];
+		if (ranges.length === 1 && ranges[0].start === 0 && ranges[0].end === text.length) return [];
+		return ranges;
 	};
 	const renderHighlightedLine = (text, ranges = []) => {
 		const source = asText(text);
@@ -1443,6 +1504,73 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		try { await globalThis.navigator?.clipboard?.writeText(exportBodyFor(entry)); patchEntry(host, paramKey, { exportCopied: true, exportError: undefined }); }
 		catch (error) { patchEntry(host, paramKey, { exportCopied: false, exportError: msgOf(error) }); }
 	};
+	// Reverse-map a saved line-comment key back to its diff block + line anchor so
+	// the assembled draft carries diffBlockId/lineId (mirrors lineCommentTargetFor,
+	// but returns the server-side anchor ids buildGithubReviewPreview indexes by).
+	const lineAnchorFor = (card, key) => {
+		for (const block of arrayOf(card && card.diffBlocks)) {
+			for (const hunk of arrayOf(block && block.hunks)) {
+				for (const line of arrayOf(hunk && hunk.lines)) {
+					if (lineKey(card, block, line) === key) {
+						return {
+							diffBlockId: asText(block && block.id) || undefined,
+							lineId: asText(line && (line.id || line.lineId || line.line || line.newLine || line.oldLine)) || undefined,
+						};
+					}
+				}
+			}
+		}
+		return undefined;
+	};
+
+	// Assemble the PrWalkthroughReviewDraft the server-side buildGithubReviewPreview
+	// expects (decisions + comments the panel already tracks). Card-level comments
+	// carry no anchor (they land in the review body); line comments carry the diff
+	// block + line ids for GitHub inline placement.
+	const buildReviewDraft = (entry) => {
+		const changeset = (entry.bundle && entry.bundle.changeset) || {};
+		const now = new Date().toISOString();
+		const decisions = {};
+		const comments = [];
+		for (const card of reviewCardsOf(entry)) {
+			const cardCommentIds = [];
+			for (const [index, comment] of savedCardCommentsForCard(entry, card).entries()) {
+				const id = `${card.id}::card::${index}`;
+				comments.push({ id, cardId: card.id, body: String(comment), source: "custom", createdAt: now });
+				cardCommentIds.push(id);
+			}
+			for (const [key, list] of savedLineCommentsForCard(entry, card)) {
+				const anchor = lineAnchorFor(card, key) || {};
+				for (const [index, comment] of arrayOf(list).filter((value) => asText(value).trim()).entries()) {
+					const id = `${key}::${index}`;
+					comments.push({ id, cardId: card.id, diffBlockId: anchor.diffBlockId, lineId: anchor.lineId, body: String(comment), source: "custom", createdAt: now });
+					cardCommentIds.push(id);
+				}
+			}
+			const status = (entry.reviewStatus || {})[card.id];
+			if (status === "liked" || status === "disliked") {
+				decisions[card.id] = { cardId: card.id, value: status, commentIds: cardCommentIds, updatedAt: now };
+			}
+		}
+		return { changeset, decisions, comments, completedCardIds: [...completedCardIds(entry)], updatedAt: now };
+	};
+
+	const postReviewToGithub = async (entry, host, paramKey) => {
+		if (!host || !host.callRoute) return;
+		patchEntry(host, paramKey, { exportPosting: true, exportPostError: undefined, exportPosted: undefined, exportReviewUrl: undefined });
+		try {
+			const draft = buildReviewDraft(entry);
+			const result = await host.callRoute("submitReview", { method: "POST", body: { draft, event: "COMMENT", confirm: true } });
+			if (!result || result.ok === false) {
+				patchEntry(host, paramKey, { exportPosting: false, exportPostError: structuredRouteMessage(result, "GitHub review submission failed."), exportPosted: undefined });
+				return;
+			}
+			patchEntry(host, paramKey, { exportPosting: false, exportPosted: msgOf(result.message || "GitHub review submitted."), exportReviewUrl: asText(result.reviewUrl) || undefined, exportPostError: undefined });
+		} catch (error) {
+			patchEntry(host, paramKey, { exportPosting: false, exportPostError: msgOf(error) });
+		}
+	};
+
 	const renderExportRows = (entry) => {
 		const rows = exportPreviewRowsFor(entry);
 		if (!rows.length) return html`<div class="export-empty" data-testid="pr-walkthrough-export-row" data-valid="false"><strong>No comment rows</strong><span>No saved card or line comments are available for export.</span></div>`;
@@ -1457,7 +1585,17 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	};
 	const renderExportDialog = (entry, host, paramKey) => {
 		if (!entry.exportPreviewOpen) return nothing;
-		return html`<div class="export-backdrop" role="presentation"><div class="export-dialog" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview"><header><div><div class="phase-label">Review export preview</div><h2>Review export preview</h2></div><button class="secondary" type="button" @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: false })}>Close</button></header><div class="warning" data-testid="pr-walkthrough-export-unavailable">Export unavailable in this pack fixture. Copy the local fallback draft below; publish is disabled until a pack-compatible export route is available.</div>${entry.exportError ? html`<div class="export-error" data-testid="pr-walkthrough-export-error">Copy failed: ${entry.exportError}</div>` : nothing}${entry.exportCopied ? html`<div class="export-result" data-testid="pr-walkthrough-export-result">Draft copied to clipboard.</div>` : nothing}${renderExportRows(entry)}<pre class="export-body" data-testid="pr-walkthrough-export-body">${exportBodyFor(entry)}</pre><footer><button class="secondary" type="button" @click=${() => copyExportDraft(entry, host, paramKey)}>Copy draft</button><button class="primary" data-testid="pr-walkthrough-export-submit" type="button" disabled>Submit to GitHub</button></footer></div></div>`;
+		// Post availability comes from the enriched bundle `export` descriptor (gh auth
+		// on the gateway host). When absent/unavailable the Post button is disabled and
+		// the reason is surfaced; the trust gate stays server-side at submit.
+		const exp = (entry.bundle && entry.bundle.export) || {};
+		const canPost = exp.available === true;
+		const unavailableMsg = canPost
+			? undefined
+			: (msgOf(exp.reason || "") || "Export unavailable: run `gh auth login` (or set GITHUB_TOKEN/GH_TOKEN) on the gateway host to post this review.");
+		return html`<div class="export-backdrop" role="presentation"><div class="export-dialog" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview"><header><div><div class="phase-label">Review export preview</div><h2>Review export preview</h2></div><button class="secondary" type="button" @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: false })}>Close</button></header>${canPost
+			? html`<div class="export-ready" data-testid="pr-walkthrough-export-unavailable">Ready to post this review to GitHub.</div>`
+			: html`<div class="warning" data-testid="pr-walkthrough-export-unavailable">${unavailableMsg}</div>`}${entry.exportError ? html`<div class="export-error" data-testid="pr-walkthrough-export-error">Copy failed: ${entry.exportError}</div>` : nothing}${entry.exportCopied ? html`<div class="export-result" data-testid="pr-walkthrough-export-result">Draft copied to clipboard.</div>` : nothing}${entry.exportPostError ? html`<div class="export-error" data-testid="pr-walkthrough-post-error">Post failed: ${entry.exportPostError}</div>` : nothing}${entry.exportPosted ? html`<div class="export-result" data-testid="pr-walkthrough-post-result">${entry.exportPosted}${entry.exportReviewUrl ? html` <a href=${entry.exportReviewUrl} target="_blank" rel="noreferrer">View review</a>` : nothing}</div>` : nothing}${renderExportRows(entry)}<pre class="export-body" data-testid="pr-walkthrough-export-body">${exportBodyFor(entry)}</pre><footer><button class="secondary" type="button" @click=${() => copyExportDraft(entry, host, paramKey)}>Copy draft</button><button class="primary" data-testid="pr-walkthrough-export-submit" type="button" disabled>Submit to GitHub</button><button class="primary" data-testid="pr-walkthrough-post-github" type="button" ?disabled=${!canPost || Boolean(entry.exportPosting)} @click=${() => postReviewToGithub(entry, host, paramKey)}>${entry.exportPosting ? "Posting…" : "Post to GitHub"}</button></footer></div></div>`;
 	};
 
 	const renderBundle = (entry, host, paramKey, displayJob) => {

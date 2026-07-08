@@ -52,9 +52,9 @@
  *
  * Scope: this only sets an env var on the spawned pi-coding-agent subprocess
  * (via RpcBridgeOptions.env, consumed in rpc-bridge.ts); it never touches
- * pi's installed files (contrast pi-ai-bedrock-headers-patch.ts, which is a
- * genuine monkeypatch for a seam pi doesn't expose natively — retention has
- * a native seam, so no patch is needed here). Existing explicit
+ * pi's installed files (contrast the since-removed pi-ai-bedrock-headers
+ * monkeypatch, retired when pi-ai gained native addCustomHeadersMiddleware —
+ * retention has a native seam, so no patch was ever needed here). Existing explicit
  * `cacheRetention` call sites (e.g. model-completion.ts's one-shot
  * `cacheRetention: "none"` utility completions) are unaffected: pi-ai's
  * `resolveCacheRetention` always prefers an explicit param over the env var.

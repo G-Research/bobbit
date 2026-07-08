@@ -154,7 +154,7 @@ export class GateVerificationLive extends LitElement {
 	@property({ type: Array }) initialSteps: InitialVerificationStep[] = [];
 
 	@state() private steps: VerificationStep[] = [];
-	@state() private overallStatus: "idle" | "running" | "passed" | "failed" = "idle";
+	@state() private overallStatus: "idle" | "running" | "passed" | "failed" | "stale" = "idle";
 	@state() private currentPhase = 0;
 	@state() private expandedSteps = new Set<number>();
 	@state() private modalStep: { index: number; name: string; output: string; type: string } | null = null;
@@ -162,6 +162,10 @@ export class GateVerificationLive extends LitElement {
 	private _stepOutputs = new Map<number, string>();
 
 	private _reconcileTimer?: ReturnType<typeof setTimeout>;
+	/** Repeating reconcile against the authoritative REST snapshot so a running
+	 * spinner cannot outlive a verification that died without a completion event. */
+	private _reconcileInterval?: ReturnType<typeof setInterval>;
+	private static readonly _RECONCILE_INTERVAL_MS = 8_000;
 	/** Throttled re-render after streaming output events (high-frequency). */
 	private _outputFlushTimer?: ReturnType<typeof setTimeout>;
 	private _abortCtrl?: AbortController;
@@ -190,12 +194,42 @@ export class GateVerificationLive extends LitElement {
 		ensureMarkdownBlock();
 		super.connectedCallback();
 		this._abortCtrl = new AbortController();
-		document.addEventListener("gate-verification-event", (e) => this._onEvent(e), { signal: this._abortCtrl.signal });
+		const signal = this._abortCtrl.signal;
+		document.addEventListener("gate-verification-event", (e) => this._onEvent(e), { signal });
+		// Reconcile when the tab regains visibility or connectivity returns — a
+		// verification may have died (or completed) while the tab was hidden or
+		// the WS was dropped, and no completion event will be replayed.
+		document.addEventListener("visibilitychange", () => {
+			if (document.visibilityState === "visible" && this._isReconcilable()) this._fetchAndReconcile();
+		}, { signal });
+		window.addEventListener("online", () => {
+			if (this._isReconcilable()) this._fetchAndReconcile();
+		}, { signal });
 		this._reconcileTimer = setTimeout(() => {
-			if (this.overallStatus === "running" || this.overallStatus === "idle") {
-				this._fetchAndReconcile();
-			}
+			if (this._isReconcilable()) this._fetchAndReconcile();
 		}, 300);
+		this._startReconcileLoop();
+	}
+
+	/** Whether the renderer is in a non-terminal state that warrants reconciliation. */
+	private _isReconcilable(): boolean {
+		return this.overallStatus === "running" || this.overallStatus === "idle";
+	}
+
+	private _startReconcileLoop(): void {
+		if (this._reconcileInterval) return;
+		this._reconcileInterval = setInterval(() => {
+			if (!this._isReconcilable()) { this._stopReconcileLoop(); return; }
+			if (document.visibilityState !== "visible") return;
+			this._fetchAndReconcile();
+		}, GateVerificationLive._RECONCILE_INTERVAL_MS);
+	}
+
+	private _stopReconcileLoop(): void {
+		if (this._reconcileInterval) {
+			clearInterval(this._reconcileInterval);
+			this._reconcileInterval = undefined;
+		}
 	}
 
 	private _markEventSeen(key: string): boolean {
@@ -220,6 +254,7 @@ export class GateVerificationLive extends LitElement {
 			clearTimeout(this._reconcileTimer);
 			this._reconcileTimer = undefined;
 		}
+		this._stopReconcileLoop();
 		if (this._outputFlushTimer) {
 			clearTimeout(this._outputFlushTimer);
 			this._outputFlushTimer = undefined;
@@ -258,13 +293,17 @@ export class GateVerificationLive extends LitElement {
 			// seed rows as failed while the verification is still running.
 			if (vStatus === "running") {
 				let activeSteps: VerificationStep[] | undefined;
+				let activeFetchOk = false;
+				let hasLiveActive = false;
 				try {
 					const activeRes = await fetch(`/api/goals/${this.goalId}/verifications/active`, { headers });
 					if (activeRes.ok) {
+						activeFetchOk = true;
 						const activeData = await activeRes.json();
 						const active = activeData.verifications?.find(
 							(v: any) => v.signalId === this.signalId
 						);
+						if (active) hasLiveActive = true;
 						if (active?.steps?.length) {
 							activeSteps = active.steps.map((s: InitialVerificationStep) => mapVerificationStep(s, "running"));
 							this.currentPhase = active.currentPhase ?? 0;
@@ -272,6 +311,24 @@ export class GateVerificationLive extends LitElement {
 					}
 				} catch {
 					// Gate snapshot fallback below is still safe when explicit statuses exist.
+				}
+
+				// STALE transition: persisted state says running, but the authoritative
+				// active-verifications endpoint answered and holds NO live entry for this
+				// signal (harness died / server restarted / dropped completion event).
+				// Do NOT infer stale when the active fetch failed — that could be a
+				// transient network blip, not a dead verification.
+				if (activeFetchOk && !hasLiveActive) {
+					this.steps = (signal.verification.steps || []).map((s: InitialVerificationStep) => {
+						const mapped = mapVerificationStep(s, "failed");
+						// Any residual running/waiting step is no longer progressing.
+						if (mapped.status === "running" || mapped.status === "waiting") mapped.status = "blocked";
+						return mapped;
+					});
+					this.overallStatus = "stale";
+					this._stopReconcileLoop();
+					this.requestUpdate();
+					return;
 				}
 
 				const signalSteps = (signal.verification.steps || []) as InitialVerificationStep[];
@@ -323,6 +380,7 @@ export class GateVerificationLive extends LitElement {
 					startedAt: now,
 				}));
 				this.overallStatus = "running";
+				this._startReconcileLoop();
 				break;
 			}
 			case "gate_verification_phase_started": {
@@ -404,6 +462,7 @@ export class GateVerificationLive extends LitElement {
 			}
 			case "gate_verification_complete": {
 				this.overallStatus = detail.status || "passed";
+				this._stopReconcileLoop();
 				this.requestUpdate();
 				break;
 			}
@@ -426,6 +485,13 @@ export class GateVerificationLive extends LitElement {
 				return html`<div class="mt-2 text-xs ${statusColor("error")}">${statusIcon("error")} Failed</div>`;
 			}
 			return html`<div class="mt-2 text-xs ${statusColor("running")}">Verification in progress…</div>`;
+		}
+
+		// Stale/terminated: the verification stopped without completing (harness
+		// died / server restart / dropped WS). Render a terminated state with a
+		// re-signal affordance instead of a perpetual spinner.
+		if (this.overallStatus === "stale" && this.steps.length === 0) {
+			return this._renderStaleBanner();
 		}
 
 		// Auto-pass: complete arrived with no steps
@@ -499,7 +565,31 @@ export class GateVerificationLive extends LitElement {
 		`;
 	}
 
+	/** Emit a bubbling request the dashboard/chat can wire to re-signal the gate. */
+	private _requestResignal() {
+		this.dispatchEvent(new CustomEvent("gate-resignal-request", {
+			detail: { goalId: this.goalId, gateId: this.gateId, signalId: this.signalId },
+			bubbles: true,
+			composed: true,
+		}));
+	}
+
+	private _renderStaleBanner(): TemplateResult {
+		return html`
+			<div class="mt-2 text-xs ${statusColor("skipped")} flex items-center gap-2 flex-wrap">
+				<span>${statusIcon("skipped")} Verification for <code class="text-[10px]">${this.gateId}</code> stopped without completing (interrupted / no longer running).</span>
+				<button
+					class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-muted text-muted-foreground hover:bg-accent"
+					@click=${() => this._requestResignal()}
+					title="Re-signal this gate to run a fresh verification"
+				>Re-signal gate</button>
+			</div>`;
+	}
+
 	private _renderHeader(passed: number, failed: number, total: number, summary: string): TemplateResult {
+		if (this.overallStatus === "stale") {
+			return html`<div class="text-xs font-medium ${statusColor("skipped")} mb-1 flex items-center gap-2 flex-wrap">${statusIcon("skipped")} Verification <code class="text-[10px]">${this.gateId}</code> interrupted — stopped without completing.<button class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-muted text-muted-foreground hover:bg-accent" @click=${() => this._requestResignal()} title="Re-signal this gate to run a fresh verification">Re-signal gate</button></div>`;
+		}
 		if (this.overallStatus === "passed") {
 			return html`<div class="text-xs font-medium ${statusColor("completed")} mb-1">${statusIcon("completed")} Verified <code class="text-[10px]">${this.gateId}</code> — <span class="text-green-500">${summary || `${passed}/${total} passed`}</span></div>`;
 		}

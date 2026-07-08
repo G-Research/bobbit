@@ -78,7 +78,10 @@ async function visibleSidePanelSizeMode(page: Page): Promise<VisibleSidePanelSiz
 			const rect = element.getBoundingClientRect();
 			return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
 		};
-		if (visible(".side-panel-fullscreen-prompt")) return "fullscreen";
+		// Fullscreen no longer renders a composer prompt strip; the workspace fills
+		// to the bottom edge and carries data-side-panel-mode="fullscreen".
+		const panelMode = (document.querySelector('[data-panel-workspace="content"]') as HTMLElement | null)?.getAttribute("data-side-panel-mode");
+		if (panelMode === "fullscreen" && visible('[data-panel-workspace="content"]')) return "fullscreen";
 		if (visible('[data-testid="side-panel-fullscreen"]')) return "split";
 		if (visible('[data-testid="side-panel-restore"]') && !visible('[data-testid="side-panel-collapse"]')) return "collapsed";
 		return "unknown";

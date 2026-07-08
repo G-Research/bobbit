@@ -21,7 +21,7 @@ import {
 	type GatewaySession,
 	type Project,
 } from "./state.js";
-import { fetchProjects, gatewayFetch, retryLoadSessions } from "./api.js";
+import { fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog } from "./api.js";
 import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
@@ -811,15 +811,47 @@ export function showHeaderToast(text: string): void {
 	}, 2500);
 	renderApp();
 }
+// Persistent launcher feedback — deliberately NOT sharing `_headerToastText`
+// (which auto-clears after 2500ms). A launcher `pending` state must stay visible
+// until the launch resolves; an `error` must persist until the user dismisses it.
+let _launcherFeedback: { kind: "pending" | "error"; message: string } | null = null;
+
 function headerToast() {
-	if (!_headerToastText) return "";
-	return html`<div class="review-toast" data-testid="header-toast">${_headerToastText}</div>`;
+	const transient = _headerToastText
+		? html`<div class="review-toast" data-testid="header-toast">${_headerToastText}</div>`
+		: "";
+	const launcher = launcherFeedbackToast();
+	if (!transient && !launcher) return "";
+	return html`${transient}${launcher}`;
+}
+
+function launcherFeedbackToast() {
+	if (!_launcherFeedback) return "";
+	const { kind, message } = _launcherFeedback;
+	if (kind === "pending") {
+		return html`<div class="review-toast launcher-feedback" data-testid="launcher-feedback" data-kind="pending">
+			<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+			<span>${message}</span>
+		</div>`;
+	}
+	return html`<div class="review-toast launcher-feedback" data-testid="launcher-feedback" data-kind="error">
+		<span>${message}</span>
+		<button type="button" class="launcher-feedback-dismiss" data-testid="launcher-feedback-dismiss" title="Dismiss"
+			@click=${() => { _launcherFeedback = null; renderApp(); }}>${icon(X, "xs")}</button>
+	</div>`;
 }
 
 window.addEventListener("bobbit-launcher-feedback", (event: Event) => {
 	const detail = (event as CustomEvent<{ kind?: string; message?: string }>).detail;
-	if (!detail || (detail.kind !== "pending" && detail.kind !== "error") || !detail.message) return;
-	showHeaderToast(detail.message);
+	if (!detail) return;
+	if (detail.kind === "resolved") {
+		_launcherFeedback = null;
+		renderApp();
+		return;
+	}
+	if ((detail.kind !== "pending" && detail.kind !== "error") || !detail.message) return;
+	_launcherFeedback = { kind: detail.kind, message: detail.message };
+	renderApp();
 });
 
 interface OpenHeaderSessionActionsPopover {
@@ -1999,6 +2031,28 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 // RENDER APP
 // ============================================================================
 
+function renderGoalPausedBannerIfNeeded(activeSession: import("./state.js").GatewaySession | undefined) {
+	if (!activeSession) return "";
+	const activeGoalId = activeSession.goalId ?? activeSession.teamGoalId;
+	if (!activeGoalId) return "";
+	const goal = state.goals.find(g => g.id === activeGoalId);
+	if (!goal?.paused) return "";
+	return html`
+		<div class="shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-sm"
+		     style="background: color-mix(in oklch, var(--warning) 12%, transparent); border-bottom: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);"
+		     data-testid="goal-paused-banner">
+			<span style="color: var(--warning);">This goal is paused.</span>
+			<button
+				class="shrink-0 rounded border px-2 py-1 text-xs font-medium hover:opacity-80 transition-opacity"
+				style="border-color: color-mix(in oklch, var(--warning) 40%, transparent); color: var(--warning);"
+				data-testid="goal-paused-banner-resume-btn"
+				@click=${() => resumeGoalWithDialog(activeGoalId)}>
+				Resume
+			</button>
+		</div>
+	`;
+}
+
 function renderArchivedBanner() {
 	const agent = state.remoteAgent;
 	if (!agent?.state?.isArchived) return "";
@@ -2944,7 +2998,7 @@ export function doRenderApp(): void {
 	`;
 	/** Render individual pane content for mobile slider. */
 	const mobilePaneContent = (tab: MobilePaneTab) => {
-		if (tab.kind === "chat") return state.chatPanel;
+		if (tab.kind === "chat") return html`${renderGoalPausedBannerIfNeeded(activeSession)}${state.chatPanel}`;
 		const content = unifiedPanelContent(tab);
 		return html`<div class="side-panel-pane goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
 	};
@@ -3029,15 +3083,13 @@ export function doRenderApp(): void {
 		if (connected && hasUnifiedPanel()) {
 			const mode = sidePanelSizeMode();
 			if (desktop && mode === "fullscreen") {
+				// Fullscreen: the panel fills to the bottom edge; the composer is hidden.
+				// To use the prompt the user collapses to split (window controls / Ctrl+]).
 				return html`
 					${reconnectBanner()}${staleSessionStoreBanner()}
 					${staffInboxOpenAffordance()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
 						${renderSidePanelWorkspace("fullscreen")}
-						<!-- Compact prompt bar at bottom -->
-						<div class="side-panel-fullscreen-prompt preview-fullscreen-prompt shrink-0 border-t border-border">
-							${state.chatPanel}
-						</div>
 					</div>
 				`;
 			}
@@ -3047,7 +3099,7 @@ export function doRenderApp(): void {
 					${reconnectBanner()}${staleSessionStoreBanner()}
 					${staffInboxOpenAffordance()}
 					<div class="goal-split-layout side-panel-split-layout flex-1 flex min-h-0 overflow-hidden">
-						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
+						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${renderGoalPausedBannerIfNeeded(activeSession)}${state.chatPanel}</div>
 						${collapsed ? sidePanelRestoreButton() : renderSidePanelWorkspace("split")}
 					</div>
 				`;
@@ -3068,7 +3120,7 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
-		if (connected) return html`${reconnectBanner()}${staleSessionStoreBanner()}${renderArchivedBanner()}${staffInboxOpenAffordance()}${state.chatPanel}`;
+		if (connected) return html`${reconnectBanner()}${staleSessionStoreBanner()}${renderArchivedBanner()}${renderGoalPausedBannerIfNeeded(activeSession)}${staffInboxOpenAffordance()}${state.chatPanel}`;
 
 		if (desktop) {
 			return html`

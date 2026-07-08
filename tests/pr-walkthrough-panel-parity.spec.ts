@@ -159,6 +159,8 @@ const READY_BUNDLE = {
                 { id: "L18", kind: "add", newLine: 18, text: "  renderReferenceDiff(block, diffMode);" },
                 { id: "L18-full-del", kind: "del", oldLine: 18, text: "legacyRenderer(block)" },
                 { id: "L18-full-add", kind: "add", newLine: 19, text: "modernReviewPanel(diffMode);" },
+                { id: "L18-rewrite-del", kind: "del", oldLine: 18, text: "  const oldValue = legacyComputation(inputs);" },
+                { id: "L18-rewrite-add", kind: "add", newLine: 19, text: "  return freshResult(state, options, flags);" },
                 { id: "L19", kind: "context", oldLine: 18, newLine: 19, text: "  renderDiffFooter(block);" },
                 { id: "L20", kind: "context", oldLine: 19, newLine: 20, text: "  preserveReviewDecision(block.id);" },
                 { id: "L21", kind: "context", oldLine: 20, newLine: 21, text: "  persistCollapsedState(block.id);" },
@@ -1119,6 +1121,15 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(fullLineDifferent.locator('.diff-line.del .diff-word'), 'split deleted rows should not wrap the entire changed line in diff-word').toHaveCount(0);
 		await expect(fullLineDifferent.locator('.diff-line.add .diff-word'), 'split added rows should not wrap the entire changed line in diff-word').toHaveCount(0);
 
+		// A near-total rewrite that only coincidentally shares indentation and a
+		// trailing ";" must NOT get an inline highlight smeared across the row — the
+		// background colour already conveys the change (GitHub / delta max-line-distance).
+		const nearTotalRewrite = firstBlock.locator('.split-row:has(.diff-line[data-line-id="L18-rewrite-del"]):has(.diff-line[data-line-id="L18-rewrite-add"])').first();
+		await expect(nearTotalRewrite.locator('.diff-line.del .line-text')).toContainText('legacyComputation(inputs);');
+		await expect(nearTotalRewrite.locator('.diff-line.add .line-text')).toContainText('freshResult(state, options, flags);');
+		await expect(nearTotalRewrite.locator('.diff-line.del .diff-word'), 'near-total rewrites sharing only indent/semicolon should not be highlighted inline').toHaveCount(0);
+		await expect(nearTotalRewrite.locator('.diff-line.add .diff-word'), 'near-total rewrites sharing only indent/semicolon should not be highlighted inline').toHaveCount(0);
+
 		const additionOnly = firstBlock.locator('.split-row:has(.diff-line[data-line-id="L36"])').first();
 		await expect(additionOnly.locator('.diff-line.empty')).toHaveCount(1);
 		await expect(additionOnly.locator('.diff-line.add .line-text')).toContainText('renderLineCommentButton(line');
@@ -1182,6 +1193,9 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-full-add"].add')).toContainText('modernReviewPanel(diffMode);');
 		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-full-del"].del .diff-word'), 'inline deleted rows should not wrap the entire changed line in diff-word').toHaveCount(0);
 		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-full-add"].add .diff-word'), 'inline added rows should not wrap the entire changed line in diff-word').toHaveCount(0);
+
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-rewrite-del"].del .diff-word'), 'inline near-total rewrites sharing only indent/semicolon should not be highlighted inline').toHaveCount(0);
+		await expect(firstBlock.locator('.inline-lines .diff-line[data-line-id="L18-rewrite-add"].add .diff-word'), 'inline near-total rewrites sharing only indent/semicolon should not be highlighted inline').toHaveCount(0);
 	});
 
 	test("ready state supports user comments, dislike gating, narrow inline default, historical file headers, and diff collapse", async ({ page }) => {
@@ -1200,8 +1214,8 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(header.locator('.diff-file-header')).toBeVisible();
 		await expect(header.locator('.caret')).toBeVisible();
 		await expect(header.locator('.diff-path')).toContainText('src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts → market-packs/pr-walkthrough/src/panel.js');
-		await expect(header.locator('.diff-add-count')).toContainText('+3');
-		await expect(header.locator('.diff-del-count')).toContainText('-2');
+		await expect(header.locator('.diff-add-count')).toContainText('+4');
+		await expect(header.locator('.diff-del-count')).toContainText('-3');
 		await expect(header.locator('a.diff-external-link, [data-testid="pr-walkthrough-external-file-link"]')).toHaveAttribute('href', /github\.com\/SuuBro\/bobbit\/blob\/fedcba/);
 
 		const dislike = page.getByRole("button", { name: "Dislike" });

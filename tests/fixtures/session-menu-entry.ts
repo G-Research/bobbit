@@ -16,6 +16,7 @@ let lastActions: SessionActionDescriptor[] = [];
 let activePopover: HTMLElement | null = null;
 let currentSurface: "sidebar" | "header" | null = null;
 let feedbackText = "";
+const feedbackEvents: Array<{ kind?: string; message?: string }> = [];
 let activeSessionId = "active-session";
 let sidebarSessionId = "sidebar-session";
 
@@ -233,7 +234,10 @@ async function flush(): Promise<void> {
 
 window.addEventListener("bobbit-launcher-feedback", (ev: Event) => {
 	const detail = (ev as CustomEvent<any>).detail ?? {};
-	feedbackText = String(detail.message ?? detail.error ?? detail.code ?? detail.status ?? "");
+	feedbackEvents.push({ kind: detail.kind, message: detail.message });
+	// `resolved` clears any active launcher feedback (mirrors render.ts).
+	if (detail.kind === "resolved") feedbackText = "";
+	else feedbackText = String(detail.message ?? detail.error ?? detail.code ?? detail.status ?? "");
 	renderFixture();
 });
 
@@ -260,8 +264,9 @@ window.addEventListener("bobbit-launcher-feedback", (ev: Event) => {
 	renderFixture();
 };
 (window as any).__openPanelCalls = () => openPanelCalls.slice();
+(window as any).__feedbackEvents = () => feedbackEvents.slice();
 (window as any).__resolveSpawnSuccess = () => {
-	feedbackText = "PR walkthrough opened";
+	// Let the real `resolved` feedback event drive the cleared state.
 	resolveSpawnRoute?.({ ok: true, childSessionId: "child-prw" });
 	renderFixture();
 };
@@ -279,6 +284,7 @@ window.addEventListener("bobbit-launcher-feedback", (ev: Event) => {
 	dismissMenuSync();
 	document.querySelectorAll("git-status-widget, #git-status-dropdown").forEach((el) => el.remove());
 	feedbackText = "";
+	feedbackEvents.length = 0;
 	callRouteCalls.length = 0;
 	openPanelCalls.length = 0;
 	resolveSpawnRoute = null;

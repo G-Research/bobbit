@@ -20,6 +20,7 @@ import {
 	type Goal,
 	type Project,
 } from "./state.js";
+import { showHeaderToast } from "./render.js";
 import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
@@ -1253,14 +1254,10 @@ async function showHeadquartersInProjectListsFromSidebar(): Promise<void> {
 			body: JSON.stringify({ showHeadquartersInProjectLists: true }),
 		});
 		setProjects(await fetchProjects());
-		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", {
-			detail: { kind: "pending", message: "Headquarters shown in project lists." },
-		}));
+		showHeaderToast("Headquarters shown in project lists.");
 	} catch {
 		state.showHeadquartersInProjectLists = false;
-		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", {
-			detail: { kind: "error", message: "Failed to show Headquarters." },
-		}));
+		showHeaderToast("Failed to show Headquarters.");
 	} finally {
 		renderApp();
 	}

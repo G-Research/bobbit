@@ -368,6 +368,13 @@ async function handleGoalTeamPrompt(ctx: CoreRouteCtx, params: Record<string, st
 		return;
 	}
 
+	// Pause guard: reject prompts to paused goals before membership check.
+	const teamPromptGoal = getGoalAcrossProjects(goalId);
+	if (teamPromptGoal?.paused) {
+		json({ error: "Goal is paused — resume it before sending prompts", code: "GOAL_PAUSED", goalId }, 409);
+		return;
+	}
+
 	// Validate target is a team agent OR a direct-child team-lead OR an owned helper child.
 	const agents = teamManager.listAgents(goalId);
 	let allowed = !!agents.find(a => a.sessionId === body.sessionId);

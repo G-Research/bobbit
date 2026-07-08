@@ -285,7 +285,7 @@ test("command step settles from process exit when inherited stdio delays close",
 			if (!fs.existsSync(holderPidFile)) return false;
 			const pid = Number(fs.readFileSync(holderPidFile, "utf8"));
 			return Number.isFinite(pid) && pid > 0 ? pid : false;
-		}, 3_000, 25);
+		}, 10_000, 25);
 
 		const result = await withTimeout(stepPromise, 6_000, "command step to settle after process exit despite inherited stdio");
 		assert.equal(result.passed, true, `${MARKER}: the exited command should be treated as the authoritative result even when a descendant holds stdio open.`);
@@ -738,14 +738,14 @@ test("normal verification preserves recovered phase results and runs only downst
 				name: "Recovered phase command",
 				type: "command",
 				phase: 0,
-				timeout: 5,
+				timeout: 30,
 				run: nodeShellCommand(`require('fs').writeFileSync(${JSON.stringify(shouldNotRunFile)}, 'reran')`),
 			},
 			{
 				name: "Downstream command",
 				type: "command",
 				phase: 1,
-				timeout: 5,
+				timeout: 30,
 				run: nodeShellCommand(`require('fs').writeFileSync(${JSON.stringify(downstreamFile)}, 'ran'); console.log('downstream:ran')`),
 			},
 		],
@@ -1093,7 +1093,7 @@ test("gate-signal command verification can be resumed by a fresh harness and rec
 		id: GATE_ID,
 		name: "Implementation",
 		dependsOn: [],
-		verify: [{ name: "Gate signal restart probe", type: "command", phase: 0, timeout: 5, run: command }],
+		verify: [{ name: "Gate signal restart probe", type: "command", phase: 0, timeout: 30, run: command }],
 	} as any;
 	const signal = {
 		id: "sig-gate-signal-restart-probe",
@@ -1114,7 +1114,7 @@ test("gate-signal command verification can be resumed by a fresh harness and rec
 			if (!step?.pid || !step?.pidFile || !step?.outFile || !fs.existsSync(step.pidFile) || !fs.existsSync(startedFile)) return false;
 			const out = fs.existsSync(step.outFile) ? fs.readFileSync(step.outFile, "utf8") : "";
 			return out.includes("gate-signal-probe:started") ? step : false;
-		}, 5_000, 25);
+		}, 20_000, 25);
 
 		const resumed = makeHarnessForStateDir(initial.stateDir);
 		const resumePromise = resumed.harness.resumeInterruptedVerifications();

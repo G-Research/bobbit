@@ -321,4 +321,28 @@ test.describe("goal_merge_child outcome pills", () => {
 		});
 		await expect(page.locator('[data-testid="children-merge-pill"]')).toContainText(/merged/);
 	});
+
+	test("rtmFailed result shows RTM not passed pill", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate(() => {
+			(window as any).__renderChildren("goal_merge_child", document.getElementById("container"),
+				{ childGoalId: "abc12345xyz" },
+				{ role: "toolResult", toolCallId: "t1", toolName: "goal_merge_child",
+					isError: false, content: [{ type: "text", text: JSON.stringify({ rtmFailed: true, error: "RTM gate not passed" }) }], timestamp: 0 },
+				false);
+		});
+		await expect(page.locator('[data-testid="children-merge-pill"]')).toContainText(/RTM not passed/);
+	});
+
+	test("alreadyMerged result shows already merged pill", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate(() => {
+			(window as any).__renderChildren("goal_merge_child", document.getElementById("container"),
+				{ childGoalId: "abc12345xyz" },
+				{ role: "toolResult", toolCallId: "t1", toolName: "goal_merge_child",
+					isError: false, content: [{ type: "text", text: JSON.stringify({ alreadyMerged: true }) }], timestamp: 0 },
+				false);
+		});
+		await expect(page.locator('[data-testid="children-merge-pill"]')).toContainText(/already merged/);
+	});
 });

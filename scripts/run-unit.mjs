@@ -128,6 +128,12 @@ const testEnv = {
 	BOBBIT_SECRETS_DIR: unitSecretsDir,
 	// Consumed by tests/helpers/hung-test-reporter.mjs (node runner only).
 	BOBBIT_UNIT_NODE_HEARTBEAT_FILE: nodeHeartbeatFile,
+	// Reduce post-exit stdio flush grace so fast commands (e.g. `echo ok`) in
+	// contract and lifecycle tests complete their verification step in ~100ms
+	// instead of the default 2000ms. Without this, sequential gate verifications
+	// in tests/contract/gate-verification.test.ts exceed waitForGateStatus's
+	// 15s internal timeout under concurrent test-suite load.
+	BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS: process.env.BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS || "100",
 };
 
 // V8 code cache (NODE_COMPILE_CACHE, Node >= 22.1) for the node-logic runner

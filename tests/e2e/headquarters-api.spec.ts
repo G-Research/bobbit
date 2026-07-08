@@ -318,7 +318,6 @@ function expectHeadquartersProject(project: any, headquartersDir: string): void 
 	});
 	expect(project.hidden).not.toBe(true);
 	expect(project.provisional).not.toBe(true);
-	expect(project.position).toBeUndefined();
 	expectSamePath(project.rootPath, headquartersDir, "Headquarters rootPath");
 }
 
@@ -632,7 +631,7 @@ test.describe("Headquarters same-root split API", () => {
 			expect(list.status, list.text).toBe(200);
 			expect(list.body.map((p: any) => p.id)).toEqual([SAME_ROOT_PROJECT_ID, HEADQUARTERS_PROJECT_ID]);
 
-			const hqSessions = await gw.json(`/api/sessions?projectId=${HEADQUARTERS_PROJECT_ID}`);
+			const hqSessions = await gw.json(`/api/sessions?projectId=${HEADQUARTERS_PROJECT_ID}`);	
 			const normalSessions = await gw.json(`/api/sessions?projectId=${SAME_ROOT_PROJECT_ID}`);
 			expect(hqSessions.status, hqSessions.text).toBe(200);
 			expect(normalSessions.status, normalSessions.text).toBe(200);

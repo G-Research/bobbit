@@ -152,6 +152,12 @@ export async function createTestGateway(opts?: {
 	process.env.BOBBIT_TEST_NO_PUSH = "1";
 	process.env.BOBBIT_TEST_NO_REMOTE = "1";
 	process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
+	// Reduce the post-exit stdio flush grace from 2000ms to 100ms so that fast
+	// commands (e.g. `echo ok`) complete their verification step in ~100ms
+	// instead of ~2000ms. Without this, 3 sequential gate verifications in
+	// contract tests take ~6s under load, exceeding waitForGateStatus's 15s
+	// internal timeout.
+	process.env.BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS = "100";
 
 	const { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway } = await getServerModules();
 

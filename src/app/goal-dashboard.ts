@@ -1215,6 +1215,18 @@ async function fetchActiveVerifications(goalId: string): Promise<void> {
 		if (!resp.ok) return;
 		const data = await resp.json();
 		const verifications: Array<any> = data.verifications || [];
+		const activeKeys = new Set(verifications.map((v: any) => `${v.gateId}:${v.signalId}`));
+
+		// Reconcile: a locally "running" entry that the authoritative active-
+		// verifications endpoint no longer reports has died without a completion
+		// event (harness crash / server restart / dropped WS). Mark it stale so
+		// the dashboard drops the perpetual spinner instead of spinning forever.
+		for (const [key, entry] of liveVerifications) {
+			if (entry.overallStatus === "running" && !activeKeys.has(key)) {
+				entry.overallStatus = "stale";
+				entry.steps = entry.steps.map(s => (s.status === "running" || s.status === "waiting") ? { ...s, status: "blocked" } : s);
+			}
+		}
 
 		for (const v of verifications) {
 			const key = `${v.gateId}:${v.signalId}`;
@@ -1434,13 +1446,29 @@ function refreshGatesFromWsEvent(goalId: string): void {
 	}).catch(() => { /* ignore */ });
 }
 
+/**
+ * Cheap change-detection signature for the gate list. Gate progress/counts are
+ * server-authoritative and already arrive over WS; this poll is a backstop.
+ * Comparing a compact signature (gateId + status + updatedAt + signalCount)
+ * avoids the previous double `JSON.stringify` of the entire (now-slimmed but
+ * still large) gate payload on every 8s tick.
+ */
+function gatesSignature(list: GateState[]): string {
+	return list
+		.map(g => `${g.gateId}:${g.status}:${(g as any).updatedAt ?? 0}:${g.signals?.length ?? 0}`)
+		.join("|");
+}
+
 function startGatePolling(goalId: string): void {
 	stopGatePolling();
 	gatePoller = createVisibilityAwarePoller(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
+		// Pause polling while the tab is hidden (mirror git-status polling guard);
+		// WS events still drive live updates and a fresh tick runs on regain.
+		if (document.visibilityState !== "visible") return;
 		try {
 			const newGates = await fetchGoalGates(goalId);
-			if (hasPollDiff(gates, newGates)) {
+			if (gatesSignature(newGates) !== gatesSignature(gates)) {
 				applyGateState(goalId, newGates);
 				renderApp();
 			}
@@ -3247,6 +3275,11 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 	const liveKey = `${signal.gateId}:${signal.id}`;
 	const liveEntry = liveVerifications.get(liveKey);
 	const isLive = liveEntry && vStatus === "running";
+	// Reconciliation (fetchActiveVerifications) flips a running live entry to
+	// "stale" when the authoritative active-verifications endpoint no longer
+	// reports it — the verification died without a completion event. Surface it
+	// instead of spinning forever; the existing Cancel button re-signals.
+	const staleLive = liveEntry?.overallStatus === "stale" && vStatus === "running";
 
 	// Live header info
 	const livePassedCount = isLive ? liveEntry!.steps.filter(s => s.status === "passed").length : 0;
@@ -3268,6 +3301,7 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 				</span>
 				<code class="signal-entry__commit" data-testid="goal-dashboard-signal-commit">${shortSha}</code>
 				<span class="signal-entry__time">${formatRelativeTime(signal.timestamp)}</span>
+				${staleLive ? html`<span class="signal-stale-badge" data-testid="goal-dashboard-signal-stale" title="Verification stopped without completing — cancel and re-signal to retry">interrupted</span>` : nothing}
 				${isLive && liveTotalCount > 0 ? html`
 					<span class="signal-steps-summary">${livePassedCount}/${liveTotalCount} checks</span>
 				` : signal.verification.steps.length > 0 ? html`

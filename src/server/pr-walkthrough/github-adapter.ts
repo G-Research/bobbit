@@ -89,6 +89,37 @@ export interface GithubWalkthroughExportCapability {
 	reason?: string;
 }
 
+/**
+ * Actionable "no credentials" reason surfaced whenever posting a review is
+ * unavailable because neither an explicit/env token nor `gh auth` is present.
+ * Single source of truth reused by `resolveGithubPr`, `resolveGithubExportAuth`,
+ * and the with-SHA availability paths in routes.ts.
+ */
+export const GITHUB_EXPORT_NEEDS_AUTH_REASON =
+	"No GitHub credentials found. Run `gh auth login` (or set GITHUB_TOKEN/GH_TOKEN) to post a review.";
+
+export interface GithubExportAuth {
+	token?: string;
+	available: boolean;
+	reason?: string;
+}
+
+/**
+ * Resolve the credential AND the availability/reason for posting to `host`. Reuses
+ * the env→gh cascade (explicit token → GITHUB_TOKEN/GH_TOKEN for github.com →
+ * `gh auth token --hostname`). Never forwards the github.com env token to an
+ * enterprise host (unchanged invariant, inherited from `resolveGithubToken`).
+ */
+export async function resolveGithubExportAuth(
+	options: { cwd?: string; token?: string },
+	host: string,
+): Promise<GithubExportAuth> {
+	const token = await resolveGithubToken(options, host);
+	return token
+		? { token, available: true }
+		: { available: false, reason: GITHUB_EXPORT_NEEDS_AUTH_REASON };
+}
+
 export interface GithubResolvedPr {
 	changesetId: string;
 	changeset: GithubWalkthroughChangesetRef;
@@ -332,7 +363,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 			repo,
 			prNumber: pr.number,
 			url: prUrl,
-			reason: exportAvailable ? undefined : "Set GITHUB_TOKEN or GH_TOKEN to submit a review back to GitHub.",
+			reason: exportAvailable ? undefined : GITHUB_EXPORT_NEEDS_AUTH_REASON,
 		},
 		provider: {
 			name: "github",

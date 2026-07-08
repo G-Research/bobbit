@@ -15,6 +15,8 @@ docs: |-
 
   Hunk placement is explicit: `primary` for the one expanded owner, `secondary` for later collapsed references to an already-primary hunk, and `skip` for generated/binary/mechanical/low-signal hunks. `skip` requires `skip_reason`; secondary references should include `primary_card_id` when known.
 
-  `narrative` entries are ordered and support `text`, `diff`, `note`, `suggested_comment`, and `checklist`. Keep setup and notes brief, and place suggested comments close to the relevant diff anchor.
+  `narrative` entries are ordered and support `text`, `diff`, `note`, `suggested_comment`, and `checklist`. For `suggested_comment` entries, `severity` must be one of: `blocking`, `non_blocking`, `question`, `nit`. Keep setup and notes brief, and place suggested comments close to the relevant diff anchor.
+
+  In `review_chunks[]`, `suggested_concerns[]` items require four fields: `severity` (blocking|non_blocking|question|nit), `concern`, `suggested_comment`, and `anchors` (array, may be empty).
 
   Successful saves return compact model-facing status such as saved, section_id, nextRequired, and missing instead of the full growing chunk summary. Use read_pr_walkthrough_submission_status whenever you need saved chunks, read receipts, coverage counts, repeated references, skipped/remaining hunks, or finalization state.

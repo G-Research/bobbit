@@ -215,51 +215,34 @@ replaced case 12c.
 
 ## Tests
 
-Two new lanes cover compaction end to end.
+Both the manual `/compact` and the auto/threshold compaction paths are
+covered **deterministically** (mock agent, no real LLM) by the
+`@live-compaction-affordance` tests in
+`tests/e2e/ui/pre-compaction-history.spec.ts`:
 
-### Real-LLM `/compact` test (manual-integration)
+- **Auto/threshold** — drives a mock-agent auto compaction (`AUTO_COMPACT:N`),
+  exercising `auto_compaction_start`/`auto_compaction_end` -> session-manager
+  sidecar append + broadcast -> client render.
+- **Manual `/compact`** — types `/compact` in the prompt box, exercising
+  `session.compact()` -> ws-handler manual branch -> session-manager manual
+  sidecar -> `compaction_start`/`compaction_end` (`reason: "manual"`) ->
+  client render.
 
-`tests/manual-integration/compaction.spec.ts` is a real-LLM test, so it
-lives under `tests/manual-integration/` (the only gate-exempt path — see
-[testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first)).
-It self-bootstraps an isolated gateway in-spec (no shared `webServer`
-config) so it is collected by `playwright-manual.config.ts`. The test:
+Both assert the summary card resolves to `data-state="complete"` with
+`data-verdict="ok"` and the single-card invariant. The mock agent's
+`compact` command and `AUTO_COMPACT` trigger emit the same event shapes as
+pi 0.74+ (see `tests/e2e/mock-agent-core.mjs::_handleAutoCompaction`).
 
-1. Creates a project + session against the isolated gateway.
-2. Knocks down the model's `contextWindow` via `models.json` so a few
-   prompts are enough to fill it (cheap and deterministic — does not
-   depend on the model's real window).
-3. Drives `/compact` from the prompt box.
-4. Asserts the rich card renders (via the `data-testid` hook above) with
-   no console errors and no error toast.
-5. Navigates to a second session and back — card still there.
-6. Reloads the page — card still there, materialised via the reload-path
-   upgrade described above.
+> Two real-LLM manual specs (`compaction.spec.ts` for `/compact` and
+> `compaction-pressure.spec.ts` for auto-compaction) previously covered
+> these paths, but both were removed: each seeded agent auth by copying a
+> static `auth.json` OAuth snapshot whose short-lived access token expires
+> mid-run (refresh fails with `invalid_grant`), so they could not
+> authenticate reliably. The deterministic e2e above replaces them.
 
-Run it with:
-
-```bash
-npm run test:manual
-```
-
-It needs an API key (real LLM), so it is opt-in and never part of the
-`unit` or `e2e` gates.
-
-### Manual-integration pressure test
-
-`tests/manual-integration/compaction-pressure.spec.ts` exercises the
-**real auto-compaction** path with real agents and Docker. It pushes a
-session near the actual context limit, waits for the agent subprocess to
-fire `auto_compaction_start` on its own, asserts the card renders with
-`data-test="trigger"` reading `auto`, then sends one more prompt and
-checks the agent keeps working post-compact. Runtime is roughly the same
-as the rest of the manual suite (~5 min).
-
-Run it with:
-
-```bash
-npm run test:manual
-```
+Renderer lifecycle (all three states, file:// harness) is additionally
+covered by `tests/e2e/ui/compaction-widget.spec.ts`, and reducer behaviour
+by `tests/message-reducer.test.ts`.
 
 ## Files
 
@@ -278,6 +261,6 @@ npm run test:manual
 | Browser E2E (renderer lifecycle, file:// harness) | `tests/e2e/ui/compaction-widget.spec.ts`, `tests/fixtures/compaction-widget.html` |
 | Browser E2E (`@live-compaction-affordance` live-session affordance + transient count-probe retry) | `tests/e2e/ui/pre-compaction-history.spec.ts` |
 | Compact-cost regression | `tests/e2e/compact-cost-ws.spec.ts`, `tests/e2e/ui/compact-cost.spec.ts`, `tests/context-cost-stats.spec.ts` |
-| Real-LLM `/compact` (manual) | `tests/manual-integration/compaction.spec.ts` |
-| Manual-integration pressure test | `tests/manual-integration/compaction-pressure.spec.ts` |
+| Manual `/compact` + auto-compaction lifecycle (deterministic e2e) | `tests/e2e/ui/pre-compaction-history.spec.ts` (`@live-compaction-affordance`) |
+| Mock agent compaction event emission | `tests/e2e/mock-agent-core.mjs` — `_handleAutoCompaction(preCount, reason)`, `compact` command |
 | Full design rationale | `docs/design/compaction-e2e-rich-summary.md` |

@@ -63,6 +63,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		env: {
 			...process.env,
 			BOBBIT_DIR: join(dir, ".bobbit"),
+			BOBBIT_SECRETS_DIR: join(dir, ".bobbit", "state"),
 			BOBBIT_TEST_NO_PUSH: "1",
 			BOBBIT_LLM_REVIEW_SKIP: "1",
 			NODE_ENV: "test",

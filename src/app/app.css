@@ -742,32 +742,39 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	}
 }
 
-/* ── Fullscreen side panel: show only the message editor ─────────────── */
-.side-panel-fullscreen-prompt,
-.preview-fullscreen-prompt {
-	overflow: hidden;
-	max-height: 150px;
+/* ── Persistent launcher feedback toast ──────────────────────────────
+   Reuses .review-toast layout but must NOT auto-fade (pending persists until
+   resolved; error persists until dismissed) and must be clickable (dismiss
+   button). Themed via design tokens — no hardcoded colors. */
+.review-toast.launcher-feedback {
+	animation: none;
+	pointer-events: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	white-space: normal;
+	background: var(--card);
+	color: var(--foreground);
+	border: 1px solid var(--border);
+	box-shadow: 0 4px 12px color-mix(in oklch, var(--foreground) 12%, transparent);
 }
-/* Hide chat messages, streaming container, context bar, stats, artifacts */
-.side-panel-fullscreen-prompt message-list,
-.side-panel-fullscreen-prompt streaming-message-container,
-.side-panel-fullscreen-prompt git-status-widget,
-.side-panel-fullscreen-prompt .bobbit-stats,
-.side-panel-fullscreen-prompt .flex.flex-col.gap-3,
-.preview-fullscreen-prompt message-list,
-.preview-fullscreen-prompt streaming-message-container,
-.preview-fullscreen-prompt git-status-widget,
-.preview-fullscreen-prompt .bobbit-stats,
-.preview-fullscreen-prompt .flex.flex-col.gap-3 {
-	display: none !important;
+.review-toast.launcher-feedback[data-kind="error"] {
+	border-color: color-mix(in oklch, var(--negative) 45%, var(--border));
 }
-/* The scroll container must not scroll — just show the editor at the bottom */
-.side-panel-fullscreen-prompt .overflow-y-auto,
-.preview-fullscreen-prompt .overflow-y-auto {
-	overflow: hidden !important;
-	display: flex !important;
-	flex-direction: column !important;
-	justify-content: flex-end !important;
+.review-toast.launcher-feedback .launcher-feedback-dismiss {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	background: transparent;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	padding: 2px;
+	border-radius: 4px;
+}
+.review-toast.launcher-feedback .launcher-feedback-dismiss:hover {
+	color: var(--foreground);
+	background: color-mix(in oklch, var(--foreground) 8%, transparent);
 }
 
 /* Chrome-style tab strip:

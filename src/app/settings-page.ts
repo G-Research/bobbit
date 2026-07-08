@@ -8,6 +8,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import { html } from "lit";
 import { live } from "lit/directives/live.js";
 import { ArrowLeft, Brain, Bug, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
+import { showHeaderToast } from "./render.js";
 import {
 	getShortcuts,
 	formatBinding,
@@ -2978,14 +2979,9 @@ async function setShowHeadquartersInProjectLists(checked: boolean): Promise<void
 		if (!res.ok) throw new Error(`Failed: ${res.status}`);
 		setProjects(await fetchProjects());
 		settingsHeadquartersVisibilityStatus = "saved";
-		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", {
-			detail: {
-				kind: "pending",
-				message: checked
-					? "Headquarters shown in project lists."
-					: "Headquarters hidden from project lists.",
-			},
-		}));
+		showHeaderToast(checked
+			? "Headquarters shown in project lists."
+			: "Headquarters hidden from project lists.");
 		setTimeout(() => {
 			if (settingsHeadquartersVisibilityStatus === "saved") {
 				settingsHeadquartersVisibilityStatus = "";

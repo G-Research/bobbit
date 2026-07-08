@@ -18,7 +18,7 @@
 
 import { collectDescendants, enrichDescendantsForPlan } from "../agent/goal-descendants.js";
 import { computeTreeCost } from "../agent/cost-tracker.js";
-import { buildGateStatusSummary } from "../gate-status-summary.js";
+import { buildGateStatusSummary, projectGateForList } from "../gate-status-summary.js";
 import { buildGateVerificationSnapshot } from "../gate-verification-snapshot.js";
 import type { PersistedGoal } from "../agent/goal-store.js";
 import type { CoreRouteCtx } from "./core-route-ctx.js";
@@ -294,7 +294,10 @@ async function handleGoalGatesList(routeCtx: CoreRouteCtx, params: Record<string
 		json({ gates: summaryGates, ...counts, summary });
 		return;
 	}
-	json({ gates: enriched });
+	// Slim the list payload: strip inline step output / artifact bodies /
+	// diagnostics. Full step text is fetched lazily on expand via the
+	// gate-detail + verification-snapshot paths below.
+	json({ gates: enriched.map(g => projectGateForList(g)) });
 	return;
 }
 
@@ -331,6 +334,7 @@ async function handleGoalGateDetail(routeCtx: CoreRouteCtx, params: Record<strin
 				signalId: latestSignal.id,
 				verification: latestSignal.verification,
 				activeVerification: verificationHarness.getActiveVerification(latestSignal.id),
+				isActiveVerificationAlive: verificationHarness.areVerificationSessionsAlive(latestSignal.id),
 				selectionOptions: { implicitDefault: true },
 			}) : undefined;
 			slim.latestSignal = {
@@ -343,6 +347,7 @@ async function handleGoalGateDetail(routeCtx: CoreRouteCtx, params: Record<strin
 					summary: verificationSnapshot.summary,
 					counts: verificationSnapshot.counts,
 					active: verificationSnapshot.active,
+					stale: verificationSnapshot.stale,
 					steps: verificationSnapshot.steps,
 					selection: verificationSnapshot.selection,
 				} : undefined,

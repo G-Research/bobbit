@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, deleteSession } from "./e2e-setup.js";
@@ -280,8 +280,9 @@ test.describe("PR walkthrough REST API", () => {
 		}
 	});
 
-	test("GitHub PR resolve can be faked from local SHAs and remains preview-only without credentials", async () => {
+	test("GitHub PR resolve faked from local SHAs reports gh-auth availability (no previewOnly)", async () => {
 		const fixture = makeGitFixture();
+		const restore = stubGithubAuthEnv(fakeGhBin(undefined, 1)); // no env token, gh fails
 		try {
 			const prUrl = "https://github.com/acme/widgets/pull/42";
 			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
@@ -294,7 +295,10 @@ test.describe("PR walkthrough REST API", () => {
 			expect(result.changeset.provider).toBe("github");
 			expect(result.changeset.prUrl).toBe(prUrl);
 			expect(result.changeset.externalUrl).toBe(prUrl);
-			expect(result.export.previewOnly).toBe(true);
+			// No creds → not available, actionable reason, and previewOnly is GONE.
+			expect(result.export.available).toBe(false);
+			expect(result.export.reason).toMatch(/gh auth login/);
+			expect(result.export.previewOnly).toBeUndefined();
 
 			const submitResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
 				method: "POST",
@@ -303,7 +307,113 @@ test.describe("PR walkthrough REST API", () => {
 			expect(submitResp.status).toBe(400);
 			expect((await submitResp.json()).code).toBe("EXPORT_UNAVAILABLE");
 		} finally {
+			restore();
 			await fixture.cleanup();
+		}
+	});
+
+	test("GitHub PR resolve reports export.available when gh is authenticated", async () => {
+		const fixture = makeGitFixture();
+		const restore = stubGithubAuthEnv(fakeGhBin("gh-token")); // gh auth token succeeds
+		try {
+			const prUrl = "https://github.com/acme/widgets/pull/42";
+			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
+				method: "POST",
+				body: JSON.stringify({ cwd: fixture.cwd, prUrl, baseSha: fixture.baseSha, headSha: fixture.headSha }),
+			});
+			expect(resp.status).toBe(200);
+			const result = await resp.json();
+			expect(result.export.available).toBe(true);
+			expect(result.export.previewOnly).toBeUndefined();
+			expect(result.export.reason).toBeUndefined();
+		} finally {
+			restore();
+			await fixture.cleanup();
+		}
+	});
+
+	test("bearer-gated public submit-review posts via gh, gated by trust + confirm + jobId", async () => {
+		const { getPackStore } = await import("../../dist/server/extension-host/pack-store.js");
+		const PACK_ID = "pr-walkthrough";
+		const store = getPackStore();
+		const changeset = {
+			baseSha: "aaaaaaa",
+			headSha: "bbbbbbb",
+			provider: "github",
+			prUrl: "https://github.com/acme/widgets/pull/42",
+			externalUrl: "https://github.com/acme/widgets/pull/42",
+			prNumber: 42,
+			prTitle: "Post via gh",
+			title: "PR #42: Post via gh",
+		};
+		const cards = [{ id: "card-1", phaseId: "significant", title: "Card", summary: "s", diffBlocks: [] }];
+		const trustedJob = "prw-submit-review-trusted";
+		const untrustedJob = "prw-submit-review-untrusted";
+		// Trusted github.com binding + finalized payload (avoids needing a git cwd).
+		await store.put(PACK_ID, `reviews/${trustedJob}/binding/prw-session-sr-1`, {
+			jobId: trustedJob,
+			parentSessionId: "owner-sr-1",
+			target: { provider: "github", prUrl: changeset.prUrl, owner: "acme", repo: "widgets", number: 42, host: "github.com", canonicalKey: "github:acme/widgets#42" },
+		});
+		await store.put(PACK_ID, `reviews/${trustedJob}/final/payload`, { changeset, cards });
+		// Untrusted enterprise binding.
+		await store.put(PACK_ID, `reviews/${untrustedJob}/binding/prw-session-sr-2`, {
+			jobId: untrustedJob,
+			parentSessionId: "owner-sr-2",
+			target: { provider: "github", prUrl: "https://github.example.com/acme/widgets/pull/42", owner: "acme", repo: "widgets", number: 42, host: "github.example.com", canonicalKey: "github:github.example.com/acme/widgets#42" },
+		});
+
+		const review = fakeGhCombinedBin();
+		const restore = stubGithubAuthEnv(review.dir, review.command);
+		try {
+			// missing jobId → 400
+			const missing = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ confirm: true }) });
+			expect(missing.status).toBe(400);
+			expect((await missing.json()).code).toBe("INVALID_SUBMIT_REVIEW_REQUEST");
+
+			// unknown jobId → 404
+			const unknown = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: "prw-nope", confirm: true }) });
+			expect(unknown.status).toBe(404);
+			expect((await unknown.json()).code).toBe("WALKTHROUGH_NOT_BOUND");
+
+			// untrusted host → 403
+			const untrusted = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: untrustedJob, confirm: true, draft: { comments: [] } }) });
+			expect(untrusted.status).toBe(403);
+			expect((await untrusted.json()).code).toBe("untrusted_github_host");
+
+			// confirm omitted → CONFIRMATION_REQUIRED
+			const noConfirm = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: trustedJob, draft: { comments: [] } }) });
+			expect(noConfirm.status).toBe(400);
+			expect((await noConfirm.json()).code).toBe("CONFIRMATION_REQUIRED");
+
+			// probe on a trusted host → { available, reason? }
+			const probe = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: trustedJob, probe: true }) });
+			expect(probe.status).toBe(200);
+			expect((await probe.json()).available).toBe(true);
+
+			// trusted host + confirm + stubbed gh → submitted:true and gh recorded the POST
+			const draft = {
+				changeset,
+				decisions: {},
+				completedCardIds: [],
+				updatedAt: new Date().toISOString(),
+				comments: [{ id: "card-1", cardId: "card-1", body: "Overall looks good.", source: "custom", createdAt: new Date().toISOString() }],
+			};
+			const submit = await apiFetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: trustedJob, confirm: true, draft, event: "COMMENT" }) });
+			expect(submit.status).toBe(200);
+			const submitBody = await submit.json();
+			expect(submitBody.submitted).toBe(true);
+			const args = review.readArgs();
+			expect(args.includes("repos/acme/widgets/pulls/42/reviews")).toBe(true);
+			expect(args.includes("POST")).toBe(true);
+			expect(args.includes("--input")).toBe(true);
+			// The recorded --input payload is the review body built server-side.
+			const payload = review.readInput() as { event?: string };
+			expect(payload.event).toBe("COMMENT");
+		} finally {
+			restore();
+			await store.deletePrefix(PACK_ID, `reviews/${trustedJob}/`);
+			await store.deletePrefix(PACK_ID, `reviews/${untrustedJob}/`);
 		}
 	});
 
@@ -324,3 +434,87 @@ test.describe("PR walkthrough REST API", () => {
 		}
 	});
 });
+
+/** A fake `gh` whose `gh auth token` succeeds (prints `token`) or fails (exit>0). */
+function fakeGhBin(token: string | undefined, exitCode = 0): string {
+	const dir = mkdtempSync(join(tmpdir(), "bobbit-fake-gh-"));
+	const posix = exitCode === 0
+		? `#!/bin/sh\nprintf '%s\\n' '${token ?? ""}'\n`
+		: `#!/bin/sh\necho 'not logged in' >&2\nexit ${exitCode}\n`;
+	writeFileSync(join(dir, "gh"), posix, "utf8");
+	chmodSync(join(dir, "gh"), 0o755);
+	const cmd = exitCode === 0
+		? `@echo off\r\necho ${token ?? ""}\r\n`
+		: `@echo off\r\necho not logged in 1>&2\r\nexit /b ${exitCode}\r\n`;
+	writeFileSync(join(dir, "gh.cmd"), cmd, "utf8");
+	return dir;
+}
+
+/**
+ * A fake `gh` that (a) answers `gh auth token` with a token and (b) records the
+ * `gh api …/reviews --method POST --input <file>` invocation (args + payload).
+ */
+function fakeGhCombinedBin(): { dir: string; command: string; readArgs: () => string[]; readInput: () => unknown } {
+	const dir = mkdtempSync(join(tmpdir(), "bobbit-fake-gh-combined-"));
+	const rec = mkdtempSync(join(tmpdir(), "bobbit-gh-rec-"));
+	const recPosix = rec.replace(/\\/g, "/");
+	const okBody = '{"html_url":"https://github.com/acme/widgets/pull/42#pullrequestreview-gh"}';
+	const posix =
+		`#!/bin/sh\n` +
+		`echo "$@" >> "${recPosix}/args.txt"\n` +
+		`if [ "$1" = "auth" ] && [ "$2" = "token" ]; then printf '%s\\n' 'gh-token'; exit 0; fi\n` +
+		`prev=""\n` +
+		`for a in "$@"; do\n` +
+		`  if [ "$prev" = "--input" ]; then cp "$a" "${recPosix}/input.json"; fi\n` +
+		`  prev="$a"\n` +
+		`done\n` +
+		`printf '%s\\n' '${okBody}'\n`;
+	writeFileSync(join(dir, "gh"), posix, "utf8");
+	chmodSync(join(dir, "gh"), 0o755);
+	const recWin = rec.replace(/\//g, "\\");
+	const cmd =
+		`@echo off\r\n` +
+		`echo %* >> "${recWin}\\args.txt"\r\n` +
+		`if "%~1"=="auth" if "%~2"=="token" (echo gh-token& exit /b 0)\r\n` +
+		`:loop\r\n` +
+		`if "%~1"=="--input" copy /y "%~2" "${recWin}\\input.json" >nul\r\n` +
+		`shift\r\n` +
+		`if not "%~1"=="" goto loop\r\n` +
+		`echo ${okBody}\r\n`;
+	writeFileSync(join(dir, "gh.cmd"), cmd, "utf8");
+	return {
+		dir,
+		command: join(dir, process.platform === "win32" ? "gh.cmd" : "gh"),
+		readArgs: () => readFileSync(join(rec, "args.txt"), "utf8").trim().split(/\s+/).filter(Boolean),
+		readInput: () => JSON.parse(readFileSync(join(rec, "input.json"), "utf8")),
+	};
+}
+
+/**
+ * Point the in-process server at the fake `gh` (BOBBIT_GH_COMMAND + PATH) and clear
+ * env tokens so availability + posting route through gh deterministically. Returns
+ * a restore function.
+ */
+function stubGithubAuthEnv(fakeGhDir: string, command?: string): () => void {
+	const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === "path") ?? "PATH";
+	const previous = {
+		GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+		GH_TOKEN: process.env.GH_TOKEN,
+		BOBBIT_GH_COMMAND: process.env.BOBBIT_GH_COMMAND,
+		PATH: process.env[pathKey],
+	};
+	delete process.env.GITHUB_TOKEN;
+	delete process.env.GH_TOKEN;
+	process.env.BOBBIT_GH_COMMAND = command ?? join(fakeGhDir, process.platform === "win32" ? "gh.cmd" : "gh");
+	process.env[pathKey] = `${fakeGhDir}${delimiter}${previous.PATH ?? ""}`;
+	return () => {
+		if (previous.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN;
+		else process.env.GITHUB_TOKEN = previous.GITHUB_TOKEN;
+		if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
+		else process.env.GH_TOKEN = previous.GH_TOKEN;
+		if (previous.BOBBIT_GH_COMMAND === undefined) delete process.env.BOBBIT_GH_COMMAND;
+		else process.env.BOBBIT_GH_COMMAND = previous.BOBBIT_GH_COMMAND;
+		if (previous.PATH === undefined) delete process.env[pathKey];
+		else process.env[pathKey] = previous.PATH;
+	};
+}

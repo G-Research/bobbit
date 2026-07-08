@@ -167,7 +167,7 @@ call them:
 | `goal_spawn_child` | Create a child goal (own team, branch, workflow) |
 | `goal_plan_propose` | Propose/mutate the execution plan (DAG of sub-goals) |
 | `goal_plan_status` | Read the current plan and per-step state |
-| `goal_merge_child` | Merge a ready child's branch into the parent |
+| `goal_merge_child` | Merge a ready child's branch into the parent; `force: true` bypasses the RTM gate check |
 | `goal_archive_child` | Archive a child goal |
 | `goal_pause` | Pause a goal and its subtree |
 | `goal_resume` | Resume a paused subtree |
@@ -361,6 +361,56 @@ surface to exactly one PR per goal tree:
 A child must be **ready-to-merge** (`child-ready-to-merge.ts`) before
 integration; `team_complete` on the parent blocks while children are unresolved.
 
+### Parent notification on child completion
+
+When a child goal's team calls `team_complete`, the server notifies the parent
+team lead automatically — regardless of whether the child's workflow has a
+`ready-to-merge` gate. This fires from `completeTeam()` in `team-manager.ts`
+via `buildParentCompletionNotification()` (`notify-team-lead-child-passed.ts`).
+
+The notification tells the parent the child's branch is ready and instructs it
+to call `goal_merge_child` or `goal_archive_child`. If the parent team lead is
+currently streaming, the message is delivered as a live steer; otherwise it is
+enqueued as a prompted message.
+
+The existing `ready-to-merge` gate notifications (`buildParentReadyNotification`)
+are **complementary, not replaced**. They still fire when a child's `ready-to-merge`
+gate passes or fails, giving the parent an early warning before the child has
+fully called `team_complete`. A child with a bespoke workflow that has no
+`ready-to-merge` gate relies solely on the completion notification.
+
+### `goal_merge_child` — `force` parameter
+
+`goal_merge_child` accepts an optional `force: boolean` parameter (maps to
+`body.force` on `POST /api/goals/:id/integrate-child/:childId`). By default,
+the server refuses to merge a child whose `ready-to-merge` gate has not passed
+(`409 RTM_NOT_PASSED`). Setting `force: true` bypasses this check.
+
+Use `force: true` when:
+- The child's workflow has no `ready-to-merge` gate (for example, a child
+  running a bespoke workflow).
+- The merge has been manually reviewed and approved as safe to proceed.
+
+### `goal_merge_child` — 409 body normalization and renderer states
+
+`goal_merge_child` uses `apiCallDetailed` so structured 409 response bodies
+are preserved regardless of HTTP status. The renderer (`GoalMergeChildRenderer`)
+can then display all outcome states:
+
+| Outcome | Renderer pill |
+|---|---|
+| Clean merge | `merged ✓` (green) |
+| Conflict | `conflict ⚠` (amber) — expandable conflict output |
+| RTM gate not passed | `RTM not passed ✗` (red) — `rtmFailed: true` in body |
+| Already merged | `already merged` (muted) |
+| Other error | Plain error message |
+
+A 409 with `{ conflict: true, output }` passes through as-is so the renderer
+can show the expandable conflict block. A 409 with `{ code: "RTM_NOT_PASSED" }`
+is normalized to `{ ...body, rtmFailed: true }` so the renderer pill fires
+correctly. A 409 with `code: "GOAL_GIT_UNAVAILABLE"` surfaces as a plain error
+message, since no structured pill is defined for that case.
+
 ## Governance
 
 Once a plan is committed, changes to it are policed so an agent can't quietly
@@ -451,20 +501,36 @@ place.
 ### Pause/resume cascade
 
 `POST /api/goals/:id/pause` and `/resume` require a `{cascade: boolean}` body
-(`422 CASCADE_REQUIRED` if absent). Pause:
+(`422 CASCADE_REQUIRED` if absent). Both endpoints work regardless of the
+`subgoalsEnabled` system preference — pause and resume are operator lifecycle
+verbs with no dependency on the subgoal feature. Pause:
 
 - soft-aborts the subtree's sessions and cancels in-flight verifications,
 - makes every spawn path return `409 GOAL_PAUSED`,
-- and keeps the pause durable across gateway restart.
+- rejects prompts to sessions on the paused goal (see below), and
+- keeps the pause durable across gateway restart.
 
 Restart restores persisted active teams and re-subscribes their existing leads.
 Boot-resume/nudge skip predicates apply only to those restored leads, so a
 paused restored lead is not nudged. Restart does not create a new Team Lead for
 an existing goal that is teamless.
 
-Resume re-enables spawns but does not auto-restart sessions. Pause/resume is an
-**operator** action and is distinct from the scheduler's dependency `blocked`
-state.
+Resume re-enables spawns and prompt delivery but does not auto-restart sessions.
+Pause/resume is an **operator** action and is distinct from the scheduler's
+dependency `blocked` state.
+
+**Prompt rejection.** While a goal is paused, `POST /api/goals/:id/team/prompt`
+and `POST /api/sessions/:id/prompt` return `409 GOAL_PAUSED` before any team
+membership or authorization checks. Sessions with no associated goal are
+unaffected. This ensures agents targeting a paused goal receive a clear,
+actionable error rather than an opaque auth failure.
+
+**In-chat banner.** A warning banner with an inline Resume button appears inside
+the session panel when the active session's goal is paused. It is visible in all
+layout modes and disappears when the goal is resumed.
+
+See [docs/design/pause-cascade.md](design/pause-cascade.md) for full details,
+including the error shape, key files, and test coverage.
 
 ### Auto-retry / rescue
 
@@ -549,6 +615,7 @@ per-session containers.
 | Subtree cost / token roll-up (`goalId`-stamped) | `src/server/agent/cost-tracker.ts`, `cost-backfill.ts` |
 | Subtree / descendant queries | `src/server/agent/goal-subtree.ts`, `goal-descendants.ts` |
 | Ready-to-merge check | `src/server/agent/child-ready-to-merge.ts` |
+| Parent notifications (pure helpers) | `src/server/agent/notify-team-lead-child-passed.ts` — `buildParentReadyNotification` (RTM gate pass/fail) and `buildParentCompletionNotification` (`team_complete`) |
 | Local branch merge helpers | `src/server/agent/skills/git.ts` (`mergeChildBranchLocal`, `shouldSkipRemotePush`) |
 | Swarm topologies and merge mode | `src/server/agent/swarm-best-of-n.ts`, `swarm-plan-fan-in.ts`, `swarm-orchestrator-worker.ts`, `swarm-group-store.ts`, `goal-manager.ts` (`mergeChild`) |
 | dependsOn validation | `src/server/agent/depends-on-validation.ts` |

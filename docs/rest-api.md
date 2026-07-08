@@ -80,7 +80,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
-| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. See [Session prompt tools](session-prompt-tools.md). |
+| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. Returns `409 { code: "GOAL_PAUSED" }` when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
@@ -493,7 +493,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`); returns the structured dismiss result documented below |
 | `POST` | `/api/goals/:id/team/steer` | Backward-compatible streaming-only steer for a team agent (`{ sessionId, message }`) |
 | `POST` | `/api/goals/:id/team/abort` | Force-abort a stuck team agent (`{ sessionId }`) |
-| `POST` | `/api/goals/:id/team/prompt` | Prompt or steer a team agent, owned helper child, or direct-child goal team lead. Body `{ sessionId, message, mode?: "prompt" | "steer", workflowGateId?, inputGateIds? }`; default mode is `"steer"`. See [Session prompt tools](session-prompt-tools.md). |
+| `POST` | `/api/goals/:id/team/prompt` | Prompt or steer a team agent, owned helper child, or direct-child goal team lead. Body `{ sessionId, message, mode?: "prompt" | "steer", workflowGateId?, inputGateIds? }`; default mode is `"steer"`. Returns `409 { code: "GOAL_PAUSED" }` when the goal is paused (checked before team membership). See [Session prompt tools](session-prompt-tools.md). |
 | `GET` | `/api/goals/:id/team/agents` | List agents for a team goal. `?include=archived` also returns archived agents with `teamLeadSessionId`, `teamGoalId`, and `delegateOf` fields |
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead). Body `{ confirmBypassedGates?: boolean }` — the agent/MCP path is refused while any gate is `bypassed`; a human confirms with `confirmBypassedGates: true` (403 for sandbox tokens). See [Gate bypass endpoint](#gate-bypass-endpoint). |
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
@@ -677,9 +677,9 @@ Staff records include a persisted `accessory` string as part of the staff identi
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects` | List visible registered projects in persisted project order. Headquarters appears first by default unless `showHeadquartersInProjectLists === false`. Hidden projects, including the synthetic `system` project, are excluded. |
+| `GET` | `/api/projects` | List visible registered projects in persisted project order. Headquarters is a reorderable project with a `position` field; its position in the list reflects the saved sidebar order. Set `showHeadquartersInProjectLists === false` to hide it from listings. Hidden projects, including the synthetic `system` project, are excluded. |
 | `POST` | `/api/projects` | Register a normal project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`; an upsert for the server workspace returns the existing Headquarters project. Without upsert, the server workspace returns `409 { code: "HEADQUARTERS_ALREADY_EXISTS", projectId: "headquarters" }`. On success, `base_ref` is pinned best-effort to the live remote's `origin/<branch>` (via `git ls-remote --symref origin HEAD`) before `project.yaml` is persisted — an unreachable remote leaves it blank (today's runtime fallback). The same pin runs on the provisional→promote path. See [design/base-ref.md](design/base-ref.md). When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
-| `PUT` | `/api/projects/order` | Persist the full normal-project ID order for sidebar project drag reorder. Headquarters is anchored first and must not be included. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
+| `PUT` | `/api/projects/order` | Persist the visible-project order for sidebar drag reorder. Include Headquarters in `projectIds` when it is visible; omit it when hidden via preference (the server excludes it automatically). Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
 | `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. For the server workspace, remediation that would archive gateway-owned `.bobbit` state is removed and the report explains that Headquarters already owns the path. |
 | `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). Returns 403 `HEADQUARTERS_IMMUTABLE` for the server/Headquarters-owned `.bobbit` state. See [add-project-preflight.md](add-project-preflight.md). |
 | `POST` | `/api/projects/detect` | Add-Project probe for a candidate `{ path }`: whether it exists, is empty, already has a `.bobbit/config/project.yaml`, and package-manager markers (`package.json`/`Cargo.toml`/`go.mod`); derives a suggested project name from `package.json` when present. Does not register anything. 400 when `path` is missing. |
@@ -737,30 +737,32 @@ not create missing parents recursively.
 
 #### Project order
 
-`GET /api/projects` returns visible projects in the server-persisted order. Headquarters is anchored first when visible and has no `position`; normal project records may include a `position` field, but clients should not need to sort by it.
+`GET /api/projects` returns visible projects in the server-persisted order. Headquarters is a normal reorderable project (PR #933) and carries a `position` field like any other visible project. Clients should not need to sort by it — the server returns projects already sorted by position.
 
 `PUT /api/projects/order` is a reserved collection-level endpoint. It must be handled by the dedicated order route, never by the generic `PUT /api/projects/:id` update path. The server keeps the dedicated route before project-id handlers and excludes reserved collection subroutes from the generic matcher so `order` cannot be interpreted as a project ID.
 
-`PUT /api/projects/order` saves a new global order for normal visible projects. Do not include Headquarters:
+`PUT /api/projects/order` saves a new global order for all visible projects, including Headquarters when it is visible.
 
 ```http
 PUT /api/projects/order
 Content-Type: application/json
 
-{ "projectIds": ["project-c", "project-a", "project-b"] }
+{ "projectIds": ["headquarters", "project-c", "project-a", "project-b"] }
 ```
 
-`projectIds` must be the complete current list of normal visible project IDs in the requested order. Headquarters, hidden projects, and `system` are excluded. On success, the server stores contiguous positions, returns `200` with all visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
+`projectIds` must be the complete current ordered list of all participating visible project IDs (normal projects **and** Headquarters when shown). Hidden projects and `system` are excluded. When Headquarters is hidden from project lists via the `showHeadquartersInProjectLists` preference, it is excluded from the expected set — clients should omit it from the payload in that case and the server preserves its existing slot.
+
+On success, the server stores contiguous positions, returns `200` with all visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
 
 Project objects include the normal project fields; this example is truncated to the fields relevant to ordering:
 
 ```json
 {
   "projects": [
-    { "id": "headquarters", "name": "Headquarters", "kind": "headquarters", "rootPath": "/server" },
-    { "id": "project-c", "name": "Gamma", "rootPath": "/repo/gamma", "position": 0 },
-    { "id": "project-a", "name": "Alpha", "rootPath": "/repo/alpha", "position": 1 },
-    { "id": "project-b", "name": "Beta", "rootPath": "/repo/beta", "position": 2 }
+    { "id": "headquarters", "name": "Headquarters", "kind": "headquarters", "rootPath": "/server", "position": 0 },
+    { "id": "project-c", "name": "Gamma", "rootPath": "/repo/gamma", "position": 1 },
+    { "id": "project-a", "name": "Alpha", "rootPath": "/repo/alpha", "position": 2 },
+    { "id": "project-b", "name": "Beta", "rootPath": "/repo/beta", "position": 3 }
   ]
 }
 ```
@@ -771,7 +773,7 @@ Invalid requests return `400` and do not mutate the registry:
 { "error": "projectIds must be an array of strings", "code": "invalid_project_order" }
 ```
 
-`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, Headquarters, hidden project IDs, and the synthetic `system` project ID. Headquarters/system/hidden projects do not participate in user ordering; `system` is never returned by `GET /api/projects`.
+`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, hidden project IDs, and the synthetic `system` project ID. It also covers including Headquarters in `projectIds` when it is **hidden** via the `showHeadquartersInProjectLists` preference (because the server excludes it from the expected set in that case). When Headquarters is **visible**, it is a valid and required entry in `projectIds`; omitting it when visible returns `stale_project_order`. `system` is never returned by `GET /api/projects`.
 
 Stale complete-order mismatches return `409` and do not mutate the registry:
 

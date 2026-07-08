@@ -1252,8 +1252,8 @@ opens `panelId` **in that child session** and auto-switches the view to it via
 `host.ui.openPanel({ panelId, sessionId: childSessionId })` (contract-v2 `PanelTarget.sessionId`,
 a real session switch). A `{ ok: false }` result (e.g. `{ code, error }`) is **not** opened as a
 panel — it is handed back to the launching surface, which emits visible launcher feedback
-(for example the session header toast from `bobbit-launcher-feedback`); nothing is spawned
-and the view does not switch. This is how the **PR-walkthrough** launchers work — a click spawns
+via the `bobbit-launcher-feedback` custom event; nothing is spawned and the view does not
+switch. This is how the **PR-walkthrough** launchers work — a click spawns
 a fresh read-only reviewer sub-agent and the panel lives only in that child session (see
 [docs/pr-walkthrough-panel.md § Launch model](pr-walkthrough-panel.md#launch-model-the-isolated-reviewer-child)).
 
@@ -1262,6 +1262,21 @@ a fresh read-only reviewer sub-agent and the panel lives only in that child sess
   the versioned Host API — the pack never touches `state` or the router.
 - **Double-spawn guard.** The dispatch keeps a **within-gesture** guard so a single click cannot
   double-fire the spawn. It is *not* cross-click dedup: separate clicks each spawn a fresh child.
+- **Launcher feedback.** A spawn (or any asynchronous launch) can take a moment to resolve, so
+  the dispatch reports progress through the `bobbit-launcher-feedback` custom event. This is a
+  **dedicated, persistent** surface (`data-testid="launcher-feedback"`) — *not* the transient
+  header toast, which auto-clears after a couple of seconds and would vanish before a slow launch
+  finished. The event `detail.kind` has three values, and messages are derived from the launcher's
+  own `label` so they read correctly for any pack (never a PR-walkthrough-specific string):
+    - `pending` — shown with a spinner (e.g. `Starting <label>…`) and **stays visible until the
+      launch resolves**, so the user always knows a launch is in flight.
+    - `resolved` — clears the pending indicator on success (the panel opening / session switch is
+      itself sufficient confirmation, so no lingering toast is needed).
+    - `error` — **replaces** the pending message with the failure (e.g. `Could not start <label>.`
+      or a route-supplied reason like `No pull request found for this branch.`) and **requires an
+      explicit user dismissal** via `data-testid="launcher-feedback-dismiss"`; it never auto-clears,
+      so a failed launch cannot be missed. Any user-facing launch surface should pass the
+      `onResult` callback so it can emit the terminal `resolved`/`error` feedback.
 - **Launcher-bound Host API.** A spawn launcher needs `callRoute` + `ui.openPanel` bound to the
   pack and the **active (owner)** session (so the route resolves against the owner's worktree).
   Launchers now receive a pack-bound Host API from a **launcher-host factory**

@@ -14,7 +14,7 @@
  */
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
+import { readGatewayCreds, apiCall, apiCallDetailed } from "../_shared/gateway.js";
 
 export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
@@ -47,6 +47,12 @@ export default function (pi: ExtensionAPI) {
 		const extraHeaders: Record<string, string> = { "X-Bobbit-Spawning-Session": sessionId };
 		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
 		return apiCall(creds, method, urlPath, body, { extraHeaders });
+	}
+
+	async function apiDetailed(method: string, urlPath: string, body?: unknown) {
+		const extraHeaders: Record<string, string> = { "X-Bobbit-Spawning-Session": sessionId };
+		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+		return apiCallDetailed(creds, method, urlPath, body, { extraHeaders });
 	}
 
 	function ok(data: unknown) {
@@ -288,15 +294,42 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_merge_child",
 		label: "Merge Child Goal",
-		description: "Merge a child's branch locally into the parent. Clean merge auto-archives the child; conflicts return 409.",
+		description: "Merge a child's branch locally into the parent. Clean merge auto-archives the child; conflicts return structured 409 data. Pass force=true to bypass the ready-to-merge gate check (appropriate when the child's workflow has no such gate, or when the merge has been manually approved as safe).",
 		promptSnippet: "Local-merge a child's branch into the parent.",
 		parameters: Type.Object({
 			childGoalId: Type.String({ description: "Id of the child goal to merge." }),
+			force: Type.Optional(Type.Boolean({ description: "Bypass the ready-to-merge gate check. Use when the child's workflow has no ready-to-merge gate, or when the merge has been manually approved as safe to proceed." })),
 		}),
 		async execute(_id, params) {
-			try {
-				return ok(await api("POST", `/api/goals/${goalId}/integrate-child/${params.childGoalId}`, {}));
-			} catch (e: any) { return err(e.message); }
+			const body: Record<string, unknown> = {};
+			if (params.force !== undefined) body.force = params.force;
+			const result = await apiDetailed("POST", `/api/goals/${goalId}/integrate-child/${params.childGoalId}`, body);
+			if (result.ok) {
+				return ok(result.body);
+			}
+			if (result.status === 409) {
+				// Normalize 409 bodies so the renderer's field expectations are met:
+				//   - RTM_NOT_PASSED  → add rtmFailed: true  (renderer checks data.rtmFailed)
+				//   - GOAL_GIT_UNAVAILABLE → surface as err() — no merge occurred, no
+				//     structured pill is defined for this case; show a plain error message.
+				//   - conflict: true  → already in the body, pass through as-is.
+				const b = typeof result.body === "object" && result.body !== null
+					? (result.body as Record<string, unknown>)
+					: {};
+				if (b.code === "RTM_NOT_PASSED") {
+					return ok({ ...b, rtmFailed: true });
+				}
+				if (b.code === "GOAL_GIT_UNAVAILABLE") {
+					return err(String(b.error ?? "Git unavailable for child merge"));
+				}
+				// conflict: true (and any other 409) — pass through; renderer handles it.
+				return ok(result.body);
+			}
+			// Other non-2xx: extract error message and surface as isError
+			const msg = typeof result.body === "object" && result.body !== null && "error" in result.body
+				? String((result.body as Record<string, unknown>).error)
+				: `HTTP ${result.status}: ${result.text}`;
+			return err(msg);
 		},
 	});
 

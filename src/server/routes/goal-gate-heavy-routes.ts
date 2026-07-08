@@ -152,6 +152,7 @@ async function handleGoalGateInspect(routeCtx: CoreRouteCtx, params: Record<stri
 				signalId: resolved.signal.id,
 				verification: resolved.signal.verification,
 				activeVerification: verificationHarness.getActiveVerification(resolved.signal.id),
+				isActiveVerificationAlive: verificationHarness.areVerificationSessionsAlive(resolved.signal.id),
 				selectionOptions,
 				stepName,
 			});
@@ -163,6 +164,7 @@ async function handleGoalGateInspect(routeCtx: CoreRouteCtx, params: Record<stri
 				summary: snapshot.summary,
 				counts: snapshot.counts,
 				active: snapshot.active,
+				stale: snapshot.stale,
 				steps: snapshot.steps,
 				selection: snapshot.selection,
 			});

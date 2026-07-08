@@ -616,7 +616,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
-import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
+import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData, seedModelDefaultsFromLegacy } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
@@ -1297,6 +1297,15 @@ export function createGateway(config: GatewayConfig) {
 		headquartersStateDir: stateDir,
 		headquartersConfigDir: configDir,
 		legacyServerBobbitDir: path.join(getProjectRoot(), ".bobbit"),
+	});
+	// Non-destructively seed model-default preference keys from the legacy
+	// .bobbit/state/preferences.json into the headquarters state dir. This
+	// covers the case where BOBBIT_DIR points to a fresh directory (the
+	// migrateLegacyHeadquartersDirectory call above skips the legacy copy when
+	// an override is active) as well as first-ever installs.
+	seedModelDefaultsFromLegacy({
+		headquartersStateDir: stateDir,
+		serverRunDir: getProjectRoot(),
 	});
 	fs.mkdirSync(stateDir, { recursive: true });
 	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
@@ -4482,6 +4491,16 @@ async function handleApiRoute(
 		if (!callerAllowedTools.some((tool) => tool.toLowerCase() === "session_prompt")) {
 			json({ error: 'Tool "session_prompt" is not allowed for this session', code: "SESSION_PROMPT_NOT_ALLOWED" }, 403);
 			return;
+		}
+		// Pause guard: reject if the target session's goal is paused.
+		const sessionPromptTarget = sessionManager.getSession(targetSessionId);
+		const sessionPromptGoalId = sessionPromptTarget?.goalId ?? sessionPromptTarget?.teamGoalId;
+		if (sessionPromptGoalId) {
+			const sessionPromptGoal = getGoalAcrossProjects(sessionPromptGoalId);
+			if (sessionPromptGoal?.paused) {
+				json({ error: "Goal is paused — resume it before sending prompts", code: "GOAL_PAUSED", goalId: sessionPromptGoalId }, 409);
+				return;
+			}
 		}
 		try {
 			const result = await deliverSessionPrompt({

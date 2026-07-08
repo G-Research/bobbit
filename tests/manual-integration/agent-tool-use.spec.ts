@@ -109,6 +109,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		env: {
 			...process.env,
 			BOBBIT_DIR: join(dir, ".bobbit"),
+			BOBBIT_SECRETS_DIR: join(dir, ".bobbit", "state"),
 			NODE_ENV: "test",
 			// The tool-use canary is about the prompted agent turn. Title generation
 			// is a separate LLM call that can race/noise manual runs, especially when

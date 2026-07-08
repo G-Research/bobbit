@@ -25,6 +25,7 @@ import type { GoalCompletedCtx } from "./lifecycle-hub.js";
 import type { PromptProfile } from "./system-prompt.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
 import { anyInFlightChild } from "./team-manager-helpers.js";
+import { buildParentCompletionNotification } from "./notify-team-lead-child-passed.js";
 import {
 	findOrphanTeamEntries,
 	findUntrackedTeamLeadSessions,
@@ -3046,6 +3047,31 @@ export class TeamManager {
 
 		// Update goal state
 		await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "complete" });
+
+		// Notify parent team lead when a child goal completes, regardless of workflow shape.
+		// This ensures the parent is woken up even if the child's workflow has no
+		// ready-to-merge gate (which is the only prior notification path).
+		try {
+			const parentNotify = buildParentCompletionNotification(goal ?? undefined);
+			if (parentNotify) {
+				const parentEntry = this.teams.get(parentNotify.parentGoalId);
+				if (parentEntry?.teamLeadSessionId) {
+					const parentLeadSession = this.sessionManager.getSession(parentEntry.teamLeadSessionId);
+					if (parentLeadSession && parentLeadSession.status !== "terminated") {
+						if (parentLeadSession.status === "streaming") {
+							this.sessionManager.deliverLiveSteer(parentEntry.teamLeadSessionId, parentNotify.message, { source: "child-complete" }).catch((e: any) => {
+								console.error("[team-manager] Failed to steer parent team-lead on child completion:", e);
+							});
+						} else {
+							this.sessionManager.enqueuePrompt(parentEntry.teamLeadSessionId, parentNotify.message, { isSteered: true, source: "child-complete" });
+						}
+						console.log(`[team-manager] Notified parent team-lead (goal ${parentNotify.parentGoalId}) that child ${goalId} completed`);
+					}
+				}
+			}
+		} catch (err) {
+			console.warn("[team-manager] Failed to notify parent team-lead on child goal completion:", err);
+		}
 
 		// Keep team tracking alive so the team lead can still be found
 		// but persist the updated state (agents cleared)

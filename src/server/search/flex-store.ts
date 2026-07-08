@@ -20,6 +20,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import { Document as FlexDocument } from "flexsearch";
 import { profileAsync } from "../agent/profiling.js";
 import { highlight } from "./snippet.js";
@@ -30,6 +31,29 @@ import {
 	type MetaRowPersisted,
 } from "./meta.js";
 import type { Indexable, SearchQuery, SearchResult, SearchResults } from "./types.js";
+
+/**
+ * Atomic rename that works on Windows.
+ *
+ * POSIX `rename(2)` is atomic and silently replaces the destination.
+ * On Windows, `fs.rename` over an existing file raises EPERM (-4048).
+ * The workaround is to unlink the destination first, then rename.
+ * The window between unlink and rename is tiny; we accept the theoretical
+ * non-atomicity because the alternative is a persistent error loop.
+ */
+async function atomicRename(src: string, dest: string): Promise<void> {
+	try {
+		await fs.promises.rename(src, dest);
+	} catch (err) {
+		const e = err as NodeJS.ErrnoException;
+		if ((e.code === "EPERM" || e.code === "EEXIST") && os.platform() === "win32") {
+			try { await fs.promises.unlink(dest); } catch { /* dest may not exist */ }
+			await fs.promises.rename(src, dest);
+		} else {
+			throw err;
+		}
+	}
+}
 
 // Minimal typing for the subset of FlexSearch we touch. FlexSearch's
 // shipped types describe both sync and Promise return shapes; we use
@@ -441,7 +465,7 @@ export class FlexSearchStore {
 		try {
 			await fs.promises.mkdir(this.dataDir, { recursive: true });
 			await fs.promises.writeFile(tmp, JSON.stringify(writeMetaRow(meta)), "utf-8");
-			await fs.promises.rename(tmp, final);
+			await atomicRename(tmp, final);
 		} catch (err) {
 			if (this._isBenignTeardownError(err)) return;
 			throw err;
@@ -550,7 +574,7 @@ export class FlexSearchStore {
 		const docsTmp = `${docsFinal}.tmp`;
 		const serialisedDocs = JSON.stringify(Array.from(this._docs.values()));
 		await fs.promises.writeFile(docsTmp, serialisedDocs, "utf-8");
-		await fs.promises.rename(docsTmp, docsFinal);
+		await atomicRename(docsTmp, docsFinal);
 		written.push(`${docsKey}.json`);
 
 		await this._idx.export(async (key: string, data: unknown) => {
@@ -572,7 +596,7 @@ export class FlexSearchStore {
 			const tmp = `${final}.tmp`;
 			const payload = typeof payloadData === "string" ? payloadData : JSON.stringify(payloadData);
 			await fs.promises.writeFile(tmp, payload, "utf-8");
-			await fs.promises.rename(tmp, final);
+			await atomicRename(tmp, final);
 			written.push(`${safeKey}.json`);
 		});
 

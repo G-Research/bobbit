@@ -16,10 +16,7 @@ import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./model-registry.js";
-import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, codeAssistComplete } from "./google-code-assist.js";
-
-ensurePiAiBedrockHeadersPatch();
 
 interface AuthCredentials {
 	type: string;

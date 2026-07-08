@@ -574,6 +574,16 @@ reviewer doesn't ask.
 
 ### 3.1 Real‑LLM e2e — `tests/compaction.spec.ts`
 
+> **Superseded / removed.** This real-LLM `/compact` spec (later moved to
+> `tests/manual-integration/compaction.spec.ts`) was removed for the same
+> reason as `compaction-pressure.spec.ts`: it seeded agent auth by copying a
+> static `auth.json` OAuth snapshot whose short-lived access token expires
+> mid-run, so it could not authenticate reliably. The manual `/compact`
+> lifecycle is now covered deterministically (mock agent, no LLM) by the
+> `@live-compaction-affordance` "manual /compact" test in
+> `tests/e2e/ui/pre-compaction-history.spec.ts`. The section below is retained
+> for historical design rationale.
+
 Claims the `compaction.spec.ts` slot in
 `tests/playwright-e2e.config.ts:21`. Prune the other four dangling entries
 in that same `testMatch` block — they reference files that this goal does
@@ -668,6 +678,16 @@ Flake avoidance:
   on the actual model response and would be flaky.
 
 ### 3.2 Manual‑integration — `tests/manual-integration/compaction-pressure.spec.ts`
+
+> **Superseded / removed.** This real-LLM pressure spec was removed: it seeded
+> agent auth by copying a static `auth.json` OAuth snapshot whose short-lived
+> access token expired mid-run (refresh failed with `invalid_grant`), so it
+> could not authenticate reliably. The auto/threshold compaction lifecycle it
+> covered is now asserted deterministically (mock agent, no LLM) by the
+> `@live-compaction-affordance` test in
+> `tests/e2e/ui/pre-compaction-history.spec.ts`, which checks the summary card
+> resolves to `data-state="complete"` / `data-verdict="ok"`. The section below
+> is retained for historical design rationale.
 
 Follow `tests/manual-integration/restart-minimal.spec.ts:1–60` for the
 gateway scaffold:

@@ -253,6 +253,7 @@ export type PromptSource =
 	| "verification"
 	| "system"
 	| "agent"
+	| "child-complete"
 	// Extension Host C2: a pack's `host.session.postMessage` drove this prompt
 	// (gesture-gated, allowedTools-scoped, audited — see session-write.ts).
 	| "extension";

@@ -4,6 +4,44 @@ import type { Workflow } from "./agent/workflow-store.js";
 
 export type GateEffectiveStatus = GateStatus | "running";
 
+/**
+ * Slim a gate for the gate-LIST endpoint (`GET /api/goals/:id/gates`).
+ *
+ * The list endpoint previously returned the entire signal history with full
+ * inline step output, artifact bodies, and diagnostics — a payload that grows
+ * unbounded with gates × signals × steps and is re-serialized by the client on
+ * every poll tick. This projection strips the heavy fields so the list stays
+ * lightweight; full step text is fetched lazily on expand via the gate-DETAIL
+ * / verification-snapshot / inspect paths (which are unaffected).
+ *
+ * For every signal step it: blanks `output`, deletes `artifact.content` (keeps
+ * `artifact.contentType` + `artifact.metadata` so the UI still knows an
+ * artifact exists), and deletes `diagnostics`. All other fields — step
+ * name/type/status/passed/skipped/duration_ms/phase and signal-level
+ * metadata/content/timestamp — are preserved.
+ *
+ * The input is NOT mutated: a structured deep clone is returned so the
+ * in-memory gate store keeps its full fidelity.
+ */
+export function projectGateForList<T extends { signals: any[] }>(gate: T): T {
+	const clone: T = typeof structuredClone === "function"
+		? structuredClone(gate)
+		: JSON.parse(JSON.stringify(gate));
+	for (const signal of clone.signals ?? []) {
+		const steps = signal?.verification?.steps;
+		if (!Array.isArray(steps)) continue;
+		for (const step of steps) {
+			if (step == null) continue;
+			step.output = "";
+			if (step.artifact && typeof step.artifact === "object") {
+				delete step.artifact.content;
+			}
+			delete step.diagnostics;
+		}
+	}
+	return clone;
+}
+
 export interface GateStatusSummaryGate {
 	gateId: string;
 	name?: string;

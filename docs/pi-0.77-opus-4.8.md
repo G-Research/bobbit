@@ -165,7 +165,6 @@ npx tsx --test --test-force-exit tests/thinking-levels.test.ts
 npx tsx --test --test-force-exit tests/rpc-bridge-spawn-args.test.ts
 npx tsx --test --test-force-exit tests/session-store.test.ts tests/session-manager-restore.test.ts
 npx tsx --test --test-force-exit tests/transcript-reader.test.ts
-npx tsx --test --test-force-exit tests/pi-ai-bedrock-headers-patch.test.ts
 npx tsx --test --test-force-exit tests/rpc-bridge-lifecycle.test.ts
 npx playwright test --config tests/playwright.config.ts tests/ui-fixtures/model-selector-fixture.spec.ts tests/thinking-levels-per-model.spec.ts
 ```

@@ -59,7 +59,7 @@ Headquarters is physically separated from normal projects. Server state/config l
 
 For non-workflow config, `projectId: "headquarters"` normalizes to server scope: roles, tools, tool policies, skills, marketplace/MCP contributions, and config-directory lookups use the same stores as `/api/project-config` and report server origins. Workflows remain project-scoped; `resolveWorkflows("headquarters")` reads the Headquarters project config store, while `resolveWorkflows(undefined)` returns `[]`.
 
-`GET /api/projects` returns Headquarters first by default. The `showHeadquartersInProjectLists` preference hides it only from normal project lists/sidebar/pickers; explicit lookup and internal routing by id still work and all sessions/goals/staff/config remain intact. Destructive project lifecycle routes reject Headquarters through `HEADQUARTERS_IMMUTABLE` or `HEADQUARTERS_ALREADY_EXISTS` responses. Because Headquarters' root is `headquartersDir` (not the server run directory), a normal project can still be registered at the server run directory without colliding with it.
+`GET /api/projects` returns visible projects in saved order. Headquarters is a reorderable project with a `position` field; its position in the list reflects the user's drag order. The `showHeadquartersInProjectLists` preference hides it only from normal project lists/sidebar/pickers; explicit lookup and internal routing by id still work and all sessions/goals/staff/config remain intact. Destructive project lifecycle routes reject Headquarters through `HEADQUARTERS_IMMUTABLE` or `HEADQUARTERS_ALREADY_EXISTS` responses. Because Headquarters' root is `headquartersDir` (not the server run directory), a normal project can still be registered at the server run directory without colliding with it.
 
 ### Synthetic system project
 
@@ -982,7 +982,7 @@ The sidebar always groups sessions and goals under collapsible project folder ro
 ├── [+ Add Project]
 ```
 
-When only one project is visible, its folder row defaults to expanded so there is no extra click required. A fresh server normally has one visible project: Headquarters. Headquarters uses the Lucide `TowerControl` icon, is anchored first, and has no destructive project actions. If the user hides Headquarters and no normal projects remain, the sidebar shows a fallback with **Quick Session in Headquarters**, **Show Headquarters**, and **Add Project** instead of a dead-end "No projects configured" state.
+When only one project is visible, its folder row defaults to expanded so there is no extra click required. A fresh server normally has one visible project: Headquarters. Headquarters uses the Lucide `TowerControl` icon, is a reorderable project (carries a `position` field and can be dragged like any other), and has no destructive project actions. If the user hides Headquarters and no normal projects remain, the sidebar shows a fallback with **Quick Session in Headquarters**, **Show Headquarters**, and **Add Project** instead of a dead-end "No projects configured" state.
 
 **Toolbar "+ New Goal" behavior** depends on how many projects are visible:
 
@@ -990,7 +990,7 @@ When only one project is visible, its folder row defaults to expanded so there i
 |---|---|
 | 0 | Only possible when Headquarters is hidden. The UI offers the hidden-Headquarters fallback actions. |
 | 1 | Skips the picker entirely and opens the goal creation dialog directly, scoped to the one visible project. |
-| 2+ | Opens `<project-picker-popover>` (`src/ui/components/ProjectPickerPopover.ts`) anchored beneath the button, listing Headquarters first when visible and normal projects after it. Clicking a project starts goal creation scoped to it; Esc / click-outside closes; arrow keys + Enter navigate. On mobile (viewport < 640px) the popover renders as a centered sheet. |
+| 2+ | Opens `<project-picker-popover>` (`src/ui/components/ProjectPickerPopover.ts`) anchored beneath the button, listing all visible projects in saved order (Headquarters and normal projects each carry a `position` field that determines their slot). Clicking a project starts goal creation scoped to it; Esc / click-outside closes; arrow keys + Enter navigate. On mobile (viewport < 640px) the popover renders as a centered sheet. |
 
 The per-project "+ goal" button on each project row bypasses the popover - the project is already unambiguous. Goal creation is centralized in `startNewGoalFlow(anchorEl)` in `src/app/goal-entry.ts` so every call site (toolbar button, mobile nav, empty-state CTA, `Alt+G` shortcut) stays in sync.
 
@@ -1783,11 +1783,10 @@ Every agent session gets its own subprocess environment with `BOBBIT_SESSION_ID=
 
 Claude models exposed by the gateway are stored under `providers.aigw` but routed through `api: "bedrock-converse-stream"` for Bedrock Converse feature parity. Those model entries also get a per-model `baseUrl` pointing at the gateway `/aws` subtree, while the provider `baseUrl` stays on the OpenAI-compatible root for non-Claude models.
 
-pi-ai's Bedrock provider does not normally forward provider-level `headers` into the AWS SDK request. Bobbit applies a narrow compatibility patch before model-completion and agent subprocess startup: `ensurePiAiBedrockHeadersPatch()` injects a middleware hook into pi-ai's Bedrock provider that copies `options.headers` into the outgoing Bedrock request **only when `model.provider === "aigw"`**. The hook is intentionally not global:
+pi-ai v0.79.6+ natively forwards provider-level `headers` into the AWS SDK request via `addCustomHeadersMiddleware()`, which is called automatically whenever `options.headers` is non-empty. No Bobbit-side patch is required: `providers.aigw.headers` written by `aigw-manager.ts` are resolved by pi-coding-agent's `resolveConfigValue` and passed as `options.headers`, and pi-ai injects them into the Bedrock request directly.
 
 - aigw-routed Claude/Bedrock traffic receives `User-Agent: Bobbit/<version>` and the resolved `x-opencode-session` when present.
-- Public Amazon Bedrock providers, Anthropic providers, and other non-aigw providers are left untouched.
-- Existing AWS user-agent middleware is not globally replaced; the Bobbit headers are applied only to the specific aigw Bedrock client request.
+- Public Amazon Bedrock providers, Anthropic providers, and other non-aigw providers are left untouched (their `options.headers` is empty).
 
 ### Startup refresh behavior
 
