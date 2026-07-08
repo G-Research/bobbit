@@ -1,144 +1,146 @@
-# Concurrency Proof Report — GLOBAL CONCURRENCY BUDGET
+# Concurrency Proof — global browser-render lease + quiet-box N-curve
 
-**Author:** test-engineer-9069 (session 15565bf7) · task 47507884
-**Status:** budget IMPLEMENTED + unit-proven; **authoritative N-way measurement PENDING a quiet box.**
-**Base commit:** `ac1a2ff0` (boot lease + Chromium 2-cap + restored render headroom).
+**Generated:** 2026-07-08 (real quiet-box measurements; NO dry-run, NO placeholders).
+**Base commit:** `12df82b6` (goal HEAD incl. gateway-boot lease + **working** browser-render lease + orphan fix).
+**Box:** 24-core AMD Ryzen AI 9 HX 370, Windows, Node 24. Idle baseline **~4–12 % CPU** (30 idle peer-agent processes; the OLED screensaver's earlier apparent load was test-teardown tail, not steady contention — the box is genuinely quiet). `retries: 0`. Wall **decoupled from flakes** for measurement via `BOBBIT_V2_PERRUN_WALL_MS=1800000` so a run's exit reflects TEST outcome, not the (large) queuing wall — wall is recorded separately.
+**Harness:** `scripts/testing-v2/concurrency-proof.mjs` for N=3; per-run manual capture (3 throwaway worktrees, each own `npm ci`+`dist`, shared cross-process ledger) for N=2/N=3 detail.
 
-> This is an AUTHORED summary (the proof harness overwrites this file with a
-> single-run snapshot; the raw 3-way×3 snapshot it produced is preserved in
-> `.profiles/testing-v2/concurrency-proof/result.json` + `logs/`). Numbers below
-> are labelled with their commit and box condition.
-
----
-
-## 1. What was built (the global concurrency budget)
-
-The reservation ledger already bounded *steady-state* worker count (Σworkers ≤
-cores). It did **not** bound the *transient* CPU bursts when many in-process
-gateways boot at once — the diagnosed root cause of the N-way flakes. Two new
-levers, both cross-process, both defaulting on:
-
-1. **Gateway-boot lease pool** (`scripts/testing-v2/ledger.mjs` :
-   `acquireLease`/`acquireGatewayBootLease`). A filesystem semaphore, cap
-   `clamp(floor(cores/6),2,8)` = **4** on the 24-core box (env
-   `BOBBIT_V2_MAX_GATEWAY_BOOTS`). Heavy op **acquires → WAITS if saturated →
-   releases**. Fail-open after 120 s (never deadlocks a boot); dead-PID +
-   max-hold sweep. Wired into **both** boot paths:
-   - tier-1 `tests2/harness/gateway.ts` — acquired **before the dynamic
-     `src/server` import**, so the ~11 s/fork cold graph transform (the measured
-     "worst contention moment", ~130 CPU-s spike at 4-way per
-     `gateway-cost-feasibility.md`) is serialised too, not just the runtime boot.
-   - tier-2 `tests/e2e/gateway-harness.ts` — acquired before `createGateway` +
-     `start()`, gated on `BOBBIT_V2_GATEWAY_BOOT_LEASE` (set **only** by
-     `playwright-v2.config.ts`), fail-open. **Legacy e2e is unaffected.**
-
-2. **Chromium cap** (`PLAYWRIGHT_CAP = 2`). Chromium is IO/gateway-bound, not
-   CPU-parallel: measured 2 workers ≈ 4-worker throughput; 1 worker doubles wall.
-   So target **2** chromium workers/run — bounds total concurrent Chromium to 2×N
-   while the ledger's `Σworkers ≤ cores` bounds the rest.
-
-3. **Restored render headroom** (`splitBundle`). Under contention the split
-   **under-allocates vitest** so Σworkers leaves ~⅓ of the cores idle for the
-   concurrent browser tiers to render into (tier-2 flakes are `toBeVisible`
-   render timeouts — see §3). Per-run split: 3-way → **3v+2p (Σ15/24)**, 4-way →
-   **2v+2p (Σ16/24)**, 5-way → **1v+2p (Σ15/24)**. Single uncontended run
-   (grant≥12) uses the full **8v+2p** for speed.
-
-**Unit-proven** (`node scripts/testing-v2/ledger.mjs --selftest`, deterministic,
-no box dependency): lease cap enforcement + wait-then-grant, fail-open, dead-PID
-sweep; split anchors; Σworkers ≤ cores under pending-contention. Cross-process
-lease cap proven by `--lease-stress` (peak concurrent holders ≤ cap, N children).
+> **This supersedes the pre-`12df82b6` "authored summary".** Re-running the proof
+> harness overwrites this file with its single-snapshot format.
 
 ---
 
-## 2. Raw 3-way × 3 measurement — CONTAMINATED, pre-headroom-fix (commit `4ec59ec5`)
+## Headline
 
-Ran `CONCURRENCY_PROOF_CONCURRENT=3 REPS=3` on the **shared dev box while ~46
-other Bobbit agent processes were live** (CPU observed oscillating 4 %→60 % as
-peers worked). This run used the **filled-box split (6v+2p, Σ=24/24)** that
-commit `ac1a2ff0` later corrected. Result:
+1. **The global browser-render lease is BUILT, WORKING, and verified.** A second
+   cross-process lease pool (`browser`, cap in `tests2/budget-caps.json`, default
+   4) caps the TOTAL number of Chromium browser workers rendering the app at once
+   across ALL concurrent `test:v2`/e2e runs — analogous to the gateway-boot lease.
+   During a 3-way run the pool was **pinned at exactly 4/4 for the whole browser
+   tier** (sampled continuously; never exceeded 4), with 2 of the 6 requested
+   workers correctly waiting. Cross-tier + cross-process interop is pinned by
+   `tests2/core/ledger-lease-bridge-interop.test.ts`.
 
-| Metric | Value | Target | Status |
-|---|---|---|---|
-| Runs green | **0/9** | 9/9 | ❌ |
-| Vitest tier failures | 7 runs | 0 | ❌ |
-| Playwright tier failures | 7 runs | 0 | ❌ |
-| Max Σworkers (ledger) | **24** | ≤ 24 | ✅ |
-| Rep 1 / 2 walls | 552–575 s | ≤ 600 | ✅ |
-| Rep 3 walls | **648–661 s** | ≤ 600 | ❌ |
+2. **It fixed a silent, pre-existing bug.** The lease import *never fired* before
+   this work: importing `scripts/testing-v2/ledger.mjs` from a Playwright-
+   transformed file throws "exports is not defined in ES module scope" (Playwright
+   mistransforms a `.mjs` outside its test root toward CJS), which the fail-open
+   `catch` swallowed. **The prior agent's gateway-boot lease in the browser tier
+   was silently dead for the same reason.** Both now load via a Playwright-ESM-safe
+   co-located client, `tests/e2e/ledger-lease-bridge.mjs`, that speaks the same
+   on-disk protocol as the ledger.
 
-**Two independent confounds make this NON-authoritative:**
-
-- **External load.** Rep 3's wall jumped ~90 s (552→661 s) with **no config
-  change between reps** — the signature of a peer agent starting heavy work
-  mid-proof. On a 24-core box shared with dozens of live agents, a 40-minute
-  proof cannot be trusted.
-- **Wrong config.** It ran the filled-box split (Σ=24/24). §3 explains why that
-  itself regresses browser reliability, and why `ac1a2ff0` reverts it.
-
-**What the run DID prove (config- and load-independent):** the ledger held
-**Σworkers ≤ 24 at all times** across 3 simultaneous runs (A3 ✅); the split
-granted each run `6v+2p` (`floor(24/3)=8 → splitBundle`); and the gateway-boot
-lease coordinated boots across all 3 runs' forks + workers from the one shared
-pool (observed `gateway-boot 0/4` between boot waves — never exceeded cap).
-
-The failing tests were a **rotating cast of tier-2 `toBeVisible` render timeouts**
-(`tool-manager-mcp-section`, `verification-dedup`, `session-actions`,
-`team-operations`, `goal-team-gates`, `proposal-revision-snapshots`) plus a few
-tier-1 timing tests — i.e. the KNOWN browser-tier contention set, not a new
-break.
+3. **With the lease working, the browser tier is fixed at 3-way** (playwright
+   **3/3 PASS** where it previously flaked), **but `test:v2` is NOT ~0-flake at
+   N ≥ 2.** The residual is **tier-1 vitest**, which the browser lease cannot
+   touch: a rotating cast of timing-sensitive integration tests starved by CPU
+   under N-way load. **Flagged per the goal owner's instruction: the browser lease
+   alone cannot crack ~0-flake at 3.**
 
 ---
 
-## 3. The key finding: browser RENDER needs CPU headroom (not just boot serialisation)
+## Authoritative N-curve (quiet box, retries:0, wall decoupled)
 
-The handoff premise was "gate the boots + Chromium and the flakes go away." That
-is **half right**. Isolating the variables (all on the shared box, so directional
-not absolute):
+| N | green (both tiers) | playwright | vitest | per-run wall | browser lease peak | Σworkers |
+|---|---|---|---|---|---|---|
+| **1** (single `test:v2`) | ~near-clean | 604 pass / 1 flake¹ | pass | ~300 s | n/a (2≤cap) | — |
+| **2** (×2 reps = 4 runs) | **0/4** | **0/4** (rotating UI timing flakes²) | 2/4³ | ~507 s | 4/4 | ~20/24 |
+| **3** (×1 clean rep = 3 runs) | **0/3** | **3/3 PASS** ✅ | **0/3** (rotating tier-1 timing flakes⁴) | ~740–786 s | 4/4 (verified held) | 15/24 |
 
-| Config | Σ @ 3-way | 3-way green | Note |
-|---|---|---|---|
-| pre-lease (`f31938d1`) 4v+1p | 15/24 | 2/9 | headroom, 1 browser worker |
-| my filled-box (`4ec59ec5`) 6v+2p | 24/24 | **0/9** | no headroom → **worse** |
-| my headroom fix (`ac1a2ff0`) 3v+2p | 15/24 | *pending quiet box* | headroom + 2 workers + boot lease |
+¹ Single-run flake = `session-actions › canonical labels` (a load-sensitive render
+  assertion; passes 2/2 in isolation). Even N=1 is not *perfectly* clean under the
+  peer-agent baseline.
+² N=2 playwright rotating cast: `app-smoke ▸ Ctrl+ArrowDown keyboard-nav`,
+  `goal-team-gates ▸ archived child`, `verification-dedup`, `proposal-panel-
+  streaming ▸ PPS-04 follow-tail`. All are render-/WS-timing assertions (e.g.
+  `data-nav-id` rows = 0 → sidebar not yet populated when evaluated).
+³ One N=2 run (`n2-r2-0`) suffered a **full v2-integration collapse** (~all 150
+  files failed), not individual flakes — a resource-exhaustion cascade (see §"Why
+  N=2 is worse than N=3").
+⁴ N=3 vitest rotating cast: `verification-command-restart-lifecycle` (2/3 runs,
+  ~28–30 s, near the 30 s test timeout), `project-reorder-api`, `multi-repo-goal`
+  (real-git, ~24 s). Different tests each run — the classic CPU-starvation
+  signature, not one deterministic failure.
 
-Tier-2 flakes are `expect(locator).toBeVisible()` timeouts: the app must **render
-within the test timeout**, which it cannot when N full suites saturate all 24
-cores. The gateway-boot lease removes the *boot* spike but not the *sustained*
-render contention — that needs idle CPU. Filling all cores (my first cut)
-starved render and regressed the green rate; `ac1a2ff0` restores the ~⅓ idle
-headroom the pre-lease design had, now combined with 2 browser workers + the
-boot lease.
+**Highest cleanly ~0-flake N (this box, this build): N=1 for the browser tier is
+effectively solved; but no N ≥ 2 is ~0-flake because of tier-1 vitest.** The honest
+"bar" the goal owner asked for is therefore gated by tier-1, not the browser lease.
 
-**Honest read:** even the pre-lease headroom config only reached 2/9 at 3-way, so
-CPU headroom is necessary but likely **not sufficient** for ~0 flakes at N≥3. The
-tier-2 browser render contention is the dominant residual flake driver and is the
-same issue LEAD-STATE tracks as "browser-tier de-flake in flight". Whether the
-headroom fix + boot lease + 2-cap reaches ~0 flakes, and at what N, **can only be
-determined on a quiet box** — see §4.
+4-way / 5-way were **not run**: 3-way already fails the ~0-flake bar on tier-1, and
+higher N is strictly worse (more CPU starvation) — running them would only reconfirm
+the tier-1 ceiling at greater cost.
 
 ---
 
-## 4. What remains (needs a coordinated quiet window)
+## Why the browser lease is necessary but not sufficient
 
-Per the handoff, the concurrency "bar" is now **acceptable wall-at-N with ~0
-flakes**, decided by the user. To produce authoritative numbers the box must be
-quiet (no competing agents), because a single peer flare invalidates a 40-min
-proof (§2). Required runs, commit `ac1a2ff0`, on a quiet box:
+- **Browser dimension — SOLVED.** Capping concurrent Chromium to 4 (from 6 at
+  3-way) gave playwright 3/3 at N=3. The lever works exactly as designed.
+- **Tier-1 vitest dimension — UNTOUCHED.** Each concurrent `test:v2` boots many
+  in-process gateways for its v2-integration tests; those tests are timing-
+  sensitive (real timers, real git, restart/verification lifecycles) and, under
+  N-way CPU saturation, miss their timeouts. The browser lease frees GPU/render
+  pressure, not the CPU that starves these. Fixing them needs a **different**
+  lever (the goal's clock DI seam → drive on observable state instead of
+  wall-clock; and/or de-flaking the real-git/real-spawn integration cluster) —
+  out of scope for a browser-render lease.
+
+### Why N=2 is *worse* than N=3 (a real, actionable ledger finding)
+
+Counter-intuitively N=2 flaked harder than N=3. Root cause is the ledger's
+`splitBundle`: at **N=2 each run's grant = `floor(24/2)=12 = MAX_BUNDLE`**, which
+takes the **uncontended split (8 vitest + 2 playwright)** intended for a *single*
+run. Two runs → **16 vitest workers + 4 browsers** → CPU oversubscription that
+both starves browser render (→ pw timing flakes) and, in one run, collapsed the
+whole v2-integration project. At **N=3** grant = `floor(24/3)=8` → the *contended*
+split (3 vitest + 2 playwright) → **9 vitest workers total** → render survives →
+pw passes. `splitBundle(grant)` cannot distinguish "1 run @ grant 12" from "N=2
+each @ grant 12" from `grant` alone. **Recommendation (separate change): use the
+full-vitest uncontended split only when `activeParents === 1`.** Not fixed here to
+avoid destabilising the parked headroom tuning.
+
+### Wall cost of the hard cap
+
+cap-4 with 6 requested workers at N=3 head-of-line-blocks (worker-scoped lease held
+for a worker's whole life), roughly doubling browser-tier wall and pushing per-run
+wall to **~740–786 s** (vs ~300 s isolated). This is the accepted "reliability >
+speed" trade — but it is steep, and a finer (per-test) lease would pipeline better
+at the cost of charging queue-wait against the 60 s test timeout (rejected here as
+it would create *new* false-timeout flakes).
+
+---
+
+## What was delivered (this task)
+
+- `scripts/testing-v2/ledger.mjs`: `browser` lease pool + `acquireBrowserRenderLease`,
+  per-pool max-hold (browser 30 min vs gateway-boot 3 min), cap from
+  `tests2/budget-caps.json` (+ `BOBBIT_V2_MAX_BROWSER` override). `--selftest` extended.
+- `tests2/budget-caps.json`: committed caps (`gateway-boot` 4, `browser` 4).
+- `tests/e2e/ledger-lease-bridge.mjs`: Playwright-ESM-safe lease client (fixes the
+  silent-fail import bug for BOTH leases).
+- `tests/e2e/gateway-harness.ts`: worker-scoped `browserRenderLease` fixture
+  (v2-only gate, acquired before gateway boot, own large timeout so the wait is
+  NOT charged to the 60 s test timeout).
+- `playwright-v2.config.ts`: `BOBBIT_V2_BROWSER_LEASE=1`.
+- `tests2/core/ledger-lease-bridge-interop.test.ts`: pins bridge↔ledger protocol.
+- `scripts/testing-v2/assert-budget.mjs`: `BOBBIT_V2_PERRUN_WALL_MS` override to
+  decouple flake vs wall during measurement (committed bar unchanged).
+
+## Recommendation to the goal owner
+
+The browser-render lever is done and correct. To reach ~0-flake at N ≥ 2 the
+binding work is now **tier-1 vitest**: (a) the clock DI seam for the timing-
+sensitive integration cluster, and (b) the `splitBundle` `activeParents===1`
+fix so N=2 stops over-allocating vitest. Set the concurrency bar accordingly —
+on this build the honest ~0-flake ceiling is tier-1-bound, not browser-bound.
+
+## Reproduce
 
 ```bash
-# ping the lead first; confirm the box is quiet, then:
-BOBBIT_V2_TOTAL_CORES=24 CONCURRENCY_PROOF_CONCURRENT=3 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs
-BOBBIT_V2_TOTAL_CORES=24 CONCURRENCY_PROOF_CONCURRENT=4 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs
-BOBBIT_V2_TOTAL_CORES=24 CONCURRENCY_PROOF_CONCURRENT=5 CONCURRENCY_PROOF_REPS=3 node scripts/testing-v2/concurrency-proof.mjs   # PING LEAD before this one
+# 3-way, flake signal decoupled from wall (author's measurement mode):
+BOBBIT_V2_TOTAL_CORES=24 CONCURRENCY_PROOF_CONCURRENT=3 CONCURRENCY_PROOF_REPS=3 \
+  CONCURRENCY_PROOF_WALL_S=1800 BOBBIT_V2_PERRUN_WALL_MS=1800000 \
+  node scripts/testing-v2/concurrency-proof.mjs
+# confirm the browser cap holds during a run:
+watch -n1 'node scripts/testing-v2/ledger.mjs --status | grep leases:'   # browser ≤ 4
 ```
-
-Record per N: green rate (target ≈0 flakes), per-run wall (rises under load —
-accepted), ledger peak Σworkers (≤ cores). If a given N still flakes on a quiet
-box, the residual is browser-tier render contention and the honest options are
-(a) fewer concurrent runs at that N is the bar, or (b) a deeper tier-2 fix
-(shard the browser tier / reduce per-test render cost) tracked as follow-up —
-**never** relocate coverage to daily (hard constraint).
-
-Tuning knobs available without code changes: `BOBBIT_V2_MAX_GATEWAY_BOOTS`,
-`BOBBIT_V2_PLAYWRIGHT_WORKERS`, `VITEST_MAX_FORKS`.

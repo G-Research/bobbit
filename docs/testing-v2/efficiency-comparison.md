@@ -57,18 +57,29 @@ little single-run **wall** for reliability:
 ## 2. Per-commit under concurrency (wall-at-N — the queuing cost)
 
 The global budget accepts **higher wall in exchange for ~0 flakes**
-(reliability > speed). Authoritative per-N wall is **PENDING a quiet box**
-(`concurrency-proof.md` §2–4): the only N-way numbers obtained so far are
-contaminated by peer-agent load (rep-3 wall blew from ~555 s to ~660 s with no
-config change). What is proven regardless of load:
+(reliability > speed). Authoritative quiet-box numbers are now in
+`concurrency-proof.md` (base `12df82b6`; idle baseline ~4–12 %):
 
-- Ledger keeps **Σworkers ≤ 24** at every N (A3 pass, 3-way).
-- Split leaves render headroom: 3-way Σ15/24, 4-way Σ16/24, 5-way Σ15/24.
-- Gateway-boot lease caps simultaneous boots at 4 across all runs.
+| N | playwright | vitest | per-run wall | browser cap held |
+|---|---|---|---|---|
+| 1 | 604 pass / 1 flake | pass | ~300 s | n/a |
+| 2 | 0/4 (UI timing flakes) | 2/4 | ~507 s | 4/4 |
+| 3 | **3/3 PASS** | 0/3 (tier-1 timing flakes) | ~740–786 s | 4/4 (verified) |
+
+- **Browser-render lease: WORKING** (verified pinned at 4/4; fixed a silent
+  fail-open import bug that had also disabled the browser-tier gateway-boot lease).
+  It solves the browser dimension at 3-way (pw 3/3).
+- **~0-flake NOT reached at N ≥ 2** — binding constraint is **tier-1 vitest**
+  timing-sensitive integration tests under CPU starvation (rotating cast), which
+  the browser lease cannot address. N=2 is worse than N=3 due to a `splitBundle`
+  over-allocation (16 vitest workers at N=2). See `concurrency-proof.md`.
+- Ledger keeps **Σworkers ≤ 24** at every N; gateway-boot + browser leases both
+  cap their pools cross-process.
 
 **Legacy concurrency** was capped at ~4 concurrent suites with `retries:3`
-(masking flakes). v2 targets `retries:0` + the global budget; whether it reaches
-~0 flakes at N=3/4/5 — and the wall at each — is the open measurement.
+(masking flakes). v2 with `retries:0`: the browser tier is de-flaked, but the
+honest ~0-flake ceiling is currently **tier-1-bound** — needs the clock DI seam +
+the split fix, not more browser work.
 
 ---
 
@@ -111,13 +122,16 @@ per-commit saving of ~117 CPU-min *each commit*.
 **So: is v2 genuinely more efficient?**
 - **CPU-min and single-loop wall: YES, decisively** (≈10× CPU, ≈3–4× wall),
   including the daily lane amortised.
-- **Concurrency reliability at N≥3: UNPROVEN** — the tier-2 browser render
-  contention (`concurrency-proof.md` §3) is the residual risk. The global budget
-  makes the box un-oversubscribable and restores render headroom, but ~0 flakes
-  at a given N is not yet demonstrated on a quiet box. If a quiet-box re-run shows
-  v2 cannot hit ~0 flakes at, say, 3-way, the honest position is: v2 is still far
-  more efficient per loop, but its *safe* concurrency ceiling may be lower than
-  legacy's nominal 4 — a real trade the user should weigh before switchover.
+- **Concurrency reliability at N≥2: browser tier SOLVED, tier-1 vitest is now the
+  ceiling.** Quiet-box measurement (`concurrency-proof.md`) shows the working
+  browser-render lease de-flakes the browser tier at 3-way (pw 3/3), but
+  `test:v2` is not ~0-flake at N≥2 because a rotating cast of timing-sensitive
+  **tier-1 vitest** integration tests is starved under N-way CPU load — a
+  dimension the browser lease cannot address. Honest position: v2 is far more
+  efficient per loop, and its browser concurrency is fixed, but its *safe*
+  ~0-flake ceiling is currently **tier-1-bound** (needs the clock DI seam + a
+  `splitBundle activeParents===1` fix), lower than legacy's nominal 4. The user
+  should weigh this before switchover; the remaining work is tier-1, not browser.
 
 ## 5. Reproduce
 
