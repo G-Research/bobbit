@@ -47,6 +47,13 @@ const singleForkFiles = [
 	"tests2/core/extension-host-isolation-config-invariant.test.ts",
 	"tests2/core/extension-host-module-isolation.test.ts",
 	"tests2/core/extension-host-route-dispatcher.test.ts",
+	// session-event-bus is a synchronous unit over a MODULE-GLOBAL EventTarget
+	// (src/app/session-event-bus.ts). Under isolate:false a sibling core file that
+	// constructs a RemoteAgent/host-api can leave a live listener on the shared bus;
+	// when this file publishes, that leaked handler fires (and can throw a stale
+	// closure), flaking all three subtests under load. A fresh isolated module graph
+	// removes the cross-file bleed deterministically.
+	"tests2/core/extension-host-session-event-bus.test.ts",
 	// env-bleed stragglers: BOBBIT_DIR / HOME / agent-dir recorded at module-top,
 	// or a pinned module singleton (globalAgentDir) that a sibling file in the same
 	// fork can initialise first — needs a fresh process for deterministic state.
