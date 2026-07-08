@@ -303,5 +303,21 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR67",
+		"area": "prompt-tool-ask-policy",
+		"file": "src/ui/components/ToolPermissionCard.ts",
+		"target": "ui",
+		"operator": "label-rename",
+		"search": ">Allow just ${this._shortToolName}</button>",
+		"replace": ">Allow jus ${this._shortToolName}</button>",
+		"description": "The tool-permission-card grant button loses its 'Allow just <tool>' label. Legacy tool-ask-policy.spec.ts fires a tool-grant-request on an ask-policy role and clicks 'Allow just Bash' to grant; prompt-interaction journey had no permission-card coverage (GAP). Ported into prompt-interaction.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/tool-ask-policy.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
 	}
 ]

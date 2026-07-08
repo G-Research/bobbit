@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
-import { sendMessage } from "../../../tests/e2e/ui/ui-helpers.js";
+import { sendMessage, createSessionViaUI } from "../../../tests/e2e/ui/ui-helpers.js";
 
 test.describe("Journey: Prompt Interaction", () => {
 	test("message editor textarea is visible", async ({ page }) => {
@@ -198,6 +198,37 @@ test.describe("Journey: Prompt Interaction", () => {
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => {});
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	// Ported from tool-ask-policy.spec.ts (audit: prompt-interaction GAP / BR67):
+	// a tool-grant-request on an ask-policy role shows a tool-permission-card and
+	// 'Allow just <tool>' grants it.
+	test("ask-policy tool grant request shows a permission card and grant works", async ({ page }) => {
+		test.setTimeout(90_000);
+		const askRole = `v2-ask-${Date.now()}`;
+		const roleResp = await apiFetch("/api/roles", {
+			method: "POST",
+			body: JSON.stringify({ name: askRole, label: "V2 Ask Policy", toolPolicies: { Bash: "ask" } }),
+		});
+		expect(roleResp.status).toBe(201);
+		let sessionId = "";
+		try {
+			await openApp(page);
+			sessionId = await createSessionViaUI(page);
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify({ roleId: askRole }) });
+			const grantPromise = apiFetch(`/api/sessions/${sessionId}/tool-grant-request`, {
+				method: "POST", body: JSON.stringify({ toolName: "Bash", toolGroup: "Shell" }),
+			});
+			const card = page.locator("tool-permission-card").first();
+			await expect(card).toBeVisible({ timeout: 15_000 });
+			await card.getByRole("button", { name: /Allow just/i }).click();
+			await expect(card.getByText(/Permission granted/i)).toBeVisible({ timeout: 5_000 });
+			const result = await grantPromise.then((r) => r.json());
+			expect(result.granted).toBe(true);
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			await apiFetch(`/api/roles/${askRole}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
