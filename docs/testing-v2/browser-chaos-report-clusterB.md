@@ -1,6 +1,6 @@
 # Browser-dimension Chaos Comparison — Test Suite v2
 
-Generated: 2026-07-07T23:50:53.346Z  |  Run duration: 4.8 min
+Generated: 2026-07-07T23:59:49.159Z  |  Run duration: 3.1 min
 
 Adversarial proof that the consolidated v2 **journeys** catch every browser-only
 mutant the retired 184-spec **legacy** suite catches. Both tiers run the targeted
@@ -10,9 +10,9 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 
 | Metric | Legacy suite | V2 journeys |
 |--------|-------------|-------------|
-| Content mutants | 3 | 3 |
-| With targeted catchers | 3 | 3 |
-| Caught | 3 | 3 |
+| Content mutants | 1 | 1 |
+| With targeted catchers | 1 | 1 |
+| Caught | 1 | 1 |
 | Missed | 0 | 0 |
 | Invalid (did not compile) | 0 | 0 |
 | Error (harness/env) | 0 | 0 |
@@ -23,17 +23,15 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 ## Acceptance Criteria
 
 - **Every legacy-caught mutant is also journey-caught (no REAL hole):** ✅ PASS
-- **V2 ≥ legacy overall (kill count):** ✅ PASS (v2 3 vs legacy 3)
+- **V2 ≥ legacy overall (kill count):** ✅ PASS (v2 1 vs legacy 1)
 - **Both-missed gaps:** ✅ None
-- **All journey kills attributed to a specific test:** ✅ PASS (3/3)
+- **All journey kills attributed to a specific test:** ✅ PASS (1/1)
 
 ## Per-area Comparison (v2 journeys ≥ legacy is the verdict)
 
 | Area | Mutants | Legacy caught | V2 caught | Real journey miss | Inconclusive | v2 ≥ legacy (runnable) |
 |------|---------|---------------|-----------|-------------------|--------------|------------------------|
-| goal-editing-archive-readonly-banner | 1 | 1 | 1 | — | — | ✅ |
-| goal-editing-form-tooltip-title | 1 | 1 | 1 | — | — | ✅ |
-| project-settings-restart-button-hidden | 1 | 1 | 1 | — | — | ✅ |
+| project-settings-project-assistant-provisional | 1 | 1 | 1 | — | — | ✅ |
 
 **Per-area v2 ≥ legacy:** ✅ PASS (no area has a real journey miss; ✅* = has env-inconclusive to re-run)
 
@@ -41,9 +39,7 @@ spec at `retries: 0` against a freshly rebuilt `dist`; attribution names the fai
 
 | ID | Area | File | Op | Legacy | V2 | Killed by (v2 test) | Duration |
 |----|------|------|----|--------|-----|---------------------|----------|
-| BR60 | goal-editing-archive-readonly-banner | `src/app/goal-dashboard.ts` | dropped-value | 🔴 caught | 🔴 caught | `tests2\browser\journeys\goal-editing.journey.spec.ts › Journey: Goal Archive Always-On — b` | 78.2s |
-| BR61 | goal-editing-form-tooltip-title | `src/app/proposal-panels.ts` | dropped-value | 🔴 caught | 🔴 caught | `tests2\browser\journeys\goal-editing.journey.spec.ts › Journey: Goal Form Tooltips — behav` | 64.7s |
-| BR63 | project-settings-restart-button-hidden | `src/app/settings-page.ts` | disabled-guard | 🔴 caught | 🔴 caught | `tests2\browser\journeys\project-settings.journey.spec.ts › Journey: Settings Restart Butto` | 44.8s |
+| BR65 | project-settings-project-assistant-provisional | `src/app/sidebar.ts` | dropped-value | 🔴 caught | 🔴 caught | `tests2\browser\journeys\project-settings.journey.spec.ts › Journey: Project Assistant › Ad` | 106.9s |
 
 **Icons:** 🔴 caught | ⚪ missed | — skipped | ⚠️ error (harness/env) | ⛔ invalid (did not compile)
 
