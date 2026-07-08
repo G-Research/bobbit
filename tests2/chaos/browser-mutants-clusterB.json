@@ -1,0 +1,307 @@
+[
+  {
+    "id": "BR00-null",
+    "area": "harness-integrity",
+    "file": "src/app/goal-dashboard-plan-tab.ts",
+    "target": "ui",
+    "operator": "no-op",
+    "nullMutant": true,
+    "search": "\t\tcase \"passed\": return \"var(--positive)\";",
+    "replace": "\t\tcase \"passed\":  return \"var(--positive)\";",
+    "description": "NULL mutant — inserts an extra space in a whitespace-insensitive location. Behaviourally identical; both the legacy spec and the v2 journey MUST still pass. Guards against a broken harness that reports false kills (e.g. a build failure counted as 'caught').",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/plan-tab-gate-status.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR45",
+    "area": "proposals-subgoal-prefill",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-form-max-depth\"",
+    "replace": "data-testid=\"goal-form-max-depth-mut\"",
+    "description": "Goal-form max-depth control loses its testid. Legacy goal-proposal-subgoal-prefill.spec.ts asserts prefilled subgoal controls; proposals journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-proposal-subgoal-prefill.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR47",
+    "area": "project-settings-maintenance",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"worktree-cleanup-maintenance\"",
+    "replace": "data-testid=\"worktree-cleanup-maintenance-mut\"",
+    "description": "Worktree-cleanup maintenance card loses its testid. Legacy settings-maintenance-archived-worktrees.spec.ts asserts counts + cleanup POST; project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR49",
+    "area": "project-onboarding-typeahead",
+    "file": "src/ui/components/DirectoryPicker.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"directory-picker-suggestions\"",
+    "replace": "data-testid=\"directory-picker-suggestions-mut\"",
+    "description": "Directory-picker typeahead suggestions container loses its testid. Legacy add-project-typeahead.spec.ts asserts the suggestion overlay; project-onboarding journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-typeahead.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR50",
+    "area": "goal-editing-existing-subgoal-settings",
+    "file": "src/app/goal-dashboard-children-tab.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-subgoal-settings-allow-toggle\"",
+    "replace": "data-testid=\"goal-subgoal-settings-allow-toggle-mut\"",
+    "description": "The dashboard Children-tab 'Allow sub-goals' settings toggle loses its testid. Legacy subgoal-existing-goal-settings.spec.ts drives it to enable subgoals on an existing parent + persist; goal-editing journey only asserts tab-children presence (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/subgoal-existing-goal-settings.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR53",
+    "area": "project-settings-agent-dir",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"agent-dir-validate\"",
+    "replace": "data-testid=\"agent-dir-validate-mut\"",
+    "description": "The Agent Directory maintenance Validate button loses its testid. Legacy settings-agent-dir.spec.ts asserts the validate control enables after a path is entered; project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/settings-agent-dir.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR54",
+    "area": "proposals-editable-accept",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"accept-label\"",
+    "replace": "data-testid=\"accept-label-mut\"",
+    "description": "The editable-proposal Apply/Accept button label loses its testid. Legacy proposal-edit-flow.spec.ts locates the Apply button via accept-label; proposals journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/proposal-edit-flow.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR55",
+    "area": "project-onboarding-select-all",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"add-project-selected-count\"",
+    "replace": "data-testid=\"add-project-selected-count-mut\"",
+    "description": "The multi-repo scan checklist selected-count readout loses its testid. Legacy add-project-select-all.spec.ts asserts the count text through select/deselect; project-onboarding journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-select-all.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR52",
+    "area": "project-onboarding-post-archive",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"preflight-archive-cta\"",
+    "replace": "data-testid=\"preflight-archive-cta-mut\"",
+    "description": "The add-project preflight archive-CTA (surfaced when a ghost .bobbit/ dir is detected) loses its testid. Legacy add-project-post-archive.spec.ts drives the CTA; project-onboarding journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-post-archive.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR56",
+    "area": "team-operations-archive-child-cascade",
+    "file": "src/app/session-manager.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": "child agent${childCount === 1 ? \"\" : \"s\"}: ${namesText}.",
+    "replace": "child agent${childCount === 1 ? \"\" : \"s\"}.",
+    "description": "The non-goal terminate confirmation drops the enumerated child-agent NAMES (keeps only the count). Legacy archive-child-cascade.spec.ts asserts each child title appears in the modal; team-operations journey only checks the children-count API, not the modal names (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/archive-child-cascade.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/team-operations.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR60",
+    "area": "goal-editing-archive-readonly-banner",
+    "file": "src/app/goal-dashboard.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": "Dashboard is read-only.",
+    "replace": "Dashboard is now editable.",
+    "description": "After a goal is archived the dashboard read-only banner text changes so it no longer says 'Dashboard is read-only.'. Legacy goal-archive-always-on.spec.ts asserts the banner text post-archive; goal-editing journey only polls the archived flag via API (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-archive-always-on.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR61",
+    "area": "goal-editing-form-tooltip-title",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": ": os.description}",
+    "replace": ": \"\"}",
+    "description": "The optional-step tooltip drops the workflow step description from its title attribute. Legacy goal-form-tooltips.spec.ts asserts title=/QA agent/i + /ephemeral server/i; goal-editing journey only asserts the icon/cursor-help/text (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-form-tooltips.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR63",
+    "area": "project-settings-restart-button-hidden",
+    "file": "src/app/settings-page.ts",
+    "target": "ui",
+    "operator": "disabled-guard",
+    "search": "if (!harnessRestartAvailable) return \"\";",
+    "replace": "if (false && !harnessRestartAvailable) return \"\";",
+    "description": "The dev-harness Restart Server control renders even when the harness restart endpoint is unavailable (its hide-guard is disabled). Legacy settings-restart-button.spec.ts asserts the button is absent by default; project-settings journey does not (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/settings-restart-button.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR69",
+    "area": "proposals-revision-autoupdate",
+    "file": "src/app/session-manager.ts",
+    "target": "ui",
+    "operator": "disabled-guard",
+    "search": "\t\t\t\tif (!state.previewSpecEdited && typeof g.spec === \"string\") state.previewSpec = g.spec;",
+    "replace": "\t\t\t\tif (false && !state.previewSpecEdited && typeof g.spec === \"string\") state.previewSpec = g.spec;",
+    "description": "The unified onProposal path stops mirroring the merged goal spec into the form-mirror (previewSpec), so an edit_proposal revision does not auto-update the assistant panel in place. Legacy goal-proposal-revision-autoupdate.spec.ts asserts the edited spec appears with no 'Open proposal' click; proposals journey never drives a revision (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-proposal-revision-autoupdate.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR67",
+    "area": "proposals-workflow-tab-customise",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-proposal-workflow-customize\"",
+    "replace": "data-testid=\"goal-proposal-workflow-customize-mut\"",
+    "description": "The goal-proposal Workflow-tab 'Customise for this goal' button loses its testid. Legacy goal-proposal-workflow-tab.spec.ts drives Customise→editor+Revert→back; proposals journey never opens the Workflow tab (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-proposal-workflow-tab.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR68",
+    "area": "goal-editing-creation-optional-steps",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": "const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;",
+    "replace": "const enabledOptionalSteps = undefined;",
+    "description": "The goal-assistant Create Goal request drops the user-enabled optional steps (always sends undefined). Legacy goal-creation.spec.ts asserts the created goal's enabledOptionalSteps contains the toggled 'QA testing' step; goal-editing journey never drives the optional-steps toggle through creation (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-creation.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR65",
+    "area": "project-settings-project-assistant-provisional",
+    "file": "src/app/sidebar.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": "(setting up)",
+    "replace": "(provisioning)",
+    "description": "A provisional project (created via Add Project → assistant) loses its '(setting up)' sidebar indicator. Legacy project-assistant.spec.ts asserts the provisional '(setting up)' marker; project-settings journey only checks shell stability (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/project-assistant.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-settings.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR64",
+    "area": "project-onboarding-multi-repo-subset",
+    "file": "src/app/dialogs.ts",
+    "target": "ui",
+    "operator": "dropped-filter",
+    "search": "selectedIds: scanItems.filter((it) => scanSelection.has(it.id)).map((it) => it.id),",
+    "replace": "selectedIds: scanItems.map((it) => it.id),",
+    "description": "The multi-repo scan Continue-with-assistant autoPrompt sends ALL scan item ids instead of only the user-selected subset. Legacy add-project-multi-repo-subset.spec.ts asserts the autoPrompt JSON selectedIds equals the chosen subset; project-onboarding journey never inspects the autoPrompt (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/add-project-multi-repo-subset.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR57",
+    "area": "proposals-project-workflow-views",
+    "file": "src/app/project-proposal-views.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"workflow-card-${id}\"",
+    "replace": "data-testid=\"workflow-card-mut-${id}\"",
+    "description": "The project-proposal Workflows-view workflow cards lose their testid. Legacy project-assistant.spec.ts asserts per-component + all-components workflow cards render under the Workflows tab; proposals journey does not exercise the project-proposal structured views (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/project-assistant.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  }
+]

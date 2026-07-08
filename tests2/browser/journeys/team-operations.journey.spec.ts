@@ -140,6 +140,64 @@ test.describe("Journey: Archive Child Cascade — behavioral assertions", () => 
 			await deleteSession(parentId).catch(() => {});
 		}
 	});
+
+	// Ported from archive-child-cascade.spec.ts (audit: team-operations GAP,
+	// mutant BR56): the non-goal terminate confirmation modal must LIST the child
+	// agents BY NAME (not just the count) so the user sees what cascades.
+	test("terminate modal lists child agents by name", async ({ page }) => {
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1280, height: 900 });
+		const cwd = nonGitCwd();
+		const parentId = await createSession();
+		await waitForSessionStatus(parentId, "idle");
+		let child1 = "";
+		let child2 = "";
+		try {
+			const d1 = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ delegateOf: parentId, instructions: "CascadeChildAlpha", cwd }),
+			});
+			expect(d1.status).toBe(201);
+			child1 = (await d1.json()).id as string;
+			const d2 = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ delegateOf: parentId, instructions: "CascadeChildBeta", cwd }),
+			});
+			expect(d2.status).toBe(201);
+			child2 = (await d2.json()).id as string;
+			await waitForSessionStatus(child1, "idle");
+			await waitForSessionStatus(child2, "idle");
+
+			await openApp(page);
+			await navigateToHash(page, `#/session/${parentId}`);
+			await expect(page.locator("message-editor textarea, textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const row = page.locator(`[data-session-id="${parentId}"]`).first();
+			await expect(row).toBeVisible({ timeout: 15_000 });
+			await row.scrollIntoViewIfNeeded();
+			await row.hover();
+			const trigger = row.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="session"][data-sidebar-actions-id="${parentId}"]`).first();
+			await expect(trigger, "session hamburger should appear on hover").toBeVisible({ timeout: 10_000 });
+			await trigger.click();
+			const terminateItem = page.locator(`sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="terminate"]`).first();
+			await expect(terminateItem).toBeVisible({ timeout: 10_000 });
+			await terminateItem.click();
+
+			// The confirm modal body must enumerate BOTH children by name + the count.
+			const body = page.locator("p.text-muted-foreground").filter({ hasText: /Are you sure you want to terminate/ }).first();
+			await expect(body).toBeVisible({ timeout: 15_000 });
+			await expect(body).toContainText("This will also archive its 2 child agents");
+			await expect(body).toContainText("CascadeChildAlpha");
+			await expect(body).toContainText("CascadeChildBeta");
+
+			// Dismiss without terminating.
+			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+		} finally {
+			if (child1) await deleteSession(child1).catch(() => {});
+			if (child2) await deleteSession(child2).catch(() => {});
+			await deleteSession(parentId).catch(() => {});
+		}
+	});
 });
 
 // Behavioral assertions ported from goal-dashboard-fanout.spec.ts

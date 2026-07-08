@@ -105,6 +105,13 @@ test.describe("Journey: Goal Archive Always-On — behavioral assertions", () =>
 				const g = await r.json();
 				return g.archived === true ? "archived" : "active";
 			}, { timeout: 20_000 }).toBe("archived");
+			// Ported from goal-archive-always-on.spec.ts (mutant BR60): the dashboard
+			// must show the read-only banner + a disabled "Archived" button once the
+			// goal is archived.
+			await expect(page.getByText(/This goal was archived .*Dashboard is read-only\./)).toBeVisible({ timeout: 15_000 });
+			const archivedBtn = page.locator(".dashboard-container").getByRole("button", { name: "Archived", exact: true }).first();
+			await expect(archivedBtn).toBeVisible({ timeout: 10_000 });
+			await expect(archivedBtn).toBeDisabled();
 		} finally {
 			await deleteGoal(goalId, true);
 		}
@@ -138,6 +145,68 @@ test.describe("Journey: Goal Creation — behavioral assertions", () => {
 			await expect(page.getByText(title).first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
+		}
+	});
+
+	// Ported from goal-creation.spec.ts (audit: goal-editing GAP, mutant BR68):
+	// toggling an optional step in the assistant proposal and creating the goal
+	// must round-trip the enabled step into the created goal's enabledOptionalSteps.
+	test("assistant optional-steps toggle round-trips into the created goal", async ({ page }) => {
+		test.setTimeout(120_000);
+		// Configure qa_start_command so the feature workflow's QA step toggle enables.
+		const projectId = await defaultProjectId();
+		if (projectId) {
+			const structuredResp = await apiFetch(`/api/projects/${projectId}/structured`).catch(() => null);
+			if (structuredResp?.ok) {
+				const data = await structuredResp.json();
+				const comps = Array.isArray(data.components) ? data.components : [];
+				if (comps.length > 0) {
+					comps[0].config = { ...(comps[0].config || {}), qa_start_command: "echo ready" };
+					await apiFetch(`/api/projects/${projectId}/config`, { method: "PUT", body: JSON.stringify({ components: comps }) });
+				}
+			}
+		}
+
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+
+		// Switch to the feature workflow which exposes the optional QA step.
+		const workflowSelect = page.locator(".goal-preview-panel select").first();
+		await expect(workflowSelect).toBeVisible({ timeout: 15_000 });
+		await workflowSelect.selectOption("feature");
+
+		// Enable the QA optional step.
+		const qaLabel = page.locator(".goal-preview-panel label", { hasText: "Enable QA Testing" }).first();
+		await expect(qaLabel).toBeVisible({ timeout: 15_000 });
+		const checkbox = qaLabel.locator("input[type='checkbox'].toggle-switch");
+		await expect(checkbox).toBeEnabled({ timeout: 15_000 });
+		await checkbox.click();
+		await expect(checkbox).toBeChecked();
+
+		const createPromise = page.waitForResponse(
+			(resp) => resp.url().includes("/api/goals") && resp.request().method() === "POST" && resp.ok(),
+			{ timeout: 20_000 },
+		);
+		await page.locator("button").filter({ hasText: "Create Goal" }).first().click();
+		await createPromise;
+		await expect(page).toHaveURL(/#\/goal(-dashboard)?\//, { timeout: 15_000 });
+
+		// The created goal must carry the toggled optional step.
+		const listResp = await apiFetch("/api/goals");
+		const listData = await listResp.json();
+		const goals = (listData.goals || listData) as Array<{ id: string; title: string; enabledOptionalSteps?: string[] }>;
+		const created = goals.find((g) => g.title === "E2E Test Goal");
+		expect(created).toBeTruthy();
+		try {
+			expect(created!.enabledOptionalSteps).toContain("QA testing");
+		} finally {
+			await deleteGoal(created!.id, true).catch(() => {});
 		}
 	});
 });
@@ -247,6 +316,11 @@ test.describe("Journey: Goal Form Tooltips — behavioral assertions", () => {
 		const tooltipIcon = qaLabel.locator("span.cursor-help").first();
 		await expect(tooltipIcon).toBeVisible({ timeout: 15_000 });
 		await expect(tooltipIcon).toHaveText("ⓘ");
+		// Ported from goal-form-tooltips.spec.ts (mutant BR61): the tooltip title
+		// attribute must carry the workflow step description (the real form wires
+		// the description into `title`, not just render a bare icon).
+		await expect(tooltipIcon).toHaveAttribute("title", /QA agent/i, { timeout: 15_000 });
+		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/i);
 	});
 });
 
@@ -280,6 +354,52 @@ test.describe("Journey: Subgoal Existing Goal Settings — behavioral assertions
 			await expect(childrenTab).toBeVisible({ timeout: 20_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
+		}
+	});
+
+	// Ported from subgoal-existing-goal-settings.spec.ts (audit: goal-editing GAP,
+	// mutant BR50): the Children-tab Sub-goal settings control lets a human enable
+	// sub-goals on an existing parent that started with subgoalsAllowed:false, and
+	// the operator-authorized PATCH persists (toggle reflects the ON state).
+	test("Children-tab allow-toggle enables subgoals on an existing parent and persists", async ({ page }) => {
+		test.setTimeout(90_000);
+		await apiFetch("/api/preferences", { method: "PUT", body: JSON.stringify({ subgoalsEnabled: true }) });
+		const spec = "Parent goal for the existing-goal sub-goal settings journey — padded to satisfy the spec minimum length validator.";
+		const parent = await createGoal({ title: `v2-existing-subgoal-${Date.now()}`, spec, team: false, subgoalsAllowed: false });
+		const parentId = parent.id as string;
+		try {
+			// Starting state: sub-goals OFF on the parent.
+			const before = await (await apiFetch(`/api/goals/${parentId}`)).json();
+			expect(before.subgoalsAllowed).toBe(false);
+
+			await openApp(page);
+			await navigateToHash(page, `#/goal/${parentId}`);
+			await expect(page.locator(".dashboard-container").first()).toBeVisible({ timeout: 20_000 });
+
+			const childrenTab = page.locator('[data-testid="tab-children"]').first();
+			await expect(childrenTab).toBeVisible({ timeout: 15_000 });
+			await childrenTab.click();
+
+			const settings = page.locator('[data-testid="goal-subgoal-settings"]').first();
+			await expect(settings).toBeVisible({ timeout: 15_000 });
+
+			const allowToggle = page.locator('[data-testid="goal-subgoal-settings-allow-toggle"]').first();
+			await expect(allowToggle).toBeVisible({ timeout: 10_000 });
+			await expect(allowToggle).not.toBeChecked();
+
+			// Toggle ON — browser-driven so the human cookie authorizes the PATCH.
+			await allowToggle.check();
+
+			// Server persisted the change (operator auth succeeded — not a 403).
+			await expect.poll(async () => {
+				const g = await (await apiFetch(`/api/goals/${parentId}`)).json();
+				return g.subgoalsAllowed;
+			}, { timeout: 15_000 }).toBe(true);
+
+			// Live UI reflects the persisted ON state.
+			await expect(allowToggle).toBeChecked({ timeout: 10_000 });
+		} finally {
+			await deleteGoal(parentId, true).catch(() => {});
 		}
 	});
 });
