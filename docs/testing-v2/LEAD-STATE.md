@@ -12,7 +12,14 @@ Only the LEAD signals gates. Signal from goal HEAD after merging member branches
 ## Goal HEAD / PR
 - Goal HEAD as of writing: **b51be76a** (command-step seam + concurrency harness merged). PR mergeable, 0 behind master (re-check).
 
-## PENDING MASTER SYNC (deferred until measurement done, to not contaminate quiet-window)
+## AUTHORITATIVE CONCURRENCY RESULT (quiet box, merged 32adf29d) + master synced (f8ca70d7, 0 behind)
+- **Browser-render lease WORKS & SOLVED the browser tier** (playwright 3/3 at N=3, Chromium pinned cap 4/4). Also fixed a real bug: the .mjs lease client silently fail-opened under Playwright (→ ESM bridge tests/e2e/ledger-lease-bridge.mjs + interop test) — had left BOTH leases dead in the browser tier before.
+- **N-curve (retries:0, quiet):** N=1 near-clean; N=2 0/4 (WORSE — ledger split bug: grant≥12 gives full 8v split → 16 vitest workers → oversubscription); N=3 playwright 3/3 but vitest 0/3; wall ~740–786s@N=3. **Binding constraint now = TIER-1 VITEST** rotating timing cluster (verification-command-restart-lifecycle, project-reorder-api, multi-repo-goal[real-git], verification-dedup, proposal-panel-streaming follow-tail, app-smoke keyboard-nav, goal-team-gates archived-child). ~0-flake ceiling on this build = N=1.
+- **TWO fixes to reach N≥2 (PENDING USER DECISION posted):** (1) CHEAP: ledger splitBundle full-vitest split only when activeParents===1 (fixes N=2-worse-than-N=3 oversubscription). (2) de-flake the ~7 timing tests via clock seam / observable-state (NO relocation). Recommended = one bounded cycle doing both + re-measure; alt = cheap-first; alt = ship N=1 + defer to spin-off.
+- **BONUS production fix landed (f8ca70d7, flag for review-findings):** tool-manager.ts defaultBuiltinToolsDir() added repo-root fallback — under src-boot the dist path didn't exist → ToolManager empty → every role-carrying spawn/delegate failed ROLE_TOOLS_UNRESOLVED. Dist unchanged; 8 test areas re-verified. Real latent bug caught by v2 src-boot.
+- Efficiency verdict stands: v2 ~10× CPU, ~3–4× wall, daily-amortised favorable (efficiency-comparison.md merged).
+
+## (DONE) MASTER SYNC #948/#949
 - Master +2: **#948 Sidebar Reveal On Nav** (src/app/sidebar-reveal.ts new, main.ts, sidebar.ts; test tests/e2e/ui/sidebar-reveal.spec.ts) + **#949 Market-Pack Roles in Teams** (src/server/agent/{resolve-role,session-manager,session-setup,team-manager,orchestration-core}.ts, server.ts; test tests/e2e/market-pack-team-roles.spec.ts). LIKELY CONFLICTS in DI-clock-seam files session-manager.ts/team-manager.ts/server.ts — use established both-or-neither resolution (keep DI seams + master behaviour). REPRESENT 2 new tests in v2 (sidebar-reveal → browser; market-pack-team-roles → integration). Do AFTER: measurement completes → merge budget+browser-lease result → then this sync.
 
 ## CONCURRENCY (Option 1) STATUS
