@@ -147,6 +147,68 @@ test.describe("Journey: Goal Creation — behavioral assertions", () => {
 			await deleteGoal(goal.id, true);
 		}
 	});
+
+	// Ported from goal-creation.spec.ts (audit: goal-editing GAP, mutant BR68):
+	// toggling an optional step in the assistant proposal and creating the goal
+	// must round-trip the enabled step into the created goal's enabledOptionalSteps.
+	test("assistant optional-steps toggle round-trips into the created goal", async ({ page }) => {
+		test.setTimeout(120_000);
+		// Configure qa_start_command so the feature workflow's QA step toggle enables.
+		const projectId = await defaultProjectId();
+		if (projectId) {
+			const structuredResp = await apiFetch(`/api/projects/${projectId}/structured`).catch(() => null);
+			if (structuredResp?.ok) {
+				const data = await structuredResp.json();
+				const comps = Array.isArray(data.components) ? data.components : [];
+				if (comps.length > 0) {
+					comps[0].config = { ...(comps[0].config || {}), qa_start_command: "echo ready" };
+					await apiFetch(`/api/projects/${projectId}/config`, { method: "PUT", body: JSON.stringify({ components: comps }) });
+				}
+			}
+		}
+
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+
+		// Switch to the feature workflow which exposes the optional QA step.
+		const workflowSelect = page.locator(".goal-preview-panel select").first();
+		await expect(workflowSelect).toBeVisible({ timeout: 15_000 });
+		await workflowSelect.selectOption("feature");
+
+		// Enable the QA optional step.
+		const qaLabel = page.locator(".goal-preview-panel label", { hasText: "Enable QA Testing" }).first();
+		await expect(qaLabel).toBeVisible({ timeout: 15_000 });
+		const checkbox = qaLabel.locator("input[type='checkbox'].toggle-switch");
+		await expect(checkbox).toBeEnabled({ timeout: 15_000 });
+		await checkbox.click();
+		await expect(checkbox).toBeChecked();
+
+		const createPromise = page.waitForResponse(
+			(resp) => resp.url().includes("/api/goals") && resp.request().method() === "POST" && resp.ok(),
+			{ timeout: 20_000 },
+		);
+		await page.locator("button").filter({ hasText: "Create Goal" }).first().click();
+		await createPromise;
+		await expect(page).toHaveURL(/#\/goal(-dashboard)?\//, { timeout: 15_000 });
+
+		// The created goal must carry the toggled optional step.
+		const listResp = await apiFetch("/api/goals");
+		const listData = await listResp.json();
+		const goals = (listData.goals || listData) as Array<{ id: string; title: string; enabledOptionalSteps?: string[] }>;
+		const created = goals.find((g) => g.title === "E2E Test Goal");
+		expect(created).toBeTruthy();
+		try {
+			expect(created!.enabledOptionalSteps).toContain("QA testing");
+		} finally {
+			await deleteGoal(created!.id, true).catch(() => {});
+		}
+	});
 });
 
 // Behavioral assertions ported from goal-empty-workflows-banner.spec.ts

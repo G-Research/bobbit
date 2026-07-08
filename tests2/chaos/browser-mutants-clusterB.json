@@ -209,6 +209,38 @@
     ]
   },
   {
+    "id": "BR67",
+    "area": "proposals-workflow-tab-customise",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-testid",
+    "search": "data-testid=\"goal-proposal-workflow-customize\"",
+    "replace": "data-testid=\"goal-proposal-workflow-customize-mut\"",
+    "description": "The goal-proposal Workflow-tab 'Customise for this goal' button loses its testid. Legacy goal-proposal-workflow-tab.spec.ts drives Customise→editor+Revert→back; proposals journey never opens the Workflow tab (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-proposal-workflow-tab.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/proposals.journey.spec.ts"
+    ]
+  },
+  {
+    "id": "BR68",
+    "area": "goal-editing-creation-optional-steps",
+    "file": "src/app/proposal-panels.ts",
+    "target": "ui",
+    "operator": "dropped-value",
+    "search": "const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;",
+    "replace": "const enabledOptionalSteps = undefined;",
+    "description": "The goal-assistant Create Goal request drops the user-enabled optional steps (always sends undefined). Legacy goal-creation.spec.ts asserts the created goal's enabledOptionalSteps contains the toggled 'QA testing' step; goal-editing journey never drives the optional-steps toggle through creation (GAP).",
+    "expectedLegacyCatchers": [
+      "tests/e2e/ui/goal-creation.spec.ts"
+    ],
+    "expectedV2Catchers": [
+      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+    ]
+  },
+  {
     "id": "BR65",
     "area": "project-settings-project-assistant-provisional",
     "file": "src/app/sidebar.ts",

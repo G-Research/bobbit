@@ -270,6 +270,43 @@ test.describe("Journey: Failed Goal Proposal", () => {
 	});
 });
 
+// Ported from goal-proposal-workflow-tab.spec.ts (audit: proposals GAP, mutant
+// BR67): the goal-proposal Workflow tab exposes a workflow select + a
+// Customise/Revert toggle (Customise → editor + Revert; Revert → back).
+test.describe("Journey: Goal Proposal — Workflow tab", () => {
+	test("Workflow tab Customise reveals editor + Revert, then reverts", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+		const workflowTab = page.locator("[data-testid='goal-proposal-tab-workflow']").first();
+		await expect(workflowTab).toBeVisible({ timeout: 15_000 });
+		await workflowTab.click();
+		await expect(page.locator("[data-testid='goal-proposal-workflow-select']").first()).toBeVisible({ timeout: 15_000 });
+
+		// Customise for this goal (the mutant target) → editor + Revert appears.
+		const customise = page.locator("[data-testid='goal-proposal-workflow-customize']").first();
+		await expect(customise).toBeVisible({ timeout: 15_000 });
+		await expect(customise).toHaveText("Customise for this goal");
+		await customise.click();
+
+		const revert = page.locator("[data-testid='goal-proposal-workflow-reset']").first();
+		await expect(revert).toBeVisible({ timeout: 15_000 });
+		await expect(revert).toHaveText("Revert to project definition");
+		await expect(page.locator("[data-testid='goal-proposal-workflow-customize']")).toHaveCount(0);
+
+		// Revert → inspector returns; Customise button comes back.
+		await revert.click();
+		await expect(page.locator("[data-testid='goal-proposal-workflow-customize']").first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator("[data-testid='goal-proposal-workflow-reset']")).toHaveCount(0);
+	});
+});
+
 // Ported from goal-proposal-dismiss-reload.spec.ts (audit: proposals GAP,
 // mutant BR66): a dismissed goal proposal must stay hidden after a page reload
 // (the dismissal fingerprint suppresses the restore-path repopulation).
