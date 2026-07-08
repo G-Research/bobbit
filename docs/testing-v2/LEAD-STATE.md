@@ -12,6 +12,12 @@ Only the LEAD signals gates. Signal from goal HEAD after merging member branches
 ## Goal HEAD / PR
 - Goal HEAD as of writing: **b51be76a** (command-step seam + concurrency harness merged). PR mergeable, 0 behind master (re-check).
 
+## MEASURED HEAD-TO-HEAD (task 190c7af5, merged f0459136) — CORRECTS THE ~10× CLAIM
+- Clean quiet-box, subtree-scoped CPU, sequential: **legacy TOTAL 16.9min / 70.6 CPU-min vs v2 TOTAL 7.5min / 30.5 CPU-min → ~2.3× on BOTH wall and CPU.** NOT ~10× — the 10× was inflated (busy-box whole-machine legacy sampling ~130 CPU-min + build vs optimistic v2 target 13). Honest number = **~2.3×**. v2 tier-1+2 is ~24.7 CPU-min, not 13.
+- Per-phase apples-to-oranges (v2 folds API-integration into unit → v2 unit slower/does-more); only TOTAL fair. Coverage: v2 unit 7762 tests, strictly more; parity/chaos-proven.
+- **CAVEATS (cut against v2, real gap likely <2.3×):** e2e:v2 UNDER-measured — Docker unavailable on box (sandbox-recovery + Docker specs didn't run), 1 broken (stories-navigation import), 1 failing (tail-chat-real-stream bash.exe ENOENT), terminal skipped; NO daily/e2e runner exists (hand-assembled); external-service-free verification NOT explicitly written in doc (structurally holds: mock bridge + fail-closed fetch). Legacy e2e had 8 flaky masked by retries:3.
+- **OPEN DECISION (posted):** given honest ~2.3× (not 10×), proceed to switchover / finish+regreen e2e:v2 first then re-measure / reconsider-scope / my-call. Switchover work remaining: e2e:v2 runner + Docker + fix 2 specs + external-calls verification + sleep/legacy-e2e-preflight-guard cleanup, then config flip + docs.
+
 ## DEFINITIVE CONCURRENCY CONCLUSION (all fixes merged f12d3ccf) — N=1 CEILING
 - Exhausted the tractable fixes: gateway-boot lease + browser-render lease + ESM-bridge bug + ledger-split bug (activeParents===1) + timing-determinism on named cluster + tool-docs regression. All correct, all merged (f12d3ccf).
 - **N=1 ~0-flake (~300s, ~13 CPU-min, 10× cheaper). N≥2 still 0/6** — but now failures are 1–2 ROTATING integration tests/run hitting 60s timeouts under CPU starvation (cast rotates across HUNDREDS of tests: team-lead-child-authz, project-isolation, verification-core, mcp-meta-call, … + intermittent gateway-boot cascade). **STRUCTURAL/HARDWARE CEILING** (2 full test:v2 runs CPU-starve the integration tier on one 24-core box), NOT a test-quality gap — de-flaking is whack-a-mole. ledger Σ≤24 holds (no catastrophic oversubscription).
