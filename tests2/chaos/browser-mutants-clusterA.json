@@ -1,0 +1,371 @@
+[
+	{
+		"id": "BR50-null-A",
+		"area": "harness-integrity",
+		"file": "src/app/workflow-page.ts",
+		"target": "ui",
+		"operator": "no-op",
+		"nullMutant": true,
+		"search": "data-testid=\"wf-step-type\" .value=${stepType}",
+		"replace": "data-testid=\"wf-step-type\"  .value=${stepType}",
+		"description": "NULL mutant (clusterA) — inserts an extra space between two attributes in a lit template (whitespace-insensitive). Behaviourally identical; both the legacy spec and the v2 journey MUST still pass. Guards against a broken harness that reports false kills.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/workflow-editor.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR46",
+		"area": "misc-workflow-editor",
+		"file": "src/app/workflow-page.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "data-testid=\"wf-step-type\"",
+		"replace": "data-testid=\"wf-step-type-mut\"",
+		"description": "Workflow-editor step-type control loses its testid. Legacy workflow-editor.spec.ts asserts step-type options + round-trip; misc journey does not (GAP). Ported into misc.journey.spec.ts (Journey: Workflow Editor).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/workflow-editor.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR48",
+		"area": "misc-role-tabs",
+		"file": "src/app/proposal-panels.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "data-testid=\"goal-proposal-role-reset\"",
+		"replace": "data-testid=\"goal-proposal-role-reset-mut\"",
+		"description": "Goal-proposal Roles-tab reset control loses its testid. Legacy goal-role-tabs-wiring.spec.ts asserts the Roles tab editor; misc journey does not (GAP). Ported into misc.journey.spec.ts (Journey: Goal Proposal Roles Tab).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/goal-role-tabs-wiring.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR51",
+		"area": "misc-prompt-stats",
+		"file": "src/ui/components/AgentInterface.ts",
+		"target": "ui",
+		"operator": "attribute-rename",
+		"search": "title=\"Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextWindow)} tokens (${pct}%)\"",
+		"replace": "title=\"Ctx: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextWindow)} tokens (${pct}%)\"",
+		"description": "Stats-bar context tooltip loses its 'Context:' prefix. Legacy prompt-stats-e2e.spec.ts asserts span[title*='Context:'] + title=/Context:.*tokens/; misc journey previously had best-effort cost only (GAP). Ported into misc.journey.spec.ts (Journey: Prompt Stats).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/prompt-stats-e2e.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR52",
+		"area": "misc-preview-newtab",
+		"file": "src/app/render.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": ": `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`;",
+		"replace": ": `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${state.previewPanelMtime}`;",
+		"description": "Open-in-new-tab preview href gains a cache-buster it must never carry. Legacy preview-happy-path.spec.ts asserts the new-tab href has no ?mtime=; misc journey previously checked only the live iframe src (PARTIAL). Ported into misc.journey.spec.ts (Journey: Preview Artifacts — new-tab href + refresh).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/preview-happy-path.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR53",
+		"area": "misc-compaction-card",
+		"file": "src/ui/tools/renderers/CompactionSummaryRenderer.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "\t\t\t\t\tdata-testid=\"compaction-summary-card\"\n\t\t\t\t\tdata-state=${state}\n\t\t\t\t\tclass=\"rounded-md border border-border bg-card p-3\"",
+		"replace": "\t\t\t\t\tdata-testid=\"compaction-summary-card-mut\"\n\t\t\t\t\tdata-state=${state}\n\t\t\t\t\tclass=\"rounded-md border border-border bg-card p-3\"",
+		"description": "The success/complete compaction summary card (non-error render path) loses its testid. Legacy compaction-persistence.spec.ts asserts a seeded sidecar renders [data-testid=compaction-summary-card] with data-state=complete surviving reload; misc journey previously only asserted the editor loaded (GAP). Ported into misc.journey.spec.ts (Journey: Compaction).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/compaction-persistence.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR54",
+		"area": "sidebar-full-search-nav",
+		"file": "src/app/sidebar.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "window.location.hash = query ? `#/search?q=${encodeURIComponent(query)}` : \"#/search\";",
+		"replace": "window.location.hash = query ? `#/find?q=${encodeURIComponent(query)}` : \"#/find\";",
+		"description": "The sidebar 'Full Search' link navigates to a non-search route. Legacy search-e2e.spec.ts SR-02 asserts the click sets the hash to #/search carrying the query; sidebar-nav journey never clicked Full Search (PARTIAL). Ported into sidebar-nav.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/search-e2e.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR55",
+		"area": "app-smoke-open-new-window",
+		"file": "src/app/session-actions.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "const opened = window.open(url, \"_blank\", \"noopener\");",
+		"replace": "const opened = window.open(url, \"_self\", \"noopener\");",
+		"description": "The session actions 'Open in new window' item opens the deep link in the SAME tab (_self) instead of a new window (_blank). Legacy open-session-new-window.spec.ts asserts window.open captured {target:'_blank', features:'noopener'}; app-smoke journey never exercised it (GAP). Ported into app-smoke.journey.spec.ts (Journey: Open in New Window).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/open-session-new-window.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/app-smoke.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR56",
+		"area": "prompt-at-mention-chip",
+		"file": "src/ui/components/FileMentionChip.ts",
+		"target": "ui",
+		"operator": "class-rename",
+		"search": "class=\"file-mention-chip-pill inline-flex items-center gap-1 align-baseline px-2 py-0.5 rounded-md",
+		"replace": "class=\"file-mention-chip-pill-mut inline-flex items-center gap-1 align-baseline px-2 py-0.5 rounded-md",
+		"description": "The file-mention chip pill loses its stable class. Legacy at-mention.spec.ts selects a file from the @-menu and asserts a live .file-mention-chip-pill renders; the prompt-interaction journey only opened the .at-menu (GAP). Ported into prompt-interaction.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/at-mention.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR57",
+		"area": "app-smoke-goal-metadata",
+		"file": "src/app/proposal-panels.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "data-testid=\"goal-metadata-add\"",
+		"replace": "data-testid=\"goal-metadata-add-mut\"",
+		"description": "The goal-proposal Metadata tab loses its add-row control testid. Legacy goal-metadata.spec.ts drives the Metadata tab and adds/edits/removes rows; the app-smoke journey covered none of the proposal Metadata tab (GAP). Ported into app-smoke.journey.spec.ts (Journey: Goal Proposal Metadata Tab).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/goal-metadata.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/app-smoke.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR58",
+		"area": "sidebar-show-read-filter",
+		"file": "src/ui/components/sidebar-filters.ts",
+		"target": "ui",
+		"operator": "dropped-testid",
+		"search": "id: \"read\",",
+		"replace": "id: \"read-mut\",",
+		"description": "The Filters popover 'Show Read' toggle row loses its stable testid (data-testid is built from the row id). Legacy sidebar-filters.spec.ts targets [data-testid='sidebar-filter-read']; the sidebar-nav journey never opened the Filters popover's Read toggle (GAP). Ported into sidebar-nav.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/sidebar-filters.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR59",
+		"area": "misc-review-approve",
+		"file": "src/ui/components/review/ReviewPane.ts",
+		"target": "ui",
+		"operator": "label-rename",
+		"search": ">Approve</button>",
+		"replace": ">Approv</button>",
+		"description": "The review pane Approve button loses its accessible name. Legacy review-pane.spec.ts clicks getByRole button 'Approve' and asserts the approve feedback posts to chat + the Review tab closes; misc journey only opened the review document (PARTIAL). Ported into misc.journey.spec.ts (Journey: Review Commenting).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/review-pane.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR60",
+		"area": "misc-image-attach",
+		"file": "src/ui/components/Messages.ts",
+		"target": "ui",
+		"operator": "tag-rename",
+		"search": "<attachment-tile .attachment=${attachment}></attachment-tile>",
+		"replace": "<attachment-tilex .attachment=${attachment}></attachment-tilex>",
+		"description": "A sent user-message stops rendering its image attachment tile. Legacy image-attach-roundtrip.spec.ts attaches a PNG + ECHO_IMAGE_BLOCK and asserts 'user-message attachment-tile' renders; misc journey had no image-attachment coverage (GAP). Ported into misc.journey.spec.ts (Journey: Image Attachment).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/image-attach-roundtrip.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR61",
+		"area": "misc-workflow-page-scope",
+		"file": "src/app/routing.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "if (hash === \"#/workflows\") {",
+		"replace": "if (hash === \"#/workflows-x\") {",
+		"description": "The router stops recognising the deprecated #/workflows hash, so the project-scoped redirect never fires. Legacy workflow-page-scope.spec.ts asserts #/workflows redirects to #/settings/<projectId>/workflows (never system); misc journey never exercised the redirect (GAP). Ported into misc.journey.spec.ts (Journey: Workflow Editor). (Retargeted from a dead redirect call-site to the single upstream route parser after a both-missed result.)",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/workflow-page-scope.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR62",
+		"area": "prompt-ask-user-choices",
+		"file": "src/ui/components/AskUserChoicesWidget.ts",
+		"target": "ui",
+		"operator": "class-rename",
+		"search": "class=\"ask-submit px-3 py-1 text-xs font-medium rounded",
+		"replace": "class=\"ask-submit-x px-3 py-1 text-xs font-medium rounded",
+		"description": "PROVE-HELD: the ask_user_choices widget submit button loses its .ask-submit class. The prompt-interaction journey already drives the widget happy path (pick → submit → widget read-only) via .ask-submit, so this must be v2-caught with no new port. Confirms the PARTIAL is genuinely held.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/ask-user-choices-ui.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR63",
+		"area": "sidebar-new-goal",
+		"file": "src/app/sidebar.ts",
+		"target": "ui",
+		"operator": "label-rename",
+		"search": "New goal${shortcutHint(\"new-goal\")}",
+		"replace": "New gaol${shortcutHint(\"new-goal\")}",
+		"description": "The sidebar New Goal button loses its title, so the New-Goal→goal-assistant flow cannot be reached. Legacy sidebar-goal-staff.spec.ts asserts New Goal opens the goal assistant; sidebar-nav journey never exercised it (GAP). Ported into sidebar-nav.journey.spec.ts via createGoalAssistantViaUI.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/sidebar-goal-staff.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR64",
+		"area": "sidebar-new-session",
+		"file": "src/app/sidebar.ts",
+		"target": "ui",
+		"operator": "label-rename",
+		"search": "title=\"New session in ${project.name}\"",
+		"replace": "title=\"Start session in ${project.name}\"",
+		"description": "The per-project New Session button loses its 'New session' title, so button[title^='New session'] no longer resolves it. Legacy sidebar-session-actions.spec.ts (SB-14) clicks it to create a session; sidebar-nav journey only asserted the button was visible, never clicked (GAP). Ported into sidebar-nav.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/sidebar-session-actions.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR65",
+		"area": "prompt-queue-ui",
+		"file": "src/ui/components/MessageEditor.ts",
+		"target": "ui",
+		"operator": "class-rename",
+		"search": "class=\"queue-pill flex items-center gap-1.5",
+		"replace": "class=\"queue-pill-x flex items-center gap-1.5",
+		"description": "A follow-up queued mid-turn loses its .queue-pill styling hook. Legacy queue-ui.spec.ts asserts a .queue-pill + .steer-btn appear when a message is queued during streaming; prompt-interaction journey had no queue coverage (GAP). Ported into prompt-interaction.journey.spec.ts (STAY_BUSY).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/queue-ui.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR66",
+		"area": "prompt-escape-abort",
+		"file": "src/ui/components/MessageEditor.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "e.key === \"Escape\" && this.isStreaming",
+		"replace": "e.key === \"Escapexx\" && this.isStreaming",
+		"description": "Escape in the composer no longer aborts a streaming agent. Legacy escape-aborts-anywhere.spec.ts asserts Escape aborts (Stop button disappears); prompt-interaction journey had no abort coverage (GAP). Ported into prompt-interaction.journey.spec.ts (STAY_BUSY → Escape → stop cleared).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/escape-aborts-anywhere.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR67",
+		"area": "prompt-tool-ask-policy",
+		"file": "src/ui/components/ToolPermissionCard.ts",
+		"target": "ui",
+		"operator": "label-rename",
+		"search": ">Allow just ${this._shortToolName}</button>",
+		"replace": ">Allow jus ${this._shortToolName}</button>",
+		"description": "The tool-permission-card grant button loses its 'Allow just <tool>' label. Legacy tool-ask-policy.spec.ts fires a tool-grant-request on an ask-policy role and clicks 'Allow just Bash' to grant; prompt-interaction journey had no permission-card coverage (GAP). Ported into prompt-interaction.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/tool-ask-policy.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR68",
+		"area": "sidebar-search-result-nav",
+		"file": "src/app/search-page.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "setHashRoute(\"goal-dashboard\", result.id);",
+		"replace": "setHashRoute(\"goal-dashboard\", \"x\");",
+		"description": "A full-search goal result navigates to the wrong goal id. Legacy search-result-navigation.spec.ts clicks a goal result card and asserts the hash contains the goal id; sidebar-nav journey never opened full-search results (GAP). Ported into sidebar-nav.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/search-result-navigation.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR69",
+		"area": "app-smoke-keyboard-nav",
+		"file": "src/app/main.ts",
+		"target": "ui",
+		"operator": "behavioural",
+		"search": "handler: () => { navigateSidebar(\"down\"); },",
+		"replace": "handler: () => { navigateSidebar(\"up\"); },",
+		"description": "Ctrl+ArrowDown walks the sidebar the WRONG direction (up). Legacy sidebar-keyboard-nav.spec.ts asserts Ctrl+ArrowDown visits data-nav-id rows in DOM order; app-smoke journey never exercised keyboard nav (GAP). Ported into app-smoke.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/sidebar-keyboard-nav.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/app-smoke.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR70",
+		"area": "stories-goal-routing",
+		"file": "src/ui/components/ProjectPickerPopover.ts",
+		"target": "ui",
+		"operator": "dropped-attr",
+		"search": "data-project-id=${p.id}",
+		"replace": "data-project-idx=${p.id}",
+		"description": "The multi-project New-Goal picker buttons lose their data-project-id, so a project cannot be picked. Legacy stories-goal-routing.spec.ts asserts the toolbar New Goal opens a project picker and the picked project scopes the goal; stories journey never exercised multi-project routing (GAP). Ported into stories-registry.journey.spec.ts.",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/stories-goal-routing.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/stories-registry.journey.spec.ts"
+		]
+	}
+]

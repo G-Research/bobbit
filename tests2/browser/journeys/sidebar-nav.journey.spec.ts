@@ -4,7 +4,8 @@
  * Consolidated from: sidebar-navigation.spec.ts, sidebar-filters.spec.ts
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
-import { filtersButton, clickShowArchivedToggle } from "../../../tests/e2e/ui/utils/sidebar-filters.js";
+import { filtersButton, clickShowArchivedToggle, openFiltersPopover } from "../../../tests/e2e/ui/utils/sidebar-filters.js";
+import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: Sidebar Navigation", () => {
 	test("sidebar and new-session button visible on load", async ({ page }) => {
@@ -204,6 +205,68 @@ test.describe("Journey: Sidebar Navigation", () => {
 			await deleteGoal(goal.id, true).catch(() => {});
 		}
 	});
+	// Ported from search-result-navigation.spec.ts (audit: sidebar-nav GAP / BR68):
+	// a full-search goal result card navigates to that goal.
+	test("full-search goal result card navigates to the goal", async ({ page }) => {
+		test.setTimeout(90_000);
+		const token = `NavTok${Date.now().toString(36)}`;
+		const goal = await createGoal({ title: `${token} NavGoal` });
+		try {
+			// Wait until the search indexer has the goal.
+			await expect.poll(async () => {
+				const resp = await apiFetch(`/api/search?q=${encodeURIComponent(token)}&limit=50`);
+				if (!resp.ok) return false;
+				const data = await resp.json() as any;
+				const results = data.results || data;
+				return Array.isArray(results) && results.some((r: any) => r.type === "goal" && r.id === goal.id);
+			}, { timeout: 30_000, intervals: [500, 1000, 2000] }).toBe(true);
+
+			await openApp(page);
+			await page.evaluate((q) => { window.location.hash = `#/search?q=${encodeURIComponent(q)}`; }, token);
+			const goalCard = page.locator('[data-role="result-group"][data-kind="goal"]').filter({ hasText: `${token} NavGoal` });
+			await expect(goalCard).toBeVisible({ timeout: 15_000 });
+			await goalCard.locator("button").first().click();
+			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(goal.id);
+		} finally {
+			await deleteGoal(goal.id, true).catch(() => {});
+		}
+	});
+
+	// Ported from sidebar-goal-staff.spec.ts (audit: sidebar-nav GAP / BR63): the
+	// sidebar New Goal button opens a goal-assistant session.
+	test("New Goal button opens a goal-assistant session", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		const sid = await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		expect(sid).toBeTruthy();
+		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+		expect(await page.evaluate(() => window.location.hash)).toContain(sid);
+	});
+
+	// Ported from sidebar-session-actions.spec.ts SB-14 (audit: sidebar-nav GAP / BR64):
+	// the per-project New Session button creates and opens a new session.
+	test("New Session button creates and opens a new session", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		const newSessionBtn = page.locator("button[title^='New session']").first();
+		await expect(newSessionBtn).toBeVisible({ timeout: 15_000 });
+		await newSessionBtn.click();
+		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 })
+			.toMatch(/#\/session\/[a-f0-9-]+/i);
+	});
+
+	// Ported from sidebar-filters.spec.ts (audit: sidebar-nav GAP / BR58): the
+	// Filters popover exposes a "Show Read" toggle row with its stable testid.
+	test("Filters popover exposes the Show Read toggle", async ({ page }) => {
+		await openApp(page);
+		await expect(filtersButton(page)).toBeVisible({ timeout: 10_000 });
+		await openFiltersPopover(page);
+		const readToggle = page.locator("[data-testid='sidebar-filter-read']").first();
+		await expect(readToggle).toBeVisible({ timeout: 10_000 });
+		await expect(readToggle.locator("input[type='checkbox']")).toHaveCount(1);
+	});
+
 	// Ported from sidebar-archived-layout.spec.ts (audit: sidebar-nav GAP): an
 	// archived session/goal renders under Show Archived with grayscale dimming.
 	test("Show Archived reveals an archived item with grayscale dimming", async ({ page }) => {
@@ -223,5 +286,23 @@ test.describe("Journey: Sidebar Navigation", () => {
 		} finally {
 			await deleteGoal(goal.id, true).catch(() => {});
 		}
+	});
+
+	// Ported from search-e2e.spec.ts SR-02 (audit: sidebar-nav PARTIAL / BR54):
+	// typing a query then clicking "Full Search" must navigate to the #/search
+	// route carrying the query.
+	test("Full Search link navigates to the #/search route with the query", async ({ page }) => {
+		await openApp(page);
+		const searchInput = page.locator("input[data-search]");
+		await expect(searchInput).toBeVisible({ timeout: 15_000 });
+		await searchInput.fill("testquery");
+		const fullSearchLink = page.getByText("Full Search");
+		await expect(fullSearchLink).toBeVisible({ timeout: 5_000 });
+		await fullSearchLink.click();
+		await expect(async () => {
+			const hash = await page.evaluate(() => window.location.hash);
+			expect(hash).toContain("#/search");
+			expect(hash).toContain("testquery");
+		}).toPass({ timeout: 5_000 });
 	});
 });

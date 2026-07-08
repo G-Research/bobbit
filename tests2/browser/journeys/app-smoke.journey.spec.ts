@@ -3,7 +3,8 @@
  * Covers: journey-app-smoke, journey-session-sharing, journey-draft-persistence
  * Consolidated from: basic-load-*, session-sharing-*, pr-preview-*, draft-loss-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, sendMessage, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
+import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: App Smoke", () => {
 	test("app loads and sidebar is visible", async ({ page }) => {
@@ -272,6 +273,115 @@ test.describe("Journey: Draft Persistence", () => {
 		} finally {
 			await deleteSession(sA).catch(() => {});
 			await deleteSession(sB).catch(() => {});
+		}
+	});
+});
+
+// Ported from goal-metadata.spec.ts (audit: app-smoke GAP / BR57): the goal
+// proposal Metadata tab must expose an add-row control that appends an editable
+// key/value row.
+test.describe("Journey: Goal Proposal Metadata Tab", () => {
+	test("Metadata tab add button appends an editable metadata row", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+		const tab = page.locator("[data-testid='goal-proposal-tab-metadata']");
+		await expect(tab).toBeVisible({ timeout: 15_000 });
+		await tab.click();
+		const panel = page.locator("[data-testid='goal-proposal-panel-metadata']");
+		await expect(panel).toBeVisible({ timeout: 10_000 });
+		const before = await page.locator("[data-testid='goal-metadata-row']").count();
+		await page.locator("[data-testid='goal-metadata-add']").click();
+		await expect(page.locator("[data-testid='goal-metadata-row']")).toHaveCount(before + 1, { timeout: 10_000 });
+		await expect(page.locator("[data-testid='goal-metadata-key']").last()).toBeVisible();
+		await expect(page.locator("[data-testid='goal-metadata-value']").last()).toBeVisible();
+	});
+});
+
+// Ported from sidebar-keyboard-nav.spec.ts (audit: app-smoke GAP / BR69):
+// Ctrl+ArrowDown walks the sidebar's data-nav-id rows forward in DOM order.
+test.describe("Journey: Sidebar Keyboard Nav", () => {
+	test("Ctrl+ArrowDown advances keyboard-nav through rows in DOM order", async ({ page }) => {
+		test.setTimeout(90_000);
+		const goal = await createGoal({ title: `KbdNav${Date.now()}`, worktree: false });
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+			const domOrder: string[] = await page.evaluate(() =>
+				Array.from(document.querySelectorAll("[data-nav-id]")).map((el) => el.getAttribute("data-nav-id") || ""));
+			expect(domOrder.length, "sidebar must emit multiple data-nav-id rows").toBeGreaterThan(1);
+			const pressDown = () => page.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "ArrowDown", code: "ArrowDown", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			})));
+			const activeId = () => page.evaluate(() => (window as any).__bobbitState?.keyboardNavActiveId ?? null);
+			await pressDown();
+			await expect.poll(activeId, { timeout: 5_000 }).not.toBeNull();
+			const id1 = await activeId();
+			await pressDown();
+			await expect.poll(activeId, { timeout: 5_000 }).not.toBe(id1);
+			const id2 = await activeId();
+			// The two visited rows must be a forward step in DOM order (Ctrl+ArrowDown
+			// moves DOWN, not up).
+			const i1 = domOrder.indexOf(id1 as string);
+			const i2 = domOrder.indexOf(id2 as string);
+			expect(i1, "first nav id in DOM order").toBeGreaterThanOrEqual(0);
+			expect(i2, "second nav id must be the next row forward (wrap allowed)").toBe((i1 + 1) % domOrder.length);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+			await deleteGoal(goal.id, true).catch(() => {});
+		}
+	});
+});
+
+// Ported from open-session-new-window.spec.ts (audit: app-smoke GAP / BR55): the
+// session row's actions popover has an "Open in new window" item that calls
+// window.open(deepLink, "_blank", "noopener").
+test.describe("Journey: Open in New Window", () => {
+	test("session actions menu opens the deep link in a new window", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await page.setViewportSize({ width: 1280, height: 900 });
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			const row = page.locator(`[data-session-id="${sessionId}"]`).first();
+			await expect(row).toBeVisible({ timeout: 10_000 });
+			const deepLink = await page.evaluate((id) => `${location.origin}/session/${id}`, sessionId);
+			// Capture window.open (stub applied right before the action so a render
+			// pass cannot restore the native impl between hover and click).
+			await page.evaluate(() => {
+				(window as any).__opened = [];
+				window.open = ((u?: string | URL, t?: string, f?: string) => {
+					(window as any).__opened.push({
+						url: u === undefined ? undefined : String(u),
+						target: t === undefined ? undefined : String(t),
+						features: f === undefined ? undefined : String(f),
+					});
+					return { opener: null } as any;
+				}) as any;
+			});
+			const trigger = row.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="session"][data-sidebar-actions-id="${sessionId}"]`).first();
+			await row.hover();
+			await expect(trigger).toBeVisible({ timeout: 5_000 });
+			await trigger.click();
+			await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+			const item = page.locator(`sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="open-new-window"]`).first();
+			await expect(item).toBeVisible({ timeout: 5_000 });
+			await expect(item).toContainText("Open in new window");
+			await item.click();
+			await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });
+			await expect.poll(() => page.evaluate(() => (window as any).__opened)).toEqual([
+				{ url: deepLink, target: "_blank", features: "noopener" },
+			]);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
 		}
 	});
 });

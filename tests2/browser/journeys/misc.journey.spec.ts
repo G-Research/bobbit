@@ -9,6 +9,9 @@
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 import { sendMessage, apiFetch, defaultProject, createGoal, deleteGoal, defaultProjectId } from "../_helpers/journey-fixture.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
+import { rawApiFetch } from "../e2e-setup.js";
+import fs from "node:fs";
+import path from "node:path";
 
 test.describe("Journey: Notification Policy", () => {
 	test("app renders without notification errors", async ({ page }) => {
@@ -128,6 +131,62 @@ test.describe("Journey: Review Commenting", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	// Ported from review-pane.spec.ts (audit: misc PARTIAL / BR59): clicking
+	// Approve in the review pane posts review feedback to the agent chat and
+	// closes the Review tab.
+	test("Approve in the review pane posts feedback to chat and closes the Review tab", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			const doneMessages = page.getByText("Done. Used review_open tool.", { exact: true });
+			const beforeCount = await doneMessages.count().catch(() => 0);
+			await sendMessage(page, "REVIEW_OPEN");
+			await expect.poll(() => doneMessages.count(), { timeout: 20_000 }).toBeGreaterThan(beforeCount);
+			const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" }).first();
+			await expect(reviewTab).toBeVisible({ timeout: 20_000 });
+			await reviewTab.click();
+			await expect(page.locator("review-document").first()).toBeVisible({ timeout: 15_000 });
+			// Approve → feedback posted to chat, Review tab closes.
+			await page.getByRole("button", { name: "Approve", exact: true }).click();
+			await expect(page.locator("user-message").filter({ hasText: /approv/i }).last()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator(".goal-tab-pill", { hasText: "Review" })).toHaveCount(0, { timeout: 10_000 });
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+});
+
+// Ported from image-attach-roundtrip.spec.ts (audit: misc GAP / BR60): an
+// attached image renders a tile in the composer and, after ECHO_IMAGE_BLOCK,
+// in the sent user message.
+test.describe("Journey: Image Attachment", () => {
+	const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+	test("attached image renders a tile in the composer and in the sent message", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			await page.locator('message-editor input[type="file"]').setInputFiles({
+				name: "pic.png", mimeType: "image/png", buffer: Buffer.from(PNG_B64, "base64"),
+			});
+			await expect(page.locator("message-editor attachment-tile").first()).toBeVisible({ timeout: 10_000 });
+			const textarea = page.locator("message-editor textarea").first();
+			await textarea.fill("ECHO_IMAGE_BLOCK here is a picture");
+			await textarea.press("Enter");
+			// The sent user message must render the image attachment tile.
+			await expect(page.locator("user-message attachment-tile").first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
 });
 
 test.describe("Journey: Preview Artifacts", () => {
@@ -186,6 +245,17 @@ test.describe("Journey: Preview Artifacts", () => {
 			await expect(iframe).toBeVisible({ timeout: 20_000 });
 			const src = await iframe.getAttribute("src");
 			expect(src).toMatch(/^\/preview\/[a-f0-9-]+\/journey\.html\?mtime=\d+$/);
+			// Ported from preview-happy-path.spec.ts (BR52): the open-in-new-tab
+			// anchor href must NOT carry a cache-buster; Refresh must bump the mtime.
+			const link = page.locator('a[title="Open preview in new tab"]').first();
+			await expect(link).toBeVisible({ timeout: 10_000 });
+			const href = await link.getAttribute("href");
+			expect(href).toMatch(/^\/preview\/[a-f0-9-]+\/journey\.html$/);
+			expect(href).not.toMatch(/[?#]mtime=/);
+			const refresh = page.locator('button[title="Refresh preview"]').first();
+			await expect(refresh).toBeVisible({ timeout: 10_000 });
+			await refresh.click();
+			await expect.poll(async () => await iframe.getAttribute("src"), { timeout: 5_000 }).not.toEqual(src);
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -202,6 +272,71 @@ test.describe("Journey: Compaction", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId);
+		}
+	});
+
+	// Ported from compaction-persistence.spec.ts (audit: misc GAP / BR53): a
+	// seeded compaction sidecar splices a rich summary row into the snapshot; the
+	// renderer must show the card (data-state complete) and it must survive reload.
+	test("seeded compaction sidecar renders the summary card and survives reload", async ({ page, gateway }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			// Seed one success sidecar entry (→ complete card). Mirrors the legacy setup.
+			const dir = path.join(gateway.bobbitDir, "state", "compaction-sidecar");
+			fs.mkdirSync(dir, { recursive: true });
+			const safe = sessionId.replace(/[^A-Za-z0-9_-]/g, "_");
+			const line = JSON.stringify({
+				schemaVersion: 1, id: "c_journey_1", trigger: "manual",
+				tokensBefore: 50_000, tokensAfter: null, durationMs: 1000,
+				startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(),
+				success: true, firstKeptEntryId: null,
+			}) + "\n";
+			fs.appendFileSync(path.join(dir, `${safe}.jsonl`), line, "utf-8");
+
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			const card = page.locator("[data-testid='compaction-summary-card']");
+			await expect(card).toHaveCount(1, { timeout: 15_000 });
+			await expect(card).toHaveAttribute("data-state", "complete");
+			// Sidecar must still anchor the card after a full reload.
+			await page.reload();
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await expect(card).toHaveCount(1, { timeout: 20_000 });
+			await expect(card).toHaveAttribute("data-state", "complete");
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+});
+
+// Ported from prompt-stats-e2e.spec.ts (audit: misc GAP / BR51): after an agent
+// response, the stats bar must show the model name, a context-usage tooltip
+// prefixed "Context:" with a percentage, and a "$" cost. The journey previously
+// only best-effort probed a cost element.
+test.describe("Journey: Prompt Stats", () => {
+	test("stats bar shows model name, context %, and cost after a response", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			await sendMessage(page, "Full stats test");
+			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+			const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
+			await expect(statsBar).toBeVisible({ timeout: 15_000 });
+			await expect(statsBar).toContainText("mock-model", { timeout: 20_000 });
+			const contextSpan = page.locator("span[title*='Context:']");
+			await expect(contextSpan).toBeVisible({ timeout: 15_000 });
+			await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
+			await expect(contextSpan).toHaveAttribute("title", /Context:.*tokens/, { timeout: 10_000 });
+			await expect(statsBar).toContainText("$", { timeout: 15_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
 		}
 	});
 });
@@ -248,6 +383,71 @@ test.describe("Journey: Workflow Editor", () => {
 	test("app shell stable for workflow editor flow", async ({ page }) => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+	});
+
+	// Ported from workflow-editor.spec.ts (audit: misc GAP / BR46): the workflow
+	// editor's verify-step type control must expose its testid AND list all four
+	// step types (command/llm-review/agent-qa/human-signoff). PR #644 regressed the
+	// human-signoff option; the journey previously asserted none of this.
+	test("workflow editor exposes the step-type control with all four types", async ({ page }) => {
+		test.setTimeout(90_000);
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		const wfId = "v2-wf-step-type-" + Date.now();
+		const res = await rawApiFetch("/api/workflows", {
+			method: "POST",
+			body: JSON.stringify({
+				projectId,
+				id: wfId,
+				name: `Test Workflow ${wfId}`,
+				description: "editor parity",
+				gates: [{ id: "g1", name: "Gate 1", depends_on: [], verify: [{ name: "Step", type: "command", run: "echo ok" }] }],
+			}),
+		});
+		expect(res.status).toBe(201);
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/settings/${projectId}/workflows`);
+			const tab = page.locator("[data-testid='workflows-tab']").first();
+			await expect(tab).toBeVisible({ timeout: 15_000 });
+			await tab.getByText(`Test Workflow ${wfId}`).first().click();
+			await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 15_000 });
+			// Expand the first gate.
+			const gateCard = page.locator(".wf-edit-container .wf-artifacts-list > .wf-gate-card").first();
+			await expect(gateCard).toBeVisible({ timeout: 10_000 });
+			await gateCard.scrollIntoViewIfNeeded();
+			if (!(await gateCard.evaluate((el) => el.classList.contains("expanded")))) {
+				await gateCard.locator(".wf-gate-header .wf-gate-chevron").click();
+			}
+			await expect(gateCard).toHaveClass(/(?:^|\s)expanded(?:\s|$)/, { timeout: 5_000 });
+			// Expand the first verify-step.
+			const stepCard = page.locator("[data-testid='wf-vstep-card']").first();
+			await expect(stepCard).toBeVisible({ timeout: 10_000 });
+			if (!((await stepCard.getAttribute("class"))?.includes("vstep-expanded"))) {
+				await stepCard.locator(".wf-vstep-collapsed-header").click();
+			}
+			await expect(stepCard).toHaveClass(/vstep-expanded/, { timeout: 5_000 });
+			// The step-type control must be present and list all four types.
+			const select = page.locator("[data-testid='wf-step-type']").first();
+			await expect(select).toBeVisible({ timeout: 10_000 });
+			const optionValues = await select.locator("option").evaluateAll((els) =>
+				(els as HTMLOptionElement[]).map((o) => o.value));
+			expect(optionValues).toEqual(["command", "llm-review", "agent-qa", "human-signoff"]);
+		} finally {
+			await apiFetch(`/api/workflows/${wfId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	// Ported from workflow-page-scope.spec.ts (audit: misc GAP / BR61): the
+	// deprecated #/workflows route redirects to the active project's settings
+	// Workflows tab (project-scoped, never the system scope).
+	test("legacy #/workflows redirects to the project-scoped settings Workflows tab", async ({ page }) => {
+		await openApp(page);
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+		await page.evaluate(() => { window.location.hash = "#/workflows"; });
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 })
+			.toMatch(/^#\/settings\/[^/]+\/workflows$/);
+		expect(await page.evaluate(() => window.location.hash)).not.toContain("/system/");
 	});
 
 	test("page.route() workflow GET stub still lets app load gracefully", async ({ page }) => {
@@ -398,6 +598,28 @@ test.describe("Journey: Auto-Retry Banner", () => {
 
 // Ported from image-model-selector-lock.spec.ts (audit: misc GAP): the footer
 // exposes the resolved image-model id (default gpt-image-2).
+// Ported from goal-role-tabs-wiring.spec.ts (audit: misc GAP / BR48): the
+// goal-proposal Roles tab must load a role editor, and clicking Customize must
+// reveal the reset-to-default control (proving per-goal role customization is
+// wired, not an enabled no-op).
+test.describe("Journey: Goal Proposal Roles Tab", () => {
+	test("Roles tab Customize reveals the reset-to-default control", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+		await page.locator("[data-testid='goal-proposal-tab-roles']").click();
+		await expect(page.locator("[data-testid='goal-proposal-panel-roles']")).toBeVisible({ timeout: 10_000 });
+		const customize = page.locator("[data-testid='goal-proposal-role-customize']");
+		await expect(customize).toBeVisible({ timeout: 15_000 });
+		await customize.click();
+		await expect(page.locator("[data-testid='goal-proposal-role-reset']")).toBeVisible({ timeout: 10_000 });
+	});
+});
+
 test.describe("Journey: Footer Image Model", () => {
 	test("footer shows the resolved image-model id (default gpt-image-2)", async ({ page }) => {
 		const sessionId = await createSession();
