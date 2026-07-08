@@ -175,5 +175,37 @@
 		"expectedV2Catchers": [
 			"tests2/browser/journeys/sidebar-nav.journey.spec.ts"
 		]
+	},
+	{
+		"id": "BR59",
+		"area": "misc-review-approve",
+		"file": "src/ui/components/review/ReviewPane.ts",
+		"target": "ui",
+		"operator": "label-rename",
+		"search": ">Approve</button>",
+		"replace": ">Approv</button>",
+		"description": "The review pane Approve button loses its accessible name. Legacy review-pane.spec.ts clicks getByRole button 'Approve' and asserts the approve feedback posts to chat + the Review tab closes; misc journey only opened the review document (PARTIAL). Ported into misc.journey.spec.ts (Journey: Review Commenting).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/review-pane.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
+	},
+	{
+		"id": "BR60",
+		"area": "misc-image-attach",
+		"file": "src/ui/components/Messages.ts",
+		"target": "ui",
+		"operator": "tag-rename",
+		"search": "<attachment-tile .attachment=${attachment}></attachment-tile>",
+		"replace": "<attachment-tilex .attachment=${attachment}></attachment-tilex>",
+		"description": "A sent user-message stops rendering its image attachment tile. Legacy image-attach-roundtrip.spec.ts attaches a PNG + ECHO_IMAGE_BLOCK and asserts 'user-message attachment-tile' renders; misc journey had no image-attachment coverage (GAP). Ported into misc.journey.spec.ts (Journey: Image Attachment).",
+		"expectedLegacyCatchers": [
+			"tests/e2e/ui/image-attach-roundtrip.spec.ts"
+		],
+		"expectedV2Catchers": [
+			"tests2/browser/journeys/misc.journey.spec.ts"
+		]
 	}
 ]

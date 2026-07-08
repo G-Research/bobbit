@@ -131,6 +131,62 @@ test.describe("Journey: Review Commenting", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	// Ported from review-pane.spec.ts (audit: misc PARTIAL / BR59): clicking
+	// Approve in the review pane posts review feedback to the agent chat and
+	// closes the Review tab.
+	test("Approve in the review pane posts feedback to chat and closes the Review tab", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			const doneMessages = page.getByText("Done. Used review_open tool.", { exact: true });
+			const beforeCount = await doneMessages.count().catch(() => 0);
+			await sendMessage(page, "REVIEW_OPEN");
+			await expect.poll(() => doneMessages.count(), { timeout: 20_000 }).toBeGreaterThan(beforeCount);
+			const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" }).first();
+			await expect(reviewTab).toBeVisible({ timeout: 20_000 });
+			await reviewTab.click();
+			await expect(page.locator("review-document").first()).toBeVisible({ timeout: 15_000 });
+			// Approve → feedback posted to chat, Review tab closes.
+			await page.getByRole("button", { name: "Approve", exact: true }).click();
+			await expect(page.locator("user-message").filter({ hasText: /approv/i }).last()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator(".goal-tab-pill", { hasText: "Review" })).toHaveCount(0, { timeout: 10_000 });
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+});
+
+// Ported from image-attach-roundtrip.spec.ts (audit: misc GAP / BR60): an
+// attached image renders a tile in the composer and, after ECHO_IMAGE_BLOCK,
+// in the sent user message.
+test.describe("Journey: Image Attachment", () => {
+	const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+	test("attached image renders a tile in the composer and in the sent message", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			await page.locator('message-editor input[type="file"]').setInputFiles({
+				name: "pic.png", mimeType: "image/png", buffer: Buffer.from(PNG_B64, "base64"),
+			});
+			await expect(page.locator("message-editor attachment-tile").first()).toBeVisible({ timeout: 10_000 });
+			const textarea = page.locator("message-editor textarea").first();
+			await textarea.fill("ECHO_IMAGE_BLOCK here is a picture");
+			await textarea.press("Enter");
+			// The sent user message must render the image attachment tile.
+			await expect(page.locator("user-message attachment-tile").first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
 });
 
 test.describe("Journey: Preview Artifacts", () => {
