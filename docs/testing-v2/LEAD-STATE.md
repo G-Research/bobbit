@@ -28,9 +28,9 @@ Goal: **Sub-3-min test suite rebuild** (id `6c956ecf-...`). Branch `goal/sub-3-m
 PR **#935** (base master). This doc is the lead's source of truth; the preview dashboard is only a user summary.
 Update this doc whenever state materially changes.
 
-## Where we are (gate DAG: 8/12 passed)
-Passed: baseline-inventory, design-doc, di-runtime, v2-foundation, mass-migration, browser-tier, parity-proof, **chaos-proof**.
-Open: **concurrency-proof** (pending — see Decisions), then **switchover** → **daily-lane** → **review-findings**.
+## Where we are (gate DAG)
+Passed: baseline/design/di/foundation/mass-migration/browser-tier/parity/**chaos-proof**. **concurrency-proof BYPASSED (Josh, spec change); daily-lane BYPASSED (Josh, not doing daily).** Remaining: **switchover** (unblocked, IN PROGRESS) → **review-findings**. Goal still needs explicit human confirm before team_complete.
+- SWITCHOVER (default mapping, user can redirect): flip .bobbit/config/project.yaml unit→`test:v2`, e2e→`test:e2e:v2`, KEEP legacy files (safety net). Rewrite docs (testing-strategy/coverage + AGENTS.md: v2 model, retries:0, honest ~1.96× CPU, N=1+ledger-no-thrash, external-free, NO daily lane) + remove superseded 4-concurrent/retries-3/daily policy w/ pointer. Port pr-walkthrough afterEach cwd-poison fix to tests/e2e/ui/pr-walkthrough-pack.spec.ts. Then signal switchover.
 Only the LEAD signals gates. Signal from goal HEAD after merging member branches (verification runs from goal.cwd HEAD).
 
 ## Goal HEAD / PR
