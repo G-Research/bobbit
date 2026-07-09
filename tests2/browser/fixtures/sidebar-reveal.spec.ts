@@ -18,11 +18,15 @@ import {
 	base,
 	createGoal,
 	createSession,
+	defaultProject,
 	defaultProjectId,
 	deleteGoal,
 	deleteSession,
 	readE2ETokenAsync,
+	startTeam,
+	teardownTeam,
 	waitForHealth,
+	waitForSessionStatus,
 } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
@@ -37,11 +41,17 @@ type Fixture = {
 	nestedSessionId: string;
 	standaloneSessionId: string;
 	fillerGoalIds: string[];
+	teamGoalId: string;
+	teamLeadSessionId: string;
+	staffId: string;
+	staffSessionId: string;
 };
 
 let fixture: Fixture;
 const createdGoalIds: string[] = [];
 const createdSessionIds: string[] = [];
+const createdTeamGoalIds: string[] = [];
+const createdStaffIds: string[] = [];
 
 function treeKey(kind: "project-sessions" | "goal", id: string): string {
 	return `sidebar-tree/v1/${kind}/${encodeURIComponent(id)}`;
@@ -175,12 +185,48 @@ test.describe("Sidebar reveal on nav", () => {
 		const fillerGoalIds = fillerGoals.map(g => g.id);
 		createdGoalIds.push(...fillerGoalIds);
 
-		fixture = { projectId, parentGoalId: parent.id, childGoalId, nestedSessionId, standaloneSessionId, fillerGoalIds };
+		// Team goal → team-lead session. The team lead is represented in the tree
+		// as a `team-lead/<id>` node (NOT a `session/<id>` node) but its DOM row
+		// carries data-nav-id="session:<id>" — the exact shape the reveal bug misses.
+		const teamGoal = await createGoal({ title: `Reveal team ${stamp}`, projectId, team: true, worktree: false });
+		createdTeamGoalIds.push(teamGoal.id);
+		const teamLeadSessionId = await startTeam(teamGoal.id);
+		await waitForSessionStatus(teamLeadSessionId, "idle", 30_000);
+
+		// Staff agent → permanent session. Staff sessions are excluded from the
+		// tree entirely (rendered only under the project-staff section), so the
+		// reveal must resolve them via the staff-row fallback.
+		const project = await defaultProject();
+		const staffResp = await apiFetch("/api/staff", {
+			method: "POST",
+			body: JSON.stringify({
+				name: `Reveal staff ${stamp}`,
+				description: "Sidebar reveal-on-nav staff fixture.",
+				systemPrompt: "You are a sidebar reveal-on-nav staff fixture.",
+				cwd: project.rootPath,
+				projectId,
+			}),
+		});
+		expect(staffResp.status, `create reveal staff: ${await staffResp.clone().text()}`).toBe(201);
+		const staff = await staffResp.json();
+		createdStaffIds.push(staff.id);
+		const staffSessionId = staff.currentSessionId as string;
+		expect(staffSessionId, "staff agent must have a permanent session id").toBeTruthy();
+
+		fixture = {
+			projectId, parentGoalId: parent.id, childGoalId, nestedSessionId, standaloneSessionId, fillerGoalIds,
+			teamGoalId: teamGoal.id, teamLeadSessionId, staffId: staff.id, staffSessionId,
+		};
 	});
 
 	test.afterAll(async () => {
+		for (const id of [...createdStaffIds].reverse()) await apiFetch(`/api/staff/${id}`, { method: "DELETE" }).catch(() => {});
+		createdStaffIds.length = 0;
+		for (const id of [...createdTeamGoalIds].reverse()) await teardownTeam(id).catch(() => {});
 		for (const id of [...createdSessionIds].reverse()) await deleteSession(id).catch(() => {});
 		createdSessionIds.length = 0;
+		for (const id of [...createdTeamGoalIds].reverse()) await deleteGoal(id).catch(() => {});
+		createdTeamGoalIds.length = 0;
 		for (const id of [...createdGoalIds].reverse()) await deleteGoal(id).catch(() => {});
 		createdGoalIds.length = 0;
 	});
@@ -267,5 +313,54 @@ test.describe("Sidebar reveal on nav", () => {
 		await expect(navRow(page, `goal:${fixture.parentGoalId}`)).toBeVisible({ timeout: 15_000 });
 		await expect(navRow(page, `session:${fixture.nestedSessionId}`), "on-path explicit collapse must keep the nested row hidden").toBeHidden({ timeout: 10_000 });
 		expect(await storedPreference(page, parentGoalKey), "on-path explicit collapse must not be overwritten").toBe("collapsed");
+	});
+
+	// Regression: team-lead sessions are `team-lead/<id>` tree nodes, not
+	// `session/<id>` nodes, so the single-key session lookup misses them and the
+	// collapsed goal ancestor never expands. The team-lead row (data-nav-id
+	// "session:<id>") stays hidden. Fails on current code; passes after the
+	// ordered fallback resolver tries the team-lead node key.
+	test("deep-link to a team-lead session expands the collapsed goal and scrolls the team-lead row into view", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 620 });
+		await seedBrowserState(page);
+		await openAppAtHash(page, `#/session/${fixture.teamLeadSessionId}`);
+
+		// The team goal defaults collapsed → the reveal must expand it so the
+		// team-lead row renders and becomes the active row.
+		await expect(navRow(page, `goal:${fixture.teamGoalId}`)).toBeVisible({ timeout: 15_000 });
+		const teamLeadRow = navRow(page, `session:${fixture.teamLeadSessionId}`);
+		await expect(teamLeadRow).toBeVisible({ timeout: 10_000 });
+		await expect(teamLeadRow).toHaveAttribute("data-nav-active", "true", { timeout: 10_000 });
+
+		await expect.poll(async () => (await rowGeometry(page, `session:${fixture.teamLeadSessionId}`)).within, { timeout: 10_000 })
+			.toBe(true);
+	});
+
+	// Regression: staff sessions are excluded from the sidebar tree entirely and
+	// render only under the project-staff section (which defaults expanded), so
+	// there is NO tree node to look up. The project-staff section defaults
+	// expanded (per the ephemeral contract, the reveal must NOT rely on
+	// re-expanding an explicit collapse) so we instead force the staff row
+	// off-screen via overflow and assert the reveal SCROLLS it into view. Fails
+	// on current code (no node → attemptReveal never scrolls); passes after the
+	// staff-row fallback resolver locates the staff entry and reveals it.
+	test("deep-link to a staff session scrolls the off-screen staff row into view", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 360 });
+		await seedBrowserState(page);
+		await openApp(page);
+		await expect(navRow(page, `goal:${fixture.parentGoalId}`)).toBeVisible({ timeout: 15_000 });
+
+		// Force sidebar overflow (short viewport + many filler goals) and pin the
+		// scroll to the top so the staff section — rendered below the goal forest
+		// — starts off-screen but still present in the DOM.
+		const staffNav = `session:${fixture.staffSessionId}`;
+		await expect.poll(async () => (await rowGeometry(page, staffNav)).overflowing, { timeout: 15_000 }).toBe(true);
+		await setSidebarScrollTop(page, 0);
+		await expect.poll(async () => (await rowGeometry(page, staffNav)).found, { timeout: 10_000 }).toBe(true);
+		expect((await rowGeometry(page, staffNav)).within, "staff row should start off-screen before navigation").toBe(false);
+
+		// In-app navigation to the staff session must scroll its row into view.
+		await inAppNavigate(page, `#/session/${fixture.staffSessionId}`);
+		await expect.poll(async () => (await rowGeometry(page, staffNav)).within, { timeout: 10_000 }).toBe(true);
 	});
 });
