@@ -33,7 +33,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -236,7 +236,7 @@ function applyMutation(filePath, search, replace) {
   return content; // original — caller must restore
 }
 
-function ensureNodeModulesJunction(worktreePath) {
+export function ensureNodeModulesJunction(worktreePath) {
   const link = path.join(worktreePath, "node_modules");
   if (fs.existsSync(link)) return; // already present or already a junction
   if (!fs.existsSync(PRIMARY_NODE_MODULES)) {
@@ -470,7 +470,7 @@ function runFullV2Suite(worktreePath) {
 
 // ── Worktree management ───────────────────────────────────────────────────────
 
-function createEphemeralWorktree(label) {
+export function createEphemeralWorktree(label) {
   const tmpDir = path.join(os.tmpdir(), `bobbit-chaos-${label}-${Date.now()}`);
   try {
     execFileSync("git", ["worktree", "add", "--detach", tmpDir, "HEAD"],
@@ -487,7 +487,7 @@ function createEphemeralWorktree(label) {
 // contents (the shared node_modules tree) instead of just unlinking the link —
 // the node_modules-corruption bug (see docs/testing-v2/node-modules-corruption-
 // rca.md). We therefore unlink the link itself, non-recursively, first.
-function unlinkNodeModulesJunction(worktreePath) {
+export function unlinkNodeModulesJunction(worktreePath) {
   const link = path.join(worktreePath, "node_modules");
   let st;
   try { st = fs.lstatSync(link); } catch { return; } // absent — nothing to do
@@ -532,7 +532,7 @@ function unlinkNodeModulesJunction(worktreePath) {
   }
 }
 
-function removeEphemeralWorktree(worktreePath) {
+export function removeEphemeralWorktree(worktreePath) {
   // 1. Unlink the node_modules junction FIRST so neither `git worktree remove`
   //    nor the fs.rmSync fallback can descend through it into the shared tree.
   try {
@@ -1199,7 +1199,11 @@ async function main() {
   console.log("\n✓ chaos.mjs complete");
 }
 
-main().catch(err => {
-  console.error("[chaos] Fatal error:", err);
-  process.exit(1);
-});
+// CLI-only guard: importing this module (e.g. from a test) must NOT run a
+// campaign. Only run main() when executed directly as a script.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(err => {
+    console.error("[chaos] Fatal error:", err);
+    process.exit(1);
+  });
+}
