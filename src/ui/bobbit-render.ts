@@ -551,6 +551,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 			<div class="bobbit-blob__nurse-cap"></div>
 			<div class="bobbit-blob__stamp"></div>
 			<div class="bobbit-blob__clipboard"></div>
+			<div class="bobbit-blob__headset"></div>
 			<div class="bobbit-blob__shadow"></div>
 		</div>
 	</div>`;
@@ -605,6 +606,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 					<div class="bobbit-blob__nurse-cap"></div>
 					<div class="bobbit-blob__stamp"></div>
 					<div class="bobbit-blob__clipboard"></div>
+					<div class="bobbit-blob__headset"></div>
 				</div>
 			</div>
 		</div>
@@ -840,14 +842,17 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	// Accessory transform — smooth variants
 	const isBandanaStyle = acc.id === "bandana";
 	const isCrown = acc.id === "crown";
+	// The headset seats half a sprite-pixel DOWN (mirrors the bandana's -0.5 up
+	// seat and the nurse-cap's blob `translate: 0 2px`).
+	const isHeadset = acc.id === "headset";
 	const accFilter = hueRotate && status !== "starting" && status !== "terminated" && acc.id !== "flask"
 		? `filter:hue-rotate(${-hueRotate}deg);`
 		: "";
 	const accTransform = isCompacting
 		? (compactSquish
 			? `transform-origin:0 ${BODY_HEIGHT * S}px;animation:${isCrown ? "bobbit-squish-crown-s" : "bobbit-squish-s"} 3s ease-in-out infinite;`
-			: `transform:scaleY(0.75) translateY(${(isBandanaStyle ? 4 : 4.5) * S}px)${isCrown ? ` translateX(${-0.5 * S}px)` : ""};transform-origin:0 ${BODY_HEIGHT * S}px;`)
-		: `${isBandanaStyle ? `transform:translateY(${-0.5 * S}px);` : ""}${isCrown ? `transform:translateX(${-0.5 * S}px);` : ""}`;
+			: `transform:scaleY(0.75) translateY(${((isBandanaStyle ? 4 : 4.5) + (isHeadset ? 0.5 : 0)) * S}px)${isCrown ? ` translateX(${-0.5 * S}px)` : ""};transform-origin:0 ${BODY_HEIGHT * S}px;`)
+		: `${isBandanaStyle ? `transform:translateY(${-0.5 * S}px);` : ""}${isCrown ? `transform:translateX(${-0.5 * S}px);` : ""}${isHeadset ? `transform:translateY(${0.5 * S}px);` : ""}`;
 
 	// Keep the compacting sprite on the same baseline as every other sidebar
 	// state. The squish animation already scales around the body bottom; adding a
