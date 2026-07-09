@@ -183,3 +183,10 @@ are deliberately out of scope.
   `code` (when present), and the HTTP status. A missing required param is caught
   client-side before any request is made, with a clear "operation X requires
   param Y" message.
+
+## See also
+
+The built-in [Support Assistant](support-assistant.md) is the primary consumer
+of this tool group: it uses `bobbit_read` to inspect state and, after explicit
+user confirmation, `bobbit_orchestrate` / `bobbit_admin` to apply changes on the
+user's behalf.

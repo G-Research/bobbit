@@ -121,6 +121,9 @@ Each MCP server is presented to the model as a **single tool** (`mcp_<server>`) 
 ### Cost Tracking
 Per-session token usage and cost, aggregated to goal and task level. Always know what you're spending.
 
+### Support Assistant
+A built-in **Support** agent you launch from Headquarters (the `LifeBuoy` button, left of the QR button) to ask "how do I…" questions about Bobbit itself. It grounds answers in Bobbit's own docs + source and — after explicit confirmation — can apply server-side changes on your behalf via the `bobbit` gateway tools. It never mutates a running Bobbit without explaining the action and getting your go-ahead. See [docs/support-assistant.md](docs/support-assistant.md).
+
 ### The Bobbit Mascot
 A squishy pixel-art blob that lives in the UI — animated, expressive, and drawn entirely with CSS box-shadows. Each session gets its own colour identity. Role accessories (crown, magnifying glass, bandana) show what the agent is doing at a glance. See the [sprite system docs](docs/bobbit-sprites.md).
 
@@ -131,6 +134,7 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 | [Getting Started](docs/getting-started.md) | First session walkthrough and key concepts |
 | [Features](docs/features.md) | Detailed feature reference |
 | [Headquarters](docs/headquarters.md) | Built-in server/default workspace |
+| [Support Assistant](docs/support-assistant.md) | Built-in HQ agent that answers Bobbit questions and applies changes |
 | [Architecture](docs/architecture.md) | System design, layers, and dependencies |
 | [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
