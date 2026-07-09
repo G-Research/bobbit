@@ -1060,6 +1060,13 @@ export interface SessionManagerOptions {
 	remoteGitPolicy?: RemoteGitPolicy;
 	testPreparingDelayMs?: string;
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
+	/**
+	 * Gateway state directory used to resolve the per-gateway `session-prompts`
+	 * scratch dir. Threaded so prompt persistence is isolated per gateway rather
+	 * than sharing a process-global (multi-gateway v2 test harness safety).
+	 * Defaults to bobbitStateDir() when omitted.
+	 */
+	stateDir?: string;
 }
 
 type RestoreCoordinator = {
@@ -1102,6 +1109,12 @@ export class SessionManager {
 	private readonly remoteGitPolicy: RemoteGitPolicy;
 	private readonly testPreparingDelayMs?: string;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
+	/**
+	 * Gateway state dir for resolving the per-gateway session-prompts scratch dir.
+	 * Single source of truth for prompt persistence/cleanup, threaded into the
+	 * system-prompt functions so multiple in-process gateways don't collide.
+	 */
+	public readonly stateDir: string;
 	/** @internal Test-only session store (used when no PCM is available). */
 	private _testStore: SessionStore | null = null;
 	private _testBgProcessStore: BgProcessStore | null = null;
@@ -1504,6 +1517,7 @@ export class SessionManager {
 		this.remoteGitPolicy = options?.remoteGitPolicy ?? {};
 		this.testPreparingDelayMs = options?.testPreparingDelayMs;
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
+		this.stateDir = options?.stateDir ?? bobbitStateDir();
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -2848,8 +2862,8 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (session) session.promptParts = parts;
 		// Persist prompt sections snapshot for the inspector
-		persistPromptSections(sessionId, parts);
-		return assembleSystemPrompt(sessionId, parts);
+		persistPromptSections(sessionId, parts, this.stateDir);
+		return assembleSystemPrompt(sessionId, parts, this.stateDir);
 	}
 
 	/**
@@ -7074,7 +7088,7 @@ export class SessionManager {
 			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
 			extStore.remove(id);
-			cleanupSessionPrompt(id);
+			cleanupSessionPrompt(id, this.stateDir);
 			console.log(`[session-manager] Unregistered external session ${id}`);
 		};
 	}
@@ -8950,13 +8964,13 @@ export class SessionManager {
 
 		// Delete session prompt file
 		try {
-			cleanupSessionPrompt(ps.id);
+			cleanupSessionPrompt(ps.id, this.stateDir);
 		} catch (err) {
 			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
 		}
 
 		// Delete persisted prompt sections JSON
-		purgePromptSectionsJson(ps.id);
+		purgePromptSectionsJson(ps.id, this.stateDir);
 
 		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
 		// worktree for server bookkeeping, so we clean those up too.  Skip paths that

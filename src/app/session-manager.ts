@@ -2066,6 +2066,50 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				mirrorGoalSetupFields(g, { authoritative: true });
 				saveGoalDraft(sessionId);
 			}
+			// Form-mirror gap closure for the role/tool/staff panels. Same rationale
+			// as the goal bridge above, but deliberately NOT gated on assistantType:
+			// these panels can be opened from ANY session (e.g. the staff-creation
+			// assistant proposing a role before proposing the staff member, or a
+			// staff/team session emitting propose_role). Without this bridge the
+			// panels render blank/disabled whenever the proposal reaches them only
+			// through the unified path (seed/rehydrate/edit/restore/switch-back)
+			// from a non-matching session, because the legacy onXProposal callbacks
+			// only fire on the live tool-use scan of a matching-assistant session.
+			// Mirrors the legacy onRoleProposal/onToolProposal/onStaffProposal field
+			// mapping and *Edited guards exactly, reading the MERGED fields.
+			if (type === "role") {
+				const r = merged as { name?: string; label?: string; prompt?: string; tools?: string; accessory?: string };
+				if (!state.rolePreviewNameEdited && typeof r.name === "string") state.rolePreviewName = r.name;
+				if (!state.rolePreviewLabelEdited && typeof r.label === "string") state.rolePreviewLabel = r.label;
+				if (!state.rolePreviewPromptEdited && typeof r.prompt === "string") state.rolePreviewPrompt = r.prompt;
+				if (!state.rolePreviewToolsEdited && typeof r.tools === "string") state.rolePreviewTools = r.tools;
+				if (!state.rolePreviewAccessoryEdited && typeof r.accessory === "string") state.rolePreviewAccessory = r.accessory;
+				saveRoleDraft(sessionId);
+			} else if (type === "tool") {
+				const t = merged as { tool?: string; action?: string; content?: string };
+				if (typeof t.tool === "string") state.toolPreviewName = t.tool;
+				const actionToItem: Record<string, keyof typeof state.toolPreviewChecklist> = {
+					"docs": "docs",
+					"renderer": "renderer",
+					"tests": "tests",
+					"config": "config",
+					"access": "config",
+					"new-tool": "config",
+				};
+				if (typeof t.action === "string") {
+					const item = actionToItem[t.action];
+					if (item) state.toolPreviewChecklist[item] = "done";
+					if (t.action === "docs" && typeof t.content === "string") state.toolPreviewDocs = t.content;
+					if (t.action === "renderer" && typeof t.content === "string") state.toolPreviewRendererHtml = t.content;
+				}
+			} else if (type === "staff") {
+				const s = merged as { name?: string; description?: string; prompt?: string; triggers?: string; cwd?: string };
+				if (!state.staffPreviewNameEdited && typeof s.name === "string") state.staffPreviewName = s.name;
+				if (!state.staffPreviewDescriptionEdited && typeof s.description === "string") state.staffPreviewDescription = s.description;
+				if (!state.staffPreviewPromptEdited && typeof s.prompt === "string") state.staffPreviewPrompt = s.prompt;
+				if (!state.staffPreviewTriggersEdited) state.staffPreviewTriggers = (typeof s.triggers === "string" ? s.triggers : "") || "[]";
+				if (!state.staffPreviewCwdEdited) state.staffPreviewCwd = proposalCwdOrProjectRoot(s.cwd, sessionId);
+			}
 			renderApp();
 		};
 
