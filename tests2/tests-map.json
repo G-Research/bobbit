@@ -32,6 +32,26 @@
       "reason": "Playwright renderer tests for nine Children tools — uses real Chromium DOM; parallel to tests2/dom/ vitest rewrite. Tracked here to prevent orphan detection false positive."
     },
     {
+      "path": "tests2/core/bobbit-tool-credentials.test.ts",
+      "reason": "bobbit gateway tool suite: credential/URL resolution — env creds, state-file fallback, absent-creds (logs + no registration, no throw), baseUrl trailing-slash trimming."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-dispatch.test.ts",
+      "reason": "bobbit gateway tool suite: per-operation dispatch — path/query building (ids, probe/action selectors, cascade), body building, and HTTP method correctness per tier."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-validation.test.ts",
+      "reason": "bobbit gateway tool suite: runtime validation — unknown operation and missing required params (incl. mandatory projectId) return an error result with no fetch issued."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-errors.test.ts",
+      "reason": "bobbit gateway tool suite: error surfacing — non-2xx { error, code } render with machine code + HTTP status; 204/empty bodies normalize to a success shape."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-tiers.test.ts",
+      "reason": "bobbit gateway tool suite: tier separation — YAML group/grantPolicy defaults and operation-union drift guard vs the dispatched catalogue and design §5."
+    },
+    {
       "path": "tests2/core/cli-real-deps.test.ts",
       "reason": "DI contract: cli.ts passes no test doubles (default-real wiring)."
     },

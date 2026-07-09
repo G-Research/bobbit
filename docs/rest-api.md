@@ -2,6 +2,16 @@
 
 All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
 
+### Driving the gateway from an agent
+
+Agents should prefer the **`bobbit` tool group** over hand-rolled `curl` for
+calling these endpoints — it resolves the auth token and base URL for you and
+returns the gateway's JSON. It is split into three privilege tiers:
+`bobbit_read` (read-only introspection), `bobbit_orchestrate` (runtime
+mutations), and `bobbit_admin` (config + destructive maintenance). See
+[The `bobbit` gateway tool group](bobbit-gateway-tool.md). Raw `curl` remains
+the fallback where the group isn't enabled.
+
 ### Error response shape
 
 Non-2xx JSON responses follow:
