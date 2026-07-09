@@ -616,7 +616,7 @@ export default function (pi: ExtensionAPI) {
 			workflowId: Type.Optional(Type.String({ description: "Workflow id." })),
 			q: Type.Optional(Type.String({ description: "Free-text query filter." })),
 			type: Type.Optional(Type.String({ description: "search type: all|goals|sessions|messages|staff." })),
-			limit: Type.Optional(Type.Number({ description: "Page size for list operations. Defaults to 50 (20 for search), max 200 (100 for search)." })),
+			limit: Type.Optional(Type.Number({ description: "Page size. Defaults: lists 50, search 20; max: lists 200, search 100." })),
 			offset: Type.Optional(Type.Number({ description: "Offset for list operations. Defaults to 0; ignored when cursor/after is used." })),
 			after: Type.Optional(Type.Union([Type.String(), Type.Number()], { description: "Cursor for cursor-backed list operations." })),
 			cursor: Type.Optional(Type.Union([Type.String(), Type.Number()], { description: "Alias for after on cursor-backed list operations." })),
