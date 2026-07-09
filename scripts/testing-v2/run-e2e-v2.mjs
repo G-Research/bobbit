@@ -3,13 +3,13 @@
  * run-e2e-v2.mjs — the v2 "e2e" real-fidelity tier (task 7862db76).
  *
  * This is the per-workflow real-fidelity remainder that stays out of tier-1/2
- * (`test:v2`): the daily-bucket specs from tests2/tests-map.json, MINUS
+ * (`test:v2`): the real-fidelity specs from tests2/tests-map.json (carried under
+ * the tests-map `daily` bucket string — an internal taxonomy label, NOT a
+ * scheduled lane; there is no `test:daily` script), MINUS
  *   - manual-integration specs (real-agent / real-LLM / real-Docker — that
- *     is the tier-3 `test:manual` lane, never here), and
- *   - the "one full legacy run" daily step (that is `test:unit` + `test:e2e`,
- *     not a tests-map entry).
+ *     is the tier-3 `test:manual` lane, never here).
  *
- * Everything else in the daily bucket runs here at retries:2 (a TEMPORARY
+ * Everything else in that bucket runs here at retries:2 (a TEMPORARY
  * concurrency bridge — see docs/testing-strategy.md "Concurrency & budgets" and
  * the Group B/C notes below; Group A uses node:test's --test-force-exit and has
  * no retry knob wired here), in three groups
@@ -22,8 +22,8 @@
  *             worktree pool / MCP subprocess / port / restart. Run via the legacy
  *             playwright-e2e config at --retries=2 (concurrency bridge).
  *   Group C — adapter browser specs: the geometry/journey specs migrated into
- *             tests2/browser/daily/. Run via playwright-v2 config, project
- *             `browser-v2-daily` (retries:2 inherited from the v2 config).
+ *             tests2/browser/e2e/. Run via playwright-v2 config, project
+ *             `browser-v2-e2e` (retries:2 inherited from the v2 config).
  *
  * External-service-free guarantee: every group runs with BOBBIT_TEST_NO_EXTERNAL
  * / BOBBIT_TEST_NO_REMOTE set (fail-closed on non-loopback fetch + no real git
@@ -65,7 +65,7 @@ function classifyDaily() {
 	const daily = (map.entries || []).filter((e) => (e.tier || e.bucket) === "daily");
 	const A = []; // node relocate .test.ts
 	const B = []; // playwright e2e relocate .spec.ts
-	const C = []; // adapter browser specs -> tests2/browser/daily/<basename>
+	const C = []; // adapter browser specs -> tests2/browser/e2e/<basename>
 	const excluded = { manualIntegration: [], missing: [] };
 	for (const e of daily) {
 		const f = e.file;
@@ -74,8 +74,8 @@ function classifyDaily() {
 			continue;
 		}
 		if (e.method === "adapter") {
-			// The physical migrated spec lives in tests2/browser/daily/<basename>.
-			const dest = join("tests2", "browser", "daily", basename(f));
+			// The physical migrated spec lives in tests2/browser/e2e/<basename>.
+			const dest = join("tests2", "browser", "e2e", basename(f));
 			if (existsSync(join(REPO_ROOT, dest))) C.push(dest.replace(/\\/g, "/"));
 			else excluded.missing.push(dest.replace(/\\/g, "/"));
 			continue;
@@ -127,7 +127,7 @@ function run(command, args, { env = {}, label, shell } = {}) {
 }
 
 // Fail-closed external-service env for ALL groups (belt-and-braces on top of the
-// e2e config's own defaults; the browser daily config does not set them itself).
+// e2e config's own defaults; the browser-v2-e2e config does not set them itself).
 //
 // NO_EXTERNAL + NO_REMOTE => skipNonLocalRemoteGit: any git op against a
 // NON-local remote (real origin / GitHub) and all outbound non-loopback HTTP are
@@ -177,21 +177,22 @@ async function runGroupB(specs) {
 
 async function runGroupC(specs) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	// playwright-v2 config, browser-v2-daily project (retries:2 from config —
+	// playwright-v2 config, browser-v2-e2e project (retries:2 from config —
 	// the concurrency bridge; we intentionally do NOT pass --retries here so the
 	// config's value governs).
-	// We run the WHOLE project (its testDir IS tests2/browser/daily — the physical
-	// browser-daily bucket) rather than passing individual spec paths: Playwright's
-	// `--project` is variadic and would swallow trailing positional file filters as
-	// extra project names. The daily dir is the source of truth for this bucket
-	// (it also carries crash-restart.journey, which tier-2 `test:v2` ignores).
+	// We run the WHOLE project (its testDir IS tests2/browser/e2e — the physical
+	// real-fidelity browser bucket) rather than passing individual spec paths:
+	// Playwright's `--project` is variadic and would swallow trailing positional
+	// file filters as extra project names. The e2e dir is the source of truth for
+	// this bucket (it also carries crash-restart.journey, which tier-2 `test:v2`
+	// ignores).
 	const localCli = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
 	const usesLocal = existsSync(localCli);
 	const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
 	const pre = usesLocal ? [localCli] : ["playwright"];
 	// RESOURCE CAP: bound Playwright workers (override with E2E_V2_PW_WORKERS).
 	const pwWorkersC = process.env.E2E_V2_PW_WORKERS || "2";
-	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-daily", `--workers=${pwWorkersC}`], {
+	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`], {
 		env: { ...EXTERNAL_FREE_ENV },
 		label: "C/adapter-browser",
 		// node.exe path may contain spaces (C:\Program Files\nodejs); spawn it
@@ -209,7 +210,7 @@ async function main() {
 		return;
 	}
 
-	console.log(`[e2e-v2] daily real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length}`);
+	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length}`);
 	console.log(`[e2e-v2] excluded: manual-integration=${excluded.manualIntegration.length}${excluded.missing.length ? `, MISSING=${excluded.missing.length} (${excluded.missing.join(", ")})` : ""}`);
 
 	const docker = dockerAvailable();

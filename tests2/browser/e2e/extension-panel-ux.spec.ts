@@ -1,6 +1,6 @@
-// Migrated from tests/e2e/ui/extension-panel-ux.spec.ts (v2 browser/daily tier).
+// Migrated from tests/e2e/ui/extension-panel-ux.spec.ts (v2 browser/e2e tier).
 // Full-gateway browser E2E — carried over verbatim (relative harness/helper
-// specifiers resolve identically from tests2/browser/daily/).
+// specifiers resolve identically from tests2/browser/e2e/).
 /**
  * Extension Panel UX Polish — browser E2E coverage for the launcher-host +
  * side-panel behaviours changed by this goal:

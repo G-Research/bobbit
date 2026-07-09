@@ -136,7 +136,7 @@ export default {
 			name: "browser-v2",
 			testDir: "./tests2/browser",
 			testMatch: ["**/*.spec.ts"],
-			testIgnore: ["**/daily/**"], // bash.exe-dependent tests; run in isolation via test:daily
+			testIgnore: ["**/e2e/**"], // real-fidelity e2e:v2 specs; run only via `test:e2e:v2` (project browser-v2-e2e), never in tier-2 `test:v2`
 			use: {
 				browserName: "chromium" as const,
 			},
@@ -146,8 +146,8 @@ export default {
 			// Run only via `test:e2e:v2` — NOT part of tier-2 `test:v2`.
 			// retries:2 is inherited from the top-level config (temporary concurrency
 			// bridge — see the top-level `retries` note; NOT a flake budget).
-			name: "browser-v2-daily",
-			testDir: "./tests2/browser/daily",
+			name: "browser-v2-e2e",
+			testDir: "./tests2/browser/e2e",
 			testMatch: ["**/*.spec.ts"],
 			use: {
 				browserName: "chromium" as const,

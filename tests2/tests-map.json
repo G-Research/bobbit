@@ -3172,7 +3172,7 @@
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - dormant/revive/live-reply without page.reload is distinct from crash-restart; needs dedicated v2 journey test; covered by legacy suite until switchover.",
       "replacement": [
-        "tests2/browser/daily/crash-restart.journey.spec.ts"
+        "tests2/browser/e2e/crash-restart.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -3276,7 +3276,7 @@
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/gate-status-cross-surface.spec.ts:153 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/gate-status-cross-surface.spec.ts"
+      "v2Path": "tests2/browser/e2e/gate-status-cross-surface.spec.ts"
     },
     {
       "file": "tests/e2e/ui/git-status-untracked-race.spec.ts",
@@ -3742,29 +3742,29 @@
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/pr-walkthrough-pack.spec.ts:787 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/pr-walkthrough-pack.spec.ts"
+      "v2Path": "tests2/browser/e2e/pr-walkthrough-pack.spec.ts"
     },
     {
       "file": "tests/e2e/ui/extension-panel-ux.spec.ts",
       "bucket": "daily",
       "method": "adapter",
       "replacement": [
-        "tests2/browser/daily/extension-panel-ux.spec.ts"
+        "tests2/browser/e2e/extension-panel-ux.spec.ts"
       ],
       "rationale": "NEW in master #945. Full-gateway browser E2E (launcher-feedback persistence + fullscreen side-panel geometry via getBoundingClientRect) â€” needs Chromium real-browser fidelity; carried into the daily tier verbatim.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/extension-panel-ux.spec.ts"
+      "v2Path": "tests2/browser/e2e/extension-panel-ux.spec.ts"
     },
     {
       "file": "tests/e2e/ui/pr-walkthrough-trust-prompt.spec.ts",
       "bucket": "daily",
       "method": "adapter",
       "replacement": [
-        "tests2/browser/daily/pr-walkthrough-trust-prompt.spec.ts"
+        "tests2/browser/e2e/pr-walkthrough-trust-prompt.spec.ts"
       ],
       "rationale": "NEW in master #946. Full-gateway browser E2E (launch trust-prompt: real client launcher â†’ confirm â†’ PUT /api/preferences â†’ retry chain, run route stubbed via page.route) â€” needs Chromium; carried into the daily tier verbatim.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/pr-walkthrough-trust-prompt.spec.ts"
+      "v2Path": "tests2/browser/e2e/pr-walkthrough-trust-prompt.spec.ts"
     },
     {
       "file": "tests/e2e/ui/pre-compaction-history.spec.ts",
@@ -3775,7 +3775,7 @@
       ],
       "rationale": "Browser E2E uses IntersectionObserver at tests/e2e/ui/pre-compaction-history.spec.ts:258 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/pre-compaction-history.spec.ts"
+      "v2Path": "tests2/browser/e2e/pre-compaction-history.spec.ts"
     },
     {
       "file": "tests/e2e/ui/preparing-ux.spec.ts",
@@ -3783,7 +3783,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
-        "tests2/browser/daily/crash-restart.journey.spec.ts"
+        "tests2/browser/e2e/crash-restart.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -3889,7 +3889,7 @@
       ],
       "rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/proposal-inline-comments.spec.ts:343 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/proposal-inline-comments.spec.ts"
+      "v2Path": "tests2/browser/e2e/proposal-inline-comments.spec.ts"
     },
     {
       "file": "tests/e2e/ui/proposal-open-all-types.spec.ts",
@@ -4050,7 +4050,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
-        "tests2/browser/daily/crash-restart.journey.spec.ts"
+        "tests2/browser/e2e/crash-restart.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -4090,7 +4090,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-crash-restart.",
       "replacement": [
-        "tests2/browser/daily/crash-restart.journey.spec.ts"
+        "tests2/browser/e2e/crash-restart.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -4165,7 +4165,7 @@
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-actions-menu.spec.ts:77 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/sidebar-actions-menu.spec.ts"
+      "v2Path": "tests2/browser/e2e/sidebar-actions-menu.spec.ts"
     },
     {
       "file": "tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts",
@@ -4236,7 +4236,7 @@
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/sidebar-font-scale.spec.ts:161 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/sidebar-font-scale.spec.ts"
+      "v2Path": "tests2/browser/e2e/sidebar-font-scale.spec.ts"
     },
     {
       "file": "tests/e2e/ui/sidebar-goal-group-filters.spec.ts",
@@ -4571,7 +4571,7 @@
       ],
       "rationale": "Browser E2E uses getBoundingClientRect() at tests/e2e/ui/stories-navigation.spec.ts:38 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/stories-navigation.spec.ts"
+      "v2Path": "tests2/browser/e2e/stories-navigation.spec.ts"
     },
     {
       "file": "tests/e2e/ui/stories-projects.spec.ts",
@@ -4682,7 +4682,7 @@
       ],
       "rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/tail-chat-real-stream.spec.ts:62 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/tail-chat-real-stream.spec.ts"
+      "v2Path": "tests2/browser/e2e/tail-chat-real-stream.spec.ts"
     },
     {
       "file": "tests/e2e/ui/tail-chat-session-navigate.spec.ts",
@@ -4692,7 +4692,7 @@
         "tests2/browser/fixtures/tail-chat-session-navigate.spec.ts"
       ],
       "rationale": "Uses scroll geometry / browser-only behaviour - keep in Chromium fixture tier; copied to tests2/browser/fixtures/.",
-      "v2Path": "tests2/browser/daily/tail-chat-session-navigate.spec.ts",
+      "v2Path": "tests2/browser/e2e/tail-chat-session-navigate.spec.ts",
       "migrated": true
     },
     {
@@ -4714,7 +4714,7 @@
       ],
       "rationale": "Browser E2E uses scroll geometry at tests/e2e/ui/terminal-pack.spec.ts:224 â€” needs Chromium real-browser fidelity.",
       "migrated": true,
-      "v2Path": "tests2/browser/daily/terminal-pack.spec.ts"
+      "v2Path": "tests2/browser/e2e/terminal-pack.spec.ts"
     },
     {
       "file": "tests/e2e/ui/tool-ask-policy.spec.ts",
@@ -7132,7 +7132,7 @@
       "method": "adapter",
       "replacement": [],
       "rationale": "Browser fixture uses getBoundingClientRect() at tests/pr-walkthrough-panel-parity.spec.ts:482 â€” needs Chromium real-browser fidelity.",
-      "v2Path": "tests2/browser/daily/pr-walkthrough-panel-parity.spec.ts",
+      "v2Path": "tests2/browser/e2e/pr-walkthrough-panel-parity.spec.ts",
       "migrated": true
     },
     {

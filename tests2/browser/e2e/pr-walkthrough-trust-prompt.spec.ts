@@ -1,6 +1,6 @@
-// Migrated from tests/e2e/ui/pr-walkthrough-trust-prompt.spec.ts (v2 browser/daily tier).
+// Migrated from tests/e2e/ui/pr-walkthrough-trust-prompt.spec.ts (v2 browser/e2e tier).
 // Full-gateway browser E2E — carried over verbatim (relative harness/helper
-// specifiers resolve identically from tests2/browser/daily/).
+// specifiers resolve identically from tests2/browser/e2e/).
 /**
  * Browser E2E — PR Walkthrough LAUNCH trust prompt (design
  * docs/design/pr-walkthrough-gh-posting.md §4b). When a walkthrough launch resolves
