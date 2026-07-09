@@ -78,6 +78,46 @@ function readGroupPolicies(gp?: GroupPolicyProvider): Record<string, GrantPolicy
 
 /** Cached output of `computeEffectiveAllowedTools`. Keyed by a content hash of role/policy/tool inputs. */
 const allowedToolsCache = new Map<string, EffectiveTool[]>();
+const missingProviderWarningKeys = new Set<string>();
+const inactiveProviderDebugKeys = new Set<string>();
+
+interface InactiveToolContributionLike {
+	reason: string;
+	rootDir?: string;
+	filePath?: string;
+	groupDir?: string;
+}
+
+interface InactiveToolContributionProvider {
+	getInactiveToolContribution?: (name: string, scopedContext?: ScopedToolContext) => InactiveToolContributionLike | undefined;
+}
+
+function inactiveToolContribution(toolManager: ToolManager, name: string, scopedContext?: ScopedToolContext): InactiveToolContributionLike | undefined {
+	const fn = (toolManager as InactiveToolContributionProvider).getInactiveToolContribution;
+	if (typeof fn !== "function") return undefined;
+	try {
+		return fn.call(toolManager, name, scopedContext);
+	} catch {
+		return undefined;
+	}
+}
+
+function warnMissingProviderOnce(name: string, scopedContext?: ScopedToolContext): void {
+	const key = `${name.toLowerCase()}\0${scopedContext?.scopeKey ?? ""}`;
+	if (missingProviderWarningKeys.has(key)) return;
+	missingProviderWarningKeys.add(key);
+	const scope = scopedContext?.scopeKey ? `; scope=${scopedContext.scopeKey}` : "";
+	console.warn(`[tool-activation] Tool "${name}" has no provider in .bobbit/config/tools/<group>/*.yaml — skipping (reason=unknown-yaml-tool${scope})`);
+}
+
+function debugInactiveProviderSkipOnce(name: string, inactive: InactiveToolContributionLike, scopedContext?: ScopedToolContext): void {
+	const key = `${name.toLowerCase()}\0${inactive.reason}\0${scopedContext?.scopeKey ?? ""}`;
+	if (inactiveProviderDebugKeys.has(key)) return;
+	inactiveProviderDebugKeys.add(key);
+	const scope = scopedContext?.scopeKey ? `; scope=${scopedContext.scopeKey}` : "";
+	const location = inactive.filePath ? `; source=${inactive.filePath}` : inactive.rootDir ? `; root=${inactive.rootDir}` : "";
+	console.debug(`[tool-activation] Tool "${name}" is a known inactive pack contribution — skipping (reason=${inactive.reason}${scope}${location})`);
+}
 /** Cached output of `computeToolPolicies`. */
 const policiesCache = new Map<string, Record<string, ToolPolicyEntry>>();
 /** Cached result of `writeMcpProxyExtensions` — value must be validated via fs.existsSync before return. */
@@ -1234,7 +1274,12 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 			if (disabledTools && disabledTools.has(entry.name.toLowerCase())) continue;
 			const provider = providers.get(entry.name);
 			if (!provider) {
-				console.warn(`[tool-activation] Tool "${entry.name}" has no provider in .bobbit/config/tools/<group>/*.yaml — skipping`);
+				const inactive = inactiveToolContribution(toolManager, entry.name, scopedContext);
+				if (inactive) {
+					debugInactiveProviderSkipOnce(entry.name, inactive, scopedContext);
+					continue;
+				}
+				warnMissingProviderOnce(entry.name, scopedContext);
 				continue;
 			}
 			if (provider.type === "pi-extension") {
