@@ -20,6 +20,10 @@
   },
   "v2Native": [
     {
+      "path": "tests2/browser/journeys/cross-session-proposal-mirror.journey.spec.ts",
+      "reason": "Reproducing test for the 'Fix cross-session proposal panels' goal: from a NON-matching session (assistantType === null) a role/tool/staff proposal that reaches the panel through the UNIFIED remote.onProposal path alone (source 'seed'/'rehydrate'/'edit'/'restore'/switch-back — not the live tool-use scan that also fires the legacy per-type callback) leaves the legacy form-mirror (rolePreviewName…, toolPreviewName…, staffPreviewName…) empty, so the panel renders blank and its primary submit stays disabled/absent. Drives onProposal directly (same technique as tests2/browser/e2e/proposal-inline-comments.spec.ts) and asserts the mirror is populated + submit enabled. FAILS on HEAD (no role/tool/staff bridge in the unified callback, only goal is bridged), passes once the bridge is added."
+    },
+    {
       "path": "tests2/integration/direct-agent-admin-token.test.ts",
       "reason": "Pinning test for the 'Direct-agent admin token' interim rollback: non-sandboxed (direct) agents receive the gateway ADMIN token (readToken()) via scopedGatewayEnvForDirectAgent (createSession/createDelegateSession) and applyScopedGatewayCredentials (restore/revive/respawn), while the sandbox path (mintScopedGatewayToken) still produces a per-project SCOPED token distinct from the admin token. Also pins the loud-throw when no admin token is available (no silent fallback)."
     },
