@@ -35,7 +35,7 @@ const EXPECTED_OPS = {
 		"create_goal", "update_goal", "archive_goal", "create_session",
 		"terminate_session", "restart_session", "create_task", "update_task",
 		"transition_task", "assign_task", "signal_gate", "reset_gate",
-		"cancel_verification", "create_staff", "team_start", "team_teardown",
+		"cancel_verification", "create_staff", "delete_staff", "team_start", "team_teardown",
 	],
 	bobbit_admin: [
 		"update_project_config", "set_provider_key", "delete_provider_key",

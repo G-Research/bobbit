@@ -79,6 +79,13 @@ describe("bobbit_orchestrate — method, query & body building", () => {
 		expect(c.body).toEqual({ title: "x" });
 	});
 
+	it("delete_staff is DELETE with no body", async () => {
+		const c = await run("bobbit_orchestrate", { operation: "delete_staff", staffId: "staff-1" });
+		expect(c.method).toBe("DELETE");
+		expect(c.url).toBe("https://gw.test/api/staff/staff-1");
+		expect(c.body).toBeUndefined();
+	});
+
 	it("transition_task sends { state } in the body", async () => {
 		const c = await run("bobbit_orchestrate", { operation: "transition_task", taskId: "t1", state: "complete" });
 		expect(c.method).toBe("POST");
