@@ -174,10 +174,18 @@ test.describe("Copy session link button (UI)", () => {
 				`hash precedence load: HASH_PRECEDENCE_SESSION_URL must not canonicalize conflicting path session ${oldSessionId}`,
 			).not.toBe(`${base()}/#/session/${oldSessionId}`);
 
+			// Copy uses absoluteHashUrl (origin+pathname+search+#/session/<id>). Here the
+			// path entrypoint is intentionally NOT canonicalized, so the copied hash link
+			// retains the current pathname while targeting newSessionId — assert against
+			// the exact form the app builds from the live location.
+			const expectedCopy = await page.evaluate(
+				(id) => `${location.origin}${location.pathname}${location.search}#/session/${id}`,
+				newSessionId,
+			);
 			await clickCopySessionAction(page);
 			await expect(async () => {
 				const clip = await page.evaluate(() => navigator.clipboard.readText());
-				expect(clip).toBe(`${base()}/#/session/${newSessionId}`);
+				expect(clip).toBe(expectedCopy);
 			}).toPass({ timeout: 5_000 });
 		} finally {
 			await deleteSession(oldSessionId).catch(() => { /* best-effort */ });
