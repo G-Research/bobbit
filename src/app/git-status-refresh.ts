@@ -117,7 +117,7 @@ export interface QuietRefreshDeps<T = unknown> {
 	 */
 	applyOk(ai: GitWidgetLike, data: T): void;
 	/** Persistence hook — `setCachedRepoState(sessionId, state)`. */
-	onCache(state: "yes" | "no"): void;
+	onCache(state: "yes" | "no" | "hidden"): void;
 	/**
 	 * Unconditional teardown, run first inside the outer `finally` (before the
 	 * staleness guard and before loading is cleared) — e.g. abort-map cleanup.
@@ -140,7 +140,7 @@ function widgetHasShowableGitData(ai: GitWidgetLike): boolean {
 }
 
 function cacheHidden<T>(deps: QuietRefreshDeps<T>): void {
-	(deps.onCache as (state: "yes" | "no" | "hidden") => void)("hidden");
+	deps.onCache("hidden");
 }
 
 /**
