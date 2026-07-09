@@ -218,6 +218,13 @@ export type PackOrderMap = Partial<Record<PackOrderScope, string[]>>;
  *  by `listName` (the contents.entrypoints[] basename), so one toggle disables
  *  both the launcher id and the deep-link routeId derived from that file. */
 export interface DisabledRefs {
+	/**
+	 * Explicit-enable sentinel for ships-disabled-by-default packs
+	 * (`PackManifest.defaultDisabled`). `true` opts the pack IN; absent/false ⇒
+	 * the pack stays at its manifest default. For normal packs this is unused
+	 * (enabled = absence of a disable override). See `isPackEffectivelyEnabled`.
+	 */
+	enabled?: boolean;
 	roles?: string[];
 	tools?: string[];
 	skills?: string[];
@@ -262,6 +269,7 @@ function normalizePackOrder(raw: unknown): { value: PackOrderMap; ok: boolean } 
 function normalizeDisabledRefs(raw: unknown): DisabledRefs {
 	const out: DisabledRefs = {};
 	if (!isPlainObject(raw)) return out;
+	if (raw.enabled === true) out.enabled = true;
 	for (const kind of ACTIVATION_KINDS) {
 		const v = raw[kind];
 		if (!Array.isArray(v)) continue;
@@ -668,6 +676,7 @@ export class ProjectConfigStore {
 			const scopeOut: Record<string, DisabledRefs> = {};
 			for (const [packName, refs] of Object.entries(byPack)) {
 				const o: DisabledRefs = {};
+				if (refs.enabled === true) o.enabled = true;
 				for (const kind of ACTIVATION_KINDS) {
 					const arr = refs[kind];
 					if (Array.isArray(arr) && arr.length > 0) o[kind] = [...arr];
@@ -882,10 +891,12 @@ export class ProjectConfigStore {
 		const refs = this.packActivation[scope]?.[packName];
 		if (!refs) return {};
 		const out: DisabledRefs = {};
+		if (refs.enabled === true) out.enabled = true;
 		for (const kind of ACTIVATION_KINDS) {
 			const arr = refs[kind];
 			if (Array.isArray(arr) && arr.length > 0) out[kind] = [...arr];
 		}
+		if (refs.enabled === true) out.enabled = true;
 		const mcpOperations = normalizeMcpOperations(refs.mcpOperations);
 		if (mcpOperations) out.mcpOperations = mcpOperations;
 		return out;

@@ -344,6 +344,14 @@ async function handleToggleAllActivation(pack: InstalledPackWire, enable: boolea
 	const current = activationByPack.get(cacheKey);
 	if (!current) return;
 	const cat = current.catalogue;
+	// Ships-disabled-by-default packs (e.g. pr-walkthrough): the master toggle
+	// drives the explicit-enable sentinel. Enabling persists `{ enabled: true }`;
+	// disabling clears the override entirely so the pack falls back to default-OFF.
+	if (pack.manifest.defaultDisabled) {
+		const disabled: DisabledRefs = enable ? { enabled: true } : {};
+		await savePackActivation(pack, disabled, `activation:${cacheKey}:all`);
+		return;
+	}
 	const disabled: DisabledRefs = enable
 		? { roles: [], tools: [], skills: [], entrypoints: [], mcp: [], mcpOperations: current.disabled?.mcpOperations ?? {}, piExtensions: [] }
 		: {
@@ -1631,8 +1639,13 @@ function renderPackActivationSummary(pack: InstalledPackWire): TemplateResult {
 	const activation = activationByPack.get(`${pack.scope}:${pack.packName}`);
 	if (!activation || activationEntityTotal(activation) === 0) return html``;
 	const total = activationEntityTotal(activation);
-	const enabled = activationEntityEnabledCount(activation);
-	const label = enabled === total ? "Enabled" : enabled === 0 ? "Disabled" : "Partially enabled";
+	// Ships-disabled-by-default packs are ON iff the explicit-enable sentinel is
+	// stored; an empty override means default-OFF (not "all entities enabled").
+	const shipsDisabled = pack.manifest.defaultDisabled === true;
+	const packOn = shipsDisabled ? activation.disabled?.enabled === true : true;
+	const enabled = packOn ? activationEntityEnabledCount(activation) : 0;
+	const masterChecked = shipsDisabled ? packOn : enabled > 0;
+	const label = !packOn ? "Disabled" : enabled === total ? "Enabled" : enabled === 0 ? "Disabled" : "Partially enabled";
 	const cacheKey = `${pack.scope}:${pack.packName}`;
 	const busyKey = `activation:${cacheKey}:all`;
 	return html`
@@ -1642,7 +1655,7 @@ function renderPackActivationSummary(pack: InstalledPackWire): TemplateResult {
 				<input
 					type="checkbox"
 					data-testid="market-toggle-pack-${pack.packName}"
-					.checked=${enabled > 0}
+					.checked=${masterChecked}
 					?disabled=${busy.has(busyKey)}
 					@change=${(e: Event) => handleToggleAllActivation(pack, (e.target as HTMLInputElement).checked)}
 				/>

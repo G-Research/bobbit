@@ -17,7 +17,7 @@ import type { ProjectContextManager } from "./project-context-manager.js";
 import type { LoadedEntity, PackEntry, PackScope, ResolvedEntity } from "./pack-types.js";
 import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
-import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./builtin-packs.js";
+import { builtinFirstPartyPackEntries, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 
 /**
@@ -70,7 +70,7 @@ export interface PackActivationProvider {
 		scope: "server" | "global-user" | "project",
 		projectId: string | undefined,
 		packName: string,
-	): { roles?: string[]; tools?: string[]; skills?: string[]; entrypoints?: string[] };
+	): { roles?: string[]; tools?: string[]; skills?: string[]; entrypoints?: string[]; enabled?: boolean };
 }
 
 export interface ResolvedPolicy {
@@ -444,6 +444,9 @@ export class ConfigCascade {
 				const scope = entry.scope;
 				if (scope !== "server" && scope !== "global-user" && scope !== "project") return true;
 				const disabled = provider.disabled(scope, projectId, entry.manifest.name);
+				// Ships-disabled-by-default packs (built-in band) contribute NOTHING
+				// until explicitly enabled — drop every entity (design option (a)).
+				if (!isPackEffectivelyEnabled(entry.manifest, disabled)) return false;
 				const list = disabled[t];
 				return !list || !list.includes(name);
 			}
