@@ -244,10 +244,16 @@ function acquireLock(timeoutMs) {
 			writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
 			return fd;
 		} catch (e) {
-			if (e.code !== "EEXIST") throw e;
+			// Lock contention. On POSIX the loser sees EEXIST. On Windows, an
+			// O_EXCL create against a lock file that a concurrent holder is
+			// deleting/creating surfaces as EPERM/EACCES (delete-pending state)
+			// rather than EEXIST — treat all three as "contended, retry" so a
+			// busy shared ledger backs off + steals instead of hard-throwing.
+			const contended = e.code === "EEXIST" || e.code === "EPERM" || e.code === "EACCES";
+			if (!contended) throw e;
 			tryStealStaleLock();
 			if (Date.now() > deadline) {
-				throw new Error(`ledger: could not acquire lock within ${timeoutMs}ms`);
+				throw new Error(`ledger: could not acquire lock within ${timeoutMs}ms (last error: ${e.code})`);
 			}
 			sleepSync(jitter(50));
 		}
