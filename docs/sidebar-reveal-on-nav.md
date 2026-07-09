@@ -34,16 +34,58 @@ two navigation models stay independent.
 
 Given a session or goal route, `revealSidebarTargetForRoute(route)`:
 
-1. Resolves the target's canonical [sidebar-tree key](sidebar-tree-state.md#canonical-keys)
-   (`session:<id>` → `{ kind: "session", sessionId }`; goal / goal-dashboard →
-   `{ kind: "goal", goalId }`). Non-session/goal routes are a no-op.
-2. Looks the node up in the tree model and walks its `parentKey` chain,
-   expanding each ancestor so the target row will render. For a session this
-   covers its project, the relevant section header (ungrouped sessions / staff /
-   archived), any parent-session child groups, and every ancestor goal in the
-   nesting chain. For a goal it covers the project and the full `parentGoalId`
-   chain up to the top-level goal.
+1. Resolves the route (`targetForRoute`) to a DOM `navId` plus an **ordered set
+   of ancestor resolvers**. A goal / goal-dashboard route has a single resolver:
+   the `goal/<id>` node walk. A session route has three (see
+   [Three session row kinds](#three-session-row-kinds-one-navid) below).
+   Non-session/goal routes are a no-op.
+2. Runs the resolvers in order and takes the **first non-null result** — the
+   list of ancestor node-keys to expand ephemerally so the target row renders.
+   A goal covers its project and the full `parentGoalId` chain; a session covers
+   its project, the relevant section header, any parent-session child groups,
+   and every ancestor goal in the nesting chain (or, for staff, just the project
+   + staff section).
 3. Scrolls the target row into view once it exists in the DOM.
+
+### Three session row kinds, one navId
+
+Every session row carries `data-nav-id="session:<id>"`, so a single
+`#/session/<id>` route can point at three structurally different rows. This is
+why session-route resolution is an ordered set of resolvers rather than one
+lookup — the DOM tag is uniform but the *tree shape* behind it is not:
+
+| Row kind | Tree representation | Resolver |
+|---|---|---|
+| Team members, delegates, LLM-review / QA verifiers, first-class children, archived sessions | `session/<id>` node | `ancestorsOf(model, session/<id>)` |
+| **Team-lead** sessions | `team-lead/<id>` node — **no** `session/<id>` node exists for a lead | `ancestorsOf(model, team-lead/<id>)` |
+| **Staff** sessions | **no tree node at all** — excluded from the tree, rendered only under the `project-staff` section | `resolveStaffAncestors(sessionId)` |
+
+- **Team-lead** rows exist because `appendTeamLeadNode` in
+  [`sidebar-tree-builder.ts`](../src/app/sidebar-tree-builder.ts) builds the lead
+  as a `{ kind: "team-lead", sessionId }` node, and its DOM row uses
+  `tlNavId = session:<id>` (see [`render-helpers.ts`](../src/app/render-helpers.ts)).
+  So the scroll `navId` already matched, but the model lookup missed: there is
+  no `session/<id>` node to find. The second resolver walks the `team-lead/<id>`
+  key instead — same `ancestorsOf` walk, different starting key.
+- **Staff** rows exist because the staff agent's `currentSessionId` is filtered
+  out of the tree via `liveSessionsNoStaff` in
+  [`sidebar.ts`](../src/app/sidebar.ts); the row is emitted only under the
+  `project-staff` section (`staffSessionNavId`, also `session:<id>`). There is
+  no node to walk at all, so `resolveStaffAncestors` maps the session id → the
+  `state.staffList` entry whose `currentSessionId` matches → the entry's
+  `project` + `project-staff` section keys directly.
+
+The resolvers run first-non-null-wins in `attemptReveal`: a real session node
+resolves case 1, a lead falls through to case 2, a staff session falls through
+to case 3, and a not-yet-loaded target returns null from all three and is
+retried (see [Async deep-link retry](#async-deep-link-retry)). If it is none of
+them — e.g. an unknown id — the reveal no-ops gracefully.
+
+The original reveal-on-nav PR (#948) shipped only the case-1 lookup, so it was
+verified against member rows and passed review/QA — but team-lead and staff
+navigations silently no-op'd (the single-key lookup returned `undefined`,
+`attemptReveal` exhausted its retries, and no ancestor ever expanded). The
+ordered-resolver form closes both gaps without changing the member path.
 
 ## Design decisions (the WHY)
 
@@ -67,9 +109,13 @@ reload. See
 [Expansion defaults and persistence](sidebar-tree-state.md#expansion-defaults-and-persistence)
 for why explicit-vs-ephemeral is the mechanism that keeps user intent durable.
 
-Only ancestors of the target are walked — the `parentKey` chain, guarded by a
-`seen` set against any pathological cycle. Unrelated collapsed nodes stay
-collapsed.
+Only ancestors of the target are walked — the `parentKey` chain (`ancestorsOf`),
+guarded by a `seen` set against any pathological cycle. Unrelated collapsed
+nodes stay collapsed. For the staff row the "ancestors" are the `project` +
+`project-staff` keys returned directly by `resolveStaffAncestors` (there is no
+node to walk), but they are expanded through the identical
+`expandSidebarTreeNode(key, { explicit: false })` path, so the non-destructive
+contract holds regardless of row kind.
 
 ### Exactly once per navigation — the `revealToken`
 
@@ -148,19 +194,28 @@ scroll would produce visible thrash.
 ## Internals — file map
 
 - [`src/app/sidebar-reveal.ts`](../src/app/sidebar-reveal.ts) —
-  `revealSidebarTargetForRoute` (public entry), `targetForRoute`,
-  `attemptReveal`, `attemptScroll`, `navRowForId`, and the `revealToken` /
-  `pending` state.
+  `revealSidebarTargetForRoute` (public entry), `targetForRoute` (builds the
+  ordered resolver set per route), `ancestorsOf` (the `parentKey` walk),
+  `resolveStaffAncestors` (the staff-row fallback), `attemptReveal`,
+  `attemptScroll`, `navRowForId`, and the `revealToken` / `pending` state.
 - [`src/app/main.ts`](../src/app/main.ts) — invokes the reveal from each
   session / goal / goal-dashboard branch of `handleHashChange` (including the
   already-connected early return) and from the cold-start deep-link boot block
   in `initApp`.
 - [`src/app/sidebar.ts`](../src/app/sidebar.ts) — exports
   `buildSidebarTreeModel` (the pre-search-filter model); rendering via
-  `buildDesktopSidebarTree` is unchanged.
+  `buildDesktopSidebarTree` is unchanged. Owns `liveSessionsNoStaff` (which
+  excludes staff sessions from the tree) and `staffSessionNavId` (the
+  `session:<id>` tag on the staff row under `project-staff`).
+- [`src/app/sidebar-tree-builder.ts`](../src/app/sidebar-tree-builder.ts) —
+  `appendTeamLeadNode` / `makeNode({ kind: "team-lead", sessionId })`, why a
+  lead is a `team-lead/<id>` node rather than a `session/<id>` node.
+- [`src/app/render-helpers.ts`](../src/app/render-helpers.ts) — `tlNavId`, the
+  `session:<id>` `data-nav-id` on the team-lead row.
 - [`src/app/sidebar-tree-state.ts`](../src/app/sidebar-tree-state.ts) —
   `expandSidebarTreeNode(key, { explicit: false })`, the ephemeral expansion
   path.
-- [`tests/e2e/ui/sidebar-reveal.spec.ts`](../tests/e2e/ui/sidebar-reveal.spec.ts)
+- [`tests2/browser/fixtures/sidebar-reveal.spec.ts`](../tests2/browser/fixtures/sidebar-reveal.spec.ts)
   — deep-link session and sub-goal reveal, in-app off-screen scroll vs
-  no-jump-when-visible, and the ephemeral-collapse contract.
+  no-jump-when-visible, the ephemeral-collapse contract, and the team-lead +
+  staff regression tests for the ordered-resolver fix.
