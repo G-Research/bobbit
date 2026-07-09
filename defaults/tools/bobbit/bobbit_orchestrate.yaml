@@ -5,10 +5,10 @@ params: [operation, goalId?, sessionId?, taskId?, gateId?, projectId?, title?, t
 provider:
   type: bobbit-extension
   extension: extension.ts
-group: BobbitOrchestrate
+group: Bobbit
 grantPolicy: never
 docs: |-
-  Gateway-wide runtime mutations addressed by explicit id (create/update/archive goals, sessions, tasks, gates, staff, team lifecycle). Hidden unless a role/project/user policy enables the `BobbitOrchestrate` group. Complements the current-goal `task_*`/`gate_*`/`team_*` tools — it does not replace them.
+  Gateway-wide runtime mutations addressed by explicit id (create/update/archive goals, sessions, tasks, gates, staff, team lifecycle). Hidden unless a role/project/user policy enables the `Bobbit` group. Complements the current-goal `task_*`/`gate_*`/`team_*` tools — it does not replace them.
 detail_docs: >-
   ## Purpose
 
@@ -19,7 +19,7 @@ detail_docs: >-
 
 
   `grantPolicy: never` — this tool is registered but hidden unless a role,
-  project, or user tool-group policy enables the `BobbitOrchestrate` group.
+  project, or user tool-group policy enables the `Bobbit` group.
 
 
   ## Parameters

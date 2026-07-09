@@ -4,6 +4,12 @@ accessory: none
 toolPolicies:
   Gates: ask
   Tasks: ask
+  # Bobbit gateway tiers. bobbit_orchestrate/bobbit_admin default to
+  # grantPolicy: never (see defaults/tools/bobbit/*.yaml); these per-tool
+  # role grants beat that default (resolveGrantPolicy step 1 > step 5).
+  # general is the only role granted bobbit_admin, and only behind `ask`.
+  bobbit_orchestrate: allow
+  bobbit_admin: ask
 createdAt: 0
 updatedAt: 1775083871266
 promptTemplate: ""

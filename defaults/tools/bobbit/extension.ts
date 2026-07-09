@@ -5,9 +5,12 @@
  * drive the server without hand-rolling `curl`, resolving the gateway URL, or
  * hunting for the auth token:
  *
- *   - `bobbit_read`        (group BobbitRead,        grantPolicy allow) — GET-only introspection
- *   - `bobbit_orchestrate` (group BobbitOrchestrate, grantPolicy never) — runtime state mutations
- *   - `bobbit_admin`       (group BobbitAdmin,        grantPolicy never) — config + destructive maintenance
+ *   - `bobbit_read`        (group Bobbit, grantPolicy allow) — GET-only introspection
+ *   - `bobbit_orchestrate` (group Bobbit, grantPolicy never) — runtime state mutations
+ *   - `bobbit_admin`       (group Bobbit, grantPolicy never) — config + destructive maintenance
+ *
+ * All three share the single `Bobbit` tool-group; tier separation is enforced
+ * purely by each tool's grantPolicy (allow/never/never).
  *
  * Unlike `tasks`/`team`, this is a NORMAL built-in tool group: it does NOT gate
  * on BOBBIT_SESSION_ID / BOBBIT_GOAL_ID. It registers purely on gateway

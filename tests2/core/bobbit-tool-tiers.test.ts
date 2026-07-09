@@ -47,9 +47,9 @@ const EXPECTED_OPS = {
 } as const;
 
 const EXPECTED_TIERS: Record<string, { group: string; grantPolicy: string; file: string }> = {
-	bobbit_read: { group: "BobbitRead", grantPolicy: "allow", file: "bobbit_read.yaml" },
-	bobbit_orchestrate: { group: "BobbitOrchestrate", grantPolicy: "never", file: "bobbit_orchestrate.yaml" },
-	bobbit_admin: { group: "BobbitAdmin", grantPolicy: "never", file: "bobbit_admin.yaml" },
+	bobbit_read: { group: "Bobbit", grantPolicy: "allow", file: "bobbit_read.yaml" },
+	bobbit_orchestrate: { group: "Bobbit", grantPolicy: "never", file: "bobbit_orchestrate.yaml" },
+	bobbit_admin: { group: "Bobbit", grantPolicy: "never", file: "bobbit_admin.yaml" },
 };
 
 function yamlField(raw: string, key: string): string | undefined {
