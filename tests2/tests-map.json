@@ -77,7 +77,7 @@
     },
     {
       "path": "tests2/core/support-assistant.test.ts",
-      "reason": "Support assistant backend wiring: getAssistantDef('support') registered; defaults/roles/support.yaml loads with accessory headset + bobbit tier policies (orchestrate allow, admin ask); SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction; assistantRoleForType maps support->support else assistant."
+      "reason": "Support assistant backend wiring: getAssistantDef('support') registered; defaults/roles/support.yaml loads with accessory headset + support policies (orchestrate allow, admin ask, session_prompt allow); SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction; assistantRoleForType maps support->support else assistant."
     },
     {
       "path": "tests2/core/support-packaging.test.ts",
