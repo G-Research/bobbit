@@ -58,7 +58,7 @@ const BUILTINS_DIR = resolve(REPO_ROOT, "defaults");
 // exactly, so the v2 tools/roles cascade matches legacy. Keep this list in
 // sync with scripts/copy-builtin-packs.mjs::FIRST_PARTY_PACKS.
 const BUILTIN_PACKS_SRC = resolve(REPO_ROOT, "market-packs");
-const FIRST_PARTY_PACKS = ["pr-walkthrough", "hindsight", "terminal"] as const;
+const FIRST_PARTY_PACKS = ["pr-walkthrough", "terminal"] as const;
 const BUILTIN_PACK_SKIP_DIRS = new Set(["src", "node_modules"]);
 const MOCK_BRIDGE_SPECIFIER = new URL("../../tests/e2e/in-process-mock-bridge.mjs", import.meta.url).href;
 
