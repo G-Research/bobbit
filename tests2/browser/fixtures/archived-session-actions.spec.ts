@@ -220,7 +220,7 @@ test.describe("archived session actions", () => {
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? null), { message: "archived sidebar hamburger must not select the row" }).toBe(selectedBefore);
 
 		await menuItem(page, "copy-link").click();
-		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe(`${base()}/session/${archivedId}`);
+		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe(`${base()}/#/session/${archivedId}`);
 		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "copy link must not navigate" }).toBe(hashBefore);
 		await closePopover(page);
 
@@ -228,7 +228,7 @@ test.describe("archived session actions", () => {
 		await openArchivedSidebarMenu(page, archivedId);
 		await menuItem(page, "open-new-window").click();
 		await expect.poll(() => page.evaluate(() => (window as any).__opened), { timeout: 5_000 }).toEqual([
-			{ url: `${base()}/session/${archivedId}`, target: "_blank", features: "noopener" },
+			{ url: `${base()}/#/session/${archivedId}`, target: "_blank", features: "noopener" },
 		]);
 		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "open in new window must not navigate in-place" }).toBe(hashBefore);
 		await closePopover(page);

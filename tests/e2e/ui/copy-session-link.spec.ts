@@ -3,8 +3,8 @@
  *
  * Covers the project's hard E2E rule (AGENTS.md):
  *   1. Navigation — open the app, create a session, button visible.
- *   2. Happy path — click → clipboard contains `${origin}/session/<id>`,
- *      and the header-toast ("Link copied") appears.
+ *   2. Happy path — click → clipboard contains `${origin}/#/session/<id>`
+ *      (the hash form), and the header-toast ("Link copied") appears.
  *   3. Persistence across reload — after page.reload() the button is still
  *      present and click still copies.
  */
@@ -74,8 +74,9 @@ test.describe("Copy session link button (UI)", () => {
 
 			// Click and verify clipboard.
 			await clickCopySessionAction(page);
+			// Session links use the hash form (absoluteHashUrl): origin+pathname+search+#/session/<id>.
 			const expectedUrl = await page.evaluate(
-				(id) => `${location.origin}/session/${id}`,
+				(id) => `${location.origin}${location.pathname}${location.search}#/session/${id}`,
 				sessionId,
 			);
 			await expect(async () => {
@@ -122,7 +123,7 @@ test.describe("Copy session link button (UI)", () => {
 		}
 	});
 
-	test("copied path-style session link opens in a fresh full-page load", async ({ page, browser }) => {
+	test("copied session link opens in a fresh full-page load", async ({ page, browser }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		const freshContext = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
@@ -135,10 +136,12 @@ test.describe("Copy session link button (UI)", () => {
 			await expectCopyActionReachable(page);
 			await clickCopySessionAction(page);
 			const copiedUrl = await page.evaluate(() => navigator.clipboard.readText());
-			expect(copiedUrl, "copy action should produce the path-style session URL being fixed").toBe(`${base()}/session/${sessionId}`);
+			expect(copiedUrl, "copy action should produce the hash-style session URL").toBe(`${base()}/#/session/${sessionId}`);
 
+			// The copied link is the hash form; inject the auth token BEFORE the
+			// fragment — a query string after '#' would be swallowed into the hash.
 			const token = await readE2ETokenAsync();
-			await freshPage.goto(`${copiedUrl}?token=${encodeURIComponent(token)}`);
+			await freshPage.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sessionId}`);
 			await expectSessionComposer(freshPage, sessionId, "copied path link fresh load");
 			await expectCanonicalSessionHashUrl(freshPage, sessionId, "copied path link fresh load");
 		} finally {
@@ -174,7 +177,7 @@ test.describe("Copy session link button (UI)", () => {
 			await clickCopySessionAction(page);
 			await expect(async () => {
 				const clip = await page.evaluate(() => navigator.clipboard.readText());
-				expect(clip).toBe(`${base()}/session/${newSessionId}`);
+				expect(clip).toBe(`${base()}/#/session/${newSessionId}`);
 			}).toPass({ timeout: 5_000 });
 		} finally {
 			await deleteSession(oldSessionId).catch(() => { /* best-effort */ });
