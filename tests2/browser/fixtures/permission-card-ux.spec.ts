@@ -7,6 +7,8 @@ const ENTRY = path.resolve("tests/fixtures/permission-card-ux-entry.ts");
 const BUNDLE = path.resolve("tests/fixtures/permission-card-ux-bundle.js");
 const PAGE = `file://${FIXTURE}`;
 const AGENT_INTERFACE_SRC = path.resolve("src/ui/components/AgentInterface.ts");
+const MESSAGE_LIST_SRC = path.resolve("src/ui/components/MessageList.ts");
+const MESSAGES_SRC = path.resolve("src/ui/components/Messages.ts");
 const TOOL_PERMISSION_CARD_SRC = path.resolve("src/ui/components/ToolPermissionCard.ts");
 
 const PINNED_SEL = "[data-permission-pinned], [data-pinned-permission-controls], .pinned-permission-controls";
@@ -16,7 +18,7 @@ test.beforeAll(() => {
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
-		deps: [ENTRY, AGENT_INTERFACE_SRC, TOOL_PERMISSION_CARD_SRC],
+		deps: [ENTRY, AGENT_INTERFACE_SRC, MESSAGE_LIST_SRC, MESSAGES_SRC, TOOL_PERMISSION_CARD_SRC],
 	});
 });
 
