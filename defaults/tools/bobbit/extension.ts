@@ -230,6 +230,11 @@ const ORCH_OPS: Record<string, OpSpec> = {
 		buildBody: (p) => ({ name: p.name, systemPrompt: p.systemPrompt, ...(p.body ?? {}) }),
 		required: ["name", "systemPrompt"],
 	},
+	delete_staff: {
+		method: "DELETE",
+		buildPath: (p) => `/api/staff/${encodeURIComponent(p.staffId)}`,
+		required: ["staffId"],
+	},
 	team_start: { method: "POST", buildPath: (p) => `/api/goals/${p.goalId}/team/start`, required: ["goalId"] },
 	team_teardown: {
 		method: "POST",
@@ -452,6 +457,7 @@ export default function (pi: ExtensionAPI) {
 			type: Type.Optional(Type.String({ description: "Task type for create_task." })),
 			state: Type.Optional(Type.String({ description: "Target task state for transition_task." })),
 			name: Type.Optional(Type.String({ description: "Staff name for create_staff." })),
+			staffId: Type.Optional(Type.String({ description: "Staff id for delete_staff." })),
 			systemPrompt: Type.Optional(Type.String({ description: "System prompt for create_staff." })),
 			cascade: Type.Optional(Type.Boolean({ description: "Cascade to descendants (archive/teardown)." })),
 			mergedManually: Type.Optional(Type.Boolean({ description: "archive_goal: mark merged manually." })),
