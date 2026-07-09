@@ -29,13 +29,16 @@ import { fileURLToPath } from "node:url";
 
 const { computeToolActivationArgs } = await import("../../src/server/agent/tool-activation.ts");
 const { ToolManager } = await import("../../src/server/agent/tool-manager.ts");
+const { buildMarketToolRootsForProject } = await import("../../src/server/server.ts");
+const { builtinFirstPartyPackEntries, isPackEffectivelyEnabled } = await import("../../src/server/agent/builtin-packs.ts");
 import type { ToolProvider } from "../../src/server/agent/tool-manager.ts";
 
 type ProviderWithGroup = ToolProvider & { groupDir: string; baseDir: string };
 const MOCK_TOOLS_DIR = "/mock/tools";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, "..", "..");
-const PR_WALKTHROUGH_TOOLS_DIR = path.join(REPO_ROOT, "market-packs", "pr-walkthrough", "tools");
+const REPO_MARKET_PACKS_DIR = path.join(REPO_ROOT, "market-packs");
+const PR_WALKTHROUGH_TOOLS_DIR = path.join(REPO_MARKET_PACKS_DIR, "pr-walkthrough", "tools");
 const PR_WALKTHROUGH_TOOL_NAMES = [
 	"readonly_bash",
 	"read_pr_walkthrough_bundle",
@@ -65,19 +68,30 @@ function providersWithoutMcpMeta(): Map<string, ProviderWithGroup> {
 	]);
 }
 
-function prWalkthroughToolsInactiveManager() {
+function prWalkthroughDefaultDisabledManager() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "tool-activation-prw-inactive-"));
 	const configDir = path.join(root, "config");
 	const builtinToolsDir = path.join(root, "builtin-tools");
 	fs.mkdirSync(path.join(configDir, "tools"), { recursive: true });
 	fs.mkdirSync(builtinToolsDir, { recursive: true });
 
+	const builtinEntries = builtinFirstPartyPackEntries(REPO_MARKET_PACKS_DIR);
+	const roots = buildMarketToolRootsForProject({
+		builtinEntries: builtinEntries.filter((entry) =>
+			isPackEffectivelyEnabled(entry.manifest, undefined),
+		),
+		inactiveBuiltinEntries: builtinEntries.filter((entry) =>
+			!isPackEffectivelyEnabled(entry.manifest, undefined),
+		),
+		marketEntries: () => [],
+		disabledTools: () => undefined,
+	});
+
 	const tm = new ToolManager(configDir, builtinToolsDir);
-	tm.setMarketToolRootsProvider(() => [
-		{ dir: PR_WALKTHROUGH_TOOLS_DIR, disabledTools: [...PR_WALKTHROUGH_TOOL_NAMES] },
-	]);
+	tm.setMarketToolRootsProvider(() => roots);
 	return {
 		tm,
+		roots,
 		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
 	};
 }
@@ -158,8 +172,15 @@ describe("computeToolActivationArgs — MCP meta-tool warn suppression", () => {
 });
 
 describe("computeToolActivationArgs — inactive PR Walkthrough tool warn suppression", () => {
-	it("does not emit repeated missing-provider warnings for known inactive PR Walkthrough tools", () => {
-		const { tm, cleanup } = prWalkthroughToolsInactiveManager();
+	it("does not emit repeated missing-provider warnings for default-disabled built-in PR Walkthrough tools", () => {
+		const { tm, roots, cleanup } = prWalkthroughDefaultDisabledManager();
+		assert.ok(
+			roots.some((root) => path.resolve(root.dir) === path.resolve(PR_WALKTHROUGH_TOOLS_DIR) && root.inactiveReason === "disabled-market-pack"),
+			"fixture must mirror production: default-disabled built-in pack is an inactive root, not a disabledTools root",
+		);
+		for (const name of PR_WALKTHROUGH_TOOL_NAMES) {
+			assert.equal(tm.getToolProviders().has(name), false, `${name} must not be registered as an active provider`);
+		}
 		const cap = captureWarn();
 		try {
 			const allowed = PR_WALKTHROUGH_TOOL_NAMES.map((name) => ({ kind: "yaml" as const, name }));
@@ -182,7 +203,7 @@ describe("computeToolActivationArgs — inactive PR Walkthrough tool warn suppre
 	});
 
 	it("dedupes missing-provider warnings for genuinely unknown YAML tool typos", () => {
-		const { tm, cleanup } = prWalkthroughToolsInactiveManager();
+		const { tm, cleanup } = prWalkthroughDefaultDisabledManager();
 		const cap = captureWarn();
 		const unknownTool = "totally_bogus_prw_activation_typo";
 		try {

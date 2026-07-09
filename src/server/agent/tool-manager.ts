@@ -61,10 +61,12 @@ export interface PiExtensionExternalTool {
 export interface MarketToolRoot {
 	dir: string;
 	disabledTools?: string[];
+	/** Whole-pack inactive root: known contributions, but never active providers. */
+	inactiveReason?: "disabled-market-pack";
 }
 
 export interface InactiveToolContribution {
-	reason: "disabled-market-pack-tool";
+	reason: "disabled-market-pack-tool" | "disabled-market-pack";
 	toolName: string;
 	rootDir: string;
 	filePath: string;
@@ -415,6 +417,9 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 	const layers: Array<{ dir: string; isBuiltin: boolean; disabledTools?: Set<string> }> = [];
 	if (builtinToolsDir) layers.push({ dir: builtinToolsDir, isBuiltin: true });
 	for (const r of marketRoots) {
+		// Whole inactive/default-disabled packs remain classified for diagnostics via
+		// getInactiveToolContribution(), but must not register any active providers.
+		if (r.inactiveReason) continue;
 		layers.push({
 			dir: r.dir,
 			isBuiltin: false,
@@ -569,10 +574,19 @@ export class ToolManager {
 	getInactiveToolContribution(name: string, _scopedContext?: ScopedToolContext): InactiveToolContribution | undefined {
 		const target = name.toLowerCase();
 		for (const root of this.marketRoots()) {
-			const disabledTools = root.disabledTools ?? [];
-			if (!disabledTools.some((toolName) => toolName.toLowerCase() === target)) continue;
 			const tool = scanToolsDirCached(root.dir, root.dir).find((entry) => entry.name.toLowerCase() === target);
 			if (!tool) continue;
+			if (root.inactiveReason) {
+				return {
+					reason: root.inactiveReason,
+					toolName: tool.name,
+					rootDir: root.dir,
+					filePath: tool.filePath,
+					groupDir: tool.groupDir,
+				};
+			}
+			const disabledTools = root.disabledTools ?? [];
+			if (!disabledTools.some((toolName) => toolName.toLowerCase() === target)) continue;
 			return {
 				reason: "disabled-market-pack-tool",
 				toolName: tool.name,

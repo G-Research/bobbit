@@ -559,7 +559,7 @@ import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
-import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
@@ -713,19 +713,29 @@ export function readConcretePackToolsFromGroups(
 export function buildMarketToolRootsForProject(options: {
 	projectId?: string;
 	builtinEntries: readonly PackEntry[];
+	/** Raw built-in entries filtered out of active contribution resolution. */
+	inactiveBuiltinEntries?: readonly PackEntry[];
 	marketEntries: (scope: InstallScope, projectId?: string) => readonly PackEntry[];
 	disabledTools: (scope: InstallScope, projectId: string | undefined, packName: string) => readonly string[] | undefined;
 }): MarketToolRoot[] {
 	const roots: MarketToolRoot[] = [];
-	const seen = new Set<string>();
+	const seenActive = new Set<string>();
+	const seenInactive = new Set<string>();
 	const push = (entry: PackEntry, activationScope: InstallScope): void => {
 		const toolsDir = path.join(entry.path, "tools");
 		const key = path.resolve(toolsDir);
-		if (seen.has(key)) return;
-		seen.add(key);
+		if (seenActive.has(key)) return;
+		seenActive.add(key);
 		const packName = entry.manifest?.name;
 		const disabledTools = packName ? options.disabledTools(activationScope, options.projectId, packName) : undefined;
 		roots.push({ dir: toolsDir, disabledTools: disabledTools ? [...disabledTools] : undefined });
+	};
+	const pushInactiveBuiltin = (entry: PackEntry): void => {
+		const toolsDir = path.join(entry.path, "tools");
+		const key = path.resolve(toolsDir);
+		if (seenActive.has(key) || seenInactive.has(key)) return;
+		seenInactive.add(key);
+		roots.push({ dir: toolsDir, inactiveReason: "disabled-market-pack" });
 	};
 
 	// Built-in first-party packs are toggleable at server scope and sit below all
@@ -734,6 +744,7 @@ export function buildMarketToolRootsForProject(options: {
 	for (const scope of ["server", "global-user", "project"] as const) {
 		for (const entry of options.marketEntries(scope, options.projectId)) push(entry, scope);
 	}
+	for (const entry of options.inactiveBuiltinEntries ?? []) pushInactiveBuiltin(entry);
 	return roots;
 }
 
@@ -2137,13 +2148,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// cascade reads (defined just below; referenced lazily at request time).
 	const marketToolRoots = (projectId?: string): MarketToolRoot[] => {
 		const effectiveProjectId = normalizeConfigProjectId(projectId);
+		const builtinPacksDir = resolveBuiltinPacksDir(config.builtinPacksDir);
+		const activationForBuiltin = (packName: string) =>
+			packActivationStore(BUILTIN_PACK_SCOPE, undefined)?.getPackActivation(BUILTIN_PACK_SCOPE, packName);
+		const builtinEntries = builtinFirstPartyPackEntries(builtinPacksDir);
 		return buildMarketToolRootsForProject({
 			projectId: effectiveProjectId,
 			// Built-in band feeds CONTRIBUTION resolution — drop ships-disabled packs
 			// (e.g. pr-walkthrough default-OFF) so their tool groups never resolve.
-			builtinEntries: activeBuiltinFirstPartyPackEntries(
-				resolveBuiltinPacksDir(config.builtinPacksDir),
-				(packName) => packActivationStore(BUILTIN_PACK_SCOPE, undefined)?.getPackActivation(BUILTIN_PACK_SCOPE, packName),
+			builtinEntries: builtinEntries.filter((entry) =>
+				isPackEffectivelyEnabled(entry.manifest, entry.manifest ? activationForBuiltin(entry.manifest.name) : undefined),
+			),
+			// Keep whole disabled/default-off pack roots classified for quiet activation
+			// diagnostics, without registering any contained tools as active providers.
+			inactiveBuiltinEntries: builtinEntries.filter((entry) =>
+				!isPackEffectivelyEnabled(entry.manifest, entry.manifest ? activationForBuiltin(entry.manifest.name) : undefined),
 			),
 			marketEntries: (scope, pid) => marketPackProvider.marketEntries(scope, pid),
 			disabledTools: (scope, pid, packName) => packActivationStore(scope, pid)?.getPackActivation(scope, packName).tools,
