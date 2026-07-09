@@ -49,6 +49,30 @@ async function centerX(loc: import("@playwright/test").Locator): Promise<number>
 	return box.x + box.width / 2;
 }
 
+async function centerY(loc: import("@playwright/test").Locator): Promise<number> {
+	const box = await loc.boundingBox();
+	if (!box) throw new Error("element has no bounding box");
+	return box.y + box.height / 2;
+}
+
+async function expectDesktopSidebarHeaderActionsAligned(page: Page): Promise<void> {
+	const buttons = page.locator(".sidebar-header-actions button");
+	await expect(buttons).toHaveCount(4);
+	const centers = await Promise.all([0, 1, 2, 3].map(async (index) => ({
+		x: await centerX(buttons.nth(index)),
+		y: await centerY(buttons.nth(index)),
+	})));
+	for (let i = 1; i < centers.length; i++) {
+		expect(centers[i].x, "sidebar header actions should be ordered horizontally").toBeGreaterThan(centers[i - 1].x);
+		expect(Math.abs(centers[i].y - centers[0].y), "sidebar header actions should be vertically aligned").toBeLessThanOrEqual(1);
+	}
+	const gaps = centers.slice(1).map((center, index) => center.x - centers[index].x);
+	const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
+	for (const gap of gaps) {
+		expect(Math.abs(gap - averageGap), "sidebar header actions should be evenly distributed").toBeLessThanOrEqual(2);
+	}
+}
+
 /**
  * Create a default (non-Headquarters) project session and navigate to it so
  * state.activeProjectId is NOT "headquarters" — proving the launcher no longer
@@ -93,11 +117,13 @@ test.describe("Journey: Support Launcher", () => {
 			await expect(launcherBtn(page)).toHaveClass(/(?:^|\s)h-6(?:\s|$)/);
 			await expect(launcherBtn(page)).toHaveClass(/(?:^|\s)w-6(?:\s|$)/);
 
-			// Sits immediately LEFT of the QR button (same header row).
+			// Sits immediately LEFT of the QR button (same header row), and the
+			// full desktop sidebar header action cluster is evenly spaced/aligned.
 			await expect(qrButton(page)).toBeVisible({ timeout: 15_000 });
 			const supportX = await centerX(launcherBtn(page));
 			const qrX = await centerX(qrButton(page));
 			expect(supportX, "support launcher should sit left of the QR button").toBeLessThan(qrX);
+			await expectDesktopSidebarHeaderActionsAligned(page);
 		} finally {
 			if (session) await deleteSession(session).catch(() => {});
 		}

@@ -3128,12 +3128,12 @@ export function doRenderApp(): void {
 						${bobbitIcon}
 					</div>
 					` : html`
-					<div class="shrink-0 flex items-center justify-between px-3 self-stretch" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
-						<div class="flex items-center gap-2">
+					<div class="sidebar-header-shell shrink-0 flex items-center justify-between px-3 self-stretch" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
+						<div class="sidebar-header-brand flex items-center gap-2">
 							${bobbitIcon}
-							<span class="text-base font-semibold text-foreground">Bobbit</span>
+							<span class="text-base font-semibold text-foreground truncate">Bobbit</span>
 						</div>
-						<div class="flex items-center" style="gap:1px;margin-right:-4px">
+						<div class="sidebar-header-actions" aria-label="Sidebar shortcuts">
 							${state.showHeadquartersInProjectLists !== false
 								? html`<span data-testid="support-launcher" style="display:contents">${Button({
 									variant: "ghost",
@@ -3141,7 +3141,7 @@ export function doRenderApp(): void {
 									children: html`${icon(MessageCircleQuestion, "xs")}`,
 									onClick: () => { showSupportDialog(); },
 									title: "Open a new support agent session",
-									className: "h-6 w-6 text-muted-foreground",
+									className: "sidebar-header-icon-btn h-6 w-6 text-muted-foreground",
 								})}</span>`
 								: nothing}
 							${Button({
@@ -3150,7 +3150,7 @@ export function doRenderApp(): void {
 								children: html`${icon(QrCode, "xs")}`,
 								onClick: showQrCodeDialog,
 								title: "Show QR code",
-								className: "h-6 w-6 text-muted-foreground",
+								className: "sidebar-header-icon-btn h-6 w-6 text-muted-foreground",
 							})}
 							<bell-toggle></bell-toggle>
 							<theme-toggle></theme-toggle>
