@@ -3,14 +3,14 @@
 ## Commands
 
 ```bash
-npm run build          # Full build (server + UI)
-npm run dev:harness    # Gateway via restart harness + vite (use this for dev)
+npm run build          # Build server + UI
+npm run dev:harness    # Gateway + vite dev
 npm run restart-server # Rebuild & restart after server changes
-npm run check          # Type-check server + web (no emit)
-npm run test:unit      # Unit phase → vitest core/dom/integration (fast pure-logic/DOM signal)
-npm run test:browser   # Browser phase → Playwright browser-v2 (geometry fixtures + smoke journeys)
-npm run test:e2e       # E2E phase → v2 real-fidelity (test:e2e:v2): real git/worktree/Docker/MCP/restart (external-free)
-npm run test:manual    # Manual integration — real agents/LLM + Docker (~5 min); ONLY gate-exempt path
+npm run check          # Type-check server + web
+npm run test:unit      # Vitest core/dom/integration
+npm run test:browser   # Playwright browser-v2
+npm run test:e2e       # E2E v2: git/worktree/Docker/MCP/restart
+npm run test:manual    # Real agents/LLM + Docker (~5 min); ONLY gate-exempt path
 ```
 
 UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Server changes (`src/server/`) require `npm run restart-server`. Always `npm run check` before restarting. Sessions survive restarts via `.bobbit/state/sessions.json`.
