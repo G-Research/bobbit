@@ -1,7 +1,7 @@
 name: bobbit_orchestrate
 description: "Mutate gateway runtime: goals, sessions, tasks, gates, staff, team lifecycle. Hidden unless enabled."
 summary: "Mutate gateway runtime state (goals/sessions/…)"
-params: [operation, goalId?, sessionId?, taskId?, gateId?, projectId?, title?, type?, state?, name?, cascade?, body?]
+params: [operation, goalId?, sessionId?, taskId?, gateId?, projectId?, title?, type?, state?, name?, staffId?, cascade?, body?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -27,7 +27,8 @@ detail_docs: >-
 
   - `operation` — which mutation to run (catalogue below).
 
-  - Ids: `goalId`, `sessionId`, `taskId`, `gateId`, `projectId`.
+  - Ids: `goalId`, `sessionId`, `taskId`, `gateId`, `projectId`, `staffId`
+  (staff deletion id).
 
   - Scalars: `title`, `type` (task type), `state` (task transition),
   `name`/`systemPrompt` (staff), `cascade`/`mergedManually` (archive/teardown).
@@ -68,6 +69,8 @@ detail_docs: >-
   | `cancel_verification` | POST | `/api/goals/:goalId/gates/:gateId/cancel-verification` | `goalId`, `gateId` | — |
 
   | `create_staff` | POST | `/api/staff` | `name`, `systemPrompt` | `description`, `triggers`, `roleId`, `cwd`, `projectId` |
+
+  | `delete_staff` | DELETE | `/api/staff/:staffId` | `staffId` | — |
 
   | `team_start` | POST | `/api/goals/:goalId/team/start` | `goalId` | — |
 
