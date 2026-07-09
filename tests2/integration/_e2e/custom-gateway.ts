@@ -61,6 +61,11 @@ export interface CustomGatewayOptions {
 	agentDir?: string;
 	/** Provide builtin tools/roles (defaults/) so config-store cascade works. Default true. */
 	builtins?: boolean;
+	/**
+	 * Seed on-disk layout AFTER env-set + setProjectRoot but BEFORE createGateway
+	 * (so startup migration/registry see it). Omit on restart to preserve state.
+	 */
+	preBoot?: (ctx: { serverRoot: string; headquartersDir: string; agentDir: string }) => void;
 }
 
 async function makeDeps(): Promise<GatewayDeps> {
@@ -110,6 +115,7 @@ export async function startCustomGateway(opts: CustomGatewayOptions): Promise<Cu
 	const { createGateway } = await import("../../../src/server/server.js");
 	const { configureAigwRuntimeFlags } = await import("../../../src/server/agent/aigw-manager.js");
 
+	opts.preBoot?.({ serverRoot, headquartersDir, agentDir });
 	scaffoldBobbitDir(serverRoot);
 	const token = loadOrCreateToken();
 
