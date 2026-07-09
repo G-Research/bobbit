@@ -60,3 +60,122 @@ export function missingDependencies(projectRoot: string): string[] {
 		(name) => !fs.existsSync(path.join(projectRoot, "node_modules", name, "package.json")),
 	);
 }
+
+export interface HealDependenciesDeps {
+	exec: (argv: string[], cwd: string) => void;
+	log?: (msg: string) => void;
+}
+
+export interface HealResult {
+	beforeMissing: string[];
+	afterMissing: string[];
+	restored: string[];
+	stillMissing: string[];
+	regressed: string[];
+	lockedFile?: string;
+}
+
+export class DependencyHealError extends Error {
+	constructor(message: string, public readonly result: HealResult, public readonly cause?: unknown) {
+		super(message);
+		this.name = "DependencyHealError";
+	}
+}
+
+function errorText(err: unknown): string {
+	if (!err) return "";
+	const parts: string[] = [];
+	if (err instanceof Error) parts.push(err.message);
+	if (typeof err === "object") {
+		const record = err as Record<string, unknown>;
+		for (const key of ["stderr", "stdout"]) {
+			const value = record[key];
+			if (Buffer.isBuffer(value)) parts.push(value.toString("utf-8"));
+			else if (typeof value === "string") parts.push(value);
+		}
+		const output = record.output;
+		if (Array.isArray(output)) {
+			for (const value of output) {
+				if (Buffer.isBuffer(value)) parts.push(value.toString("utf-8"));
+				else if (typeof value === "string") parts.push(value);
+			}
+		}
+	}
+	return parts.filter(Boolean).join("\n");
+}
+
+export function extractNpmLockedFile(err: unknown): string | undefined {
+	if (err && typeof err === "object") {
+		const maybePath = (err as { path?: unknown }).path;
+		if (typeof maybePath === "string" && maybePath.trim()) return maybePath.trim();
+	}
+
+	const text = errorText(err);
+	const pathLine = text.match(/(?:^|\n)\s*npm\s+(?:ERR!|error)\s+path\s+(.+?)\s*(?:\n|$)/i);
+	if (pathLine?.[1]) return pathLine[1].trim();
+	const syscallLine = text.match(/(?:^|\n)\s*path\s*[:=]\s*(.+?)\s*(?:\n|$)/i);
+	if (syscallLine?.[1]) return syscallLine[1].trim();
+	return undefined;
+}
+
+function isBusyOrPermError(err: unknown): boolean {
+	const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+	if (typeof code === "string" && /^(EBUSY|EPERM)$/i.test(code)) return true;
+	return /\b(?:EBUSY|EPERM)\b/i.test(errorText(err));
+}
+
+function buildResult(beforeMissing: string[], afterMissing: string[], lockedFile?: string): HealResult {
+	return {
+		beforeMissing,
+		afterMissing,
+		restored: beforeMissing.filter((name) => !afterMissing.includes(name)),
+		stillMissing: afterMissing.filter((name) => beforeMissing.includes(name)),
+		regressed: afterMissing.filter((name) => !beforeMissing.includes(name)),
+		lockedFile,
+	};
+}
+
+function describeList(names: string[]): string {
+	return names.length === 0 ? "none" : names.join(", ");
+}
+
+/**
+ * Testable dependency-repair seam for the dev harness.
+ *
+ * Runs only the injected safe repair command (`npm install` in production),
+ * snapshots declared dependency presence before/after, and fails loud if repair
+ * makes the tree worse. EBUSY/EPERM errors include npm's exact locked native
+ * file path plus the stop-vite/gateway instruction.
+ */
+export function healDependencies(projectRoot: string, deps: HealDependenciesDeps): HealResult {
+	const beforeMissing = missingDependencies(projectRoot);
+	let execError: unknown;
+	let lockedFile: string | undefined;
+
+	deps.log?.(`[harness] dependency self-heal argv=npm install cwd=${projectRoot}`);
+	try {
+		deps.exec(["npm", "install"], projectRoot);
+	} catch (err) {
+		execError = err;
+		if (isBusyOrPermError(err)) lockedFile = extractNpmLockedFile(err);
+	}
+
+	const afterMissing = missingDependencies(projectRoot);
+	const result = buildResult(beforeMissing, afterMissing, lockedFile);
+
+	if (result.regressed.length > 0 || execError) {
+		const parts: string[] = ["Dependency self-heal failed."];
+		if (result.regressed.length > 0) {
+			parts.push(`Repair regressed declared dependencies that were present before repair: ${describeList(result.regressed)}.`);
+		}
+		if (lockedFile) {
+			parts.push(`npm reported a locked native file: ${lockedFile}. Stop vite/gateway, then retry \`npm install\`.`);
+		} else if (execError) {
+			parts.push("The npm install repair command failed. Stop vite/gateway, then retry `npm install`.");
+		}
+		parts.push(`beforeMissing=${beforeMissing.length} afterMissing=${afterMissing.length}`);
+		throw new DependencyHealError(parts.join(" "), result, execError);
+	}
+
+	return result;
+}

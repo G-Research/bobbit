@@ -23,7 +23,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { restartSentinelPath } from "./harness-signal.js";
-import { missingDependencies } from "./harness-deps.js";
+import { DependencyHealError, healDependencies, missingDependencies, type HealResult } from "./harness-deps.js";
 import { windowsGatewayKillArgs } from "./harness-kill.js";
 
 // ---------------------------------------------------------------------------
@@ -222,6 +222,18 @@ async function waitForPortFree(port: number): Promise<void> {
  * additive `npm install` (which never pre-wipes the tree). A healthy tree is a
  * no-op, so the common restart path stays fast. See docs/dev-workflow.md.
  */
+function summarizeList(values: string[]): string {
+	return values.length === 0 ? "[]" : `[${values.join(",")}]`;
+}
+
+function logHealSummary(result: HealResult): void {
+	console.log(
+		`[harness] dependency-self-heal summary before=${result.beforeMissing.length} after=${result.afterMissing.length} ` +
+		`restored=${summarizeList(result.restored)} stillMissing=${summarizeList(result.stillMissing)} ` +
+		`regressed=${summarizeList(result.regressed)} lockedFile=${result.lockedFile ?? ""}`,
+	);
+}
+
 function ensureDeps(): void {
 	const missing = missingDependencies(PROJECT_ROOT);
 	if (missing.length === 0) return;
@@ -231,24 +243,35 @@ function ensureDeps(): void {
 	console.log(`[harness] ${missing.length} dependency(ies) missing from node_modules: ${preview}${suffix}`);
 	console.log("[harness] Self-healing with non-destructive `npm install`...");
 	try {
-		execSync("npm install", {
-			cwd: PROJECT_ROOT,
-			stdio: "inherit",
-			timeout: INSTALL_TIMEOUT_MS,
-			shell: true as unknown as string,
+		const result = healDependencies(PROJECT_ROOT, {
+			log: (msg) => console.log(msg),
+			exec: (argv, cwd) => {
+				const command = argv.join(" ");
+				console.log(`[harness] npm invocation argv=${argv.join(" ")} cwd=${cwd}`);
+				const stdout = execSync(command, {
+					cwd,
+					encoding: "utf-8",
+					maxBuffer: 20 * 1024 * 1024,
+					stdio: "pipe",
+					timeout: INSTALL_TIMEOUT_MS,
+					shell: true as unknown as string,
+				});
+				if (stdout) process.stdout.write(stdout);
+			},
 		});
-		const stillMissing = missingDependencies(PROJECT_ROOT);
-		if (stillMissing.length > 0) {
+		logHealSummary(result);
+		if (result.stillMissing.length > 0) {
 			console.error(
-				`[harness] ${stillMissing.length} dependency(ies) still missing after npm install. ` +
+				`[harness] ${result.stillMissing.length} dependency(ies) still missing after npm install. ` +
 				`Stop the dev stack (vite/gateway) and run \`npm install\` manually — a native file may be locked.`,
 			);
 		} else {
 			console.log("[harness] Dependencies restored.");
 		}
 	} catch (err) {
-		console.error("[harness] `npm install` self-heal failed:", err);
-		console.error("[harness] Stop the dev stack and run `npm install` manually.");
+		if (err instanceof DependencyHealError) logHealSummary(err.result);
+		console.error("[harness] `npm install` self-heal failed:", err instanceof Error ? err.message : err);
+		console.error("[harness] Stop vite/gateway, then retry `npm install`.");
 	}
 }
 
