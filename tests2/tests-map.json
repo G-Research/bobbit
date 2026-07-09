@@ -20,6 +20,18 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/permission-reducer.test.ts",
+      "reason": "Failing-first reproducing tests for Permission Card UX reducer lifecycle: denied rows must remain as compact history, timed-out rows settle stale/expired, and superseded rows stop being actionable."
+    },
+    {
+      "path": "tests2/dom/permission-card-ux.test.ts",
+      "reason": "Failing-first reproducing DOM tests for Permission Card UX: blocked no-result tool calls must not render complete, streaming tool-call context must persist through tool_permission_needed, grant errors clear spinners, pinned+inline permission cards share state, pinned grant/deny settles rows, and pinned controls derive from current transcript rows."
+    },
+    {
+      "path": "tests2/browser/fixtures/permission-card-ux.spec.ts",
+      "reason": "Failing-first browser fixture for Permission Card UX: bottom-pinned active permission controls stay visible with a scrolled transcript, do not overlap editor/status/safe-area, grant/deny from pinned controls settle correctly, and reconnect/alive-socket remount derives pinned controls from current rows."
+    },
+    {
       "path": "tests2/core/git-repo-cache.test.ts",
       "reason": "Reproducing test (TDD red) for the 'Fix git widget flash' goal (32cd6b4f): pins the NEW pure module src/app/git-repo-cache.ts — sessionId->'yes'|'no' localStorage cache and computeConnectGitState (cached 'no' => {gitRepoKnown:'no',quietRecheck:true} so no skeleton/loading on reconnect; cached 'yes'/no-entry => {gitRepoKnown:'unknown',quietRecheck:false} so a genuine first check still shows the skeleton), plus prune/cap bounds and broken/absent-localStorage tolerance. FAILS on HEAD (module absent — import cannot resolve), passes post-fix."
     },
