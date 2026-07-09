@@ -1,0 +1,105 @@
+name: bobbit_orchestrate
+description: "Mutate gateway runtime: goals, sessions, tasks, gates, staff, team lifecycle. Hidden unless enabled."
+summary: "Mutate gateway runtime state (goals/sessions/…)"
+params: [operation, goalId?, sessionId?, taskId?, gateId?, projectId?, title?, type?, state?, name?, cascade?, body?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: BobbitOrchestrate
+grantPolicy: never
+docs: |-
+  Gateway-wide runtime mutations addressed by explicit id (create/update/archive goals, sessions, tasks, gates, staff, team lifecycle). Hidden unless a role/project/user policy enables the `BobbitOrchestrate` group. Complements the current-goal `task_*`/`gate_*`/`team_*` tools — it does not replace them.
+detail_docs: >-
+  ## Purpose
+
+
+  Curated wrapper over the gateway's runtime **mutation** endpoints, keyed by
+  explicit id so an orchestration session can drive goals/sessions/tasks/gates
+  across projects. Auth + URL are resolved for you.
+
+
+  `grantPolicy: never` — this tool is registered but hidden unless a role,
+  project, or user tool-group policy enables the `BobbitOrchestrate` group.
+
+
+  ## Parameters
+
+
+  - `operation` — which mutation to run (catalogue below).
+
+  - Ids: `goalId`, `sessionId`, `taskId`, `gateId`, `projectId`.
+
+  - Scalars: `title`, `type` (task type), `state` (task transition),
+  `name`/`systemPrompt` (staff), `cascade`/`mergedManually` (archive/teardown).
+
+  - `body` — free-form JSON for the richer POST/PUT bodies (see each op).
+
+
+  ## Operation catalogue
+
+  | operation | method | path | required | body |
+
+  |---|---|---|---|---|
+
+  | `create_goal` | POST | `/api/goals` | `projectId`, `title` | `spec`, `workflowId`, `cwd`, `parentGoalId`, `sandboxed`, `autoStartTeam`, `enabledOptionalSteps[]`, `metadata{}` |
+
+  | `update_goal` | PUT | `/api/goals/:goalId` | `goalId` | `title`, `spec`, `state`, `cwd`, `branch`, `repoPath`, `reattemptOf` |
+
+  | `archive_goal` | DELETE | `/api/goals/:goalId` (`?cascade`, `?mergedManually`) | `goalId`, `cascade` | — |
+
+  | `create_session` | POST | `/api/sessions` | `projectId` | `goalId`, `assistantType`, `roleId`, `cwd`, `worktree`, `sandboxed`, `title`, `args` |
+
+  | `terminate_session` | DELETE | `/api/sessions/:sessionId` | `sessionId` | — |
+
+  | `restart_session` | POST | `/api/sessions/:sessionId/restart` | `sessionId` | — |
+
+  | `create_task` | POST | `/api/goals/:goalId/tasks` | `goalId`, `title`, `type` | `spec`, `dependsOn[]`, `parentTaskId`, `workflowGateId`, `inputGateIds[]` |
+
+  | `update_task` | PUT | `/api/tasks/:taskId` | `taskId` | `title`, `spec`, `resultSummary`, `headSha` |
+
+  | `transition_task` | POST | `/api/tasks/:taskId/transition` | `taskId`, `state` | — |
+
+  | `assign_task` | POST | `/api/tasks/:taskId/assign` | `taskId`, `sessionId` | — |
+
+  | `signal_gate` | POST | `/api/goals/:goalId/gates/:gateId/signal` | `goalId`, `gateId` | `sessionId`, `content`, `metadata{}` |
+
+  | `reset_gate` | POST | `/api/goals/:goalId/gates/:gateId/reset` | `goalId`, `gateId` | — |
+
+  | `cancel_verification` | POST | `/api/goals/:goalId/gates/:gateId/cancel-verification` | `goalId`, `gateId` | — |
+
+  | `create_staff` | POST | `/api/staff` | `name`, `systemPrompt` | `description`, `triggers`, `roleId`, `cwd`, `projectId` |
+
+  | `team_start` | POST | `/api/goals/:goalId/team/start` | `goalId` | — |
+
+  | `team_teardown` | POST | `/api/goals/:goalId/team/teardown` (`?cascade`) | `goalId`, `cascade` | — |
+
+
+  `state` values: `todo`, `in-progress`, `blocked`, `complete`, `skipped`.
+
+
+  ## Notes / Gotchas
+
+  - **`delete = archive`** — there is no hard-delete goal endpoint; `archive_goal`
+  (DELETE `/api/goals/:id`) archives with cascade semantics.
+
+  - `create_goal`/`create_session` **require** an explicit `projectId` — no
+  defaulting.
+
+  - `team_start` returns 400 `SPEC_REQUIRED` if the goal has no spec;
+  `team_teardown` with `cascade=false` returns 409 `HAS_DESCENDANT_TEAMS` when
+  live descendants exist.
+
+
+  ## Overlap policy (use the dedicated tool instead)
+
+  - **Current goal** — mutate your own goal's tasks/gates via `task_*` /
+  `gate_signal` / `verification_result`; the ops here are for cross-goal work by
+  explicit id.
+
+  - **Team of the current goal** — use `team_spawn`/`team_dismiss`/
+  `team_complete`/`team_abort`; only `team_start`/`team_teardown` (keyed by
+  `goalId`) live here.
+
+  - **Prompting/steering sessions** — do NOT re-implement; use
+  `session_prompt` / `team_prompt` / `team_steer`. Delegate creation uses
+  `team_delegate`, not `create_session`.

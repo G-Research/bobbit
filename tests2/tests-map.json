@@ -36,6 +36,26 @@
       "reason": "Part 1+2 of 'Hide/Disable PR & Hindsight': fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; plus hindsight is absent from the built-in group and from /api/marketplace/installed. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts."
     },
     {
+      "path": "tests2/core/bobbit-tool-credentials.test.ts",
+      "reason": "bobbit gateway tool suite: credential/URL resolution — env creds, state-file fallback, absent-creds (logs + no registration, no throw), baseUrl trailing-slash trimming."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-dispatch.test.ts",
+      "reason": "bobbit gateway tool suite: per-operation dispatch — path/query building (ids, probe/action selectors, cascade), body building, and HTTP method correctness per tier."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-validation.test.ts",
+      "reason": "bobbit gateway tool suite: runtime validation — unknown operation and missing required params (incl. mandatory projectId) return an error result with no fetch issued."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-errors.test.ts",
+      "reason": "bobbit gateway tool suite: error surfacing — non-2xx { error, code } render with machine code + HTTP status; 204/empty bodies normalize to a success shape."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-tiers.test.ts",
+      "reason": "bobbit gateway tool suite: tier separation — YAML group/grantPolicy defaults and operation-union drift guard vs the dispatched catalogue and design §5."
+    },
+    {
       "path": "tests2/core/cli-real-deps.test.ts",
       "reason": "DI contract: cli.ts passes no test doubles (default-real wiring)."
     },
@@ -62,6 +82,10 @@
     {
       "path": "tests2/core/guard-v2.test.ts",
       "reason": "The v2 bucket-membership guard itself (self-covering; must not manage itself)."
+    },
+    {
+      "path": "tests2/core/headset-accessory.test.ts",
+      "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context."
     },
     {
       "path": "tests2/core/ledger-lease-bridge-interop.test.ts",
@@ -98,6 +122,10 @@
     {
       "path": "tests2/core/build-workflow-list.test.ts",
       "reason": "Pins buildWorkflowListText (extracted from SessionManager._buildWorkflowList): the workflowless empty branch must not forbid propose_goal and must mention the inline-workflow escape hatch, mirroring the UI guard, propose_goal contract, and goal-manager backstop."
+    },
+    {
+      "path": "tests2/core/chaos-worktree-safety.test.ts",
+      "reason": "Reproducing test for the chaos node_modules-wipe goal: pins junction-safe teardown (unlinkReparsePoint / cleanupChaosRoot preserve an external junction target) and the no-inner-node_modules layout (ensureNodeModulesJunction removed). Temp-FS only, external-free core tier. FAILS on HEAD (helpers absent, ensureNodeModulesJunction still defined), passes post-fix."
     }
   ],
   "journeys": [

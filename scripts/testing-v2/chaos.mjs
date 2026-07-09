@@ -16,8 +16,12 @@
  * Design decisions (see docs/testing-v2/design.md §6):
  *   - One ephemeral git worktree per mutant (isolated, clean after removal)
  *   - Mutation via string-search/replace (more reliable than unified diffs on Windows)
- *   - node_modules junction from primary repo so the ephemeral worktree can
- *     run tests without a full npm install
+ *   - A campaign-scoped "chaos root" under os.tmpdir() holds ONE shared
+ *     node_modules link (junction on Windows / dir symlink on POSIX) to the
+ *     complete toolchain node_modules; every ephemeral worktree is a SIBLING of
+ *     it, so tests resolve modules by walking UP without a full npm install and
+ *     NO node_modules link ever lives inside a throwaway (force-deleted)
+ *     worktree. See docs/testing-v2/node-modules-corruption-rca.md.
  *   - Targeted test runs (seconds per mutant) — never full-suite per mutant
  *   - Null mutant guards harness integrity: both suites must pass
  *   - Full-suite sample for ≥5 random non-null mutants (per spec R8)
@@ -33,7 +37,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -159,6 +163,15 @@ const MUTANTS_FILE = path.join(REPO_ROOT, "tests2", "chaos", "mutants.json");
 const REPORT_JSON = path.join(REPO_ROOT, ".profiles", "chaos", "comparison-report.json");
 const REPORT_MD = path.join(REPO_ROOT, "docs", "testing-v2", "chaos-report.md");
 
+// Campaign-scoped container ("chaos root"): holds ONE shared node_modules
+// junction plus every per-mutant worktree as a SIBLING. Node and Vite resolve
+// modules by walking UP from <CHAOS_ROOT>/wt-*/… to <CHAOS_ROOT>/node_modules,
+// so nothing resolvable ever lives inside a throwaway worktree (= a deletion
+// root). This is the primary fix for the node_modules-wipe bug: a recursive
+// worktree delete can no longer descend through an in-worktree junction into
+// the shared/primary tree. See docs/testing-v2/node-modules-corruption-rca.md.
+const CHAOS_ROOT = path.join(os.tmpdir(), `bobbit-chaos-root-${process.pid}-${Date.now()}`);
+
 // ── CLI parsing ───────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -236,20 +249,20 @@ function applyMutation(filePath, search, replace) {
   return content; // original — caller must restore
 }
 
-function ensureNodeModulesJunction(worktreePath) {
-  const link = path.join(worktreePath, "node_modules");
-  if (fs.existsSync(link)) return; // already present or already a junction
-  if (!fs.existsSync(PRIMARY_NODE_MODULES)) {
-    console.warn(`[chaos] Warning: primary node_modules not found at ${PRIMARY_NODE_MODULES}`);
-    return;
-  }
-  try {
+// Provision the campaign-scoped chaos root ONCE per run: create the container
+// dir and a SINGLE shared `node_modules` reparse point inside it pointing at the
+// complete toolchain node_modules. Per-mutant worktrees are created as siblings
+// (see createEphemeralWorktree) and resolve modules by walking up to this link.
+// The "complete toolchain" fail-loud guard stays in main(); this only provisions.
+export function ensureChaosRoot(root = CHAOS_ROOT, nmTarget = PRIMARY_NODE_MODULES) {
+  fs.mkdirSync(root, { recursive: true });
+  const link = path.join(root, "node_modules");
+  if (!fs.existsSync(link)) {
     // On Windows use 'junction' for directories; on POSIX use 'dir' symlink.
     const type = process.platform === "win32" ? "junction" : "dir";
-    fs.symlinkSync(PRIMARY_NODE_MODULES, link, type);
-  } catch (err) {
-    console.warn(`[chaos] Warning: failed to create node_modules junction: ${err.message}`);
+    fs.symlinkSync(nmTarget, link, type);
   }
+  return root;
 }
 
 function runCommand(file, cliArgs, cwd, timeoutMs = 120_000) {
@@ -470,15 +483,59 @@ function runFullV2Suite(worktreePath) {
 
 // ── Worktree management ───────────────────────────────────────────────────────
 
-function createEphemeralWorktree(label) {
-  const tmpDir = path.join(os.tmpdir(), `bobbit-chaos-${label}-${Date.now()}`);
+export function createEphemeralWorktree(label) {
+  // Sibling of the shared node_modules inside the chaos root. NO per-worktree
+  // node_modules link is created — the worktree resolves modules by walking up
+  // to <CHAOS_ROOT>/node_modules, so nothing resolvable lives in this deletion
+  // root and a force-delete can never descend through a junction into the
+  // shared/primary tree (the node_modules-wipe bug).
+  const dir = path.join(CHAOS_ROOT, `wt-${label}`);
   try {
-    execFileSync("git", ["worktree", "add", "--detach", tmpDir, "HEAD"],
+    execFileSync("git", ["worktree", "add", "--detach", dir, "HEAD"],
       { cwd: REPO_ROOT, stdio: "pipe" });
-    return tmpDir;
+    return dir;
   } catch (err) {
     throw new Error(`git worktree add failed: ${err.stderr || err.message}`);
   }
+}
+
+// Remove ONLY a reparse point (junction/symlink), NEVER following it into its
+// target. On Windows a directory junction is a directory that is NOT a symlink
+// per lstat, so it must be removed with rmdir (non-recursive); a POSIX/Windows
+// symlink is removed with unlink. Refuse a real (non-link) entry — recursively
+// deleting that would be the exact footgun this helper exists to prevent.
+export function unlinkReparsePoint(p) {
+  const st = fs.lstatSync(p); // let it throw if absent — callers guard with existsSync
+  if (process.platform === "win32" && st.isDirectory() && !st.isSymbolicLink()) {
+    fs.rmdirSync(p); // Windows directory junction
+  } else if (st.isSymbolicLink()) {
+    fs.unlinkSync(p); // POSIX/Windows symlink
+  } else {
+    throw new Error("refusing to reparse-unlink a real entry: " + p);
+  }
+}
+
+// Campaign teardown: remove the single shared node_modules reparse point FIRST
+// (so it can never be traversed), then recursively delete the chaos root. By
+// the time rm -rf runs, the junction is already gone — there is nothing external
+// left to descend into.
+export function cleanupChaosRoot(root = CHAOS_ROOT) {
+  const link = path.join(root, "node_modules");
+  try {
+    if (fs.existsSync(link)) unlinkReparsePoint(link);
+  } catch (e) {
+    console.warn(`[chaos] junction unlink: ${e.message}`);
+  }
+  // Never recursively delete through a surviving reparse point: if the link is
+  // STILL present (unlink failed), leave the chaos root in place rather than
+  // risk `rmSync` descending through the junction into an external target.
+  if (fs.existsSync(link)) {
+    console.warn(`[chaos] node_modules reparse point still present after unlink; skipping recursive delete of ${root} to avoid traversing the junction`);
+    return;
+  }
+  try {
+    fs.rmSync(root, { recursive: true, force: true });
+  } catch { /* best-effort */ }
 }
 
 // Remove the `node_modules` reparse point (junction/symlink) WITHOUT following
@@ -487,7 +544,7 @@ function createEphemeralWorktree(label) {
 // contents (the shared node_modules tree) instead of just unlinking the link —
 // the node_modules-corruption bug (see docs/testing-v2/node-modules-corruption-
 // rca.md). We therefore unlink the link itself, non-recursively, first.
-function unlinkNodeModulesJunction(worktreePath) {
+export function unlinkNodeModulesJunction(worktreePath) {
   const link = path.join(worktreePath, "node_modules");
   let st;
   try { st = fs.lstatSync(link); } catch { return; } // absent — nothing to do
@@ -532,7 +589,7 @@ function unlinkNodeModulesJunction(worktreePath) {
   }
 }
 
-function removeEphemeralWorktree(worktreePath) {
+export function removeEphemeralWorktree(worktreePath) {
   // 1. Unlink the node_modules junction FIRST so neither `git worktree remove`
   //    nor the fs.rmSync fallback can descend through it into the shared tree.
   try {
@@ -571,8 +628,8 @@ async function runMutant(mutant) {
   }
 
   try {
-    // 2. Ensure node_modules is accessible
-    ensureNodeModulesJunction(worktreePath);
+    // 2. node_modules is resolved via the shared <CHAOS_ROOT>/node_modules link
+    //    (a sibling of this worktree) — no per-worktree link is created.
 
     // 3. Apply the mutation
     const targetFile = path.join(worktreePath, mutant.file);
@@ -747,7 +804,6 @@ function runFullV2Baseline() {
     return { files: new Set(), tests: new Set(), durationMs: Date.now() - start, error: err.message };
   }
   try {
-    ensureNodeModulesJunction(worktreePath);
     console.log(`\n[chaos] full-v2 baseline: running full core+dom tier on the CLEAN tree…`);
     const r = runFullV2Suite(worktreePath);
     console.log(`  baseline: ${r.failingFiles.length} pre-existing failing file(s), ${r.failingTests.length} test(s)  (${((Date.now() - start) / 1000).toFixed(1)}s)`);
@@ -768,7 +824,6 @@ async function runFullV2SampleOne(mutant, baseline) {
     return { id: mutant.id, area: mutant.area, killed: false, error: `worktree: ${err.message}`, durationMs: Date.now() - start };
   }
   try {
-    ensureNodeModulesJunction(worktreePath);
     const targetFile = path.join(worktreePath, mutant.file);
     if (!fs.existsSync(targetFile)) {
       return { id: mutant.id, area: mutant.area, killed: false, error: `file not found: ${mutant.file}`, durationMs: Date.now() - start };
@@ -1088,6 +1143,12 @@ async function main() {
   fs.mkdirSync(path.dirname(REPORT_JSON), { recursive: true });
   fs.mkdirSync(path.dirname(REPORT_MD), { recursive: true });
 
+  // Provision the campaign-scoped chaos root ONCE (shared node_modules link +
+  // container for all worktrees). Torn down in the finally below.
+  ensureChaosRoot();
+  console.log(`chaos root:   ${CHAOS_ROOT}`);
+
+  try {
   const results = [];
   for (const mutant of mutants) {
     const result = await runMutant(mutant);
@@ -1192,14 +1253,27 @@ async function main() {
   ));
   if (nullFailed) {
     console.error("\n❌ NULL MUTANT INTEGRITY CHECK FAILED — harness may be broken");
-    process.exit(1);
+    // Do NOT process.exit() here — that would bypass the finally below and leak
+    // the CHAOS_ROOT/node_modules junction into os.tmpdir(). Set the exit code
+    // and return so cleanupChaosRoot() runs; the CLI wrapper exits non-0.
+    process.exitCode = 1;
+    return;
   }
 
   // Success even if some mutants are missed — the report documents them
   console.log("\n✓ chaos.mjs complete");
+  } finally {
+    // Campaign teardown: unlink the shared node_modules reparse point first,
+    // then remove the whole chaos root. Never descends through the junction.
+    cleanupChaosRoot();
+  }
 }
 
-main().catch(err => {
-  console.error("[chaos] Fatal error:", err);
-  process.exit(1);
-});
+// CLI-only guard: importing this module (e.g. from a test) must NOT run a
+// campaign. Only run main() when executed directly as a script.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(err => {
+    console.error("[chaos] Fatal error:", err);
+    process.exit(1);
+  });
+}
