@@ -1081,7 +1081,7 @@ type IdleWaiter = {
  */
 export function buildWorkflowListText(workflows: import("./workflow-store.js").Workflow[]): string {
 	if (!workflows || workflows.length === 0) {
-		return '⚠️ This project has no workflows configured. You CANNOT propose a goal yet — the user must run the project assistant first to scaffold workflows. Do not call propose_goal. Instead tell the user "this project has no workflows yet; open the project assistant from Settings → Components (or click the banner in the goal panel) to set them up", and stop.';
+		return '⚠️ This project has no registered workflows configured. The preferred path is to scaffold a registered workflow first — tell the user they can open the project assistant from Settings → Components (or click the banner in the goal panel) to set them up. However, you MAY still propose a goal for a workflowless project provided you supply a valid `inlineWorkflow` in the propose_goal call — that inline workflow becomes the authoritative workflow for the goal. Prefer inline workflow only as a planning-stage escape hatch when the user wants to proceed without scaffolding registered workflows.';
 	}
 	return workflows.map(w => {
 		const gateNames = w.gates.map(g => g.name).join(', ');
