@@ -38,7 +38,8 @@ import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
 import { readToken } from "../auth/token.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
-import { getAssistantDef } from "./assistant-registry.js";
+import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
+import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
 import { profile } from "./profiling.js";
@@ -2750,7 +2751,7 @@ export class SessionManager {
 	}
 
 	private resolveSessionRole(roleName?: string, assistantType?: string, projectId?: string): import("./role-store.js").Role | undefined {
-		const name = roleName || (assistantType ? "assistant" : "general");
+		const name = roleName || (assistantType ? assistantRoleForType(assistantType) : "general");
 		// Cascade-first: pack-shipped roles (e.g. `pr-reviewer`) live in the config
 		// cascade, not the in-memory RoleManager. Resolving via roleManager alone
 		// returns `undefined` for a pack role, which on the restore / force-respawn
@@ -2995,7 +2996,7 @@ export class SessionManager {
 		let parts: PromptParts;
 
 		if (assistantDef) {
-			const assistantTemplate = this.resolveRolePromptTemplate("assistant", session.projectId);
+			const assistantTemplate = this.resolveRolePromptTemplate(assistantRoleForType(session.assistantType), session.projectId);
 			let assistantGoalSpec = "";
 			if (assistantTemplate) {
 				assistantGoalSpec = assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(session.goalId || session.id).slice(0, 8)}`);
@@ -3012,6 +3013,11 @@ export class SessionManager {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal, this.prStatusStore!);
 					}
 				}
+			}
+			if (session.assistantType === "support") {
+				assistantGoalSpec = assistantGoalSpec
+					.replaceAll("{{BOBBIT_DOCS_DIR}}", resolveBundledDocsDir())
+					.replaceAll("{{BOBBIT_SRC_DIR}}", resolveBundledSrcDir());
 			}
 			assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, { subGoalsEnabled: this.isSubgoalsEnabled });
 			parts = {
@@ -5390,7 +5396,7 @@ export class SessionManager {
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
 		if (assistantDef) {
 			// Combine assistant role's shared prompt with per-type specialized prompt
-			const assistantTemplate = this.resolveRolePromptTemplate("assistant", ps.projectId);
+			const assistantTemplate = this.resolveRolePromptTemplate(assistantRoleForType(ps.assistantType), ps.projectId);
 			let assistantGoalSpec = "";
 			if (assistantTemplate) {
 				assistantGoalSpec = assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`);
@@ -5406,6 +5412,11 @@ export class SessionManager {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal, this.prStatusStore!);
 					}
 				}
+			}
+			if (ps.assistantType === "support") {
+				assistantGoalSpec = assistantGoalSpec
+					.replaceAll("{{BOBBIT_DOCS_DIR}}", resolveBundledDocsDir())
+					.replaceAll("{{BOBBIT_SRC_DIR}}", resolveBundledSrcDir());
 			}
 			assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, { subGoalsEnabled: this.isSubgoalsEnabled });
 

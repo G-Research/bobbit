@@ -22,6 +22,7 @@ import { ROLE_ASSISTANT_PROMPT } from "./role-assistant.js";
 import { TOOL_ASSISTANT_PROMPT } from "./tool-assistant.js";
 import { STAFF_ASSISTANT_PROMPT } from "./staff-assistant.js";
 import { PROJECT_ASSISTANT_PROMPT, PROJECT_ASSISTANT_SCAFFOLDING_PROMPT } from "./project-assistant.js";
+import { SUPPORT_ASSISTANT_PROMPT } from "./support-assistant.js";
 
 export interface AssistantDef {
 	type: string;
@@ -68,7 +69,23 @@ const FALLBACK_DEFAULTS: Record<string, AssistantDef> = {
 		promptTitle: "New Project Setup Assistant",
 		prompt: PROJECT_ASSISTANT_SCAFFOLDING_PROMPT,
 	},
+	support: {
+		type: "support",
+		title: "Support",
+		promptTitle: "Bobbit Support Assistant",
+		prompt: SUPPORT_ASSISTANT_PROMPT,
+	},
 };
+
+/**
+ * Map an assistant type to the role whose promptTemplate + tool policies back
+ * its session. The `support` assistant uses the dedicated `support` role (which
+ * may drive the gateway via the `bobbit` tools); every other assistant type
+ * uses the read-only advisor `assistant` role.
+ */
+export function assistantRoleForType(assistantType: string | undefined): string {
+	return assistantType === "support" ? "support" : "assistant";
+}
 
 /** Returns the path to the assistant YAML config directory. */
 function assistantConfigDir(): string {
