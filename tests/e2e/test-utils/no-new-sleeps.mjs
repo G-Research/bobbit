@@ -50,6 +50,12 @@ const ALLOW_LIST = new Set([
 	"mock-agent-core.mjs",
 	"mock-agent.mjs",
 	"port-test-helper.mjs",
+	// Cross-process lease-pool client for Test Suite v2: polls leases.json under
+	// a filesystem lock across SEPARATE OS processes (vitest tier + Playwright
+	// tier + ledger CLI). There is no cross-process event to await — filesystem
+	// polling with backoff IS the correct primitive here, exactly like the other
+	// harness/polling helpers above. Not a test spec.
+	"ledger-lease-bridge.mjs",
 ]);
 
 // Patterns that count as a "sleep". Each pattern must match exactly one

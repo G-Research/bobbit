@@ -426,7 +426,7 @@ export class SessionHandle {
 
 export class GoalHandle {
 	constructor(
-		private page: Page,
+		_page: Page,
 		private name: string,
 		private _goalId?: string,
 		private _ctx?: SpecContext,
@@ -455,7 +455,7 @@ export class GoalHandle {
 export class GateHandle {
 	constructor(
 		private page: Page,
-		private name: string,
+		_name: string,
 		private _gateId?: string,
 		private _goalId?: string,
 		private _ctx?: SpecContext,
@@ -491,7 +491,7 @@ export class GateHandle {
 export class StaffHandle {
 	constructor(
 		private page: Page,
-		private name: string,
+		_name: string,
 		private _staffId?: string,
 		private _ctx?: SpecContext,
 	) {}
@@ -1053,7 +1053,7 @@ export class SpecContext {
 				}
 				return null;
 			}, { timeoutMs: 15_000, intervalMs: 50, label: `agent_finish ${sessionName} > ${baseline}` });
-			handle.pendingTurnBaseline = observed;
+			handle.pendingTurnBaseline = observed ?? undefined;
 		},
 	};
 

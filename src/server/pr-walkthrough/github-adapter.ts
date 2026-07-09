@@ -1,6 +1,6 @@
 import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
 import { isTrustedExternalHost, safeExternalUrl } from "../../shared/pr-walkthrough/url-safety.js";
-import { execFileSafe } from "../exec-file-safe.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 export type GithubDiffLineSide = "old" | "new" | "context";
 export type GithubDiffLineKind = "context" | "add" | "del";
@@ -111,10 +111,12 @@ export interface GithubExportAuth {
  * enterprise host (unchanged invariant, inherited from `resolveGithubToken`).
  */
 export async function resolveGithubExportAuth(
-	options: { cwd?: string; token?: string },
+	options: { cwd?: string; token?: string; commandRunner?: CommandRunner },
 	host: string,
 ): Promise<GithubExportAuth> {
-	const token = await resolveGithubToken(options, host);
+	// Route the gh-auth probe through the injected CommandRunner so the test fence
+	// (fail-closed on gh) applies here too; defaults to the real runner in prod.
+	const token = await resolveGithubToken(options, host, options.commandRunner ?? realCommandRunner);
 	return token
 		? { token, available: true }
 		: { available: false, reason: GITHUB_EXPORT_NEEDS_AUTH_REASON };
@@ -144,7 +146,9 @@ export interface ResolveGithubPrOptions {
 	prNumber?: string | number;
 	token?: string;
 	fetch?: FetchLike;
+	commandRunner?: CommandRunner;
 	apiBaseUrl?: string;
+	noExternal?: boolean;
 	maxFiles?: number;
 	maxPatchBytes?: number;
 	maxLinesPerFile?: number;
@@ -206,10 +210,6 @@ type FetchLike = (url: string, init?: {
 
 const DEFAULT_MAX_PATCH_BYTES = 1_000_000;
 const DEFAULT_MAX_LINES_PER_FILE = 2_000;
-
-function externalNetworkBlockedForTests(): boolean {
-	return process.env.BOBBIT_TEST_NO_EXTERNAL === "1" || process.env.BOBBIT_E2E === "1";
-}
 
 function isLocalHttpUrl(raw: string): boolean {
 	try {
@@ -286,7 +286,8 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 	const warnings: GithubWalkthroughWarning[] = [];
 	const trustedHosts = options.trustedHosts;
 	const parsed = parseGithubPrReference(options, trustedHosts);
-	const inferred = parsed.owner && parsed.repo ? undefined : await inferGithubRepository(options.cwd);
+	const commandRunner = options.commandRunner ?? realCommandRunner;
+	const inferred = parsed.owner && parsed.repo ? undefined : await inferGithubRepository(options.cwd, commandRunner);
 	const owner = parsed.owner ?? inferred?.owner;
 	const repo = parsed.repo ?? inferred?.repo;
 	const host = normalizeHost(parsed.host ?? inferred?.host ?? "github.com");
@@ -307,7 +308,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 	}
 
 	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? apiBaseUrlForHost(host);
-	if (externalNetworkBlockedForTests() && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
+	if (options.noExternal && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
 		throw new GithubPrAdapterError(`External GitHub API access is disabled in tests: ${apiBaseUrl}`, {
 			status: 403,
 			code: "github_external_network_disabled",
@@ -316,7 +317,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 		});
 	}
 
-	const token = await resolveGithubToken(options, host);
+	const token = await resolveGithubToken(options, host, commandRunner);
 	const fetchImpl = options.fetch ?? fetch;
 	const headers = githubHeaders(token);
 	const prApiUrl = `${apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`;
@@ -324,6 +325,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 	const files = await fetchGithubFiles(fetchImpl, prApiUrl, headers, options.maxFiles ?? 300, warnings);
 	const resolvedFiles = await enrichFilesWithDiffs({
 		cwd: options.cwd,
+		commandRunner,
 		baseSha: pr.base.sha,
 		headSha: pr.head.sha,
 		files,
@@ -378,11 +380,11 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 	};
 }
 
-async function inferGithubRepository(cwd: string | undefined): Promise<{ owner: string; repo: string; host: string } | undefined> {
+async function inferGithubRepository(cwd: string | undefined, commandRunner: CommandRunner = realCommandRunner): Promise<{ owner: string; repo: string; host: string } | undefined> {
 	if (!cwd) return undefined;
 	try {
-		const { stdout } = await execFileSafe("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000, encoding: "utf8" });
-		return parseGithubRemoteUrl(stdout) ?? undefined;
+		const { stdout } = await commandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000, encoding: "utf8" });
+		return parseGithubRemoteUrl(stdout.toString()) ?? undefined;
 	} catch {
 		return undefined;
 	}
@@ -442,13 +444,15 @@ async function enrichFilesWithDiffs(input: {
 	maxPatchBytes: number;
 	maxLinesPerFile: number;
 	trustedHosts?: string[];
+	commandRunner?: CommandRunner;
 }): Promise<GithubWalkthroughFile[]> {
 	const trustedHosts = input.trustedHosts;
-	const localDiffAvailable = await hasLocalCommit(input.cwd, input.baseSha) && await hasLocalCommit(input.cwd, input.headSha);
+	const commandRunner = input.commandRunner ?? realCommandRunner;
+	const localDiffAvailable = await hasLocalCommit(input.cwd, input.baseSha, commandRunner) && await hasLocalCommit(input.cwd, input.headSha, commandRunner);
 	const enriched: GithubWalkthroughFile[] = [];
 	for (const file of input.files) {
 		const rawPatch = localDiffAvailable
-			? await readLocalPatchForFile(input.cwd, input.baseSha, input.headSha, file).catch(() => cleanString(file.patch))
+			? await readLocalPatchForFile(input.cwd, input.baseSha, input.headSha, file, commandRunner).catch(() => cleanString(file.patch))
 			: cleanString(file.patch);
 		const normalized = normalizeGithubPatch(rawPatch, input.maxPatchBytes);
 		const patch = normalized.patch;
@@ -500,26 +504,26 @@ async function enrichFilesWithDiffs(input: {
 	return enriched;
 }
 
-async function hasLocalCommit(cwd: string | undefined, sha: string): Promise<boolean> {
+async function hasLocalCommit(cwd: string | undefined, sha: string, commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
 	if (!cwd || !sha) return false;
 	try {
-		await execFileSafe("git", ["rev-parse", "--verify", `${sha}^{commit}`], { cwd, timeout: 5_000, encoding: "utf8" });
+		await commandRunner.execFile("git", ["rev-parse", "--verify", `${sha}^{commit}`], { cwd, timeout: 5_000, encoding: "utf8" });
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-async function readLocalPatchForFile(cwd: string | undefined, baseSha: string, headSha: string, file: GithubApiChangedFile): Promise<string | undefined> {
+async function readLocalPatchForFile(cwd: string | undefined, baseSha: string, headSha: string, file: GithubApiChangedFile, commandRunner: CommandRunner = realCommandRunner): Promise<string | undefined> {
 	if (!cwd) return undefined;
 	const paths = file.previous_filename && file.previous_filename !== file.filename ? [file.previous_filename, file.filename] : [file.filename];
-	const { stdout } = await execFileSafe("git", ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", baseSha, headSha, "--", ...paths], {
+	const { stdout } = await commandRunner.execFile("git", ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", baseSha, headSha, "--", ...paths], {
 		cwd,
 		timeout: 20_000,
 		maxBuffer: 10 * 1024 * 1024,
 		encoding: "utf8",
 	});
-	return extractPatchBody(stdout) || undefined;
+	return extractPatchBody(stdout.toString()) || undefined;
 }
 
 function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patch?: string; status: GithubWalkthroughFile["status"]; isGenerated?: boolean; maxLinesPerFile?: number; externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string }): GithubDiffBlock & { truncated?: boolean } {
@@ -675,7 +679,7 @@ function normalizeGithubFileStatus(status: string): GithubWalkthroughFile["statu
 	}
 }
 
-async function resolveGithubToken(options: ResolveGithubPrOptions, host: string): Promise<string | undefined> {
+async function resolveGithubToken(options: ResolveGithubPrOptions, host: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | undefined> {
 	const explicit = cleanString(options.token);
 	if (explicit) return explicit;
 	// The global GITHUB_TOKEN/GH_TOKEN env tokens are github.com credentials. Never
@@ -686,15 +690,15 @@ async function resolveGithubToken(options: ResolveGithubPrOptions, host: string)
 		const envToken = cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
 		if (envToken) return envToken;
 	}
-	return githubCliAuthToken(options.cwd, normalized);
+	return githubCliAuthToken(options.cwd, normalized, commandRunner);
 }
 
-async function githubCliAuthToken(cwd: string | undefined, host: string): Promise<string | undefined> {
+async function githubCliAuthToken(cwd: string | undefined, host: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | undefined> {
 	const args = ["auth", "token"];
 	if (host && host !== "github.com") args.push("--hostname", host);
 	try {
 		const command = cleanString(process.env.BOBBIT_GH_COMMAND) || "gh";
-		const { stdout } = await execFileSafe(command, args, {
+		const { stdout } = await commandRunner.execFile(command, args, {
 			cwd,
 			encoding: "utf8",
 			timeout: 5_000,

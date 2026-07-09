@@ -3,12 +3,12 @@
  * Returns env var names only — never values — for display in the settings UI.
  */
 
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
 import { globalAuthPath, serverSecretsDir } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 /** Provider keys from auth.json / host env → sandbox env var name + description */
 const PROVIDER_TOKENS: { envVar: string; label: string; provider: string; envKeys: string[] }[] = [
@@ -72,7 +72,7 @@ export const OPENAI_CODEX_SANDBOX_AUTH_TOKEN_KEYS = new Set(["OPENAI_API_KEY", "
 /** Sandbox-token policy keys that opt a sandbox into the Google account (Gemini Code Assist) OAuth credential. */
 export const GOOGLE_GEMINI_CLI_SANDBOX_AUTH_TOKEN_KEYS = new Set(["GOOGLE_CLOUD_ACCESS_TOKEN"]);
 
-const TOOL_TOKENS: { envVar: string; label: string; detect: () => boolean }[] = [
+const TOOL_TOKENS: { envVar: string; label: string; detect: (commandRunner: CommandRunner) => boolean }[] = [
 	{
 		envVar: "OPENAI_CODEX_AUTH",
 		label: "OpenAI Codex (auth.json)",
@@ -81,7 +81,7 @@ const TOOL_TOKENS: { envVar: string; label: string; detect: () => boolean }[] = 
 	{
 		envVar: "GITHUB_TOKEN",
 		label: "GitHub (git push, gh CLI)",
-		detect: () => !!(process.env["GITHUB_TOKEN"] || process.env["GH_TOKEN"] || detectGhCli()),
+		detect: (commandRunner) => !!(process.env["GITHUB_TOKEN"] || process.env["GH_TOKEN"] || detectGhCli(commandRunner)),
 	},
 	{
 		envVar: "NPM_TOKEN",
@@ -90,9 +90,10 @@ const TOOL_TOKENS: { envVar: string; label: string; detect: () => boolean }[] = 
 	},
 ];
 
-function detectGhCli(): boolean {
+function detectGhCli(commandRunner: CommandRunner = realCommandRunner): boolean {
+	if (!commandRunner.execFileSync) return false;
 	try {
-		const token = execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).trim();
+		const token = commandRunner.execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).toString().trim();
 		return !!token;
 	} catch {
 		return false;
@@ -361,7 +362,7 @@ export function mergeHostAgentProviderEnv(existing: Record<string, string> | und
  * Scan the host for available tokens. Returns env var names + labels + availability.
  * Never returns actual token values.
  */
-export function detectHostTokens(prefs?: PreferencesStore | null): DetectedHostToken[] {
+export function detectHostTokens(prefs?: PreferencesStore | null, commandRunner: CommandRunner = realCommandRunner): DetectedHostToken[] {
 	const authProviders = detectAuthJson();
 	const result: DetectedHostToken[] = [];
 
@@ -373,7 +374,7 @@ export function detectHostTokens(prefs?: PreferencesStore | null): DetectedHostT
 	}
 
 	for (const t of TOOL_TOKENS) {
-		result.push({ envVar: t.envVar, label: t.label, available: t.detect() });
+		result.push({ envVar: t.envVar, label: t.label, available: t.detect(commandRunner) });
 	}
 
 	return result;
@@ -384,7 +385,7 @@ export function detectHostTokens(prefs?: PreferencesStore | null): DetectedHostT
  * Used by the sandbox token system when a token has an empty value (meaning "from host").
  * Returns undefined if the token cannot be resolved.
  */
-export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore | null): string | undefined {
+export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore | null, commandRunner: CommandRunner = realCommandRunner): string | undefined {
 	// Check env var directly
 	if (process.env[envVar]) return process.env[envVar];
 
@@ -392,7 +393,7 @@ export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore |
 	if (envVar === "GITHUB_TOKEN") {
 		if (process.env["GH_TOKEN"]) return process.env["GH_TOKEN"];
 		try {
-			const token = execFileSync("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).trim();
+			const token = commandRunner.execFileSync?.("gh", ["auth", "token"], { timeout: 5_000, encoding: "utf-8" }).toString().trim();
 			if (token) return token;
 		} catch { /* gh not installed or not authenticated */ }
 		return undefined;

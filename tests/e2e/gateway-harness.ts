@@ -36,6 +36,21 @@ import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
+
+// Load the v2 lease pools from the Playwright process. Importing the ledger
+// (scripts/testing-v2/ledger.mjs) DIRECTLY here is impossible: Playwright
+// mistransforms a .mjs located outside its test root toward CJS, so any form of
+// import (static, dynamic, file:// URL, namespace, re-export) throws "exports is
+// not defined in ES module scope" at eval time — the lease then silently
+// fail-opens and never fires (the bug behind the browser-tier N-way flakes). The
+// co-located ./ledger-lease-bridge.mjs is transformed as native ESM and speaks
+// the SAME leases.json protocol as the ledger, so the browser tier and the
+// vitest tier share the same global caps. Cached after first load; both leases.
+let _ledgerModulePromise: Promise<any> | undefined;
+function loadLedger(): Promise<any> {
+	if (!_ledgerModulePromise) _ledgerModulePromise = import("./ledger-lease-bridge.mjs");
+	return _ledgerModulePromise;
+}
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const STATIC_DIR = resolve(PROJECT_ROOT, "dist", "ui");
 
@@ -184,8 +199,36 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	enableDevHarnessRestart: boolean;
 	splitHeadquartersServerRoot: boolean;
 	sameRootProjectAtStartup: boolean;
+	browserRenderLease: void;
 	gateway: GatewayInfo;
 }>({
+	// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): cap the TOTAL number of
+	// Chromium browser workers rendering the app at once across ALL concurrent
+	// test:v2/e2e runs. Each Playwright worker = one Chromium browser; this
+	// worker-scoped lease is acquired at worker startup (BEFORE the gateway boots,
+	// via the `gateway` fixture's dependency on it) and held for the worker's whole
+	// life, so a worker that can't get a slot WAITS holding nothing. This throttles
+	// the sustained multi-browser RENDER contention that drives tier-2 toBeVisible
+	// timeouts at N-way (the residual flake source after the gateway-boot lease).
+	// Gated on BOBBIT_V2_BROWSER_LEASE (set by playwright-v2.config.ts, NEVER by the
+	// legacy e2e config) and fully fail-open: any import/acquire error proceeds
+	// without a lease. Its own large fixture timeout covers a long queue wait — the
+	// wait is charged here, NOT against the 60 s gateway/test timeouts. Cap in
+	// tests2/budget-caps.json ("browser"). See docs/testing-v2/concurrency-proof.md.
+	browserRenderLease: [async ({}, use) => {
+		let release: () => void = () => {};
+		if (process.env.BOBBIT_V2_BROWSER_LEASE === "1") {
+			try {
+				const { acquireBrowserRenderLease } = await loadLedger();
+				const lease = await acquireBrowserRenderLease();
+				release = () => lease.release();
+			} catch {
+				/* ledger unavailable — render without a lease (fail-open) */
+			}
+		}
+		await use();
+		release();
+	}, { scope: "worker", auto: true, timeout: 1_500_000 }],
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
 	// at the top of a spec file. Playwright groups tests with matching option
 	// values onto the same worker, so each spec file effectively gets its own gateway.
@@ -205,7 +248,11 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// the server run directory before gateway boot.
 	sameRootProjectAtStartup: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup }, use, workerInfo) => {
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, browserRenderLease }, use, workerInfo) => {
+		// Depend on browserRenderLease purely for ordering: the global browser-render
+		// slot must be held BEFORE this worker boots a gateway, so a queued worker
+		// holds no gateway while it waits. The value itself is void.
+		void browserRenderLease;
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
@@ -314,6 +361,9 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		process.env.BOBBIT_E2E = "1";
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
+		// Reduce post-exit stdio flush grace from 2000ms to 100ms so fast
+		// verification commands (echo ok, node -e) complete quickly under load.
+		process.env.BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS = "100";
 		// Skip outbound network probes and per-prompt title-generation calls.
 		// Tests that exercise these paths override explicitly.
 		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
@@ -399,13 +449,37 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			staticDir: STATIC_DIR,
 		};
 
+		// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): serialise this worker's
+		// gateway boot through the cross-process gateway-boot lease so that N
+		// concurrent test:v2 runs never fire a cluster of simultaneous browser-tier
+		// boots. Gated on BOBBIT_V2_GATEWAY_BOOT_LEASE (set by playwright-v2.config.ts,
+		// NEVER by the legacy e2e config) and fully fail-open: any import/acquire
+		// error falls back to booting without a lease. Legacy e2e is unaffected.
+		let releaseBootLease: () => void = () => {};
+		if (process.env.BOBBIT_V2_GATEWAY_BOOT_LEASE === "1") {
+			try {
+				const { acquireGatewayBootLease } = await loadLedger();
+				const lease = await acquireGatewayBootLease();
+				releaseBootLease = () => lease.release();
+			} catch {
+				/* ledger unavailable — boot without a lease (fail-open) */
+			}
+		}
+
 		let gw = createGateway({
 			...gatewayConfig,
 			port: 0,             // OS-assigned port on first boot
 			portExplicit: true,  // Skip auto-increment loop
 		});
 
-		const port = await gw.start();
+		let port: number;
+		try {
+			port = await gw.start();
+		} finally {
+			// Boot CPU burst is over once start() settles — free the lease for the
+			// next queued worker. Remaining setup is gateway-bound, not a CPU burst.
+			releaseBootLease();
+		}
 		const gatewayUrl = `http://127.0.0.1:${port}`;
 
 		// Set env so e2e-setup.ts helpers and in-process mock agents target this worker's server.
@@ -604,3 +678,4 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 });
 
 export { expect } from "@playwright/test";
+export type { Page } from "@playwright/test";

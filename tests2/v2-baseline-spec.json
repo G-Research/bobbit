@@ -1,0 +1,11 @@
+{
+	"generatedAt": "2026-07-07T03:38:41.883Z",
+	"contracts": 19,
+	"stories": 71,
+	"fullyCovered": 7,
+	"variations": {
+		"total": 64,
+		"covered": 39,
+		"pct": 60.9375
+	}
+}

@@ -1,0 +1,133 @@
+/**
+ * Journey: Staff + Debug Tools — v2 browser smoke
+ * Covers: journey-staff, journey-debug-tools
+ * Consolidated from: staff-inbox, debug-panel, api-error-modal, etc.
+ */
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, defaultProject } from "../_helpers/journey-fixture.js";
+
+test.describe("Journey: Staff", () => {
+	test("settings staff section navigable", async ({ page }) => {
+		await openApp(page);
+		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
+	});
+
+	test("sidebar remains stable during staff route", async ({ page }) => {
+		await openApp(page);
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
+		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+	});
+
+	test("staff page renders with 'Staff Agents' heading", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/staff");
+		// The staff page always renders the "Staff Agents" h1 heading.
+		await expect(page.locator("h1").filter({ hasText: "Staff Agents" })).toBeVisible({ timeout: 15_000 });
+	});
+
+	test("staff page shows empty-state or table when there are no staff agents", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/staff");
+		await expect(page.locator("h1").filter({ hasText: "Staff Agents" })).toBeVisible({ timeout: 15_000 });
+
+		// Either the empty-state message or a staff table must be present.
+		const emptyState = page.getByText("No staff agents yet");
+		const staffTable = page.locator("table");
+		// Use or() to accept either state — whichever renders first.
+		await expect(emptyState.or(staffTable).first()).toBeVisible({ timeout: 20_000 });
+	});
+});
+
+test.describe("Journey: Debug Tools", () => {
+	test("app shell loads correctly for debug scenario", async ({ page }) => {
+		await openApp(page);
+		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+	});
+
+	test("app title is set", async ({ page }) => {
+		await openApp(page);
+		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
+		const title = await page.title();
+		expect(title).toBeTruthy();
+	});
+
+	test("settings general page renders Appearance section", async ({ page }) => {
+		// The general settings tab contains the Appearance heading and the
+		// debug-mode-toggle area (visible in dev-harness mode only).
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+		// The Settings h1 must appear.
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 15_000 });
+		// The Appearance section heading must be present.
+		await expect(page.getByTestId("general-appearance-heading")).toBeVisible({ timeout: 20_000 });
+	});
+
+	test("send message → mock agent response appears (tool renderer output path)", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const editor = page.locator("message-editor textarea").first();
+			await expect(editor).toBeVisible({ timeout: 15_000 });
+			await editor.fill("debug test");
+			await editor.press("Enter");
+			// The mock agent responds with "OK" — proves the message renderer renders agent output
+			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+});
+
+// Ported from staff-sub-section.spec.ts (audit: staff-debug PARTIAL): a project
+// with a staff agent renders the per-project Staff header in the sidebar.
+test.describe("Journey: Staff Sidebar Header", () => {
+	test("creating a staff agent renders the sidebar Staff header", async ({ page }) => {
+		const project = await defaultProject();
+		let staffId = "";
+		try {
+			const resp = await apiFetch("/api/staff", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `v2-staff-${Date.now()}`,
+					systemPrompt: "You are a sidebar test bot.",
+					cwd: project.rootPath, projectId: project.id,
+				}),
+			});
+			expect(resp.status).toBe(201);
+			staffId = (await resp.json()).id;
+
+			await openApp(page);
+			const header = page.locator(`[data-testid='sidebar-staff-header'][data-nav-id="staff-header:${project.id}"]`).first();
+			await expect(header).toBeVisible({ timeout: 20_000 });
+		} finally {
+			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+});
+
+// Ported from staff-role.spec.ts (audit: staff-debug GAP): the staff edit page
+// exposes the role select.
+test.describe("Journey: Staff Role Select", () => {
+	test("staff edit page exposes the role select", async ({ page }) => {
+		const project = await defaultProject();
+		let staffId = "";
+		try {
+			const resp = await apiFetch("/api/staff", {
+				method: "POST",
+				body: JSON.stringify({ name: `v2-staffrole-${Date.now()}`, systemPrompt: "role test bot", cwd: project.rootPath, projectId: project.id }),
+			});
+			expect(resp.status).toBe(201);
+			staffId = (await resp.json()).id;
+			await openApp(page);
+			await navigateToHash(page, `#/staff/${staffId}`);
+			await expect(page.locator('[data-testid="staff-role-select"]').first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+});

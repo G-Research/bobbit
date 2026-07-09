@@ -16,14 +16,11 @@
  * See `docs/internals.md` (Git status cache section) and the design doc on
  * the goal "Faster git status".
  */
-import { execFile as execFileCb } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import { promisify } from "node:util";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { GitStatusResult } from "../server.js";
 import { parseBaseRef } from "./git.js";
-
-const execFileAsync = promisify(execFileCb);
 
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
@@ -55,6 +52,7 @@ export interface BatchGitStatusOpts {
 	 * See `docs/design/base-ref.md`.
 	 */
 	configuredBaseRef?: string;
+	commandRunner?: CommandRunner;
 }
 
 const PER_CALL_TIMEOUT_MS = 3000;
@@ -73,6 +71,7 @@ async function runGit(
 	containerId?: string,
 	timeoutMs = PER_CALL_TIMEOUT_MS,
 	trim = true,
+	commandRunner: CommandRunner = realCommandRunner,
 ): Promise<{ stdout: string; ok: boolean }> {
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
@@ -81,20 +80,20 @@ async function runGit(
 	try {
 		let stdout: string;
 		if (containerId) {
-			const r = await execFileAsync(
+			const r = await commandRunner.execFile(
 				"docker",
 				["exec", "-w", cwd, containerId, "git", ...args],
 				{ encoding: "utf-8", timeout: timeoutMs, windowsHide: true },
 			);
-			stdout = r.stdout;
+			stdout = r.stdout.toString();
 		} else {
-			const r = await execFileAsync("git", args, {
+			const r = await commandRunner.execFile("git", args, {
 				cwd,
 				encoding: "utf-8",
 				timeout: timeoutMs,
 				windowsHide: true,
 			});
-			stdout = r.stdout;
+			stdout = r.stdout.toString();
 		}
 		success = 1;
 		return { stdout: trim ? stdout.trim() : stdout.replace(/\r?\n$/, ""), ok: true };
@@ -161,7 +160,9 @@ function parsePorcelain(raw: string): { status: { file: string; status: string }
 }
 
 /** Host path: parallel native execFile per design §2 (Phase A then Phase B). */
-async function runHost(cwd: string, untracked: boolean, configuredBaseRef?: string): Promise<GitStatusResult | null> {
+async function runHost(cwd: string, untracked: boolean, configuredBaseRef: string | undefined, commandRunner: CommandRunner): Promise<GitStatusResult | null> {
+	const runGitStatus = (args: string[], timeoutMs = PER_CALL_TIMEOUT_MS, trim = true) => runGit(args, cwd, undefined, timeoutMs, trim, commandRunner);
+
 	const porcelainArgs = [
 		"-c",
 		"core.filemode=false",
@@ -172,12 +173,12 @@ async function runHost(cwd: string, untracked: boolean, configuredBaseRef?: stri
 
 	// Phase A — six independent calls in parallel.
 	const [a1, a2, a3, a4, a5, a6] = await Promise.all([
-		runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd),
-		runGit(["symbolic-ref", "refs/remotes/origin/HEAD"], cwd),
-		runGit(["rev-parse", "--verify", "refs/heads/master"], cwd),
-		runGit(["rev-parse", "--verify", "refs/heads/main"], cwd),
+		runGitStatus(["rev-parse", "--abbrev-ref", "HEAD"]),
+		runGitStatus(["symbolic-ref", "refs/remotes/origin/HEAD"]),
+		runGitStatus(["rev-parse", "--verify", "refs/heads/master"]),
+		runGitStatus(["rev-parse", "--verify", "refs/heads/main"]),
 		runGit(porcelainArgs, cwd, undefined, PER_CALL_TIMEOUT_MS, false),
-		runGit(["rev-parse", "--abbrev-ref", "@{u}"], cwd),
+		runGitStatus(["rev-parse", "--abbrev-ref", "@{u}"]),
 	]);
 
 	// A1 mandatory.
@@ -204,22 +205,22 @@ async function runHost(cwd: string, untracked: boolean, configuredBaseRef?: stri
 	const { status, clean, summary } = parsePorcelain(a5.ok ? a5.stdout : "");
 
 	// Phase B0 — verify origin/<primary> exists (serialized between phases).
-	const b0 = await runGit(["rev-parse", "--verify", `origin/${primaryBranch}`], cwd);
+	const b0 = await runGitStatus(["rev-parse", "--verify", `origin/${primaryBranch}`]);
 	const pref = b0.ok ? `origin/${primaryBranch}` : primaryBranch;
 
 	// Phase B — four parallel rev-list counts + two shortstat diffs.
 	const [b1, b2, b3, b4, b5, b6] = await Promise.all([
-		runGit(["rev-list", "--count", "@{u}..HEAD"], cwd),
-		runGit(["rev-list", "--count", "HEAD..@{u}"], cwd),
-		runGit(["rev-list", "--count", `${pref}..HEAD`], cwd),
-		runGit(["rev-list", "--count", `HEAD..${pref}`], cwd),
+		runGitStatus(["rev-list", "--count", "@{u}..HEAD"]),
+		runGitStatus(["rev-list", "--count", "HEAD..@{u}"]),
+		runGitStatus(["rev-list", "--count", `${pref}..HEAD`]),
+		runGitStatus(["rev-list", "--count", `HEAD..${pref}`]),
 		// shortstat against primary committed delta (three-dot)
 		!isOnPrimary && b0.ok
-			? runGit(["diff", "--shortstat", `${pref}...HEAD`], cwd)
+			? runGitStatus(["diff", "--shortstat", `${pref}...HEAD`])
 			: Promise.resolve({ stdout: "", ok: true }),
 		// shortstat against working tree (uncommitted: staged + unstaged)
 		!isOnPrimary
-			? runGit(["diff", "--shortstat", "HEAD"], cwd)
+			? runGitStatus(["diff", "--shortstat", "HEAD"])
 			: Promise.resolve({ stdout: "", ok: true }),
 	]);
 
@@ -270,7 +271,7 @@ async function runHost(cwd: string, untracked: boolean, configuredBaseRef?: stri
 /** Container path: preserve the legacy single-spawn batched script. The
  * Windows tax is host-side only; inside Linux containers `git` is fast and
  * one `docker exec sh -c` round-trip beats 11 parallel `docker exec` calls. */
-async function runContainer(cwd: string, containerId: string, untracked: boolean, configuredBaseRef?: string): Promise<GitStatusResult | null> {
+async function runContainer(cwd: string, containerId: string, untracked: boolean, configuredBaseRef: string | undefined, commandRunner: CommandRunner): Promise<GitStatusResult | null> {
 	const porcelainLine = untracked
 		? "git -c core.filemode=false status --porcelain=v1 -uall 2>/dev/null"
 		: "git -c core.filemode=false status --porcelain=v1 -uno 2>/dev/null";
@@ -326,7 +327,7 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 	let errorCode = "none";
 	let stdout: string;
 	try {
-		const result = await execFileAsync(
+		const result = await commandRunner.execFile(
 			"docker",
 			["exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript],
 			{
@@ -337,7 +338,7 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 			},
 		);
 		success = 1;
-		stdout = result.stdout;
+		stdout = result.stdout.toString();
 	} catch (err) {
 		errorCode = childErrorCode(err);
 		throw err;
@@ -433,10 +434,11 @@ export async function runBatchGitStatusNative(
 	opts?: BatchGitStatusOpts,
 ): Promise<GitStatusResult | null> {
 	const untracked = opts?.untracked === true;
+	const commandRunner = opts?.commandRunner ?? realCommandRunner;
 	if (opts?.containerId) {
-		return runContainer(cwd, opts.containerId, untracked, opts?.configuredBaseRef);
+		return runContainer(cwd, opts.containerId, untracked, opts?.configuredBaseRef, commandRunner);
 	}
-	return runHost(cwd, untracked, opts?.configuredBaseRef);
+	return runHost(cwd, untracked, opts?.configuredBaseRef, commandRunner);
 }
 
 /** Single-quote a string for safe inclusion in an `sh -c` shell script.

@@ -1,4 +1,6 @@
 import type { ServerResponse } from "node:http";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import type { BgProcessInfo } from "./bg-process-manager.js";
 
 /** Result shape produced by `BgProcessManager.waitForExit`. */
@@ -26,9 +28,10 @@ export type BgWaitResult = { info: BgProcessInfo; timedOut: boolean; aborted: bo
 export async function streamBgWaitResponse(
 	res: ServerResponse,
 	waitForExit: () => Promise<BgWaitResult>,
-	opts?: { heartbeatMs?: number },
+	opts?: { heartbeatMs?: number; clock?: Clock },
 ): Promise<void> {
 	const heartbeatMs = opts?.heartbeatMs ?? 60_000;
+	const clock = opts?.clock ?? realClock;
 	let headWritten = false;
 	const ensureHead = (): void => {
 		if (headWritten) return;
@@ -42,7 +45,7 @@ export async function streamBgWaitResponse(
 
 	// Heartbeat newline keeps the long-poll connection alive past undici's
 	// default headersTimeout. The first tick also flushes the chunked head.
-	const heartbeat = setInterval(() => {
+	const heartbeat = clock.setInterval(() => {
 		try {
 			ensureHead();
 			res.write("\n");
@@ -67,6 +70,6 @@ export async function streamBgWaitResponse(
 		ensureHead();
 		res.end(JSON.stringify(result));
 	} finally {
-		clearInterval(heartbeat);
+		clock.clearInterval(heartbeat);
 	}
 }

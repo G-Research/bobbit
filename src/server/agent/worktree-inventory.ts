@@ -1,8 +1,6 @@
-import { execFile as execFileCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { SessionManager, ArchivedSessionWorktreeGroup, ArchivedSessionWorktreeItem, ArchivedSessionWorktreeScanResponse, ArchivedSessionWorktreeSelectionPreset, ArchivedSessionWorktreeSession, ArchivedWorktreeReason, ArchivedWorktreeReasonCategory, ArchivedWorktreeSelectionCategory, CleanupArchivedSessionWorktreesRequest, CleanupArchivedSessionWorktreesResponse, ArchivedSessionWorktreeCleanupResult } from "./session-manager.js";
 import type { PersistedGoal } from "./goal-store.js";
@@ -12,9 +10,8 @@ import type { PersistedSession } from "./session-store.js";
 import type { Component } from "./project-config-store.js";
 import { normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
 import { branchToSlug, worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
-import { cleanupWorktree, shouldSkipRemotePushForTests } from "../skills/git.js";
-
-const execFile = promisify(execFileCb);
+import { cleanupWorktree, shouldSkipRemotePushForTests, type RemoteGitPolicy } from "../skills/git.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 export type WorktreeInventorySource =
 	| "runtime-session"
@@ -160,6 +157,8 @@ export interface WorktreeInventoryDeps {
 	clock?: () => number;
 	fs?: Pick<typeof fs, "existsSync" | "readdirSync" | "statSync">;
 	execGit?: (repoPath: string, args: readonly string[], opts?: { timeoutMs?: number }) => Promise<string>;
+	commandRunner?: CommandRunner;
+	remotePolicy?: RemoteGitPolicy;
 }
 
 interface ParsedGitWorktree { path: string; branch?: string }
@@ -364,7 +363,7 @@ export class WorktreeInventoryService {
 				continue;
 			}
 			try {
-				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
+				await cleanupWorktree(item.repoPath, item.path, item.branch, false, this.deps.commandRunner ?? realCommandRunner, this.deps.remotePolicy ?? {});
 				const removed = await this.worktreeRemoved(item);
 				if (!removed) {
 					record({ itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "failed", reason: "git-scan-error", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: false });
@@ -1023,23 +1022,24 @@ export class WorktreeInventoryService {
 		const guards = this.buildGuards();
 		if (this.branchDeleteBlockedReason(item.branch, item.repoPath, guards, item.legacy?.archivedSession?.item.key)) return false;
 		if (!(await this.localBranchExists(item.repoPath, item.branch))) return false;
-		try { await execFile("git", ["branch", "-D", item.branch], { cwd: item.repoPath }); } catch { /* verify below */ }
+		const commandRunner = this.deps.commandRunner ?? realCommandRunner;
+		try { await commandRunner.execFile("git", ["branch", "-D", item.branch], { cwd: item.repoPath }); } catch { /* verify below */ }
 		if (await this.localBranchExists(item.repoPath, item.branch)) return false;
-		if (!(await shouldSkipRemotePushForTests(item.repoPath))) {
-			try { await execFile("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 }); } catch { /* best-effort */ }
+		if (!(await shouldSkipRemotePushForTests(item.repoPath, "origin", commandRunner, this.deps.remotePolicy ?? {}))) {
+			try { await commandRunner.execFile("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 }); } catch { /* best-effort */ }
 		}
 		return true;
 	}
 
 	private localBranchExists(repoPath: string | undefined, branch: string | undefined): Promise<boolean> {
 		if (!repoPath || !branch) return Promise.resolve(false);
-		return execFile("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath }).then(() => true).catch(() => false);
+		return (this.deps.commandRunner ?? realCommandRunner).execFile("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath }).then(() => true).catch(() => false);
 	}
 
 	private async execGit(repoPath: string, args: readonly string[], opts?: { timeoutMs?: number }): Promise<string> {
 		if (this.deps.execGit) return this.deps.execGit(repoPath, args, opts);
-		const { stdout } = await execFile("git", [...args], { cwd: repoPath, timeout: opts?.timeoutMs ?? 10_000 }) as { stdout: string };
-		return stdout;
+		const { stdout } = await (this.deps.commandRunner ?? realCommandRunner).execFile("git", [...args], { cwd: repoPath, timeout: opts?.timeoutMs ?? 10_000 }) as { stdout: string | Buffer };
+		return stdout.toString();
 	}
 
 	private exists(p: string | undefined): boolean { try { return !!p && this.fsa.existsSync(p); } catch { return false; } }

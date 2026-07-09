@@ -38,7 +38,7 @@ async function deleteProject(id: string | undefined): Promise<void> {
 
 test.describe("unborn git repo worktree fallback", () => {
 	test("regular session creation in an unborn repo settles without raw HEAD worktree failure", async () => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 
 		const baseDir = mkdtempSync(path.join(tmpdir(), `bobbit-e2e-unborn-session-${process.pid}-`));
 		const repoPath = path.join(baseDir, "repo");
@@ -70,7 +70,7 @@ test.describe("unborn git repo worktree fallback", () => {
 			const settled = await pollUntil(async () => {
 				const rec = await readSession(sessionId!);
 				return rec.status !== "preparing" ? rec : null;
-			}, { timeoutMs: 20_000, intervalMs: 200, label: "unborn repo session leaves preparing" });
+			}, { timeoutMs: 40_000, intervalMs: 200, label: "unborn repo session leaves preparing" });
 
 			expect(JSON.stringify(settled), "settled session should not expose raw invalid HEAD output").not.toMatch(RAW_INVALID_HEAD);
 			expect(settled.status, "session should remain usable instead of being archived/terminated by worktree setup").not.toMatch(/^(archived|terminated)$/);

@@ -15,6 +15,8 @@ import { completeModelText } from "./model-completion.js";
 import { getAvailableModels, modelRecencyRank, type ApiModel } from "./model-registry.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
+const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
+
 /** Cache for the fallback naming model id, keyed by gateway URL. TTL ~60s. */
 let _fallbackCache: { url: string; modelId: string | null; expiresAt: number } | null = null;
 const FALLBACK_TTL_MS = 60_000;
@@ -25,7 +27,7 @@ const FALLBACK_TTL_MS = 60_000;
  * Returns the *stripped* id (no provider prefix) suitable for generateViaGateway,
  * or null if the gateway exposes no Claude-family model.
  */
-export async function pickFallbackAigwNamingModel(aigwUrl: string): Promise<string | null> {
+export async function pickFallbackAigwNamingModel(aigwUrl: string, _fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	const normalized = aigwUrl.replace(/\/+$/, "");
 	const now = Date.now();
 	if (_fallbackCache && _fallbackCache.url === normalized && _fallbackCache.expiresAt > now) {
@@ -80,6 +82,9 @@ export interface TitleGenOptions {
 	availableModels?: ApiModel[] | (() => Promise<ApiModel[]>);
 	/** Test hook: performs the direct-model completion. */
 	directModelCompleter?: (model: ApiModel, args: { systemPrompt: string; userPrompt: string; maxTokens: number; thinkingLevel: "off" }) => Promise<string | null>;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_TITLE_GEN behavior. */
+	skipTitleGeneration?: boolean;
+	fetchImpl?: typeof fetch;
 }
 
 interface AuthCredentials {
@@ -204,10 +209,10 @@ export function cleanTitle(raw: string): string {
  * but the gateway's /v1/chat/completions endpoint needs the full ID (e.g. "aws/us.anthropic.claude-...").
  * Queries the gateway's /v1/models endpoint to find a match.
  */
-async function resolveGatewayModelId(baseUrl: string, strippedId: string): Promise<string> {
+async function resolveGatewayModelId(baseUrl: string, strippedId: string, fetchImpl: typeof fetch = defaultFetch): Promise<string> {
 	try {
 		const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-		const res = await fetch(modelsUrl, { headers: aigwUserAgentHeaders(), signal: AbortSignal.timeout(5000) });
+		const res = await fetchImpl(modelsUrl, { headers: aigwUserAgentHeaders(), signal: AbortSignal.timeout(5000) });
 		if (!res.ok) return strippedId;
 		const data = await res.json() as { data?: Array<{ id: string }> };
 		if (!Array.isArray(data.data)) return strippedId;
@@ -230,9 +235,9 @@ async function resolveGatewayModelId(baseUrl: string, strippedId: string): Promi
 /**
  * Generate title via the AI Gateway using OpenAI-compatible chat completions.
  */
-async function generateViaGateway(aigwUrl: string, modelId: string, preview: string, thinkingLevel?: string): Promise<string | null> {
+async function generateViaGateway(aigwUrl: string, modelId: string, preview: string, thinkingLevel?: string, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	const baseUrl = aigwUrl.replace(/\/+$/, "");
-	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId);
+	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId, fetchImpl);
 	const url = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
 	const body: any = {
@@ -266,7 +271,7 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 	console.log(`[title-gen] Requesting title via gateway model "${resolvedModel}"${resolvedModel !== modelId ? ` (resolved from "${modelId}")` : ""}...`);
 
 	try {
-		const response = await fetch(url, {
+		const response = await fetchImpl(url, {
 			method: "POST",
 			headers: aigwUserAgentHeaders({ "Content-Type": "application/json" }),
 			body: JSON.stringify(body),
@@ -328,7 +333,7 @@ async function generateViaConfiguredDirectModel(model: ApiModel, userPrompt: str
 	}
 }
 
-async function generateViaAnthropic(preview: string, thinkingLevel?: string, modelId = DEFAULT_TITLE_MODEL): Promise<string | null> {
+async function generateViaAnthropic(preview: string, thinkingLevel?: string, modelId = DEFAULT_TITLE_MODEL, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	let auth = loadAuth();
 	if (!auth) return null;
 
@@ -387,7 +392,7 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string, mod
 	console.log(`[title-gen] Requesting title via ${modelId}…`);
 
 	try {
-		let response = await fetch(ANTHROPIC_API_URL, {
+		let response = await fetchImpl(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
@@ -399,7 +404,7 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string, mod
 			const newToken = await refreshOAuthToken();
 			if (newToken) {
 				headers["Authorization"] = `Bearer ${newToken}`;
-				response = await fetch(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
+				response = await fetchImpl(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
 			}
 		}
 
@@ -435,9 +440,10 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string, mod
  * Returns null if generation fails.
  */
 export async function generateSessionTitle(messages: any[], options?: TitleGenOptions): Promise<string | null> {
+	const fetchImpl = options?.fetchImpl ?? defaultFetch;
 	// Skip title generation entirely when tests/CI opt out - avoids real
 	// outbound calls to api.anthropic.com for every prompted test.
-	if (process.env.BOBBIT_SKIP_TITLE_GEN) return null;
+	if (options?.skipTitleGeneration ?? false) return null;
 	const preview = extractConversationPreview(messages);
 	if (!preview.trim()) {
 		console.error("[title-gen] No conversation content to summarise");
@@ -451,7 +457,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 		const configured = await findConfiguredModel(options.namingModel, options);
 		if (configured) {
 			if (configured.provider === "aigw" && options.aigwUrl) {
-				return generateViaGateway(options.aigwUrl, configured.modelId, preview, "off");
+				return generateViaGateway(options.aigwUrl, configured.modelId, preview, "off", fetchImpl);
 			}
 			if (configured.model) {
 				const userPrompt = `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`;
@@ -459,7 +465,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 				return generateViaConfiguredDirectModel(configured.model, userPrompt, systemPrompt, options);
 			}
 			if (configured.provider === "anthropic") {
-				return generateViaAnthropic(preview, "off", configured.modelId);
+				return generateViaAnthropic(preview, "off", configured.modelId, fetchImpl);
 			}
 			console.warn(`[title-gen] Naming model "${options.namingModel}" is not available; falling back`);
 		}
@@ -469,10 +475,10 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	// Claude model from the gateway (prefer Haiku). This avoids silent failures
 	// in secure-zone deployments that cannot reach api.anthropic.com directly.
 	if (options?.aigwUrl) {
-		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl);
+		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl, fetchImpl);
 		if (fallbackId) {
 			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}"`);
-			return generateViaGateway(options.aigwUrl, fallbackId, preview, "off");
+			return generateViaGateway(options.aigwUrl, fallbackId, preview, "off", fetchImpl);
 		}
 		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found; falling back");
 	}
@@ -491,7 +497,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	}
 
 	// Legacy default: direct Anthropic API.
-	return generateViaAnthropic(preview, "off");
+	return generateViaAnthropic(preview, "off", DEFAULT_TITLE_MODEL, fetchImpl);
 }
 
 // ── Goal title summarization ──────────────────────────────────────────
@@ -501,9 +507,9 @@ const GOAL_SUMMARY_SYSTEM = "Summarize this goal title in exactly 3 words. Wrap 
 /**
  * Generate a 3-word summary of a goal title via the AI Gateway.
  */
-async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, goalTitle: string): Promise<string | null> {
+async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, goalTitle: string, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	const baseUrl = aigwUrl.replace(/\/+$/, "");
-	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId);
+	const resolvedModel = await resolveGatewayModelId(baseUrl, modelId, fetchImpl);
 	const url = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
 	const body = {
@@ -519,7 +525,7 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 	console.log(`[title-gen] Requesting goal summary via gateway model "${resolvedModel}"…`);
 
 	try {
-		const response = await fetch(url, {
+		const response = await fetchImpl(url, {
 			method: "POST",
 			headers: aigwUserAgentHeaders({ "Content-Type": "application/json" }),
 			body: JSON.stringify(body),
@@ -547,7 +553,7 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 /**
  * Generate a 3-word summary of a goal title via direct Anthropic API.
  */
-async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFAULT_TITLE_MODEL): Promise<string | null> {
+async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFAULT_TITLE_MODEL, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	let auth = loadAuth();
 	if (!auth) return null;
 
@@ -592,7 +598,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFA
 	console.log(`[title-gen] Requesting goal summary via ${modelId}…`);
 
 	try {
-		let response = await fetch(ANTHROPIC_API_URL, {
+		let response = await fetchImpl(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
@@ -604,7 +610,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFA
 			const newToken = await refreshOAuthToken();
 			if (newToken) {
 				headers["Authorization"] = `Bearer ${newToken}`;
-				response = await fetch(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
+				response = await fetchImpl(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
 			}
 		}
 
@@ -641,7 +647,8 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFA
  * Returns null if generation fails.
  */
 export async function generateGoalSummaryTitle(goalTitle: string, options?: TitleGenOptions): Promise<string | null> {
-	if (process.env.BOBBIT_SKIP_TITLE_GEN) return null;
+	const fetchImpl = options?.fetchImpl ?? defaultFetch;
+	if (options?.skipTitleGeneration ?? false) return null;
 	if (!goalTitle.trim()) {
 		console.error("[title-gen] No goal title to summarise");
 		return null;
@@ -667,10 +674,10 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 	// Gateway configured but no explicit naming model - auto-select a low-cost
 	// Claude model (prefer Haiku) rather than hitting api.anthropic.com.
 	if (options?.aigwUrl) {
-		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl);
+		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl, fetchImpl);
 		if (fallbackId) {
 			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}" for goal summary`);
-			return generateGoalSummaryViaGateway(options.aigwUrl, fallbackId, goalTitle);
+			return generateGoalSummaryViaGateway(options.aigwUrl, fallbackId, goalTitle, fetchImpl);
 		}
 		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found for goal summary; falling back");
 	}
@@ -684,5 +691,5 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 		}
 	}
 
-	return generateGoalSummaryViaAnthropic(goalTitle);
+	return generateGoalSummaryViaAnthropic(goalTitle, DEFAULT_TITLE_MODEL, fetchImpl);
 }

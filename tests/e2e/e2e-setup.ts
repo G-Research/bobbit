@@ -9,7 +9,7 @@
  * (not import time) so each worker gets the right server.
  */
 
-import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, realpathSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import WebSocket from "ws";
@@ -71,7 +71,9 @@ export let E2E_PI_DIR: string; // legacy alias
 // Re-define as getters on the module object. The `export let` declarations
 // above create the binding slots; Object.defineProperty replaces them with
 // getters that read process.env each time.
-const _thisModule: Record<string, unknown> = { E2E_PORT, BASE, WS_BASE, E2E_BOBBIT_DIR, E2E_PI_DIR };
+// Placeholder values — every key is immediately replaced by a getter via the
+// Object.defineProperty calls below, so the initial contents are throwaway.
+const _thisModule: Record<string, unknown> = { E2E_PORT: "", BASE: "", WS_BASE: "", E2E_BOBBIT_DIR: "", E2E_PI_DIR: "" };
 Object.defineProperty(_thisModule, "E2E_PORT", { get: port, enumerable: true });
 Object.defineProperty(_thisModule, "BASE", { get: base, enumerable: true });
 Object.defineProperty(_thisModule, "WS_BASE", { get: wsBase, enumerable: true });
@@ -98,13 +100,53 @@ E2E_PI_DIR = bobbitDir();
  * parallel test runs that share the same repo).
  */
 const _nonGitCwdByHarnessRoot: Record<string, string> = {};
+let _nonGitCwdRotation = 0;
+/**
+ * True if `dir`, or any ancestor up to and including `stopAt`, contains a `.git`
+ * entry — i.e. `dir` sits inside a git working tree.
+ */
+function isInsideGitRepo(dir: string, stopAt: string): boolean {
+	let cur = dir;
+	for (let i = 0; i < 40; i++) {
+		if (existsSync(join(cur, ".git"))) return true;
+		if (cur === stopAt) break;
+		const parent = dirname(cur);
+		if (parent === cur) break;
+		cur = parent;
+	}
+	return false;
+}
 export function nonGitCwd(): string {
 	const defaultRoot = harnessDefaultProjectRoot();
 	const key = `${port()}|${defaultRoot}`;
-	let cwd = _nonGitCwdByHarnessRoot[key];
+	let cwd: string | undefined = _nonGitCwdByHarnessRoot[key];
+	// Self-heal cross-test poisoning: the memoized workspace is SHARED across
+	// every default-project session on this worker gateway. A spec that git-inits
+	// its session cwd (e.g. pr-walkthrough-pack calls setupSessionGitRepo on the
+	// session's real working dir, which IS this shared nonGitCwd) turns the shared
+	// dir into a git repo. The next session that reuses it would then be treated
+	// as "inside a repo" → the gateway creates an unexpected worktree whose
+	// checked-out tree does NOT contain this untracked workspace subdir, so a
+	// later `bash_bg` spawn runs with a nonexistent cwd → "spawn bash.exe ENOENT".
+	// If the cached dir has become part of a git repo, rotate to a fresh,
+	// guaranteed-non-git sibling so the non-git contract is restored.
+	if (cwd && isInsideGitRepo(cwd, defaultRoot)) {
+		delete _nonGitCwdByHarnessRoot[key];
+		cwd = undefined;
+	}
 	if (!cwd) {
-		cwd = join(defaultRoot, ".e2e-workspaces", `non-git-${port()}`);
+		const suffix = _nonGitCwdRotation > 0 ? `-${_nonGitCwdRotation}` : "";
+		cwd = join(defaultRoot, ".e2e-workspaces", `non-git-${port()}${suffix}`);
+		// If even the freshly-named dir is somehow inside a repo, keep rotating —
+		// but bounded, so a poisoned defaultRoot itself can never spin forever
+		// (in that pathological case there is no non-git child; fall through and
+		// let the caller surface the real problem rather than hang the worker).
+		for (let tries = 0; tries < 16 && isInsideGitRepo(cwd, defaultRoot); tries++) {
+			_nonGitCwdRotation++;
+			cwd = join(defaultRoot, ".e2e-workspaces", `non-git-${port()}-${_nonGitCwdRotation}`);
+		}
 		_nonGitCwdByHarnessRoot[key] = cwd;
+		_nonGitCwdRotation++;
 	}
 	mkdirSync(cwd, { recursive: true });
 	try { return realpathSync(cwd); } catch { return cwd; }

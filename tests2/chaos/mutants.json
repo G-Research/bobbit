@@ -1,0 +1,551 @@
+[
+  {
+    "id": "M00-null",
+    "area": "null",
+    "file": "src/server/agent/gate-dependency-check.ts",
+    "description": "No-op: adds an inline comment — both suites must PASS (harness sanity check).",
+    "search": "if (!workflowGateId) return null;",
+    "replace": "if (!workflowGateId) return null; // null-mutant: no-op",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": [],
+    "nullMutant": true
+  },
+  {
+    "id": "M01-gate-bypass-ignored",
+    "area": "gate-workflow",
+    "file": "src/server/agent/gate-dependency-check.ts",
+    "description": "Remove bypassed gate from dependency satisfaction; bypassed gates no longer unblock downstream.",
+    "search": "gateStates.filter(g => g.status === \"passed\" || g.status === \"bypassed\").map(g => g.gateId),",
+    "replace": "gateStates.filter(g => g.status === \"passed\").map(g => g.gateId), // mutant: bypass-ignored",
+    "expectedLegacyCatchers": ["tests/gate-dependency-enforcement.test.ts"],
+    "expectedV2Catchers": ["tests2/core/gate-dependency-enforcement.test.ts"]
+  },
+  {
+    "id": "M02-gate-cascade-inverted",
+    "area": "gate-workflow",
+    "file": "src/server/agent/gate-store.ts",
+    "description": "Invert cascadeReset condition — only resets already-pending gates (no-op on passed/failed).",
+    "search": "\t\t\tif (gate && gate.status !== \"pending\") {",
+    "replace": "\t\t\tif (gate && gate.status === \"pending\") { // mutant: inverted condition",
+    "expectedLegacyCatchers": ["tests/gate-store-logic.test.ts"],
+    "expectedV2Catchers": ["tests2/core/gate-store-logic.test.ts"]
+  },
+  {
+    "id": "M03-gate-no-signal-push",
+    "area": "stores-persistence",
+    "file": "src/server/agent/gate-store.ts",
+    "description": "Dropped signal push — recordSignal() does not append the signal to gate history.",
+    "search": "\t\tgate.signals.push(signal);\n\t\tgate.updatedAt = Date.now();\n\t\tthis.save();",
+    "replace": "\t\t// gate.signals.push(signal); // mutant: dropped signal push\n\t\tgate.updatedAt = Date.now();\n\t\tthis.save();",
+    "expectedLegacyCatchers": ["tests/gate-store-logic.test.ts"],
+    "expectedV2Catchers": ["tests2/core/gate-store-logic.test.ts"]
+  },
+  {
+    "id": "M04-session-store-no-persist",
+    "area": "stores-persistence",
+    "file": "src/server/agent/session-store.ts",
+    "description": "Removed saveNow() from put() — sessions written to memory but never flushed to disk.",
+    "search": "\t\tthis.sessions.set(session.id, session);\n\t\tthis.saveNow(); // immediate — structural change\n\t\tthis.onIndexUpdate?.(session);",
+    "replace": "\t\tthis.sessions.set(session.id, session);\n\t\t// this.saveNow(); // mutant: no persist on put\n\t\tthis.onIndexUpdate?.(session);",
+    "expectedLegacyCatchers": ["tests/session-store.test.ts"],
+    "expectedV2Catchers": ["tests2/core/session-store.test.ts"]
+  },
+  {
+    "id": "M05-scheduler-wrong-return",
+    "area": "team-scheduler",
+    "file": "src/server/agent/child-team-scheduler.ts",
+    "description": "Wrong return value — capacity-blocked children falsely report 'started'.",
+    "search": "\t\tthis._enqueue(rootGoalId, childGoalId);\n\t\treturn \"capacity-blocked\";",
+    "replace": "\t\tthis._enqueue(rootGoalId, childGoalId);\n\t\treturn \"started\"; // mutant: wrong return value",
+    "expectedLegacyCatchers": ["tests/child-team-scheduler.test.ts"],
+    "expectedV2Catchers": ["tests2/core/child-team-scheduler.test.ts"]
+  },
+  {
+    "id": "M06-team-idle-nudge-zero",
+    "area": "team-scheduler",
+    "file": "src/server/agent/team-manager.ts",
+    "description": "Zero debounce — worker idle notifications fire immediately with 0 ms delay (blip protection removed).",
+    "search": "\tprivate static readonly WORKER_IDLE_NUDGE_DEBOUNCE_MS = 5_000;",
+    "replace": "\tprivate static readonly WORKER_IDLE_NUDGE_DEBOUNCE_MS = 0; // mutant: no debounce",
+    "expectedLegacyCatchers": ["tests/team-manager-worker-idle-debounce.test.ts"],
+    "expectedV2Catchers": ["tests2/core/team-manager-worker-idle-debounce.test.ts"]
+  },
+  {
+    "id": "M07-session-status-no-bump",
+    "area": "session-lifecycle",
+    "file": "src/server/agent/session-status.ts",
+    "description": "Removed statusVersion bump — version stays at 0 forever; clients cannot detect dropped frames.",
+    "search": "\tsession.statusVersion = (session.statusVersion ?? 0) + 1;",
+    "replace": "\t// session.statusVersion = (session.statusVersion ?? 0) + 1; // mutant: no bump",
+    "expectedLegacyCatchers": ["tests/session-manager-status.test.ts"],
+    "expectedV2Catchers": ["tests2/core/session-manager-status.test.ts"]
+  },
+  {
+    "id": "M08-session-status-skip-broadcast",
+    "area": "session-lifecycle",
+    "file": "src/server/agent/session-status.ts",
+    "description": "Skip all WS broadcasts — broadcastFrame skips every client unconditionally.",
+    "search": "\t\tif (client.readyState !== 1) continue;",
+    "replace": "\t\tif (true) continue; // mutant: skip all clients",
+    "expectedLegacyCatchers": ["tests/session-manager-status.test.ts"],
+    "expectedV2Catchers": ["tests2/core/session-manager-status.test.ts"]
+  },
+  {
+    "id": "M09-branch-wrong-slice",
+    "area": "git-worktree",
+    "file": "src/server/agent/goal-manager.ts",
+    "description": "Wider slice — toBranchName truncates at 50 chars instead of 14, violating the ≤14 length invariant.",
+    "search": "\t\t.slice(0, 14)",
+    "replace": "\t\t.slice(0, 50) // mutant: wrong truncation",
+    "expectedLegacyCatchers": ["tests/team-branch-shape.test.ts"],
+    "expectedV2Catchers": ["tests2/core/team-branch-shape.test.ts"]
+  },
+  {
+    "id": "M10-worktree-slug-wrong-replace",
+    "area": "git-worktree",
+    "file": "src/server/skills/worktree-paths.ts",
+    "description": "Wrong replacement — branchToSlug replaces dots instead of slashes; path components retained.",
+    "search": "\treturn branch.replace(/\\//g, \"-\");",
+    "replace": "\treturn branch.replace(/\\./g, \"-\"); // mutant: wrong char replaced",
+    "expectedLegacyCatchers": ["tests/worktree-paths.test.ts"],
+    "expectedV2Catchers": ["tests2/core/worktree-paths.test.ts"]
+  },
+  {
+    "id": "M11-push-safety-bypass",
+    "area": "verification",
+    "file": "src/server/agent/verification-harness.ts",
+    "description": "Push safety bypass — all git push commands silently approved without checking refspecs.",
+    "search": "\tconst tokens = shellTokenize(command);\n\tconst protectedBranches = protectedBranchSet(vars);",
+    "replace": "\tif (true) return { ok: true }; // mutant: bypass all checks\n\tconst tokens = shellTokenize(command);\n\tconst protectedBranches = protectedBranchSet(vars);",
+    "expectedLegacyCatchers": ["tests/verification-push-guard.test.ts"],
+    "expectedV2Catchers": ["tests2/core/verification-push-guard.test.ts"]
+  },
+  {
+    "id": "M12-step-timeout-no-unit",
+    "area": "verification",
+    "file": "src/server/agent/verification-harness.ts",
+    "description": "Timeout wrong — unit command steps get 300 s (same as generic) instead of 1200 s.",
+    "search": "\treturn isComponentUnitCommand ? DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC : DEFAULT_COMMAND_STEP_TIMEOUT_SEC;",
+    "replace": "\treturn DEFAULT_COMMAND_STEP_TIMEOUT_SEC; // mutant: no unit-command special case",
+    "expectedLegacyCatchers": ["tests/verification-harness-command-scheduling.test.ts"],
+    "expectedV2Catchers": ["tests2/core/verification-harness-command-scheduling.test.ts"]
+  },
+  {
+    "id": "M13-fence-gh-bypass",
+    "area": "di-fence",
+    "file": "tests2/harness/fenced-command-runner.ts",
+    "description": "DI-fence: gh invocation no longer blocked in execFile — the test-only gh fence is disabled.",
+    "search": "\t\t\tif (name === \"gh\") throw new Error(\"[fenced-command-runner] blocked gh invocation\");\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") await assertGitRemoteAllowed(args, options);\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
+    "replace": "\t\t\t// if (name === \"gh\") ... // mutant: gh check removed\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") await assertGitRemoteAllowed(args, options);\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": ["tests2/core/command-runner-fence.test.ts"],
+    "note": "No legacy catcher — fence is a new v2 seam (demonstrates v2 NEW coverage)"
+  },
+  {
+    "id": "M14-fence-network-git-allowed",
+    "area": "di-fence",
+    "file": "tests2/harness/fenced-command-runner.ts",
+    "description": "DI-fence: NETWORK_GIT_COMMANDS cleared — git push/fetch/clone/ls-remote all allowed through the fence.",
+    "search": "const NETWORK_GIT_COMMANDS = new Set([\"push\", \"fetch\", \"clone\", \"ls-remote\"]);",
+    "replace": "const NETWORK_GIT_COMMANDS = new Set<string>([]); // mutant: allow all git network ops",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": ["tests2/core/command-runner-fence.test.ts"],
+    "note": "No legacy catcher — fence is a new v2 seam (demonstrates v2 NEW coverage)"
+  },
+  {
+    "id": "M15-cascade-workflow-hidden-invert",
+    "area": "config-cascade",
+    "file": "src/server/agent/config-cascade.ts",
+    "description": "Workflow hidden filter inverted — only hidden workflows returned; visible workflows excluded from cascade.",
+    "search": "\t\t\t.filter(w => !w.hidden)",
+    "replace": "\t\t\t.filter(w => !!w.hidden) // mutant: inverted hidden filter",
+    "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
+    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+  },
+  {
+    "id": "M16-cascade-hq-normalization-broken",
+    "area": "config-cascade",
+    "file": "src/server/agent/config-cascade.ts",
+    "description": "HQ normalization broken — Headquarters never normalizes to server scope; project-scoped resolution activated for HQ.",
+    "search": "\treturn projectId === HEADQUARTERS_PROJECT_ID ? undefined : projectId;",
+    "replace": "\treturn projectId; // mutant: never normalize HQ to server scope",
+    "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
+    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+  },
+  {
+    "id": "M17-reducer-wrong-sort",
+    "area": "message-reducer",
+    "file": "src/app/message-reducer.ts",
+    "description": "Sort reversed — messages sorted descending by _order instead of ascending; newest appears first.",
+    "search": "\t\tif (a._order !== b._order) return a._order - b._order;",
+    "replace": "\t\tif (a._order !== b._order) return b._order - a._order; // mutant: reversed",
+    "expectedLegacyCatchers": ["tests/message-reducer.test.ts"],
+    "expectedV2Catchers": ["tests2/core/message-reducer.test.ts"]
+  },
+  {
+    "id": "M18-reducer-settle-inverted",
+    "area": "message-reducer",
+    "file": "src/app/message-reducer.ts",
+    "description": "settle-optimistic inverted — condition flipped; already-at-sentinel rows never re-stamped to chronological position.",
+    "search": "\t\t\t\tif (m._origin === \"optimistic\" && m._order > OPTIMISTIC_ORDER_BASE) {",
+    "replace": "\t\t\t\tif (m._origin === \"optimistic\" && m._order < OPTIMISTIC_ORDER_BASE) { // mutant: inverted",
+    "expectedLegacyCatchers": ["tests/message-reducer.test.ts"],
+    "expectedV2Catchers": ["tests2/core/message-reducer.test.ts"]
+  },
+  {
+    "id": "M19-sidebar-inverted-filter",
+    "area": "app-state",
+    "file": "src/app/sidebar-tree-builder.ts",
+    "description": "Live sessions filter inverted — archived sessions treated as live; non-archived sessions excluded.",
+    "search": "\tconst liveSessions = dedupeSessionsById(sortSessions(input.sessions.filter(s => !s.archived)));",
+    "replace": "\tconst liveSessions = dedupeSessionsById(sortSessions(input.sessions.filter(s => !!s.archived))); // mutant",
+    "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
+    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+  },
+  {
+    "id": "M20-gate-status-no-live-renderer",
+    "area": "renderer",
+    "file": "src/ui/tools/renderers/GateToolRenderers.ts",
+    "description": "Renderer: shouldRenderLiveVerification always false — gate-verification-live component never rendered.",
+    "search": "\t\tconst shouldRenderLiveVerification = !!(latestSignal && verification && goalId2 && resolvedGateId && signalId);",
+    "replace": "\t\tconst shouldRenderLiveVerification = false; // mutant: never render live verification",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": ["tests2/dom/gate-status-renderer.test.ts"],
+    "note": "Renderer legacy coverage is a Playwright browser spec (tests/gate-status-renderer.spec.ts) that runs in the browser tier, NOT the node chaos harness — so it is intentionally not listed here to avoid a false-positive kill from a tsx import error. The v2 dom-tier catcher runs the REAL renderer under happy-dom."
+  },
+  {
+    "id": "M21-goal-store-archive-flag-missing",
+    "area": "stores-persistence",
+    "file": "src/server/agent/goal-store.ts",
+    "description": "Archive flag not set — existing.archived stays undefined; callbacks fire on every subsequent archive call (idempotence broken).",
+    "search": "\t\tthis.generation++;\n\t\texisting.archived = true;\n\t\texisting.archivedAt = Date.now();\n\t\tthis.save();",
+    "replace": "\t\tthis.generation++;\n\t\t// existing.archived = true; // mutant: archive flag never set\n\t\texisting.archivedAt = Date.now();\n\t\tthis.save();",
+    "expectedLegacyCatchers": ["tests/goal-trigger-dispatcher.test.ts"],
+    "expectedV2Catchers": ["tests2/core/goal-trigger-dispatcher.test.ts"]
+  },
+  {
+    "id": "M22-aggregate-gate-status-wrong-failed",
+    "area": "gate-workflow",
+    "file": "src/server/agent/goal-descendants.ts",
+    "description": "Silenced failure — failed gate status returns 'pending' instead of 'failed'; failures invisible to the plan tab.",
+    "search": "\tif (gates.some(g => g.status === \"failed\")) return \"failed\";",
+    "replace": "\tif (gates.some(g => g.status === \"failed\")) return \"pending\"; // mutant: wrong status",
+    "expectedLegacyCatchers": ["tests/goal-descendants-enrichment.test.ts"],
+    "expectedV2Catchers": ["tests2/core/goal-descendants-enrichment.test.ts"]
+  },
+  {
+    "id": "M23-gatesummary-bypassed-as-passed",
+    "area": "gate-workflow",
+    "file": "src/server/gate-status-summary.ts",
+    "description": "Bypassed count reads passed gates — bypassedCount reflects passed gates instead of bypassed ones; a workflow with zero bypassed gates reports a non-zero bypassed count.",
+    "search": "\tconst bypassed = summaryGates.filter(gate => gate.status === \"bypassed\").length;",
+    "replace": "\tconst bypassed = summaryGates.filter(gate => gate.status === \"passed\").length; // mutant: counts passed as bypassed",
+    "expectedLegacyCatchers": ["tests/gate-status-summary.test.ts"],
+    "expectedV2Catchers": ["tests2/core/gate-status-summary.test.ts"]
+  },
+  {
+    "id": "M24-gatesummary-passed-inverted",
+    "area": "gate-workflow",
+    "file": "src/server/gate-status-summary.ts",
+    "description": "Inverted passed predicate — the passed tally counts non-passed gates, so a fully-passed workflow reports 0/N.",
+    "search": "\t\tpassed: summaryGates.filter(gate => gate.status === \"passed\").length,",
+    "replace": "\t\tpassed: summaryGates.filter(gate => gate.status !== \"passed\").length, // mutant: inverted passed predicate",
+    "expectedLegacyCatchers": ["tests/gate-status-summary.test.ts"],
+    "expectedV2Catchers": ["tests2/core/gate-status-summary.test.ts"]
+  },
+  {
+    "id": "M25-plan-mutation-prune-inverted",
+    "area": "stores-persistence",
+    "file": "src/server/agent/plan-mutation-store.ts",
+    "description": "Inverted expiry comparison — pruneExpired retains expired requests and deletes still-valid ones.",
+    "search": "\t\t\t\tconst kept = list.filter(m => m.expiresAt > now);",
+    "replace": "\t\t\t\tconst kept = list.filter(m => m.expiresAt < now); // mutant: inverted expiry check",
+    "expectedLegacyCatchers": ["tests/plan-mutation-store.test.ts"],
+    "expectedV2Catchers": ["tests2/core/plan-mutation-store.test.ts"]
+  },
+  {
+    "id": "M26-inbox-listpending-inverted",
+    "area": "stores-persistence",
+    "file": "src/server/agent/inbox-store.ts",
+    "description": "Inverted pending filter — listPending returns already-resolved (non-pending) entries and hides genuinely pending ones.",
+    "search": "\t\treturn this.ensureLoaded(staffId).filter((e) => e.state === \"pending\");",
+    "replace": "\t\treturn this.ensureLoaded(staffId).filter((e) => e.state !== \"pending\"); // mutant: inverted pending filter",
+    "expectedLegacyCatchers": ["tests/inbox-store.test.ts"],
+    "expectedV2Catchers": ["tests2/core/inbox-store.test.ts"]
+  },
+  {
+    "id": "M27-semaphore-acquire-offbyone",
+    "area": "team-scheduler",
+    "file": "src/server/agent/semaphore.ts",
+    "description": "Off-by-one in acquire — permits are handed out even when the semaphore is saturated (value 0), so the (N+1)th acquire never blocks and concurrency caps are breached.",
+    "search": "\t\tif (this._value > 0) {\n\t\t\tthis._value--;\n\t\t\treturn;\n\t\t}",
+    "replace": "\t\tif (this._value >= 0) { // mutant: off-by-one — hands out permits past capacity\n\t\t\tthis._value--;\n\t\t\treturn;\n\t\t}",
+    "expectedLegacyCatchers": ["tests/semaphore.test.ts"],
+    "expectedV2Catchers": ["tests2/core/semaphore.test.ts"]
+  },
+  {
+    "id": "M28-semaphore-overrelease-offbyone",
+    "area": "team-scheduler",
+    "file": "src/server/agent/semaphore.ts",
+    "description": "Off-by-one in release — the over-release guard uses > instead of >=, so releasing at capacity silently exceeds the cap instead of throwing.",
+    "search": "\t\tif (this._value >= this._capacity) {",
+    "replace": "\t\tif (this._value > this._capacity) { // mutant: off-by-one — over-release no longer throws",
+    "expectedLegacyCatchers": ["tests/semaphore.test.ts"],
+    "expectedV2Catchers": ["tests2/core/semaphore.test.ts"]
+  },
+  {
+    "id": "M29-child-rtm-master-step-inverted",
+    "area": "team-scheduler",
+    "file": "src/server/agent/child-ready-to-merge.ts",
+    "description": "Inverted step-name guard — every ready-to-merge step EXCEPT 'Master merged into branch' is rewritten to the parent-branch echo, corrupting the push/PR steps for spawned child goals.",
+    "search": "\t\tif (step.name === \"Master merged into branch\") {",
+    "replace": "\t\tif (step.name !== \"Master merged into branch\") { // mutant: inverted step guard",
+    "expectedLegacyCatchers": ["tests/child-ready-to-merge-helper.test.ts"],
+    "expectedV2Catchers": ["tests2/core/child-ready-to-merge-helper.test.ts"]
+  },
+  {
+    "id": "M30-eventbuffer-overflow-offbyone",
+    "area": "session-lifecycle",
+    "file": "src/server/agent/event-buffer.ts",
+    "description": "Off-by-one in ring eviction — the buffer evicts one entry early (at length == maxSize), dropping the oldest replayable event before capacity is actually exceeded.",
+    "search": "\t\tif (this.buffer.length > this.maxSize) {",
+    "replace": "\t\tif (this.buffer.length >= this.maxSize) { // mutant: off-by-one eviction",
+    "expectedLegacyCatchers": ["tests/event-buffer.test.ts"],
+    "expectedV2Catchers": ["tests2/core/event-buffer.test.ts"]
+  },
+  {
+    "id": "M31-eventbuffer-canresume-offbyone",
+    "area": "session-lifecycle",
+    "file": "src/server/agent/event-buffer.ts",
+    "description": "Off-by-one in resume window — canResumeFrom drops the +1, so a client whose last-seen seq equals the oldest retained seq minus one is wrongly told it cannot resume (forces a full snapshot / dropped-frame path).",
+    "search": "\t\treturn this.buffer[0].seq <= fromSeq + 1;",
+    "replace": "\t\treturn this.buffer[0].seq <= fromSeq; // mutant: off-by-one resume window",
+    "expectedLegacyCatchers": ["tests/event-buffer.test.ts"],
+    "expectedV2Catchers": ["tests2/core/event-buffer.test.ts"]
+  },
+  {
+    "id": "M32-backoff-exponent-offbyone",
+    "area": "session-lifecycle",
+    "file": "src/server/agent/session-setup.ts",
+    "description": "Off-by-one in retry backoff exponent — attempt 1 waits 2s instead of 1s (the whole doubling sequence is shifted up one step), doubling provider-overload backoff pressure.",
+    "search": "\tconst exponent = Math.min(safeAttempt - 1, 60);",
+    "replace": "\tconst exponent = Math.min(safeAttempt, 60); // mutant: off-by-one backoff exponent",
+    "expectedLegacyCatchers": ["tests/backoff-delay.test.ts"],
+    "expectedV2Catchers": ["tests2/core/backoff-delay.test.ts"]
+  },
+  {
+    "id": "M33-shortstat-insertions-deletions-swapped",
+    "area": "git-worktree",
+    "file": "src/server/skills/git-status-native.ts",
+    "description": "Swapped arguments — parseShortstat returns insertions where deletions belong and vice-versa, so the git status widget shows inverted +/- line counts.",
+    "search": "\t\tinsertions: ins ? parseInt(ins[1], 10) || 0 : 0,\n\t\tdeletions: del ? parseInt(del[1], 10) || 0 : 0,",
+    "replace": "\t\tinsertions: del ? parseInt(del[1], 10) || 0 : 0, // mutant: swapped ins/del\n\t\tdeletions: ins ? parseInt(ins[1], 10) || 0 : 0,",
+    "expectedLegacyCatchers": ["tests/git-shortstat-parser.test.ts"],
+    "expectedV2Catchers": ["tests2/core/git-shortstat-parser.test.ts"]
+  },
+  {
+    "id": "M34-baseref-remote-prefix-inverted",
+    "area": "git-worktree",
+    "file": "src/server/skills/git.ts",
+    "description": "Negated remote-prefix guard — parseBaseRef treats 'origin/<branch>' as a local branch (no prefix strip, isRemote=false) and local branches as remote, corrupting worktree base-ref resolution.",
+    "search": "\tif (trimmed.startsWith(\"origin/\")) {",
+    "replace": "\tif (!trimmed.startsWith(\"origin/\")) { // mutant: negated remote-prefix guard",
+    "expectedLegacyCatchers": ["tests/base-ref-parse.test.ts"],
+    "expectedV2Catchers": ["tests2/core/base-ref-parse.test.ts"]
+  },
+  {
+    "id": "M35-baseref-removed-await",
+    "area": "git-worktree",
+    "file": "src/server/skills/git.ts",
+    "description": "Removed await — resolveBaseRefWithExec no longer awaits the symbolic-ref exec, so `out` is a Promise; `.trim()` throws, is swallowed by the surrounding catch, and the resolver silently falls back to the HEAD sentinel instead of the real origin branch.",
+    "search": "\t\tconst out = await exec([\"symbolic-ref\", \"refs/remotes/origin/HEAD\"]);",
+    "replace": "\t\tconst out = exec([\"symbolic-ref\", \"refs/remotes/origin/HEAD\"]); // mutant: removed await",
+    "expectedLegacyCatchers": ["tests/base-ref-parse.test.ts"],
+    "expectedV2Catchers": ["tests2/core/base-ref-parse.test.ts"]
+  },
+  {
+    "id": "M36-getsortedphases-reversed",
+    "area": "verification",
+    "file": "src/server/agent/verification-logic.ts",
+    "description": "Reversed comparator (swapped operands) — getSortedPhases sorts phases descending, so verification runs phase 2 before phase 0 and the phase-ordering contract breaks.",
+    "search": "\treturn [...groups.keys()].sort((a, b) => a - b);",
+    "replace": "\treturn [...groups.keys()].sort((a, b) => b - a); // mutant: reversed phase order",
+    "expectedLegacyCatchers": ["tests/verification-logic.test.ts"],
+    "expectedV2Catchers": ["tests2/core/verification-logic.test.ts"]
+  },
+  {
+    "id": "M37-canskipallsteps-offbyone",
+    "area": "verification",
+    "file": "src/server/agent/verification-logic.ts",
+    "description": "Off-by-one in cache-completeness check — canSkipAllSteps uses > instead of >=, so a fully-cached step set is never recognized as skippable and re-runs every step.",
+    "search": "\treturn cache.size >= activeSteps.length && activeSteps.every(s => cache.has(s.name));",
+    "replace": "\treturn cache.size > activeSteps.length && activeSteps.every(s => cache.has(s.name)); // mutant: off-by-one",
+    "expectedLegacyCatchers": ["tests/verification-logic.test.ts"],
+    "expectedV2Catchers": ["tests2/core/verification-logic.test.ts"]
+  },
+  {
+    "id": "M38-computeallpassed-inverted-boolean",
+    "area": "verification",
+    "file": "src/server/agent/verification-logic.ts",
+    "description": "Inverted boolean logic — computeAllPassed requires skipped AND passed instead of skipped OR passed, so any phase-skipped (passed:false) step wrongly fails the whole gate.",
+    "search": "\treturn results.every(r => r.skipped || r.passed);",
+    "replace": "\treturn results.every(r => r.skipped && r.passed); // mutant: inverted OR->AND",
+    "expectedLegacyCatchers": ["tests/verification-logic.test.ts"],
+    "expectedV2Catchers": ["tests2/core/verification-logic.test.ts"]
+  },
+  {
+    "id": "M39-cascade-server-origin-wrong",
+    "area": "config-cascade",
+    "file": "src/server/agent/config-cascade.ts",
+    "description": "Wrong return value — scopeToOrigin maps the server scope to the 'builtin' origin tag, so server-scoped roles/tools are mislabelled and precedence/override provenance is corrupted.",
+    "search": "\t\tcase \"server\": return \"server\";",
+    "replace": "\t\tcase \"server\": return \"builtin\"; // mutant: wrong origin tag",
+    "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
+    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+  },
+  {
+    "id": "M40-cascade-workflow-guard-inverted",
+    "area": "config-cascade",
+    "file": "src/server/agent/config-cascade.ts",
+    "description": "Negated projectId guard — resolveWorkflows returns [] when a projectId IS supplied (and attempts resolution when it is absent), so project/Headquarters workflow resolution returns nothing.",
+    "search": "\t\tif (!projectId) return [];",
+    "replace": "\t\tif (projectId) return []; // mutant: negated workflow guard",
+    "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
+    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+  },
+  {
+    "id": "M41-cascade-role-find-inverted",
+    "area": "config-cascade",
+    "file": "src/server/agent/config-cascade.ts",
+    "description": "Inverted find predicate — readRoleField matches the first role whose name does NOT equal the requested role, so role model/thinking/prompt resolution returns the wrong role's fields (or undefined).",
+    "search": "\t\tconst r = roles.find(x => x.name === roleName);",
+    "replace": "\t\tconst r = roles.find(x => x.name !== roleName); // mutant: inverted role lookup",
+    "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
+    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+  },
+  {
+    "id": "M42-reducer-synth-seq-offbyone",
+    "area": "message-reducer",
+    "file": "src/app/message-reducer.ts",
+    "description": "Off-by-one in synthetic id — id-less live rows are stamped synth:seq:<seq+1>, so the stable render key no longer matches the broadcast seq and re-delivery/dedup keys drift.",
+    "search": "\t\t\t\tincoming = { ...incoming, id: `synth:seq:${seq}` };",
+    "replace": "\t\t\t\tincoming = { ...incoming, id: `synth:seq:${seq + 1}` }; // mutant: off-by-one synth id",
+    "expectedLegacyCatchers": ["tests/message-reducer-dedup.test.ts"],
+    "expectedV2Catchers": ["tests2/core/message-reducer-dedup.test.ts"]
+  },
+  {
+    "id": "M43-reducer-replace-by-id-inverted",
+    "area": "message-reducer",
+    "file": "src/app/message-reducer.ts",
+    "description": "Inverted replace-by-id lookup — the reducer finds the first row whose id does NOT match the incoming id, so a re-delivered live row is appended as a duplicate instead of replacing in place.",
+    "search": "\t\t\t\tconst idx = messages.findIndex((m) => m.id === incoming.id);",
+    "replace": "\t\t\t\tconst idx = messages.findIndex((m) => m.id !== incoming.id); // mutant: inverted replace-by-id",
+    "expectedLegacyCatchers": ["tests/message-reducer-dedup.test.ts"],
+    "expectedV2Catchers": ["tests2/core/message-reducer-dedup.test.ts"]
+  },
+  {
+    "id": "M44-reducer-s17-alternative-dropped",
+    "area": "message-reducer",
+    "file": "src/app/message-reducer.ts",
+    "description": "Dropped alternative (OR->AND) — the optimistic text-fallback requires BOTH the raw text and the skill-expanded modelText to match, so a slash-skill prompt echoed as its expanded body is no longer deduped (S17 double-render regression).",
+    "search": "\t\t\t\t\t\t\t(extractText(m) === text || reconstructModelText(m) === text),",
+    "replace": "\t\t\t\t\t\t\t(extractText(m) === text && reconstructModelText(m) === text), // mutant: dropped OR alternative",
+    "expectedLegacyCatchers": ["tests/message-reducer-dedup.test.ts"],
+    "expectedV2Catchers": ["tests2/core/message-reducer-dedup.test.ts"]
+  },
+  {
+    "id": "M45-sidebar-base-indent-wrong-default",
+    "area": "app-state",
+    "file": "src/app/sidebar-tree-builder.ts",
+    "description": "Wrong default value — the default base indentation is changed from the design constant to 3px, so unconfigured sidebars render with the wrong indent metadata.",
+    "search": "const DEFAULT_BASE_INDENT_PX = SIDEBAR_TREE_BASE_INDENT_PX;",
+    "replace": "const DEFAULT_BASE_INDENT_PX = 3; // mutant: wrong default base indent",
+    "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
+    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+  },
+  {
+    "id": "M46-sidebar-nested-indent-wrong-default",
+    "area": "app-state",
+    "file": "src/app/sidebar-tree-builder.ts",
+    "description": "Wrong default value — the default nested-goal indentation is changed to 9px, so nested goal rows render at the wrong depth-scaled indent.",
+    "search": "const DEFAULT_NESTED_GOAL_INDENT_PX = SIDEBAR_TREE_INDENT_DEFAULT_PX;",
+    "replace": "const DEFAULT_NESTED_GOAL_INDENT_PX = 9; // mutant: wrong default nested indent",
+    "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
+    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+  },
+  {
+    "id": "M47-sidebar-clamp-minmax-swapped",
+    "area": "app-state",
+    "file": "src/app/sidebar-tree-builder.ts",
+    "description": "Swapped arguments — the base-indent clamp passes MAX as the min bound and MIN as the max bound, so indentation preferences are clamped to the wrong (inverted) range.",
+    "search": "MIN_NESTED_GOAL_INDENT_PX, MAX_NESTED_GOAL_INDENT_PX, DEFAULT_BASE_INDENT_PX",
+    "replace": "MAX_NESTED_GOAL_INDENT_PX, MIN_NESTED_GOAL_INDENT_PX, DEFAULT_BASE_INDENT_PX",
+    "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
+    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+  },
+  {
+    "id": "M48-sidebar-livegoals-inverted",
+    "area": "app-state",
+    "file": "src/app/sidebar-tree-builder.ts",
+    "description": "Inverted archived filter — the live-goal forest is built from archived goals (and live goals are excluded), so active goals vanish from the sidebar.",
+    "search": "\tconst liveGoals = projectGoals.filter(g => !g.archived);",
+    "replace": "\tconst liveGoals = projectGoals.filter(g => !!g.archived); // mutant: inverted archived filter",
+    "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
+    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+  },
+  {
+    "id": "M49-bash-renderer-description-inverted",
+    "area": "renderer",
+    "file": "src/ui/tools/renderers/BashRenderer.ts",
+    "description": "Inverted description guard — when a description IS provided the collapsed header renders the summarized command fallback instead of the italic description (and vice-versa).",
+    "search": "\t\t\t? (params.description",
+    "replace": "\t\t\t? (!params.description // mutant: inverted description guard",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": ["tests2/dom/bash-renderer-description.test.ts"],
+    "note": "Renderer legacy coverage is a Playwright browser spec (tests/bash-renderer-description.spec.ts) that runs in the browser tier, not the node chaos harness; the v2 dom-tier catcher renders the REAL BashRenderer under happy-dom."
+  },
+  {
+    "id": "M50-write-renderer-istruncated-inverted",
+    "area": "renderer",
+    "file": "src/ui/tools/renderers/WriteRenderer.ts",
+    "description": "Inverted truncation detection — isTruncated returns the opposite verdict, so a truncated write result is rendered as normal content (no preview / no 'Load full content' affordance).",
+    "search": "\t\t(content as any)._truncated === true",
+    "replace": "\t\t(content as any)._truncated !== true // mutant: inverted truncation detection",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": ["tests2/dom/write-renderer-truncated.test.ts"],
+    "note": "Renderer legacy coverage is a Playwright browser spec (tests/write-renderer-truncated.spec.ts) that runs in the browser tier, not the node chaos harness; the v2 dom-tier catcher renders the REAL WriteRenderer under happy-dom."
+  },
+  {
+    "id": "M51-write-renderer-formatsize-divisor",
+    "area": "renderer",
+    "file": "src/ui/tools/renderers/WriteRenderer.ts",
+    "description": "Wrong divisor — formatSize divides megabyte-scale sizes by 1024 instead of 1048576, so the truncation badge reports a wildly wrong size (e.g. '10240.0 MB' instead of '10.0 MB').",
+    "search": "\tif (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;",
+    "replace": "\tif (bytes >= 1_048_576) return `${(bytes / 1024).toFixed(1)} MB`; // mutant: wrong MB divisor",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": ["tests2/dom/write-renderer-truncated.test.ts"],
+    "note": "Renderer legacy coverage is a Playwright browser spec (tests/write-renderer-truncated.spec.ts) that runs in the browser tier, not the node chaos harness; the v2 dom-tier catcher renders the REAL WriteRenderer under happy-dom."
+  },
+  {
+    "id": "M52-gate-renderer-final-status-dropped",
+    "area": "renderer",
+    "file": "src/ui/tools/renderers/GateToolRenderers.ts",
+    "description": "Dropped terminal-status branch — the live gate verification component only forwards a 'failed' finalStatus (the 'passed' case collapses to undefined), so a passed gate never shows its terminal state.",
+    "search": "signalStatus === \"passed\" || signalStatus === \"failed\" ? signalStatus : undefined",
+    "replace": "signalStatus === \"failed\" ? signalStatus : undefined",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": ["tests2/dom/gate-status-renderer.test.ts"],
+    "note": "Renderer legacy coverage is a Playwright browser spec (tests/gate-status-renderer.spec.ts) that runs in the browser tier, not the node chaos harness; the v2 dom-tier catcher renders the REAL GateStatusRenderer under happy-dom."
+  },
+  {
+    "id": "M53-fence-fetch-loopback-inverted",
+    "area": "di-fence",
+    "file": "tests2/harness/fenced-fetch.ts",
+    "description": "DI-fence: inverted loopback guard — the fenced fetch would BLOCK loopback hosts and ALLOW non-loopback ones, disabling the fail-closed outbound-HTTP fence (a test could reach the network).",
+    "search": "if (!isLoopbackHost(url.hostname)) {",
+    "replace": "if (isLoopbackHost(url.hostname)) { // mutant: inverted loopback fence",
+    "expectedLegacyCatchers": [],
+    "expectedV2Catchers": ["tests2/core/fetch-fence.test.ts"],
+    "note": "No legacy catcher — the fetch fence is a new v2 DI seam (demonstrates v2 NEW coverage). Pins fence-per-seam: at least one mutant disables each fence (command-runner: M13/M14; fetch: M53)."
+  }
+]

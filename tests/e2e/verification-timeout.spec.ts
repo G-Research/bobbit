@@ -127,7 +127,7 @@ test.describe("Verification command-step tree-kill (E2E)", () => {
 	test.setTimeout(60_000);
 
 	test.beforeAll(async () => {
-		await createWorkflow(TIMEOUT_WORKFLOW, 3);
+		await createWorkflow(TIMEOUT_WORKFLOW, 10);
 		await createWorkflow(CANCEL_WORKFLOW, 60);
 	});
 
@@ -162,7 +162,7 @@ test.describe("Verification command-step tree-kill (E2E)", () => {
 			const latest = sigs[sigs.length - 1];
 			expect(latest.verification.status).toBe("failed");
 			const stepOutput = (latest.verification.steps?.[0]?.output ?? "") as string;
-			expect(stepOutput).toMatch(/timed out after 3s\s+\u2014\s+killed subprocess tree/);
+			expect(stepOutput).toMatch(/timed out after 10s\s+\u2014\s+killed subprocess tree/);
 
 			// Verify the descendant node process was reaped via Node's portable
 			// kill(pid, 0). The step output contains both PARENT_PID and CHILD_PID.

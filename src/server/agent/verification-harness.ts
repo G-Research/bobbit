@@ -1,6 +1,8 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
+import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
+import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
 function isPidAlive(pid: number): boolean {
@@ -919,6 +921,7 @@ export async function buildReviewPrompt(
 	goalSpec?: string,
 	allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 	gate?: { content?: boolean; depends_on?: string[]; dependsOn?: string[] },
+	commandRunner: CommandRunner = realCommandRunner,
 ): Promise<string> {
 	const isDesignGate = gate ? isPreImplementationGate(gate) : false;
 	const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master || "master";
@@ -995,10 +998,7 @@ export async function buildReviewPrompt(
 	} else {
 		let baselineSha: string | null = null;
 		try {
-			const { execFile: execFileCb } = await import("node:child_process");
-			const { promisify } = await import("node:util");
-			const execFileAsync = promisify(execFileCb);
-			const { stdout } = await execFileAsync("git", ["rev-parse", `origin/${reviewBaselineBranch}`], { cwd, timeout: 5_000 });
+			const { stdout } = await commandRunner.execFile("git", ["rev-parse", `origin/${reviewBaselineBranch}`], { cwd, timeout: 5_000 });
 			baselineSha = stdout.toString().trim().slice(0, 12);
 		} catch {
 			baselineSha = null;
@@ -2077,7 +2077,7 @@ export class VerificationHarness {
 	private async _rerunLlmReviewStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
 	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
-		if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+		if (this.skipLlmReview) {
 			return { name: stepName, type: "llm-review", passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
 
@@ -2153,7 +2153,7 @@ export class VerificationHarness {
 	private async _rerunAgentQaStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
 	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
-		if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+		if (this.skipLlmReview) {
 			return { name: stepName, type: "agent-qa", passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
 
@@ -2235,6 +2235,11 @@ export class VerificationHarness {
 	private _cancelledTrackedKeys = new Set<string>();
 
 	private readonly broadcastFn: (goalId: string, event: any) => void;
+	private readonly commandRunner: CommandRunner;
+	/** Executor for verification command STEPS (default = real durable spawn). */
+	private readonly commandStepRunner: VerificationCommandRunner;
+	private readonly clock: Clock;
+	private readonly skipLlmReview: boolean;
 
 	constructor(
 		stateDir: string,
@@ -2248,7 +2253,12 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; skipLlmReview?: boolean } = {},
 	) {
+		this.commandRunner = deps.commandRunner ?? realCommandRunner;
+		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
+		this.clock = deps.clock ?? realClock;
+		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
 		// monotonic `seq`. The UI uses (type, signalId, stepIndex, seq) to
@@ -2402,11 +2412,11 @@ export class VerificationHarness {
 	 */
 	private async _sleepCancellable(totalMs: number, isCancelled: () => boolean): Promise<void> {
 		const CHUNK_MS = 2000;
-		const deadline = Date.now() + totalMs;
-		while (Date.now() < deadline) {
+		const deadline = this.clock.now() + totalMs;
+		while (this.clock.now() < deadline) {
 			if (isCancelled()) return;
-			const remaining = deadline - Date.now();
-			await new Promise(r => setTimeout(r, Math.min(CHUNK_MS, remaining)));
+			const remaining = deadline - this.clock.now();
+			await new Promise<void>(r => this.clock.setTimeout(() => r(), Math.min(CHUNK_MS, remaining)));
 		}
 	}
 
@@ -2459,9 +2469,9 @@ export class VerificationHarness {
 	private async _waitForCommandIdentityFile(step: ActiveVerification["steps"][number], isStillActive: () => boolean): Promise<{ pid?: number; ok: boolean; reason: string; retryable?: boolean; mtimeMs?: number }> {
 		let identity = this._readCommandIdentityFile(step);
 		if (identity.ok || !identity.retryable) return identity;
-		const deadline = Date.now() + COMMAND_IDENTITY_PIDFILE_RETRY_MS;
-		while (Date.now() < deadline && isStillActive()) {
-			await new Promise(r => setTimeout(r, COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS));
+		const deadline = this.clock.now() + COMMAND_IDENTITY_PIDFILE_RETRY_MS;
+		while (this.clock.now() < deadline && isStillActive()) {
+			await new Promise<void>(r => this.clock.setTimeout(() => r(), COMMAND_IDENTITY_PIDFILE_RETRY_INTERVAL_MS));
 			identity = this._readCommandIdentityFile(step);
 			if (identity.ok || !identity.retryable) return identity;
 		}
@@ -2552,10 +2562,10 @@ export class VerificationHarness {
 	}
 
 	private async _waitForPidToExit(pid: number, timeoutMs = 1_500): Promise<boolean> {
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
+		const deadline = this.clock.now() + timeoutMs;
+		while (this.clock.now() < deadline) {
 			if (!isPidAlive(pid)) return true;
-			await new Promise(r => setTimeout(r, 50));
+			await new Promise<void>(r => this.clock.setTimeout(() => r(), 50));
 		}
 		return !isPidAlive(pid);
 	}
@@ -2564,7 +2574,7 @@ export class VerificationHarness {
 
 	private _scheduleCommandKillCleanupRetry(signalId: string): void {
 		if (this._commandKillRetryTimers.has(signalId)) return;
-		const timer = setTimeout(async () => {
+		const timer = this.clock.setTimeout(async () => {
 			this._commandKillRetryTimers.delete(signalId);
 			const active = this.activeVerifications.get(signalId);
 			if (!active || !this._hasPendingCommandKillCleanup(active)) return;
@@ -3138,12 +3148,9 @@ export class VerificationHarness {
 			// Sync the goal worktree with the latest commits before running verification.
 			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
 			if (goalBranch) {
-				const { execFile: execFileCb } = await import("node:child_process");
-				const { promisify } = await import("node:util");
-				const execFileAsync = promisify(execFileCb);
 				let hasOriginRemote = false;
 				try {
-					await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
+					await this.commandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
 					hasOriginRemote = true;
 				} catch {
 					// Local-only repositories are valid verification targets; skip remote sync quietly.
@@ -3152,8 +3159,8 @@ export class VerificationHarness {
 				if (hasOriginRemote) {
 					let hasRemoteGoalBranch = false;
 					try {
-						const { stdout } = await execFileAsync("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${goalBranch}`], { cwd, timeout: 15_000 });
-						hasRemoteGoalBranch = lsRemoteOutputHasHead(stdout, goalBranch);
+						const { stdout } = await this.commandRunner.execFile("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${goalBranch}`], { cwd, timeout: 15_000 });
+						hasRemoteGoalBranch = lsRemoteOutputHasHead(stdout.toString(), goalBranch);
 					} catch (err) {
 						if (!isMissingRemoteHeadLsRemoteError(err)) {
 							console.warn(`[verification] Failed to check origin/${goalBranch} (non-fatal):`, err);
@@ -3162,8 +3169,8 @@ export class VerificationHarness {
 
 					if (hasRemoteGoalBranch) {
 						try {
-							await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-							await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
+							await this.commandRunner.execFile("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
+							await this.commandRunner.execFile("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
 							console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
 						} catch (err) {
 							console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
@@ -3175,7 +3182,7 @@ export class VerificationHarness {
 					const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master;
 					if (reviewBaselineBranch) {
 						try {
-							await execFileAsync("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
+							await this.commandRunner.execFile("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
 						} catch (err) {
 							console.warn(`[verification] Failed to fetch origin/${reviewBaselineBranch} (non-fatal):`, err);
 						}
@@ -3427,7 +3434,7 @@ export class VerificationHarness {
 							result = await this.runSubgoalStep(step, signal, active, index);
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
-							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+							if (this.skipLlmReview) {
 								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
@@ -3527,7 +3534,7 @@ export class VerificationHarness {
 							}
 						} else {
 							// llm-review — spawn a one-shot reviewer sub-agent
-							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+							if (this.skipLlmReview) {
 								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
@@ -3725,7 +3732,7 @@ export class VerificationHarness {
 		const timeoutMs = (step.timeout || 600) * 1000;
 
 		// Build the combined prompt sections (shared between session-based and direct-RpcBridge paths)
-		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate);
+		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, this.commandRunner);
 
 		// Build the kickoff message (shared between both paths)
 		const kickoff = [
@@ -4593,13 +4600,13 @@ export class VerificationHarness {
 			}
 
 			const completionPromise = new Promise<void>((resolve, reject) => {
-				const timer = setTimeout(() => {
+				const timer = this.clock.setTimeout(() => {
 					reject(new Error(`LLM review sub-agent timed out after ${timeoutMs / 1000}s`));
 				}, timeoutMs);
 
 				const eventUnsub = rpc.onEvent((event: any) => {
 					if (event.type === "agent_end") {
-						clearTimeout(timer);
+						this.clock.clearTimeout(timer);
 						eventUnsub();
 						resolve();
 					}
@@ -4624,12 +4631,12 @@ export class VerificationHarness {
 			console.log(`[verification] No verification_result from ${subSessionId}, sending reminder`);
 
 			const reminderCompletionPromise = new Promise<void>((resolve, reject) => {
-				const timer = setTimeout(() => {
+				const timer = this.clock.setTimeout(() => {
 					reject(new Error(`Reminder timed out after ${timeoutMs / 1000}s`));
 				}, timeoutMs);
 				const eventUnsub = rpc.onEvent((event: any) => {
 					if (event.type === "agent_end") {
-						clearTimeout(timer);
+						this.clock.clearTimeout(timer);
 						eventUnsub();
 						resolve();
 					}
@@ -4646,10 +4653,10 @@ export class VerificationHarness {
 			// before racing against agent_end — mirror of SessionManager.waitForStreaming
 			// for the legacy direct-RpcBridge path.
 			await new Promise<void>((resolve) => {
-				const t = setTimeout(() => { try { unsub(); } catch { /* ignore */ } resolve(); }, 10_000);
+				const t = this.clock.setTimeout(() => { try { unsub(); } catch { /* ignore */ } resolve(); }, 10_000);
 				const unsub = rpc.onEvent((event: any) => {
 					if (event.type === "agent_start") {
-						clearTimeout(t);
+						this.clock.clearTimeout(t);
 						try { unsub(); } catch { /* ignore */ }
 						resolve();
 					}
@@ -4735,20 +4742,38 @@ export class VerificationHarness {
 			//   pending-retry → not durable here (Windows w/o Git Bash); a restart
 			//                   is a retryable pending interruption, never a verdict
 			//   unsupported   → no streaming context; not recoverable
-			const recoveryMode: CommandRecoveryMode = decideCommandRecoveryMode({
+			const recoveryMode0: CommandRecoveryMode = decideCommandRecoveryMode({
 				containerId,
 				hasStreamCtx: !!streamCtx,
 				platform: process.platform,
 				hasGitBash: !!GIT_BASH,
 			});
+			// A non-durable command-step runner (tier-1 fake) cannot drive the
+			// detached pid/exit-file wrapper or a durable in-container job. Downgrade
+			// any durable mode to the attached, restart→pending/retryable path so NONE
+			// of the durable file machinery (wrapper, pidFile, readProcessStartToken,
+			// file tailers) runs against a fake. Production (real runner) is never
+			// nonDurable, so this is a strict no-op there.
+			const runnerNonDurable = !!this.commandStepRunner.nonDurable;
+			// The `container-exec` arm is defensive-only: container steps are dispatched
+			// by the `if (containerId)` branch below via a DIRECT spawnTracked call and
+			// are never routed through this seam, so a fake never reaches container mode
+			// in practice. Kept in the downgrade so that IF a nonDurable runner ever saw
+			// a container step it would still avoid the durable in-container files.
+			const recoveryMode: CommandRecoveryMode =
+				runnerNonDurable && (recoveryMode0 === "detached" || recoveryMode0 === "container-exec") && !!streamCtx
+					? "pending-retry"
+					: recoveryMode0;
 			let useDetached = recoveryMode === "detached";
 			const useContainerDurable = recoveryMode === "container-exec" && !!streamCtx;
 			let restartRecoveryUnsupportedReason: string | undefined =
 				recoveryMode === "pending-retry"
-					? "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path is not durable, so a gateway restart leaves the step pending/retryable (it is re-run on the next signal), never a fabricated verdict."
+					? (runnerNonDurable
+						? "Command step executed via an injected non-durable command-step runner (tier-1 fake); the attached path is not durable, so a gateway restart leaves the step pending/retryable (re-run on the next signal), never a fabricated verdict."
+						: "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path is not durable, so a gateway restart leaves the step pending/retryable (it is re-run on the next signal), never a fabricated verdict.")
 					: undefined;
 
-			if (recoveryMode === "pending-retry" && !VerificationHarness._warnedCmdExeDetached) {
+			if (recoveryMode === "pending-retry" && !runnerNonDurable && !VerificationHarness._warnedCmdExeDetached) {
 				VerificationHarness._warnedCmdExeDetached = true;
 				console.warn("[verification] Git Bash not found on Windows — durable detached command mode unavailable (cmd.exe cannot run the bash exit-file wrapper). A gateway restart mid-verification will leave command steps pending/retryable rather than recovered.");
 			}
@@ -4952,7 +4977,8 @@ export class VerificationHarness {
 							// bg-processes) untouched.
 							try {
 								const qp = shellSingleQuote(pidFileForKill);
-								const killer = spawn("docker", [
+								if (!this.commandRunner.spawn) throw new Error("CommandRunner.spawn is required for docker command cleanup");
+								const killer = this.commandRunner.spawn("docker", [
 									"exec", containerId, "/bin/sh", "-c",
 									`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null; rm -f ${qp}`,
 								], { stdio: "ignore" });
@@ -4961,18 +4987,25 @@ export class VerificationHarness {
 						},
 					});
 				} else if (useDetached) {
-					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
+					// Host durable path routed through the command-step seam (default =
+					// realVerificationCommandRunner → the identical spawnTracked call).
+					tracked = this.commandStepRunner.spawn({
+						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
 						stdio: ["ignore", "ignore", "ignore"],
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
+						useDetached: true,
 					});
 				} else {
-					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
+					// Host attached path routed through the seam (default = real spawn).
+					tracked = this.commandStepRunner.spawn({
+						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
+						useDetached: false,
 					});
 				}
 				child = tracked.child;
@@ -5102,7 +5135,7 @@ export class VerificationHarness {
 			const settleFromProcess = (code: number | null, signal: NodeJS.Signals | null) => {
 				if (settled) return;
 				settled = true;
-				if (closeGraceTimer) clearTimeout(closeGraceTimer);
+				if (closeGraceTimer) this.clock.clearTimeout(closeGraceTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
@@ -5144,7 +5177,7 @@ export class VerificationHarness {
 			child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
 				exitCode = code;
 				exitSignal = signal;
-				closeGraceTimer = setTimeout(() => {
+				closeGraceTimer = this.clock.setTimeout(() => {
 					if (settled) return;
 					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; treating the process exit as authoritative and attempting to kill any remaining subprocess group.`;
 					stderr += `${stderr ? "\n" : ""}${warning}`;
@@ -5162,7 +5195,7 @@ export class VerificationHarness {
 			child.on("error", (err: Error) => {
 				if (settled) return;
 				settled = true;
-				if (closeGraceTimer) clearTimeout(closeGraceTimer);
+				if (closeGraceTimer) this.clock.clearTimeout(closeGraceTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 				resolve(handleSpawnError(err));
@@ -5227,7 +5260,7 @@ export class VerificationHarness {
 			}
 		};
 
-		const interval = setInterval(() => {
+		const interval = this.clock.setInterval(() => {
 			if (stopped) return;
 			outPos = readNew(outFile, outPos, "stdout");
 			errPos = readNew(errFile, errPos, "stderr");
@@ -5236,7 +5269,7 @@ export class VerificationHarness {
 		return () => {
 			if (stopped) return;
 			stopped = true;
-			clearInterval(interval);
+			this.clock.clearInterval(interval);
 			// Final flush to catch the tail end of output written between the
 			// last poll and child exit.
 			outPos = readNew(outFile, outPos, "stdout");
@@ -5422,11 +5455,11 @@ export class VerificationHarness {
 			return restartInterrupted(cleanup.reason ?? unsafeReason);
 		};
 
-		if (Date.now() >= deadline) {
+		if (this.clock.now() >= deadline) {
 			return await finalizeTimeoutAfterVerifiedCleanup("The original timeout deadline elapsed, but the command identity could no longer be verified; refusing to kill a possibly reused PID.");
 		}
 
-		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: verified pid ${identity.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: verified pid ${identity.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - this.clock.now()) / 1000))}s)`);
 
 		let stopTail: (() => void) | undefined;
 		if (step.outFile && step.errFile) {
@@ -5442,9 +5475,9 @@ export class VerificationHarness {
 		}
 
 		try {
-			while (Date.now() < deadline) {
+			while (this.clock.now() < deadline) {
 				if (!this._isResumeStillActive(v)) return null;
-				await new Promise(r => setTimeout(r, 500));
+				await new Promise<void>(r => this.clock.setTimeout(() => r(), 500));
 				if (step.exitFile && fs.existsSync(step.exitFile)) {
 					return finalize(readExitFile());
 				}
@@ -5456,7 +5489,7 @@ export class VerificationHarness {
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
 				return finalize(readExitFile());
 			}
-			if (Date.now() >= deadline) {
+			if (this.clock.now() >= deadline) {
 				return await finalizeTimeoutAfterVerifiedCleanup("The command reached its timeout after restart, but identity verification failed before it could be safely killed.");
 			}
 
@@ -6409,7 +6442,7 @@ export class VerificationHarness {
 		if (!ctx) return "archived-other";
 		const POLL_MS = 100;
 		const MAX_WAIT_MS = 24 * 60 * 60 * 1000;
-		const startedAt = Date.now();
+		const startedAt = this.clock.now();
 		while (true) {
 			if (active.cancelled) return "cancelled";
 			const child = ctx.goalStore.get(childGoalId);
@@ -6419,8 +6452,8 @@ export class VerificationHarness {
 				return child.state === "complete" ? "archived-complete" : "archived-other";
 			}
 			if (child.state !== "blocked") return "unblocked";
-			if (Date.now() - startedAt >= MAX_WAIT_MS) return "timeout";
-			await new Promise(r => setTimeout(r, POLL_MS));
+			if (this.clock.now() - startedAt >= MAX_WAIT_MS) return "timeout";
+			await new Promise<void>(r => this.clock.setTimeout(() => r(), POLL_MS));
 		}
 	}
 
@@ -6445,11 +6478,11 @@ export class VerificationHarness {
 		if (this._subgoalHooks?.waitForReadyToMerge) {
 			const aborter = { aborted: !!active.cancelled };
 			// keep aborter.aborted in sync with active.cancelled (best effort)
-			const sync = setInterval(() => { aborter.aborted = !!active.cancelled; }, 50);
+			const sync = this.clock.setInterval(() => { aborter.aborted = !!active.cancelled; }, 50);
 			try {
 				return await this._subgoalHooks.waitForReadyToMerge(childGoalId, aborter);
 			} finally {
-				clearInterval(sync);
+				this.clock.clearInterval(sync);
 			}
 		}
 
@@ -6461,7 +6494,7 @@ export class VerificationHarness {
 		// `"timeout"` like `"archived-other"` (release semaphore + retry on
 		// the next harness pass).
 		const MAX_WAIT_MS = 24 * 60 * 60 * 1000;
-		const startedAt = Date.now();
+		const startedAt = this.clock.now();
 		while (true) {
 			if (active.cancelled) return "cancelled";
 			const child = ctx.goalStore.get(childGoalId);
@@ -6475,10 +6508,10 @@ export class VerificationHarness {
 			}
 			const rtm = ctx.gateStore.getGate(childGoalId, "ready-to-merge");
 			if (rtm?.status === "passed") return "passed";
-			if (Date.now() - startedAt >= MAX_WAIT_MS) return "timeout";
+			if (this.clock.now() - startedAt >= MAX_WAIT_MS) return "timeout";
 			// paused / pending / failed all continue the wait — only an external
 			// archive or a passed ready-to-merge is terminal.
-			await new Promise(r => setTimeout(r, POLL_MS));
+			await new Promise<void>(r => this.clock.setTimeout(() => r(), POLL_MS));
 		}
 	}
 }

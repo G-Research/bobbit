@@ -157,6 +157,19 @@ export class ConfigCascade {
 		this.globalUserBase = base;
 	}
 
+	/**
+	 * Override the first-party pack band root so the cascade resolves the SAME
+	 * shipped packs as the runtime tool loader (`ToolManager.marketRoots`). server.ts
+	 * wires both from `resolveBuiltinPacksDir(config.builtinPacksDir)`; without this
+	 * the cascade would fall back to the dist default while the runtime honored the
+	 * config override, split-braining `/api/tools` (a pack tool present at runtime but
+	 * absent from the cascade surfaces with a bogus `origin:"mcp"`). Production passes
+	 * the identical default, so behavior there is unchanged.
+	 */
+	setBuiltinPacksDir(dir: string): void {
+		this.builtinPacksDir = dir;
+	}
+
 	// ── Field-level role resolution (model / thinkingLevel / promptTemplate) ──
 	//
 	// Unlike `resolveRoles()` which replaces whole role items at each layer,

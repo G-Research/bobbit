@@ -682,7 +682,7 @@ function renderMobileLanding() {
 											const projectSettingsTarget = isHeadquartersProject(project) ? "system/general" : `${project.id}/general`;
 											return html`
 												${i > 0 ? html`<div class="border-t border-border/30 my-0.5 mx-2"></div>` : ""}
-												<div data-project-reorder-id=${isHeadquartersProject(project) ? nothing : project.id} data-project-id=${project.id} data-tree-key=${projectTree.projectNode.key}>
+												<div data-project-reorder-id=${project.id} data-project-id=${project.id} data-tree-key=${projectTree.projectNode.key}>
 													<div
 														data-testid="project-header"
 														data-project-id=${project.id}

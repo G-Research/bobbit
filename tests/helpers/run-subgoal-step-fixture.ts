@@ -213,7 +213,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
  * Build a synthetic ActiveVerification with one subgoal step. Mirrors the
  * shape produced by `verifyGateSignal`'s init block.
  */
-export function buildActive(parentId: string, planId = "p1"): {
+export function buildActive(parentId: string, _planId = "p1"): {
 	signal: any;
 	active: any;
 	stepIndex: number;

@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import type { FsLike } from "./gateway-deps.js";
+import { realFs } from "./gateway-deps.js";
 import path from "node:path";
 
 export interface ReviewAnnotation {
@@ -23,7 +24,7 @@ interface ReviewAnnotationData {
  * Persisted to `.bobbit/state/review-annotations-{sessionId}.json`.
  */
 export class ReviewAnnotationStore {
-	constructor(private stateDir: string) {}
+	constructor(private stateDir: string, private readonly fs: FsLike = realFs) {}
 
 	private filePath(sessionId: string): string {
 		return path.join(this.stateDir, `review-annotations-${sessionId}.json`);
@@ -32,8 +33,8 @@ export class ReviewAnnotationStore {
 	private read(sessionId: string): ReviewAnnotationData {
 		try {
 			const fp = this.filePath(sessionId);
-			if (fs.existsSync(fp)) {
-				const raw = JSON.parse(fs.readFileSync(fp, "utf-8"));
+			if (this.fs.existsSync(fp)) {
+				const raw = JSON.parse(this.fs.readFileSync(fp, "utf-8"));
 				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 					return {
 						annotations: raw.annotations ?? {},
@@ -49,8 +50,8 @@ export class ReviewAnnotationStore {
 
 	private write(sessionId: string, data: ReviewAnnotationData): void {
 		try {
-			if (!fs.existsSync(this.stateDir)) fs.mkdirSync(this.stateDir, { recursive: true });
-			fs.writeFileSync(this.filePath(sessionId), JSON.stringify(data, null, 2), "utf-8");
+			if (!this.fs.existsSync(this.stateDir)) this.fs.mkdirSync(this.stateDir, { recursive: true });
+			this.fs.writeFileSync(this.filePath(sessionId), JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[review-annotation-store] Failed to write:", err);
 		}
@@ -120,8 +121,8 @@ export class ReviewAnnotationStore {
 	deleteFile(sessionId: string): void {
 		try {
 			const fp = this.filePath(sessionId);
-			if (fs.existsSync(fp)) {
-				fs.unlinkSync(fp);
+			if (this.fs.existsSync(fp)) {
+				this.fs.unlinkSync(fp);
 			}
 		} catch (err) {
 			console.error("[review-annotation-store] Failed to delete:", err);

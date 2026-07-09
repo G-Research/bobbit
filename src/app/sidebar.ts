@@ -78,7 +78,9 @@ let _suppressProjectHeaderClick = false;
 let _suppressProjectHeaderClickTimer: number | null = null;
 
 function currentProjectIds(): string[] {
-	return state.projects.map((project) => project.id);
+	// Only include projects that participate in user-controlled visible ordering:
+	// exclude hidden and system projects, matching the server's participatesInVisibleOrder().
+	return state.projects.filter(p => !p.hidden && p.id !== "system").map(p => p.id);
 }
 
 function completeProjectOrderIds(projectIds: string[]): string[] {

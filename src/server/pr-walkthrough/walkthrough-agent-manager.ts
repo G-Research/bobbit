@@ -1,5 +1,5 @@
 import { GithubPrAdapterError, parseGithubRemoteUrl } from "./github-adapter.js";
-import { execFileSafe } from "../exec-file-safe.js";
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type {
 	PrWalkthroughJobError,
 	PrWalkthroughJobRecord,
@@ -148,10 +148,10 @@ export function numberOnlyTargetFromInferred(
 
 /** Best-effort GitHub origin inference (read-only git). Retained alongside the pure
  *  target helpers for completeness / potential reuse; no launch side effects. */
-export async function inferGithubRepository(cwd: string): Promise<{ owner: string; repo: string; host: string } | undefined> {
+export async function inferGithubRepository(cwd: string, commandRunner: CommandRunner = realCommandRunner): Promise<{ owner: string; repo: string; host: string } | undefined> {
 	try {
-		const { stdout } = await execFileSafe("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000, encoding: "utf8" });
-		return parseGithubRemoteUrl(stdout) ?? undefined;
+		const { stdout } = await commandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000, encoding: "utf8" });
+		return parseGithubRemoteUrl(stdout.toString()) ?? undefined;
 	} catch {
 		return undefined;
 	}

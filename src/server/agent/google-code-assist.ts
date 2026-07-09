@@ -610,11 +610,10 @@ export function parseCodeAssistStreamChunk(payload: any): CodeAssistStreamDelta 
 }
 
 function defaultFetch(): FetchLike {
-	const f = (globalThis as any).fetch;
-	if (typeof f !== "function") {
+	if (typeof globalThis.fetch !== "function") {
 		throw new Error("global fetch is unavailable in this runtime");
 	}
-	return f as FetchLike;
+	return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => globalThis.fetch(input, init)) as FetchLike;
 }
 
 /**

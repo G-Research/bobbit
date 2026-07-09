@@ -5,6 +5,8 @@ import type { PreferencesStore } from "./preferences-store.js";
 import type { CustomProviderConfig } from "./model-registry.js";
 import { resolveHostTokenValue } from "./host-tokens.js";
 
+const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
+
 export type ImageProviderType = "openai-images" | "gemini-images" | "google-imagen";
 
 export interface ApiImageModel {
@@ -234,7 +236,7 @@ export function canonicalImageModelPref(pref: string | undefined | null): string
 	return fallback;
 }
 
-export async function generateImage(prefs: PreferencesStore, request: ImageGenerationRequest): Promise<{ model: ApiImageModel; images: GeneratedImage[] }> {
+export async function generateImage(prefs: PreferencesStore, request: ImageGenerationRequest, fetchImpl: typeof fetch = defaultFetch): Promise<{ model: ApiImageModel; images: GeneratedImage[] }> {
 	if (!request.prompt || typeof request.prompt !== "string") {
 		throw new Error("prompt is required");
 	}
@@ -247,21 +249,21 @@ export async function generateImage(prefs: PreferencesStore, request: ImageGener
 			: "No image generation model is configured");
 	}
 	if (model.api === "openai-images") {
-		const images = await generateOpenAIImage(prefs, model, request);
+		const images = await generateOpenAIImage(prefs, model, request, fetchImpl);
 		return { model, images };
 	}
 	if (model.api === "gemini-images") {
-		const images = await generateGeminiImage(prefs, model, request);
+		const images = await generateGeminiImage(prefs, model, request, fetchImpl);
 		return { model, images };
 	}
 	if (model.api === "google-imagen") {
-		const images = await generateImagenImage(prefs, model, request);
+		const images = await generateImagenImage(prefs, model, request, fetchImpl);
 		return { model, images };
 	}
 	throw new Error(`Unsupported image provider: ${model.api}`);
 }
 
-async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
+async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel, request: ImageGenerationRequest, fetchImpl: typeof fetch = defaultFetch): Promise<GeneratedImage[]> {
 	const apiKey = getOpenAIImageApiKey(prefs);
 	if (!apiKey) {
 		const codexToken = getOpenAICodexOAuthCredential();
@@ -286,7 +288,7 @@ async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel
 		body.response_format = "b64_json";
 	}
 
-	const resp = await fetch(`${trimSlash(model.baseUrl)}/images/generations`, {
+	const resp = await fetchImpl(`${trimSlash(model.baseUrl)}/images/generations`, {
 		method: "POST",
 		headers: {
 			"Authorization": `Bearer ${apiKey}`,
@@ -311,7 +313,7 @@ async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel
 	return images;
 }
 
-async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
+async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel, request: ImageGenerationRequest, fetchImpl: typeof fetch = defaultFetch): Promise<GeneratedImage[]> {
 	const requestedN = Math.max(Math.floor(request.n || 1), 1);
 	if (requestedN > 1) {
 		throw new Error("openai-codex image driver supports n=1 only");
@@ -340,7 +342,7 @@ async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel
 		tool_choice: "auto",
 	};
 
-	const resp = await fetch("https://chatgpt.com/backend-api/codex/responses", {
+	const resp = await fetchImpl("https://chatgpt.com/backend-api/codex/responses", {
 		method: "POST",
 		headers: {
 			"Authorization": `Bearer ${token}`,
@@ -364,7 +366,7 @@ async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel
 	return images.slice(0, 1);
 }
 
-async function generateGeminiImage(prefs: PreferencesStore, model: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
+async function generateGeminiImage(prefs: PreferencesStore, model: ApiImageModel, request: ImageGenerationRequest, fetchImpl: typeof fetch = defaultFetch): Promise<GeneratedImage[]> {
 	const apiKey = getImageProviderKey(prefs, model);
 	if (!apiKey) throw new Error(`Missing API key for ${model.provider}`);
 	// Gemini image generation does not honour batch via generationConfig, so reject
@@ -390,7 +392,7 @@ async function generateGeminiImage(prefs: PreferencesStore, model: ApiImageModel
 	const base = model.baseUrl.includes("/models/")
 		? trimSlash(model.baseUrl)
 		: `${trimSlash(model.baseUrl)}/v1beta/models/${encodeURIComponent(model.id)}:generateContent`;
-	const resp = await fetch(base, {
+	const resp = await fetchImpl(base, {
 		method: "POST",
 		headers: {
 			"x-goog-api-key": apiKey,
@@ -411,7 +413,7 @@ async function generateGeminiImage(prefs: PreferencesStore, model: ApiImageModel
 	return images;
 }
 
-async function generateImagenImage(prefs: PreferencesStore, model: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
+async function generateImagenImage(prefs: PreferencesStore, model: ApiImageModel, request: ImageGenerationRequest, fetchImpl: typeof fetch = defaultFetch): Promise<GeneratedImage[]> {
 	const apiKey = getImageProviderKey(prefs, model);
 	if (!apiKey) throw new Error(`Missing API key for ${model.provider}`);
 	const parameters: Record<string, unknown> = {
@@ -426,7 +428,7 @@ async function generateImagenImage(prefs: PreferencesStore, model: ApiImageModel
 	const base = model.baseUrl.includes("/models/")
 		? trimSlash(model.baseUrl)
 		: `${trimSlash(model.baseUrl)}/v1beta/models/${encodeURIComponent(model.id)}:predict`;
-	const resp = await fetch(base, {
+	const resp = await fetchImpl(base, {
 		method: "POST",
 		headers: {
 			"x-goog-api-key": apiKey,
@@ -648,7 +650,7 @@ function isBuiltinImageProvider(model: ApiImageModel | undefined): boolean {
 	return !model.customProviderId;
 }
 
-async function imageFromUrl(url: string, model: ApiImageModel | undefined, revisedPrompt?: string): Promise<GeneratedImage> {
+async function imageFromUrl(url: string, model: ApiImageModel | undefined, revisedPrompt?: string, fetchImpl: typeof fetch = defaultFetch): Promise<GeneratedImage> {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
@@ -668,7 +670,7 @@ async function imageFromUrl(url: string, model: ApiImageModel | undefined, revis
 	const controller = new AbortController();
 	const timeoutSignal = AbortSignal.timeout(IMAGE_FETCH_TIMEOUT_MS);
 	timeoutSignal.addEventListener("abort", () => controller.abort(timeoutSignal.reason));
-	const resp = await fetch(url, { signal: controller.signal, redirect: "manual" });
+	const resp = await fetchImpl(url, { signal: controller.signal, redirect: "manual" });
 	if (resp.type === "opaqueredirect" || (resp.status >= 300 && resp.status < 400)) {
 		throw new Error(`imageFromUrl: redirects not followed (status ${resp.status})`);
 	}

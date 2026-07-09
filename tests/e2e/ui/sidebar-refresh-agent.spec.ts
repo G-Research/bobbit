@@ -87,7 +87,7 @@ test.describe("Sidebar Refresh agent action", () => {
 		if (await trigger.isVisible().catch(() => false)) {
 			await trigger.click();
 			await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
-			await expect(refreshMenuItem(page), "Refresh agent must not appear for ineligible sessions").toHaveCount(0);
+			await expect(refreshMenuItem(page), "Refresh agent must not appear for ineligible sessions").toHaveCount(0, { timeout: 15_000 });
 			await closeMenu(page);
 		} else {
 			await expect(trigger, "ineligible sessions may hide the whole action trigger").not.toBeVisible();

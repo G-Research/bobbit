@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 
 export interface TraceProviderRow {
@@ -20,23 +21,25 @@ const MAX_TRACE_BYTES = 2 * 1024 * 1024;
 
 export class ContextTraceStore {
 	private readonly traceDir: string;
+	private readonly fs: FsLike;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.traceDir = path.join(stateDir, "session-context-trace");
 	}
 
 	appendTrace(sessionId: string, entry: TraceEntry): void {
-		fs.mkdirSync(this.traceDir, { recursive: true });
+		this.fs.mkdirSync(this.traceDir, { recursive: true });
 		const file = this.traceFile(sessionId);
-		fs.appendFileSync(file, JSON.stringify(entry) + "\n");
+		this.fs.appendFileSync(file, JSON.stringify(entry) + "\n");
 		this.enforceCap(file);
 	}
 
 	readTrace(sessionId: string, limit?: number): TraceEntry[] {
 		const file = this.traceFile(sessionId);
-		if (!fs.existsSync(file)) return [];
+		if (!this.fs.existsSync(file)) return [];
 		const entries: TraceEntry[] = [];
-		for (const line of fs.readFileSync(file, "utf-8").split("\n")) {
+		for (const line of this.fs.readFileSync(file, "utf-8").split("\n")) {
 			if (!line.trim()) continue;
 			try {
 				entries.push(JSON.parse(line) as TraceEntry);
@@ -52,15 +55,15 @@ export class ContextTraceStore {
 	}
 
 	private enforceCap(file: string): void {
-		let stat: fs.Stats;
+		let stat: ReturnType<FsLike["statSync"]>;
 		try {
-			stat = fs.statSync(file);
+			stat = this.fs.statSync(file);
 		} catch {
 			return;
 		}
 		if (stat.size <= MAX_TRACE_BYTES) return;
 
-		const lines = fs.readFileSync(file, "utf-8").split("\n").filter((line) => line.length > 0);
+		const lines = this.fs.readFileSync(file, "utf-8").split("\n").filter((line) => line.length > 0);
 		const kept: string[] = [];
 		let bytes = 0;
 		for (let i = lines.length - 1; i >= 0; i--) {
@@ -73,8 +76,8 @@ export class ContextTraceStore {
 		kept.reverse();
 
 		const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-		fs.writeFileSync(tmp, kept.join(""));
-		fs.renameSync(tmp, file);
+		this.fs.writeFileSync(tmp, kept.join(""));
+		this.fs.renameSync(tmp, file);
 	}
 }
 

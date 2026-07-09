@@ -305,7 +305,9 @@ function dynamicGatewayProxy(): Plugin {
 				const isPreview = u.startsWith("/preview/");
 				if (!u.startsWith("/api") && !isManifest && !isPreview) return next();
 				const target = new URL(readGatewayUrl());
-				const opts: http.RequestOptions = {
+				// https.RequestOptions (superset of http.RequestOptions) so the TLS-only
+				// rejectUnauthorized is accepted; http.request ignores it for plain HTTP.
+				const opts: https.RequestOptions = {
 					hostname: target.hostname,
 					port: target.port,
 					path: req.url,

@@ -1,10 +1,7 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-
-const execFileAsync = promisify(execFile);
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 export interface SandboxStatus {
 	available: boolean;
@@ -61,7 +58,7 @@ export function resolveSandboxDockerContext(preferredRoot?: string): string | nu
 	return null;
 }
 
-export async function buildSandboxImage(imageName: string, dockerContextRoot?: string): Promise<{ success: boolean; error?: string }> {
+export async function buildSandboxImage(imageName: string, dockerContextRoot?: string, commandRunner: CommandRunner = realCommandRunner): Promise<{ success: boolean; error?: string }> {
 	const contextRoot = resolveSandboxDockerContext(dockerContextRoot);
 	if (!contextRoot) {
 		const error = "Dockerfile not found at docker/Dockerfile";
@@ -72,7 +69,7 @@ export async function buildSandboxImage(imageName: string, dockerContextRoot?: s
 	_building = true;
 	try {
 		console.log(`[sandbox] Building Docker image "${imageName}" from ${path.join(contextRoot, "docker", "Dockerfile")}...`);
-		await execFileAsync("docker", ["build", "-t", imageName, path.join(contextRoot, "docker")], { cwd: contextRoot, timeout: 300_000 });
+		await commandRunner.execFile("docker", ["build", "-t", imageName, path.join(contextRoot, "docker")], { cwd: contextRoot, timeout: 300_000 });
 		console.log(`[sandbox] Docker image "${imageName}" built successfully`);
 		return { success: true };
 	} catch (err: any) {
@@ -88,13 +85,13 @@ export async function buildSandboxImage(imageName: string, dockerContextRoot?: s
  * Check if the Docker image has the expected pi-coding-agent version baked in.
  * Returns the image version (or null if not labelled / image missing).
  */
-export async function getImageAgentVersion(imageName: string): Promise<string | null> {
+export async function getImageAgentVersion(imageName: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
 	try {
-		const { stdout } = await execFileAsync(
+		const { stdout } = await commandRunner.execFile(
 			"docker", ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", imageName],
 			{ timeout: 5000 },
 		);
-		const version = stdout.trim();
+		const version = stdout.toString().trim();
 		return version && version !== "<no value>" ? version : null;
 	} catch {
 		return null;
@@ -119,7 +116,7 @@ export function getHostAgentVersion(): string | null {
  * Rebuilds automatically if the version is stale or missing.
  * Returns true if the image is ready.
  */
-export async function ensureImageAgentVersion(imageName: string, dockerContextRoot?: string): Promise<boolean> {
+export async function ensureImageAgentVersion(imageName: string, dockerContextRoot?: string, commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
 	const hostVersion = getHostAgentVersion();
 	if (!hostVersion) {
 		console.warn("[sandbox] Cannot determine host pi-coding-agent version, skipping image version check");
@@ -145,7 +142,7 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 
 	_building = true;
 	try {
-		await execFileAsync(
+		await commandRunner.execFile(
 			"docker",
 			["build", "--build-arg", `PI_AGENT_VERSION=${hostVersion}`, "-t", imageName, path.join(contextRoot, "docker")],
 			{ cwd: contextRoot, timeout: 300_000 },
@@ -161,13 +158,13 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 	}
 }
 
-export async function checkDockerAvailability(imageName?: string, dockerContextRoot?: string): Promise<SandboxStatus> {
+export async function checkDockerAvailability(imageName?: string, dockerContextRoot?: string, commandRunner: CommandRunner = realCommandRunner): Promise<SandboxStatus> {
 	try {
-		const { stdout } = await execFileAsync("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 5000 });
-		const status: SandboxStatus = { available: true, dockerVersion: stdout.trim() };
+		const { stdout } = await commandRunner.execFile("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 5000 });
+		const status: SandboxStatus = { available: true, dockerVersion: stdout.toString().trim() };
 		if (imageName) {
 			try {
-				await execFileAsync("docker", ["image", "inspect", imageName], { timeout: 5000 });
+				await commandRunner.execFile("docker", ["image", "inspect", imageName], { timeout: 5000 });
 				status.imageExists = true;
 			} catch {
 				status.imageExists = false;

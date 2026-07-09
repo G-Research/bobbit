@@ -1,0 +1,6846 @@
+{
+	"generatedAt": "2026-07-07T18:06:41.712Z",
+	"scope": "v2-core,v2-core-isolated,v2-dom (integration excluded — unstable under V8 coverage; server coverage via parity.mjs)",
+	"files": {
+		"src/app/account-oauth-providers.ts": {
+			"lines": {
+				"pct": 94.44,
+				"covered": 102,
+				"total": 108
+			},
+			"branches": {
+				"pct": 80.48,
+				"covered": 33,
+				"total": 41
+			}
+		},
+		"src/app/api.ts": {
+			"lines": {
+				"pct": 19.77,
+				"covered": 426,
+				"total": 2154
+			},
+			"branches": {
+				"pct": 46.25,
+				"covered": 74,
+				"total": 160
+			}
+		},
+		"src/app/boot-timing.ts": {
+			"lines": {
+				"pct": 20.23,
+				"covered": 17,
+				"total": 84
+			},
+			"branches": {
+				"pct": 33.33,
+				"covered": 2,
+				"total": 6
+			}
+		},
+		"src/app/channel-bridge.ts": {
+			"lines": {
+				"pct": 64.63,
+				"covered": 159,
+				"total": 246
+			},
+			"branches": {
+				"pct": 70.37,
+				"covered": 38,
+				"total": 54
+			}
+		},
+		"src/app/client-debug.ts": {
+			"lines": {
+				"pct": 6.84,
+				"covered": 10,
+				"total": 146
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/compaction-types.ts": {
+			"lines": {
+				"pct": 87.67,
+				"covered": 64,
+				"total": 73
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 9,
+				"total": 12
+			}
+		},
+		"src/app/components-editor.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 43,
+				"total": 43
+			},
+			"branches": {
+				"pct": 86.95,
+				"covered": 20,
+				"total": 23
+			}
+		},
+		"src/app/components/search-status-dot-state.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 21,
+				"total": 21
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 10,
+				"total": 10
+			}
+		},
+		"src/app/components/search-status-dot.ts": {
+			"lines": {
+				"pct": 17.82,
+				"covered": 18,
+				"total": 101
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/config-scope.ts": {
+			"lines": {
+				"pct": 18.18,
+				"covered": 20,
+				"total": 110
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/custom-messages.ts": {
+			"lines": {
+				"pct": 42.85,
+				"covered": 45,
+				"total": 105
+			},
+			"branches": {
+				"pct": 80,
+				"covered": 4,
+				"total": 5
+			}
+		},
+		"src/app/cwd-combobox.ts": {
+			"lines": {
+				"pct": 47.36,
+				"covered": 54,
+				"total": 114
+			},
+			"branches": {
+				"pct": 70.58,
+				"covered": 12,
+				"total": 17
+			}
+		},
+		"src/app/dialogs-lazy.ts": {
+			"lines": {
+				"pct": 18.98,
+				"covered": 15,
+				"total": 79
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 4,
+				"total": 4
+			}
+		},
+		"src/app/dialogs.ts": {
+			"lines": {
+				"pct": 12.04,
+				"covered": 256,
+				"total": 2126
+			},
+			"branches": {
+				"pct": 66,
+				"covered": 33,
+				"total": 50
+			}
+		},
+		"src/app/entrypoint-icon-registry.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 10,
+				"total": 10
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			}
+		},
+		"src/app/error-helpers.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 20,
+				"total": 20
+			},
+			"branches": {
+				"pct": 93.75,
+				"covered": 15,
+				"total": 16
+			}
+		},
+		"src/app/favicon-badge.ts": {
+			"lines": {
+				"pct": 29.33,
+				"covered": 22,
+				"total": 75
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 3,
+				"total": 6
+			}
+		},
+		"src/app/follow-tail.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 96
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/gate-status-events.ts": {
+			"lines": {
+				"pct": 64.81,
+				"covered": 35,
+				"total": 54
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/gateway-fetch.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 14,
+				"total": 14
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			}
+		},
+		"src/app/gesture-context.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 10,
+				"total": 10
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 7,
+				"total": 7
+			}
+		},
+		"src/app/git-status-refresh.ts": {
+			"lines": {
+				"pct": 60.71,
+				"covered": 34,
+				"total": 56
+			},
+			"branches": {
+				"pct": 83.33,
+				"covered": 15,
+				"total": 18
+			}
+		},
+		"src/app/goal-dashboard-children-tab.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 154
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/goal-dashboard-plan-tab.ts": {
+			"lines": {
+				"pct": 18.75,
+				"covered": 45,
+				"total": 240
+			},
+			"branches": {
+				"pct": 60,
+				"covered": 12,
+				"total": 20
+			}
+		},
+		"src/app/goal-dashboard-tab-visibility.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 20
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/goal-dashboard.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 2203
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/app/goal-descendants-count.ts": {
+			"lines": {
+				"pct": 11.76,
+				"covered": 2,
+				"total": 17
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/goal-entry.ts": {
+			"lines": {
+				"pct": 8.33,
+				"covered": 5,
+				"total": 60
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/headquarters.ts": {
+			"lines": {
+				"pct": 51.61,
+				"covered": 16,
+				"total": 31
+			},
+			"branches": {
+				"pct": 33.33,
+				"covered": 1,
+				"total": 3
+			}
+		},
+		"src/app/host-api.ts": {
+			"lines": {
+				"pct": 76.19,
+				"covered": 176,
+				"total": 231
+			},
+			"branches": {
+				"pct": 60.34,
+				"covered": 35,
+				"total": 58
+			}
+		},
+		"src/app/inbox-panel.ts": {
+			"lines": {
+				"pct": 13.2,
+				"covered": 14,
+				"total": 106
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/lazy-review.ts": {
+			"lines": {
+				"pct": 22.22,
+				"covered": 2,
+				"total": 9
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/lazy-widgets.ts": {
+			"lines": {
+				"pct": 50.87,
+				"covered": 29,
+				"total": 57
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 5,
+				"total": 5
+			}
+		},
+		"src/app/main.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 784
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/app/marketplace-page.ts": {
+			"lines": {
+				"pct": 5.06,
+				"covered": 68,
+				"total": 1342
+			},
+			"branches": {
+				"pct": 80,
+				"covered": 8,
+				"total": 10
+			}
+		},
+		"src/app/message-reducer.ts": {
+			"lines": {
+				"pct": 90.42,
+				"covered": 557,
+				"total": 616
+			},
+			"branches": {
+				"pct": 86.53,
+				"covered": 257,
+				"total": 297
+			}
+		},
+		"src/app/mobile-header.ts": {
+			"lines": {
+				"pct": 60,
+				"covered": 3,
+				"total": 5
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/notification-policy.ts": {
+			"lines": {
+				"pct": 90.82,
+				"covered": 99,
+				"total": 109
+			},
+			"branches": {
+				"pct": 88.05,
+				"covered": 59,
+				"total": 67
+			}
+		},
+		"src/app/pack-entrypoints.ts": {
+			"lines": {
+				"pct": 59.45,
+				"covered": 154,
+				"total": 259
+			},
+			"branches": {
+				"pct": 70.27,
+				"covered": 52,
+				"total": 74
+			}
+		},
+		"src/app/pack-panels.ts": {
+			"lines": {
+				"pct": 80.15,
+				"covered": 202,
+				"total": 252
+			},
+			"branches": {
+				"pct": 61.81,
+				"covered": 68,
+				"total": 110
+			}
+		},
+		"src/app/pack-renderers.ts": {
+			"lines": {
+				"pct": 95.08,
+				"covered": 58,
+				"total": 61
+			},
+			"branches": {
+				"pct": 52.63,
+				"covered": 10,
+				"total": 19
+			}
+		},
+		"src/app/panel-workspace.ts": {
+			"lines": {
+				"pct": 84.88,
+				"covered": 629,
+				"total": 741
+			},
+			"branches": {
+				"pct": 73.82,
+				"covered": 299,
+				"total": 405
+			}
+		},
+		"src/app/perf-flags.ts": {
+			"lines": {
+				"pct": 39.53,
+				"covered": 17,
+				"total": 43
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/pi-ai-lazy.ts": {
+			"lines": {
+				"pct": 1.58,
+				"covered": 1,
+				"total": 63
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/plan-edge-paths.ts": {
+			"lines": {
+				"pct": 2.43,
+				"covered": 1,
+				"total": 41
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/plan-node-state.ts": {
+			"lines": {
+				"pct": 87.87,
+				"covered": 29,
+				"total": 33
+			},
+			"branches": {
+				"pct": 86.11,
+				"covered": 31,
+				"total": 36
+			}
+		},
+		"src/app/plan-synthesis.ts": {
+			"lines": {
+				"pct": 85.5,
+				"covered": 118,
+				"total": 138
+			},
+			"branches": {
+				"pct": 69.76,
+				"covered": 30,
+				"total": 43
+			}
+		},
+		"src/app/play-finish-sound.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 21,
+				"total": 21
+			},
+			"branches": {
+				"pct": 85.71,
+				"covered": 6,
+				"total": 7
+			}
+		},
+		"src/app/preview-panel.ts": {
+			"lines": {
+				"pct": 52.27,
+				"covered": 241,
+				"total": 461
+			},
+			"branches": {
+				"pct": 64.8,
+				"covered": 81,
+				"total": 125
+			}
+		},
+		"src/app/project-assistant-autoprompt.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 54,
+				"total": 54
+			},
+			"branches": {
+				"pct": 95,
+				"covered": 19,
+				"total": 20
+			}
+		},
+		"src/app/project-proposal-diff.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 26,
+				"total": 26
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 18,
+				"total": 18
+			}
+		},
+		"src/app/project-proposal-views.ts": {
+			"lines": {
+				"pct": 87.01,
+				"covered": 181,
+				"total": 208
+			},
+			"branches": {
+				"pct": 72.27,
+				"covered": 73,
+				"total": 101
+			}
+		},
+		"src/app/proposal-helpers.ts": {
+			"lines": {
+				"pct": 88.88,
+				"covered": 168,
+				"total": 189
+			},
+			"branches": {
+				"pct": 85.24,
+				"covered": 52,
+				"total": 61
+			}
+		},
+		"src/app/proposal-panel-placeholder.ts": {
+			"lines": {
+				"pct": 83.33,
+				"covered": 10,
+				"total": 12
+			},
+			"branches": {
+				"pct": 83.33,
+				"covered": 5,
+				"total": 6
+			}
+		},
+		"src/app/proposal-panels-lazy.ts": {
+			"lines": {
+				"pct": 15.53,
+				"covered": 16,
+				"total": 103
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/proposal-panels.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 2518
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/proposal-parsers.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 27,
+				"total": 27
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/proposal-registry.ts": {
+			"lines": {
+				"pct": 66.48,
+				"covered": 123,
+				"total": 185
+			},
+			"branches": {
+				"pct": 72.54,
+				"covered": 37,
+				"total": 51
+			}
+		},
+		"src/app/proposal-update-policy.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 9,
+				"total": 9
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			}
+		},
+		"src/app/proposal-workspace-actions.ts": {
+			"lines": {
+				"pct": 71.42,
+				"covered": 5,
+				"total": 7
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/pwa-lifecycle.ts": {
+			"lines": {
+				"pct": 17.56,
+				"covered": 36,
+				"total": 205
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 11,
+				"total": 11
+			}
+		},
+		"src/app/remote-agent.ts": {
+			"lines": {
+				"pct": 38.81,
+				"covered": 784,
+				"total": 2020
+			},
+			"branches": {
+				"pct": 40.84,
+				"covered": 125,
+				"total": 306
+			}
+		},
+		"src/app/render-helpers.ts": {
+			"lines": {
+				"pct": 14.98,
+				"covered": 177,
+				"total": 1181
+			},
+			"branches": {
+				"pct": 77.41,
+				"covered": 72,
+				"total": 93
+			}
+		},
+		"src/app/render-triggers.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 132
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/render.ts": {
+			"lines": {
+				"pct": 4.21,
+				"covered": 94,
+				"total": 2229
+			},
+			"branches": {
+				"pct": 62.5,
+				"covered": 5,
+				"total": 8
+			}
+		},
+		"src/app/review-sources-lazy.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 4,
+				"total": 4
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/review-sources.ts": {
+			"lines": {
+				"pct": 27.47,
+				"covered": 122,
+				"total": 444
+			},
+			"branches": {
+				"pct": 42.62,
+				"covered": 26,
+				"total": 61
+			}
+		},
+		"src/app/role-manager-page.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 723
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/routing.ts": {
+			"lines": {
+				"pct": 53.61,
+				"covered": 126,
+				"total": 235
+			},
+			"branches": {
+				"pct": 60.25,
+				"covered": 47,
+				"total": 78
+			}
+		},
+		"src/app/safe-storage.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 38,
+				"total": 38
+			},
+			"branches": {
+				"pct": 88.23,
+				"covered": 15,
+				"total": 17
+			}
+		},
+		"src/app/search-page.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 458
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/session-actions.ts": {
+			"lines": {
+				"pct": 47.93,
+				"covered": 186,
+				"total": 388
+			},
+			"branches": {
+				"pct": 57.14,
+				"covered": 20,
+				"total": 35
+			}
+		},
+		"src/app/session-colors.ts": {
+			"lines": {
+				"pct": 50,
+				"covered": 32,
+				"total": 64
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			}
+		},
+		"src/app/session-event-bus.ts": {
+			"lines": {
+				"pct": 34.61,
+				"covered": 36,
+				"total": 104
+			},
+			"branches": {
+				"pct": 95.23,
+				"covered": 20,
+				"total": 21
+			}
+		},
+		"src/app/session-load-state.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			}
+		},
+		"src/app/session-manager.ts": {
+			"lines": {
+				"pct": 6.07,
+				"covered": 150,
+				"total": 2470
+			},
+			"branches": {
+				"pct": 62.5,
+				"covered": 10,
+				"total": 16
+			}
+		},
+		"src/app/session-write-bridge.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 15,
+				"total": 15
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 4,
+				"total": 8
+			}
+		},
+		"src/app/settings-page.ts": {
+			"lines": {
+				"pct": 16.59,
+				"covered": 604,
+				"total": 3640
+			},
+			"branches": {
+				"pct": 71.27,
+				"covered": 134,
+				"total": 188
+			}
+		},
+		"src/app/shortcut-registry.ts": {
+			"lines": {
+				"pct": 37.94,
+				"covered": 74,
+				"total": 195
+			},
+			"branches": {
+				"pct": 62.5,
+				"covered": 10,
+				"total": 16
+			}
+		},
+		"src/app/side-panel-workspace.ts": {
+			"lines": {
+				"pct": 54.95,
+				"covered": 410,
+				"total": 746
+			},
+			"branches": {
+				"pct": 56.22,
+				"covered": 131,
+				"total": 233
+			}
+		},
+		"src/app/sidebar-font-scale.ts": {
+			"lines": {
+				"pct": 60.37,
+				"covered": 32,
+				"total": 53
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 19,
+				"total": 19
+			}
+		},
+		"src/app/sidebar-nav.ts": {
+			"lines": {
+				"pct": 23.76,
+				"covered": 48,
+				"total": 202
+			},
+			"branches": {
+				"pct": 32.14,
+				"covered": 9,
+				"total": 28
+			}
+		},
+		"src/app/sidebar-nesting.ts": {
+			"lines": {
+				"pct": 71.53,
+				"covered": 98,
+				"total": 137
+			},
+			"branches": {
+				"pct": 72,
+				"covered": 36,
+				"total": 50
+			}
+		},
+		"src/app/sidebar-spawned-children.ts": {
+			"lines": {
+				"pct": 98.91,
+				"covered": 91,
+				"total": 92
+			},
+			"branches": {
+				"pct": 89.13,
+				"covered": 41,
+				"total": 46
+			}
+		},
+		"src/app/sidebar-tree-builder.ts": {
+			"lines": {
+				"pct": 95.79,
+				"covered": 729,
+				"total": 761
+			},
+			"branches": {
+				"pct": 90.02,
+				"covered": 388,
+				"total": 431
+			}
+		},
+		"src/app/sidebar-tree-layout.ts": {
+			"lines": {
+				"pct": 98.26,
+				"covered": 113,
+				"total": 115
+			},
+			"branches": {
+				"pct": 80.35,
+				"covered": 45,
+				"total": 56
+			}
+		},
+		"src/app/sidebar-tree-state.ts": {
+			"lines": {
+				"pct": 94.52,
+				"covered": 207,
+				"total": 219
+			},
+			"branches": {
+				"pct": 82.72,
+				"covered": 91,
+				"total": 110
+			}
+		},
+		"src/app/sidebar.ts": {
+			"lines": {
+				"pct": 5.4,
+				"covered": 82,
+				"total": 1518
+			},
+			"branches": {
+				"pct": 21.42,
+				"covered": 3,
+				"total": 14
+			}
+		},
+		"src/app/skills-page.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 198
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/staff-page.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 488
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/app/state.ts": {
+			"lines": {
+				"pct": 72.86,
+				"covered": 298,
+				"total": 409
+			},
+			"branches": {
+				"pct": 71.42,
+				"covered": 40,
+				"total": 56
+			}
+		},
+		"src/app/storage.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 39,
+				"total": 39
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/streaming-message-id.ts": {
+			"lines": {
+				"pct": 72.72,
+				"covered": 8,
+				"total": 11
+			},
+			"branches": {
+				"pct": 66.66,
+				"covered": 4,
+				"total": 6
+			}
+		},
+		"src/app/subgoal-eligibility.ts": {
+			"lines": {
+				"pct": 24.67,
+				"covered": 19,
+				"total": 77
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 5,
+				"total": 5
+			}
+		},
+		"src/app/subgoals-flag.ts": {
+			"lines": {
+				"pct": 57.14,
+				"covered": 12,
+				"total": 21
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 7,
+				"total": 7
+			}
+		},
+		"src/app/surface-token-bridge.ts": {
+			"lines": {
+				"pct": 72.27,
+				"covered": 146,
+				"total": 202
+			},
+			"branches": {
+				"pct": 46.29,
+				"covered": 25,
+				"total": 54
+			}
+		},
+		"src/app/team-archived-bucket.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 20,
+				"total": 20
+			},
+			"branches": {
+				"pct": 85.71,
+				"covered": 6,
+				"total": 7
+			}
+		},
+		"src/app/theme-init.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 9,
+				"total": 9
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 10,
+				"total": 10
+			}
+		},
+		"src/app/tool-manager-page.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1023
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/app/tree-cost-legacy.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 32,
+				"total": 32
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 26,
+				"total": 26
+			}
+		},
+		"src/app/verification-event-bus.ts": {
+			"lines": {
+				"pct": 16.27,
+				"covered": 7,
+				"total": 43
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/app/workflow-page.ts": {
+			"lines": {
+				"pct": 4.24,
+				"covered": 56,
+				"total": 1320
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/agent-dir-config.ts": {
+			"lines": {
+				"pct": 74.25,
+				"covered": 398,
+				"total": 536
+			},
+			"branches": {
+				"pct": 77.11,
+				"covered": 155,
+				"total": 201
+			}
+		},
+		"src/server/agent/agent-session-path.ts": {
+			"lines": {
+				"pct": 94.8,
+				"covered": 73,
+				"total": 77
+			},
+			"branches": {
+				"pct": 89.65,
+				"covered": 26,
+				"total": 29
+			}
+		},
+		"src/server/agent/aigw-manager.ts": {
+			"lines": {
+				"pct": 70.16,
+				"covered": 435,
+				"total": 620
+			},
+			"branches": {
+				"pct": 76.88,
+				"covered": 143,
+				"total": 186
+			}
+		},
+		"src/server/agent/aigw-user-agent.ts": {
+			"lines": {
+				"pct": 81.81,
+				"covered": 27,
+				"total": 33
+			},
+			"branches": {
+				"pct": 62.5,
+				"covered": 5,
+				"total": 8
+			}
+		},
+		"src/server/agent/ask-user-choices-validation.ts": {
+			"lines": {
+				"pct": 56.58,
+				"covered": 73,
+				"total": 129
+			},
+			"branches": {
+				"pct": 61.4,
+				"covered": 35,
+				"total": 57
+			}
+		},
+		"src/server/agent/assistant-registry.ts": {
+			"lines": {
+				"pct": 57.57,
+				"covered": 76,
+				"total": 132
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 6,
+				"total": 8
+			}
+		},
+		"src/server/agent/bg-process-manager.ts": {
+			"lines": {
+				"pct": 81.86,
+				"covered": 790,
+				"total": 965
+			},
+			"branches": {
+				"pct": 83.51,
+				"covered": 299,
+				"total": 358
+			}
+		},
+		"src/server/agent/bg-process-store.ts": {
+			"lines": {
+				"pct": 81.95,
+				"covered": 159,
+				"total": 194
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 51,
+				"total": 68
+			}
+		},
+		"src/server/agent/bg-runner.ts": {
+			"lines": {
+				"pct": 73.25,
+				"covered": 63,
+				"total": 86
+			},
+			"branches": {
+				"pct": 56.25,
+				"covered": 9,
+				"total": 16
+			}
+		},
+		"src/server/agent/bg-wait-response.ts": {
+			"lines": {
+				"pct": 92.68,
+				"covered": 38,
+				"total": 41
+			},
+			"branches": {
+				"pct": 70,
+				"covered": 7,
+				"total": 10
+			}
+		},
+		"src/server/agent/bobbit-archive.ts": {
+			"lines": {
+				"pct": 89.09,
+				"covered": 196,
+				"total": 220
+			},
+			"branches": {
+				"pct": 80,
+				"covered": 64,
+				"total": 80
+			}
+		},
+		"src/server/agent/builtin-config.ts": {
+			"lines": {
+				"pct": 82.42,
+				"covered": 136,
+				"total": 165
+			},
+			"branches": {
+				"pct": 66.1,
+				"covered": 39,
+				"total": 59
+			}
+		},
+		"src/server/agent/builtin-packs.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 48,
+				"total": 48
+			},
+			"branches": {
+				"pct": 92.3,
+				"covered": 12,
+				"total": 13
+			}
+		},
+		"src/server/agent/child-ready-to-merge.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 39,
+				"total": 39
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 13,
+				"total": 13
+			}
+		},
+		"src/server/agent/child-team-scheduler.ts": {
+			"lines": {
+				"pct": 98.56,
+				"covered": 137,
+				"total": 139
+			},
+			"branches": {
+				"pct": 92.75,
+				"covered": 64,
+				"total": 69
+			}
+		},
+		"src/server/agent/color-store.ts": {
+			"lines": {
+				"pct": 82.65,
+				"covered": 81,
+				"total": 98
+			},
+			"branches": {
+				"pct": 68.42,
+				"covered": 13,
+				"total": 19
+			}
+		},
+		"src/server/agent/compaction-sidecar.ts": {
+			"lines": {
+				"pct": 10.11,
+				"covered": 18,
+				"total": 178
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 1,
+				"total": 2
+			}
+		},
+		"src/server/agent/config-cascade.ts": {
+			"lines": {
+				"pct": 83.79,
+				"covered": 212,
+				"total": 253
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 57,
+				"total": 76
+			}
+		},
+		"src/server/agent/config-directories.ts": {
+			"lines": {
+				"pct": 87.76,
+				"covered": 165,
+				"total": 188
+			},
+			"branches": {
+				"pct": 85.71,
+				"covered": 30,
+				"total": 35
+			}
+		},
+		"src/server/agent/config-resolver.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 47,
+				"total": 47
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 17,
+				"total": 17
+			}
+		},
+		"src/server/agent/context-blocks.ts": {
+			"lines": {
+				"pct": 85.93,
+				"covered": 55,
+				"total": 64
+			},
+			"branches": {
+				"pct": 80,
+				"covered": 16,
+				"total": 20
+			}
+		},
+		"src/server/agent/context-trace-store.ts": {
+			"lines": {
+				"pct": 95,
+				"covered": 57,
+				"total": 60
+			},
+			"branches": {
+				"pct": 83.33,
+				"covered": 20,
+				"total": 24
+			}
+		},
+		"src/server/agent/continue-archived.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 29,
+				"total": 29
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 9,
+				"total": 12
+			}
+		},
+		"src/server/agent/cost-backfill.ts": {
+			"lines": {
+				"pct": 92.88,
+				"covered": 222,
+				"total": 239
+			},
+			"branches": {
+				"pct": 68.42,
+				"covered": 65,
+				"total": 95
+			}
+		},
+		"src/server/agent/cost-tracker.ts": {
+			"lines": {
+				"pct": 94.13,
+				"covered": 305,
+				"total": 324
+			},
+			"branches": {
+				"pct": 89.91,
+				"covered": 107,
+				"total": 119
+			}
+		},
+		"src/server/agent/cpu-diagnostics.ts": {
+			"lines": {
+				"pct": 98.46,
+				"covered": 257,
+				"total": 261
+			},
+			"branches": {
+				"pct": 79.45,
+				"covered": 58,
+				"total": 73
+			}
+		},
+		"src/server/agent/depends-on-validation.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 68,
+				"total": 68
+			},
+			"branches": {
+				"pct": 93.87,
+				"covered": 46,
+				"total": 49
+			}
+		},
+		"src/server/agent/docker-args.ts": {
+			"lines": {
+				"pct": 89.61,
+				"covered": 164,
+				"total": 183
+			},
+			"branches": {
+				"pct": 82.35,
+				"covered": 42,
+				"total": 51
+			}
+		},
+		"src/server/agent/event-buffer.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 52,
+				"total": 52
+			},
+			"branches": {
+				"pct": 91.66,
+				"covered": 22,
+				"total": 24
+			}
+		},
+		"src/server/agent/gate-dependency-check.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 21,
+				"total": 21
+			},
+			"branches": {
+				"pct": 93.75,
+				"covered": 15,
+				"total": 16
+			}
+		},
+		"src/server/agent/gate-diagnostics-cleanup.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 20,
+				"total": 20
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 6,
+				"total": 8
+			}
+		},
+		"src/server/agent/gate-store.ts": {
+			"lines": {
+				"pct": 78.27,
+				"covered": 191,
+				"total": 244
+			},
+			"branches": {
+				"pct": 80.35,
+				"covered": 45,
+				"total": 56
+			}
+		},
+		"src/server/agent/goal-assistant.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 32,
+				"total": 32
+			},
+			"branches": {
+				"pct": 66.66,
+				"covered": 4,
+				"total": 6
+			}
+		},
+		"src/server/agent/goal-descendants.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 35,
+				"total": 35
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 20,
+				"total": 20
+			}
+		},
+		"src/server/agent/goal-manager.ts": {
+			"lines": {
+				"pct": 40.35,
+				"covered": 272,
+				"total": 674
+			},
+			"branches": {
+				"pct": 68.8,
+				"covered": 86,
+				"total": 125
+			}
+		},
+		"src/server/agent/goal-metadata.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 54,
+				"total": 54
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 33,
+				"total": 33
+			}
+		},
+		"src/server/agent/goal-paused-guard.ts": {
+			"lines": {
+				"pct": 80.64,
+				"covered": 25,
+				"total": 31
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 9,
+				"total": 9
+			}
+		},
+		"src/server/agent/goal-store.ts": {
+			"lines": {
+				"pct": 76.71,
+				"covered": 112,
+				"total": 146
+			},
+			"branches": {
+				"pct": 81.25,
+				"covered": 39,
+				"total": 48
+			}
+		},
+		"src/server/agent/goal-subtree.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 73,
+				"total": 73
+			},
+			"branches": {
+				"pct": 94.87,
+				"covered": 37,
+				"total": 39
+			}
+		},
+		"src/server/agent/goal-trigger-dispatcher.ts": {
+			"lines": {
+				"pct": 92.3,
+				"covered": 36,
+				"total": 39
+			},
+			"branches": {
+				"pct": 93.33,
+				"covered": 14,
+				"total": 15
+			}
+		},
+		"src/server/agent/google-code-assist-models.ts": {
+			"lines": {
+				"pct": 95.34,
+				"covered": 41,
+				"total": 43
+			},
+			"branches": {
+				"pct": 70,
+				"covered": 14,
+				"total": 20
+			}
+		},
+		"src/server/agent/google-code-assist-provider-extension.ts": {
+			"lines": {
+				"pct": 97.26,
+				"covered": 71,
+				"total": 73
+			},
+			"branches": {
+				"pct": 60,
+				"covered": 12,
+				"total": 20
+			}
+		},
+		"src/server/agent/google-code-assist.ts": {
+			"lines": {
+				"pct": 90.11,
+				"covered": 474,
+				"total": 526
+			},
+			"branches": {
+				"pct": 73.58,
+				"covered": 195,
+				"total": 265
+			}
+		},
+		"src/server/agent/host-tokens.ts": {
+			"lines": {
+				"pct": 83.72,
+				"covered": 252,
+				"total": 301
+			},
+			"branches": {
+				"pct": 85.6,
+				"covered": 113,
+				"total": 132
+			}
+		},
+		"src/server/agent/image-generation.ts": {
+			"lines": {
+				"pct": 70.08,
+				"covered": 431,
+				"total": 615
+			},
+			"branches": {
+				"pct": 63.88,
+				"covered": 92,
+				"total": 144
+			}
+		},
+		"src/server/agent/inbox-manager.ts": {
+			"lines": {
+				"pct": 88.79,
+				"covered": 103,
+				"total": 116
+			},
+			"branches": {
+				"pct": 97.43,
+				"covered": 38,
+				"total": 39
+			}
+		},
+		"src/server/agent/inbox-nudger.ts": {
+			"lines": {
+				"pct": 76.31,
+				"covered": 116,
+				"total": 152
+			},
+			"branches": {
+				"pct": 54.68,
+				"covered": 35,
+				"total": 64
+			}
+		},
+		"src/server/agent/inbox-store.ts": {
+			"lines": {
+				"pct": 96.29,
+				"covered": 104,
+				"total": 108
+			},
+			"branches": {
+				"pct": 90.9,
+				"covered": 40,
+				"total": 44
+			}
+		},
+		"src/server/agent/inline-file-images.ts": {
+			"lines": {
+				"pct": 97.05,
+				"covered": 66,
+				"total": 68
+			},
+			"branches": {
+				"pct": 68,
+				"covered": 17,
+				"total": 25
+			}
+		},
+		"src/server/agent/lifecycle-hub.ts": {
+			"lines": {
+				"pct": 95.67,
+				"covered": 177,
+				"total": 185
+			},
+			"branches": {
+				"pct": 76.05,
+				"covered": 54,
+				"total": 71
+			}
+		},
+		"src/server/agent/marketplace-install.ts": {
+			"lines": {
+				"pct": 86.92,
+				"covered": 512,
+				"total": 589
+			},
+			"branches": {
+				"pct": 63.96,
+				"covered": 158,
+				"total": 247
+			}
+		},
+		"src/server/agent/marketplace-source-store.ts": {
+			"lines": {
+				"pct": 91.12,
+				"covered": 226,
+				"total": 248
+			},
+			"branches": {
+				"pct": 80.12,
+				"covered": 125,
+				"total": 156
+			}
+		},
+		"src/server/agent/mcp-gateway-runtime-identity.ts": {
+			"lines": {
+				"pct": 95.91,
+				"covered": 47,
+				"total": 49
+			},
+			"branches": {
+				"pct": 44,
+				"covered": 11,
+				"total": 25
+			}
+		},
+		"src/server/agent/mcp-gateway-source.ts": {
+			"lines": {
+				"pct": 94.02,
+				"covered": 456,
+				"total": 485
+			},
+			"branches": {
+				"pct": 70.68,
+				"covered": 164,
+				"total": 232
+			}
+		},
+		"src/server/agent/mcp-registry-source.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 662
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/server/agent/model-completion.ts": {
+			"lines": {
+				"pct": 58.76,
+				"covered": 124,
+				"total": 211
+			},
+			"branches": {
+				"pct": 21.42,
+				"covered": 12,
+				"total": 56
+			}
+		},
+		"src/server/agent/model-error-sanitizer.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 9,
+				"total": 9
+			},
+			"branches": {
+				"pct": 57.14,
+				"covered": 4,
+				"total": 7
+			}
+		},
+		"src/server/agent/model-registry.ts": {
+			"lines": {
+				"pct": 70.38,
+				"covered": 328,
+				"total": 466
+			},
+			"branches": {
+				"pct": 70.11,
+				"covered": 183,
+				"total": 261
+			}
+		},
+		"src/server/agent/monorepo-scan.ts": {
+			"lines": {
+				"pct": 99.53,
+				"covered": 213,
+				"total": 214
+			},
+			"branches": {
+				"pct": 78.94,
+				"covered": 75,
+				"total": 95
+			}
+		},
+		"src/server/agent/name-generator.ts": {
+			"lines": {
+				"pct": 33.89,
+				"covered": 40,
+				"total": 118
+			},
+			"branches": {
+				"pct": 8.33,
+				"covered": 1,
+				"total": 12
+			}
+		},
+		"src/server/agent/nested-goal-routes.ts": {
+			"lines": {
+				"pct": 63.92,
+				"covered": 661,
+				"total": 1034
+			},
+			"branches": {
+				"pct": 63.58,
+				"covered": 234,
+				"total": 368
+			}
+		},
+		"src/server/agent/notify-team-lead-child-passed.ts": {
+			"lines": {
+				"pct": 69.81,
+				"covered": 37,
+				"total": 53
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 18,
+				"total": 18
+			}
+		},
+		"src/server/agent/notify-team-lead-failure.ts": {
+			"lines": {
+				"pct": 86.44,
+				"covered": 51,
+				"total": 59
+			},
+			"branches": {
+				"pct": 78.94,
+				"covered": 15,
+				"total": 19
+			}
+		},
+		"src/server/agent/openai-model-additions.ts": {
+			"lines": {
+				"pct": 82.53,
+				"covered": 208,
+				"total": 252
+			},
+			"branches": {
+				"pct": 76.11,
+				"covered": 51,
+				"total": 67
+			}
+		},
+		"src/server/agent/orchestration-core.ts": {
+			"lines": {
+				"pct": 88.96,
+				"covered": 387,
+				"total": 435
+			},
+			"branches": {
+				"pct": 79.01,
+				"covered": 177,
+				"total": 224
+			}
+		},
+		"src/server/agent/orphan-cleanup.ts": {
+			"lines": {
+				"pct": 92.72,
+				"covered": 51,
+				"total": 55
+			},
+			"branches": {
+				"pct": 86.66,
+				"covered": 26,
+				"total": 30
+			}
+		},
+		"src/server/agent/pack-contributions.ts": {
+			"lines": {
+				"pct": 80.82,
+				"covered": 548,
+				"total": 678
+			},
+			"branches": {
+				"pct": 77.05,
+				"covered": 262,
+				"total": 340
+			}
+		},
+		"src/server/agent/pack-list.ts": {
+			"lines": {
+				"pct": 98.19,
+				"covered": 163,
+				"total": 166
+			},
+			"branches": {
+				"pct": 84.31,
+				"covered": 43,
+				"total": 51
+			}
+		},
+		"src/server/agent/pack-manifest.ts": {
+			"lines": {
+				"pct": 92.36,
+				"covered": 230,
+				"total": 249
+			},
+			"branches": {
+				"pct": 78.91,
+				"covered": 116,
+				"total": 147
+			}
+		},
+		"src/server/agent/pack-resolver.ts": {
+			"lines": {
+				"pct": 92.39,
+				"covered": 85,
+				"total": 92
+			},
+			"branches": {
+				"pct": 92.15,
+				"covered": 47,
+				"total": 51
+			}
+		},
+		"src/server/agent/pack-types.ts": {
+			"lines": {
+				"pct": 56.41,
+				"covered": 22,
+				"total": 39
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 6,
+				"total": 8
+			}
+		},
+		"src/server/agent/parent-workflow-freeze.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 20,
+				"total": 20
+			},
+			"branches": {
+				"pct": 85.71,
+				"covered": 12,
+				"total": 14
+			}
+		},
+		"src/server/agent/pi-extension-contributions.ts": {
+			"lines": {
+				"pct": 81.4,
+				"covered": 302,
+				"total": 371
+			},
+			"branches": {
+				"pct": 66.24,
+				"covered": 104,
+				"total": 157
+			}
+		},
+		"src/server/agent/pi-extension-discovery.ts": {
+			"lines": {
+				"pct": 83.7,
+				"covered": 411,
+				"total": 491
+			},
+			"branches": {
+				"pct": 65.28,
+				"covered": 126,
+				"total": 193
+			}
+		},
+		"src/server/agent/plan-mutation-store.ts": {
+			"lines": {
+				"pct": 86.23,
+				"covered": 94,
+				"total": 109
+			},
+			"branches": {
+				"pct": 79.48,
+				"covered": 31,
+				"total": 39
+			}
+		},
+		"src/server/agent/plan-mutation.ts": {
+			"lines": {
+				"pct": 96.47,
+				"covered": 164,
+				"total": 170
+			},
+			"branches": {
+				"pct": 83.67,
+				"covered": 82,
+				"total": 98
+			}
+		},
+		"src/server/agent/pr-status-store.ts": {
+			"lines": {
+				"pct": 69.38,
+				"covered": 34,
+				"total": 49
+			},
+			"branches": {
+				"pct": 60,
+				"covered": 6,
+				"total": 10
+			}
+		},
+		"src/server/agent/preferences-store.ts": {
+			"lines": {
+				"pct": 85.71,
+				"covered": 42,
+				"total": 49
+			},
+			"branches": {
+				"pct": 81.81,
+				"covered": 9,
+				"total": 11
+			}
+		},
+		"src/server/agent/profiling.ts": {
+			"lines": {
+				"pct": 23.36,
+				"covered": 25,
+				"total": 107
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 5,
+				"total": 10
+			}
+		},
+		"src/server/agent/project-assistant.ts": {
+			"lines": {
+				"pct": 92.85,
+				"covered": 26,
+				"total": 28
+			},
+			"branches": {
+				"pct": 33.33,
+				"covered": 1,
+				"total": 3
+			}
+		},
+		"src/server/agent/project-config-store.ts": {
+			"lines": {
+				"pct": 73.08,
+				"covered": 524,
+				"total": 717
+			},
+			"branches": {
+				"pct": 77.36,
+				"covered": 188,
+				"total": 243
+			}
+		},
+		"src/server/agent/project-context-manager.ts": {
+			"lines": {
+				"pct": 29.66,
+				"covered": 70,
+				"total": 236
+			},
+			"branches": {
+				"pct": 81.81,
+				"covered": 18,
+				"total": 22
+			}
+		},
+		"src/server/agent/project-context.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 125,
+				"total": 125
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 20,
+				"total": 20
+			}
+		},
+		"src/server/agent/project-preflight.ts": {
+			"lines": {
+				"pct": 88.34,
+				"covered": 394,
+				"total": 446
+			},
+			"branches": {
+				"pct": 78.43,
+				"covered": 120,
+				"total": 153
+			}
+		},
+		"src/server/agent/project-registry.ts": {
+			"lines": {
+				"pct": 70.78,
+				"covered": 475,
+				"total": 671
+			},
+			"branches": {
+				"pct": 77.06,
+				"covered": 168,
+				"total": 218
+			}
+		},
+		"src/server/agent/project-sandbox.ts": {
+			"lines": {
+				"pct": 31.76,
+				"covered": 276,
+				"total": 869
+			},
+			"branches": {
+				"pct": 57.3,
+				"covered": 51,
+				"total": 89
+			}
+		},
+		"src/server/agent/prompt-conditionals.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 31,
+				"total": 31
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 16,
+				"total": 16
+			}
+		},
+		"src/server/agent/prompt-queue.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 91,
+				"total": 91
+			},
+			"branches": {
+				"pct": 88.46,
+				"covered": 46,
+				"total": 52
+			}
+		},
+		"src/server/agent/provider-bridge-extension.ts": {
+			"lines": {
+				"pct": 92.3,
+				"covered": 60,
+				"total": 65
+			},
+			"branches": {
+				"pct": 68.75,
+				"covered": 11,
+				"total": 16
+			}
+		},
+		"src/server/agent/repo-scan.ts": {
+			"lines": {
+				"pct": 96.64,
+				"covered": 144,
+				"total": 149
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 54,
+				"total": 72
+			}
+		},
+		"src/server/agent/resolve-project.ts": {
+			"lines": {
+				"pct": 3.77,
+				"covered": 6,
+				"total": 159
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/agent/resolve-role.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 22,
+				"total": 22
+			},
+			"branches": {
+				"pct": 80,
+				"covered": 8,
+				"total": 10
+			}
+		},
+		"src/server/agent/review-model-override.ts": {
+			"lines": {
+				"pct": 93.33,
+				"covered": 140,
+				"total": 150
+			},
+			"branches": {
+				"pct": 83.33,
+				"covered": 55,
+				"total": 66
+			}
+		},
+		"src/server/agent/role-assistant.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/agent/role-manager.ts": {
+			"lines": {
+				"pct": 94.54,
+				"covered": 52,
+				"total": 55
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 18,
+				"total": 18
+			}
+		},
+		"src/server/agent/role-prompt.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 62,
+				"total": 62
+			},
+			"branches": {
+				"pct": 83.87,
+				"covered": 26,
+				"total": 31
+			}
+		},
+		"src/server/agent/role-store.ts": {
+			"lines": {
+				"pct": 72.72,
+				"covered": 64,
+				"total": 88
+			},
+			"branches": {
+				"pct": 62.5,
+				"covered": 20,
+				"total": 32
+			}
+		},
+		"src/server/agent/rpc-bridge.ts": {
+			"lines": {
+				"pct": 73.72,
+				"covered": 477,
+				"total": 647
+			},
+			"branches": {
+				"pct": 69.44,
+				"covered": 125,
+				"total": 180
+			}
+		},
+		"src/server/agent/sandbox-clone-source.ts": {
+			"lines": {
+				"pct": 92.48,
+				"covered": 123,
+				"total": 133
+			},
+			"branches": {
+				"pct": 63.63,
+				"covered": 35,
+				"total": 55
+			}
+		},
+		"src/server/agent/sandbox-manager.ts": {
+			"lines": {
+				"pct": 37.14,
+				"covered": 52,
+				"total": 140
+			},
+			"branches": {
+				"pct": 53.33,
+				"covered": 8,
+				"total": 15
+			}
+		},
+		"src/server/agent/sandbox-mounts.ts": {
+			"lines": {
+				"pct": 40,
+				"covered": 16,
+				"total": 40
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/agent/sandbox-status.ts": {
+			"lines": {
+				"pct": 24.28,
+				"covered": 34,
+				"total": 140
+			},
+			"branches": {
+				"pct": 72.72,
+				"covered": 8,
+				"total": 11
+			}
+		},
+		"src/server/agent/secrets-store.ts": {
+			"lines": {
+				"pct": 37.5,
+				"covered": 21,
+				"total": 56
+			},
+			"branches": {
+				"pct": 60,
+				"covered": 3,
+				"total": 5
+			}
+		},
+		"src/server/agent/semaphore.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 67,
+				"total": 67
+			},
+			"branches": {
+				"pct": 96.29,
+				"covered": 26,
+				"total": 27
+			}
+		},
+		"src/server/agent/session-eager-branch-delete.ts": {
+			"lines": {
+				"pct": 89.65,
+				"covered": 26,
+				"total": 29
+			},
+			"branches": {
+				"pct": 87.5,
+				"covered": 14,
+				"total": 16
+			}
+		},
+		"src/server/agent/session-fs.ts": {
+			"lines": {
+				"pct": 43.55,
+				"covered": 71,
+				"total": 163
+			},
+			"branches": {
+				"pct": 65.51,
+				"covered": 19,
+				"total": 29
+			}
+		},
+		"src/server/agent/session-manager.ts": {
+			"lines": {
+				"pct": 41.05,
+				"covered": 2633,
+				"total": 6414
+			},
+			"branches": {
+				"pct": 61.63,
+				"covered": 670,
+				"total": 1087
+			}
+		},
+		"src/server/agent/session-prompt-delivery.ts": {
+			"lines": {
+				"pct": 92.59,
+				"covered": 50,
+				"total": 54
+			},
+			"branches": {
+				"pct": 86.95,
+				"covered": 20,
+				"total": 23
+			}
+		},
+		"src/server/agent/session-setup.ts": {
+			"lines": {
+				"pct": 47.92,
+				"covered": 461,
+				"total": 962
+			},
+			"branches": {
+				"pct": 58.51,
+				"covered": 110,
+				"total": 188
+			}
+		},
+		"src/server/agent/session-sidecar.ts": {
+			"lines": {
+				"pct": 56.7,
+				"covered": 55,
+				"total": 97
+			},
+			"branches": {
+				"pct": 12,
+				"covered": 3,
+				"total": 25
+			}
+		},
+		"src/server/agent/session-status.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 22,
+				"total": 22
+			},
+			"branches": {
+				"pct": 84.61,
+				"covered": 11,
+				"total": 13
+			}
+		},
+		"src/server/agent/session-store.ts": {
+			"lines": {
+				"pct": 92.36,
+				"covered": 375,
+				"total": 406
+			},
+			"branches": {
+				"pct": 95.72,
+				"covered": 179,
+				"total": 187
+			}
+		},
+		"src/server/agent/shell-util.ts": {
+			"lines": {
+				"pct": 53.94,
+				"covered": 41,
+				"total": 76
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 6,
+				"total": 12
+			}
+		},
+		"src/server/agent/spawn-child-spawnedby.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 45,
+				"total": 45
+			},
+			"branches": {
+				"pct": 97.5,
+				"covered": 39,
+				"total": 40
+			}
+		},
+		"src/server/agent/spawn-child-spec-validation.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 25,
+				"total": 25
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			}
+		},
+		"src/server/agent/spawn-child-workflow.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 37,
+				"total": 37
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 22,
+				"total": 22
+			}
+		},
+		"src/server/agent/spawn-tree.ts": {
+			"lines": {
+				"pct": 88.59,
+				"covered": 101,
+				"total": 114
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 14,
+				"total": 28
+			}
+		},
+		"src/server/agent/splice-inflight-message.ts": {
+			"lines": {
+				"pct": 96.82,
+				"covered": 61,
+				"total": 63
+			},
+			"branches": {
+				"pct": 87.5,
+				"covered": 35,
+				"total": 40
+			}
+		},
+		"src/server/agent/staff-assistant.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/agent/staff-backfill.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 26,
+				"total": 26
+			},
+			"branches": {
+				"pct": 90,
+				"covered": 9,
+				"total": 10
+			}
+		},
+		"src/server/agent/staff-manager.ts": {
+			"lines": {
+				"pct": 21.7,
+				"covered": 107,
+				"total": 493
+			},
+			"branches": {
+				"pct": 80.55,
+				"covered": 29,
+				"total": 36
+			}
+		},
+		"src/server/agent/staff-store.ts": {
+			"lines": {
+				"pct": 79.79,
+				"covered": 79,
+				"total": 99
+			},
+			"branches": {
+				"pct": 90,
+				"covered": 18,
+				"total": 20
+			}
+		},
+		"src/server/agent/staff-trigger-engine.ts": {
+			"lines": {
+				"pct": 60.84,
+				"covered": 129,
+				"total": 212
+			},
+			"branches": {
+				"pct": 77.63,
+				"covered": 59,
+				"total": 76
+			}
+		},
+		"src/server/agent/state-migration.ts": {
+			"lines": {
+				"pct": 81.26,
+				"covered": 1119,
+				"total": 1377
+			},
+			"branches": {
+				"pct": 67.05,
+				"covered": 289,
+				"total": 431
+			}
+		},
+		"src/server/agent/subgoal-nesting-limit.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 96,
+				"total": 96
+			},
+			"branches": {
+				"pct": 93.02,
+				"covered": 40,
+				"total": 43
+			}
+		},
+		"src/server/agent/system-prompt.ts": {
+			"lines": {
+				"pct": 85.45,
+				"covered": 335,
+				"total": 392
+			},
+			"branches": {
+				"pct": 80.21,
+				"covered": 146,
+				"total": 182
+			}
+		},
+		"src/server/agent/task-manager.ts": {
+			"lines": {
+				"pct": 82.74,
+				"covered": 187,
+				"total": 226
+			},
+			"branches": {
+				"pct": 87.05,
+				"covered": 74,
+				"total": 85
+			}
+		},
+		"src/server/agent/task-store.ts": {
+			"lines": {
+				"pct": 78.16,
+				"covered": 68,
+				"total": 87
+			},
+			"branches": {
+				"pct": 67.85,
+				"covered": 19,
+				"total": 28
+			}
+		},
+		"src/server/agent/team-manager-helpers.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 11,
+				"total": 11
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			}
+		},
+		"src/server/agent/team-manager.ts": {
+			"lines": {
+				"pct": 69.45,
+				"covered": 1264,
+				"total": 1820
+			},
+			"branches": {
+				"pct": 72.19,
+				"covered": 418,
+				"total": 579
+			}
+		},
+		"src/server/agent/team-names.ts": {
+			"lines": {
+				"pct": 74.62,
+				"covered": 50,
+				"total": 67
+			},
+			"branches": {
+				"pct": 70.58,
+				"covered": 12,
+				"total": 17
+			}
+		},
+		"src/server/agent/team-store-consistency.ts": {
+			"lines": {
+				"pct": 10.16,
+				"covered": 18,
+				"total": 177
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 1,
+				"total": 2
+			}
+		},
+		"src/server/agent/team-store.ts": {
+			"lines": {
+				"pct": 79.62,
+				"covered": 43,
+				"total": 54
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 9,
+				"total": 12
+			}
+		},
+		"src/server/agent/thinking-level-clamp.ts": {
+			"lines": {
+				"pct": 96.82,
+				"covered": 61,
+				"total": 63
+			},
+			"branches": {
+				"pct": 72,
+				"covered": 18,
+				"total": 25
+			}
+		},
+		"src/server/agent/title-generator.ts": {
+			"lines": {
+				"pct": 22.85,
+				"covered": 112,
+				"total": 490
+			},
+			"branches": {
+				"pct": 42.85,
+				"covered": 21,
+				"total": 49
+			}
+		},
+		"src/server/agent/tool-activation.ts": {
+			"lines": {
+				"pct": 84.52,
+				"covered": 568,
+				"total": 672
+			},
+			"branches": {
+				"pct": 89.31,
+				"covered": 351,
+				"total": 393
+			}
+		},
+		"src/server/agent/tool-assistant.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/agent/tool-contributions.ts": {
+			"lines": {
+				"pct": 90,
+				"covered": 171,
+				"total": 190
+			},
+			"branches": {
+				"pct": 93.02,
+				"covered": 120,
+				"total": 129
+			}
+		},
+		"src/server/agent/tool-extension-preflight.ts": {
+			"lines": {
+				"pct": 78.37,
+				"covered": 203,
+				"total": 259
+			},
+			"branches": {
+				"pct": 64.47,
+				"covered": 49,
+				"total": 76
+			}
+		},
+		"src/server/agent/tool-group-policy-store.ts": {
+			"lines": {
+				"pct": 96.42,
+				"covered": 54,
+				"total": 56
+			},
+			"branches": {
+				"pct": 94.44,
+				"covered": 17,
+				"total": 18
+			}
+		},
+		"src/server/agent/tool-guard-extension.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 21,
+				"total": 21
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			}
+		},
+		"src/server/agent/tool-manager.ts": {
+			"lines": {
+				"pct": 79.59,
+				"covered": 554,
+				"total": 696
+			},
+			"branches": {
+				"pct": 84.92,
+				"covered": 214,
+				"total": 252
+			}
+		},
+		"src/server/agent/tool-result-error-bridge-extension.ts": {
+			"lines": {
+				"pct": 89.36,
+				"covered": 42,
+				"total": 47
+			},
+			"branches": {
+				"pct": 70.58,
+				"covered": 12,
+				"total": 17
+			}
+		},
+		"src/server/agent/tool-result-error-normalizer.ts": {
+			"lines": {
+				"pct": 84.21,
+				"covered": 64,
+				"total": 76
+			},
+			"branches": {
+				"pct": 74.13,
+				"covered": 43,
+				"total": 58
+			}
+		},
+		"src/server/agent/transcript-reader.ts": {
+			"lines": {
+				"pct": 78.93,
+				"covered": 371,
+				"total": 470
+			},
+			"branches": {
+				"pct": 81.73,
+				"covered": 179,
+				"total": 219
+			}
+		},
+		"src/server/agent/transcript-sanitizer.ts": {
+			"lines": {
+				"pct": 90.9,
+				"covered": 280,
+				"total": 308
+			},
+			"branches": {
+				"pct": 83.43,
+				"covered": 136,
+				"total": 163
+			}
+		},
+		"src/server/agent/truncate-large-content.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 130,
+				"total": 130
+			},
+			"branches": {
+				"pct": 98.66,
+				"covered": 74,
+				"total": 75
+			}
+		},
+		"src/server/agent/verification-harness.ts": {
+			"lines": {
+				"pct": 56.6,
+				"covered": 2632,
+				"total": 4650
+			},
+			"branches": {
+				"pct": 65.86,
+				"covered": 820,
+				"total": 1245
+			}
+		},
+		"src/server/agent/verification-logic.ts": {
+			"lines": {
+				"pct": 94.41,
+				"covered": 321,
+				"total": 340
+			},
+			"branches": {
+				"pct": 93.22,
+				"covered": 165,
+				"total": 177
+			}
+		},
+		"src/server/agent/verification-reviewer-meta.ts": {
+			"lines": {
+				"pct": 29.41,
+				"covered": 5,
+				"total": 17
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/agent/workflow-manager.ts": {
+			"lines": {
+				"pct": 94.63,
+				"covered": 141,
+				"total": 149
+			},
+			"branches": {
+				"pct": 91.3,
+				"covered": 63,
+				"total": 69
+			}
+		},
+		"src/server/agent/workflow-store.ts": {
+			"lines": {
+				"pct": 76.32,
+				"covered": 216,
+				"total": 283
+			},
+			"branches": {
+				"pct": 67.68,
+				"covered": 111,
+				"total": 164
+			}
+		},
+		"src/server/agent/workflow-validator.ts": {
+			"lines": {
+				"pct": 97.48,
+				"covered": 155,
+				"total": 159
+			},
+			"branches": {
+				"pct": 83.51,
+				"covered": 76,
+				"total": 91
+			}
+		},
+		"src/server/agent/worktree-decision.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 7,
+				"total": 7
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			}
+		},
+		"src/server/agent/worktree-inventory.ts": {
+			"lines": {
+				"pct": 77.75,
+				"covered": 629,
+				"total": 809
+			},
+			"branches": {
+				"pct": 69.23,
+				"covered": 270,
+				"total": 390
+			}
+		},
+		"src/server/agent/worktree-pool.ts": {
+			"lines": {
+				"pct": 31.74,
+				"covered": 200,
+				"total": 630
+			},
+			"branches": {
+				"pct": 34.54,
+				"covered": 19,
+				"total": 55
+			}
+		},
+		"src/server/agent/worktree-reference-guard.ts": {
+			"lines": {
+				"pct": 67.21,
+				"covered": 41,
+				"total": 61
+			},
+			"branches": {
+				"pct": 80,
+				"covered": 20,
+				"total": 25
+			}
+		},
+		"src/server/agent/worktree-support.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 44,
+				"total": 44
+			},
+			"branches": {
+				"pct": 96.29,
+				"covered": 26,
+				"total": 27
+			}
+		},
+		"src/server/agent/worktree-sweeper.ts": {
+			"lines": {
+				"pct": 27.03,
+				"covered": 63,
+				"total": 233
+			},
+			"branches": {
+				"pct": 60,
+				"covered": 15,
+				"total": 25
+			}
+		},
+		"src/server/agent/yaml-store.ts": {
+			"lines": {
+				"pct": 68.31,
+				"covered": 69,
+				"total": 101
+			},
+			"branches": {
+				"pct": 61.11,
+				"covered": 11,
+				"total": 18
+			}
+		},
+		"src/server/auth/children-mutation-authz.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 13,
+				"total": 13
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 15,
+				"total": 15
+			}
+		},
+		"src/server/auth/cookie.ts": {
+			"lines": {
+				"pct": 94.11,
+				"covered": 128,
+				"total": 136
+			},
+			"branches": {
+				"pct": 85.45,
+				"covered": 47,
+				"total": 55
+			}
+		},
+		"src/server/auth/desec.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 35
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/auth/oauth.ts": {
+			"lines": {
+				"pct": 68.09,
+				"covered": 461,
+				"total": 677
+			},
+			"branches": {
+				"pct": 71.32,
+				"covered": 102,
+				"total": 143
+			}
+		},
+		"src/server/auth/rate-limit.ts": {
+			"lines": {
+				"pct": 34.28,
+				"covered": 12,
+				"total": 35
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			}
+		},
+		"src/server/auth/redact.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 16,
+				"total": 16
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 1,
+				"total": 2
+			}
+		},
+		"src/server/auth/sandbox-guard.ts": {
+			"lines": {
+				"pct": 87.77,
+				"covered": 79,
+				"total": 90
+			},
+			"branches": {
+				"pct": 88.8,
+				"covered": 111,
+				"total": 125
+			}
+		},
+		"src/server/auth/sandbox-token.ts": {
+			"lines": {
+				"pct": 26.53,
+				"covered": 13,
+				"total": 49
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/auth/session-secret.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 24,
+				"total": 24
+			},
+			"branches": {
+				"pct": 81.81,
+				"covered": 9,
+				"total": 11
+			}
+		},
+		"src/server/auth/tls.ts": {
+			"lines": {
+				"pct": 3.4,
+				"covered": 6,
+				"total": 176
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			}
+		},
+		"src/server/auth/token.ts": {
+			"lines": {
+				"pct": 86.95,
+				"covered": 40,
+				"total": 46
+			},
+			"branches": {
+				"pct": 70,
+				"covered": 7,
+				"total": 10
+			}
+		},
+		"src/server/binaries.ts": {
+			"lines": {
+				"pct": 67.25,
+				"covered": 115,
+				"total": 171
+			},
+			"branches": {
+				"pct": 55.26,
+				"covered": 21,
+				"total": 38
+			}
+		},
+		"src/server/bobbit-dir.ts": {
+			"lines": {
+				"pct": 86.95,
+				"covered": 60,
+				"total": 69
+			},
+			"branches": {
+				"pct": 88.46,
+				"covered": 23,
+				"total": 26
+			}
+		},
+		"src/server/cli-gateway-deps.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 3
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/cli-loopback.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 5,
+				"total": 5
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			}
+		},
+		"src/server/cli.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 218
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/dev-boot-timing.ts": {
+			"lines": {
+				"pct": 89.23,
+				"covered": 58,
+				"total": 65
+			},
+			"branches": {
+				"pct": 77.77,
+				"covered": 21,
+				"total": 27
+			}
+		},
+		"src/server/exec-file-safe.ts": {
+			"lines": {
+				"pct": 80.76,
+				"covered": 42,
+				"total": 52
+			},
+			"branches": {
+				"pct": 60,
+				"covered": 9,
+				"total": 15
+			}
+		},
+		"src/server/extension-host/action-dispatcher.ts": {
+			"lines": {
+				"pct": 95.23,
+				"covered": 140,
+				"total": 147
+			},
+			"branches": {
+				"pct": 90.74,
+				"covered": 49,
+				"total": 54
+			}
+		},
+		"src/server/extension-host/action-guard.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 67,
+				"total": 67
+			},
+			"branches": {
+				"pct": 89.09,
+				"covered": 49,
+				"total": 55
+			}
+		},
+		"src/server/extension-host/channel-dispatcher.ts": {
+			"lines": {
+				"pct": 80.55,
+				"covered": 29,
+				"total": 36
+			},
+			"branches": {
+				"pct": 72.72,
+				"covered": 8,
+				"total": 11
+			}
+		},
+		"src/server/extension-host/channel-module-host.ts": {
+			"lines": {
+				"pct": 78.67,
+				"covered": 214,
+				"total": 272
+			},
+			"branches": {
+				"pct": 59.37,
+				"covered": 57,
+				"total": 96
+			}
+		},
+		"src/server/extension-host/channel-open-permits.ts": {
+			"lines": {
+				"pct": 92,
+				"covered": 115,
+				"total": 125
+			},
+			"branches": {
+				"pct": 87.5,
+				"covered": 35,
+				"total": 40
+			}
+		},
+		"src/server/extension-host/channel-pty-helper.ts": {
+			"lines": {
+				"pct": 84.84,
+				"covered": 168,
+				"total": 198
+			},
+			"branches": {
+				"pct": 57.97,
+				"covered": 40,
+				"total": 69
+			}
+		},
+		"src/server/extension-host/channel-registry.ts": {
+			"lines": {
+				"pct": 94.09,
+				"covered": 685,
+				"total": 728
+			},
+			"branches": {
+				"pct": 82.69,
+				"covered": 258,
+				"total": 312
+			}
+		},
+		"src/server/extension-host/channel-types.ts": {
+			"lines": {
+				"pct": 91.48,
+				"covered": 86,
+				"total": 94
+			},
+			"branches": {
+				"pct": 84.44,
+				"covered": 38,
+				"total": 45
+			}
+		},
+		"src/server/extension-host/confinement-loader.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 36
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/extension-host/contract-adapter.ts": {
+			"lines": {
+				"pct": 95.07,
+				"covered": 135,
+				"total": 142
+			},
+			"branches": {
+				"pct": 78.78,
+				"covered": 78,
+				"total": 99
+			}
+		},
+		"src/server/extension-host/module-host-bootstrap.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 342
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/extension-host/module-host-worker.ts": {
+			"lines": {
+				"pct": 86.66,
+				"covered": 143,
+				"total": 165
+			},
+			"branches": {
+				"pct": 73.84,
+				"covered": 48,
+				"total": 65
+			}
+		},
+		"src/server/extension-host/pack-contribution-registry.ts": {
+			"lines": {
+				"pct": 89.78,
+				"covered": 123,
+				"total": 137
+			},
+			"branches": {
+				"pct": 90.9,
+				"covered": 60,
+				"total": 66
+			}
+		},
+		"src/server/extension-host/pack-identity.ts": {
+			"lines": {
+				"pct": 79.48,
+				"covered": 31,
+				"total": 39
+			},
+			"branches": {
+				"pct": 83.33,
+				"covered": 10,
+				"total": 12
+			}
+		},
+		"src/server/extension-host/pack-store.ts": {
+			"lines": {
+				"pct": 89.12,
+				"covered": 336,
+				"total": 377
+			},
+			"branches": {
+				"pct": 88.88,
+				"covered": 136,
+				"total": 153
+			}
+		},
+		"src/server/extension-host/path-guard.ts": {
+			"lines": {
+				"pct": 90.9,
+				"covered": 20,
+				"total": 22
+			},
+			"branches": {
+				"pct": 92.3,
+				"covered": 12,
+				"total": 13
+			}
+		},
+		"src/server/extension-host/route-dispatcher.ts": {
+			"lines": {
+				"pct": 95.62,
+				"covered": 131,
+				"total": 137
+			},
+			"branches": {
+				"pct": 92.15,
+				"covered": 47,
+				"total": 51
+			}
+		},
+		"src/server/extension-host/server-host-api.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 147,
+				"total": 147
+			},
+			"branches": {
+				"pct": 98.24,
+				"covered": 56,
+				"total": 57
+			}
+		},
+		"src/server/extension-host/session-write-permit.ts": {
+			"lines": {
+				"pct": 90.47,
+				"covered": 57,
+				"total": 63
+			},
+			"branches": {
+				"pct": 90.9,
+				"covered": 30,
+				"total": 33
+			}
+		},
+		"src/server/extension-host/session-write.ts": {
+			"lines": {
+				"pct": 92.5,
+				"covered": 74,
+				"total": 80
+			},
+			"branches": {
+				"pct": 75.6,
+				"covered": 31,
+				"total": 41
+			}
+		},
+		"src/server/extension-host/surface-binding.ts": {
+			"lines": {
+				"pct": 93.1,
+				"covered": 81,
+				"total": 87
+			},
+			"branches": {
+				"pct": 92.18,
+				"covered": 59,
+				"total": 64
+			}
+		},
+		"src/server/gate-artifacts.ts": {
+			"lines": {
+				"pct": 64.19,
+				"covered": 147,
+				"total": 229
+			},
+			"branches": {
+				"pct": 82.22,
+				"covered": 37,
+				"total": 45
+			}
+		},
+		"src/server/gate-diagnostics.ts": {
+			"lines": {
+				"pct": 70.09,
+				"covered": 218,
+				"total": 311
+			},
+			"branches": {
+				"pct": 56.31,
+				"covered": 58,
+				"total": 103
+			}
+		},
+		"src/server/gate-status-summary.ts": {
+			"lines": {
+				"pct": 93.33,
+				"covered": 70,
+				"total": 75
+			},
+			"branches": {
+				"pct": 46.87,
+				"covered": 15,
+				"total": 32
+			}
+		},
+		"src/server/gate-verification-snapshot.ts": {
+			"lines": {
+				"pct": 94.25,
+				"covered": 377,
+				"total": 400
+			},
+			"branches": {
+				"pct": 71.17,
+				"covered": 121,
+				"total": 170
+			}
+		},
+		"src/server/gateway-deps.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 27,
+				"total": 27
+			},
+			"branches": {
+				"pct": 90.9,
+				"covered": 10,
+				"total": 11
+			}
+		},
+		"src/server/harness-deps.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 17
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/harness-kill.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/harness-signal.ts": {
+			"lines": {
+				"pct": 35,
+				"covered": 7,
+				"total": 20
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/server/harness.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 245
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/legacy-test-runtime-flags.ts": {
+			"lines": {
+				"pct": 72.22,
+				"covered": 39,
+				"total": 54
+			},
+			"branches": {
+				"pct": 66.66,
+				"covered": 2,
+				"total": 3
+			}
+		},
+		"src/server/mcp/mcp-client.ts": {
+			"lines": {
+				"pct": 46.79,
+				"covered": 190,
+				"total": 406
+			},
+			"branches": {
+				"pct": 53.44,
+				"covered": 31,
+				"total": 58
+			}
+		},
+		"src/server/mcp/mcp-manager.ts": {
+			"lines": {
+				"pct": 85.38,
+				"covered": 812,
+				"total": 951
+			},
+			"branches": {
+				"pct": 83.68,
+				"covered": 277,
+				"total": 331
+			}
+		},
+		"src/server/mcp/mcp-meta.ts": {
+			"lines": {
+				"pct": 97.91,
+				"covered": 94,
+				"total": 96
+			},
+			"branches": {
+				"pct": 86.2,
+				"covered": 50,
+				"total": 58
+			}
+		},
+		"src/server/mcp/mcp-types.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/pr-walkthrough/card-synthesis.ts": {
+			"lines": {
+				"pct": 95.77,
+				"covered": 363,
+				"total": 379
+			},
+			"branches": {
+				"pct": 87.73,
+				"covered": 186,
+				"total": 212
+			}
+		},
+		"src/server/pr-walkthrough/diff-parser.ts": {
+			"lines": {
+				"pct": 87.56,
+				"covered": 169,
+				"total": 193
+			},
+			"branches": {
+				"pct": 87.65,
+				"covered": 71,
+				"total": 81
+			}
+		},
+		"src/server/pr-walkthrough/export-mapper.ts": {
+			"lines": {
+				"pct": 93.07,
+				"covered": 215,
+				"total": 231
+			},
+			"branches": {
+				"pct": 64.7,
+				"covered": 66,
+				"total": 102
+			}
+		},
+		"src/server/pr-walkthrough/git-changeset.ts": {
+			"lines": {
+				"pct": 83.42,
+				"covered": 146,
+				"total": 175
+			},
+			"branches": {
+				"pct": 55.31,
+				"covered": 26,
+				"total": 47
+			}
+		},
+		"src/server/pr-walkthrough/github-adapter.ts": {
+			"lines": {
+				"pct": 79.92,
+				"covered": 410,
+				"total": 513
+			},
+			"branches": {
+				"pct": 68.13,
+				"covered": 124,
+				"total": 182
+			}
+		},
+		"src/server/pr-walkthrough/routes.ts": {
+			"lines": {
+				"pct": 43.91,
+				"covered": 487,
+				"total": 1109
+			},
+			"branches": {
+				"pct": 50.9,
+				"covered": 112,
+				"total": 220
+			}
+		},
+		"src/server/pr-walkthrough/walkthrough-agent-manager.ts": {
+			"lines": {
+				"pct": 69.11,
+				"covered": 94,
+				"total": 136
+			},
+			"branches": {
+				"pct": 46.8,
+				"covered": 22,
+				"total": 47
+			}
+		},
+		"src/server/pr-walkthrough/walkthrough-agent-store.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/pr-walkthrough/walkthrough-analysis-bundle.ts": {
+			"lines": {
+				"pct": 91.93,
+				"covered": 673,
+				"total": 732
+			},
+			"branches": {
+				"pct": 62.24,
+				"covered": 155,
+				"total": 249
+			}
+		},
+		"src/server/pr-walkthrough/walkthrough-readonly-policy.ts": {
+			"lines": {
+				"pct": 92.44,
+				"covered": 428,
+				"total": 463
+			},
+			"branches": {
+				"pct": 87.53,
+				"covered": 323,
+				"total": 369
+			}
+		},
+		"src/server/pr-walkthrough/walkthrough-store.ts": {
+			"lines": {
+				"pct": 67.21,
+				"covered": 82,
+				"total": 122
+			},
+			"branches": {
+				"pct": 81.57,
+				"covered": 31,
+				"total": 38
+			}
+		},
+		"src/server/pr-walkthrough/walkthrough-yaml-schema.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 8,
+				"total": 8
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/preview/artifacts.ts": {
+			"lines": {
+				"pct": 83.42,
+				"covered": 302,
+				"total": 362
+			},
+			"branches": {
+				"pct": 51.78,
+				"covered": 58,
+				"total": 112
+			}
+		},
+		"src/server/preview/content-route.ts": {
+			"lines": {
+				"pct": 85.45,
+				"covered": 141,
+				"total": 165
+			},
+			"branches": {
+				"pct": 72.6,
+				"covered": 53,
+				"total": 73
+			}
+		},
+		"src/server/preview/events.ts": {
+			"lines": {
+				"pct": 14.7,
+				"covered": 5,
+				"total": 34
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/preview/mime.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 32,
+				"total": 32
+			},
+			"branches": {
+				"pct": 33.33,
+				"covered": 1,
+				"total": 3
+			}
+		},
+		"src/server/preview/mount.ts": {
+			"lines": {
+				"pct": 85.6,
+				"covered": 351,
+				"total": 410
+			},
+			"branches": {
+				"pct": 71.15,
+				"covered": 111,
+				"total": 156
+			}
+		},
+		"src/server/preview/path-guard.ts": {
+			"lines": {
+				"pct": 92.15,
+				"covered": 47,
+				"total": 51
+			},
+			"branches": {
+				"pct": 85.18,
+				"covered": 23,
+				"total": 27
+			}
+		},
+		"src/server/preview/theme-snapshot.ts": {
+			"lines": {
+				"pct": 87.85,
+				"covered": 123,
+				"total": 140
+			},
+			"branches": {
+				"pct": 83.95,
+				"covered": 68,
+				"total": 81
+			}
+		},
+		"src/server/proposals/proposal-files.ts": {
+			"lines": {
+				"pct": 89.23,
+				"covered": 257,
+				"total": 288
+			},
+			"branches": {
+				"pct": 81.15,
+				"covered": 56,
+				"total": 69
+			}
+		},
+		"src/server/proposals/proposal-types.ts": {
+			"lines": {
+				"pct": 57.89,
+				"covered": 176,
+				"total": 304
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 63,
+				"total": 84
+			}
+		},
+		"src/server/replay-pacing.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 14,
+				"total": 14
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			}
+		},
+		"src/server/review-annotation-store.ts": {
+			"lines": {
+				"pct": 44.56,
+				"covered": 41,
+				"total": 92
+			},
+			"branches": {
+				"pct": 54.54,
+				"covered": 6,
+				"total": 11
+			}
+		},
+		"src/server/scaffold.ts": {
+			"lines": {
+				"pct": 83.67,
+				"covered": 41,
+				"total": 49
+			},
+			"branches": {
+				"pct": 76.92,
+				"covered": 10,
+				"total": 13
+			}
+		},
+		"src/server/search/chunker.ts": {
+			"lines": {
+				"pct": 88.7,
+				"covered": 55,
+				"total": 62
+			},
+			"branches": {
+				"pct": 79.31,
+				"covered": 23,
+				"total": 29
+			}
+		},
+		"src/server/search/content-policy.ts": {
+			"lines": {
+				"pct": 94.39,
+				"covered": 101,
+				"total": 107
+			},
+			"branches": {
+				"pct": 90.47,
+				"covered": 57,
+				"total": 63
+			}
+		},
+		"src/server/search/flex-store.ts": {
+			"lines": {
+				"pct": 91.69,
+				"covered": 475,
+				"total": 518
+			},
+			"branches": {
+				"pct": 75.9,
+				"covered": 189,
+				"total": 249
+			}
+		},
+		"src/server/search/indexer.ts": {
+			"lines": {
+				"pct": 87.2,
+				"covered": 218,
+				"total": 250
+			},
+			"branches": {
+				"pct": 77.94,
+				"covered": 53,
+				"total": 68
+			}
+		},
+		"src/server/search/meta.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 47,
+				"total": 47
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 23,
+				"total": 23
+			}
+		},
+		"src/server/search/progress-bus.ts": {
+			"lines": {
+				"pct": 52.94,
+				"covered": 18,
+				"total": 34
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			}
+		},
+		"src/server/search/search-service.ts": {
+			"lines": {
+				"pct": 61.67,
+				"covered": 346,
+				"total": 561
+			},
+			"branches": {
+				"pct": 53.09,
+				"covered": 60,
+				"total": 113
+			}
+		},
+		"src/server/search/snippet.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 76,
+				"total": 76
+			},
+			"branches": {
+				"pct": 91.89,
+				"covered": 34,
+				"total": 37
+			}
+		},
+		"src/server/search/sources/files-source.stub.ts": {
+			"lines": {
+				"pct": 90,
+				"covered": 72,
+				"total": 80
+			},
+			"branches": {
+				"pct": 64.28,
+				"covered": 9,
+				"total": 14
+			}
+		},
+		"src/server/search/sources/goal-source.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 37,
+				"total": 37
+			},
+			"branches": {
+				"pct": 64.7,
+				"covered": 11,
+				"total": 17
+			}
+		},
+		"src/server/search/sources/hash.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 17,
+				"total": 17
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 1,
+				"total": 2
+			}
+		},
+		"src/server/search/sources/message-source.ts": {
+			"lines": {
+				"pct": 95.04,
+				"covered": 96,
+				"total": 101
+			},
+			"branches": {
+				"pct": 71.05,
+				"covered": 27,
+				"total": 38
+			}
+		},
+		"src/server/search/sources/session-source.ts": {
+			"lines": {
+				"pct": 97.91,
+				"covered": 47,
+				"total": 48
+			},
+			"branches": {
+				"pct": 55.55,
+				"covered": 10,
+				"total": 18
+			}
+		},
+		"src/server/search/sources/session-title.ts": {
+			"lines": {
+				"pct": 92.85,
+				"covered": 26,
+				"total": 28
+			},
+			"branches": {
+				"pct": 91.3,
+				"covered": 21,
+				"total": 23
+			}
+		},
+		"src/server/search/sources/staff-source.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 39,
+				"total": 39
+			},
+			"branches": {
+				"pct": 52.94,
+				"covered": 9,
+				"total": 17
+			}
+		},
+		"src/server/search/types.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/server.ts": {
+			"lines": {
+				"pct": 7.65,
+				"covered": 1016,
+				"total": 13267
+			},
+			"branches": {
+				"pct": 66.66,
+				"covered": 192,
+				"total": 288
+			}
+		},
+		"src/server/setup-status.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 9,
+				"total": 9
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			}
+		},
+		"src/server/side-panel-workspace-routes.ts": {
+			"lines": {
+				"pct": 1.38,
+				"covered": 3,
+				"total": 217
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/server/side-panel-workspace.ts": {
+			"lines": {
+				"pct": 89.85,
+				"covered": 363,
+				"total": 404
+			},
+			"branches": {
+				"pct": 59.27,
+				"covered": 163,
+				"total": 275
+			}
+		},
+		"src/server/sidebar-actions.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 34,
+				"total": 34
+			},
+			"branches": {
+				"pct": 95.45,
+				"covered": 21,
+				"total": 22
+			}
+		},
+		"src/server/skills/file-enumeration.ts": {
+			"lines": {
+				"pct": 98.48,
+				"covered": 65,
+				"total": 66
+			},
+			"branches": {
+				"pct": 80,
+				"covered": 36,
+				"total": 45
+			}
+		},
+		"src/server/skills/git-status-native.ts": {
+			"lines": {
+				"pct": 49.41,
+				"covered": 168,
+				"total": 340
+			},
+			"branches": {
+				"pct": 71.79,
+				"covered": 56,
+				"total": 78
+			}
+		},
+		"src/server/skills/git.ts": {
+			"lines": {
+				"pct": 41.7,
+				"covered": 327,
+				"total": 784
+			},
+			"branches": {
+				"pct": 76.37,
+				"covered": 97,
+				"total": 127
+			}
+		},
+		"src/server/skills/merge-mentions.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 37,
+				"total": 37
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 14,
+				"total": 14
+			}
+		},
+		"src/server/skills/resolve-file-mentions.ts": {
+			"lines": {
+				"pct": 88.44,
+				"covered": 199,
+				"total": 225
+			},
+			"branches": {
+				"pct": 81.81,
+				"covered": 54,
+				"total": 66
+			}
+		},
+		"src/server/skills/resolve-skill-expansions.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 72,
+				"total": 72
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 14,
+				"total": 14
+			}
+		},
+		"src/server/skills/skill-manifest.ts": {
+			"lines": {
+				"pct": 97.7,
+				"covered": 85,
+				"total": 87
+			},
+			"branches": {
+				"pct": 93.47,
+				"covered": 43,
+				"total": 46
+			}
+		},
+		"src/server/skills/skill-sidecar.ts": {
+			"lines": {
+				"pct": 90.69,
+				"covered": 117,
+				"total": 129
+			},
+			"branches": {
+				"pct": 69.35,
+				"covered": 43,
+				"total": 62
+			}
+		},
+		"src/server/skills/slash-skills.ts": {
+			"lines": {
+				"pct": 85.09,
+				"covered": 217,
+				"total": 255
+			},
+			"branches": {
+				"pct": 80.39,
+				"covered": 82,
+				"total": 102
+			}
+		},
+		"src/server/skills/worktree-paths.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 33,
+				"total": 33
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 18,
+				"total": 18
+			}
+		},
+		"src/server/skills/worktree-setup.ts": {
+			"lines": {
+				"pct": 93.15,
+				"covered": 68,
+				"total": 73
+			},
+			"branches": {
+				"pct": 84,
+				"covered": 42,
+				"total": 50
+			}
+		},
+		"src/server/state-migration/migrate-project-yaml.ts": {
+			"lines": {
+				"pct": 86.19,
+				"covered": 256,
+				"total": 297
+			},
+			"branches": {
+				"pct": 82.14,
+				"covered": 138,
+				"total": 168
+			}
+		},
+		"src/server/state-migration/per-component-workflows.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 115,
+				"total": 115
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 7,
+				"total": 7
+			}
+		},
+		"src/server/state-migration/seed-default-workflows.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 261,
+				"total": 261
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			}
+		},
+		"src/server/utils/text-selection.ts": {
+			"lines": {
+				"pct": 81.58,
+				"covered": 195,
+				"total": 239
+			},
+			"branches": {
+				"pct": 88.42,
+				"covered": 84,
+				"total": 95
+			}
+		},
+		"src/server/watchdog.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 223
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/ws-overflow-guard.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 13,
+				"total": 13
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			}
+		},
+		"src/server/ws/handler.ts": {
+			"lines": {
+				"pct": 27.62,
+				"covered": 355,
+				"total": 1285
+			},
+			"branches": {
+				"pct": 37.1,
+				"covered": 59,
+				"total": 159
+			}
+		},
+		"src/server/ws/protocol.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/server/ws/runtime-model-selection.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 46,
+				"total": 46
+			},
+			"branches": {
+				"pct": 55.55,
+				"covered": 5,
+				"total": 9
+			}
+		},
+		"src/shared/ask-envelope.ts": {
+			"lines": {
+				"pct": 97.29,
+				"covered": 72,
+				"total": 74
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 33,
+				"total": 44
+			}
+		},
+		"src/shared/entrypoint-icons.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 10,
+				"total": 10
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			}
+		},
+		"src/shared/extension-host/host-api.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/shared/git-diff/unified.ts": {
+			"lines": {
+				"pct": 85.19,
+				"covered": 305,
+				"total": 358
+			},
+			"branches": {
+				"pct": 83.84,
+				"covered": 109,
+				"total": 130
+			}
+		},
+		"src/shared/model-ranks.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/shared/palette-colors.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 15,
+				"total": 15
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/shared/parse-acceptance-criteria.ts": {
+			"lines": {
+				"pct": 7.69,
+				"covered": 6,
+				"total": 78
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/shared/pr-walkthrough/draft.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 44
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/shared/pr-walkthrough/generated-path.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 48,
+				"total": 48
+			},
+			"branches": {
+				"pct": 92.85,
+				"covered": 13,
+				"total": 14
+			}
+		},
+		"src/shared/pr-walkthrough/ids.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 34,
+				"total": 34
+			},
+			"branches": {
+				"pct": 76.92,
+				"covered": 10,
+				"total": 13
+			}
+		},
+		"src/shared/pr-walkthrough/index.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 5
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/shared/pr-walkthrough/nav-label.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 24,
+				"total": 24
+			},
+			"branches": {
+				"pct": 92.3,
+				"covered": 12,
+				"total": 13
+			}
+		},
+		"src/shared/pr-walkthrough/types.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/shared/pr-walkthrough/url-safety.ts": {
+			"lines": {
+				"pct": 96.77,
+				"covered": 60,
+				"total": 62
+			},
+			"branches": {
+				"pct": 97.82,
+				"covered": 45,
+				"total": 46
+			}
+		},
+		"src/shared/pr-walkthrough/yaml-to-cards.ts": {
+			"lines": {
+				"pct": 92.96,
+				"covered": 1440,
+				"total": 1549
+			},
+			"branches": {
+				"pct": 74.53,
+				"covered": 565,
+				"total": 758
+			}
+		},
+		"src/shared/preview-bridge-scripts.ts": {
+			"lines": {
+				"pct": 82.6,
+				"covered": 19,
+				"total": 23
+			},
+			"branches": {
+				"pct": 20,
+				"covered": 1,
+				"total": 5
+			}
+		},
+		"src/shared/side-panel-workspace.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 12,
+				"total": 12
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			}
+		},
+		"src/shared/thinking-levels.ts": {
+			"lines": {
+				"pct": 98.76,
+				"covered": 80,
+				"total": 81
+			},
+			"branches": {
+				"pct": 92.75,
+				"covered": 64,
+				"total": 69
+			}
+		},
+		"src/ui/ChatPanel.ts": {
+			"lines": {
+				"pct": 11.03,
+				"covered": 16,
+				"total": 145
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/bobbit-render.ts": {
+			"lines": {
+				"pct": 46.04,
+				"covered": 227,
+				"total": 493
+			},
+			"branches": {
+				"pct": 79.68,
+				"covered": 51,
+				"total": 64
+			}
+		},
+		"src/ui/bobbit-sprite-data.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 269,
+				"total": 269
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/AgentInterface.ts": {
+			"lines": {
+				"pct": 1.74,
+				"covered": 31,
+				"total": 1776
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/components/AskUserChoicesWidget.ts": {
+			"lines": {
+				"pct": 45.75,
+				"covered": 280,
+				"total": 612
+			},
+			"branches": {
+				"pct": 42.47,
+				"covered": 48,
+				"total": 113
+			}
+		},
+		"src/ui/components/AttachmentTile.ts": {
+			"lines": {
+				"pct": 65.62,
+				"covered": 42,
+				"total": 64
+			},
+			"branches": {
+				"pct": 42.85,
+				"covered": 3,
+				"total": 7
+			}
+		},
+		"src/ui/components/BellToggle.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 35,
+				"total": 35
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 12,
+				"total": 12
+			}
+		},
+		"src/ui/components/BgProcessPill.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 279
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/components/BobbitLoadingAnimation.ts": {
+			"lines": {
+				"pct": 21.21,
+				"covered": 7,
+				"total": 33
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/CommentableMarkdown.ts": {
+			"lines": {
+				"pct": 14.75,
+				"covered": 9,
+				"total": 61
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/ConsoleBlock.ts": {
+			"lines": {
+				"pct": 81.81,
+				"covered": 45,
+				"total": 55
+			},
+			"branches": {
+				"pct": 53.84,
+				"covered": 7,
+				"total": 13
+			}
+		},
+		"src/ui/components/ContinueSessionChooser.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 49
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/components/CostPopover.ts": {
+			"lines": {
+				"pct": 94.59,
+				"covered": 105,
+				"total": 111
+			},
+			"branches": {
+				"pct": 72.09,
+				"covered": 31,
+				"total": 43
+			}
+		},
+		"src/ui/components/CustomProviderCard.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 71
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/components/DeferredBlock.ts": {
+			"lines": {
+				"pct": 23.86,
+				"covered": 42,
+				"total": 176
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 2,
+				"total": 4
+			}
+		},
+		"src/ui/components/DiffBlock.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 199
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/components/DirectoryPicker.ts": {
+			"lines": {
+				"pct": 2.38,
+				"covered": 9,
+				"total": 377
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/ErrorDetails.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 24,
+				"total": 24
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 7,
+				"total": 7
+			}
+		},
+		"src/ui/components/ErrorMessage.ts": {
+			"lines": {
+				"pct": 48.27,
+				"covered": 14,
+				"total": 29
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/ExpandableSection.ts": {
+			"lines": {
+				"pct": 96.55,
+				"covered": 28,
+				"total": 29
+			},
+			"branches": {
+				"pct": 66.66,
+				"covered": 4,
+				"total": 6
+			}
+		},
+		"src/ui/components/FileMentionChip.ts": {
+			"lines": {
+				"pct": 13.18,
+				"covered": 12,
+				"total": 91
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/GitStatusWidget.ts": {
+			"lines": {
+				"pct": 87.14,
+				"covered": 773,
+				"total": 887
+			},
+			"branches": {
+				"pct": 77.23,
+				"covered": 285,
+				"total": 369
+			}
+		},
+		"src/ui/components/GoalStatusWidget.ts": {
+			"lines": {
+				"pct": 62.03,
+				"covered": 464,
+				"total": 748
+			},
+			"branches": {
+				"pct": 52.63,
+				"covered": 100,
+				"total": 190
+			}
+		},
+		"src/ui/components/Input.ts": {
+			"lines": {
+				"pct": 90.78,
+				"covered": 69,
+				"total": 76
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 3,
+				"total": 6
+			}
+		},
+		"src/ui/components/LiveTimer.ts": {
+			"lines": {
+				"pct": 94,
+				"covered": 47,
+				"total": 50
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 15,
+				"total": 20
+			}
+		},
+		"src/ui/components/MessageEditor.ts": {
+			"lines": {
+				"pct": 51.69,
+				"covered": 472,
+				"total": 913
+			},
+			"branches": {
+				"pct": 63.29,
+				"covered": 100,
+				"total": 158
+			}
+		},
+		"src/ui/components/MessageList.ts": {
+			"lines": {
+				"pct": 8.62,
+				"covered": 22,
+				"total": 255
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/Messages.ts": {
+			"lines": {
+				"pct": 47.35,
+				"covered": 277,
+				"total": 585
+			},
+			"branches": {
+				"pct": 62.5,
+				"covered": 50,
+				"total": 80
+			}
+		},
+		"src/ui/components/PreCompactionHistory.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 217
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/components/ProjectPickerPopover.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 190
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/components/ProjectProposalPanel.ts": {
+			"lines": {
+				"pct": 94.11,
+				"covered": 80,
+				"total": 85
+			},
+			"branches": {
+				"pct": 90,
+				"covered": 36,
+				"total": 40
+			}
+		},
+		"src/ui/components/ProviderKeyInput.ts": {
+			"lines": {
+				"pct": 58.26,
+				"covered": 74,
+				"total": 127
+			},
+			"branches": {
+				"pct": 40,
+				"covered": 6,
+				"total": 15
+			}
+		},
+		"src/ui/components/RichGitDiffViewer.ts": {
+			"lines": {
+				"pct": 94.55,
+				"covered": 330,
+				"total": 349
+			},
+			"branches": {
+				"pct": 80.24,
+				"covered": 130,
+				"total": 162
+			}
+		},
+		"src/ui/components/SandboxedIframe.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 337
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/components/SearchBox.ts": {
+			"lines": {
+				"pct": 95,
+				"covered": 76,
+				"total": 80
+			},
+			"branches": {
+				"pct": 84.61,
+				"covered": 22,
+				"total": 26
+			}
+		},
+		"src/ui/components/SearchResults.ts": {
+			"lines": {
+				"pct": 90.21,
+				"covered": 83,
+				"total": 92
+			},
+			"branches": {
+				"pct": 86.84,
+				"covered": 33,
+				"total": 38
+			}
+		},
+		"src/ui/components/SidebarActionsPopover.ts": {
+			"lines": {
+				"pct": 59.25,
+				"covered": 365,
+				"total": 616
+			},
+			"branches": {
+				"pct": 61.83,
+				"covered": 81,
+				"total": 131
+			}
+		},
+		"src/ui/components/SkillChip.ts": {
+			"lines": {
+				"pct": 61.53,
+				"covered": 40,
+				"total": 65
+			},
+			"branches": {
+				"pct": 36.36,
+				"covered": 4,
+				"total": 11
+			}
+		},
+		"src/ui/components/StreamingMessageContainer.ts": {
+			"lines": {
+				"pct": 66.54,
+				"covered": 187,
+				"total": 281
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 54,
+				"total": 72
+			}
+		},
+		"src/ui/components/ThinkingBlock.ts": {
+			"lines": {
+				"pct": 93.75,
+				"covered": 30,
+				"total": 32
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 6,
+				"total": 8
+			}
+		},
+		"src/ui/components/ToolGroup.ts": {
+			"lines": {
+				"pct": 26.08,
+				"covered": 36,
+				"total": 138
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/ToolPermissionCard.ts": {
+			"lines": {
+				"pct": 20.31,
+				"covered": 13,
+				"total": 64
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/VerificationOutputModal.ts": {
+			"lines": {
+				"pct": 63.68,
+				"covered": 128,
+				"total": 201
+			},
+			"branches": {
+				"pct": 66.66,
+				"covered": 26,
+				"total": 39
+			}
+		},
+		"src/ui/components/message-renderer-registry.ts": {
+			"lines": {
+				"pct": 84.61,
+				"covered": 11,
+				"total": 13
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			}
+		},
+		"src/ui/components/review/AnnotationPopover.ts": {
+			"lines": {
+				"pct": 4.45,
+				"covered": 11,
+				"total": 247
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/review/AnnotationStore.ts": {
+			"lines": {
+				"pct": 8.99,
+				"covered": 35,
+				"total": 389
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 1,
+				"total": 2
+			}
+		},
+		"src/ui/components/review/ReviewDocument.ts": {
+			"lines": {
+				"pct": 17.78,
+				"covered": 132,
+				"total": 742
+			},
+			"branches": {
+				"pct": 82.35,
+				"covered": 28,
+				"total": 34
+			}
+		},
+		"src/ui/components/review/ReviewPane.ts": {
+			"lines": {
+				"pct": 11.71,
+				"covered": 30,
+				"total": 256
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/components/review/proposal-annotations.ts": {
+			"lines": {
+				"pct": 98.27,
+				"covered": 57,
+				"total": 58
+			},
+			"branches": {
+				"pct": 95.23,
+				"covered": 20,
+				"total": 21
+			}
+		},
+		"src/ui/components/review/review-types.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/components/sandbox/ArtifactsRuntimeProvider.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 166
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/components/sandbox/AttachmentsRuntimeProvider.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 47
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/components/sandbox/ConsoleRuntimeProvider.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 122
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/components/sandbox/FileDownloadRuntimeProvider.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 75
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/components/sandbox/RuntimeMessageBridge.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 19
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/components/sandbox/RuntimeMessageRouter.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 108
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/components/sandbox/SandboxRuntimeProvider.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/components/sidebar-actions-flip.ts": {
+			"lines": {
+				"pct": 65.11,
+				"covered": 28,
+				"total": 43
+			},
+			"branches": {
+				"pct": 90,
+				"covered": 9,
+				"total": 10
+			}
+		},
+		"src/ui/components/sidebar-filters.ts": {
+			"lines": {
+				"pct": 15.1,
+				"covered": 21,
+				"total": 139
+			},
+			"branches": {
+				"pct": 40,
+				"covered": 2,
+				"total": 5
+			}
+		},
+		"src/ui/dialogs/AigwModelsDialog.ts": {
+			"lines": {
+				"pct": 95.91,
+				"covered": 47,
+				"total": 49
+			},
+			"branches": {
+				"pct": 47.05,
+				"covered": 8,
+				"total": 17
+			}
+		},
+		"src/ui/dialogs/ApiKeyPromptDialog.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 59
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/dialogs/AttachmentOverlay.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 324
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/dialogs/CopyLinkFallbackDialog.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 66
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/dialogs/CustomProviderDialog.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 243
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/dialogs/ImageModelSelector.ts": {
+			"lines": {
+				"pct": 16.29,
+				"covered": 22,
+				"total": 135
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/dialogs/ModelSelector.ts": {
+			"lines": {
+				"pct": 62.02,
+				"covered": 196,
+				"total": 316
+			},
+			"branches": {
+				"pct": 48.11,
+				"covered": 51,
+				"total": 106
+			}
+		},
+		"src/ui/dialogs/PersistentStorageDialog.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 97
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/dialogs/ProvidersModelsTab.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 162
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/dialogs/SessionListDialog.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 105
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/dialogs/SettingsDialog.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 156
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/dialogs/SystemPromptDialog.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 137
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/inbox/AddToInboxDialog.ts": {
+			"lines": {
+				"pct": 12.65,
+				"covered": 10,
+				"total": 79
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/inbox/InboxEntry.ts": {
+			"lines": {
+				"pct": 17.33,
+				"covered": 13,
+				"total": 75
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/inbox/InboxPanel.ts": {
+			"lines": {
+				"pct": 14.54,
+				"covered": 16,
+				"total": 110
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/index.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 34
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/lazy/children-goal-state-pill.ts": {
+			"lines": {
+				"pct": 88.46,
+				"covered": 46,
+				"total": 52
+			},
+			"branches": {
+				"pct": 37.5,
+				"covered": 6,
+				"total": 16
+			}
+		},
+		"src/ui/lazy/children-mutation-approval.ts": {
+			"lines": {
+				"pct": 77.04,
+				"covered": 47,
+				"total": 61
+			},
+			"branches": {
+				"pct": 56.52,
+				"covered": 13,
+				"total": 23
+			}
+		},
+		"src/ui/lazy/diff-block.ts": {
+			"lines": {
+				"pct": 33.33,
+				"covered": 2,
+				"total": 6
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/lazy/gate-verification-live.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 4,
+				"total": 4
+			}
+		},
+		"src/ui/lazy/markdown-block.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 6,
+				"total": 6
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 3,
+				"total": 3
+			}
+		},
+		"src/ui/lazy/safe-markdown-block.ts": {
+			"lines": {
+				"pct": 94.76,
+				"covered": 181,
+				"total": 191
+			},
+			"branches": {
+				"pct": 90.38,
+				"covered": 47,
+				"total": 52
+			}
+		},
+		"src/ui/prompts/prompts.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 8
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/storage/app-storage.ts": {
+			"lines": {
+				"pct": 83.78,
+				"covered": 31,
+				"total": 37
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 3,
+				"total": 4
+			}
+		},
+		"src/ui/storage/backends/indexeddb-storage-backend.ts": {
+			"lines": {
+				"pct": 17.94,
+				"covered": 28,
+				"total": 156
+			},
+			"branches": {
+				"pct": 83.33,
+				"covered": 5,
+				"total": 6
+			}
+		},
+		"src/ui/storage/store.ts": {
+			"lines": {
+				"pct": 83.33,
+				"covered": 10,
+				"total": 12
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 3,
+				"total": 4
+			}
+		},
+		"src/ui/storage/stores/command-history-store.ts": {
+			"lines": {
+				"pct": 82.25,
+				"covered": 51,
+				"total": 62
+			},
+			"branches": {
+				"pct": 94.73,
+				"covered": 18,
+				"total": 19
+			}
+		},
+		"src/ui/storage/stores/custom-providers-store.ts": {
+			"lines": {
+				"pct": 41.93,
+				"covered": 13,
+				"total": 31
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/storage/stores/prompt-draft-attachments-store.ts": {
+			"lines": {
+				"pct": 91.3,
+				"covered": 84,
+				"total": 92
+			},
+			"branches": {
+				"pct": 69.44,
+				"covered": 25,
+				"total": 36
+			}
+		},
+		"src/ui/storage/stores/provider-keys-store.ts": {
+			"lines": {
+				"pct": 65.21,
+				"covered": 15,
+				"total": 23
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			}
+		},
+		"src/ui/storage/stores/sessions-store.ts": {
+			"lines": {
+				"pct": 28.43,
+				"covered": 29,
+				"total": 102
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 2,
+				"total": 2
+			}
+		},
+		"src/ui/storage/stores/settings-store.ts": {
+			"lines": {
+				"pct": 56.52,
+				"covered": 13,
+				"total": 23
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/storage/stores/shortcut-bindings-store.ts": {
+			"lines": {
+				"pct": 64.7,
+				"covered": 11,
+				"total": 17
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/storage/transient-draft-store.ts": {
+			"lines": {
+				"pct": 81.51,
+				"covered": 172,
+				"total": 211
+			},
+			"branches": {
+				"pct": 76.4,
+				"covered": 68,
+				"total": 89
+			}
+		},
+		"src/ui/storage/types.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/ArtifactElement.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 7
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/ArtifactPill.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 17
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/Console.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 62
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/DocxArtifact.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 120
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/GenericArtifact.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 74
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/HtmlArtifact.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 161
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/ImageArtifact.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 78
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/MarkdownArtifact.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 59
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/PdfArtifact.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 156
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/SvgArtifact.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 53
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/TextArtifact.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 132
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/artifacts-tool-renderer.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 219
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/artifacts.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 547
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/artifacts/index.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 7
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/extract-document.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 175
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/highlight-core.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 111
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/index.ts": {
+			"lines": {
+				"pct": 68.75,
+				"covered": 110,
+				"total": 160
+			},
+			"branches": {
+				"pct": 66.66,
+				"covered": 4,
+				"total": 6
+			}
+		},
+		"src/ui/tools/javascript-repl.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 204
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderer-registry.ts": {
+			"lines": {
+				"pct": 86.85,
+				"covered": 218,
+				"total": 251
+			},
+			"branches": {
+				"pct": 86.17,
+				"covered": 81,
+				"total": 94
+			}
+		},
+		"src/ui/tools/renderers/ActivateSkillRenderer.ts": {
+			"lines": {
+				"pct": 84.9,
+				"covered": 45,
+				"total": 53
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 6,
+				"total": 12
+			}
+		},
+		"src/ui/tools/renderers/AskUserChoicesRenderer.ts": {
+			"lines": {
+				"pct": 82.22,
+				"covered": 74,
+				"total": 90
+			},
+			"branches": {
+				"pct": 65.11,
+				"covered": 28,
+				"total": 43
+			}
+		},
+		"src/ui/tools/renderers/BashRenderer.ts": {
+			"lines": {
+				"pct": 57.57,
+				"covered": 38,
+				"total": 66
+			},
+			"branches": {
+				"pct": 40,
+				"covered": 4,
+				"total": 10
+			}
+		},
+		"src/ui/tools/renderers/BgProcessRenderer.ts": {
+			"lines": {
+				"pct": 83.1,
+				"covered": 123,
+				"total": 148
+			},
+			"branches": {
+				"pct": 56.14,
+				"covered": 32,
+				"total": 57
+			}
+		},
+		"src/ui/tools/renderers/BrowserClickRenderer.ts": {
+			"lines": {
+				"pct": 20.68,
+				"covered": 6,
+				"total": 29
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/BrowserEvalRenderer.ts": {
+			"lines": {
+				"pct": 18.42,
+				"covered": 7,
+				"total": 38
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/BrowserNavigateRenderer.ts": {
+			"lines": {
+				"pct": 12.06,
+				"covered": 7,
+				"total": 58
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/BrowserTypeRenderer.ts": {
+			"lines": {
+				"pct": 18.75,
+				"covered": 6,
+				"total": 32
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/BrowserWaitRenderer.ts": {
+			"lines": {
+				"pct": 20,
+				"covered": 6,
+				"total": 30
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/CalculateRenderer.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 35
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/CompactionSummaryRenderer.ts": {
+			"lines": {
+				"pct": 92.85,
+				"covered": 104,
+				"total": 112
+			},
+			"branches": {
+				"pct": 78.57,
+				"covered": 33,
+				"total": 42
+			}
+		},
+		"src/ui/tools/renderers/DefaultRenderer.ts": {
+			"lines": {
+				"pct": 63.88,
+				"covered": 69,
+				"total": 108
+			},
+			"branches": {
+				"pct": 43.75,
+				"covered": 7,
+				"total": 16
+			}
+		},
+		"src/ui/tools/renderers/DelegateRenderer.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 89
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/EditProposalRenderer.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 52
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/EditRenderer.ts": {
+			"lines": {
+				"pct": 13.4,
+				"covered": 13,
+				"total": 97
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/FindRenderer.ts": {
+			"lines": {
+				"pct": 95.34,
+				"covered": 41,
+				"total": 43
+			},
+			"branches": {
+				"pct": 75,
+				"covered": 9,
+				"total": 12
+			}
+		},
+		"src/ui/tools/renderers/GateInspectRenderer.ts": {
+			"lines": {
+				"pct": 96.35,
+				"covered": 264,
+				"total": 274
+			},
+			"branches": {
+				"pct": 83.41,
+				"covered": 176,
+				"total": 211
+			}
+		},
+		"src/ui/tools/renderers/GateToolRenderers.ts": {
+			"lines": {
+				"pct": 57.48,
+				"covered": 96,
+				"total": 167
+			},
+			"branches": {
+				"pct": 43.18,
+				"covered": 19,
+				"total": 44
+			}
+		},
+		"src/ui/tools/renderers/GateVerificationLive.ts": {
+			"lines": {
+				"pct": 52.85,
+				"covered": 259,
+				"total": 490
+			},
+			"branches": {
+				"pct": 80.35,
+				"covered": 135,
+				"total": 168
+			}
+		},
+		"src/ui/tools/renderers/GetCurrentTimeRenderer.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 60
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/GoalArchiveChildRenderer.ts": {
+			"lines": {
+				"pct": 97.67,
+				"covered": 42,
+				"total": 43
+			},
+			"branches": {
+				"pct": 65.21,
+				"covered": 15,
+				"total": 23
+			}
+		},
+		"src/ui/tools/renderers/GoalDecideMutationRenderer.ts": {
+			"lines": {
+				"pct": 97.87,
+				"covered": 46,
+				"total": 47
+			},
+			"branches": {
+				"pct": 60,
+				"covered": 15,
+				"total": 25
+			}
+		},
+		"src/ui/tools/renderers/GoalMergeChildRenderer.ts": {
+			"lines": {
+				"pct": 98.21,
+				"covered": 55,
+				"total": 56
+			},
+			"branches": {
+				"pct": 70.58,
+				"covered": 24,
+				"total": 34
+			}
+		},
+		"src/ui/tools/renderers/GoalPauseResumeRenderer.ts": {
+			"lines": {
+				"pct": 90.16,
+				"covered": 55,
+				"total": 61
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 11,
+				"total": 22
+			}
+		},
+		"src/ui/tools/renderers/GoalPlanProposeRenderer.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 102,
+				"total": 102
+			},
+			"branches": {
+				"pct": 76.56,
+				"covered": 49,
+				"total": 64
+			}
+		},
+		"src/ui/tools/renderers/GoalPlanStatusRenderer.ts": {
+			"lines": {
+				"pct": 93.84,
+				"covered": 61,
+				"total": 65
+			},
+			"branches": {
+				"pct": 46.66,
+				"covered": 14,
+				"total": 30
+			}
+		},
+		"src/ui/tools/renderers/GoalSetPolicyRenderer.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 44,
+				"total": 44
+			},
+			"branches": {
+				"pct": 53.84,
+				"covered": 7,
+				"total": 13
+			}
+		},
+		"src/ui/tools/renderers/GoalSpawnChildRenderer.ts": {
+			"lines": {
+				"pct": 92.85,
+				"covered": 65,
+				"total": 70
+			},
+			"branches": {
+				"pct": 67.74,
+				"covered": 21,
+				"total": 31
+			}
+		},
+		"src/ui/tools/renderers/GrepRenderer.ts": {
+			"lines": {
+				"pct": 18.18,
+				"covered": 8,
+				"total": 44
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/HtmlRenderer.ts": {
+			"lines": {
+				"pct": 12.17,
+				"covered": 19,
+				"total": 156
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/InboxToolRenderers.ts": {
+			"lines": {
+				"pct": 97.63,
+				"covered": 206,
+				"total": 211
+			},
+			"branches": {
+				"pct": 55.29,
+				"covered": 47,
+				"total": 85
+			}
+		},
+		"src/ui/tools/renderers/LsRenderer.ts": {
+			"lines": {
+				"pct": 21.05,
+				"covered": 8,
+				"total": 38
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/PreviewRenderer.ts": {
+			"lines": {
+				"pct": 95.75,
+				"covered": 474,
+				"total": 495
+			},
+			"branches": {
+				"pct": 78.8,
+				"covered": 197,
+				"total": 250
+			}
+		},
+		"src/ui/tools/renderers/ProposalRenderer.ts": {
+			"lines": {
+				"pct": 76.36,
+				"covered": 84,
+				"total": 110
+			},
+			"branches": {
+				"pct": 66.66,
+				"covered": 34,
+				"total": 51
+			}
+		},
+		"src/ui/tools/renderers/ReadRenderer.ts": {
+			"lines": {
+				"pct": 17.3,
+				"covered": 9,
+				"total": 52
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/ReadSessionRenderer.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 219
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/ReviewRenderer.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 30
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/ScreenshotRenderer.ts": {
+			"lines": {
+				"pct": 19.04,
+				"covered": 8,
+				"total": 42
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/SessionPromptRenderer.ts": {
+			"lines": {
+				"pct": 92.92,
+				"covered": 92,
+				"total": 99
+			},
+			"branches": {
+				"pct": 64.61,
+				"covered": 42,
+				"total": 65
+			}
+		},
+		"src/ui/tools/renderers/SvgRenderer.ts": {
+			"lines": {
+				"pct": 14.58,
+				"covered": 7,
+				"total": 48
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/TaskToolRenderers.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 149
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/TeamToolRenderers.ts": {
+			"lines": {
+				"pct": 37.3,
+				"covered": 119,
+				"total": 319
+			},
+			"branches": {
+				"pct": 56.92,
+				"covered": 37,
+				"total": 65
+			}
+		},
+		"src/ui/tools/renderers/VerificationResultRenderer.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 71
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/tools/renderers/WebFetchRenderer.ts": {
+			"lines": {
+				"pct": 9.72,
+				"covered": 7,
+				"total": 72
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/WebSearchRenderer.ts": {
+			"lines": {
+				"pct": 9.09,
+				"covered": 7,
+				"total": 77
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/tools/renderers/WriteRenderer.ts": {
+			"lines": {
+				"pct": 83.87,
+				"covered": 104,
+				"total": 124
+			},
+			"branches": {
+				"pct": 63.63,
+				"covered": 21,
+				"total": 33
+			}
+		},
+		"src/ui/tools/renderers/children-renderer-helpers.ts": {
+			"lines": {
+				"pct": 75.71,
+				"covered": 53,
+				"total": 70
+			},
+			"branches": {
+				"pct": 62.06,
+				"covered": 18,
+				"total": 29
+			}
+		},
+		"src/ui/tools/renderers/delegate-cards.ts": {
+			"lines": {
+				"pct": 58.97,
+				"covered": 46,
+				"total": 78
+			},
+			"branches": {
+				"pct": 85.71,
+				"covered": 36,
+				"total": 42
+			}
+		},
+		"src/ui/tools/renderers/image-utils.ts": {
+			"lines": {
+				"pct": 5.95,
+				"covered": 5,
+				"total": 84
+			},
+			"branches": {
+				"pct": 33.33,
+				"covered": 2,
+				"total": 6
+			}
+		},
+		"src/ui/tools/renderers/proposal-rev-marker.ts": {
+			"lines": {
+				"pct": 94.08,
+				"covered": 159,
+				"total": 169
+			},
+			"branches": {
+				"pct": 68.96,
+				"covered": 60,
+				"total": 87
+			}
+		},
+		"src/ui/tools/types.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/utils/ansi.ts": {
+			"lines": {
+				"pct": 57.05,
+				"covered": 89,
+				"total": 156
+			},
+			"branches": {
+				"pct": 37.14,
+				"covered": 13,
+				"total": 35
+			}
+		},
+		"src/ui/utils/attachment-utils.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 351
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 1,
+				"total": 1
+			}
+		},
+		"src/ui/utils/auth-token.ts": {
+			"lines": {
+				"pct": 0,
+				"covered": 0,
+				"total": 19
+			},
+			"branches": {
+				"pct": 0,
+				"covered": 0,
+				"total": 1
+			}
+		},
+		"src/ui/utils/diff-utils.ts": {
+			"lines": {
+				"pct": 33.33,
+				"covered": 1,
+				"total": 3
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/utils/fetch-tool-content.ts": {
+			"lines": {
+				"pct": 86.66,
+				"covered": 13,
+				"total": 15
+			},
+			"branches": {
+				"pct": 50,
+				"covered": 1,
+				"total": 2
+			}
+		},
+		"src/ui/utils/format.ts": {
+			"lines": {
+				"pct": 48.48,
+				"covered": 16,
+				"total": 33
+			},
+			"branches": {
+				"pct": 81.81,
+				"covered": 9,
+				"total": 11
+			}
+		},
+		"src/ui/utils/i18n.ts": {
+			"lines": {
+				"pct": 100,
+				"covered": 241,
+				"total": 241
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		},
+		"src/ui/utils/proxy-utils.ts": {
+			"lines": {
+				"pct": 8.06,
+				"covered": 5,
+				"total": 62
+			},
+			"branches": {
+				"pct": 100,
+				"covered": 0,
+				"total": 0
+			}
+		}
+	}
+}

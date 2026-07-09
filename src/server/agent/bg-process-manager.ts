@@ -15,6 +15,8 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import fs from "node:fs";
 import path from "node:path";
 import type { WebSocket } from "ws";
@@ -258,23 +260,25 @@ export interface TailerSpec {
 	 * — no content-based dedupe needed (Fix 3 / Fix 4).
 	 */
 	onOffsetReset?: (stream: "stdout" | "stderr", newOffset: number) => void;
+	clock?: Clock;
 }
 export type TailerFactory = (spec: TailerSpec) => { out: Tailer; err: Tailer };
 
 /** Default host poll tailer (200ms) with §6.2 truncation/offset-rebase + gateway copytruncate. */
 export class PollTailer implements Tailer {
 	private offset = 0;
-	private timer: ReturnType<typeof setInterval> | null = null;
+	private timer: ReturnType<Clock["setInterval"]> | null = null;
 	constructor(
 		private readonly file: string,
 		private readonly stream: "stdout" | "stderr",
 		private readonly onChunk: (stream: "stdout" | "stderr", text: string, newOffset: number) => void,
 		private readonly onOffsetReset?: (stream: "stdout" | "stderr", newOffset: number) => void,
+		private readonly clock: Clock = realClock,
 	) {}
 	start(startOffset: number): void {
 		this.offset = startOffset;
 		if (this.timer) return;
-		this.timer = setInterval(() => this.tick(), 200);
+		this.timer = this.clock.setInterval(() => this.tick(), 200);
 		if (typeof (this.timer as any).unref === "function") (this.timer as any).unref();
 	}
 	private tick(): void {
@@ -314,7 +318,7 @@ export class PollTailer implements Tailer {
 		}
 	}
 	stop(): void {
-		if (this.timer) { clearInterval(this.timer); this.timer = null; }
+		if (this.timer) { this.clock.clearInterval(this.timer); this.timer = null; }
 	}
 }
 
@@ -351,7 +355,7 @@ const DOCKER_TRUNC_PROBE_MS = 1000;
 export class DockerTailer implements Tailer {
 	private offset = 0;
 	private child: ChildProcess | null = null;
-	private probeTimer: ReturnType<typeof setInterval> | null = null;
+	private probeTimer: ReturnType<Clock["setInterval"]> | null = null;
 	constructor(
 		private readonly spool: string,
 		private readonly containerId: string,
@@ -359,6 +363,7 @@ export class DockerTailer implements Tailer {
 		private readonly onChunk: (stream: "stdout" | "stderr", text: string, newOffset: number) => void,
 		private readonly onOffsetReset?: (stream: "stdout" | "stderr", newOffset: number) => void,
 		private readonly deps: DockerExec = defaultDockerExec,
+		private readonly clock: Clock = realClock,
 	) {}
 	start(startOffset: number): void {
 		this.offset = startOffset;
@@ -377,7 +382,7 @@ export class DockerTailer implements Tailer {
 		// container spool size; if it dropped below our offset, rebase the offset down
 		// to the current size (the bytes tail -F already streamed) and persist the reset
 		// so offset stays aligned with the file position — no later duplicate.
-		this.probeTimer = setInterval(() => this.probeTruncation(), DOCKER_TRUNC_PROBE_MS);
+		this.probeTimer = this.clock.setInterval(() => this.probeTruncation(), DOCKER_TRUNC_PROBE_MS);
 		if (typeof (this.probeTimer as any).unref === "function") (this.probeTimer as any).unref();
 	}
 	private probeTruncation(): void {
@@ -385,7 +390,7 @@ export class DockerTailer implements Tailer {
 		if (size < this.offset) { this.offset = size; this.onOffsetReset?.(this.stream, size); }
 	}
 	stop(): void {
-		if (this.probeTimer) { clearInterval(this.probeTimer); this.probeTimer = null; }
+		if (this.probeTimer) { this.clock.clearInterval(this.probeTimer); this.probeTimer = null; }
 		if (this.child) { try { this.child.kill("SIGTERM"); } catch { /* ignore */ } this.child = null; }
 	}
 }
@@ -403,13 +408,13 @@ function projectedLineSize(ts: number, text: string): number {
 const defaultTailerFactory: TailerFactory = (spec: TailerSpec) => {
 	if (spec.inContainer && spec.containerId) {
 		return {
-			out: new DockerTailer(spec.outSpool, spec.containerId, "stdout", spec.onChunk, spec.onOffsetReset),
-			err: new DockerTailer(spec.errSpool, spec.containerId, "stderr", spec.onChunk, spec.onOffsetReset),
+			out: new DockerTailer(spec.outSpool, spec.containerId, "stdout", spec.onChunk, spec.onOffsetReset, defaultDockerExec, spec.clock ?? realClock),
+			err: new DockerTailer(spec.errSpool, spec.containerId, "stderr", spec.onChunk, spec.onOffsetReset, defaultDockerExec, spec.clock ?? realClock),
 		};
 	}
 	return {
-		out: new PollTailer(spec.outSpool, "stdout", spec.onChunk, spec.onOffsetReset),
-		err: new PollTailer(spec.errSpool, "stderr", spec.onChunk, spec.onOffsetReset),
+		out: new PollTailer(spec.outSpool, "stdout", spec.onChunk, spec.onOffsetReset, spec.clock ?? realClock),
+		err: new PollTailer(spec.errSpool, "stderr", spec.onChunk, spec.onOffsetReset, spec.clock ?? realClock),
 	};
 };
 
@@ -455,10 +460,10 @@ export interface BgProcess {
 	_resolveExited: () => void;
 	_logBytes: number;
 	_tailers: { out: Tailer; err: Tailer } | null;
-	_statusTimer: ReturnType<typeof setInterval> | null;
-	_projectionTimer: ReturnType<typeof setTimeout> | null;
+	_statusTimer: ReturnType<Clock["setInterval"]> | null;
+	_projectionTimer: ReturnType<Clock["setTimeout"]> | null;
 	_killIntent: number | null;
-	_killEscalate: ReturnType<typeof setTimeout> | null;
+	_killEscalate: ReturnType<Clock["setTimeout"]> | null;
 }
 
 export interface BgProcessInfo {
@@ -489,6 +494,7 @@ export class BgProcessManager {
 		storeProvider: (sessionId: string) => BgProcessStore | undefined = () => undefined,
 		tailerFactory: TailerFactory = defaultTailerFactory,
 		env: BgEnv = defaultEnv,
+		private readonly clock: Clock = realClock,
 	) {
 		this.clientsProvider = clientsProvider;
 		this.spawnFn = spawnFn;
@@ -536,7 +542,7 @@ export class BgProcessManager {
 			child,
 			stdout: [], stderr: [], log: [],
 			status: "running", exitCode: null, terminalReason: null,
-			startTime: Date.now(), endTime: null,
+			startTime: this.clock.now(), endTime: null,
 			cwd, containerId, paths,
 			outOffset: 0, errOffset: 0,
 			killRequested: false, killRequestedAt: null,
@@ -622,7 +628,7 @@ export class BgProcessManager {
 	/** Non-blocking delay for the bounded host-restore pidfile retry (Fix MEDIUM). */
 	private sleep(ms: number): Promise<void> {
 		return new Promise((res) => {
-			const t = setTimeout(res, ms);
+			const t = this.clock.setTimeout(() => res(), ms);
 			if (typeof (t as any).unref === "function") (t as any).unref();
 		});
 	}
@@ -636,7 +642,7 @@ export class BgProcessManager {
 			return;
 		}
 		if (attempt >= 50) return; // ~5s of retries
-		const t = setTimeout(() => this.resolveDockerProcessPid(sessionId, bg, attempt + 1), 100);
+		const t = this.clock.setTimeout(() => this.resolveDockerProcessPid(sessionId, bg, attempt + 1), 100);
 		if (typeof (t as any).unref === "function") (t as any).unref();
 	}
 
@@ -650,6 +656,7 @@ export class BgProcessManager {
 			containerId: bg.containerId,
 			onChunk: (stream, text, newOffset) => this.onChunk(sessionId, bg, stream, text, newOffset),
 			onOffsetReset: (stream, newOffset) => this.onOffsetReset(sessionId, bg, stream, newOffset),
+			clock: this.clock,
 		};
 		bg._tailers = this.tailerFactory(spec);
 		bg._tailers.out.start(bg.outOffset);
@@ -672,7 +679,7 @@ export class BgProcessManager {
 
 	private onChunk(sessionId: string, bg: BgProcess, stream: "stdout" | "stderr", text: string, newOffset: number): void {
 		if (stream === "stdout") bg.outOffset = newOffset; else bg.errOffset = newOffset;
-		const ts = Date.now();
+		const ts = this.clock.now();
 		const lines = text.split("\n");
 		for (const line of lines) {
 			if (line.length > 0) this.appendLog(bg, stream, line, ts);
@@ -699,7 +706,7 @@ export class BgProcessManager {
 
 	private scheduleProjection(bg: BgProcess): void {
 		if (bg._projectionTimer) return;
-		const t = setTimeout(() => { bg._projectionTimer = null; this.writeProjection(bg); }, PROJECTION_DEBOUNCE_MS);
+		const t = this.clock.setTimeout(() => { bg._projectionTimer = null; this.writeProjection(bg); }, PROJECTION_DEBOUNCE_MS);
 		if (typeof (t as any).unref === "function") (t as any).unref();
 		bg._projectionTimer = t;
 	}
@@ -724,7 +731,7 @@ export class BgProcessManager {
 			const t1 = line.indexOf("\t");
 			const t2 = line.indexOf("\t", t1 + 1);
 			if (t1 < 0 || t2 < 0) continue;
-			const ts = parseInt(line.slice(0, t1), 10) || Date.now();
+			const ts = parseInt(line.slice(0, t1), 10) || this.clock.now();
 			const tag = line.slice(t1 + 1, t2);
 			const text = line.slice(t2 + 1);
 			const stream: "stdout" | "stderr" = tag === "err" ? "stderr" : "stdout";
@@ -740,7 +747,7 @@ export class BgProcessManager {
 
 	private startStatusWatcher(sessionId: string, bg: BgProcess): void {
 		if (bg._statusTimer) return;
-		const t = setInterval(() => this.checkStatus(sessionId, bg), STATUS_POLL_MS);
+		const t = this.clock.setInterval(() => this.checkStatus(sessionId, bg), STATUS_POLL_MS);
 		if (typeof (t as any).unref === "function") (t as any).unref();
 		bg._statusTimer = t;
 	}
@@ -768,7 +775,7 @@ export class BgProcessManager {
 			// racing, and permanently discarding, the real exit code written to the status
 			// file milliseconds later (reconcileExit stops the watcher). Requiring BOTH
 			// dead AND grace-elapsed gives the durable status write time to land.
-			if (!alive && Date.now() - bg._killIntent > KILL_GRACE_MS) {
+			if (!alive && this.clock.now() - bg._killIntent > KILL_GRACE_MS) {
 				this.reconcileExit(sessionId, bg, null, "killed");
 			}
 		}
@@ -782,7 +789,7 @@ export class BgProcessManager {
 		bg.status = reason === "unrecoverable" ? "unrecoverable" : "exited";
 		bg.exitCode = exitCode;
 		bg.terminalReason = reason;
-		bg.endTime = Date.now();
+		bg.endTime = this.clock.now();
 		this.stopTimers(bg);
 		this.writeProjection(bg);
 		this.store(sessionId)?.update(sessionId, bg.id, {
@@ -801,7 +808,7 @@ export class BgProcessManager {
 		for (const stream of ["stdout", "stderr"] as const) {
 			const tail = this.readSpoolFrom(bg, stream, stream === "stdout" ? bg.outOffset : bg.errOffset);
 			if (tail && tail.text) {
-				const ts = Date.now();
+				const ts = this.clock.now();
 				const arr = stream === "stdout" ? bg.stdout : bg.stderr;
 				for (const line of tail.text.split("\n")) {
 					if (line.length > 0) {
@@ -820,9 +827,9 @@ export class BgProcessManager {
 
 	private stopTimers(bg: BgProcess): void {
 		if (bg._tailers) { try { bg._tailers.out.stop(); bg._tailers.err.stop(); } catch { /* ignore */ } bg._tailers = null; }
-		if (bg._statusTimer) { clearInterval(bg._statusTimer); bg._statusTimer = null; }
-		if (bg._projectionTimer) { clearTimeout(bg._projectionTimer); bg._projectionTimer = null; }
-		if (bg._killEscalate) { clearTimeout(bg._killEscalate); bg._killEscalate = null; }
+		if (bg._statusTimer) { this.clock.clearInterval(bg._statusTimer); bg._statusTimer = null; }
+		if (bg._projectionTimer) { this.clock.clearTimeout(bg._projectionTimer); bg._projectionTimer = null; }
+		if (bg._killEscalate) { this.clock.clearTimeout(bg._killEscalate); bg._killEscalate = null; }
 	}
 
 	// ── file readers (host fs / docker exec) ──────────────────────────────────────
@@ -1067,7 +1074,7 @@ export class BgProcessManager {
 		bg.status = "exited";
 		bg.exitCode = null;
 		bg.terminalReason = "killed";
-		bg.endTime = Date.now();
+		bg.endTime = this.clock.now();
 		this.stopTimers(bg);
 		this.store(sessionId)?.update(sessionId, bg.id, {
 			status: "exited", exitCode: null, terminalReason: "killed", endTime: bg.endTime,
@@ -1104,7 +1111,7 @@ export class BgProcessManager {
 	 */
 	private restoreLoadOutput(bg: BgProcess): void {
 		if (!this.loadProjection(bg)) { this.restoreFromSpoolsOnly(bg); return; }
-		const ts = Date.now();
+		const ts = this.clock.now();
 		for (const stream of ["stdout", "stderr"] as const) {
 			const off = stream === "stdout" ? bg.outOffset : bg.errOffset;
 			const tail = this.readSpoolFrom(bg, stream, off);
@@ -1136,7 +1143,7 @@ export class BgProcessManager {
 		}
 		if (!anyReadable) return; // nothing readable anywhere; leave the (empty) buffer
 		bg.log = []; bg.stdout = []; bg.stderr = []; bg._logBytes = 0;
-		const ts = Date.now();
+		const ts = this.clock.now();
 		for (const stream of ["stdout", "stderr"] as const) {
 			const tail = tails[stream];
 			if (!tail) { if (stream === "stdout") bg.outOffset = 0; else bg.errOffset = 0; continue; }
@@ -1158,7 +1165,7 @@ export class BgProcessManager {
 		bg.status = "unrecoverable";
 		bg.exitCode = null;
 		bg.terminalReason = "unrecoverable";
-		bg.endTime = Date.now();
+		bg.endTime = this.clock.now();
 		this.stopTimers(bg);
 		this.store(sessionId)?.update(sessionId, bg.id, {
 			status: bg.status, exitCode: null, terminalReason: "unrecoverable", endTime: bg.endTime,
@@ -1202,7 +1209,7 @@ export class BgProcessManager {
 	kill(sessionId: string, processId: string): boolean {
 		const bg = this.processes.get(sessionId)?.get(processId);
 		if (!bg || bg.status !== "running") return false;
-		bg._killIntent = Date.now();
+		bg._killIntent = this.clock.now();
 		// Fix 1: record the kill intent DURABLY (sync flush) before signalling, so a
 		// restart in the kill→exit window re-issues the kill (still-alive) or marks the
 		// process "killed" rather than "unrecoverable" (dead with no status).
@@ -1213,7 +1220,7 @@ export class BgProcessManager {
 		}
 		if (bg.paths.inContainer && bg.containerId && bg.processPid > 0) {
 			this.env.dockerCli(["exec", bg.containerId, "kill", "-TERM", `-${bg.processPid}`]);
-			const esc = setTimeout(() => {
+			const esc = this.clock.setTimeout(() => {
 				if (bg.status === "running" && bg.containerId) {
 					this.env.dockerCli(["exec", bg.containerId, "kill", "-KILL", `-${bg.processPid}`]);
 				}
@@ -1222,7 +1229,7 @@ export class BgProcessManager {
 			bg._killEscalate = esc;
 		} else if (bg.processPid > 0) {
 			this.env.killHostTree(bg.processPid, "SIGTERM");
-			const esc = setTimeout(() => {
+			const esc = this.clock.setTimeout(() => {
 				if (bg.status === "running") this.env.killHostTree(bg.processPid, "SIGKILL");
 			}, KILL_GRACE_MS);
 			if (typeof (esc as any).unref === "function") (esc as any).unref();
@@ -1365,7 +1372,7 @@ export class BgProcessManager {
 
 		let timer: ReturnType<typeof setTimeout> | null = null;
 		let onAbort: (() => void) | null = null;
-		const timeoutP = new Promise<"timeout">((res) => { timer = setTimeout(() => res("timeout"), timeoutMs); });
+		const timeoutP = new Promise<"timeout">((res) => { timer = this.clock.setTimeout(() => res("timeout"), timeoutMs); });
 		const abortP = new Promise<"abort">((res) => {
 			if (!signal) return;
 			onAbort = () => res("abort");
@@ -1376,7 +1383,7 @@ export class BgProcessManager {
 			const winner = await Promise.race([exitP, timeoutP, abortP]);
 			return { info: this.toInfo(bg), timedOut: winner === "timeout", aborted: winner === "abort" };
 		} finally {
-			if (timer) clearTimeout(timer);
+			if (timer) this.clock.clearTimeout(timer);
 			if (onAbort && signal) signal.removeEventListener("abort", onAbort);
 		}
 	}
@@ -1391,7 +1398,7 @@ export class BgProcessManager {
 	/** Flush pending projection writes + store (for tests / shutdown). */
 	flush(sessionId?: string): void {
 		const flushOne = (sid: string, bg: BgProcess) => {
-			if (bg._projectionTimer) { clearTimeout(bg._projectionTimer); bg._projectionTimer = null; this.writeProjection(bg); }
+			if (bg._projectionTimer) { this.clock.clearTimeout(bg._projectionTimer); bg._projectionTimer = null; this.writeProjection(bg); }
 			this.store(sid)?.flush();
 		};
 		if (sessionId) {

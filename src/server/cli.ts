@@ -13,6 +13,7 @@ import { ensureTlsCert } from "./auth/tls.js";
 import { loadDesecConfig, updateDesecIp } from "./auth/desec.js";
 import { createGateway } from "./server.js";
 import { loopbackForBind } from "./cli-loopback.js";
+import { resolveCliGatewayDeps } from "./cli-gateway-deps.js";
 
 export { loopbackForBind };
 
@@ -203,7 +204,7 @@ async function main() {
 		systemPromptPath,
 		tls,
 		forceAuth: args.forceAuth,
-	});
+	}, resolveCliGatewayDeps());
 
 	const actualPort = await gateway.start();
 

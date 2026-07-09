@@ -26,6 +26,8 @@
  */
 
 import { spawn, type ChildProcess, type StdioOptions } from "node:child_process";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 
 export interface SpawnTrackedOptions {
 	cwd?: string;
@@ -38,6 +40,7 @@ export interface SpawnTrackedOptions {
 	killGraceMs?: number;
 	/** Invoked once when the timer fires, before the tree kill. */
 	onTimeout?: () => void;
+	clock?: Clock;
 }
 
 export interface TrackedChild {
@@ -80,6 +83,7 @@ export function spawnTracked(
 ): TrackedChild {
 	const isWin = process.platform === "win32";
 	const killGraceMs = opts.killGraceMs ?? 5000;
+	const clock = opts.clock ?? realClock;
 
 	const child = spawn(cmd, args as string[], {
 		cwd: opts.cwd,
@@ -128,9 +132,9 @@ export function spawnTracked(
 			// open. We only schedule one escalation; subsequent killTree calls
 			// reset the timer if needed.
 			if (signal === "SIGTERM") {
-				if (tracked._escalationTimer) clearTimeout(tracked._escalationTimer);
+				if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
 				const grace = graceMsOverride ?? killGraceMs;
-				tracked._escalationTimer = setTimeout(() => {
+				tracked._escalationTimer = clock.setTimeout(() => {
 					if (tracked._closed) return;
 					try { process.kill(-pid, "SIGKILL"); } catch { /* already dead */ }
 				}, grace);
@@ -141,7 +145,7 @@ export function spawnTracked(
 
 	// Optional helper-owned timeout.
 	if (opts.timeoutMs != null && opts.timeoutMs > 0) {
-		tracked._timeoutTimer = setTimeout(() => {
+		tracked._timeoutTimer = clock.setTimeout(() => {
 			if (tracked._closed) return;
 			tracked._timedOut = true;
 			try { opts.onTimeout?.(); } catch { /* ignore */ }
@@ -154,8 +158,8 @@ export function spawnTracked(
 
 	const onClose = () => {
 		tracked._closed = true;
-		if (tracked._timeoutTimer) clearTimeout(tracked._timeoutTimer);
-		if (tracked._escalationTimer) clearTimeout(tracked._escalationTimer);
+		if (tracked._timeoutTimer) clock.clearTimeout(tracked._timeoutTimer);
+		if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
 		registry.delete(tracked);
 	};
 	child.once("close", onClose);

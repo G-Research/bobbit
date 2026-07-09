@@ -1,0 +1,768 @@
+{
+  "pass": false,
+  "model": "multi-worktree",
+  "violations": [
+    "A1: 6/6 run(s) exited non-zero: rep1/#1(exit 1), rep1/#2(exit 1), rep2/#1(exit 1), rep2/#2(exit 1), rep3/#1(exit 1), rep3/#2(exit 1)",
+    "A2: 6 run(s) had vitest tier-1 failures: rep1/#1, rep1/#2, rep2/#1, rep2/#2, rep3/#1, rep3/#2",
+    "A2: 3 run(s) had playwright tier-2 failures: rep2/#1, rep2/#2, rep3/#2"
+  ],
+  "config": {
+    "concurrent": 2,
+    "reps": 3,
+    "perRunWallCapS": 1800,
+    "totalCores": 24,
+    "baseSha": "bc7a25070b8ecc9365b083ee63fe0836bf51efd6",
+    "specConcurrent": 3,
+    "specReps": 3,
+    "fullSpec": false,
+    "note": "Reduced-scale smoke; full proof is 3×3 (the default)."
+  },
+  "summary": {
+    "totalRuns": 6,
+    "green": 0,
+    "exitNonZero": 6,
+    "vitestFails": 6,
+    "playwrightFails": 3,
+    "maxWallS": 593.4,
+    "minWallS": 516.8,
+    "avgWallS": 548.3,
+    "maxLedgerWorkers": 14
+  },
+  "runs": [
+    {
+      "rep": 1,
+      "index": 1,
+      "pid": 47272,
+      "exitCode": 1,
+      "wallS": 553.6,
+      "overWallCap": false,
+      "spawnError": null,
+      "analysis": {
+        "vitestPass": false,
+        "playwrightPass": true,
+        "budgetFail": false,
+        "budgetPass": true,
+        "playwrightUnexpected": null,
+        "vitestSummaryOk": false
+      },
+      "failureTail": "\u001b[1A\u001b[2K[596/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:101:2 › Sidebar bobbit data-URL memoization › explicit static sidebar idle bobbits render without inline animation while preserving idle styling\n\u001b[1A\u001b[2K[597/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:129:2 › Sidebar bobbit data-URL memoization › static sidebar status rendering preserves busy and unread animations without idle breathing\n\u001b[1A\u001b[2K[598/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:171:2 › Sidebar bobbit data-URL memoization › compacting sidebar bobbits stay inside the clipped wrapper without layout shift\n\u001b[1A\u001b[2K[599/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:219:2 › Sidebar bobbit data-URL memoization › identical opts: toDataURL runs once on first render, never again\n\u001b[1A\u001b[2K[600/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:89:2 › Sidebar filter/search lightweight fixture › filter defaults and localStorage persistence render with the single-project sidebar\n\u001b[1A\u001b[2K[601/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:245:2 › Sidebar bobbit data-URL memoization › single-layer sprite: only one encode across many renders\n\u001b[1A\u001b[2K[602/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:263:2 › Sidebar bobbit data-URL memoization › hue-rotate is CSS-only: does not produce a distinct cached bitmap\n\u001b[1A\u001b[2K[603/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:281:2 › Sidebar bobbit data-URL memoization › key correctness: pixel-affecting opts produce DIFFERENT cached URLs\n\u001b[1A\u001b[2K[604/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:345:2 › Sidebar bobbit data-URL memoization › idle vs streaming must NOT collide: idle sleeps (eyes closed), streaming is awake\n\u001b[1A\u001b[2K[605/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:242:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row\n\u001b[1A\u001b[2K[606/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:121:2 › Sidebar filter/search lightweight fixture › search input filters rows, auto-opens archived results, supports full search, and Escape clears\n\u001b[1A\u001b[2K[607/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:265:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+ArrowLeft and Ctrl+ArrowRight collapse expandable rows without moving selection\n\u001b[1A\u001b[2K[608/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:146:2 › Sidebar filter/search lightweight fixture › search expands retained collapsed goal ancestors ephemerally\n\u001b[1A\u001b[2K[609/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:291:2 › Sidebar keyboard navigation lightweight fixture › Show Archived deterministically adds archived rows to the keyboard cycle\n\u001b[1A\u001b[2K[610/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:164:2 › Sidebar filter/search lightweight fixture › search reveals matching runtime rows under collapsed goals without persisting expansion\n\u001b[1A\u001b[2K[611/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:182:2 › Sidebar filter/search lightweight fixture › search retains matching first-class and delegate child sessions with goal ownership\n\u001b[1A\u001b[2K[612/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:313:2 › Sidebar keyboard navigation lightweight fixture › route-selected project, goal, and session rows persist after rerender\n\u001b[1A\u001b[2K[613/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:219:2 › Sidebar filter/search lightweight fixture › Show Read and Show Busy filters hide rows while search bypasses the filters\n\u001b[1A\u001b[2K[614/623] [browser-v2] › tests2\\browser\\fixtures\\streaming-bobbit-canvas-ref.spec.ts:43:2 › Streaming bobbit canvas eye animation › keeps the existing canvas animation across streaming re-renders\n\u001b[1A\u001b[2K[615/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:91:2 › Tools page → MCP section fixture › renders flat servers, expands operations, and resets expansion on reload\n\u001b[1A\u001b[2K[616/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:74:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal renders streamed line exactly once when same event is dispatched 6×\n\u001b[1A\u001b[2K[617/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:142:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor\n\u001b[1A\u001b[2K[618/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:225:2 › Verification log Nx duplication (reproducing) › GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×\n\u001b[1A\u001b[2K[619/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:128:2 › Tools page → MCP section fixture › groups gateway sub-namespaces and flat servers\n\u001b[1A\u001b[2K[620/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:148:2 › Tools page → MCP section fixture › writes server and tool policy updates\n\u001b[1A\u001b[2K[621/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:170:2 › Tools page → MCP section fixture › uses supplied public MCP policy keys when gateway runtime names differ\n\u001b[1A\u001b[2K[622/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:213:2 › Tools page → MCP section fixture › shows inherited parent MCP policy for unset sub-namespace rows without storing override\n\u001b[1A\u001b[2K[623/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:257:2 › Tools page → MCP section fixture › loads default and persisted policies, and reset persists empty\n\u001b[1A\u001b[2K\u001b[33m  6 skipped\u001b[39m\n\u001b[32m  617 passed\u001b[39m\u001b[2m (9.1m)\u001b[22m\nassert-budget: scope=browser tier=tier2\n  wall: 547.9s (cap 1800s)  [.profiles/testing-v2/budgets/playwright-report.json]\n  cpu:  n/a (cap 240.00 CPU-min)  [unmeasured]\n  artifact: C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\.profiles\\testing-v2\\budgets\\2026-07-08T17-31-23-265Z-browser.json\nassert-budget: PASS\n[run-v2] tier1/vitest (test:v2:core): FAIL in 489.1s\n[run-v2] tier2/playwright (test:v2:browser): PASS in 550.3s\n[run-v2] total wall 553.0s, whole-tree CPU 125.28 CPU-min (peak procs 60)\n[run-v2] budget artifact: C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\.profiles\\testing-v2\\budgets\\2026-07-08T17-31-24-125Z-full.json\n[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)"
+    },
+    {
+      "rep": 1,
+      "index": 2,
+      "pid": 19812,
+      "exitCode": 1,
+      "wallS": 555.5,
+      "overWallCap": false,
+      "spawnError": null,
+      "analysis": {
+        "vitestPass": false,
+        "playwrightPass": true,
+        "budgetFail": false,
+        "budgetPass": true,
+        "playwrightUnexpected": null,
+        "vitestSummaryOk": false
+      },
+      "failureTail": "\u001b[1A\u001b[2K[596/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:101:2 › Sidebar bobbit data-URL memoization › explicit static sidebar idle bobbits render without inline animation while preserving idle styling\n\u001b[1A\u001b[2K[597/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:129:2 › Sidebar bobbit data-URL memoization › static sidebar status rendering preserves busy and unread animations without idle breathing\n\u001b[1A\u001b[2K[598/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:171:2 › Sidebar bobbit data-URL memoization › compacting sidebar bobbits stay inside the clipped wrapper without layout shift\n\u001b[1A\u001b[2K[599/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:219:2 › Sidebar bobbit data-URL memoization › identical opts: toDataURL runs once on first render, never again\n\u001b[1A\u001b[2K[600/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:245:2 › Sidebar bobbit data-URL memoization › single-layer sprite: only one encode across many renders\n\u001b[1A\u001b[2K[601/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:263:2 › Sidebar bobbit data-URL memoization › hue-rotate is CSS-only: does not produce a distinct cached bitmap\n\u001b[1A\u001b[2K[602/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:281:2 › Sidebar bobbit data-URL memoization › key correctness: pixel-affecting opts produce DIFFERENT cached URLs\n\u001b[1A\u001b[2K[603/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:89:2 › Sidebar filter/search lightweight fixture › filter defaults and localStorage persistence render with the single-project sidebar\n\u001b[1A\u001b[2K[604/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:345:2 › Sidebar bobbit data-URL memoization › idle vs streaming must NOT collide: idle sleeps (eyes closed), streaming is awake\n\u001b[1A\u001b[2K[605/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:242:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row\n\u001b[1A\u001b[2K[606/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:121:2 › Sidebar filter/search lightweight fixture › search input filters rows, auto-opens archived results, supports full search, and Escape clears\n\u001b[1A\u001b[2K[607/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:265:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+ArrowLeft and Ctrl+ArrowRight collapse expandable rows without moving selection\n\u001b[1A\u001b[2K[608/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:146:2 › Sidebar filter/search lightweight fixture › search expands retained collapsed goal ancestors ephemerally\n\u001b[1A\u001b[2K[609/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:291:2 › Sidebar keyboard navigation lightweight fixture › Show Archived deterministically adds archived rows to the keyboard cycle\n\u001b[1A\u001b[2K[610/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:164:2 › Sidebar filter/search lightweight fixture › search reveals matching runtime rows under collapsed goals without persisting expansion\n\u001b[1A\u001b[2K[611/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:313:2 › Sidebar keyboard navigation lightweight fixture › route-selected project, goal, and session rows persist after rerender\n\u001b[1A\u001b[2K[612/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:182:2 › Sidebar filter/search lightweight fixture › search retains matching first-class and delegate child sessions with goal ownership\n\u001b[1A\u001b[2K[613/623] [browser-v2] › tests2\\browser\\fixtures\\streaming-bobbit-canvas-ref.spec.ts:43:2 › Streaming bobbit canvas eye animation › keeps the existing canvas animation across streaming re-renders\n\u001b[1A\u001b[2K[614/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:219:2 › Sidebar filter/search lightweight fixture › Show Read and Show Busy filters hide rows while search bypasses the filters\n\u001b[1A\u001b[2K[615/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:91:2 › Tools page → MCP section fixture › renders flat servers, expands operations, and resets expansion on reload\n\u001b[1A\u001b[2K[616/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:74:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal renders streamed line exactly once when same event is dispatched 6×\n\u001b[1A\u001b[2K[617/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:142:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor\n\u001b[1A\u001b[2K[618/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:225:2 › Verification log Nx duplication (reproducing) › GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×\n\u001b[1A\u001b[2K[619/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:128:2 › Tools page → MCP section fixture › groups gateway sub-namespaces and flat servers\n\u001b[1A\u001b[2K[620/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:148:2 › Tools page → MCP section fixture › writes server and tool policy updates\n\u001b[1A\u001b[2K[621/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:170:2 › Tools page → MCP section fixture › uses supplied public MCP policy keys when gateway runtime names differ\n\u001b[1A\u001b[2K[622/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:213:2 › Tools page → MCP section fixture › shows inherited parent MCP policy for unset sub-namespace rows without storing override\n\u001b[1A\u001b[2K[623/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:257:2 › Tools page → MCP section fixture › loads default and persisted policies, and reset persists empty\n\u001b[1A\u001b[2K\u001b[33m  6 skipped\u001b[39m\n\u001b[32m  617 passed\u001b[39m\u001b[2m (9.2m)\u001b[22m\nassert-budget: scope=browser tier=tier2\n  wall: 550.1s (cap 1800s)  [.profiles/testing-v2/budgets/playwright-report.json]\n  cpu:  n/a (cap 240.00 CPU-min)  [unmeasured]\n  artifact: C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-1\\.profiles\\testing-v2\\budgets\\2026-07-08T17-31-25-365Z-browser.json\nassert-budget: PASS\n[run-v2] tier1/vitest (test:v2:core): FAIL in 425.4s\n[run-v2] tier2/playwright (test:v2:browser): PASS in 552.2s\n[run-v2] total wall 555.0s, whole-tree CPU 118.61 CPU-min (peak procs 60)\n[run-v2] budget artifact: C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-1\\.profiles\\testing-v2\\budgets\\2026-07-08T17-31-26-038Z-full.json\n[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)"
+    },
+    {
+      "rep": 2,
+      "index": 1,
+      "pid": 41996,
+      "exitCode": 1,
+      "wallS": 547.1,
+      "overWallCap": false,
+      "spawnError": null,
+      "analysis": {
+        "vitestPass": false,
+        "playwrightPass": false,
+        "budgetFail": false,
+        "budgetPass": true,
+        "playwrightUnexpected": null,
+        "vitestSummaryOk": false
+      },
+      "failureTail": " \u001b[32m✓\u001b[39m \u001b[30m\u001b[43m v2-core-isolated \u001b[49m\u001b[39m tests2/core/transcript-sanitizer-agent-dir.test.ts \u001b[2m(\u001b[22m\u001b[2m7 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[33m1 skipped\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 34\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[2m\u001b[90m↓\u001b[39m\u001b[22m transcript sanitizer trusted agent directory roots\u001b[2m > \u001b[22mrejects a final symlink inside a historical sessions root\u001b[2m\u001b[90m [symlink creation not permitted on this platform]\u001b[39m\u001b[22m\n\u001b[90mstderr\u001b[2m | tests2/core/session-recovery-agent-dir.test.ts\u001b[2m > \u001b[22m\u001b[2mrecoverSessionFile with configurable agent directories\u001b[2m > \u001b[22m\u001b[2mdoes not delete exact persisted outside transcript files during purge\n\u001b[22m\u001b[39m[session-manager] Failed to cleanup prompt for outside-purge-session: Error: system-prompt: initPromptDirs() not called\n    at getPromptsDir \u001b[90m(C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\\u001b[39msrc\\server\\agent\\system-prompt.ts:41:26\u001b[90m)\u001b[39m\n    at cleanupSessionPrompt \u001b[90m(C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\\u001b[39msrc\\server\\agent\\system-prompt.ts:757:31\u001b[90m)\u001b[39m\n    at SessionManager.purgeOneSession \u001b[90m(C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\\u001b[39msrc\\server\\agent\\session-manager.ts:8886:4\u001b[90m)\u001b[39m\n    at SessionManager.purgeArchivedSession \u001b[90m(C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\\u001b[39msrc\\server\\agent\\session-manager.ts:8061:3\u001b[90m)\u001b[39m\n    at \u001b[90mC:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\\u001b[39mtests2\\core\\session-recovery-agent-dir.test.ts:259:16\n    at \u001b[90mfile:///C:/Users/jsubr/w/bobbit-wt/cc-proof-47860/wt-0/\u001b[39mnode_modules/\u001b[4m@vitest/runner\u001b[24m/dist/chunk-hooks.js:752:20\n \u001b[32m✓\u001b[39m \u001b[30m\u001b[43m v2-core-isolated \u001b[49m\u001b[39m tests2/core/session-recovery-agent-dir.test.ts \u001b[2m(\u001b[22m\u001b[2m9 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[32m 81\u001b[2mms\u001b[22m\u001b[39m\n\u001b[90mstdout\u001b[2m | tests2/core/bobbit-dir-agent-dir.test.ts\u001b[2m > \u001b[22m\u001b[2magent directory resolver\u001b[2m > \u001b[22m\u001b[2mscaffold and agent-dir runtime leave existing ~/.pi/agent untouched\n\u001b[22m\u001b[39mCreating Headquarters .bobbit/ in C:\\Users\\jsubr\\AppData\\Local\\Temp\\bobbit-pi-agent-untouched-AmCu3W\\project\\.bobbit...\nCreated Headquarters .bobbit/ in C:\\Users\\jsubr\\AppData\\Local\\Temp\\bobbit-pi-agent-untouched-AmCu3W\\project\\.bobbit. Customize roles, workflows, and system prompt in its config/ directory\n \u001b[32m✓\u001b[39m \u001b[30m\u001b[43m v2-core-isolated \u001b[49m\u001b[39m tests2/core/bobbit-dir-agent-dir.test.ts \u001b[2m(\u001b[22m\u001b[2m6 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[32m 59\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m \u001b[30m\u001b[43m v2-core-isolated \u001b[49m\u001b[39m tests2/core/container-path-translation.test.ts \u001b[2m(\u001b[22m\u001b[2m8 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[32m 2\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m \u001b[30m\u001b[43m v2-core-isolated \u001b[49m\u001b[39m tests2/core/extension-host-session-event-bus.test.ts \u001b[2m(\u001b[22m\u001b[2m3 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[32m 1\u001b[2mms\u001b[22m\u001b[39m\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m \u001b[30m\u001b[43m v2-integration \u001b[49m\u001b[39m tests2/integration/project-isolation.test.ts\u001b[2m > \u001b[22mProject isolation — no default fallback\u001b[2m > \u001b[22mmulti-project session lifecycle — no cross-contamination\n\u001b[31m\u001b[1mError\u001b[22m: Test timed out in 60000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m testImpl tests2/integration/_e2e/in-process-harness.ts:\u001b[2m265:2\u001b[22m\u001b[39m\n    \u001b[90m263| \u001b[39m\n    \u001b[90m264| \u001b[39m\u001b[35mconst\u001b[39m testImpl \u001b[33m=\u001b[39m ((name\u001b[33m:\u001b[39m string\u001b[33m,\u001b[39m a\u001b[33m?\u001b[39m\u001b[33m:\u001b[39m unknown\u001b[33m,\u001b[39m b\u001b[33m?\u001b[39m\u001b[33m:\u001b[39m unknown) \u001b[33m=>\u001b[39m {\n    \u001b[90m265| \u001b[39m \u001b[34mvIt\u001b[39m(name\u001b[33m,\u001b[39m \u001b[34mwrapTest\u001b[39m(\u001b[34mpickFn\u001b[39m(a\u001b[33m,\u001b[39m b)))\u001b[33m;\u001b[39m\n    \u001b[90m   | \u001b[39m \u001b[31m^\u001b[39m\n    \u001b[90m266| \u001b[39m}) \u001b[35mas\u001b[39m \u001b[33mCompatTest\u001b[39m\u001b[33m;\u001b[39m\n    \u001b[90m267| \u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m tests2/integration/project-isolation.test.ts:\u001b[2m260:2\u001b[22m\u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m tests2/integration/_e2e/in-process-harness.ts:\u001b[2m229:3\u001b[22m\u001b[39m\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\u001b[2m Test Files \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m810 passed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[33m3 skipped\u001b[39m\u001b[90m (814)\u001b[39m\n\u001b[2m      Tests \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m7146 passed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[33m27 skipped\u001b[39m\u001b[90m (7174)\u001b[39m\n\u001b[2m   Start at \u001b[22m 18:31:30\n\u001b[2m   Duration \u001b[22m 542.36s\u001b[2m (transform 47.13s, setup 16ms, collect 75.13s, tests 1580.19s, environment 3.97s, prepare 4.57s)\u001b[22m\n[run-v2] tier1/vitest (test:v2:core): FAIL in 544.1s\n[run-v2] tier2/playwright (test:v2:browser): FAIL in 517.4s\n[run-v2] total wall 546.7s, whole-tree CPU 89.82 CPU-min (peak procs 67)\n[run-v2] budget artifact: C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\.profiles\\testing-v2\\budgets\\2026-07-08T17-40-33-368Z-full.json\n[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)"
+    },
+    {
+      "rep": 2,
+      "index": 2,
+      "pid": 3880,
+      "exitCode": 1,
+      "wallS": 516.8,
+      "overWallCap": false,
+      "spawnError": null,
+      "analysis": {
+        "vitestPass": false,
+        "playwrightPass": false,
+        "budgetFail": false,
+        "budgetPass": true,
+        "playwrightUnexpected": null,
+        "vitestSummaryOk": false
+      },
+      "failureTail": "\u001b[1A\u001b[2K[593/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-actions-menu-fixture.spec.ts:327:1 › mobile rows expose quick actions plus hamburger menus without row navigation\n\u001b[1A\u001b[2K[594/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-archived-fixture.spec.ts:332:2 › Sidebar archived deterministic fixture › mobile archived sections share bucketing, collapse persistence, and search highlighting\n\u001b[1A\u001b[2K[595/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:72:2 › Sidebar bobbit data-URL memoization › default idle preview bobbits keep the breathing animation\n\u001b[1A\u001b[2K[596/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:101:2 › Sidebar bobbit data-URL memoization › explicit static sidebar idle bobbits render without inline animation while preserving idle styling\n\u001b[1A\u001b[2K[597/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:129:2 › Sidebar bobbit data-URL memoization › static sidebar status rendering preserves busy and unread animations without idle breathing\n\u001b[1A\u001b[2K[598/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:171:2 › Sidebar bobbit data-URL memoization › compacting sidebar bobbits stay inside the clipped wrapper without layout shift\n\u001b[1A\u001b[2K[599/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:219:2 › Sidebar bobbit data-URL memoization › identical opts: toDataURL runs once on first render, never again\n\u001b[1A\u001b[2K[600/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:245:2 › Sidebar bobbit data-URL memoization › single-layer sprite: only one encode across many renders\n\u001b[1A\u001b[2K[601/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:263:2 › Sidebar bobbit data-URL memoization › hue-rotate is CSS-only: does not produce a distinct cached bitmap\n\u001b[1A\u001b[2K[602/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:89:2 › Sidebar filter/search lightweight fixture › filter defaults and localStorage persistence render with the single-project sidebar\n\u001b[1A\u001b[2K[603/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:281:2 › Sidebar bobbit data-URL memoization › key correctness: pixel-affecting opts produce DIFFERENT cached URLs\n\u001b[1A\u001b[2K[604/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:345:2 › Sidebar bobbit data-URL memoization › idle vs streaming must NOT collide: idle sleeps (eyes closed), streaming is awake\n\u001b[1A\u001b[2K[605/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:242:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row\n\u001b[1A\u001b[2K[606/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:121:2 › Sidebar filter/search lightweight fixture › search input filters rows, auto-opens archived results, supports full search, and Escape clears\n\u001b[1A\u001b[2K[607/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:265:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+ArrowLeft and Ctrl+ArrowRight collapse expandable rows without moving selection\n\u001b[1A\u001b[2K[608/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:146:2 › Sidebar filter/search lightweight fixture › search expands retained collapsed goal ancestors ephemerally\n\u001b[1A\u001b[2K[609/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:291:2 › Sidebar keyboard navigation lightweight fixture › Show Archived deterministically adds archived rows to the keyboard cycle\n\u001b[1A\u001b[2K[610/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:164:2 › Sidebar filter/search lightweight fixture › search reveals matching runtime rows under collapsed goals without persisting expansion\n\u001b[1A\u001b[2K[611/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:313:2 › Sidebar keyboard navigation lightweight fixture › route-selected project, goal, and session rows persist after rerender\n\u001b[1A\u001b[2K[612/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:182:2 › Sidebar filter/search lightweight fixture › search retains matching first-class and delegate child sessions with goal ownership\n\u001b[1A\u001b[2K[613/623] [browser-v2] › tests2\\browser\\fixtures\\streaming-bobbit-canvas-ref.spec.ts:43:2 › Streaming bobbit canvas eye animation › keeps the existing canvas animation across streaming re-renders\n\u001b[1A\u001b[2K[614/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:91:2 › Tools page → MCP section fixture › renders flat servers, expands operations, and resets expansion on reload\n\u001b[1A\u001b[2K[615/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:219:2 › Sidebar filter/search lightweight fixture › Show Read and Show Busy filters hide rows while search bypasses the filters\n\u001b[1A\u001b[2K[616/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:74:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal renders streamed line exactly once when same event is dispatched 6×\n\u001b[1A\u001b[2K[617/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:142:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor\n\u001b[1A\u001b[2K[618/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:225:2 › Verification log Nx duplication (reproducing) › GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×\n\u001b[1A\u001b[2K[619/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:128:2 › Tools page → MCP section fixture › groups gateway sub-namespaces and flat servers\n\u001b[1A\u001b[2K[620/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:148:2 › Tools page → MCP section fixture › writes server and tool policy updates\n\u001b[1A\u001b[2K[621/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:170:2 › Tools page → MCP section fixture › uses supplied public MCP policy keys when gateway runtime names differ\n\u001b[1A\u001b[2K[622/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:213:2 › Tools page → MCP section fixture › shows inherited parent MCP policy for unset sub-namespace rows without storing override\n\u001b[1A\u001b[2K[623/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:257:2 › Tools page → MCP section fixture › loads default and persisted policies, and reset persists empty\n\u001b[1A\u001b[2K\u001b[31m  1 failed\u001b[39m\n\u001b[31m    [browser-v2] › tests2\\browser\\fixtures\\proposal-revision-snapshots.spec.ts:187:2 › Proposal revision snapshots › streaming proposal previews do not synthesize snapshot revisions \u001b[39m\n\u001b[33m  6 skipped\u001b[39m\n\u001b[32m  616 passed\u001b[39m\u001b[2m (8.5m)\u001b[22m\n[run-v2] tier1/vitest (test:v2:core): FAIL in 475.2s\n[run-v2] tier2/playwright (test:v2:browser): FAIL in 513.7s\n[run-v2] total wall 516.4s, whole-tree CPU 88.96 CPU-min (peak procs 86)\n[run-v2] budget artifact: C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-1\\.profiles\\testing-v2\\budgets\\2026-07-08T17-40-03-071Z-full.json\n[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)"
+    },
+    {
+      "rep": 3,
+      "index": 1,
+      "pid": 45688,
+      "exitCode": 1,
+      "wallS": 593.4,
+      "overWallCap": false,
+      "spawnError": null,
+      "analysis": {
+        "vitestPass": false,
+        "playwrightPass": true,
+        "budgetFail": false,
+        "budgetPass": true,
+        "playwrightUnexpected": null,
+        "vitestSummaryOk": false
+      },
+      "failureTail": "    \u001b[90m266| \u001b[39m}) \u001b[35mas\u001b[39m \u001b[33mCompatTest\u001b[39m\u001b[33m;\u001b[39m\n    \u001b[90m267| \u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m tests2/integration/gate-signal-reminder.test.ts:\u001b[2m107:2\u001b[22m\u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m tests2/integration/_e2e/in-process-harness.ts:\u001b[2m229:3\u001b[22m\u001b[39m\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯\u001b[22m\u001b[39m\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m \u001b[30m\u001b[43m v2-integration \u001b[49m\u001b[39m tests2/integration/mcp-meta-call.test.ts\u001b[2m > \u001b[22mMCP meta-tool API E2E\u001b[2m > \u001b[22mPOST /api/internal/mcp-call denies per-op `never` policy via role\n\u001b[31m\u001b[1mError\u001b[22m: Test timed out in 60000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m testImpl tests2/integration/_e2e/in-process-harness.ts:\u001b[2m265:2\u001b[22m\u001b[39m\n    \u001b[90m263| \u001b[39m\n    \u001b[90m264| \u001b[39m\u001b[35mconst\u001b[39m testImpl \u001b[33m=\u001b[39m ((name\u001b[33m:\u001b[39m string\u001b[33m,\u001b[39m a\u001b[33m?\u001b[39m\u001b[33m:\u001b[39m unknown\u001b[33m,\u001b[39m b\u001b[33m?\u001b[39m\u001b[33m:\u001b[39m unknown) \u001b[33m=>\u001b[39m {\n    \u001b[90m265| \u001b[39m \u001b[34mvIt\u001b[39m(name\u001b[33m,\u001b[39m \u001b[34mwrapTest\u001b[39m(\u001b[34mpickFn\u001b[39m(a\u001b[33m,\u001b[39m b)))\u001b[33m;\u001b[39m\n    \u001b[90m   | \u001b[39m \u001b[31m^\u001b[39m\n    \u001b[90m266| \u001b[39m}) \u001b[35mas\u001b[39m \u001b[33mCompatTest\u001b[39m\u001b[33m;\u001b[39m\n    \u001b[90m267| \u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m tests2/integration/mcp-meta-call.test.ts:\u001b[2m558:2\u001b[22m\u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m tests2/integration/_e2e/in-process-harness.ts:\u001b[2m229:3\u001b[22m\u001b[39m\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯\u001b[22m\u001b[39m\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m \u001b[30m\u001b[43m v2-integration \u001b[49m\u001b[39m tests2/integration/mcp-meta-call.test.ts\u001b[2m > \u001b[22mMCP meta-tool API E2E\u001b[2m > \u001b[22mPOST /api/internal/mcp-call lets broad role allow override persisted per-op `never`\n\u001b[31m\u001b[1mError\u001b[22m: Test timed out in 60000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m testImpl tests2/integration/_e2e/in-process-harness.ts:\u001b[2m265:2\u001b[22m\u001b[39m\n    \u001b[90m263| \u001b[39m\n    \u001b[90m264| \u001b[39m\u001b[35mconst\u001b[39m testImpl \u001b[33m=\u001b[39m ((name\u001b[33m:\u001b[39m string\u001b[33m,\u001b[39m a\u001b[33m?\u001b[39m\u001b[33m:\u001b[39m unknown\u001b[33m,\u001b[39m b\u001b[33m?\u001b[39m\u001b[33m:\u001b[39m unknown) \u001b[33m=>\u001b[39m {\n    \u001b[90m265| \u001b[39m \u001b[34mvIt\u001b[39m(name\u001b[33m,\u001b[39m \u001b[34mwrapTest\u001b[39m(\u001b[34mpickFn\u001b[39m(a\u001b[33m,\u001b[39m b)))\u001b[33m;\u001b[39m\n    \u001b[90m   | \u001b[39m \u001b[31m^\u001b[39m\n    \u001b[90m266| \u001b[39m}) \u001b[35mas\u001b[39m \u001b[33mCompatTest\u001b[39m\u001b[33m;\u001b[39m\n    \u001b[90m267| \u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m tests2/integration/mcp-meta-call.test.ts:\u001b[2m612:2\u001b[22m\u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m tests2/integration/_e2e/in-process-harness.ts:\u001b[2m229:3\u001b[22m\u001b[39m\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯\u001b[22m\u001b[39m\n\u001b[2m Test Files \u001b[22m \u001b[1m\u001b[31m2 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m809 passed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[33m3 skipped\u001b[39m\u001b[90m (814)\u001b[39m\n\u001b[2m      Tests \u001b[22m \u001b[1m\u001b[31m3 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m7144 passed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[33m27 skipped\u001b[39m\u001b[90m (7174)\u001b[39m\n\u001b[2m   Start at \u001b[22m 18:40:37\n\u001b[2m   Duration \u001b[22m 588.55s\u001b[2m (transform 39.26s, setup 11ms, collect 68.50s, tests 1721.99s, environment 2.44s, prepare 3.08s)\u001b[22m\n[run-v2] tier1/vitest (test:v2:core): FAIL in 590.4s\n[run-v2] tier2/playwright (test:v2:browser): PASS in 515.2s\n[run-v2] total wall 593.0s, whole-tree CPU 1868.60 CPU-min (peak procs 64)\n[run-v2] budget artifact: C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-0\\.profiles\\testing-v2\\budgets\\2026-07-08T17-50-26-994Z-full.json\n[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)"
+    },
+    {
+      "rep": 3,
+      "index": 2,
+      "pid": 11404,
+      "exitCode": 1,
+      "wallS": 523.1,
+      "overWallCap": false,
+      "spawnError": null,
+      "analysis": {
+        "vitestPass": false,
+        "playwrightPass": false,
+        "budgetFail": false,
+        "budgetPass": true,
+        "playwrightUnexpected": null,
+        "vitestSummaryOk": false
+      },
+      "failureTail": "\u001b[1A\u001b[2K[593/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-archived-fixture.spec.ts:322:2 › Sidebar archived deterministic fixture › collapsed sidebar exposes archived goal rows only when Show Archived is on\n\u001b[1A\u001b[2K[594/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:72:2 › Sidebar bobbit data-URL memoization › default idle preview bobbits keep the breathing animation\n\u001b[1A\u001b[2K[595/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:101:2 › Sidebar bobbit data-URL memoization › explicit static sidebar idle bobbits render without inline animation while preserving idle styling\n\u001b[1A\u001b[2K[596/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:129:2 › Sidebar bobbit data-URL memoization › static sidebar status rendering preserves busy and unread animations without idle breathing\n\u001b[1A\u001b[2K[597/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-archived-fixture.spec.ts:332:2 › Sidebar archived deterministic fixture › mobile archived sections share bucketing, collapse persistence, and search highlighting\n\u001b[1A\u001b[2K[598/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:171:2 › Sidebar bobbit data-URL memoization › compacting sidebar bobbits stay inside the clipped wrapper without layout shift\n\u001b[1A\u001b[2K[599/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:219:2 › Sidebar bobbit data-URL memoization › identical opts: toDataURL runs once on first render, never again\n\u001b[1A\u001b[2K[600/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:245:2 › Sidebar bobbit data-URL memoization › single-layer sprite: only one encode across many renders\n\u001b[1A\u001b[2K[601/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:263:2 › Sidebar bobbit data-URL memoization › hue-rotate is CSS-only: does not produce a distinct cached bitmap\n\u001b[1A\u001b[2K[602/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:281:2 › Sidebar bobbit data-URL memoization › key correctness: pixel-affecting opts produce DIFFERENT cached URLs\n\u001b[1A\u001b[2K[603/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-bobbit-datauri-cache.spec.ts:345:2 › Sidebar bobbit data-URL memoization › idle vs streaming must NOT collide: idle sleeps (eyes closed), streaming is awake\n\u001b[1A\u001b[2K[604/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:89:2 › Sidebar filter/search lightweight fixture › filter defaults and localStorage persistence render with the single-project sidebar\n\u001b[1A\u001b[2K[605/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:242:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row\n\u001b[1A\u001b[2K[606/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:121:2 › Sidebar filter/search lightweight fixture › search input filters rows, auto-opens archived results, supports full search, and Escape clears\n\u001b[1A\u001b[2K[607/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:265:2 › Sidebar keyboard navigation lightweight fixture › Ctrl+ArrowLeft and Ctrl+ArrowRight collapse expandable rows without moving selection\n\u001b[1A\u001b[2K[608/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:146:2 › Sidebar filter/search lightweight fixture › search expands retained collapsed goal ancestors ephemerally\n\u001b[1A\u001b[2K[609/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:291:2 › Sidebar keyboard navigation lightweight fixture › Show Archived deterministically adds archived rows to the keyboard cycle\n\u001b[1A\u001b[2K[610/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:164:2 › Sidebar filter/search lightweight fixture › search reveals matching runtime rows under collapsed goals without persisting expansion\n\u001b[1A\u001b[2K[611/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-keyboard-nav-fixture.spec.ts:313:2 › Sidebar keyboard navigation lightweight fixture › route-selected project, goal, and session rows persist after rerender\n\u001b[1A\u001b[2K[612/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:182:2 › Sidebar filter/search lightweight fixture › search retains matching first-class and delegate child sessions with goal ownership\n\u001b[1A\u001b[2K[613/623] [browser-v2] › tests2\\browser\\fixtures\\streaming-bobbit-canvas-ref.spec.ts:43:2 › Streaming bobbit canvas eye animation › keeps the existing canvas animation across streaming re-renders\n\u001b[1A\u001b[2K[614/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:91:2 › Tools page → MCP section fixture › renders flat servers, expands operations, and resets expansion on reload\n\u001b[1A\u001b[2K[615/623] [browser-v2] › tests2\\browser\\fixtures\\sidebar-filter-search-fixture.spec.ts:219:2 › Sidebar filter/search lightweight fixture › Show Read and Show Busy filters hide rows while search bypasses the filters\n\u001b[1A\u001b[2K[616/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:74:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal renders streamed line exactly once when same event is dispatched 6×\n\u001b[1A\u001b[2K[617/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:142:2 › Verification log Nx duplication (reproducing) › VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor\n\u001b[1A\u001b[2K[618/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:128:2 › Tools page → MCP section fixture › groups gateway sub-namespaces and flat servers\n\u001b[1A\u001b[2K[619/623] [browser-v2] › tests2\\browser\\fixtures\\verification-dedup.spec.ts:225:2 › Verification log Nx duplication (reproducing) › GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×\n\u001b[1A\u001b[2K[620/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:148:2 › Tools page → MCP section fixture › writes server and tool policy updates\n\u001b[1A\u001b[2K[621/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:170:2 › Tools page → MCP section fixture › uses supplied public MCP policy keys when gateway runtime names differ\n\u001b[1A\u001b[2K[622/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:213:2 › Tools page → MCP section fixture › shows inherited parent MCP policy for unset sub-namespace rows without storing override\n\u001b[1A\u001b[2K[623/623] [browser-v2] › tests2\\browser\\fixtures\\tool-manager-mcp-section.spec.ts:257:2 › Tools page → MCP section fixture › loads default and persisted policies, and reset persists empty\n\u001b[1A\u001b[2K\u001b[31m  1 failed\u001b[39m\n\u001b[31m    [browser-v2] › tests2\\browser\\journeys\\app-smoke.journey.spec.ts:308:2 › Journey: Sidebar Keyboard Nav › Ctrl+ArrowDown advances keyboard-nav through rows in DOM order \u001b[39m\n\u001b[33m  6 skipped\u001b[39m\n\u001b[32m  616 passed\u001b[39m\u001b[2m (8.6m)\u001b[22m\n[run-v2] tier1/vitest (test:v2:core): FAIL in 490.0s\n[run-v2] tier2/playwright (test:v2:browser): FAIL in 520.2s\n[run-v2] total wall 522.7s, whole-tree CPU 1864.36 CPU-min (peak procs 69)\n[run-v2] budget artifact: C:\\Users\\jsubr\\w\\bobbit-wt\\cc-proof-47860\\wt-1\\.profiles\\testing-v2\\budgets\\2026-07-08T17-49-16-763Z-full.json\n[run-v2] budget PASS (full ≤180s wall / ≤13 CPU-min)"
+    }
+  ],
+  "ledger": [
+    {
+      "rep": 1,
+      "maxWorkers": 14,
+      "sampleCount": 1068,
+      "withinCoreCount": true,
+      "samples": [
+        {
+          "ts": 1783531330552,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783531331057,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783531331561,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783531332078,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783531332597,
+          "total": 7,
+          "count": 2
+        },
+        {
+          "ts": 1783531333100,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531333617,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531334133,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531334653,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531335164,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531335686,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531336192,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531336711,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531337253,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531337795,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531338310,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531338837,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531339347,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531339860,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531340369,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531340874,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531341432,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531341939,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531342460,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531342983,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531343528,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531344047,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531344749,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531345329,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531345883,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531346391,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531346927,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531347447,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531347953,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531348472,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531349014,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531349520,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531350061,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531350579,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531351099,
+          "total": 14,
+          "count": 4
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "maxWorkers": 14,
+      "sampleCount": 1059,
+      "withinCoreCount": true,
+      "samples": [
+        {
+          "ts": 1783531886273,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783531886790,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783531887307,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783531887823,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783531888329,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531888842,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531889355,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531889870,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531890381,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531890894,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531891593,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531892118,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531892634,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531893212,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531893722,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531894298,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531894884,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531895399,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531895913,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531896454,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531897031,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531897542,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531898057,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531898568,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531899079,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531899601,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531900145,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531900664,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531901192,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531901712,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531902220,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531902732,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531903243,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531903750,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531904308,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531904870,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531905386,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531905898,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531906416,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783531907055,
+          "total": 14,
+          "count": 4
+        }
+      ]
+    },
+    {
+      "rep": 3,
+      "maxWorkers": 14,
+      "sampleCount": 1146,
+      "withinCoreCount": true,
+      "samples": [
+        {
+          "ts": 1783532433643,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783532434158,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783532434660,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783532435163,
+          "total": 0,
+          "count": 0
+        },
+        {
+          "ts": 1783532435677,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532436195,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532436711,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532437226,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532437741,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532438256,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532438768,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532439358,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532439869,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532440418,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532440929,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532441504,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532442169,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532442684,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532443191,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532443706,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532444335,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532444842,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532445353,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532445865,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532446381,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532446954,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532447468,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532448041,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532448554,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532449119,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532449627,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532450139,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532450728,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532451243,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532451754,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532452271,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532452790,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532453295,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532453807,
+          "total": 14,
+          "count": 4
+        },
+        {
+          "ts": 1783532454337,
+          "total": 14,
+          "count": 4
+        }
+      ]
+    }
+  ],
+  "createdAt": "2026-07-08T17:50:51.594Z"
+}

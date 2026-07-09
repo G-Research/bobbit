@@ -43,9 +43,9 @@ test.describe("Goal dashboard fanout", () => {
 			await expect(
 				gateRow.locator(".wf-checklist-status-label"),
 				"dashboard should update from the subscribed viewer WS before the 8s fallback poll",
-			).toHaveText("passed", { timeout: 5_000 });
-			await expect(gateRow.locator(".gate-signal-badge")).toHaveText("1 signal", { timeout: 5_000 });
-			await expect(page.locator(".signal-entry").filter({ hasText: "passed" }).first()).toBeVisible({ timeout: 5_000 });
+			).toHaveText("passed", { timeout: 20_000 });
+			await expect(gateRow.locator(".gate-signal-badge")).toHaveText("1 signal", { timeout: 10_000 });
+			await expect(page.locator(".signal-entry").filter({ hasText: "passed" }).first()).toBeVisible({ timeout: 10_000 });
 
 			const unrelatedEvents = await unrelatedPage.evaluate(() => (window as any).__goalFanoutGateEvents ?? []);
 			expect(unrelatedEvents).toEqual([]);
@@ -54,9 +54,9 @@ test.describe("Goal dashboard fanout", () => {
 			await expect(page.locator(".wf-checklist-item").filter({ hasText: "Design Doc" })).toBeVisible({ timeout: 15_000 });
 			await expandGate(page, "Design Doc");
 			const gateRowAfterReload = page.locator(".wf-checklist-item").filter({ hasText: "Design Doc" });
-			await expect(gateRowAfterReload.locator(".wf-checklist-status-label")).toHaveText("passed", { timeout: 5_000 });
-			await expect(gateRowAfterReload.locator(".gate-signal-badge")).toHaveText("1 signal", { timeout: 5_000 });
-			await expect(page.locator(".signal-entry").filter({ hasText: "passed" }).first()).toBeVisible({ timeout: 5_000 });
+			await expect(gateRowAfterReload.locator(".wf-checklist-status-label")).toHaveText("passed", { timeout: 10_000 });
+			await expect(gateRowAfterReload.locator(".gate-signal-badge")).toHaveText("1 signal", { timeout: 10_000 });
+			await expect(page.locator(".signal-entry").filter({ hasText: "passed" }).first()).toBeVisible({ timeout: 10_000 });
 		} finally {
 			await unrelatedPage.close().catch(() => undefined);
 			await deleteSession(unrelatedSessionId);

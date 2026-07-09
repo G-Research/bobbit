@@ -334,6 +334,7 @@ const extension: ExtensionFactory = (pi) => {
 				return {
 					isError: true,
 					content: [{ type: "text", text: JSON.stringify({ error: "transcript_unavailable", detail: err?.message ?? String(err) }) }],
+					details: undefined,
 				};
 			}
 			if (!result.ok) {
@@ -342,6 +343,7 @@ const extension: ExtensionFactory = (pi) => {
 				return {
 					isError: true,
 					content: [{ type: "text", text: JSON.stringify(detail ? { error: code, detail } : { error: code }) }],
+					details: undefined,
 				};
 			}
 			const envelope = result.body;

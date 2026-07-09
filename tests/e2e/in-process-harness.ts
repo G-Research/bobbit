@@ -211,6 +211,9 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		process.env.BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS = "100";
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
+		// Reduce post-exit stdio flush grace from 2000ms to 100ms so fast
+		// verification commands (echo ok, node -e) complete quickly under load.
+		process.env.BOBBIT_VERIFICATION_EXIT_CLOSE_GRACE_MS = "100";
 		// Skip outbound network probes and per-prompt title-generation calls.
 		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
 		process.env.BOBBIT_SKIP_TITLE_GEN = "1";

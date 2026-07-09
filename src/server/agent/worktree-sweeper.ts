@@ -21,9 +21,7 @@
  * `session-<slug>-<id8>` / `session-new-session-<id8>` orphan handling).
  */
 
-import { execFile as execFileCb } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { cleanupWorktree } from "../skills/git.js";
@@ -31,8 +29,7 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
 import { classifyPoolReclaimCandidate, isBobbitPoolBranch, isContainerInternalWorktreePath, parseGitWorktreeList } from "./worktree-inventory.js";
 import { worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
-
-const execFile = promisify(execFileCb);
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
@@ -45,15 +42,15 @@ function gitChildLabel(args: readonly string[]): string {
 	return cmd ? `git ${cmd}` : "git";
 }
 
-async function execGit(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+async function execGit(args: readonly string[], options?: any, commandRunner: CommandRunner = realCommandRunner): Promise<{ stdout: string; stderr: string }> {
 	if (!cpuDiagnosticsEnabled()) {
-		return await execFile("git", args, options) as unknown as { stdout: string; stderr: string };
+		return await commandRunner.execFile("git", args, options) as unknown as { stdout: string; stderr: string };
 	}
 	const start = performance.now();
 	let success = 0;
 	let errorCode = "none";
 	try {
-		const result = await execFile("git", args, options) as unknown as { stdout: string; stderr: string };
+		const result = await commandRunner.execFile("git", args, options) as unknown as { stdout: string; stderr: string };
 		success = 1;
 		return result;
 	} catch (err) {
@@ -119,7 +116,9 @@ export async function sweepOrphanedWorktrees(opts: {
 	sessions: SweepRecord[];
 	teams?: SweepRecord[];
 	staff: SweepRecord[];
+	commandRunner?: CommandRunner;
 }): Promise<SweepResult> {
+	const commandRunner = opts.commandRunner ?? realCommandRunner;
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
 	const diagCounters = diagEnabled ? {
@@ -196,7 +195,7 @@ export async function sweepOrphanedWorktrees(opts: {
 					const { stdout } = await execGit(["worktree", "list", "--porcelain"], {
 						cwd: repoPath,
 						timeout: 10_000,
-					});
+					}, commandRunner);
 					for (const wt of parseGitWorktreeList(stdout)) {
 						worktrees.push({ ...wt, repoPath });
 						if (diagCounters) diagCounters.worktreesSeen++;
@@ -268,7 +267,7 @@ export async function sweepOrphanedWorktrees(opts: {
 				if (!branch) continue; // detached worktree; leave alone.
 
 				try {
-					await cleanupWorktree(wt.repoPath, wt.path, branch, !archivedBranches.has(branch));
+					await cleanupWorktree(wt.repoPath, wt.path, branch, !archivedBranches.has(branch), commandRunner);
 					cleaned++;
 					if (diagCounters) diagCounters.cleaned++;
 					console.log(`[sweeper] Cleaned orphan worktree: ${wt.path} (branch: ${branch}, repo: ${wt.repoPath})`);

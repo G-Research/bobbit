@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Clock } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -125,6 +127,8 @@ export interface RpcBridgeOptions {
 	 * Valid: off|minimal|low|medium|high. Silently ignored otherwise.
 	 */
 	initialThinkingLevel?: string;
+	/** Timer/clock implementation. Defaults to real timers. */
+	clock?: Clock;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -211,10 +215,16 @@ export function synthesizeAttachmentText(
 
 let _factory: RpcBridgeFactory | null = null;
 
+export function getRegisteredRpcBridgeFactory(): RpcBridgeFactory | null {
+	return _factory;
+}
+
 /**
- * Register an alternative bridge factory. Called by test harnesses to
+ * Register an alternative bridge factory. Called by legacy test harnesses to
  * route mock sessions to an in-process implementation. Return `null` from
  * the factory to fall through to the default child-process RpcBridge.
+ *
+ * @deprecated Pass `GatewayDeps.agentBridgeFactory` to `createGateway` instead.
  */
 export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void {
 	_factory = factory;
@@ -335,7 +345,7 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 export class RpcBridge {
 	private process: ChildProcess | null = null;
 	private requestId = 0;
-	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<typeof setTimeout> }>();
+	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<Clock["setTimeout"]> }>();
 	private eventListeners: RpcEventListener[] = [];
 	private lineBuffer = "";
 	/** Persistent UTF-8 decoders so a multibyte char split across two stdout/
@@ -346,6 +356,7 @@ export class RpcBridge {
 	private stderrDecoder = new StringDecoder("utf8");
 	/** Ring buffer of last stderr lines — included in exit error messages for diagnostics. */
 	private stderrTail: string[] = [];
+	private readonly clock: Clock = realClock;
 
 	constructor(private options: RpcBridgeOptions = {}) {
 		// If a test-registered factory claims this options object, return that
@@ -361,6 +372,7 @@ export class RpcBridge {
 				return alt as unknown as RpcBridge;
 			}
 		}
+		this.clock = options.clock ?? realClock;
 	}
 
 	async start(): Promise<void> {
@@ -429,7 +441,7 @@ export class RpcBridge {
 					this.process!.once("exit", onExit);
 					// If no error within 100ms, the spawn is stable
 					const startupDelay = this.options.containerId ? 100 : 100;
-					setTimeout(() => {
+					this.clock.setTimeout(() => {
 						if (!settled) {
 							settled = true;
 							this.process?.removeListener("error", onError);
@@ -457,7 +469,7 @@ export class RpcBridge {
 						`retry ${attempt + 1}/${MAX_SPAWN_RETRIES} in ${delay}ms` +
 						`${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}`,
 					);
-					await new Promise(resolve => setTimeout(resolve, delay));
+					await new Promise<void>(resolve => this.clock.setTimeout(() => resolve(), delay));
 					continue;
 				}
 				throw err;
@@ -561,7 +573,7 @@ export class RpcBridge {
 		this.process!.on("error", (err: NodeJS.ErrnoException) => {
 			console.error(`[rpc-bridge] Process error: ${err.code || err.message}${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}`);
 			for (const [, p] of this.pending) {
-				clearTimeout(p.timeout);
+				this.clock.clearTimeout(p.timeout);
 				p.reject(err);
 			}
 			this.pending.clear();
@@ -579,7 +591,7 @@ export class RpcBridge {
 			// can surface the actual failure reason instead of a generic "exited with code 1".
 			const exitMsg = `Agent process exited with ${reason}${stderrContext}`;
 			for (const [, p] of this.pending) {
-				clearTimeout(p.timeout);
+				this.clock.clearTimeout(p.timeout);
 				p.reject(new Error(exitMsg));
 			}
 			this.pending.clear();
@@ -615,7 +627,7 @@ export class RpcBridge {
 		const msg = { ...command, id };
 
 		return new Promise((resolve, reject) => {
-			const timeout = setTimeout(() => {
+			const timeout = this.clock.setTimeout(() => {
 				this.pending.delete(id);
 				reject(new Error(`Command timed out: ${command.type}`));
 			}, timeoutMs);
@@ -671,15 +683,15 @@ export class RpcBridge {
 	 * Used after spawning Docker containers where initialization can take 30-60s.
 	 */
 	async waitForReady(overallTimeoutMs = 90_000): Promise<void> {
-		const start = Date.now();
+		const start = this.clock.now();
 		const pingInterval = 2_000;
-		while (Date.now() - start < overallTimeoutMs) {
+		while (this.clock.now() - start < overallTimeoutMs) {
 			try {
 				await this.sendCommand({ type: "get_state" }, 5_000);
 				return; // Agent responded — it's ready
 			} catch {
 				if (!this.process) throw new Error("Agent process exited during initialization");
-				await new Promise((r) => setTimeout(r, pingInterval));
+				await new Promise((r) => this.clock.setTimeout(() => r(undefined), pingInterval));
 			}
 		}
 		throw new Error(`Agent did not become ready within ${overallTimeoutMs}ms`);
@@ -709,13 +721,13 @@ export class RpcBridge {
 		if (!this.process) return;
 
 		return new Promise((resolve) => {
-			const killTimer = setTimeout(() => {
+			const killTimer = this.clock.setTimeout(() => {
 				this.process?.kill("SIGKILL");
 				resolve();
 			}, 3000);
 
 			this.process!.on("exit", () => {
-				clearTimeout(killTimer);
+				this.clock.clearTimeout(killTimer);
 				resolve();
 			});
 
@@ -886,7 +898,7 @@ export class RpcBridge {
 			// Response to a pending request
 			if (parsed.type === "response" && parsed.id && this.pending.has(parsed.id)) {
 				const p = this.pending.get(parsed.id)!;
-				clearTimeout(p.timeout);
+				this.clock.clearTimeout(p.timeout);
 				this.pending.delete(parsed.id);
 				p.resolve(parsed);
 			} else {

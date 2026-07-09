@@ -1,0 +1,35 @@
+{
+  "generatedBy": "scripts/testing-v2/codemod.mjs",
+  "generatedAt": "2026-07-05T23:27:28.413Z",
+  "argv": [
+    "tests/headquarters-config-alias.test.ts"
+  ],
+  "dryRun": false,
+  "methods": [
+    "codemod"
+  ],
+  "counts": {
+    "total": 1,
+    "clean": 0,
+    "needsWithEnv": 1,
+    "needsManual": 0,
+    "written": 1
+  },
+  "files": [
+    {
+      "file": "tests/headquarters-config-alias.test.ts",
+      "target": "tests2/core/headquarters-config-alias.test.ts",
+      "method": "codemod",
+      "bucket": "v2-core",
+      "classification": "needs-withEnv",
+      "reasons": [
+        "mutates process.env — wrap in withEnv(patch, fn) to restore in finally"
+      ],
+      "transforms": [
+        "node:test→vitest imports",
+        "relative import paths"
+      ],
+      "written": true
+    }
+  ]
+}

@@ -1,5 +1,10 @@
-import { exec, execFile as execFileCb } from "node:child_process";
+import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
+import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
+import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
+export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
+export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -96,7 +101,7 @@ import {
 } from "./utils/text-selection.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
-import { recordElapsed } from "./agent/profiling.js";
+import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
@@ -115,7 +120,7 @@ import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
 
 /**
  * Render the `team_wait` result text (orchestration-core design §9). Returns on
@@ -515,7 +520,7 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
@@ -590,7 +595,10 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
 export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
 
 const execAsync = promisify(exec);
-const execFileAsync = promisify(execFileCb);
+let serverCommandRunner: CommandRunner = realCommandRunner;
+let serverRemoteGitPolicy: RemoteGitPolicy = {};
+export function __setServerRemoteGitPolicy(p: RemoteGitPolicy): RemoteGitPolicy { const prev = serverRemoteGitPolicy; serverRemoteGitPolicy = p; return prev; }
+let serverRuntimeFlags = { e2e: false, testNoExternal: false };
 
 function oneLineDescription(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -920,6 +928,8 @@ async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
 	extraBranches: readonly string[],
 	repoPath: string,
+	commandRunner: CommandRunner,
+	remotePolicy: RemoteGitPolicy = {},
 ): Promise<void> {
 	const branches = new Set<string>();
 	if (goal.branch) branches.add(goal.branch);
@@ -927,7 +937,7 @@ async function deleteRemoteGoalBranches(
 		if (b) branches.add(b);
 	}
 	if (branches.size === 0) return;
-	if (shouldSkipRemotePush()) return;
+	if (shouldSkipRemotePush(remotePolicy)) return;
 
 	// Multi-repo: iterate all configured repos and run `git push --delete` in
 	// each one in parallel. Single-repo collapses to a single repoPath.
@@ -938,7 +948,7 @@ async function deleteRemoteGoalBranches(
 
 	await Promise.allSettled(repoPaths.flatMap(rp => Array.from(branches).map(async (branch) => {
 		try {
-			await execFileAsync("git", ["push", "origin", "--delete", branch], {
+			await commandRunner.execFile("git", ["push", "origin", "--delete", branch], {
 				cwd: rp,
 				timeout: 15_000,
 			});
@@ -1040,7 +1050,7 @@ export function buildGhPrMergeArgs(branch: string | undefined, method: string, a
 
 async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
 	if (_ghExecFileForTests) return _ghExecFileForTests(args, { cwd, timeout });
-	const { stdout } = await execFileAsync("gh", [...args], { cwd, encoding: "utf-8", timeout });
+	const { stdout } = await serverCommandRunner.execFile("gh", [...args], { cwd, encoding: "utf-8", timeout });
 	return String(stdout);
 }
 
@@ -1198,34 +1208,50 @@ async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: str
 }
 
 // ── Async git helpers (avoid blocking event loop) ──
-async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: string): Promise<string> {
+function splitGitShellCommand(cmd: string): string[] {
+	const trimmed = cmd.trim();
+	if (!trimmed.startsWith("git ")) throw new Error(`Unsupported git command: ${cmd}`);
+	const body = trimmed.slice(4).trim();
+	const matches = body.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+	return matches.map(part => {
+		if ((part.startsWith('"') && part.endsWith('"')) || (part.startsWith("'") && part.endsWith("'"))) return part.slice(1, -1);
+		return part;
+	});
+}
+
+async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: string, commandRunner?: CommandRunner): Promise<string> {
+	const runner = commandRunner ?? serverCommandRunner;
 	if (containerId) {
-		// Run inside Docker container
-		const { stdout } = await execFileAsync("docker", [
+		const { stdout } = await runner.execFile("docker", [
 			"exec", "-w", cwd, containerId, "/bin/sh", "-c", cmd,
 		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-		return stdout.trim();
+		return String(stdout).trim();
+	}
+	if (cmd.trim().startsWith("git ")) {
+		const { stdout } = await runner.execFile("git", splitGitShellCommand(cmd), { cwd, encoding: "utf-8", timeout });
+		return String(stdout).trim();
 	}
 	const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout });
 	return stdout.trim();
 }
-async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?: string): Promise<string> {
-	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
+async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?: string, commandRunner?: CommandRunner): Promise<string> {
+	try { return await execGit(cmd, cwd, 5000, containerId, commandRunner); } catch { return fallback; }
 }
 
-async function execGitArgs(args: string[], cwd: string, timeout = 5000, containerId?: string): Promise<string> {
+async function execGitArgs(args: string[], cwd: string, timeout = 5000, containerId?: string, commandRunner?: CommandRunner): Promise<string> {
+	const runner = commandRunner ?? serverCommandRunner;
 	if (containerId) {
-		const { stdout } = await execFileAsync("docker", [
+		const { stdout } = await runner.execFile("docker", [
 			"exec", "-w", cwd, containerId, "git", ...args,
 		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-		return stdout.trim();
+		return String(stdout).trim();
 	}
-	const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf-8", timeout });
-	return stdout.trim();
+	const { stdout } = await runner.execFile("git", args, { cwd, encoding: "utf-8", timeout });
+	return String(stdout).trim();
 }
 // Argument-vector variant of execGitSafe: never passes user input through a shell.
-async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string): Promise<string> {
-	try { return await execGitArgs(args, cwd, 5000, containerId); } catch { return fallback; }
+async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string, commandRunner?: CommandRunner): Promise<string> {
+	try { return await execGitArgs(args, cwd, 5000, containerId, commandRunner); } catch { return fallback; }
 }
 
 function branchPublishGitArgs(branch: string): {
@@ -1574,18 +1600,18 @@ function parseCommitChangedFiles(output: string): CommitChangedFile[] {
 	});
 }
 
-async function assertCommitExists(cwd: string, commit: string, containerId?: string): Promise<void> {
+async function assertCommitExists(cwd: string, commit: string, containerId?: string, commandRunner?: CommandRunner): Promise<void> {
 	if (!isValidCommitSha(commit)) throw new Error("INVALID_COMMIT");
 	try {
-		await execGitArgs(["cat-file", "-e", `${commit}^{commit}`], cwd, 5000, containerId);
+		await execGitArgs(["cat-file", "-e", `${commit}^{commit}`], cwd, 5000, containerId, commandRunner);
 	} catch {
 		throw new Error("INVALID_COMMIT");
 	}
 }
 
-async function getCommitChangedFiles(cwd: string, sha: string, containerId?: string): Promise<CommitChangedFile[]> {
-	await assertCommitExists(cwd, sha, containerId);
-	const out = await execGitArgs(["show", "--format=", "--name-status", "--find-renames", sha], cwd, 10000, containerId);
+async function getCommitChangedFiles(cwd: string, sha: string, containerId?: string, commandRunner?: CommandRunner): Promise<CommitChangedFile[]> {
+	await assertCommitExists(cwd, sha, containerId, commandRunner);
+	const out = await execGitArgs(["show", "--format=", "--name-status", "--find-renames", sha], cwd, 10000, containerId, commandRunner);
 	return parseCommitChangedFiles(out);
 }
 
@@ -1671,19 +1697,18 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
-async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string): Promise<string> {
-	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
+async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
 	let hasHead = true;
-	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId); } catch { hasHead = false; }
+	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId, commandRunner); } catch { hasHead = false; }
 
 	let diff = "";
 	if (commit) {
 		if (!file || isUnsafeGitPath(file)) throw new Error("INVALID_PATH");
-		await assertCommitExists(cwd, commit, containerId);
-		const changedFiles = await getCommitChangedFiles(cwd, commit, containerId);
+		await assertCommitExists(cwd, commit, containerId, commandRunner);
+		const changedFiles = await getCommitChangedFiles(cwd, commit, containerId, commandRunner);
 		const renamedFile = changedFiles.find(f => f.status === "R" && (f.path === file || f.oldPath === file));
 		const pathspecs = renamedFile?.oldPath ? [renamedFile.oldPath, renamedFile.path] : [file];
-		diff = await execGitArgs(["show", "--format=", "--find-renames", commit, "--", ...pathspecs], cwd, 10000, containerId);
+		diff = await execGitArgs(["show", "--format=", "--find-renames", commit, "--", ...pathspecs], cwd, 10000, containerId, commandRunner);
 	} else if (file) {
 		// Sanitize: reject path traversal, absolute paths, drive letters
 		if (isUnsafeGitPath(file)) {
@@ -1693,48 +1718,43 @@ async function getGitDiff(cwd: string, file?: string, containerId?: string, comm
 			// Run git diff inside container
 			// Argument-vector execution — `file` is never parsed by a shell.
 			if (hasHead) {
-				diff = await execGitArgsSafe(["diff", "HEAD", "--", file], cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "HEAD", "--", file], cwd, "", containerId, commandRunner);
 			} else {
-				diff = await execGitArgsSafe(["diff", "--cached", "--", file], cwd, "", containerId)
-					+ await execGitArgsSafe(["diff", "--", file], cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "--cached", "--", file], cwd, "", containerId, commandRunner)
+					+ await execGitArgsSafe(["diff", "--", file], cwd, "", containerId, commandRunner);
 			}
 			if (!diff.trim()) {
-				diff = await execGitArgsSafe(["diff", "--no-index", "/dev/null", "--", file], cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "--no-index", "/dev/null", "--", file], cwd, "", containerId, commandRunner);
 			}
 		} else if (hasHead) {
-			const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--", file], opts);
-			diff = stdout;
+			diff = await execGitArgs(["diff", "HEAD", "--", file], cwd, 5000, undefined, commandRunner);
 		} else {
-			const { stdout: s1 } = await execFileAsync("git", ["diff", "--cached", "--", file], opts);
-			const { stdout: s2 } = await execFileAsync("git", ["diff", "--", file], opts);
-			diff = s1 + s2;
+			diff = await execGitArgs(["diff", "--cached", "--", file], cwd, 5000, undefined, commandRunner)
+				+ await execGitArgs(["diff", "--", file], cwd, 5000, undefined, commandRunner);
 		}
 		// Try untracked if empty (host path only — container path handled above)
 		if (!diff.trim() && !containerId) {
 			try {
 				const devNull = process.platform === "win32" ? "NUL" : "/dev/null";
-				const { stdout } = await execFileAsync("git", ["diff", "--no-index", devNull, "--", file], opts);
-				diff = stdout;
+				diff = await execGitArgs(["diff", "--no-index", devNull, "--", file], cwd, 5000, undefined, commandRunner);
 			} catch (e: any) {
 				// git diff --no-index exits 1 when there are differences
-				if (e.stdout) diff = e.stdout;
+				if (e.stdout) diff = String(e.stdout);
 			}
 		}
 	} else {
 		if (containerId) {
 			if (hasHead) {
-				diff = await execGitSafe("git diff HEAD", cwd, "", containerId);
+				diff = await execGitSafe("git diff HEAD", cwd, "", containerId, commandRunner);
 			} else {
-				diff = await execGitSafe("git diff --cached", cwd, "", containerId)
-					+ await execGitSafe("git diff", cwd, "", containerId);
+				diff = await execGitSafe("git diff --cached", cwd, "", containerId, commandRunner)
+					+ await execGitSafe("git diff", cwd, "", containerId, commandRunner);
 			}
 		} else if (hasHead) {
-			const { stdout } = await execFileAsync("git", ["diff", "HEAD"], opts);
-			diff = stdout;
+			diff = await execGitArgs(["diff", "HEAD"], cwd, 5000, undefined, commandRunner);
 		} else {
-			const { stdout: s1 } = await execFileAsync("git", ["diff", "--cached"], opts);
-			const { stdout: s2 } = await execFileAsync("git", ["diff"], opts);
-			diff = s1 + s2;
+			diff = await execGitArgs(["diff", "--cached"], cwd, 5000, undefined, commandRunner)
+				+ await execGitArgs(["diff"], cwd, 5000, undefined, commandRunner);
 		}
 	}
 
@@ -1764,9 +1784,79 @@ export interface GatewayConfig {
 	tls?: TlsConfig;
 	/** Force auth even on localhost (used by E2E tests). */
 	forceAuth?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_MCP behavior. */
+	skipMcp?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_WORKTREE_POOL behavior. */
+	skipWorktreePool?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_SKIP_TITLE_GEN behavior. */
+	skipTitleGeneration?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_TEST_NO_PUSH behavior. */
+	skipRemotePush?: boolean;
+	/** Runtime boundary flag for legacy BOBBIT_TEST_NO_REMOTE/BOBBIT_TEST_NO_EXTERNAL behavior. */
+	skipNonLocalRemoteGit?: boolean;
+	/**
+	 * Override for the builtin `defaults/` tree. Defaults to undefined, in which
+	 * case BuiltinConfigProvider uses its dist-relative default. Used by the v2
+	 * test harness to point a src-booted gateway at the repo-root `defaults/`.
+	 */
+	builtinsDir?: string;
+	/**
+	 * Override for the builtin packs (`market-packs/`) dir. Defaults to undefined,
+	 * in which case resolveBuiltinPacksDir uses its dist-relative default. Used by
+	 * the v2 test harness to point a src-booted gateway at repo-root `market-packs/`.
+	 */
+	builtinPacksDir?: string;
 }
 
-export function createGateway(config: GatewayConfig) {
+export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
+	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
+	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
+	if (deps?.agentBridgeFactory) {
+		registerRpcBridgeFactory(deps.agentBridgeFactory);
+	}
+	const registeredRpcBridgeFactory = getRegisteredRpcBridgeFactory();
+	const gatewayDeps = resolveGatewayDeps({
+		...deps,
+		agentBridgeFactory: deps?.agentBridgeFactory ?? registeredRpcBridgeFactory ?? undefined,
+	});
+	serverCommandRunner = gatewayDeps.commandRunner;
+	const envRuntimeFlags = resolveLegacyTestRuntimeFlags();
+	const gatewayRuntimeFlags = {
+		...envRuntimeFlags,
+		skipRemotePush: config.skipRemotePush ?? envRuntimeFlags.skipRemotePush,
+		skipNonLocalRemoteGit: config.skipNonLocalRemoteGit ?? envRuntimeFlags.skipNonLocalRemoteGit,
+		skipMcp: config.skipMcp ?? envRuntimeFlags.skipMcp,
+		skipWorktreePool: config.skipWorktreePool ?? envRuntimeFlags.skipWorktreePool,
+		skipTitleGeneration: config.skipTitleGeneration ?? envRuntimeFlags.skipTitleGeneration,
+	};
+	config = {
+		...config,
+		skipRemotePush: gatewayRuntimeFlags.skipRemotePush,
+		skipNonLocalRemoteGit: gatewayRuntimeFlags.skipNonLocalRemoteGit,
+		skipMcp: gatewayRuntimeFlags.skipMcp,
+		skipWorktreePool: gatewayRuntimeFlags.skipWorktreePool,
+		skipTitleGeneration: gatewayRuntimeFlags.skipTitleGeneration,
+	};
+	const remoteGitPolicy: RemoteGitPolicy = {
+		skipRemotePush: gatewayRuntimeFlags.skipRemotePush,
+		skipNonLocalRemoteGit: gatewayRuntimeFlags.skipNonLocalRemoteGit,
+		e2eTmpRoot: gatewayRuntimeFlags.e2eTmpRoot,
+	};
+	serverRemoteGitPolicy = remoteGitPolicy;
+	serverRuntimeFlags = { e2e: gatewayRuntimeFlags.e2e, testNoExternal: gatewayRuntimeFlags.testNoExternal };
+	const worktreeSetupRuntime = {
+		skipNpmCi: gatewayRuntimeFlags.skipNpmCi,
+		recordSetupPath: gatewayRuntimeFlags.testRecordSetup,
+	};
+	configureProfilingRuntime({ e2eProfile: gatewayRuntimeFlags.e2eProfile, e2eProfileFlushMs: gatewayRuntimeFlags.e2eProfileFlushMs });
+	configureAigwRuntimeFlags({ skipAigwDiscovery: gatewayRuntimeFlags.skipAigwDiscovery, testNoExternal: gatewayRuntimeFlags.testNoExternal, e2e: gatewayRuntimeFlags.e2e });
+	let rpcBridgeFactoryRestored = false;
+	const restoreExplicitRpcBridgeFactory = () => {
+		if (!hasExplicitAgentBridgeFactory || rpcBridgeFactoryRestored) return;
+		rpcBridgeFactoryRestored = true;
+		registerRpcBridgeFactory(previousRpcBridgeFactory);
+	};
+
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
 	migrateLegacyHeadquartersDirectory({
@@ -1789,7 +1879,7 @@ export function createGateway(config: GatewayConfig) {
 	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
 	// they do not enter through cli.ts. This is a no-op after CLI initialization.
 	globalAgentDir();
-	if (cpuDiagnosticsEnabled()) getCpuDiagnostics();
+	if (cpuDiagnosticsEnabled()) getCpuDiagnostics(gatewayDeps.clock);
 
 	// Initialize module-level caches for parameterized modules
 	initPromptDirs(stateDir);
@@ -1840,11 +1930,18 @@ export function createGateway(config: GatewayConfig) {
 		projectRegistry.list().map(p => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
 	);
 
-	const projectConfigStore = new ProjectConfigStore(configDir);
+	const projectConfigStore = new ProjectConfigStore(configDir, gatewayDeps.fsImpl);
 
 	// Initialize per-project contexts. Headquarters shares the server-scope
 	// ProjectConfigStore so server/HQ writes cannot stale-read or clobber.
-	const projectContextManager = new ProjectContextManager(projectRegistry, { headquartersProjectConfigStore: projectConfigStore });
+	const projectContextManager = new ProjectContextManager(projectRegistry, {
+		headquartersProjectConfigStore: projectConfigStore,
+		fsImpl: gatewayDeps.fsImpl,
+		clock: gatewayDeps.clock,
+		commandRunner: gatewayDeps.commandRunner,
+		remotePolicy: remoteGitPolicy,
+		worktreeSetupRuntime,
+	});
 	projectContextManager.initAll();
 
 	// Migrate inline token values from project.yaml → secrets.json (one-time)
@@ -1887,9 +1984,9 @@ export function createGateway(config: GatewayConfig) {
 	}
 
 	const colorStore = new ColorStore(stateDir);
-	const prStatusStore = new PrStatusStore(stateDir);
-	const preferencesStore = new PreferencesStore(stateDir);
-	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
+	const prStatusStore = new PrStatusStore(stateDir, gatewayDeps.fsImpl);
+	const preferencesStore = new PreferencesStore(stateDir, gatewayDeps.fsImpl);
+	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir, gatewayDeps.fsImpl);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;
@@ -1936,6 +2033,12 @@ export function createGateway(config: GatewayConfig) {
 		groupPolicyStore,
 		projectContextManager,
 		prStatusStore,
+		clock: gatewayDeps.clock,
+		commandRunner: gatewayDeps.commandRunner,
+		skipTitleGeneration: gatewayRuntimeFlags.skipTitleGeneration,
+		remoteGitPolicy,
+		testPreparingDelayMs: gatewayRuntimeFlags.testPreparingDelayMs,
+		worktreeSetupRuntime,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 
@@ -1950,7 +2053,7 @@ export function createGateway(config: GatewayConfig) {
 		};
 	}
 
-	const builtinConfigProvider = new BuiltinConfigProvider();
+	const builtinConfigProvider = new BuiltinConfigProvider(config.builtinsDir);
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
 	// Direct store lookups (roleStore.get()) transparently fall back to
 	// builtins, so no seeding to disk is needed. Workflows are project-
@@ -1972,6 +2075,12 @@ export function createGateway(config: GatewayConfig) {
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
+	// Keep the cascade's first-party pack band aligned with the runtime tool loader
+	// (buildMarketToolRootsForProject below also resolves via config.builtinPacksDir).
+	// Passing the identical resolved dir prevents a split-brain where a shipped pack
+	// tool exists at runtime but is missing from the cascade (surfacing as origin
+	// "mcp"). Production passes undefined ⇒ same dist default the constructor uses.
+	configCascade.setBuiltinPacksDir(resolveBuiltinPacksDir(config.builtinPacksDir));
 	sessionManager.configCascade = configCascade;
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
@@ -1985,7 +2094,7 @@ export function createGateway(config: GatewayConfig) {
 	// scope `base` via scopePaths() (design §1.3.1). Server/HQ base is the
 	// physical Headquarters directory, global-user is the home dir, project is
 	// each project's rootPath.
-	const marketplaceSourceStore = new MarketplaceSourceStore(configDir);
+	const marketplaceSourceStore = new MarketplaceSourceStore(configDir, gatewayDeps.fsImpl);
 	const marketplaceInstaller = new MarketplaceInstaller({
 		sourceStore: marketplaceSourceStore,
 		cacheRoot: path.join(bobbitStateDir(), "marketplace-cache"),
@@ -2030,7 +2139,7 @@ export function createGateway(config: GatewayConfig) {
 		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		return buildMarketToolRootsForProject({
 			projectId: effectiveProjectId,
-			builtinEntries: builtinFirstPartyPackEntries(resolveBuiltinPacksDir()),
+			builtinEntries: builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)),
 			marketEntries: (scope, pid) => marketPackProvider.marketEntries(scope, pid),
 			disabledTools: (scope, pid, packName) => packActivationStore(scope, pid)?.getPackActivation(scope, packName).tools,
 		});
@@ -2093,7 +2202,7 @@ export function createGateway(config: GatewayConfig) {
 		// deduped by resolved path with the same `seen` set, so a user-installed
 		// same-name pack (pushed later from a scope band) still wins when the
 		// registry collapses to one winning pack per packId.
-		for (const e of builtinFirstPartyPackEntries(resolveBuiltinPacksDir())) {
+		for (const e of builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir))) {
 			const key = path.resolve(e.path);
 			if (seen.has(key)) continue;
 			seen.add(key);
@@ -2244,7 +2353,7 @@ export function createGateway(config: GatewayConfig) {
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
-		trace: new ContextTraceStore(bobbitStateDir()),
+		trace: new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl),
 		// Hierarchical goal-metadata resolver. The hub is shared across projects
 		// while each GoalStore is per ProjectContext, so route STRICTLY by goalId
 		// (never the caller-supplied projectId, which may be stale/cross-project).
@@ -2308,7 +2417,7 @@ export function createGateway(config: GatewayConfig) {
 		},
 	});
 
-	const staffManager = new StaffManager(projectContextManager);
+	const staffManager = new StaffManager(projectContextManager, { remotePolicy: remoteGitPolicy, worktreeSetupRuntime });
 	sessionManager.setStaffManager(staffManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
@@ -2340,6 +2449,7 @@ export function createGateway(config: GatewayConfig) {
 		sessionManager,
 		staffManager,
 		inboxStore: crossProjectInboxStore,
+		clock: gatewayDeps.clock,
 	});
 	inboxManager.setNudger(inboxNudger);
 	staffManager.setInboxManager(inboxManager);
@@ -2355,7 +2465,7 @@ export function createGateway(config: GatewayConfig) {
 		console.warn("[server] backfillStaffIds failed (non-fatal):", err);
 	}
 
-	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager);
+	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager, gatewayDeps.clock);
 	triggerEngine.start();
 	inboxNudger.start();
 
@@ -2427,7 +2537,8 @@ export function createGateway(config: GatewayConfig) {
 		projectContextManager,
 		toolManager,
 		orchestrationCore,
-	});
+		commandRunner: gatewayDeps.commandRunner,
+	}, undefined, gatewayDeps.clock);
 	const bgProcessManager = new BgProcessManager(
 		(sessionId: string) => {
 			const session = sessionManager.getSession(sessionId);
@@ -2444,12 +2555,15 @@ export function createGateway(config: GatewayConfig) {
 				return undefined;
 			}
 		},
+		undefined,
+		undefined,
+		gatewayDeps.clock,
 	);
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();
 
-	const cleanupInterval = setInterval(() => {
+	const cleanupInterval = gatewayDeps.clock.setInterval(() => {
 		rateLimiter.cleanup();
 	}, 60_000);
 
@@ -2577,7 +2691,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2940,7 +3054,7 @@ export function createGateway(config: GatewayConfig) {
 		});
 	}
 
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade);
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -2992,6 +3106,7 @@ export function createGateway(config: GatewayConfig) {
 
 	return {
 		server,
+		deps: gatewayDeps,
 		sessionManager,
 		/** @internal Exposed for in-process E2E tests to drive supervisor-respawn directly. */
 		teamManager,
@@ -3009,8 +3124,8 @@ export function createGateway(config: GatewayConfig) {
 			writeOpenAIModelAdditions();
 			await initExtensionChannelsOnce();
 
-			// Initialize MCP servers (skip in test environments)
-			if (!process.env.BOBBIT_SKIP_MCP) {
+			// Initialize MCP servers (skip when disabled by gateway runtime config)
+			if (!gatewayRuntimeFlags.skipMcp) {
 				try {
 					await sessionManager.initMcp(headquartersDir());
 				} catch (err) {
@@ -3084,8 +3199,8 @@ export function createGateway(config: GatewayConfig) {
 				// `ensureForProject` rejects on the awaited boundary (no fire-and-forget).
 				const resolveOrigin = async (cwd: string): Promise<string | null> => {
 					try {
-						const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 5000 });
-						return stdout.trim() || null;
+						const { stdout } = await serverCommandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5000 });
+						return String(stdout).trim() || null;
 					} catch {
 						return null;
 					}
@@ -3184,7 +3299,7 @@ export function createGateway(config: GatewayConfig) {
 					baseRefResolver: () => cfg.get("base_ref"),
 				};
 			};
-			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
+			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
@@ -3343,7 +3458,7 @@ export function createGateway(config: GatewayConfig) {
 				})();
 
 				const poolInitTask = (async () => {
-					if (process.env.BOBBIT_SKIP_WORKTREE_POOL) return;
+					if (gatewayRuntimeFlags.skipWorktreePool) return;
 					// Hidden contexts (synthetic system project) must NOT seed a
 					// worktree pool. When bobbit's state dir is nested inside an
 					// unrelated git checkout, `isGitRepo(<state>/system-project)`
@@ -3454,35 +3569,39 @@ export function createGateway(config: GatewayConfig) {
 			throw new Error(`All ports ${config.port}-${maxPort} in use`);
 		},
 		async shutdown() {
-			// Stop accepting NEW connections AND forcibly terminate existing
-			// keep-alive connections BEFORE we tear down the state stores.
-			// Without this, an HTTP/1.1 keep-alive connection from the client
-			// can still deliver a request to handleApiRoute mid-shutdown (e.g.
-			// during the awaits below), after projectContextManager.closeAll()
-			// has emptied the contexts map — producing spurious `Goal "X" not
-			// found in any project` errors. It also matters for the test
-			// crash/restart path: a stale keep-alive connection on the OLD
-			// server's accept() fd survives port reuse and routes new requests
-			// to the OLD (already torn down) handler closure. Forcibly closing
-			// connections forces clients to reconnect to the NEW server.
-			try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
-			server.close();
-			clearInterval(cleanupInterval);
-			triggerEngine.stop();
-			inboxNudger.stop();
-			wss.close();
-			await disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown");
-			try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
-			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-			for (const pool of sessionManager.getAllWorktreePools().values()) {
-				await pool.drain();
+			try {
+				// Stop accepting NEW connections AND forcibly terminate existing
+				// keep-alive connections BEFORE we tear down the state stores.
+				// Without this, an HTTP/1.1 keep-alive connection from the client
+				// can still deliver a request to handleApiRoute mid-shutdown (e.g.
+				// during the awaits below), after projectContextManager.closeAll()
+				// has emptied the contexts map — producing spurious `Goal "X" not
+				// found in any project` errors. It also matters for the test
+				// crash/restart path: a stale keep-alive connection on the OLD
+				// server's accept() fd survives port reuse and routes new requests
+				// to the OLD (already torn down) handler closure. Forcibly closing
+				// connections forces clients to reconnect to the NEW server.
+				try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
+				server.close();
+				gatewayDeps.clock.clearInterval(cleanupInterval);
+				triggerEngine.stop();
+				inboxNudger.stop();
+				wss.close();
+				await disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown");
+				try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
+				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
+				for (const pool of sessionManager.getAllWorktreePools().values()) {
+					await pool.drain();
+				}
+				await sessionManager.shutdown();
+				await projectContextManager.closeAll();
+				if (sandboxManager) {
+					await sandboxManager.shutdownAll();
+				}
+				await sessionManager.cleanupSandboxNetwork();
+			} finally {
+				restoreExplicitRpcBridgeFactory();
 			}
-			await sessionManager.shutdown();
-			await projectContextManager.closeAll();
-			if (sandboxManager) {
-				await sandboxManager.shutdownAll();
-			}
-			await sessionManager.cleanupSandboxNetwork();
 		},
 	};
 }
@@ -3673,6 +3792,10 @@ async function handleApiRoute(
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionChannelServices?: ExtensionChannelServices,
+	fetchImpl: typeof fetch = fetch,
+	commandRunner?: CommandRunner,
+	fsImpl?: FsLike,
+	clock?: Clock,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -3845,6 +3968,8 @@ async function handleApiRoute(
 		orchestrationCore,
 		packStore: getPackStore(),
 		sessionSecretStore: sessionManager.sessionSecretStore,
+		commandRunner: serverCommandRunner,
+		noExternal: serverRuntimeFlags.testNoExternal || serverRuntimeFlags.e2e,
 	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────
@@ -4126,7 +4251,7 @@ async function handleApiRoute(
 	// dedupe by seq and the message list stays stable.
 	const replayMatch = url.pathname.match(/^\/api\/internal\/test\/replay-buffered-events\/([^/]+)$/);
 	if (replayMatch && req.method === "POST") {
-		if (process.env.BOBBIT_E2E !== "1") { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
+		if (!serverRuntimeFlags.e2e) { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
 		const sessionId = replayMatch[1];
 		const session = sessionManager.getSession(sessionId);
 		if (!session) { json({ error: "session not found" }, 404); return; }
@@ -4208,11 +4333,12 @@ async function handleApiRoute(
 	//   Returns { path, created, content }.
 	if (url.pathname === "/api/system-prompt/customise" && req.method === "POST") {
 		const userPath = path.join(bobbitConfigDir(), "system-prompt.md");
-		const defaultPath = path.join(
-			path.dirname(fileURLToPath(import.meta.url)),
-			"defaults",
-			"system-prompt.md",
-		);
+		// Resolve the shipped default via config.builtinsDir when the gateway was
+		// pointed at a repo-root `defaults/` (src-booted test harness); production
+		// leaves builtinsDir undefined and falls back to the dist-relative path.
+		const defaultsBase = config.builtinsDir
+			?? path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults");
+		const defaultPath = path.join(defaultsBase, "system-prompt.md");
 		let created = false;
 		try {
 			if (!fs.existsSync(userPath)) {
@@ -4837,7 +4963,7 @@ async function handleApiRoute(
 					const primaryRepoPath = isMultiRepo
 						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 						: await getRepoRoot(body.rootPath);
-					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 					// Only pin when the detected ref is grammar-valid AND present in
 					// every component repo — otherwise a manual save would reject it
 					// and it could break worktree creation for the lacking component.
@@ -4851,8 +4977,8 @@ async function handleApiRoute(
 				}
 			} catch { /* best-effort — leave base_ref blank */ }
 			// Initialize worktree pool if the new project is a git repo.
-			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
-			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
+			// Respect gateway runtime config for E2E/CI.
+			if (!config.skipWorktreePool) {
 				try {
 					// Multi-repo: rootPath is a container dir, individual repos sit
 					// under <rootPath>/<repo>/. We treat that case as "git-ready" if
@@ -5015,7 +5141,7 @@ async function handleApiRoute(
 					const primaryRepoPath = isMultiRepo
 						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 						: await getRepoRoot(rootPath);
-					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 					// Pin only if the detected ref exists in every component repo
 					// (mirrors save-time validation). See POST /api/projects above.
 					if (
@@ -5065,7 +5191,7 @@ async function handleApiRoute(
 			// checks add-time pinning applies (grammar + cross-component existence).
 			// The Settings "Detect from remote" button fills this value, so a
 			// non-saveable value here would be rejected by the normal Save path.
-			let detected = await detectBaseRefFromRemote(primaryRepoPath);
+			let detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 			if (
 				detected
 				&& (!isValidBaseRefBranchGrammar(detected)
@@ -5247,14 +5373,14 @@ async function handleApiRoute(
 						// repo, fail with the tag-specific message rather than the generic
 						// "not present" error.
 						try {
-							await execFileAsync("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
+							await serverCommandRunner.execFile("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
 							tagDetected = true;
 							break;
 						} catch {
 							// Not a tag in this repo — continue with branch-ref check below.
 						}
 						try {
-							await execFileAsync("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
+							await serverCommandRunner.execFile("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
 						} catch {
 							failures.push({
 								component: c.name,
@@ -5868,7 +5994,7 @@ async function handleApiRoute(
 			if (Number.isFinite(n) && n > 0) limit = Math.min(n, 1000);
 		}
 		try {
-			const entries = new ContextTraceStore(bobbitStateDir()).readTrace(sessionId, limit);
+			const entries = new ContextTraceStore(bobbitStateDir(), fsImpl).readTrace(sessionId, limit);
 			json({ entries });
 		} catch (err: any) {
 			jsonError(500, err);
@@ -7095,7 +7221,7 @@ async function handleApiRoute(
 			prStatusStore.remove(g.id);
 			const archivedGoal = gm.getGoal(g.id);
 			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
+				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!, serverRemoteGitPolicy).catch(err => {
 					console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
 				});
 			}
@@ -8471,7 +8597,7 @@ async function handleApiRoute(
 		const builtinSource = { id: BUILTIN_SOURCE_ID, url: "builtin:", builtin: true, addedAt: new Date(0).toISOString() };
 		// A pack name is "built-in" iff a shipped first-party pack declares it.
 		const isBuiltinPackName = (name: string): boolean =>
-			builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).some((e) => e.manifest?.name === name);
+			builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).some((e) => e.manifest?.name === name);
 		// True iff a real user install of `(scope, packName)` exists in the ledger.
 		const hasUserInstall = (scope: InstallScope, packName: string, projectId?: string): boolean =>
 			installer.listInstalled(allContexts(normalizeConfigProjectId(projectId))).some((p) => p.scope === scope && p.packName === packName);
@@ -8557,7 +8683,7 @@ async function handleApiRoute(
 			};
 			const sources: BrowseSourceState[] = [];
 			const packs: BrowsePack[] = [];
-			const builtinPacks = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e): BrowsePack => ({
+			const builtinPacks = builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).map((e): BrowsePack => ({
 				...e.manifest!,
 				dirName: e.manifest!.name,
 				hasTools: e.manifest!.contents.tools.length > 0,
@@ -8641,7 +8767,7 @@ async function handleApiRoute(
 				if (sub === "/packs" && req.method === "GET") {
 					// Map the shipped first-party packs to the same browse-row shape
 					// `installer.browsePacks` returns, flagged builtin + provided.
-					const packs = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
+					const packs = builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).map((e) => ({
 						...e.manifest!,
 						dirName: e.manifest!.name,
 						hasTools: e.manifest!.contents.tools.length > 0,
@@ -8759,7 +8885,7 @@ async function handleApiRoute(
 				// Prepend synthetic built-in pack rows (§6.4): a distinct non-install
 				// row kind (no meta/ledger entry) flagged `builtin: true`. A
 				// user-installed same-name pack still appears as its own ledger row.
-				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
+				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).map((e) => ({
 					scope: "server" as InstallScope,
 					packName: e.manifest!.name,
 					manifest: e.manifest!,
@@ -8885,7 +9011,7 @@ async function handleApiRoute(
 			// Built-in first-party packs (§7.4) have NO install-ledger entry but ARE
 			// toggleable at server scope — resolve their catalogue from the built-in band.
 			if ((!entry || !entry.manifest) && scope === "server") {
-				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
+				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)).find((e) => e.manifest?.name === packName);
 			}
 			if (!entry || !entry.manifest) return null;
 			const c = entry.manifest.contents;
@@ -9619,7 +9745,7 @@ async function handleApiRoute(
 			let sendId = modelId;
 			try {
 				const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-				const r = await fetch(modelsUrl, { signal: AbortSignal.timeout(5000) });
+				const r = await fetchImpl(modelsUrl, { signal: AbortSignal.timeout(5000) });
 				if (r.ok) {
 					const data = await r.json() as { data?: Array<{ id: string }> };
 					if (Array.isArray(data.data)) {
@@ -9639,7 +9765,7 @@ async function handleApiRoute(
 			}
 			const started = Date.now();
 			try {
-				const resp = await fetch(chatUrl, {
+				const resp = await fetchImpl(chatUrl, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({
@@ -10798,7 +10924,7 @@ async function handleApiRoute(
 		// for workflow variables such as `{{baseBranch}}` and legacy `{{master}}`.
 		const branchContainer = goalBranchContainer(goal);
 		const configuredBase = parseBaseRef(gateSignalCtx.projectConfigStore.get("base_ref") || "");
-		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer).catch(() => "master"));
+		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer, serverCommandRunner, serverRemoteGitPolicy).catch(() => "master"));
 		verificationHarness.verifyGateSignal(
 			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
@@ -11321,7 +11447,7 @@ async function handleApiRoute(
 				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const out = await execGit(`git log --format="${COMMIT_LOG_FORMAT}" --shortstat ${rangeSpec}`, goal.cwd);
+			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], goal.cwd);
 			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), goal.cwd);
 			json({ commits });
 		} catch (e: any) {
@@ -11417,7 +11543,7 @@ async function handleApiRoute(
 			diffCwd = goalRepoWorktrees[repoParam];
 		}
 		try {
-			const diff = await getGitDiff(diffCwd, file, cid, commit);
+			const diff = await getGitDiff(diffCwd, file, cid, commit, commandRunner);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
@@ -11478,12 +11604,12 @@ async function handleApiRoute(
 
 		const remoteCwd = goal.repoPath || goal.cwd;
 		try {
-			const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
+			const { stdout } = await serverCommandRunner.execFile("git", ["remote", "get-url", "origin"], {
 				cwd: remoteCwd,
 				encoding: "utf-8",
 				timeout: 5_000,
 			});
-			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(stdout.trim()), goal.branch);
+			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(String(stdout).trim()), goal.branch);
 			if (!branchUrl) { json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse); return; }
 			json({ available: true, kind: "branch", url: branchUrl } satisfies GoalGithubLinkResponse);
 		} catch {
@@ -11524,7 +11650,7 @@ async function handleApiRoute(
 		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const resolvedGoalBranch = clientGoalBranch || goal.branch;
 		try {
-			await execFileAsync("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 			json({ ok: true });
@@ -13441,7 +13567,7 @@ async function handleApiRoute(
 			// upstream config. Local-only sessions are explicitly durable via their
 			// local worktree and must not publish just because status was queried.
 			const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
-			if (publishDecision && !shouldSkipRemotePush()) {
+			if (publishDecision && !shouldSkipRemotePush(serverRemoteGitPolicy)) {
 				publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
 					containerId: cid,
 					setUpstream: publishDecision.setUpstream,
@@ -13509,7 +13635,7 @@ async function handleApiRoute(
 		// explicitly durable via their local worktree and must not publish just
 		// because status was queried.
 		const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
-		if (publishDecision && !shouldSkipRemotePush()) {
+		if (publishDecision && !shouldSkipRemotePush(serverRemoteGitPolicy)) {
 			publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
 				containerId: cid,
 				setUpstream: publishDecision.setUpstream,
@@ -13700,7 +13826,7 @@ async function handleApiRoute(
 			if (entry) diffCwd = entry.worktreePath;
 		}
 		try {
-			const diff = await getGitDiff(diffCwd, file, cid, commit);
+			const diff = await getGitDiff(diffCwd, file, cid, commit, commandRunner);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
@@ -13750,7 +13876,7 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const out = await execGit(`git log --format="${COMMIT_LOG_FORMAT}" --shortstat ${rangeSpec}`, cwd, 10000, cid);
+			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], cwd, 10000, cid);
 			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), cwd, cid);
 
 			json({ commits });
@@ -13819,7 +13945,7 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Git push"), 409); return; }
-		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
+		if (shouldSkipRemotePush(serverRemoteGitPolicy)) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -13842,7 +13968,7 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "Squash push"), 409); return; }
-		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
+		if (shouldSkipRemotePush(serverRemoteGitPolicy)) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
@@ -13898,7 +14024,7 @@ async function handleApiRoute(
 			// For sandboxed sessions, write temp file inside container
 			const msgFile = cid ? `/tmp/SQUASH_MSG_${Date.now()}` : path.join(cwd, ".git", "SQUASH_MSG");
 			if (cid) {
-				await execFileAsync("docker", [
+				await serverCommandRunner.execFile("docker", [
 					"exec", "-w", cwd, cid, "/bin/sh", "-c", `cat > ${msgFile} << 'BOBBIT_EOF'\n${fullMessage}\nBOBBIT_EOF`,
 				], { encoding: "utf-8", timeout: 5000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
 			} else {
@@ -14019,7 +14145,7 @@ async function handleApiRoute(
 		try {
 			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
 			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
-			await execFileAsync("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(cwd);
 			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
 			json({ ok: true });
@@ -14871,7 +14997,8 @@ async function handleApiRoute(
 		bgProcessManager.registerWait(sessionId, controller);
 		try {
 			await streamBgWaitResponse(res, () =>
-				bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal));
+				bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal),
+				{ clock });
 		} finally {
 			bgProcessManager.unregisterWait(sessionId, controller);
 		}
@@ -15904,7 +16031,7 @@ async function handleApiRoute(
 	// ─── Maintenance endpoints ──────────────────────────────────────────
 	// These replace the old automatic cleanup-on-startup behavior.
 	// Users can preview orphaned resources and choose to clean them up.
-	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager });
+	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager, commandRunner: serverCommandRunner, remotePolicy: serverRemoteGitPolicy });
 
 	// GET /api/maintenance/worktrees
 	if (url.pathname === "/api/maintenance/worktrees" && req.method === "GET") {
