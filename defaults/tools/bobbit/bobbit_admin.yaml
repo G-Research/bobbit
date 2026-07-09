@@ -1,0 +1,102 @@
+name: bobbit_admin
+description: "Config + destructive maintenance: project config, provider keys, marketplace, overrides, cleanup, restart."
+summary: "Gateway config + destructive maintenance"
+params: [operation, projectId?, workflowId?, name?, provider?, scope?, action?, config?, body?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: BobbitAdmin
+grantPolicy: never
+docs: |-
+  Highest-privilege gateway surface: project config, provider keys, custom providers / AI gateway, marketplace install/update/uninstall, tool/role/workflow overrides, destructive maintenance cleanup, sandbox image build, and harness restart/shutdown. Hidden unless a role/project/user policy enables the `BobbitAdmin` group.
+detail_docs: >-
+  ## Purpose
+
+
+  Curated wrapper over the gateway's **config + destructive maintenance**
+  endpoints. Highest privilege of the three `bobbit_*` tiers. Auth + URL are
+  resolved for you.
+
+
+  `grantPolicy: never` — registered but hidden unless a role, project, or user
+  tool-group policy explicitly enables the `BobbitAdmin` group. Keep this the
+  most conservative tier.
+
+
+  ## Parameters
+
+
+  - `operation` — which admin action to run (catalogue below).
+
+  - `projectId`, `workflowId`, `name` (tool/role), `provider`, `key`, `scope`
+  (`server`|`project`), `action` (sub-selector), `id` (custom-provider delete),
+  `sourceId`/`dirName`/`packName` (marketplace), `url` (aigw).
+
+  - `config` — key/values for `update_project_config` and `custom_providers`
+  upsert; `body` — any other operation body fields.
+
+
+  ## Operation catalogue
+
+  | operation | method | path | required |
+
+  |---|---|---|---|
+
+  | `update_project_config` | PUT | `/api/projects/:projectId/config` | `projectId`, `config` |
+
+  | `set_provider_key` | POST | `/api/provider-keys/:provider` | `provider`, `key` |
+
+  | `delete_provider_key` | DELETE | `/api/provider-keys/:provider` | `provider` |
+
+  | `custom_providers` | GET/POST/DELETE | `/api/custom-providers[/:id]` | `action` (list\|upsert\|delete) |
+
+  | `aigw_configure` | POST/DELETE | `/api/aigw/configure` | `action` (configure\|remove) |
+
+  | `marketplace_install` | POST | `/api/marketplace/install` | `sourceId`, `dirName`, `scope` |
+
+  | `marketplace_update` | POST | `/api/marketplace/update` | `packName`, `scope` |
+
+  | `marketplace_uninstall` | DELETE | `/api/marketplace/installed` | `packName`, `scope` |
+
+  | `tool_override` | POST | `/api/tools/:name/customize` (`?scope`, `?projectId`) | `name` |
+
+  | `role_override` | POST | `/api/roles/:name/customize` (`?scope`, `?projectId`) | `name` |
+
+  | `workflow_override` | POST | `/api/workflows/:workflowId/customize` (`?projectId`) | `workflowId`, `projectId` |
+
+  | `maintenance_cleanup` | POST | see `action` below | `action` |
+
+  | `sandbox_image_build` | POST | `/api/sandbox-image/build` | — |
+
+  | `system_prompt_customise` | POST | `/api/system-prompt/customise` | — |
+
+  | `harness_restart` | POST | `/api/harness/restart` | — |
+
+  | `shutdown` | POST | `/api/shutdown` | — |
+
+
+  ### `maintenance_cleanup` actions (`action=`)
+
+  `worktrees` → `/api/maintenance/cleanup-worktrees`;
+  `archived_session_worktrees` → `/api/maintenance/cleanup-archived-session-worktrees`;
+  `sessions` → `/api/maintenance/cleanup-sessions`;
+  `purge_archives` → `/api/maintenance/purge-archives`;
+  `cleanup_index_rows` → `/api/maintenance/cleanup-index-rows` (`projectId?`);
+  `search_rebuild` → `/api/search/rebuild` (`projectId?`);
+  `search_compact` → `/api/search/compact`.
+
+  Pass any dry-run/paths fields via `body`.
+
+
+  ## Notes / Gotchas
+
+  - **Destructive** — `maintenance_cleanup` deletes worktrees, purges archives,
+  and rebuilds the search index. `shutdown`/`harness_restart` stop or restart the
+  gateway. Confirm intent before calling.
+
+  - `*_override` ops create an override by copying into scope (the `/customize`
+  endpoints); removing an override (`DELETE …/override`) is not exposed here.
+
+  - `custom_providers`/`aigw_configure` multiplex verbs behind `action`.
+
+  - `sandbox_image_build` returns 409 if a build is already in progress.
