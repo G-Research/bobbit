@@ -75,6 +75,102 @@ export async function runGitStatusRefresh<T>(
 	}
 }
 
+/**
+ * Minimal widget-state shape the quiet-aware refresh drives. The real
+ * `AgentInterface` satisfies this structurally; tests pass a plain object (or a
+ * Proxy that records `gitStatusLoading` writes).
+ */
+export interface GitWidgetLike {
+	gitRepoKnown: GitRepoKnown;
+	gitStatusLoading: boolean;
+	gitStatus?: unknown;
+	branch?: string;
+	partial?: boolean;
+}
+
+/**
+ * Dependencies for {@link runWidgetGitRefresh}. Keeps the DOM / WebSocket /
+ * module-singleton concerns out of the state machine so it is unit-testable.
+ */
+export interface QuietRefreshDeps<T = unknown> {
+	signal: AbortSignal;
+	/** Fetcher — typically `(signal) => fetchGitStatus(id, { …, signal })`. */
+	fetch(signal: AbortSignal): Promise<GitStatusResult>;
+	/** Abortable sleep. Rejects with AbortError when the signal fires. */
+	sleep(ms: number, signal: AbortSignal): Promise<void>;
+	/** Return true to bail out (e.g. session switched away). */
+	isStale(): boolean;
+	/**
+	 * Whether the caller *requested* a quiet recheck. The refresh only actually
+	 * runs quiet when this is true AND `ai.gitRepoKnown === 'no'` (a cached
+	 * git-less session) — see {@link runWidgetGitRefresh}.
+	 */
+	quiet: boolean;
+	/**
+	 * Apply an `ok` payload to `ai` (set `gitStatus` / `partial` / `branch`).
+	 * Kept as a hook so the session-manager can preserve its
+	 * `withUntrackedStatusPreserved` merge without leaking that logic here.
+	 */
+	applyOk(ai: GitWidgetLike, data: T): void;
+	/** Persistence hook — `setCachedRepoState(sessionId, state)`. */
+	onCache(state: "yes" | "no"): void;
+	/**
+	 * Unconditional teardown, run first inside the outer `finally` (before the
+	 * staleness guard and before loading is cleared) — e.g. abort-map cleanup.
+	 */
+	onFinally?(): void;
+}
+
+/**
+ * Quiet-aware git-status refresh state machine, extracted from
+ * `session-manager.ts::refreshGitStatusForSession` so it can be unit-tested
+ * against a fake widget-state object.
+ *
+ * Rules (must stay identical to the session-manager behaviour):
+ * - `quiet` is effective only for a cached git-less session
+ *   (`deps.quiet && ai.gitRepoKnown === 'no'`). When quiet, `gitStatusLoading`
+ *   is NEVER flipped `true` (no "Checking git…" skeleton, widget stays hidden).
+ * - `onOk`: apply status via `deps.applyOk`, flip `gitRepoKnown = 'yes'`
+ *   (revealing the widget), and persist `'yes'`.
+ * - `onNotARepo`: flip `gitRepoKnown = 'no'`, clear `gitStatus`, persist `'no'`.
+ * - `onFinally`: run `deps.onFinally` unconditionally, then (when not stale)
+ *   clear `gitStatusLoading` unless this was a quiet recheck that stayed `'no'`.
+ */
+export async function runWidgetGitRefresh<T = unknown>(
+	ai: GitWidgetLike,
+	deps: QuietRefreshDeps<T>,
+): Promise<void> {
+	const quiet = deps.quiet && ai.gitRepoKnown === "no";
+	if (!quiet) ai.gitStatusLoading = true;
+
+	await runGitStatusRefresh<T>(deps.signal, {
+		fetch: deps.fetch,
+		sleep: deps.sleep,
+		isStale: deps.isStale,
+		onOk: (data) => {
+			if (deps.isStale()) return;
+			deps.applyOk(ai, data);
+			// Repo now exists — reveal the widget and resume normal behaviour.
+			ai.gitRepoKnown = "yes";
+			deps.onCache("yes");
+		},
+		onNotARepo: () => {
+			if (deps.isStale()) return;
+			ai.gitRepoKnown = "no";
+			ai.gitStatus = undefined;
+			deps.onCache("no");
+		},
+		onFinally: () => {
+			// Unconditional teardown (abort-map cleanup) first — must run even
+			// when stale so the in-flight marker cannot leak.
+			deps.onFinally?.();
+			if (deps.isStale()) return;
+			// Never surface loading for a quiet recheck that stayed git-less.
+			if (!(quiet && ai.gitRepoKnown === "no")) ai.gitStatusLoading = false;
+		},
+	});
+}
+
 /** Default abortable sleep based on `setTimeout`. */
 export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
 	return new Promise<void>((resolve, reject) => {

@@ -132,9 +132,13 @@ function acquireLock(timeoutMs) {
 			writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
 			return fd;
 		} catch (e) {
-			if (e.code !== "EEXIST") throw e;
+			// Windows surfaces a delete-pending lock as EPERM/EACCES (not EEXIST)
+			// when a concurrent holder is racing create/delete on the shared
+			// ledger — treat all three as contention and retry within the timeout.
+			const contended = e.code === "EEXIST" || e.code === "EPERM" || e.code === "EACCES";
+			if (!contended) throw e;
 			tryStealStaleLock();
-			if (Date.now() > deadline) throw new Error(`lease-bridge: could not acquire lock within ${timeoutMs}ms`);
+			if (Date.now() > deadline) throw new Error(`lease-bridge: could not acquire lock within ${timeoutMs}ms (last error: ${e.code})`);
 			sleepSync(jitter(50));
 		}
 	}
