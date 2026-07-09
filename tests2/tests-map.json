@@ -32,6 +32,10 @@
       "reason": "Playwright renderer tests for nine Children tools — uses real Chromium DOM; parallel to tests2/dom/ vitest rewrite. Tracked here to prevent orphan detection false positive."
     },
     {
+      "path": "tests2/browser/e2e/pr-walkthrough-default-off.spec.ts",
+      "reason": "Part 1+2 of 'Hide/Disable PR & Hindsight': fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; plus hindsight is absent from the built-in group and from /api/marketplace/installed. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts."
+    },
+    {
       "path": "tests2/core/bobbit-tool-credentials.test.ts",
       "reason": "bobbit gateway tool suite: credential/URL resolution — env creds, state-file fallback, absent-creds (logs + no registration, no throw), baseUrl trailing-slash trimming."
     },
@@ -114,6 +118,10 @@
     {
       "path": "tests2/core/session-mcp-projectless-fail-closed.test.ts",
       "reason": "Split-port of tests/headquarters-server-scope-guards.test.ts (projectless-session MCP fail-closed pure-unit case); that file's primary v2Path is tests2/integration/headquarters-server-scope-guards.test.ts, so this second port is tracked here to avoid an orphan."
+    },
+    {
+      "path": "tests2/core/pack-default-disabled.test.ts",
+      "reason": "Part 1 of 'Hide/Disable PR & Hindsight': pins the manifest `defaultDisabled` flag, the `isPackEffectivelyEnabled` chokepoint, the `activeBuiltinFirstPartyPackEntries` contribution filter (pr-walkthrough default-OFF, terminal unaffected, raw enumerator still lists), and ConfigCascade dropping the pr-reviewer role until pr-walkthrough is explicitly enabled."
     },
     {
       "path": "tests2/core/build-workflow-list.test.ts",

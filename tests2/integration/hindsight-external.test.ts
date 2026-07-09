@@ -1,15 +1,20 @@
 /**
  * API E2E — Hindsight pack, external mode (Extension Platform G2 / G2.1+G2.2).
  *
- * Drives the built-in (dormant-by-default) Hindsight memory provider against an
+ * Drives the (dormant-by-default) Hindsight memory provider against an
  * in-process Hindsight STUB (tests/e2e/hindsight-stub.mjs) so the lifecycle
  * recall/retain hooks, dormancy gating, retry queue, and diagnostics can be
  * exercised deterministically with no network and no real Hindsight.
  *
+ * NOTE: Hindsight is intentionally NOT shipped as a built-in first-party pack
+ * (it is hidden until the pack works — see scripts/copy-builtin-packs.mjs). This
+ * suite therefore STAGES its own server-scope copy of the pack from the repo
+ * source tree (installPack below) so the provider is present for the scenario.
+ *
  * Pattern mirrors provider-session-setup.spec.ts / provider-turn-hooks.spec.ts:
- * the pack is layered as a SERVER-SCOPE market pack on top of the real built-in
- * band (NOT via BOBBIT_BUILTIN_PACKS_DIR, which would clobber sibling specs
- * sharing the worker-scoped in-process gateway). Provider config is seeded into
+ * the pack is layered as a SERVER-SCOPE market pack (NOT via
+ * BOBBIT_BUILTIN_PACKS_DIR, which would clobber sibling specs sharing the
+ * worker-scoped in-process gateway). Provider config is seeded into
  * the pack-scoped store (the same store the loader overlays over yaml defaults —
  * design §8.3) BEFORE a session is created, so the host's config-gated activation
  * (`activation.requiresConfig: [externalUrl]`) flips the provider from dormant to

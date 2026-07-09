@@ -4,6 +4,12 @@ description: >-
   Reviews pull requests in a dedicated walkthrough panel with a pack-scoped
   reviewer role and PR walkthrough analysis tools.
 version: 1.0.0
+# Ships DISABLED by default: the built-in band resolves this pack in place, but
+# none of its contributions (role/tools/provider/entrypoints/routes) activate
+# until it is explicitly enabled from the marketplace (persists
+# `pack_activation.server.pr-walkthrough = { enabled: true }`). See
+# `isPackEffectivelyEnabled` + docs/design/built-in-first-party-packs.md.
+defaultDisabled: true
 contents:
   # pr-reviewer: the read-only reviewer role minted by the `run` route via
   # host.agents.spawn. Its toolPolicies allow the "PR Walkthrough" group

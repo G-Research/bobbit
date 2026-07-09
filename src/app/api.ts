@@ -3059,6 +3059,9 @@ export interface PackManifest {
 	version: string;
 	author?: string;
 	homepage?: string;
+	/** Ships-disabled-by-default (built-in first-party packs). When true, the
+	 *  pack contributes nothing until explicitly enabled (`DisabledRefs.enabled`). */
+	defaultDisabled?: boolean;
 	contents: {
 		roles: string[];
 		tools: string[];
@@ -3409,6 +3412,9 @@ export function getPackConflicts(projectId?: string): Promise<MarketResult<{ con
 
 /** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`. */
 export interface DisabledRefs {
+	/** Explicit-enable sentinel for ships-disabled-by-default packs. `true` opts
+	 *  the pack IN; absent ⇒ manifest default. Unused for normal packs. */
+	enabled?: boolean;
 	roles?: string[];
 	tools?: string[];
 	skills?: string[];

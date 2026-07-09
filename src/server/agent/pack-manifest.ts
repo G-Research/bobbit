@@ -187,6 +187,9 @@ export function validateManifest(
 		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows },
 	};
 	if (d.schema !== undefined) manifest.schema = schema;
+	// Ships-disabled-by-default flag (built-in first-party packs). Only `true`
+	// is meaningful; anything else is treated as absent (today's default-enabled).
+	if (d.defaultDisabled === true) manifest.defaultDisabled = true;
 	if (provides !== undefined) manifest.provides = provides;
 	if (requires !== undefined) manifest.requires = requires;
 	// NEW (pack-schema-v1 §1.2): optional top-level `routes: { module?, names? }`.

@@ -20,13 +20,13 @@ UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Serve
 Where things live. Use this to orient, then `rg` for the symbol.
 
 - **Server REST/WS**: `src/server/` — REST in `server.ts::handleApiRoute()`, WebSocket in `src/server/ws/`.
-- **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. `bash_bg` processes persist + re-attach across restart via `bg-process-{manager,store,runner}.ts`; state under `<stateDir>/bg-processes/`. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md).
+- **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md) for `bash_bg` persistence.
 - **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Tool descriptions are budget-pinned by `tests2/core/tool-description-budget.test.ts`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
 - **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; built-in packs in `market-packs/`. See [docs/marketplace.md](docs/marketplace.md).
 - **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
-- **Tests (v2)**: `tests2/{core,dom,integration}` (vitest), `tests2/browser` (Playwright), `tests2/tests-map.json` (buckets + `v2Path`); `tests/e2e/` relocate specs + harness = the `e2e:v2` tier; `tests/manual-integration/` (real agents). Guard: `tests2/core/guard-v2.test.ts` + `scripts/testing-v2/parity.mjs`.
+- **Tests (v2)**: `tests2/{core,dom,integration}` (vitest), `tests2/browser` (Playwright), `tests2/tests-map.json` (buckets + `v2Path`); `tests/e2e/` = the `e2e:v2` tier; `tests/manual-integration/` (real agents).
 - **Docs**: `docs/` (reference + design notes), `docs/design/` (per-feature design docs), `docs/debugging.md` (full diagnostic checklists), `docs/internals.md` (config cascade, sandbox, search, MCP).
 
 ## Before editing anything non-trivial
@@ -39,9 +39,9 @@ Where things live. Use this to orient, then `rg` for the symbol.
 ## Testing (Test Suite v2)
 
 - **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒vitest (`core`/`dom`/`integration`); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` (vitest) → `test:browser` (Playwright browser-v2) → `test:e2e` (real-fidelity). worktree/Docker/MCP/restart → `e2e:v2` + `test:manual`.
-- **`retries:0`** — a flake is a bug, fixed by architecture (DI seams, one-gateway-per-fork + `scope()` cleanup, observable-state waits). **No daily lane**; **external-free** (fenced runner+fetch). Concurrency via the ledger (`Σworkers≤cores`, N=1 bar).
+- **`retries:0`** — a flake is a bug, fixed by architecture (DI seams, one-gateway-per-fork + `scope()` cleanup, observable-state waits). **External-free** (fenced runner+fetch).
 - Isolation only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
-- Every user-facing feature needs a `tests2/browser` journey (nav, happy path, reload, cleanup). See [docs/testing-strategy.md](docs/testing-strategy.md), [docs/testing-coverage.md](docs/testing-coverage.md), [docs/testing-v2/](docs/testing-v2/).
+- Every user-facing feature needs a `tests2/browser` journey (nav, happy path, reload, cleanup). See [docs/testing-v2/](docs/testing-v2/).
 
 ## Git conventions
 

@@ -56,6 +56,25 @@ async function setTrustedHosts(hosts: string[]): Promise<void> {
 	await apiFetch("/api/preferences", { method: "PUT", body: JSON.stringify({ githubTrustedHosts: hosts }) });
 }
 
+// pr-walkthrough now ships DISABLED-by-default (manifest `defaultDisabled`): with
+// no explicit-enable override the pack resolves nothing, so its session-menu
+// launcher never renders. These launch tests exercise the pack ON, so enable it at
+// server scope by persisting the explicit `{ enabled: true }` override — the same
+// payload the marketplace master toggle writes — then clear it back to default-OFF
+// after each test. Mirrors pr-walkthrough-pack.spec.ts::resetPrWalkthroughActivation.
+async function enablePrWalkthroughPack(): Promise<void> {
+	await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: "pr-walkthrough", disabled: { enabled: true, roles: [], tools: [], skills: [], entrypoints: [] } }),
+	});
+}
+async function clearPrWalkthroughPack(): Promise<void> {
+	await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: "pr-walkthrough", disabled: {} }),
+	});
+}
+
 /** Open the chat-header session-actions menu and click the PR Walkthrough launcher. */
 async function clickPrWalkthroughLauncher(page: Page): Promise<void> {
 	const trigger = page.locator('[data-testid="session-actions-trigger"]').first();
@@ -76,11 +95,14 @@ test.describe("PR walkthrough — launch trust prompt", () => {
 	let savedHosts: string[] = [];
 
 	test.beforeEach(async () => {
+		await enablePrWalkthroughPack().catch(() => {});
 		savedHosts = await readTrustedHosts();
 	});
 	test.afterEach(async () => {
 		// Restore the pre-test managed list so a run never leaks a test host.
 		await setTrustedHosts(savedHosts).catch(() => {});
+		// Return the pack to default-OFF so it never leaks enabled to later specs.
+		await clearPrWalkthroughPack().catch(() => {});
 	});
 
 	async function freshSession(page: Page): Promise<string> {

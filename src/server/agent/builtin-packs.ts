@@ -20,7 +20,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { PackEntry } from "./pack-types.js";
+import type { PackEntry, PackManifest } from "./pack-types.js";
+// Type-only import (erased at runtime → no project-config-store import cycle).
+import type { DisabledRefs } from "./project-config-store.js";
 import { readManifest } from "./pack-manifest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // dist/server/agent/
@@ -57,6 +59,46 @@ export function resolveBuiltinPacksDir(override?: string): string {
  * `meta` marks provenance (`sourceUrl: "builtin:"`) so the Market UI can flag
  * `builtin: true`. Graceful on a missing dir (returns `[]`).
  */
+/**
+ * Effective activation for a pack given its manifest + stored activation refs
+ * — the single chokepoint (design option (a)) that all CONTRIBUTION enumerators
+ * consult so a ships-disabled-by-default pack resolves NOTHING until explicitly
+ * enabled.
+ *
+ * - Normal packs (`defaultDisabled` absent/false): always "enabled" here;
+ *   per-entity disable refs still apply downstream (unchanged behaviour).
+ * - Ships-disabled packs (`defaultDisabled === true`): enabled ONLY when an
+ *   explicit `{ enabled: true }` override is stored; absence ⇒ OFF.
+ *
+ * NOTE: this gates whole-pack resolution, NOT the marketplace listing — the
+ * Market UI enumerates built-in rows from the RAW
+ * {@link builtinFirstPartyPackEntries}, so a disabled pack still shows a row +
+ * toggle.
+ */
+export function isPackEffectivelyEnabled(
+	manifest: Pick<PackManifest, "defaultDisabled"> | undefined,
+	disabled: DisabledRefs | undefined,
+): boolean {
+	if (!manifest?.defaultDisabled) return true;
+	return disabled?.enabled === true;
+}
+
+/**
+ * Built-in first-party pack entries filtered to only those effectively ENABLED
+ * for CONTRIBUTION resolution (roles/tools/providers/entrypoints/routes/…). Use
+ * this everywhere a built-in band feeds the resolution/contribution pipelines
+ * (NOT the marketplace listing). `activationFor(packName)` returns the stored
+ * server-scope activation refs for the pack (missing ⇒ default).
+ */
+export function activeBuiltinFirstPartyPackEntries(
+	builtinPacksDir: string,
+	activationFor: (packName: string) => DisabledRefs | undefined,
+): PackEntry[] {
+	return builtinFirstPartyPackEntries(builtinPacksDir).filter((e) =>
+		isPackEffectivelyEnabled(e.manifest, e.manifest ? activationFor(e.manifest.name) : undefined),
+	);
+}
+
 export function builtinFirstPartyPackEntries(builtinPacksDir: string): PackEntry[] {
 	let dirents: fs.Dirent[];
 	try {
