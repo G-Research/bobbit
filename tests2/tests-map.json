@@ -20,6 +20,10 @@
   },
   "v2Native": [
     {
+      "path": "tests2/integration/direct-agent-admin-token.test.ts",
+      "reason": "Pinning test for the 'Direct-agent admin token' interim rollback: non-sandboxed (direct) agents receive the gateway ADMIN token (readToken()) via scopedGatewayEnvForDirectAgent (createSession/createDelegateSession) and applyScopedGatewayCredentials (restore/revive/respawn), while the sandbox path (mintScopedGatewayToken) still produces a per-project SCOPED token distinct from the admin token. Also pins the loud-throw when no admin token is available (no silent fallback)."
+    },
+    {
       "path": "tests2/core/verification-harness-review-reliability.test.ts",
       "reason": "Reproducing test for the 'Fix LLM review reliability' goal: pins per-attempt fresh reviewer session id (transcript not clobbered on retry) and honoring of a verification_result that arrives during teardown (no 404-drop). FAILS on HEAD, passes post-fix. Companion assertions pin the completed-but-missed-tool-call classification (non-transient → no from-scratch re-run) and that within-budget transient failures still retry."
     },
