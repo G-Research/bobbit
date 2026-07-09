@@ -24,7 +24,7 @@ Authoritative inputs:
 
 `createGateway(config, deps?)` becomes the single runtime wiring point. Missing deps always default to production implementations; the CLI boundary passes no test doubles.
 
-**CLI contract phase scoping.** During migration, `cli.ts` MAY map legacy env flags to deps (the documented CLI-only bridge that keeps the legacy suite green) — the strict "no test doubles from the CLI" contract (`cli-real-deps.test.ts`) is enforced starting at the switchover gate, at which point the env→deps mapping is deleted from `src/` and the flags are removed. Concretely: the DI-runtime and mass-migration gates permit the CLI env bridge; the switchover gate's llm-review + `cli-real-deps.test.ts` require it gone. (An earlier plan proposed a standalone `check-no-test-flags.mjs` grep gate; that was dropped — the switchover gate is llm-review-only, so no production command needs it, and `cli-real-deps.test.ts` already pins the no-test-doubles CLI contract.) Intermediate migration commits therefore never conflict with the final no-deps CLI contract.
+**CLI contract phase scoping.** During migration, `cli.ts` MAY map legacy env flags to deps (the documented CLI-only bridge that keeps the legacy suite green) — the strict "no test doubles from the CLI" contract (`cli-real-deps.test.ts`) is enforced starting at the switchover gate: the CLI injects no test doubles or harness fences. **Accepted deviation at switchover (settled with the user):** the env→runtime-flag bridge (`src/server/legacy-test-runtime-flags.ts`) is RETAINED as a documented CLI-boundary / operator-feature exception — it feeds `GatewayConfig` fields and serves operator features (`qa_start_command`, `scripts/bench-server-cpu.mjs`) — rather than being fully deleted. `cli-real-deps.test.ts` pins the narrower live contract (no test doubles from the CLI). Concretely: the DI-runtime and mass-migration gates permit the CLI env bridge; the switchover gate accepts the documented bridge plus the two `NODE_ENV === "test"` conditionals (see §1.7). (An earlier plan proposed a standalone `check-no-test-flags.mjs` grep gate; that was dropped — the switchover gate is llm-review-only, so no production command needs it, and `cli-real-deps.test.ts` already pins the no-test-doubles CLI contract.) Intermediate migration commits therefore never conflict with the final no-deps CLI contract.
 
 ```ts
 export interface Clock {
@@ -222,7 +222,9 @@ Contract tests to add under `tests2/`:
 - `tests2/core/store-fsimpl-contract.test.ts`: each listed store works with memfs and defaults to Node fs when omitted.
 - `tests2/integration/gateway-fixture-leak.test.ts`: deliberate-leak negative test for the fixture leak detector.
 
-### 1.7 Env flags eliminated at switchover
+### 1.7 Env flags at switchover (accepted CLI-boundary exception)
+
+**Accepted deviation (settled with the user):** full deletion of the env→flag bridge was NOT completed at switchover. `src/server/legacy-test-runtime-flags.ts` is retained as the documented CLI-boundary / operator-feature bridge — it feeds `GatewayConfig` fields and still serves operator features (`qa_start_command`'s `BOBBIT_LLM_REVIEW_SKIP`/`BOBBIT_SKIP_NPM_CI`, and `scripts/bench-server-cpu.mjs`). The table below records the *intended* end-state per flag; the bridge that reads them is the accepted exception. Fully eliminating it (convert to `GatewayConfig`/CLI options + migrate the operator consumers) is a tracked follow-up. `cli-real-deps.test.ts` pins the narrower live contract (the CLI injects no test doubles / harness fences).
 
 Audit command over `src/server src/app src/ui` found these files still reference test-only env behavior: `aigw-manager.ts`, `profiling.ts`, `project-assistant.ts`, `session-eager-branch-delete.ts`, `title-generator.ts`, `verification-harness.ts`, `pr-walkthrough/export-mapper.ts`, `pr-walkthrough/github-adapter.ts`, `replay-pacing.ts`, `server.ts`, `skills/git.ts`, and `skills/worktree-setup.ts`.
 
@@ -239,7 +241,7 @@ Audit command over `src/server src/app src/ui` found these files still reference
 | `BOBBIT_LLM_REVIEW_SKIP` | deleted; verification tests inject llm-review fakes through deps |
 | `BOBBIT_E2E` | deleted; behavior becomes explicit config/deps or normal production path |
 
-`NODE_ENV === "test"` conditionals are also banned in `src/` after switchover, except a documented CLI-only mapping that is removed by the switchover gate.
+`NODE_ENV === "test"` conditionals in `src/` are minimized; two remain as part of the accepted CLI-boundary exception — `cli.ts` (suppress auto-opening a browser) and `gate-diagnostics.ts` (log-retention behavior). These are documented and accepted at switchover; removing them is part of the tracked follow-up.
 
 ## 2. Tier-1 harness
 

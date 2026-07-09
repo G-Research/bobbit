@@ -1,3 +1,13 @@
+/**
+ * ACCEPTED CLI-BOUNDARY EXCEPTION (switchover, settled with the user).
+ * This env→flag bridge was NOT fully deleted at switchover. It is retained as the
+ * documented CLI-boundary / operator-feature mapping: it feeds GatewayConfig fields
+ * and serves operator features (project.yaml `qa_start_command`'s BOBBIT_LLM_REVIEW_SKIP
+ * / BOBBIT_SKIP_NPM_CI, and scripts/bench-server-cpu.mjs). It is the intentional
+ * exception to "no test-only env flags in src/"; `cli-real-deps.test.ts` pins the
+ * narrower live contract (the CLI injects no test doubles). Fully converting these to
+ * GatewayConfig/CLI options is a tracked follow-up. See docs/testing-v2/design.md §1.7.
+ */
 export interface LegacyTestRuntimeFlags {
 	skipRemotePush: boolean;
 	skipNonLocalRemoteGit: boolean;
