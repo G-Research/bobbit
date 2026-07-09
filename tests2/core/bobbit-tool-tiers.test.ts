@@ -100,8 +100,8 @@ describe("bobbit_read docs — pagination and semantic filters", () => {
 		for (const param of ["limit?", "offset?", "after?", "cursor?"]) {
 			expect(paramsLine, `params should include ${param}`).toContain(param);
 		}
-		expect(raw).toMatch(/default\s+page\s+size[^\n]*50|50[^\n]*default\s+page\s+size/i);
-		expect(raw).toMatch(/max(?:imum)?\s+page\s+size[^\n]*200|200[^\n]*max(?:imum)?\s+page\s+size/i);
+		expect(raw).toMatch(/limit=50[^\n]*default|default[^\n]*limit=50/i);
+		expect(raw).toMatch(/maximum[^\n]*200|200[^\n]*maximum/i);
 		expect(raw).toMatch(/pagination/i);
 		for (const field of ["hasMore", "nextOffset", "nextCursor", "pagedBy", "itemKey"]) {
 			expect(raw).toContain(field);
@@ -112,7 +112,7 @@ describe("bobbit_read docs — pagination and semantic filters", () => {
 	it("documents projectId support for list operations that are project-scoped", () => {
 		const raw = readYaml();
 		for (const operation of ["list_goals", "list_sessions", "list_workflows", "list_roles", "list_tools", "list_staff", "list_mcp_servers"]) {
-			const row = raw.match(new RegExp(`\\| \\`${operation}\\` \\|[^\\n]+`, "i"))?.[0] ?? "";
+			const row = raw.match(new RegExp("\\| `" + operation + "` \\|[^\\n]+", "i"))?.[0] ?? "";
 			expect(row, `${operation} docs should mention projectId`).toContain("projectId");
 		}
 	});

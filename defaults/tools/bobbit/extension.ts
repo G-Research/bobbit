@@ -114,7 +114,7 @@ function normalizePaging(params: Params, spec: PageSpec): NormalizedPaging {
 function appendPagingQuery(base: string, entries: Array<[string, unknown]>, params: Params, spec: PageSpec): string {
 	const paging = normalizePaging(params, spec);
 	const pagingEntries: Array<[string, unknown]> = [["limit", paging.limit]];
-	if (paging.mode === "cursor") {
+	if (paging.mode === "cursor" && paging.cursor !== undefined) {
 		pagingEntries.push(["after", paging.cursor]);
 	} else {
 		pagingEntries.push(["offset", paging.offset]);
