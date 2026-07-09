@@ -24,7 +24,7 @@ Authoritative inputs:
 
 `createGateway(config, deps?)` becomes the single runtime wiring point. Missing deps always default to production implementations; the CLI boundary passes no test doubles.
 
-**CLI contract phase scoping.** During migration, `cli.ts` MAY map legacy env flags to deps (the documented CLI-only bridge that keeps the legacy suite green) — the strict "no test doubles from the CLI" contract (`cli-real-deps.test.ts`) is enforced starting at the switchover gate, at which point the env→deps mapping is deleted from `src/` and the flags are removed. Concretely: the DI-runtime and mass-migration gates permit the CLI env bridge; the switchover gate's `check-no-test-flags.mjs` + `cli-real-deps.test.ts` require it gone. Intermediate migration commits therefore never conflict with the final no-deps CLI contract.
+**CLI contract phase scoping.** During migration, `cli.ts` MAY map legacy env flags to deps (the documented CLI-only bridge that keeps the legacy suite green) — the strict "no test doubles from the CLI" contract (`cli-real-deps.test.ts`) is enforced starting at the switchover gate, at which point the env→deps mapping is deleted from `src/` and the flags are removed. Concretely: the DI-runtime and mass-migration gates permit the CLI env bridge; the switchover gate's llm-review + `cli-real-deps.test.ts` require it gone. (An earlier plan proposed a standalone `check-no-test-flags.mjs` grep gate; that was dropped — the switchover gate is llm-review-only, so no production command needs it, and `cli-real-deps.test.ts` already pins the no-test-doubles CLI contract.) Intermediate migration commits therefore never conflict with the final no-deps CLI contract.
 
 ```ts
 export interface Clock {
@@ -874,7 +874,7 @@ Safety rules:
 - `npm run test:v2` green within ≤180 s wall and ≤13 CPU-min measured by full process-tree CPU, `retries: 0`.
 - Five concurrent full v2 runs × three reps: 15/15 green, **each run's wall ≤ 3 min × 1.25 tolerance under mutual load**, reservation-ledger proof attached and `sum(workerSlots) <= cores` in every generation.
 - `scripts/testing-v2/parity.mjs` shows V8 per-area line+branch coverage non-regression against named baselines, story-registry non-regression, no unmapped tests, no retired-without-replacement tests, and a clean baseline-history honesty check.
-- `scripts/testing-v2/check-no-test-flags.mjs` finds no test-only env flags or `NODE_ENV === "test"` conditionals in `src/` at switchover.
+- No test-only env flags or `NODE_ENV === "test"` conditionals remain in `src/` at switchover — verified by the switchover llm-review (the standalone `check-no-test-flags.mjs` grep script was dropped as redundant; `cli-real-deps.test.ts` pins the no-test-doubles CLI contract).
 - `docs/testing-v2/chaos-report.md` shows v2 catches 100% of legacy-caught mutants, matches/exceeds kill rate overall and per area, passes the null-mutant check, includes the ≥5 full-v2 sample, and remediates or justifies every both-missed mutant.
 - `npm run test:daily` has one full green evidence artifact, the staff-agent daily trigger exists, `docs/testing-v2.md` documents the runbook, and the 14-green legacy-retirement counter is persisted.
 
