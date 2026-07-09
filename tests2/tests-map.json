@@ -20,6 +20,14 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/verification-harness-review-reliability.test.ts",
+      "reason": "Reproducing test for the 'Fix LLM review reliability' goal: pins per-attempt fresh reviewer session id (transcript not clobbered on retry) and honoring of a verification_result that arrives during teardown (no 404-drop). FAILS on HEAD, passes post-fix. Companion assertions pin the completed-but-missed-tool-call classification (non-transient → no from-scratch re-run) and that within-budget transient failures still retry."
+    },
+    {
+      "path": "tests2/core/session-id-clobber-guard.test.ts",
+      "reason": "Companion invariant for the 'Fix LLM review reliability' goal: SessionManager.createSession refuses to clobber an already-LIVE session id (loud throw), while opts.allowSessionReuse bypasses the guard for the sanctioned restart-resume path."
+    },
+    {
       "path": "tests2/browser/fixtures/children-tool-renderers.spec.ts",
       "reason": "Playwright renderer tests for nine Children tools — uses real Chromium DOM; parallel to tests2/dom/ vitest rewrite. Tracked here to prevent orphan detection false positive."
     },

@@ -5682,8 +5682,27 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
+		// Guard against silently clobbering an existing session's transcript. A
+		// caller-supplied sessionId that already maps to a LIVE session (or an
+		// archived record) means someone is about to build a brand-new agent in
+		// place, overwriting the prior session's transcript — this was the
+		// smoking-gun defect behind reviewer-transcript "resets" during llm-review
+		// retries. The only sanctioned reuse is the restart-resume path, which sets
+		// `allowSessionReuse`. Everything else is a bug: log LOUDLY (greppable
+		// prefix) and refuse to clobber a live session.
+		if (opts?.sessionId && !opts?.allowSessionReuse) {
+			const liveClash = this.sessions.has(id);
+			const archivedClash = !liveClash && !!this.getArchivedSession(id);
+			if (liveClash || archivedClash) {
+				const roleLabel = opts.roleName ?? opts.role ?? "unknown";
+				console.error(`[session-manager][session-id-clobber] createSession called with an already-${liveClash ? "LIVE" : "archived"} sessionId="${id}" (role=${roleLabel}, goalId=${goalId ?? "?"}). This would overwrite an existing session's transcript. sessionId reuse is only permitted on the sanctioned restart-resume path (opts.allowSessionReuse). Refusing to clobber.`);
+				if (liveClash) {
+					throw new Error(`[session-manager] Refusing to clobber live session "${id}" — sessionId reuse is only permitted on the restart-resume path (allowSessionReuse). This is a bug in the caller; each from-scratch attempt must use a fresh session id.`);
+				}
+			}
+		}
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
 			: undefined;
