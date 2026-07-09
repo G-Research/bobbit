@@ -3990,6 +3990,14 @@ export class SessionManager {
 				}
 			}
 		} else if (event.type === "agent_end") {
+			// Pi 0.80+ emits agent_end for retryable failed attempts before its
+			// internal auto-retry loop settles. Do not mark Bobbit idle, revoke
+			// one-time grants, or drain queued prompts until the final agent_end.
+			if (event.willRetry === true) {
+				session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
+				return;
+			}
+
 			// Revoke one-time granted tools after the turn completes
 			if (session.oneTimeGrantedTools && session.oneTimeGrantedTools.length > 0) {
 				const toRevoke = new Set(session.oneTimeGrantedTools.map(t => t.toLowerCase()));
@@ -6297,7 +6305,7 @@ export class SessionManager {
 			}, timeoutMs);
 
 			unsub = session.rpcClient.onEvent((event: any) => {
-				if (event.type === "agent_end") {
+				if (event.type === "agent_end" && event.willRetry !== true) {
 					waiter.cleanup();
 					resolve();
 				}
