@@ -74,6 +74,10 @@
     {
       "path": "tests2/browser/journeys/sidebar-nav.journey.spec.ts",
       "reason": "v2 browser smoke journey — multi-feature integration test, no legacy equivalent."
+    },
+    {
+      "path": "tests2/core/session-mcp-projectless-fail-closed.test.ts",
+      "reason": "Split-port of tests/headquarters-server-scope-guards.test.ts (projectless-session MCP fail-closed pure-unit case); that file's primary v2Path is tests2/integration/headquarters-server-scope-guards.test.ts, so this second port is tracked here to avoid an orphan."
     }
   ],
   "journeys": [
@@ -534,8 +538,10 @@
       "file": "tests/bg-process-states.spec.ts",
       "bucket": "v2-dom",
       "method": "rewrite",
-      "replacement": [],
-      "rationale": "Read in re-audit: dropdown/status fixture uses clicks and text assertions only; no geometry APIs (tests/bg-process-states.spec.ts:207-218)."
+      "replacement": [
+        "tests2/dom/bg-process-renderer.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/dom/bg-process-renderer.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/bg-process-windows-restart.test.ts",
@@ -1055,7 +1061,9 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/activate-skill-rest.test.ts"
     },
     {
       "file": "tests/e2e/agent-dir-settings.spec.ts",
@@ -1106,8 +1114,10 @@
       "file": "tests/e2e/aigw-startup-refresh.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/aigw-startup-refresh.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/aigw-startup-refresh.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/aigw-title-generator.spec.ts",
@@ -1149,8 +1159,12 @@
       "file": "tests/e2e/api-goals-spawn-child-route.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/api-goals-spawn-child.test.ts",
+        "tests2/core/api-spawn-child-spawnedby-derivation.test.ts",
+        "tests2/core/api-spawn-child-spec-validation.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/api-goals-spawn-child.test.ts, tests2/core/api-spawn-child-spawnedby-derivation.test.ts, tests2/core/api-spawn-child-spec-validation.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/api-subgoals-disabled.spec.ts",
@@ -1165,8 +1179,10 @@
       "file": "tests/e2e/archive-dormant-cascade.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/orchestration-cascade.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/orchestration-cascade.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/archived-delegates-api.spec.ts",
@@ -1235,8 +1251,11 @@
       "file": "tests/e2e/base-ref-pin.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/integration/base-ref-api.test.ts",
+        "tests2/core/base-ref-parse.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/base-ref-api.test.ts, tests2/core/base-ref-parse.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/bg-process-sandbox-guard.spec.ts",
@@ -1305,8 +1324,10 @@
       "file": "tests/e2e/context-window-overrides.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/aigw-context-window-overrides.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/aigw-context-window-overrides.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/continue-archived-assistant.spec.ts",
@@ -1365,8 +1386,10 @@
       "file": "tests/e2e/cost-backfill-on-boot.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/cost-backfill.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/cost-backfill.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/cost-update-cache-hit.spec.ts",
@@ -1444,8 +1467,10 @@
       "file": "tests/e2e/gate-active-verification-snapshot.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/gate-verification-snapshot.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/gate-verification-snapshot.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/gate-bypass-api.spec.ts",
@@ -1532,8 +1557,10 @@
       "file": "tests/e2e/gate-verification-resume.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/team-manager-reviewer-resume.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/team-manager-reviewer-resume.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/gates-api-heavy.spec.ts",
@@ -1609,8 +1636,12 @@
       "file": "tests/e2e/goal-metadata-hierarchy.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/goal-metadata.test.ts",
+        "tests2/core/goal-metadata-edges.test.ts"
+      ],
+      "rationale": "PARTIAL / ACCEPTED-LOSS: metadata resolver ancestry + deep-merge covered by core/goal-metadata + goal-metadata-edges. The session-level APPLICATION sub-behaviour (lead/member/reviewer/delegate/nested disabled-tool absence + worktree-marker inherited metadata + disabledProviders marker filtering) was NOT ported by the straggler-porting branches; knowingly deferred. Legacy kept as safety-net.",
+      "acceptedLoss": true
     },
     {
       "file": "tests/e2e/goal-pr-url.spec.ts",
@@ -1662,7 +1693,9 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/headquarters-api.test.ts"
     },
     {
       "file": "tests/e2e/hindsight-external.spec.ts",
@@ -1678,21 +1711,28 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "Read in daily re-audit: deterministic real gateway + mock agent, explicitly never test:manual (tests/e2e/host-agents-sandbox-inheritance.spec.ts:1-11)."
+      "rationale": "Read in daily re-audit: deterministic real gateway + mock agent, explicitly never test:manual (tests/e2e/host-agents-sandbox-inheritance.spec.ts:1-11).",
+      "migrated": true,
+      "v2Path": "tests2/integration/host-agents-sandbox-inheritance.test.ts"
     },
     {
       "file": "tests/e2e/host-agents.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/host-agents-scope.test.ts",
+        "tests2/core/orchestration-core.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/host-agents-scope.test.ts, tests2/core/orchestration-core.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/human-signoff.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/human-signoff.test.ts"
     },
     {
       "file": "tests/e2e/image-generation-providers.spec.ts",
@@ -1777,15 +1817,19 @@
       "file": "tests/e2e/marketplace-pi-extension.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/marketplace-pi-extension-activation.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/marketplace-pi-extension-activation.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/marketplace-provider-activation.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/marketplace-provider-activation.test.ts"
     },
     {
       "file": "tests/e2e/mcp-integration.spec.ts",
@@ -1911,8 +1955,10 @@
       "file": "tests/e2e/per-project-config-dirs.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/config-directories.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/config-directories.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/per-project-worktree-pool.spec.ts",
@@ -1947,7 +1993,9 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/pr-cache.test.ts"
     },
     {
       "file": "tests/e2e/pr-walkthrough-api.spec.ts",
@@ -1962,8 +2010,10 @@
       "file": "tests/e2e/pr-walkthrough-host-agents.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/integration/pr-walkthrough-api.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/pr-walkthrough-api.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/preview-broadcast.spec.ts",
@@ -2149,36 +2199,47 @@
       "file": "tests/e2e/propose-goal-tool-result-iserror.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/tool-result-error-bridge-extension.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/tool-result-error-bridge-extension.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/provider-hook-effective-goal.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/goal-metadata-edges.test.ts",
+        "tests2/core/provider-bridge-extension.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/goal-metadata-edges.test.ts, tests2/core/provider-bridge-extension.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/provider-session-setup.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/dynamic-context-section.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/dynamic-context-section.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/provider-turn-hooks.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/provider-bridge-extension.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/provider-bridge-extension.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/qa-seed.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/qa-seed.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/qa-seed.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/queue-e2e.spec.ts",
@@ -2361,7 +2422,9 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/session-create-regressions-todo.test.ts"
     },
     {
       "file": "tests/e2e/session-created-sync.spec.ts",
@@ -2376,29 +2439,40 @@
       "file": "tests/e2e/session-git-status-multi-repo.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/integration/git-handoff-multi-repo.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/git-handoff-multi-repo.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/session-lifecycle-ui.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/integration/session-lifecycle-api.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/session-lifecycle-api.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/session-prompt.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/integration/steer-midturn.test.ts",
+        "tests2/integration/team-steer-prompt.test.ts",
+        "tests2/dom/session-prompt-renderer.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/steer-midturn.test.ts, tests2/integration/team-steer-prompt.test.ts, tests2/dom/session-prompt-renderer.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/session-recovery.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/session-store-atomic-write.test.ts",
+        "tests2/core/session-recovery-agent-dir.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/session-store-atomic-write.test.ts, tests2/core/session-recovery-agent-dir.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/session-restart-api.spec.ts",
@@ -2450,7 +2524,9 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/sidebar-actions-fork-github-link.test.ts"
     },
     {
       "file": "tests/e2e/sidebar-api.spec.ts",
@@ -2510,8 +2586,11 @@
       "file": "tests/e2e/staff-cwd-parity.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/integration/staff.test.ts",
+        "tests2/core/staff-session-staffid-persistence.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/staff.test.ts, tests2/core/staff-session-staffid-persistence.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/staff-goal-triggers.spec.ts",
@@ -2626,7 +2705,9 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/system-prompt-customise.test.ts"
     },
     {
       "file": "tests/e2e/task-git-fields.spec.ts",
@@ -2669,7 +2750,9 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/team-delegate.test.ts"
     },
     {
       "file": "tests/e2e/team-dismiss-structured-regression.spec.ts",
@@ -2703,7 +2786,9 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "migrated": true,
+      "v2Path": "tests2/integration/team-wait-semantics.test.ts"
     },
     {
       "file": "tests/e2e/thinking-level.spec.ts",
@@ -4766,8 +4851,10 @@
       "file": "tests/e2e/verification-timeout.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
-      "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier."
+      "replacement": [
+        "tests2/core/verification-harness-timeout.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/verification-harness-timeout.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/wizard-greeting.spec.ts",
@@ -5618,14 +5705,21 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks)."
+      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "migrated": true,
+      "v2Path": "tests2/core/headquarters-no-worktree-runtime.test.ts"
     },
     {
       "file": "tests/headquarters-server-scope-guards.test.ts",
       "bucket": "v2-core",
       "method": "codemod",
-      "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks)."
+      "replacement": [
+        "tests2/integration/headquarters-server-scope-guards.test.ts",
+        "tests2/core/session-mcp-projectless-fail-closed.test.ts"
+      ],
+      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "migrated": true,
+      "v2Path": "tests2/integration/headquarters-server-scope-guards.test.ts"
     },
     {
       "file": "tests/headquarters-state-migration.test.ts",
@@ -5667,8 +5761,10 @@
       "file": "tests/hq-explicit-project-scope.spec.ts",
       "bucket": "v2-dom",
       "method": "rewrite",
-      "replacement": [],
-      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project)."
+      "replacement": [
+        "tests2/core/headquarters-config-alias.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/headquarters-config-alias.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/html-artifact-detection.spec.ts",
@@ -6171,7 +6267,9 @@
       "bucket": "v2-dom",
       "method": "rewrite",
       "replacement": [],
-      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project)."
+      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project).",
+      "migrated": true,
+      "v2Path": "tests2/dom/message-editor-arrows.test.ts"
     },
     {
       "file": "tests/message-editor-attach.spec.ts",
@@ -6313,7 +6411,9 @@
       "bucket": "v2-dom",
       "method": "rewrite",
       "replacement": [],
-      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project)."
+      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project).",
+      "migrated": true,
+      "v2Path": "tests2/dom/mobile-header-race.test.ts"
     },
     {
       "file": "tests/mobile-header.spec.ts",
@@ -7238,7 +7338,9 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks)."
+      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "migrated": true,
+      "v2Path": "tests2/core/project-registry-provisional-dedupe.test.ts"
     },
     {
       "file": "tests/project-registry-symlink.test.ts",
@@ -7398,7 +7500,9 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks)."
+      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "migrated": true,
+      "v2Path": "tests2/core/proposal-scope-system-alias.test.ts"
     },
     {
       "file": "tests/proposal-tools-goal-validation.test.ts",
@@ -7756,7 +7860,9 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks)."
+      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "migrated": true,
+      "v2Path": "tests2/core/rpc-bridge-gateway-env.test.ts"
     },
     {
       "file": "tests/rpc-bridge-lifecycle.test.ts",
@@ -7967,8 +8073,10 @@
       "file": "tests/runtime-project-scope.test.ts",
       "bucket": "v2-core",
       "method": "codemod",
-      "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks)."
+      "replacement": [
+        "tests2/integration/sessions-projectless.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/sessions-projectless.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/safe-area-css.test.ts",
@@ -8055,8 +8163,10 @@
       "file": "tests/sandbox-headquarters-exempt.test.ts",
       "bucket": "v2-core",
       "method": "codemod",
-      "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks)."
+      "replacement": [
+        "tests2/core/sandbox-guard.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/sandbox-guard.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/sandbox-init-rejection.test.ts",
@@ -8492,8 +8602,10 @@
       "file": "tests/session-manager-sandbox-scope.test.ts",
       "bucket": "v2-core",
       "method": "codemod",
-      "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks)."
+      "replacement": [
+        "tests2/core/sandbox-guard.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/sandbox-guard.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/session-manager-skills-catalog-empty-allowlist.test.ts",
@@ -9753,8 +9865,11 @@
       "file": "tests/ui-fixtures/proposal-review-fixture.spec.ts",
       "bucket": "v2-dom",
       "method": "rewrite",
-      "replacement": [],
-      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project)."
+      "replacement": [
+        "tests2/core/proposal-renderer-helpers.test.ts",
+        "tests2/dom/proposal-renderer-failed.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/proposal-renderer-helpers.test.ts, tests2/dom/proposal-renderer-failed.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/ui-fixtures/search-index-ui.spec.ts",
@@ -9771,8 +9886,10 @@
       "file": "tests/ui-fixtures/search-preview-archive.spec.ts",
       "bucket": "v2-dom",
       "method": "rewrite",
-      "replacement": [],
-      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project)."
+      "replacement": [
+        "tests2/integration/search-preview-api.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/search-preview-api.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/ui-fixtures/search-preview-maintenance.spec.ts",
@@ -9809,8 +9926,10 @@
       "file": "tests/ui-fixtures/settings-admin-fixture.spec.ts",
       "bucket": "v2-dom",
       "method": "rewrite",
-      "replacement": [],
-      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project)."
+      "replacement": [
+        "tests2/integration/maintenance-api.test.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/integration/maintenance-api.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/ui-fixtures/sidebar-actions-menu-fixture.spec.ts",
@@ -9867,8 +9986,10 @@
       "file": "tests/ui-fixtures/sidebar-navigation-fixture.spec.ts",
       "bucket": "v2-dom",
       "method": "rewrite",
-      "replacement": [],
-      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project)."
+      "replacement": [
+        "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+      ],
+      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/browser/journeys/sidebar-nav.journey.spec.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/ui-fixtures/thinking-levels.spec.ts",
