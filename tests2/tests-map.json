@@ -72,6 +72,10 @@
       "reason": "Support assistant offline packaging: package.json files ships docs/ + src/; npm pack --dry-run --json lists docs/ + src/ entries; resolveBundledDocsDir/resolveBundledSrcDir return existing directories."
     },
     {
+      "path": "tests2/integration/support-session-role-wiring.test.ts",
+      "reason": "Reproducing integration test for the Support Assistant fix-up (defects 5 & 6): a running Support session (assistantType=support, projectId=headquarters) must persist role=support + accessory=headset (not the hardcoded assistant/wand), and its prompt-sections must expose a dedicated Role section (source 'Role: support') carrying the support role promptTemplate WITHOUT folding it into the Goal section (no duplication)."
+    },
+    {
       "path": "tests2/core/cli-real-deps.test.ts",
       "reason": "DI contract: cli.ts passes no test doubles (default-real wiring)."
     },
