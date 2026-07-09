@@ -153,6 +153,18 @@ describe("sanitizeTranscriptContent", () => {
 		assert.equal(content, file);
 	});
 
+	it("leaves Pi 0.80.x session-tree metadata entries byte-identical", () => {
+		const entries = [
+			JSON.stringify({ type: "active_tools_change", id: "tools-1", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", activeToolNames: ["read", "write"] }),
+			JSON.stringify({ type: "leaf", id: "leaf-1", parentId: "tools-1", timestamp: "2026-01-01T00:00:01.000Z", targetId: "msg-1" }),
+			JSON.stringify({ type: "custom_message", id: "custom-1", parentId: "leaf-1", timestamp: "2026-01-01T00:00:02.000Z", customType: "extension", content: [{ type: "text", text: "" }], display: false }),
+		].join("\n");
+		const { content, changed, rewritten } = sanitizeTranscriptContent(entries);
+		assert.equal(changed, false);
+		assert.equal(rewritten, 0);
+		assert.equal(content, entries);
+	});
+
 	it("empty input is a no-op", () => {
 		const { content, changed } = sanitizeTranscriptContent("");
 		assert.equal(changed, false);
@@ -249,6 +261,29 @@ describe("rebaseTranscriptCwdMetadataContent", () => {
 		assert.equal(twice.rewritten, 0);
 		assert.equal(twice.content, once.content);
 		assert.ok(once.content.endsWith("\n"), "trailing newline preserved across rebase");
+	});
+
+	it("does not rebase Pi 0.80.x non-header session-tree entries with cwd-shaped data", () => {
+		const activeTools = JSON.stringify({
+			type: "active_tools_change",
+			id: "tools-1",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			cwd: oldCwd,
+			activeToolNames: ["read"],
+		});
+		const custom = JSON.stringify({
+			type: "custom",
+			id: "custom-1",
+			parentId: "tools-1",
+			timestamp: "2026-01-01T00:00:01.000Z",
+			data: { cwd: otherOldCwd },
+		});
+		const file = [activeTools, custom].join("\n");
+		const { content, changed, rewritten } = rebase(file);
+		assert.equal(changed, false);
+		assert.equal(rewritten, 0);
+		assert.equal(content, file);
 	});
 });
 

@@ -34,6 +34,19 @@ describe("tool result error normalization", () => {
 		assert.equal(normalized.messages[0].isError, true);
 	});
 
+	it("normalizes Pi 0.80.x tool_execution_end when returned result content serializes isError", () => {
+		const event = {
+			type: "tool_execution_end",
+			toolCallId: "tc-1",
+			toolName: "sample_tool",
+			isError: false,
+			result: { content: [{ type: "text", text: JSON.stringify({ isError: true, error: "failed" }) }] },
+		};
+		const normalized = normalizeToolResultErrorEvent(event) as any;
+		assert.equal(normalized.isError, true);
+		assert.equal(event.isError, false, "normalization should not mutate the original event");
+	});
+
 	it("preserves successful tool results", () => {
 		const msg = { role: "toolResult", toolName: "x", isError: false, content: [{ type: "text", text: "ok" }] };
 		const normalized = normalizeToolResultErrorMessages([msg]) as any[];
