@@ -513,7 +513,7 @@ test.describe("unified session actions", () => {
 		});
 
 		await clickHeaderAction(page, "copy-link");
-		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe(`${base()}/session/${sessionId}`);
+		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe(`${base()}/#/session/${sessionId}`);
 
 		await clickHeaderAction(page, "view-system-prompt");
 		await expect(page.locator("system-prompt-dialog").getByText("System Prompt Inspector")).toBeVisible({ timeout: 10_000 });
@@ -521,7 +521,7 @@ test.describe("unified session actions", () => {
 
 		await clickHeaderAction(page, "open-new-window");
 		await expect.poll(() => page.evaluate(() => (window as any).__sessionActionOpenedUrls), { timeout: 5_000 }).toEqual([
-			`${base()}/session/${sessionId}`,
+			`${base()}/#/session/${sessionId}`,
 		]);
 	});
 });

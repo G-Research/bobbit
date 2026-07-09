@@ -18,13 +18,25 @@
 // only read the DOM and flip ephemeral expansion prefs. A monotonic
 // `revealToken` guarantees a superseded navigation's in-flight rAF callbacks
 // no-op, so exactly one reveal runs per navigation.
+//
+// A session route can point at THREE different sidebar row kinds, all of which
+// carry `data-nav-id="session:<id>"` but resolve to different tree shapes:
+//   1. a `session/<id>` tree node       — team members, delegates, verifiers…
+//   2. a `team-lead/<id>` tree node      — team-lead sessions (no session node)
+//   3. a staff row under `project-staff` — staff sessions (NO tree node at all;
+//      excluded from the tree via `liveSessionsNoStaff`)
+// Resolution is therefore an ordered set of *ancestor resolvers*: each takes the
+// current tree model and returns the list of ancestor node-keys to expand
+// ephemerally, or null when it cannot resolve the target. `attemptReveal` runs
+// them in order and uses the first non-null result; if all return null it
+// retries (data still loading) and eventually no-ops gracefully.
 // ============================================================================
 
-import { renderApp } from "./state.js";
+import { renderApp, state } from "./state.js";
 import { getRouteFromHash, type AppRoute } from "./routing.js";
 import { buildSidebarTreeModel } from "./sidebar.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
-import { sidebarTreeKey } from "./sidebar-tree-builder.js";
+import { sidebarTreeKey, type SidebarTreeNodeKey } from "./sidebar-tree-builder.js";
 
 /** Max retry attempts for both the model-lookup and the DOM-scroll polls.
  *
@@ -36,11 +48,20 @@ import { sidebarTreeKey } from "./sidebar-tree-builder.js";
  * fires; it stays bounded (`revealToken` still guarantees exactly-once). */
 const MAX_ATTEMPTS = 30;
 
+/** The tree model shape the resolvers read (from `buildSidebarTreeModel`). */
+type SidebarTreeModel = ReturnType<typeof buildSidebarTreeModel>;
+
+/** Resolve a route target to the ordered list of ancestor node-keys that must
+ *  be expanded ephemerally for the target row to render, or null when the
+ *  target cannot be resolved against this model (e.g. data not loaded yet, or
+ *  the route is a different row kind). */
+type AncestorResolver = (model: SidebarTreeModel) => SidebarTreeNodeKey[] | null;
+
 interface PendingReveal {
-	/** Canonical sidebar-tree key of the target node (session or goal). */
-	key: string;
 	/** DOM `data-nav-id` of the target row (`session:<id>` / `goal:<id>`). */
 	navId: string;
+	/** Ordered ancestor resolvers; first non-null result wins. */
+	resolvers: AncestorResolver[];
 }
 
 let pending: PendingReveal | null = null;
@@ -53,16 +74,66 @@ function nextFrame(cb: () => void): void {
 	else setTimeout(cb, 16);
 }
 
+/** Walk a node's `parentKey` chain, returning the ordered list of ancestor
+ *  node-keys (nearest-first). A `seen` guard defends against any pathological
+ *  cycle in `parentKey`. Returns null when the starting node is absent. */
+function ancestorsOf(model: SidebarTreeModel, startKey: string): SidebarTreeNodeKey[] | null {
+	const node = model.flatByKey.get(startKey);
+	if (!node) return null;
+	const out: SidebarTreeNodeKey[] = [];
+	const seen = new Set<string>();
+	let pk = node.parentKey;
+	while (pk && !seen.has(pk)) {
+		seen.add(pk);
+		const parent = model.flatByKey.get(pk);
+		if (!parent) break;
+		out.push(parent.nodeKey);
+		pk = parent.parentKey;
+	}
+	return out;
+}
+
 /** Resolve the reveal target for a route, or null when the route is not a
- *  session / goal destination. */
+ *  session / goal destination. Session routes carry an ordered set of
+ *  resolvers (session node → team-lead node → staff row); goal routes resolve
+ *  via the single `goal/<id>` node walk. */
 function targetForRoute(route: AppRoute): PendingReveal | null {
 	if ((route.view === "goal" || route.view === "goal-dashboard") && route.goalId) {
-		return { key: sidebarTreeKey({ kind: "goal", goalId: route.goalId }), navId: `goal:${route.goalId}` };
+		const goalId = route.goalId;
+		return {
+			navId: `goal:${goalId}`,
+			resolvers: [(model) => ancestorsOf(model, sidebarTreeKey({ kind: "goal", goalId }))],
+		};
 	}
 	if (route.view === "session" && route.sessionId) {
-		return { key: sidebarTreeKey({ kind: "session", sessionId: route.sessionId }), navId: `session:${route.sessionId}` };
+		const sessionId = route.sessionId;
+		return {
+			navId: `session:${sessionId}`,
+			resolvers: [
+				// 1. Regular session node (members, delegates, verifiers, children…).
+				(model) => ancestorsOf(model, sidebarTreeKey({ kind: "session", sessionId })),
+				// 2. Team-lead node — same walk, different tree key.
+				(model) => ancestorsOf(model, sidebarTreeKey({ kind: "team-lead", sessionId })),
+				// 3. Staff row — no tree node exists; map the session id to its staff
+				//    entry and return the project + project-staff section ancestors.
+				() => resolveStaffAncestors(sessionId),
+			],
+		};
 	}
 	return null;
+}
+
+/** Resolve a staff session id to the ancestor node-keys of its staff row. Staff
+ *  sessions are excluded from the tree, so we locate the staff entry whose
+ *  `currentSessionId` matches and return its `project` + `project-staff`
+ *  section keys directly. Null when it is not a (project-scoped) staff session. */
+function resolveStaffAncestors(sessionId: string): SidebarTreeNodeKey[] | null {
+	const staff = state.staffList.find((s) => s.currentSessionId === sessionId);
+	if (!staff || !staff.projectId) return null;
+	return [
+		{ kind: "project", projectId: staff.projectId },
+		{ kind: "project-staff", projectId: staff.projectId },
+	];
 }
 
 /**
@@ -83,29 +154,26 @@ export function revealSidebarTargetForRoute(route: AppRoute = getRouteFromHash()
 	attemptReveal(token, 0);
 }
 
-/** Bounded rAF poll: find the target node in the (unfiltered) tree model,
- *  expand its ancestor chain, then hand off to the scroll poll. Retries while
- *  the node is still absent (data loading async on a deep-link). */
+/** Bounded rAF poll: run the target's ancestor resolvers against the
+ *  (unfiltered) tree model, expand the resolved ancestor chain ephemerally,
+ *  then hand off to the scroll poll. Retries while every resolver returns null
+ *  (data loading async on a deep-link, or not a staff session either). */
 function attemptReveal(token: number, attempt: number): void {
 	if (token !== revealToken || !pending) return;
 	const current = pending;
 	const model = buildSidebarTreeModel();
-	const node = model.flatByKey.get(current.key);
-	if (!node) {
+	let ancestors: SidebarTreeNodeKey[] | null = null;
+	for (const resolve of current.resolvers) {
+		ancestors = resolve(model);
+		if (ancestors) break;
+	}
+	if (!ancestors) {
 		if (attempt < MAX_ATTEMPTS) nextFrame(() => attemptReveal(token, attempt + 1));
 		return;
 	}
-	// Walk the parent chain, expanding each ancestor ephemerally. A `seen`
-	// guard defends against any pathological cycle in `parentKey`.
-	const seen = new Set<string>();
-	let pk = node.parentKey;
-	while (pk && !seen.has(pk)) {
-		seen.add(pk);
-		const parent = model.flatByKey.get(pk);
-		if (!parent) break;
-		expandSidebarTreeNode(parent.nodeKey, { explicit: false });
-		pk = parent.parentKey;
-	}
+	// Expand each resolved ancestor ephemerally (never overwrites an explicit
+	// collapse; no-ops when the node's default is already expanded).
+	for (const key of ancestors) expandSidebarTreeNode(key, { explicit: false });
 	renderApp();
 	attemptScroll(current.navId, token, 0);
 }

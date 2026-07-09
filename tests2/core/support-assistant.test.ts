@@ -15,7 +15,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
-const { getAssistantDef, assistantRoleForType } = await import("../../src/server/agent/assistant-registry.ts");
+const { getAssistantDef, assistantRoleForType, composeAssistantTitle } = await import("../../src/server/agent/assistant-registry.ts");
 const { SUPPORT_ASSISTANT_PROMPT } = await import("../../src/server/agent/support-assistant.ts");
 
 const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "defaults");
@@ -48,6 +48,32 @@ describe("assistantRoleForType", () => {
 		assert.equal(assistantRoleForType("goal"), "assistant");
 		assert.equal(assistantRoleForType("project"), "assistant");
 		assert.equal(assistantRoleForType(undefined), "assistant");
+	});
+});
+
+describe("assistant titlePrefix", () => {
+	it("exposes the exact type prefixes used for initial title + auto-rename", () => {
+		const cases: Record<string, string> = {
+			goal: "New Goal",
+			role: "New Role",
+			tool: "New Tool",
+			staff: "New Staff",
+			project: "New Project",
+			"project-scaffolding": "New Project",
+			support: "Support",
+		};
+		for (const [type, prefix] of Object.entries(cases)) {
+			const def = getAssistantDef(type);
+			assert.ok(def, `assistant def must be registered for ${type}`);
+			assert.equal(def!.titlePrefix, prefix, `titlePrefix for ${type}`);
+		}
+	});
+});
+
+describe("composeAssistantTitle", () => {
+	it("composes '<prefix>: <summary>'", () => {
+		assert.equal(composeAssistantTitle("Support", "reset worktree pool"), "Support: reset worktree pool");
+		assert.equal(composeAssistantTitle("New Goal", "add dark mode"), "New Goal: add dark mode");
 	});
 });
 
