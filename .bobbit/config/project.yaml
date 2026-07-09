@@ -9,6 +9,7 @@ components:
       build: npm run build
       check: npm run check
       unit: npm run test:unit
+      browser: npm run test:browser
       e2e: npm run test:e2e
     config:
       qa_start_command: BOBBIT_NO_OPEN='1' BOBBIT_LLM_REVIEW_SKIP='1'
@@ -111,16 +112,22 @@ workflows:
             phase: 1
             component: bobbit
             command: unit
-          - name: E2E tests
+          - name: Browser tests
             type: command
             phase: 2
+            timeout: 900
+            component: bobbit
+            command: browser
+          - name: E2E tests
+            type: command
+            phase: 3
             timeout: 900
             component: bobbit
             command: e2e
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
-            phase: 3
+            phase: 4
             prompt: >-
               Compare the goal specification and design document to the actual
               implementation on this branch.
@@ -161,7 +168,7 @@ workflows:
           - name: Code quality review
             type: llm-review
             role: code-reviewer
-            phase: 3
+            phase: 4
             prompt: >-
               Review the code changes on branch {{branch}} vs
               origin/{{baseBranch}} for quality.
@@ -200,7 +207,7 @@ workflows:
               5. Test coverage — are new behaviors tested?
           - name: E2E user journey coverage
             type: llm-review
-            phase: 3
+            phase: 4
             prompt: >-
               Verify that the implementation includes browser-based E2E tests
               covering the user journey for this feature.
@@ -223,7 +230,7 @@ workflows:
           - name: Bug hunt
             type: llm-review
             role: bug-hunter
-            phase: 3
+            phase: 4
             prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
               for actionable bugs. Focus on correctness, edge cases, error
               paths, cross-system interactions, concurrency/lifecycle, and
@@ -233,7 +240,7 @@ workflows:
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 3
+            phase: 4
             prompt: >-
               Security review of changes on branch {{branch}} vs
               origin/{{baseBranch}}.
@@ -461,16 +468,22 @@ workflows:
             phase: 1
             component: bobbit
             command: unit
-          - name: E2E tests
+          - name: Browser tests
             type: command
             phase: 2
+            timeout: 900
+            component: bobbit
+            command: browser
+          - name: E2E tests
+            type: command
+            phase: 3
             timeout: 900
             component: bobbit
             command: e2e
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
-            phase: 3
+            phase: 4
             prompt: >-
               Compare the goal specification and design document to the actual
               implementation on this branch. Ignore documentation gaps; focus
@@ -484,14 +497,14 @@ workflows:
           - name: Code quality review
             type: llm-review
             role: code-reviewer
-            phase: 3
+            phase: 4
             prompt: Review the code changes on branch {{branch}} vs origin/{{baseBranch}}
               for quality. Check correctness, error handling, edge cases, code
               style, and test coverage.
           - name: Bug hunt
             type: llm-review
             role: bug-hunter
-            phase: 3
+            phase: 4
             prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
               for actionable bugs. Focus on correctness, edge cases, error
               paths, cross-system interactions, concurrency/lifecycle, and
@@ -501,14 +514,14 @@ workflows:
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 3
+            phase: 4
             prompt: Security review of changes on branch {{branch}} vs
               origin/{{baseBranch}}. Check injection, auth/authz, validation,
               secrets, and dependency risks.
           - name: QA testing
             type: agent-qa
             role: qa-tester
-            phase: 4
+            phase: 5
             optional: true
             optionalLabel: Enable QA Testing
             description: Spawn a QA agent that builds the project, starts an ephemeral
@@ -613,16 +626,22 @@ workflows:
             phase: 1
             component: bobbit
             command: unit
-          - name: E2E tests
+          - name: Browser tests
             type: command
             phase: 2
+            timeout: 900
+            component: bobbit
+            command: browser
+          - name: E2E tests
+            type: command
+            phase: 3
             timeout: 900
             component: bobbit
             command: e2e
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
-            phase: 3
+            phase: 4
             prompt: >-
               Compare the goal specification and design document to the actual
               implementation on this branch. Ignore documentation gaps; focus
@@ -635,20 +654,20 @@ workflows:
           - name: Code quality review
             type: llm-review
             role: code-reviewer
-            phase: 3
+            phase: 4
             prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
               quality. Check root-cause fix, minimality, error handling,
               regression risk, and test coverage.
           - name: Regression test coverage
             type: llm-review
-            phase: 3
+            phase: 4
             prompt: Verify that the bug fix includes a regression test that would catch
               reintroduction. PASS if at least one unit, fixture, or E2E test
               covers the fixed behavior; FAIL if no regression test was added.
           - name: Bug hunt
             type: llm-review
             role: bug-hunter
-            phase: 3
+            phase: 4
             prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
               actionable bugs. Focus on correctness, edge cases, error paths,
               cross-system interactions, concurrency/lifecycle, and dangerous
@@ -658,13 +677,13 @@ workflows:
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 3
+            phase: 4
             prompt: Security review of changes on branch {{branch}} vs {{baseBranch}}. Check
               injection, auth/authz, validation, secrets, and dependency risks.
           - name: QA testing
             type: agent-qa
             role: qa-tester
-            phase: 4
+            phase: 5
             optional: true
             optionalLabel: Enable QA Testing
             description: Spawn a QA agent that builds the project, starts an ephemeral
@@ -728,16 +747,22 @@ workflows:
             phase: 1
             component: bobbit
             command: unit
-          - name: E2E tests
+          - name: Browser tests
             type: command
             phase: 2
+            timeout: 900
+            component: bobbit
+            command: browser
+          - name: E2E tests
+            type: command
+            phase: 3
             timeout: 900
             component: bobbit
             command: e2e
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
-            phase: 3
+            phase: 4
             prompt: >-
               Compare the goal specification to the actual implementation on
               this branch. Ignore documentation gaps; focus exclusively on
@@ -751,14 +776,14 @@ workflows:
           - name: Code quality review
             type: llm-review
             role: code-reviewer
-            phase: 3
+            phase: 4
             prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
               quality. Check correctness, error handling, edge cases,
               minimality, and test coverage.
           - name: Bug hunt
             type: llm-review
             role: bug-hunter
-            phase: 3
+            phase: 4
             prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
               actionable bugs. Focus on correctness, edge cases, error paths,
               cross-system interactions, concurrency/lifecycle, and dangerous
