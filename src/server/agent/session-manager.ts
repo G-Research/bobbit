@@ -1072,6 +1072,23 @@ type IdleWaiter = {
 	cleanup: () => void;
 };
 
+/**
+ * Build the markdown workflow list injected into the goal-assistant prompt's
+ * `{{AVAILABLE_WORKFLOWS}}` placeholder. Pure function over the resolved
+ * workflow set — the single source for both the empty-project branch and the
+ * per-workflow bullet formatting. Extracted from `SessionManager._buildWorkflowList`
+ * so it can be unit-tested without a full SessionManager.
+ */
+export function buildWorkflowListText(workflows: import("./workflow-store.js").Workflow[]): string {
+	if (!workflows || workflows.length === 0) {
+		return '⚠️ This project has no workflows configured. You CANNOT propose a goal yet — the user must run the project assistant first to scaffold workflows. Do not call propose_goal. Instead tell the user "this project has no workflows yet; open the project assistant from Settings → Components (or click the banner in the goal panel) to set them up", and stop.';
+	}
+	return workflows.map(w => {
+		const gateNames = w.gates.map(g => g.name).join(', ');
+		return `- **${w.id}** (${w.name}) — ${w.description}. Gates: ${gateNames}.`;
+	}).join('\n');
+}
+
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
@@ -2529,13 +2546,7 @@ export class SessionManager {
 			const ctx = this.projectContextManager.getOrCreate(projectId);
 			if (ctx) workflows = ctx.workflowStore.getAll();
 		}
-		if (!workflows || workflows.length === 0) {
-			return '⚠️ This project has no workflows configured. You CANNOT propose a goal yet — the user must run the project assistant first to scaffold workflows. Do not call propose_goal. Instead tell the user "this project has no workflows yet; open the project assistant from Settings → Components (or click the banner in the goal panel) to set them up", and stop.';
-		}
-		return workflows.map(w => {
-			const gateNames = w.gates.map(g => g.name).join(', ');
-			return `- **${w.id}** (${w.name}) — ${w.description}. Gates: ${gateNames}.`;
-		}).join('\n');
+		return buildWorkflowListText(workflows);
 	}
 
 	/**
