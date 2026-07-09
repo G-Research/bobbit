@@ -522,6 +522,13 @@ export function cleanupChaosRoot(root = CHAOS_ROOT) {
   } catch (e) {
     console.warn(`[chaos] junction unlink: ${e.message}`);
   }
+  // Never recursively delete through a surviving reparse point: if the link is
+  // STILL present (unlink failed), leave the chaos root in place rather than
+  // risk `rmSync` descending through the junction into an external target.
+  if (fs.existsSync(link)) {
+    console.warn(`[chaos] node_modules reparse point still present after unlink; skipping recursive delete of ${root} to avoid traversing the junction`);
+    return;
+  }
   try {
     fs.rmSync(root, { recursive: true, force: true });
   } catch { /* best-effort */ }
@@ -1242,7 +1249,11 @@ async function main() {
   ));
   if (nullFailed) {
     console.error("\n❌ NULL MUTANT INTEGRITY CHECK FAILED — harness may be broken");
-    process.exit(1);
+    // Do NOT process.exit() here — that would bypass the finally below and leak
+    // the CHAOS_ROOT/node_modules junction into os.tmpdir(). Set the exit code
+    // and return so cleanupChaosRoot() runs; the CLI wrapper exits non-0.
+    process.exitCode = 1;
+    return;
   }
 
   // Success even if some mutants are missed — the report documents them
