@@ -2,8 +2,8 @@
 //
 // Pins the backend surface for the built-in Support assistant:
 //   • getAssistantDef("support") is registered (title/promptTitle).
-//   • defaults/roles/support.yaml loads with accessory: headset and the
-//     bobbit tier tool policies (orchestrate: allow, admin: ask).
+//   • defaults/roles/support.yaml loads with accessory: headset, bobbit tier
+//     tool policies (orchestrate: allow, admin: ask), and session_prompt: allow.
 //   • SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction.
 //   • assistantRoleForType maps support -> support, everything else -> assistant.
 import { guardProcessEnv } from "./helpers/env-guard.js";
@@ -78,7 +78,7 @@ describe("composeAssistantTitle", () => {
 });
 
 describe("support role definition", () => {
-	it("defaults/roles/support.yaml loads with headset accessory + bobbit tier policies", () => {
+	it("defaults/roles/support.yaml loads with headset accessory + support tool policies", () => {
 		const raw = fs.readFileSync(SUPPORT_ROLE_FILE, "utf-8");
 		const role = YAML.parse(raw) as {
 			name?: string;
@@ -90,6 +90,7 @@ describe("support role definition", () => {
 		assert.equal(role.accessory, "headset");
 		assert.equal(role.toolPolicies?.bobbit_orchestrate, "allow");
 		assert.equal(role.toolPolicies?.bobbit_admin, "ask");
+		assert.equal(role.toolPolicies?.session_prompt, "allow");
 		// bobbit_read must NOT be listed — its `allow` default already applies.
 		assert.equal(role.toolPolicies?.bobbit_read, undefined);
 		assert.ok(role.promptTemplate && role.promptTemplate.length > 0, "support role needs a promptTemplate");
