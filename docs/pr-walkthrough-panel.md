@@ -21,9 +21,9 @@ compact alternate rendering of the same data.
 ## How it works now (built-in first-party pack)
 
 **The PR-walkthrough viewer ships as a built-in first-party pack**
-(`market-packs/pr-walkthrough/`), auto-resolved **active-by-default** with no
-manual install, and is the **sole provider** of the viewer panel, its data
-routes, and its deep-link. The bespoke built-in viewer (the old
+(`market-packs/pr-walkthrough/`), listed from the built-in source with no
+manual install and enabled through Market activation, and is the **sole provider**
+of the viewer panel, its data routes, and its deep-link. The bespoke built-in viewer (the old
 `PrWalkthroughPanel.ts` component, the standalone `/walkthrough?...` browser
 route, the `/walkthrough-pr` client slash intercept, and the child-session
 side-panel viewer) was **deleted**. The pre-migration surfaces are kept only as

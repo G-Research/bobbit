@@ -3,10 +3,10 @@
 ## Commands
 
 ```bash
-npm run build          # Full build (server + UI)
+npm run build          # Build (server + UI)
 npm run dev:harness    # Gateway via restart harness + vite (use this for dev)
 npm run restart-server # Rebuild & restart after server changes
-npm run check          # Type-check server + web (no emit)
+npm run check          # Type-check server + web
 npm run test:unit      # Unit phase → vitest core/dom/integration (fast pure-logic/DOM signal)
 npm run test:browser   # Browser phase → Playwright browser-v2 (geometry fixtures + smoke journeys)
 npm run test:e2e       # E2E phase → v2 real-fidelity (test:e2e:v2): real git/worktree/Docker/MCP/restart (external-free)
@@ -53,7 +53,7 @@ Primary branch is **`master`** (not `main`). Never create a `main` branch.
 
 **Forks**: open PRs against the fork's `master`, not the upstream repo.
 
-Worktree details: [docs/dev-workflow.md](docs/dev-workflow.md).
+See [docs/dev-workflow.md](docs/dev-workflow.md).
 
 ## Maintaining this file
 

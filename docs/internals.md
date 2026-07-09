@@ -1491,6 +1491,12 @@ This happens transparently in `normalizeGrantPolicy()` - existing role YAML and 
 
 > **Activation flag contract (pi 0.70+).** `computeToolActivationArgs()` emits `--no-builtin-tools` + `--no-extensions` + an explicit `--extension <…>/defaults/tools/_builtins/extension.ts` with `env.BOBBIT_BUILTIN_TOOLS` carrying the sorted list of pi file-builtins to re-register. The shape is pinned by `tests/tool-activation-contract.test.ts` (unit, seconds) and end-to-end by `tests/manual-integration/agent-tool-use.spec.ts`. Background and the diagnostic flow live in [docs/debugging.md — Agent silently substitutes file tools](debugging.md#agent-silently-substitutes-file-tools-when-prompted-for-bash--web--mcp) and [docs/testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers).
 
+### Tool activation diagnostics
+
+`computeToolActivationArgs()` warns for real YAML allowlist mistakes, not for expected inactive pack contributions. If a YAML tool has no active provider but `ToolManager.getInactiveToolContribution()` can identify it in an inactive marketplace or built-in pack root, activation skips it quietly and emits only a deduped debug diagnostic. This covers default-disabled first-party packs such as PR Walkthrough when their persisted role/session references still mention pack-owned tools.
+
+Unknown YAML names still warn once per process and scope with `reason=unknown-yaml-tool`, preserving typo visibility without repeating on every session spawn. `tests2/core/tool-activation-mcp-warn.test.ts` pins both behaviours.
+
 ---
 
 ## Per-role model & thinking-level overrides

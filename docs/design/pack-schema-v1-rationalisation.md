@@ -1057,10 +1057,12 @@ UI-only coverage lives in fixture/litmus packs such as
 store/session APIs through pack-bound surface auth with **no tool in `allowedTools`**.
 
 The production PR walkthrough pack later gained real reviewer tools. It now declares
-`contents.tools: [pr-walkthrough]` and owns the three tool YAMLs plus shared implementation
-under `market-packs/pr-walkthrough/tools/pr-walkthrough/`. Its panel, routes, and entrypoints
-remain pack-bound surfaces; its reviewer tools remain normal role/tool-policy-resolved agent
-tools.
+`contents.tools: [pr-walkthrough]` and owns the reviewer tool YAMLs plus shared implementation
+under `market-packs/pr-walkthrough/tools/pr-walkthrough/`: `readonly_bash`,
+`read_pr_walkthrough_bundle`, `submit_pr_walkthrough_chunk`,
+`read_pr_walkthrough_submission_status`, `finalize_pr_walkthrough_submission`, and
+compatibility `submit_pr_walkthrough_yaml`. Its panel, routes, and entrypoints remain
+pack-bound surfaces; its reviewer tools remain normal role/tool-policy-resolved agent tools.
 
 ### 10.3 `scripts/build-market-packs.mjs`
 
