@@ -58,16 +58,22 @@ async function getSession(id: string): Promise<any> {
 
 async function getPromptSections(id: string): Promise<PromptSection[]> {
 	// Poll until the persisted prompt-sections snapshot is available.
-	let sections: PromptSection[] | undefined;
-	await expect(async () => {
-		const resp = await rawApiFetch(`/api/sessions/${id}/prompt-sections`);
-		expect(resp.status).toBe(200);
-		const body = await resp.json();
-		expect(Array.isArray(body?.sections)).toBe(true);
-		expect(body.sections.length).toBeGreaterThan(0);
-		sections = body.sections as PromptSection[];
-	}).toPass({ timeout: 10_000 });
-	return sections!;
+	const start = Date.now();
+	let lastErr: unknown;
+	while (Date.now() - start < 10_000) {
+		try {
+			const resp = await rawApiFetch(`/api/sessions/${id}/prompt-sections`);
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(Array.isArray(body?.sections)).toBe(true);
+			expect(body.sections.length).toBeGreaterThan(0);
+			return body.sections as PromptSection[];
+		} catch (err) {
+			lastErr = err;
+			await new Promise(r => setTimeout(r, 100));
+		}
+	}
+	throw lastErr instanceof Error ? lastErr : new Error("prompt-sections not available within 10000ms");
 }
 
 test.describe("Support session role wiring (reproducing defects 5 & 6)", () => {
