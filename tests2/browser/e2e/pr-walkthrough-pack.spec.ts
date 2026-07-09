@@ -277,9 +277,15 @@ async function listInstalled(): Promise<Array<{ packName: string; scope: string;
 }
 
 async function resetPrWalkthroughActivation(): Promise<void> {
+	// pr-walkthrough now ships DISABLED-by-default (manifest `defaultDisabled`): an
+	// all-empty disabled set normalizes to NO explicit-enable sentinel ⇒ the pack
+	// resolves NOTHING (default-OFF). These live-feature tests exercise the pack ON,
+	// so the baseline must persist the explicit `{ enabled: true }` override — the
+	// same payload the marketplace master toggle writes when a user opts the pack IN
+	// — while keeping every per-entity toggle enabled (empty disabled arrays).
 	await apiFetch("/api/marketplace/pack-activation", {
 		method: "PUT",
-		body: JSON.stringify({ scope: "server", packName: PACK, disabled: { roles: [], tools: [], skills: [], entrypoints: [] } }),
+		body: JSON.stringify({ scope: "server", packName: PACK, disabled: { enabled: true, roles: [], tools: [], skills: [], entrypoints: [] } }),
 	});
 }
 
@@ -350,13 +356,13 @@ function liveDeepLink(): string {
 
 test.beforeEach(async () => {
 	// Server-scope activation persists between E2E runs; start every test from the
-	// shipped all-enabled state so failures do not cascade.
+	// explicitly-enabled state (pack ships default-OFF now) so failures do not cascade.
 	await resetPrWalkthroughActivation().catch(() => {});
 });
 
 test.afterEach(async () => {
-	// Best-effort: re-enable all toggles so a failed run never leaves the shipped
-	// feature partially disabled for the next test.
+	// Best-effort: re-enable the pack + all toggles so a failed run never leaves the
+	// feature disabled/partially disabled for the next test.
 	await resetPrWalkthroughActivation().catch(() => {});
 	// UN-POISON shared state. setupSessionGitRepo git-inits the session's working
 	// dir. For a UI default-project session with no dedicated worktree that dir IS
@@ -388,10 +394,12 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 	test("no-install dogfood: built-in resolution → path-traversal probe → disable/re-enable → non-removable", async ({ page, gateway }) => {
 		setupOutsideRepo();
 
-		// ── Step 1: NO INSTALL. The built-in band resolves the pack active-by-default. ──
+		// ── Step 1: NO INSTALL. The built-in band resolves the pack once it is enabled
+		// (the baseline persists the explicit `{ enabled: true }` override; the pack now
+		// ships default-OFF). ──
 		await expectRuntimePrwTools(PRW_TOOL_NAMES);
 		const packMeta = (await listContributions()).find((p) => p.packId === PACK);
-		expect(packMeta, "the built-in pr-walkthrough pack must be resolved with NO install").toBeTruthy();
+		expect(packMeta, "the built-in pr-walkthrough pack must be resolved with NO install once enabled").toBeTruthy();
 		expect(packMeta?.panels?.some((p) => p.id === PANEL_ID)).toBe(true);
 		expect(packMeta?.routeNames).toEqual(expect.arrayContaining(["bundle", "publish"]));
 		expect(packMeta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR Walkthrough")).toBe(true);

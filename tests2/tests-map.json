@@ -32,6 +32,10 @@
       "reason": "Playwright renderer tests for nine Children tools — uses real Chromium DOM; parallel to tests2/dom/ vitest rewrite. Tracked here to prevent orphan detection false positive."
     },
     {
+      "path": "tests2/browser/e2e/pr-walkthrough-default-off.spec.ts",
+      "reason": "Part 1+2 of 'Hide/Disable PR & Hindsight': fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; plus hindsight is absent from the built-in group and from /api/marketplace/installed. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts."
+    },
+    {
       "path": "tests2/core/cli-real-deps.test.ts",
       "reason": "DI contract: cli.ts passes no test doubles (default-real wiring)."
     },
