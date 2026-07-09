@@ -2023,6 +2023,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
 	const sessionManager = new SessionManager({
+		stateDir,
 		agentCliPath: config.agentCliPath,
 		systemPromptPath: config.systemPromptPath,
 		colorStore,
@@ -5939,7 +5940,7 @@ async function handleApiRoute(
 				const parts = sessionManager.getPromptParts(sessionId);
 				if (parts) {
 					parts.dynamicContext = blocks;
-					persistPromptSections(sessionId, parts);
+					persistPromptSections(sessionId, parts, sessionManager.stateDir);
 				}
 			} catch (err) {
 				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
@@ -15086,7 +15087,7 @@ async function handleApiRoute(
 		const id = promptSectionsMatch[1];
 
 		// Try persisted snapshot first (captures the actual prompt at creation time)
-		const persisted = loadPersistedPromptSections(id);
+		const persisted = loadPersistedPromptSections(id, sessionManager.stateDir);
 		if (persisted) {
 			json(persisted);
 			return;
