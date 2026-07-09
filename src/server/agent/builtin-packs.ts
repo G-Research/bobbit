@@ -65,6 +65,14 @@ export function resolveBuiltinPacksDir(override?: string): string {
 export interface PackEnableState {
 	/** Explicit-enable sentinel for ships-disabled-by-default packs. */
 	enabled?: boolean;
+	/**
+	 * Other stored disabled-entity refs (roles/tools/entrypoints/…) may also be
+	 * present on the override. The effective-activation check reads ONLY
+	 * `enabled`, but the wider shape is accepted so callers can pass a full
+	 * `DisabledRefs` without a cast (and without importing it here — avoids a
+	 * project-config-store import cycle).
+	 */
+	[kind: string]: unknown;
 }
 
 /**
