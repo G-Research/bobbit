@@ -1,40 +1,75 @@
-# Testing Strategy — Assessment & Path Forward
+# Testing Strategy — Test Suite v2
+
+> **This project runs Test Suite v2.** `npm run test:unit` and `npm run test:e2e`
+> are transparent aliases for the v2 tiers; the legacy per-file `tsx --test` +
+> `playwright-e2e` unit/browser suites were **deleted at switchover** (git history
+> retains them). The detailed design, measurements, and proofs live under
+> [`docs/testing-v2/`](testing-v2/) — this doc is the operating model + the still-live
+> harness reference. Historical "assessment & path forward" narrative below is kept
+> as rationale; where it describes the *old* 3-bucket / `retries:3` / 4-concurrent /
+> daily-lane policy it is **explicitly superseded** (see [Concurrency & budgets](#concurrency--budgets)).
 
 ## The phase invariant (read this first)
 
-Bobbit runs its tests through **workflow gates**, not `npm test`. The implementation gate runs four command steps against the goal branch — `build`, `check`, `unit`, `e2e` — whose commands live in `.bobbit/config/project.yaml`. Whatever the `unit:` / `e2e:` commands execute IS the test suite; anything they don't run is invisible and lets failures slip onto `master`.
+Bobbit runs its tests through **workflow gates**, not `npm test`. The implementation
+gate runs command steps against the goal branch — `build`, `check`, `unit`, `e2e` —
+whose commands live in `.bobbit/config/project.yaml`. Whatever the `unit:` / `e2e:`
+commands execute IS the test suite. After switchover those canonical commands route
+to v2:
 
-To make that a no-brainer, exactly one rule is enforced: **every test file under `tests/` except those under `tests/manual-integration/**` runs in exactly one phase — `unit` or `e2e`.** Three buckets, two runners in the unit phase:
+| Phase | Gate command | Runs | Runner / source of truth |
+|-------|-------------|------|--------------------------|
+| **unit** | `unit:` → `npm run test:unit` → **`test:v2`** | tier-1 (vitest: `tests2/core` node + `tests2/dom` happy-dom + `tests2/integration` gateway-per-worker) **‖** tier-2 (Playwright: `tests2/browser` geometry fixtures + smoke journeys) | [`vitest.config.ts`](../vitest.config.ts) + [`playwright-v2.config.ts`](../playwright-v2.config.ts), orchestrated by [`scripts/testing-v2/run-v2.mjs`](../scripts/testing-v2/run-v2.mjs) |
+| **e2e** | `e2e:` → `npm run test:e2e` → **`test:e2e:v2`** | the **real-fidelity remainder** — real git worktree / pool / sweeper, sandbox/Docker, MCP subprocess, spawned-process, port/restart — run against a real gateway with the in-process mock bridge, `retries:0` | [`scripts/testing-v2/run-e2e-v2.mjs`](../scripts/testing-v2/run-e2e-v2.mjs) (Groups A/B/C, derived from `tests2/tests-map.json`) |
+| **manual-integration** *(gate-exempt)* | `npm run test:manual` only | real LLM / real agents / real Docker | [`playwright-manual.config.ts`](../playwright-manual.config.ts) |
 
-| Bucket | What | Runner / source of truth | Gate command |
-|--------|------|---------------------------|--------------|
-| **unit · node** | fast logic tests, no real LLM | `tsx --test` over `NODE_UNIT_GLOBS` in [`scripts/test-phase-config.mjs`](../scripts/test-phase-config.mjs) (`tests/*.test.ts` + `tests/contract/*.test.ts`) | `unit:` → `npm run test:unit` |
-| **unit · browser** | `file://` component fixtures, no server | `tests/playwright.config.ts` (`tests/*.spec.ts`, minus `e2e/`, `manual-integration/`) | `unit:` → `npm run test:unit` |
-| **e2e** | all remaining non-LLM integration | `playwright-e2e.config.ts` (union across its `api` / `api-realpush` / `browser` projects) | `e2e:` → `npx playwright test --config playwright-e2e.config.ts` |
-| **manual-integration** *(gate-exempt)* | real LLM / Docker | `playwright-manual.config.ts` | `npm run test:manual` only |
+There is **no daily lane.** Real-fidelity coverage that used to be deferred to a
+tier-3 daily run is the per-workflow `e2e:v2` phase — it runs every workflow, exactly
+as legacy's per-commit `unit`+`e2e` did. Only `tests/manual-integration/**` (real
+LLM/agents) stays out of the gate, invoked manually in both worlds.
 
-`npm run test:unit` runs the two unit runners **concurrently** via [`scripts/run-unit.mjs`](../scripts/run-unit.mjs), splitting the cores between them and capping each runner at 6 workers by default (node `--test-concurrency=min(6,N/2)`, browser `--workers=min(6,N/2)`) so they run genuinely in parallel without oversubscribing or starving file:// browser fixtures. Env overrides are available for intentional local stress runs.
+**Bucket membership is the invariant.** Every physical test file belongs to exactly
+one bucket — `v2-core` / `v2-dom` / `v2-integration` / `v2-browser` (tier-1/2),
+`daily` (e2e:v2 real-fidelity), or `manual-integration` — recorded in
+[`tests2/tests-map.json`](../tests2/tests-map.json). The guard is
+[`tests2/core/guard-v2.test.ts`](../tests2/core/guard-v2.test.ts) (runs inside tier-1)
+plus its heavier twin [`scripts/testing-v2/parity.mjs`](../scripts/testing-v2/parity.mjs):
+no orphan `tests2/` files, no dangling `v2Path`, no retired-without-replacement.
+**New tests land in `tests2/`.**
 
-**Convention purity**: `*.test.ts` ⇒ node:test runner; `*.spec.ts` ⇒ Playwright. A `*.test.ts` must never import `@playwright/test`; a `*.spec.ts` must never import `node:test`. This is what keeps the two unit runners cleanly separable.
+**Convention purity**: `*.test.ts` ⇒ vitest (node/happy-dom); `*.spec.ts` ⇒ Playwright.
 
-**The guard**: [`tests/test-phase-invariant.test.ts`](../tests/test-phase-invariant.test.ts) enumerates every `tests/**/*.{test,spec}.ts`, derives the bucket globs from the same configs/constant the runners use, and fails if any file is claimed by zero phases (orphan) or more than one (double-claim), or violates the runner convention. There is **no fourth bucket**: a spec that some other config (e.g. the manual `docker` project) happens to collect but that does not physically live under `tests/manual-integration/` is treated as an orphan — which is why the real-Docker and real-LLM specs physically live under `tests/manual-integration/` rather than under `tests/e2e/` with an ignore.
+**`retries: 0` everywhere.** Determinism is met by architecture — DI seams (injected
+clock, fenced `CommandRunner`, fenced `fetch`, mock agent bridge), a one-gateway-per-fork
+harness with `scope()` per-test cleanup + a leak detector, and observable-state waits
+(WS events / `clock.advance()`) instead of wall-clock sleeps — never by a retry budget.
 
-**Measured unit wall time (24-core dev box): ~90s** (down from ~135s when the two runners were chained with `&&`). This is above the <1min aspiration. Binding constraint: both unit runners are CPU-bound and parallelise internally; the node logic suite alone is ~3.4k tests, and at a half-core split (`--test-concurrency=12`) it is the long pole at ~90s while the browser fixtures finish at ~76s. Giving either runner all cores oversubscribes the box and reintroduces contention-induced timeouts, so the split is the fastest **green** configuration. Sharding the node suite across processes is the next lever if the box shrinks. See the parallelism-ladder discussion in `docs/design/test-phase-invariant.md`.
+**Cost (honestly measured, [`docs/testing-v2/head-to-head.md`](testing-v2/head-to-head.md)):**
+whole-suite v2 is **~1.96× cheaper on CPU** than legacy (legacy 73.1 → v2 37.4 CPU-min,
+Docker-inclusive, under peer load; clean-quiet-box reference ~2.25×). The dominant win
+is structural: vitest `pool:forks isolate:false` (one reused gateway per fork) replacing
+legacy's per-file `tsx` spawn+transform tax, plus consolidating ~1571 browser-e2e specs
+into ~600 journeys. It is **not** the ~10× once claimed (that compared an inflated
+busy-box legacy baseline against an optimistic budget ceiling — corrected).
 
-**Measured e2e wall time (24-core dev box): ~6.5–7 min**, dominated by the `browser` project (~5.2 min when run standalone). Retries do **not** inflate this: back-to-back runs measured `--retries=3` at ~6.5 min and `--retries=0` at ~6.5–7.1 min — the retry budget is flake *insurance*, not steady-state cost. The number is above the ~5 min aspiration. Binding constraint: the `browser` project runs an in-process gateway + Chromium per worker; the worker budget below is deliberately conservative to avoid the cross-worker filesystem/CPU contention that historically produced flakes, and the spec mandated folding the previously `--grep-invert`-excluded `mcp-integration` + `session-lifecycle-ui` specs back into this project. Raising the worker budget to chase <5 min reintroduces exactly the contention flakes the budget exists to prevent, and would also degrade robustness when up to ~4 suites run concurrently — so it is not a free lever. A sub-5-min single-suite wall is a deliberately-superseded non-goal; see [E2E suite parallelism budget](#e2e-suite-parallelism-budget).
-
-## Current State
+## Current State (v2)
 
 ### Test Inventory
 
-| Layer | Files | Tests | Runtime | Parallelism |
-|-------|-------|-------|---------|-------------|
-| Unit · node (node:test logic) | ~340 | ~3.4k | long pole of the ~90s unit wall | `--test-concurrency=N/2` |
-| Unit · browser (file:// fixtures) | ~120 | ~1.3k | finishes ~76s within the unit wall | `--workers=N/2` |
-| E2E (in-process API + spawned browser) | ~330 | ~1.3k | ~6.5–7 min typical, longer under verification/concurrent load | api 2 / browser 3 workers |
-| Manual integration (real agent/LLM + Docker) | ~11 | serial | ~5 min | **None** |
+| Tier | Bucket(s) | Runner | ~Wall (isolated) |
+|------|-----------|--------|------------------|
+| tier-1 core/dom/integration | `v2-core`, `v2-dom`, `v2-integration` | vitest `pool:forks isolate:false` | folded into the ~250–300 s `test:v2` wall |
+| tier-2 browser | `v2-browser` (geometry fixtures + smoke journeys) | Playwright (`playwright-v2.config.ts`, Chromium, retries:0) | ‖ with tier-1 |
+| **`test:v2` total** | all of the above | `run-v2.mjs` (ledger-scheduled) | **~250–300 s** |
+| e2e:v2 real-fidelity | `daily` (relocate + adapter) | `run-e2e-v2.mjs` A/B/C, retries:0 | **~210–230 s** (Docker-inclusive) |
+| manual-integration | `manual-integration` | `playwright-manual.config.ts` | ~5 min, on demand |
 
-(Counts are order-of-magnitude; the authoritative membership is the phase-invariant guard, not this table.)
+Authoritative membership is `tests2/tests-map.json` + the guard, not this table.
+`test:v2` runs ~7800 tests (tier-1 ~7150 + tier-2 ~650); e2e:v2 is ~183 real-fidelity
+specs. Coverage parity with legacy is proven by [`parity.mjs`](../scripts/testing-v2/parity.mjs)
+(per-area V8 coverage + story-registry non-regression) and the chaos mutation
+comparison ([`docs/testing-v2/`](testing-v2/)): v2 catches 100% of legacy-caught mutants,
+kill rate ≥ legacy overall and per area.
 
 ### What Each Layer Actually Tests
 
@@ -68,7 +103,15 @@ Use split-suite metrics to prove browser E2E changes without running expensive t
 - Use `metrics:coverage` and scoped `metrics:check` when validating coverage non-regression without requiring every current metric file.
 - Compare current `.profiles/metrics/*.json` artifacts against committed `docs/testing-metrics/baseline-*.json` files. Update baselines only after intentional coverage movement is reviewed and documented.
 
-### The Gap
+### The Gap (mostly closed by v2)
+
+> **v2 update.** The gap below described the *legacy* automated suite. v2 closes
+> most of it: the **`e2e:v2`** phase runs real git worktree/pool/sweeper, real
+> Docker (`sandbox-recovery`), MCP subprocess, and spawned-process/port/restart
+> fidelity **per workflow** (not deferred), and the consolidated browser
+> **smoke journeys** exercise multi-feature user journeys. What remains
+> genuinely manual-only is real-LLM/real-agent behaviour under
+> `tests/manual-integration/**`. The original text is kept as rationale.
 
 The manual integration tests catch bugs that the automated suite misses because they exercise **three things simultaneously** that no other test layer combines:
 
@@ -243,6 +286,17 @@ Each E2E test file tests one feature. But bugs emerge from feature *interactions
 No test exercises a multi-feature user journey like: "create a project → create a sandboxed goal → verify team starts → check git status widget → navigate to settings → change config → go back to goal → verify nothing broke."
 
 ## Strategy
+
+> **Largely realized by Test Suite v2 — kept as design rationale.** The four
+> dimensions below were the original forward-plan. v2 delivered the substance:
+> **Dimension 2** (enhanced e2e infra — restart harness, Docker-optional, richer
+> mock agent) ships as the `e2e:v2` real-fidelity tier + the in-process
+> `crash()`/`restart()` fixture; **Dimension 3/4** (UI-shell testing + cross-feature
+> journeys) ship as the `tests2/dom` happy-dom rewrites + `tests2/integration`
+> gateway-per-worker tests + the consolidated `tests2/browser` smoke journeys.
+> **Dimension 1** (the `GatewayClient` UI-layer refactor) was deliberately left as a
+> **separate follow-up goal** (an explicit v2 non-goal). Read the sections below for
+> the *why*; read [`docs/testing-v2/`](testing-v2/) for what was actually built.
 
 The goal is to reach manual-integration-level confidence in an automated, parallelizable suite that runs in <5 minutes. This requires changes across four dimensions.
 
@@ -616,77 +670,84 @@ Any test that needs a real LLM call lives under `tests/manual-integration/` and 
 
 The canary for `--tools` allowlist regressions has two layers, both pinning the post-`fdfee7c5` activation contract:
 
-- **Unit contract pin** — `tests/tool-activation-contract.test.ts`. Runs in seconds under `npm run test:unit`; asserts `computeToolActivationArgs()` emits `--no-builtin-tools`, `--no-extensions`, the `_builtins/extension.ts` re-register shim, and the sorted `BOBBIT_BUILTIN_TOOLS` env list, with no stray `--tools` flag.
+- **Unit contract pin** — `tests2/core/tool-activation-contract.test.ts`. Runs in seconds inside tier-1 under `npm run test:unit` (v2); asserts `computeToolActivationArgs()` emits `--no-builtin-tools`, `--no-extensions`, the `_builtins/extension.ts` re-register shim, and the sorted `BOBBIT_BUILTIN_TOOLS` env list, with no stray `--tools` flag.
 - **Manual-integration canary** — `tests/manual-integration/agent-tool-use.spec.ts`. Real agent in a sandboxed session, seven scenarios covering pi builtins (bash, edit, find), the steer/interrupt path, a tool-error path, a Bobbit extension tool (`web_fetch`), and an MCP meta-tool (`mcp_describe`). Tool-card assertions are tool-name-specific (`data-tool-name="<name>"` on the shared wrapper in `src/ui/components/Messages.ts`); substitute tools that produce the same visible side-effect no longer pass.
 
 Run the unit pin on every commit and the integration canary before and after any `@earendil-works/pi-*` version bump. See [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers) for the full scenario list, rationale, and the recipe for adding a new tool category.
 
-## Target State
+## Achieved State (v2)
 
-| Layer | Tests | Runtime | Confidence |
-|-------|-------|---------|------------|
-| Unit (file:// fixtures) | ~500 | <30s | UI components correct in isolation |
-| UI Component (file:// + mock client) | ~100 | <30s | App shell wired correctly |
-| API E2E (in-process) | ~450 | <60s | Server contract correct |
-| Browser E2E (spawned + restartable) | ~150 | <90s | Full-stack journeys work |
-| Sandbox E2E (Docker, optional) | ~30 | <120s | Docker paths verified |
-| **Total** | **~1,230** | **<5 min** | **Manual-integration-level** |
+| Tier | Tests | Wall (isolated) | Confidence |
+|------|-------|-----------------|------------|
+| tier-1 core/dom/integration (vitest) | ~7150 | folded into `test:v2` | logic + UI-shell (happy-dom) + gateway-per-worker API |
+| tier-2 browser (Playwright journeys + geometry) | ~650 | ‖ tier-1 | consolidated full-stack smoke journeys + geometry fixtures |
+| **`test:v2` (unit phase)** | **~7800** | **~250–300 s** | replaces legacy unit + most of legacy e2e |
+| e2e:v2 (real-fidelity phase) | ~183 | ~210–230 s | real worktree/pool/Docker/MCP/spawn/restart, retries:0 |
+| manual-integration | ~11 | ~5 min, on demand | real agent/LLM/Docker |
 
-The manual integration tests remain as an optional "nuclear option" (`npm run test:manual`) for validating real-agent behavior, but the automated suite provides equivalent confidence for code changes.
+Whole-suite CPU is **~1.96× cheaper than legacy** (73.1 → 37.4 CPU-min,
+[`head-to-head.md`](testing-v2/head-to-head.md)), external-service-free, `retries:0`,
+coverage-proven. The manual integration tests remain the on-demand real-agent smoke;
+the automated tiers provide equivalent confidence for code changes.
 
-## E2E suite parallelism budget
+## Concurrency & budgets
 
-The E2E suite historically produced suite-level contention flakes: specs passed
-in isolation, but full runs failed when many workers each spun up a gateway,
-WebSocket stack, and, for browser tests, a Chromium instance on a constrained
-Windows host. The current budget is intentionally conservative so speed gains do
-not come from over-parallelising a shared filesystem.
+> **Supersedes the old `retries:3` / 4-concurrent / sub-5-min-out-of-scope
+> policy.** That policy (a conservative Playwright worker budget + a retry margin
+> for concurrent legacy e2e suites) is retired by Test Suite v2. It survives only
+> in git history and in the historical *techniques* below (deterministic-wait
+> hardening, RCA fixes — still valid), **not** as the operating policy. v2 is
+> `retries:0` everywhere; concurrency is governed by a cross-process ledger, not a
+> retry budget.
 
-### Worker and retry counts
+**`retries: 0` everywhere.** No suite carries a flake budget. Flakes are bugs; they
+are fixed by architecture (DI seams, one-gateway-per-fork + `scope()` cleanup +
+leak detector, observable-state waits) — never masked by retries.
 
-Configured in `playwright-e2e.config.ts`:
+**Single-run bar (the switchover bar).** A single isolated `test:v2` runs in
+**~250–300 s** (`budgets.json` `full` wall cap 300 s) and `test:e2e:v2` in
+**~210–230 s**, both green at `retries:0`. Budgets are enforced by
+[`scripts/testing-v2/assert-budget.mjs`](../scripts/testing-v2/assert-budget.mjs) from
+runner JSON + process-tree CPU sampling. Wall is the hard gate; CPU-min is
+observability-only (the per-PID sampler over-counts on a shared box — see
+`budgets.json`).
 
-- Top-level: `workers: 4`, `retries: 3`, `fullyParallel: true`.
-- `api` project: `workers: 2` and inherited `fullyParallel: true`.
-- `api-realpush` project: `workers: 1`, `fullyParallel: false`.
-- `browser` project: `workers: 3`, `fullyParallel: false`.
+> **Gate-loop caveat.** `test:v2` trips its 300 s wall budget (exit 1) under heavy
+> *concurrent* peer load even when every test passes. If the gate loop reports a
+> `test:v2` failure whose only violation is `wall … > 300000`, it is a
+> budget-under-load artifact, not a test regression — raise the cap or run
+> isolated. Flagged for review.
 
-Each worker owns a full gateway state directory; browser workers add Chromium
-and static UI serving. The browser and real-push projects stay spec-serial
-inside their project workers because their setup costs and filesystem side
-effects are heavier. The API project remains fully parallel because it uses the
-in-process harness, but its worker budget is capped at two to avoid stacking too
-many gateway/git-heavy setup paths on Windows.
+**Concurrency = N=1 + a no-thrash ledger.** The committed bar is: one full `test:v2`
+run is ~0-flake, and the cross-process **ledger** ([`scripts/testing-v2/ledger.mjs`](../scripts/testing-v2/ledger.mjs))
+keeps `Σ(workerSlots) ≤ cores` and caps the real contention sources (concurrent
+gateway boots, total Chromium render workers — `budget-caps.json`) so additional
+concurrent runs **queue** rather than oversubscribe. Measured N≥2 on this single
+24-core box still starves the heaviest integration tests into timeouts — a
+hardware/structural ceiling, not a test-quality gap — so **restoring 5-way
+concurrency is a spin-off goal**, not part of this switchover. The ledger makes
+oversubscription structurally impossible at any N (best-effort under load).
 
-**`retries: 3` is the deliberate current policy, not debt.** The flake-hardening
-effort root-caused the browser flake floor in place (see [Flake hardening](#flake-hardening-deterministic-waits)),
-removed every `@quarantine` label, and un-skipped the one flake-skipped spec.
-The config nonetheless **keeps** `retries: 3` and the current worker budget on
-purpose. Rationale: the dev box must support running up to ~4 e2e suites
-**concurrently** (overlapping worktrees / parallel goals). Under that mutual
-contention a suite can hit a transient cross-suite race — CPU/FS pressure, a
-goal-assistant cold-start timeout — unrelated to any real bug. `retries: 3`
-absorbs those transients so one suite's blip does not red-light an otherwise
-green concurrent run. The deterministic-wait hardening keeps the
-**first-attempt** failure rate low, so retries are a resilience margin, **not**
-a crutch for un-root-caused flakes.
+**External-service-free (hard constraint).** Neither `test:v2` nor `test:e2e:v2`
+makes any external-service call — no real LLM, no real GitHub remote, no non-loopback
+HTTP. Enforced structurally by the in-process mock agent bridge + the fail-closed
+injected `fetch` (rejects non-loopback) + the fenced `CommandRunner` (rejects
+`push`/`fetch`/`clone`/`ls-remote` to non-local remotes, all `gh`, all Docker unless
+a fake runtime is provided). Proven empirically by
+[`scripts/testing-v2/fetch-egress-guard.mjs`](../scripts/testing-v2/fetch-egress-guard.mjs)
+(whole-process-tree egress log stays empty across a full run; positive control
+catches github/npmjs). Any real-LLM/external spec belongs in `manual-integration`,
+never here.
 
-The original goal's `retries: 0` + sub-5-min asks are explicitly **superseded**
-by this decision. Retries are not being reduced to 0, and worker counts are not
-being raised: raising parallelism to chase a sub-5-min single-suite wall would
-manufacture the very contention this budget avoids and degrade concurrent-suite
-robustness. A sub-5-min single-suite wall was therefore not achieved and is out
-of scope under this policy.
+### Legacy techniques still worth keeping
 
-Measured evidence:
-
-- A single retries-free full suite runs ~6.5–7.0 min wall (~1270–1279 passed,
-  ~6 skipped).
-- **Two** full suites run concurrently at the committed `retries: 3` both passed
-  (exit 0): suite 1 with 0 failed / 1 flaky-retried (`qa-seed`), suite 2 with
-  0 failed / 2 flaky-retried (`dynamic-chat-tabs`, `repro-h3-snapshot-live-interleave`);
-  ~9.5–10.0 min each under mutual contention. So under concurrency the suite
-  absorbs ~1–2 transient flakes each with 0 hard failures.
+The deterministic-wait hardening and RCA fixes below were done for the legacy e2e
+suite. The **techniques** (synchronize on observable state, clean up worker-scoped
+entities, atomic per-worker fixtures) are exactly how v2 stays `retries:0`, so they
+are kept as reference. `playwright-e2e.config.ts` still exists and is **reused by
+`e2e:v2` Group B** — but `run-e2e-v2.mjs` overrides its committed `retries`/`workers`
+defaults to `--retries=0 --workers=2` (env `E2E_V2_PW_WORKERS` / `E2E_V2_NODE_CONCURRENCY`),
+so the old committed `retries:3` config values no longer describe how the specs run.
 
 When a clearly root-causable flake is found it is fixed in place rather than
 masked — e.g. `open-session-new-window`'s middle-click was rewritten to dispatch
@@ -753,14 +814,15 @@ E2E command before merge.
 
 ### Playwright transform-cache isolation
 
-Run the root E2E suite through the npm wrapper:
+`e2e:v2` Group B drives the relocate specs through the same npm wrapper
+(`run-e2e-v2.mjs` calls `npm run test:e2e:run -- <specs> --workers=2 --retries=0`):
 
 ```bash
-npm run test:e2e
+npm run test:e2e:run -- <specs>   # the wrapper e2e:v2 Group B reuses
 ```
 
-`npm run test:e2e` builds first, then calls `scripts/run-playwright-e2e.mjs`
-before Playwright's CLI imports transform-cache modules. The wrapper creates a
+`scripts/run-playwright-e2e.mjs` runs before Playwright's CLI imports
+transform-cache modules. The wrapper creates a
 run-scoped Playwright transform-cache root, injects
 `scripts/playwright-e2e-cache-bootstrap.cjs` through `NODE_OPTIONS`, and gives
 the runner plus each Playwright worker its own process-local `PWTEST_CACHE_DIR`.
@@ -828,59 +890,39 @@ pressure and was one of the original causes of the flake pattern.
 
 ### Measurement protocol
 
-Acceptance timing must use the exact command, including build and wrapper cache
-isolation:
+The v2 phases already sample their own wall + subtree-CPU and enforce budgets:
 
 ```bash
-npm run test:e2e
+npm run test:v2        # unit phase (tier-1 ‖ tier-2) — reports wall/CPU + asserts budget
+npm run test:e2e:v2    # real-fidelity phase (A/B/C, retries:0) — reports per-group wall/CPU
 ```
 
-For flake experiments, prefer the same wrapper with retries disabled:
+For an apples-to-apples cost comparison against legacy, use the committed
+subtree-scoped wrapper (keys CPU on `(pid, CreationDate)`, excludes pre-run
+procs — corrects the Windows PID-churn over-count):
 
 ```bash
-npm run test:e2e -- --retries=0
+node scripts/testing-v2/measure-subtree.mjs <label> out.json -- <cmd...>
 ```
 
-If the build is already known fresh and you only need the Playwright portion,
-this wrapper-backed equivalent is acceptable:
-
-```bash
-npm run test:e2e:run -- --retries=0
-```
-
-Run flake experiments repeatedly enough to distinguish suite-level contention
-from one-off noise; three consecutive retry-free runs is the usual target for
-changes to worker counts, temp/cache roots, teardown, or webServer hooks. Direct
-`npx playwright test --config playwright-e2e.config.ts --retries=0` is only a
-fallback when the npm wrapper is unavailable, and its runner-cache isolation is
-weaker for the reason described above.
-
-`--retries=0` is a measurement flag only. The committed E2E config keeps
-`retries: 3` for normal runs as a deliberate resilience margin for concurrent
-suites (see [Worker and retry counts](#worker-and-retry-counts)), so a transient
-cross-suite race does not red-light an otherwise green run. Use `--retries=0`
-only to surface first-attempt flakes during hardening or measurement, not as a
-target for the committed config.
+The `e2e:v2` Group B/C still run through the Playwright transform-cache isolation
+below (they reuse `playwright-e2e.config.ts` / `playwright-v2.config.ts`), so
+cross-worktree cache hygiene still applies. Everything runs at `retries:0`; there
+is no retry flag to toggle for "flake experiments" — a flake is a bug to root-cause.
 
 ### What not to change without re-measuring
 
-- Don't raise the top-level worker budget above 4, the `api` budget above 2, or
-  the `browser` budget above 3 as a speed strategy. The budget is sized so up
-  to ~4 suites can run
-  concurrently without mutual contention; raising it to chase a faster
-  single-suite wall manufactures exactly the cross-suite flakes the budget
-  exists to prevent. A sub-5-min single-suite wall is explicitly out of scope.
-- Don't reduce `retries: 3` to 0 in the committed config. It is the deliberate
-  concurrent-robustness margin, not temporary debt — see
-  [Worker and retry counts](#worker-and-retry-counts).
-- Don't set `fullyParallel: true` on the `browser` or `api-realpush` projects.
-- Don't serialise the whole `api` project; keep targeted hotspot specs serial
-  instead. The in-process lane still benefits from limited parallelism at its
-  current worker budget.
-- Don't remove the wrapper-backed `npm run test:e2e` path or replace it with raw
-  `npx` as the primary command.
+- Don't reintroduce a `retries > 0` policy. v2 is `retries:0`; determinism is met
+  by architecture, and a retry budget hides real bugs.
+- Don't bypass the ledger for concurrency. Worker counts come from
+  `scripts/testing-v2/ledger.mjs` (`Σ(workerSlots) ≤ cores`) + the gateway-boot /
+  browser render-lease caps in `budget-caps.json`. Hardcoding higher worker counts
+  reintroduces the oversubscription the ledger prevents.
 - Don't remove `BOBBIT_E2E_TMP_ROOT`, `BOBBIT_E2E_PWTEST_CACHE_ROOT`, or the
-  Windows `C:\bobbit-e2e\` default without measuring the filesystem impact.
-
-If a future change must violate any of the above, re-run the measurement
-protocol and update this section with the new numbers.
+  Windows `C:\bobbit-e2e\` default without measuring the filesystem impact — the
+  reused Playwright configs still depend on them.
+- Don't set `fullyParallel: true` on the `browser` or `api-realpush` projects of
+  the reused `playwright-e2e.config.ts`.
+- Restoring 5-way concurrency is a **spin-off goal** (hardware ceiling on this
+  box), not a switchover lever. Re-measure with `measure-subtree.mjs` +
+  `concurrency-proof.mjs` before claiming a new bar.
