@@ -21,6 +21,23 @@ function text(result: any): string {
 	return result?.content?.[0]?.text ?? "";
 }
 
+describe("bobbit_read — paging schema", () => {
+	it("exposes shared paging and cursor params as list-wide controls", () => {
+		const props = tools.get("bobbit_read")!.parameters?.properties ?? {};
+
+		for (const name of ["limit", "offset", "after", "cursor"]) {
+			expect(props[name], `${name} should be registered in the bobbit_read schema`).toBeTruthy();
+		}
+
+		expect(props.limit.description).toMatch(/page|list|bounded/i);
+		expect(props.limit.description).not.toMatch(/^search:/i);
+		expect(props.offset.description).toMatch(/page|list|offset/i);
+		expect(props.offset.description).not.toMatch(/^search:/i);
+		expect(props.after.description).toMatch(/cursor|after/i);
+		expect(props.cursor.description).toMatch(/cursor|after/i);
+	});
+});
+
 describe("bobbit tools — operation validation", () => {
 	it("unknown operation → isError, no fetch", async () => {
 		const calls = stubFetch();

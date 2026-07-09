@@ -72,6 +72,10 @@
       "reason": "bobbit gateway tool suite: tier separation — YAML group/grantPolicy defaults and operation-union drift guard vs the dispatched catalogue and design §5."
     },
     {
+      "path": "tests2/core/bobbit-tool-pagination.test.ts",
+      "reason": "bobbit gateway tool suite: pagination contract — bounded list-style bobbit_read responses, fallback/post-response slicing, preserved ancillary fields, and normalized pagination metadata."
+    },
+    {
       "path": "tests2/core/role-bobbit-tools-policy.test.ts",
       "reason": "bobbit gateway tier role-policy invariant: bobbit_orchestrate/bobbit_admin default never; ONLY general + support + team-lead re-grant orchestrate, ONLY general + support get admin behind ask."
     },
