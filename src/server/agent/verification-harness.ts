@@ -1090,6 +1090,18 @@ function verificationRetryDelayMs(attempt: number, isBackoff: boolean): number {
 
 const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
 const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
+// Reminder-path fairness (see runLlmReviewViaSession). A reviewer that went
+// idle without calling verification_result is nudged up to MAX_REVIEWER_REMINDERS
+// times. Each nudge gets a fair turn: we wait REVIEWER_REMINDER_STREAM_SETTLE_MS
+// for the agent to actually start streaming before racing waitForIdle, and —
+// if it did stream this turn — a further REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS
+// for an in-flight verdict POST to land before giving up. This restores the
+// pre-regression behavior where a reviewer that completed its analysis but
+// missed the tool call is re-nudged on the SAME session (preserving its
+// context) instead of being torn down after a single under-graced reminder.
+const MAX_REVIEWER_REMINDERS = 2;
+const REVIEWER_REMINDER_STREAM_SETTLE_MS = 15_000;
+const REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS = 20_000;
 
 function isRetryableLlmReviewRecovery(output: string): boolean {
 	return isTransientReviewError(output) || isRetryableGenericAgentError(output);
@@ -2060,9 +2072,11 @@ export class VerificationHarness {
 			};
 		} finally {
 			try { errListenerUnsub(); } catch { /* ignore */ }
-			this.pendingResults.delete(step.sessionId);
-			// Terminate and unregister reviewer session
+			// Terminate BEFORE deleting the pending resolver so a verdict POST
+			// racing teardown is still captured, not 404-dropped (see the
+			// delete-vs-late-POST fix in runLlmReviewViaSession).
 			try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
+			this.pendingResults.delete(step.sessionId);
 			if (this.teamManager) {
 				try { await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* ignore */ }
 			}
@@ -3444,13 +3458,35 @@ export class VerificationHarness {
 								// 15 min — user corporate-subscription quotas can exceed any
 								// finite bound, and the right answer is to wait, not fail.
 								const maxBoundedAttempts = 3;
+								// Fresh reviewer/QA session id per from-scratch attempt (see the
+								// llm-review branch below for rationale) so a retry never clobbers
+								// the prior attempt's transcript.
+								let attemptSessionId = stepSessionId;
 								for (let attempt = 1; ; attempt++) {
 									if (active.cancelled) break;
+									if (attempt > 1) {
+										const retiredSessionId = attemptSessionId;
+										attemptSessionId = `agent-qa-${randomUUID().slice(0, 12)}`;
+										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}). Prior transcript preserved.`);
+										active.steps[index].startedAt = Date.now();
+										if (!active.cancelled) this.broadcastFn(signal.goalId, {
+											type: "gate_verification_step_started",
+											goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+											stepIndex: index, stepName: step.name,
+											startedAt: active.steps[index].startedAt,
+											sessionId: attemptSessionId, phase,
+										});
+										const avRetry = this.activeVerifications.get(signal.id);
+										if (avRetry && avRetry.steps[index]) {
+											avRetry.steps[index].sessionId = attemptSessionId;
+											this._persistActive();
+										}
+									}
 									const qaResult = await this.runAgentQaStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
 										cwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
-										goalSpec, allGateStates, stepSessionId,
+										goalSpec, allGateStates, attemptSessionId,
 									);
 									result = qaResult;
 									if (qaResult.artifact) {
@@ -3543,14 +3579,42 @@ export class VerificationHarness {
 								// survive a long provider rate-limit / overload window.
 								const maxBoundedAttempts = 3;
 								let finalAttempt = 0;
+								// Each from-scratch attempt gets a FRESH reviewer session id so a
+								// prior attempt's transcript is never clobbered — it stays viewable
+								// at its original /session/<id> URL. The FIRST attempt keeps the
+								// pre-generated `stepSessionId` (already broadcast via
+								// gate_verification_step_started); attempts 2..N mint a new id and
+								// re-broadcast the lineage so the UI can follow retired→new.
+								// See tests2/core/verification-harness-review-reliability.test.ts.
+								let attemptSessionId = stepSessionId;
 								for (let attempt = 1; ; attempt++) {
 									finalAttempt = attempt;
 									if (active.cancelled) break;
+									if (attempt > 1) {
+										const retiredSessionId = attemptSessionId;
+										attemptSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
+										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}, timeout=${step.timeout ?? 600}s). Prior transcript preserved.`);
+										active.steps[index].startedAt = Date.now();
+										if (!active.cancelled) this.broadcastFn(signal.goalId, {
+											type: "gate_verification_step_started",
+											goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+											stepIndex: index, stepName: step.name,
+											startedAt: active.steps[index].startedAt,
+											sessionId: attemptSessionId, phase,
+										});
+										const avRetry = this.activeVerifications.get(signal.id);
+										if (avRetry && avRetry.steps[index]) {
+											avRetry.steps[index].sessionId = attemptSessionId;
+											this._persistActive();
+										}
+									} else {
+										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${step.timeout ?? 600}s).`);
+									}
 									result = await this.runLlmReviewStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
 										cwd, builtinVars,
 										signal.content, signal.metadata,
-										goalSpec, allGateStates, signal.goalId, stepSessionId,
+										goalSpec, allGateStates, signal.goalId, attemptSessionId,
 										gate,
 									);
 									const decision = shouldRetryVerificationStep({
@@ -3854,9 +3918,20 @@ export class VerificationHarness {
 		// Pre-generate sessionId so we can register the verification_result resolver and extension before session creation
 		const sessionId = preGeneratedSessionId || `llm-review-${randomUUID().slice(0, 12)}`;
 
-		// Set up verification_result promise
+		// Set up verification_result promise. Wrap the resolver so a late verdict
+		// (a verification_result POST that lands during/after teardown) is CAPTURED
+		// even after we've stopped awaiting the promise — the `finally` below can
+		// then honor it instead of returning the "did not call" hard failure.
+		// This closes the delete-vs-late-POST race that used to 404-drop a real
+		// pass (server.ts verification-result handler → pendingResults.get()).
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
-		this.pendingResults.set(sessionId, resultResolver);
+		let capturedVerdict: VerificationResult | null = null;
+		let hardFailureNoResult = false;
+		const capturingResolver = (r: VerificationResult) => {
+			if (!capturedVerdict) capturedVerdict = r;
+			resultResolver(r);
+		};
+		this.pendingResults.set(sessionId, capturingResolver);
 
 		let lastErroredToolOutput: string | null = null;
 		let errListenerUnsub: (() => void) | undefined;
@@ -4035,42 +4110,75 @@ export class VerificationHarness {
 				return { passed: false, output: recoveryResult.output, sessionId };
 			}
 
-			// Agent went idle without calling the tool — if the last turn hit a
-			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the context-rich reminder for live reviewers. The legacy
-			// terse reminder did not elicit a tool call when the agent had emitted
-			// its verdict as chat-text and ended turn — re-attaching the kickoff
-			// puts the spec back in context so the agent has something to call
-			// the tool with.
-			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
-			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
-			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "context-rich"} reminder`);
-			await session.rpcClient.prompt(reminderPrompt);
-			// Wait for the agent to actually pick up the reminder before racing
-			// against waitForIdle — see _tryResumeFromSession for rationale. The
-			// live-session path is normally streaming when the reminder fires, but
-			// guard for consistency in case the kickoff turn ended without a tool
-			// call and the session is already idle.
-			await this.sessionManager!.waitForStreaming(sessionId, 10_000).catch(() => {});
-			const result2 = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-			]);
-
-			if (result2.type === "result") {
-				return { passed: result2.verdict, output: result2.summary, sessionId };
+			// Agent went idle without calling the tool. Re-nudge the SAME live
+			// session — it still has its full analysis in context, so a reminder is
+			// far cheaper and more reliable than tearing it down and re-running from
+			// scratch. Give each reminder a FAIR turn (don't tear down an actively
+			// streaming reviewer) and send up to MAX_REVIEWER_REMINDERS of them
+			// before escalating. This restores the pre-regression behavior; the
+			// single under-graced reminder used to SIGTERM a reviewer that had
+			// completed its review but missed the tool call.
+			let reminderOutcome:
+				| { type: "result"; verdict: boolean; summary: string }
+				| { type: "errored"; output: string }
+				| { type: "idle" } = { type: "idle" };
+			for (let reminderNum = 1; reminderNum <= MAX_REVIEWER_REMINDERS; reminderNum++) {
+				const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
+				const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
+				console.log(`[verification][reviewer-lifecycle] reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${sessionId} for "${step.name}" (${jsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
+				await session.rpcClient.prompt(reminderPrompt);
+				// Wait for the agent to actually pick up the reminder before racing
+				// against waitForIdle — see _tryResumeFromSession for rationale. Give
+				// it a fair settle window; if it never starts streaming we still loop
+				// to the next reminder rather than tearing down after one nudge.
+				const started = await this.sessionManager!.waitForStreaming(sessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
+				const result2 = await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+				]);
+				if (result2.type === "result") {
+					reminderOutcome = { type: "result", verdict: result2.verdict, summary: result2.summary };
+					break;
+				}
+				const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
+				if (postReminderRecovery.type === "result") {
+					await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
+					reminderOutcome = { type: "result", verdict: postReminderRecovery.verdict, summary: postReminderRecovery.summary };
+					break;
+				}
+				if (postReminderRecovery.type === "errored") {
+					reminderOutcome = { type: "errored", output: postReminderRecovery.output };
+					break;
+				}
+				// Idle without result. If the reviewer actually streamed this turn it
+				// likely completed its analysis but its verdict POST is still in
+				// flight — give a short settle grace and re-check the channel once
+				// before deciding to nudge again / give up.
+				if (started) {
+					const late = await Promise.race([
+						resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+						new Promise<{ type: "timeout" }>(r => this.clock.setTimeout(() => r({ type: "timeout" }), REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS)),
+					]);
+					if (late.type === "result") {
+						reminderOutcome = { type: "result", verdict: late.verdict, summary: late.summary };
+						break;
+					}
+				}
+				// Otherwise loop and send another reminder (fair turn).
 			}
 
-			const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
-			if (postReminderRecovery.type === "result") {
-				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
-				return { passed: postReminderRecovery.verdict, output: postReminderRecovery.summary, sessionId };
+			if (reminderOutcome.type === "result") {
+				return { passed: reminderOutcome.verdict, output: reminderOutcome.summary, sessionId };
 			}
-			if (postReminderRecovery.type === "errored") {
-				return { passed: false, output: postReminderRecovery.output, sessionId };
+			if (reminderOutcome.type === "errored") {
+				return { passed: false, output: reminderOutcome.output, sessionId };
 			}
 
-			// Hard failure
+			// Hard failure — reviewer never produced a verdict after fair reminders.
+			// Flag it so the `finally` can still honor a verdict that lands during
+			// teardown (the delete-vs-late-POST race) instead of dropping it.
+			hardFailureNoResult = true;
+			console.log(`[verification][reviewer-lifecycle] termination reason=reminder-exhausted for ${sessionId} ("${step.name}") after ${MAX_REVIEWER_REMINDERS} fair reminder(s) — no verification_result.`);
 			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId };
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
@@ -4094,16 +4202,34 @@ export class VerificationHarness {
 			return { passed: false, output: errOutput, sessionId };
 		} finally {
 			try { errListenerUnsub?.(); } catch { /* ignore */ }
-			// Always clean up pending results, extension file, terminate, and unregister
+			// Always clean up pending results, extension file, terminate, and unregister.
+			//
+			// ORDER MATTERS: terminate the session FIRST, then delete the pending
+			// resolver. A verification_result POST can race the teardown — the
+			// reviewer emits its verdict just as the harness gives up. If we deleted
+			// the resolver before terminate (the old order), that late POST hit
+			// server.ts's `pendingResults.get()` lookup, found nothing, and was
+			// 404-dropped — a real pass silently lost. By keeping the resolver live
+			// across terminateSession, a late verdict is still captured
+			// (capturingResolver) and honored below.
 			if (sessionId) {
-				this.pendingResults.delete(sessionId);
 				try {
 					await this.sessionManager!.terminateSession(sessionId);
 				} catch { /* ignore — session may already be terminated */ }
+				this.pendingResults.delete(sessionId);
 				if (this.teamManager) {
 					try {
 						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
 					} catch { /* ignore */ }
+				}
+				// If the reviewer's verdict landed during teardown and we were about
+				// to return the "did not call verification_result" hard failure,
+				// honor the late verdict instead of dropping it.
+				if (hardFailureNoResult && capturedVerdict) {
+					const v: VerificationResult = capturedVerdict;
+					console.log(`[verification][reviewer-lifecycle] late verification_result for ${sessionId} ("${step.name}") arrived during teardown — honoring verdict=${v.verdict ? "pass" : "fail"} instead of the 'did not call' hard failure.`);
+					// eslint-disable-next-line no-unsafe-finally
+					return { passed: v.verdict, output: v.summary, sessionId };
 				}
 			}
 		}
@@ -4435,8 +4561,11 @@ export class VerificationHarness {
 		} finally {
 			try { qaErrListenerUnsub?.(); } catch { /* ignore */ }
 			if (qaSessionId) {
-				this.pendingResults.delete(qaSessionId);
+				// Terminate BEFORE deleting the pending resolver so a verdict POST
+				// racing teardown is still captured, not 404-dropped (see the
+				// delete-vs-late-POST fix in runLlmReviewViaSession).
 				try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
+				this.pendingResults.delete(qaSessionId);
 				if (this.teamManager) {
 					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
 				}

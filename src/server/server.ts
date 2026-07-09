@@ -15881,9 +15881,11 @@ async function handleApiRoute(
 		}
 		const resolver = verificationHarness.pendingResults.get(body.sessionId);
 		if (!resolver) {
+			console.warn(`[verification][reviewer-lifecycle] verification_result POST 404-dropped for session ${body.sessionId} (verdict=${body.verdict}) — no pending resolver (teardown already ran / unknown session).`);
 			json({ error: "No pending verification for this session" }, 404);
 			return;
 		}
+		console.log(`[verification][reviewer-lifecycle] verification_result POST accepted for session ${body.sessionId} (verdict=${body.verdict}).`);
 		// Support report_html_file: server reads file directly (avoids tool output limits for large reports)
 		if (typeof body.report_html === "string" && typeof body.report_html_file === "string") {
 			json({ error: "Provide either report_html or report_html_file, not both" }, 400);

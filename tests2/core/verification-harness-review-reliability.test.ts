@@ -46,6 +46,7 @@ import os from "node:os";
 import path from "node:path";
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
+const { isTransientReviewError, shouldRetryVerificationStep } = await import("../../src/server/agent/verification-logic.js");
 
 const MARKER = "LLM_REVIEW_RELIABILITY_REPRO";
 
@@ -279,5 +280,52 @@ test("verification_result arriving during teardown is honored, not 404-dropped",
 		lateVerdictHonored,
 		true,
 		`${MARKER}: late verification_result was not honored during teardown — the delete-vs-late-POST race silently dropped a real pass.`,
+	);
+});
+
+// Companion invariant (added by the fix): a "completed-but-missed-tool-call"
+// reviewer outcome must be classified NON-transient, so the bounded retry loop
+// does NOT throw away the reviewer's work with a fresh-ID from-scratch re-run.
+// The fair-turn in-session re-nudge (MAX_REVIEWER_REMINDERS in
+// runLlmReviewViaSession) is the recovery mechanism for this case — consistent
+// with the QA path's intent (QA_NON_TRANSIENT_PATTERNS). If someone later adds
+// this phrasing to the transient markers, this test fails loudly.
+test("'did not call verification_result after reminder' is non-transient (no from-scratch re-run)", () => {
+	const output = "Agent did not call verification_result after reminder.";
+	assert.equal(
+		isTransientReviewError(output),
+		false,
+		`${MARKER}: a completed-but-missed-tool-call outcome must NOT be transient — otherwise the loop re-runs from scratch and discards the reviewer's analysis.`,
+	);
+	const decision = shouldRetryVerificationStep({
+		passed: false,
+		output,
+		attempt: 1,
+		maxBoundedAttempts: 3,
+		isTransient: isTransientReviewError,
+	});
+	assert.equal(
+		decision,
+		"break",
+		`${MARKER}: the bounded retry loop must break (not from-scratch re-run) on a completed-but-missed-tool-call outcome; in-session re-nudging is the recovery path.`,
+	);
+});
+
+// Companion invariant: an infra-transient reviewer failure (e.g. ECONNRESET)
+// within budget must still request a from-scratch retry (which now mints a
+// fresh session id per attempt). Guards against over-broadly reclassifying
+// transient failures as terminal while fixing the missed-tool-call case.
+test("transient reviewer failure within budget still retries from scratch", () => {
+	const decision = shouldRetryVerificationStep({
+		passed: false,
+		output: "LLM review failed: read ECONNRESET",
+		attempt: 1,
+		maxBoundedAttempts: 3,
+		isTransient: isTransientReviewError,
+	});
+	assert.equal(
+		decision,
+		"retry",
+		`${MARKER}: a within-budget transient reviewer failure must still retry (fresh-id from-scratch attempt).`,
 	);
 });
