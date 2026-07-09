@@ -32,8 +32,9 @@ test.describe("Persisted prompt sections", () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 		try {
+			const cursor = conn.messageCount();
 			conn.send({ type: "prompt", text: "Reply with OK" });
-			await conn.waitFor(statusPredicate("idle"), 15_000);
+			await conn.waitForFrom(cursor, statusPredicate("idle"), 15_000);
 		} finally {
 			conn.close();
 		}
@@ -70,8 +71,9 @@ test.describe("Persisted prompt sections", () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 		try {
+			const cursor = conn.messageCount();
 			conn.send({ type: "prompt", text: "Reply with OK" });
-			await conn.waitFor(statusPredicate("idle"), 15_000);
+			await conn.waitForFrom(cursor, statusPredicate("idle"), 15_000);
 		} finally {
 			conn.close();
 		}
@@ -84,8 +86,9 @@ test.describe("Persisted prompt sections", () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 		try {
+			const cursor = conn.messageCount();
 			conn.send({ type: "prompt", text: "Reply with OK" });
-			await conn.waitFor(statusPredicate("idle"), 15_000);
+			await conn.waitForFrom(cursor, statusPredicate("idle"), 15_000);
 		} finally {
 			conn.close();
 		}
