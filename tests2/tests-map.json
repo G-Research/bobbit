@@ -52,6 +52,10 @@
       "reason": "bobbit gateway tool suite: tier separation — YAML group/grantPolicy defaults and operation-union drift guard vs the dispatched catalogue and design §5."
     },
     {
+      "path": "tests2/core/role-bobbit-tools-policy.test.ts",
+      "reason": "bobbit gateway tier role-policy invariant: bobbit_orchestrate/bobbit_admin default never; ONLY general + team-lead re-grant orchestrate, ONLY general gets admin behind ask."
+    },
+    {
       "path": "tests2/core/cli-real-deps.test.ts",
       "reason": "DI contract: cli.ts passes no test doubles (default-real wiring)."
     },

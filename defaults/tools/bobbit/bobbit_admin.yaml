@@ -5,10 +5,10 @@ params: [operation, projectId?, workflowId?, name?, provider?, scope?, action?, 
 provider:
   type: bobbit-extension
   extension: extension.ts
-group: BobbitAdmin
+group: Bobbit
 grantPolicy: never
 docs: |-
-  Highest-privilege gateway surface: project config, provider keys, custom providers / AI gateway, marketplace install/update/uninstall, tool/role/workflow overrides, destructive maintenance cleanup, sandbox image build, and harness restart/shutdown. Hidden unless a role/project/user policy enables the `BobbitAdmin` group.
+  Highest-privilege gateway surface: project config, provider keys, custom providers / AI gateway, marketplace install/update/uninstall, tool/role/workflow overrides, destructive maintenance cleanup, sandbox image build, and harness restart/shutdown. Hidden unless a role/project/user policy enables the `Bobbit` group.
 detail_docs: >-
   ## Purpose
 
@@ -19,7 +19,7 @@ detail_docs: >-
 
 
   `grantPolicy: never` — registered but hidden unless a role, project, or user
-  tool-group policy explicitly enables the `BobbitAdmin` group. Keep this the
+  tool-group policy explicitly enables the `Bobbit` group. Keep this the
   most conservative tier.
 
 
