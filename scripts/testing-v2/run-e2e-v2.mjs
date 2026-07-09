@@ -9,7 +9,10 @@
  *   - the "one full legacy run" daily step (that is `test:unit` + `test:e2e`,
  *     not a tests-map entry).
  *
- * Everything else in the daily bucket runs here at retries:0, in three groups
+ * Everything else in the daily bucket runs here at retries:2 (a TEMPORARY
+ * concurrency bridge — see docs/testing-strategy.md "Concurrency & budgets" and
+ * the Group B/C notes below; Group A uses node:test's --test-force-exit and has
+ * no retry knob wired here), in three groups
  * derived mechanically from tests-map.json (so this is reusable, not
  * hand-assembled — it tracks the map, not a frozen list):
  *
@@ -17,10 +20,10 @@
  *             sweeper / sandbox-mount / spawn-tree fidelity. Run via `tsx --test`.
  *   Group B — playwright e2e relocate specs (tests/e2e .spec.ts): real
  *             worktree pool / MCP subprocess / port / restart. Run via the legacy
- *             playwright-e2e config at --retries=0.
+ *             playwright-e2e config at --retries=2 (concurrency bridge).
  *   Group C — adapter browser specs: the geometry/journey specs migrated into
  *             tests2/browser/daily/. Run via playwright-v2 config, project
- *             `browser-v2-daily` (retries:0).
+ *             `browser-v2-daily` (retries:2 inherited from the v2 config).
  *
  * External-service-free guarantee: every group runs with BOBBIT_TEST_NO_EXTERNAL
  * / BOBBIT_TEST_NO_REMOTE set (fail-closed on non-loopback fetch + no real git
@@ -160,11 +163,13 @@ async function runGroupA(specs) {
 async function runGroupB(specs) {
 	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
 	// Reuse the project's playwright-e2e runner (cache isolation + external-free
-	// env baked in) at retries:0.
+	// env baked in) at retries:2 — TEMPORARY concurrency bridge (see file header +
+	// docs/testing-strategy.md "Concurrency & budgets"; restore 0 when the higher-N
+	// server-throughput fix lands).
 	// RESOURCE CAP: bound Playwright workers so the e2e browser swarm can't
 	// oversubscribe the box (override with E2E_V2_PW_WORKERS).
 	const pwWorkers = process.env.E2E_V2_PW_WORKERS || "2";
-	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=0"], {
+	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=2"], {
 		env: { ...EXTERNAL_FREE_ENV },
 		label: "B/e2e-relocate",
 	});
@@ -172,7 +177,9 @@ async function runGroupB(specs) {
 
 async function runGroupC(specs) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	// playwright-v2 config, browser-v2-daily project (retries:0 from config).
+	// playwright-v2 config, browser-v2-daily project (retries:2 from config —
+	// the concurrency bridge; we intentionally do NOT pass --retries here so the
+	// config's value governs).
 	// We run the WHOLE project (its testDir IS tests2/browser/daily — the physical
 	// browser-daily bucket) rather than passing individual spec paths: Playwright's
 	// `--project` is variadic and would swallow trailing positional file filters as

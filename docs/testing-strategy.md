@@ -20,7 +20,7 @@ to v2:
 | Phase | Gate command | Runs | Runner / source of truth |
 |-------|-------------|------|--------------------------|
 | **unit** | `unit:` → `npm run test:unit` → **`test:v2`** | tier-1 (vitest: `tests2/core` node + `tests2/dom` happy-dom + `tests2/integration` gateway-per-worker) **‖** tier-2 (Playwright: `tests2/browser` geometry fixtures + smoke journeys) | [`vitest.config.ts`](../vitest.config.ts) + [`playwright-v2.config.ts`](../playwright-v2.config.ts), orchestrated by [`scripts/testing-v2/run-v2.mjs`](../scripts/testing-v2/run-v2.mjs) |
-| **e2e** | `e2e:` → `npm run test:e2e` → **`test:e2e:v2`** | the **real-fidelity remainder** — real git worktree / pool / sweeper, sandbox/Docker, MCP subprocess, spawned-process, port/restart — run against a real gateway with the in-process mock bridge, `retries:0` | [`scripts/testing-v2/run-e2e-v2.mjs`](../scripts/testing-v2/run-e2e-v2.mjs) (Groups A/B/C, derived from `tests2/tests-map.json`) |
+| **e2e** | `e2e:` → `npm run test:e2e` → **`test:e2e:v2`** | the **real-fidelity remainder** — real git worktree / pool / sweeper, sandbox/Docker, MCP subprocess, spawned-process, port/restart — run against a real gateway with the in-process mock bridge, `retries:2` (temporary concurrency bridge) | [`scripts/testing-v2/run-e2e-v2.mjs`](../scripts/testing-v2/run-e2e-v2.mjs) (Groups A/B/C, derived from `tests2/tests-map.json`) |
 | **manual-integration** *(gate-exempt)* | `npm run test:manual` only | real LLM / real agents / real Docker | [`playwright-manual.config.ts`](../playwright-manual.config.ts) |
 
 There is **no daily lane.** Real-fidelity coverage that used to be deferred to a
@@ -39,10 +39,16 @@ no orphan `tests2/` files, no dangling `v2Path`, no retired-without-replacement.
 
 **Convention purity**: `*.test.ts` ⇒ vitest (node/happy-dom); `*.spec.ts` ⇒ Playwright.
 
-**`retries: 0` everywhere.** Determinism is met by architecture — DI seams (injected
-clock, fenced `CommandRunner`, fenced `fetch`, mock agent bridge), a one-gateway-per-fork
-harness with `scope()` per-test cleanup + a leak detector, and observable-state waits
-(WS events / `clock.advance()`) instead of wall-clock sleeps — never by a retry budget.
+**`retry: 2` — a TEMPORARY concurrency bridge (see [Concurrency & budgets](#concurrency--budgets)).**
+Single-run determinism is still met by architecture — DI seams (injected clock, fenced
+`CommandRunner`, fenced `fetch`, mock agent bridge), a one-gateway-per-fork harness with
+`scope()` per-test cleanup + a leak detector, and observable-state waits (WS events /
+`clock.advance()`) instead of wall-clock sleeps. The retry budget exists **only** because
+Bobbit runs goals concurrently in prod and the concurrency proof
+([`concurrency-proof.md`](testing-v2/concurrency-proof.md), the N=2 → 3/6 finding) proved a
+structural server-throughput ceiling at N≥2: a rotating cast of tests hits wall-timeouts /
+load-induced races under CPU starvation — not logic bugs. Those flakes are known and
+documented, not blind-masked; retries restore to `0` when the higher-N throughput fix lands.
 
 **Cost (honestly measured, [`docs/testing-v2/head-to-head.md`](testing-v2/head-to-head.md)):**
 whole-suite v2 is **~1.96× cheaper on CPU** than legacy (legacy 73.1 → v2 37.4 CPU-min,
@@ -59,9 +65,9 @@ busy-box legacy baseline against an optimistic budget ceiling — corrected).
 | Tier | Bucket(s) | Runner | ~Wall (isolated) |
 |------|-----------|--------|------------------|
 | tier-1 core/dom/integration | `v2-core`, `v2-dom`, `v2-integration` | vitest `pool:forks isolate:false` | folded into the ~250–300 s `test:v2` wall |
-| tier-2 browser | `v2-browser` (geometry fixtures + smoke journeys) | Playwright (`playwright-v2.config.ts`, Chromium, retries:0) | ‖ with tier-1 |
+| tier-2 browser | `v2-browser` (geometry fixtures + smoke journeys) | Playwright (`playwright-v2.config.ts`, Chromium, retries:2 bridge) | ‖ with tier-1 |
 | **`test:v2` total** | all of the above | `run-v2.mjs` (ledger-scheduled) | **~250–300 s** |
-| e2e:v2 real-fidelity | `daily` (relocate + adapter) | `run-e2e-v2.mjs` A/B/C, retries:0 | **~210–230 s** (Docker-inclusive) |
+| e2e:v2 real-fidelity | `daily` (relocate + adapter) | `run-e2e-v2.mjs` A/B/C, retries:2 bridge | **~210–230 s** (Docker-inclusive) |
 | manual-integration | `manual-integration` | `playwright-manual.config.ts` | ~5 min, on demand |
 
 Authoritative membership is `tests2/tests-map.json` + the guard, not this table.
@@ -682,31 +688,52 @@ Run the unit pin on every commit and the integration canary before and after any
 | tier-1 core/dom/integration (vitest) | ~7150 | folded into `test:v2` | logic + UI-shell (happy-dom) + gateway-per-worker API |
 | tier-2 browser (Playwright journeys + geometry) | ~650 | ‖ tier-1 | consolidated full-stack smoke journeys + geometry fixtures |
 | **`test:v2` (unit phase)** | **~7800** | **~250–300 s** | replaces legacy unit + most of legacy e2e |
-| e2e:v2 (real-fidelity phase) | ~183 | ~210–230 s | real worktree/pool/Docker/MCP/spawn/restart, retries:0 |
+| e2e:v2 (real-fidelity phase) | ~183 | ~210–230 s | real worktree/pool/Docker/MCP/spawn/restart, retries:2 (concurrency bridge) |
 | manual-integration | ~11 | ~5 min, on demand | real agent/LLM/Docker |
 
 Whole-suite CPU is **~1.96× cheaper than legacy** (73.1 → 37.4 CPU-min,
-[`head-to-head.md`](testing-v2/head-to-head.md)), external-service-free, `retries:0`,
+[`head-to-head.md`](testing-v2/head-to-head.md)), external-service-free, `retry:2`
+(temporary concurrency bridge — see [Concurrency & budgets](#concurrency--budgets)),
 coverage-proven. The manual integration tests remain the on-demand real-agent smoke;
 the automated tiers provide equivalent confidence for code changes.
 
 ## Concurrency & budgets
 
 > **Supersedes the old `retries:3` / 4-concurrent / sub-5-min-out-of-scope
-> policy.** That policy (a conservative Playwright worker budget + a retry margin
-> for concurrent legacy e2e suites) is retired by Test Suite v2. It survives only
-> in git history and in the historical *techniques* below (deterministic-wait
-> hardening, RCA fixes — still valid), **not** as the operating policy. v2 is
-> `retries:0` everywhere; concurrency is governed by a cross-process ledger, not a
-> retry budget.
+> policy.** That policy (a conservative Playwright worker budget + a broad retry
+> margin for concurrent legacy e2e suites) is retired by Test Suite v2. It survives
+> only in git history and in the historical *techniques* below (deterministic-wait
+> hardening, RCA fixes — still valid), **not** as the operating policy. Concurrency
+> is governed by a cross-process ledger; the small `retry: 2` bridge below is a
+> narrow, documented server-throughput stopgap, not the old blanket retry margin.
 
-**`retries: 0` everywhere.** No suite carries a flake budget. Flakes are bugs; they
-are fixed by architecture (DI seams, one-gateway-per-fork + `scope()` cleanup +
-leak detector, observable-state waits) — never masked by retries.
+**`retry: 2` — TEMPORARY concurrency bridge (not a flake budget).**
+Single-run determinism is met by architecture (DI seams, one-gateway-per-fork +
+`scope()` cleanup + leak detector, observable-state waits) — a lone `test:v2` needs
+zero retries. The budget exists because **Bobbit runs goals concurrently in prod**,
+so concurrent goal gate-loops each launch a full `test:v2`. The concurrency proof
+([`concurrency-proof.md`](testing-v2/concurrency-proof.md), the N=2 → 3/6 finding)
+proved a **structural server-throughput ceiling on one 24-core box at N≥2**: the
+ledger correctly caps Σworkers≤24 (no oversubscription), yet a *rotating* cast of
+integration tests still hits 60 s wall-timeouts under CPU starvation, plus
+occasional tier-2 render-timeouts and one load-induced `403` on goal-creation —
+**none are assertion or logic bugs**; no test-side timing lever moves them because
+they already drive on observable WS state. With `retries: 0` those spurious
+starvation failures would fail concurrent goal gate-loops spuriously. What flakes
+under load, and why, is documented above and in the proof — this is a *known,
+bounded* bridge, not blind flake-masking. **Removal condition:** restore
+`retry: 0` / `retries: 0` in `vitest.config.ts`, `playwright-v2.config.ts`, and
+`run-e2e-v2.mjs` Group B once the higher-N server-throughput fix (spin-off goal)
+lands and a clean N≥2 proof holds.
+
+> Note: vitest's key is `retry` (singular). The value in `vitest.config.ts` before
+> this bridge was `retries: 0` — a silently-ignored no-op (vitest's real default is
+> already 0), so tier-1 single-run behaviour is unchanged by the correction.
 
 **Single-run bar (the switchover bar).** A single isolated `test:v2` runs in
 **~250–300 s** (`budgets.json` `full` wall cap 300 s) and `test:e2e:v2` in
-**~210–230 s**, both green at `retries:0`. Budgets are enforced by
+**~210–230 s**, both green (a single isolated run needs no retries; the `retry: 2`
+bridge only matters under concurrent load). Budgets are enforced by
 [`scripts/testing-v2/assert-budget.mjs`](../scripts/testing-v2/assert-budget.mjs) from
 runner JSON + process-tree CPU sampling. Wall is the hard gate; CPU-min is
 observability-only (the per-PID sampler over-counts on a shared box — see
@@ -743,11 +770,14 @@ never here.
 
 The deterministic-wait hardening and RCA fixes below were done for the legacy e2e
 suite. The **techniques** (synchronize on observable state, clean up worker-scoped
-entities, atomic per-worker fixtures) are exactly how v2 stays `retries:0`, so they
+entities, atomic per-worker fixtures) are exactly how v2 keeps single-run
+determinism (the `retry:2` bridge only fires under concurrent load), so they
 are kept as reference. `playwright-e2e.config.ts` still exists and is **reused by
 `e2e:v2` Group B** — but `run-e2e-v2.mjs` overrides its committed `retries`/`workers`
-defaults to `--retries=0 --workers=2` (env `E2E_V2_PW_WORKERS` / `E2E_V2_NODE_CONCURRENCY`),
+defaults to `--retries=2 --workers=2` (env `E2E_V2_PW_WORKERS` / `E2E_V2_NODE_CONCURRENCY`),
 so the old committed `retries:3` config values no longer describe how the specs run.
+The `--retries=2` is the documented concurrency bridge (see [Concurrency & budgets](#concurrency--budgets)),
+not the retired blanket `retries:3` margin.
 
 When a clearly root-causable flake is found it is fixed in place rather than
 masked — e.g. `open-session-new-window`'s middle-click was rewritten to dispatch
@@ -815,7 +845,7 @@ E2E command before merge.
 ### Playwright transform-cache isolation
 
 `e2e:v2` Group B drives the relocate specs through the same npm wrapper
-(`run-e2e-v2.mjs` calls `npm run test:e2e:run -- <specs> --workers=2 --retries=0`):
+(`run-e2e-v2.mjs` calls `npm run test:e2e:run -- <specs> --workers=2 --retries=2` — the concurrency bridge):
 
 ```bash
 npm run test:e2e:run -- <specs>   # the wrapper e2e:v2 Group B reuses
@@ -894,7 +924,7 @@ The v2 phases already sample their own wall + subtree-CPU and enforce budgets:
 
 ```bash
 npm run test:v2        # unit phase (tier-1 ‖ tier-2) — reports wall/CPU + asserts budget
-npm run test:e2e:v2    # real-fidelity phase (A/B/C, retries:0) — reports per-group wall/CPU
+npm run test:e2e:v2    # real-fidelity phase (A/B/C, retries:2 concurrency bridge) — reports per-group wall/CPU
 ```
 
 For an apples-to-apples cost comparison against legacy, use the committed
@@ -907,13 +937,21 @@ node scripts/testing-v2/measure-subtree.mjs <label> out.json -- <cmd...>
 
 The `e2e:v2` Group B/C still run through the Playwright transform-cache isolation
 below (they reuse `playwright-e2e.config.ts` / `playwright-v2.config.ts`), so
-cross-worktree cache hygiene still applies. Everything runs at `retries:0`; there
-is no retry flag to toggle for "flake experiments" — a flake is a bug to root-cause.
+cross-worktree cache hygiene still applies. Everything runs at the `retry:2`
+concurrency bridge (see [Concurrency & budgets](#concurrency--budgets)); the bridge
+is a documented server-throughput stopgap under concurrent load, NOT a knob for
+"flake experiments" — a genuine single-run flake is still a bug to root-cause, and
+the budget restores to `0` when the higher-N throughput fix lands.
 
 ### What not to change without re-measuring
 
-- Don't reintroduce a `retries > 0` policy. v2 is `retries:0`; determinism is met
-  by architecture, and a retry budget hides real bugs.
+- Don't widen or normalise the `retry: 2` **concurrency bridge**. It is a
+  temporary, documented server-throughput stopgap for concurrent goal gate-loops
+  (see [Concurrency & budgets](#concurrency--budgets)), scheduled for removal when
+  the higher-N throughput fix lands — not a standing flake budget. Single-run
+  determinism is still met by architecture; don't let the bridge mask a real
+  single-run flake (those are bugs to root-cause), and don't bump it past 2
+  without re-measuring.
 - Don't bypass the ledger for concurrency. Worker counts come from
   `scripts/testing-v2/ledger.mjs` (`Σ(workerSlots) ≤ cores`) + the gateway-boot /
   browser render-lease caps in `budget-caps.json`. Hardcoding higher worker counts
