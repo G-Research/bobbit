@@ -73,9 +73,10 @@ process.env.BOBBIT_V2_GATEWAY_BOOT_LEASE = "1";
 // runs set this; the legacy e2e config never does, so legacy is unchanged.
 process.env.BOBBIT_V2_BROWSER_LEASE = "1";
 
-// Worker count from ledger (PLAYWRIGHT_CAP=2 chromium workers — the IO-bound
-// sweet spot; the ledger's Σworkers≤cores caps total Chromium across runs).
-// BOBBIT_V2_PLAYWRIGHT_WORKERS overrides for measurement/tuning. Falls back to 2.
+// Worker count from ledger (PLAYWRIGHT_CAP=3 chromium workers; raised 2→3 after
+// a solo isolated run measured ~3.8x faster with more browser workers — the
+// ledger's Σworkers≤cores reservation + the browser-render lease cap total
+// Chromium across runs). BOBBIT_V2_PLAYWRIGHT_WORKERS overrides for measurement/tuning.
 function resolvePlaywrightWorkers(): number {
 	const override = Number(process.env.BOBBIT_V2_PLAYWRIGHT_WORKERS);
 	if (Number.isFinite(override) && override >= 1) return Math.floor(override);

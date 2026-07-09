@@ -35,8 +35,8 @@
  *                                   parentRunId: string, release: () => void,
  *                                   childEnv: Record<string,string> }
  *       Used by run-v2.mjs. Reserves a parent bundle after a coalescing window,
- *       splits it into vitest + playwright child reservations (4→2+2, 12→8+4,
- *       cap vitest 8 / playwright 4), registers both, and returns the split plus
+ *       splits it into vitest + playwright child reservations (4→1v+3p, 12→8v+3p,
+ *       cap vitest 8 / playwright 3), registers both, and returns the split plus
  *       `childEnv` to pass to spawned tier children so their config's
  *       reserveWorkerSlots() re-uses the grant instead of re-reserving.
  *
@@ -110,15 +110,19 @@ const DEFAULT_GRANT_TIMEOUT_MS = 180_000;
 const MIN_BUNDLE = 4;
 const MAX_BUNDLE = 12;
 const VITEST_CAP = 8;
-// Chromium is IO/gateway-bound, not CPU-parallelism-bound: measured 2 playwright
-// workers ≈ 4 workers throughput (~276 s vs ~297 s), while 1 worker DOUBLES wall
-// (~550–710 s). So 2 is the sweet spot — enough to avoid the 1-worker wall
-// penalty, few enough to keep concurrent Chromium (the tier-2 contention driver)
-// bounded. This cap + the ledger's Σworkers≤cores invariant is the "gate total
-// Chromium" half of the global concurrency budget (the gateway-boot lease is the
-// other half). Was 4 (single-run fast path); dropped to 2 after N-way flake
-// analysis showed 4 concurrent browser tiers over-contend on this box.
-const PLAYWRIGHT_CAP = 2;
+// Cap on chromium workers per run. Earlier tuning claimed "2 ≈ 4 workers
+// throughput" (IO-bound), but a fresh isolated measurement on the 24-core box
+// disproved that for a SOLO run: the tier-2 browser suite (~620 specs) took
+// ~525 s at 2 workers vs ~140 s at 6 — a ~3.8x speedup, and the box was only
+// reserving 10/24 cores at 2 workers. Raised 2 → 3 as a conservative step
+// toward that headroom. The ledger's Σworkers≤cores reservation invariant AND
+// the global browser-render lease (cap 4, bounds TOTAL concurrent Chromium
+// across all runs) still gate N-way contention, so concurrent browser tiers
+// remain bounded even though each run now reserves 3. This cap + those two
+// bounds are the "gate total Chromium" half of the global concurrency budget
+// (the gateway-boot lease is the other half). History: 4 (single-run fast
+// path) → 2 (N-way flake analysis) → 3 (solo-speed measurement).
+const PLAYWRIGHT_CAP = 3;
 
 // ─── lease pools (global concurrency budget) ───
 const LEASES_FILENAME = "leases.json";
@@ -404,8 +408,8 @@ function computeGrant(state, myParentRunId, cores) {
 
 /**
  * Split a committed parent bundle into vitest + playwright worker counts.
- * Anchors (verified by selftest, single run / activeParents=1): 12→8v+2p,
- * 8→3v+2p, 6→2v+2p, 4→1v+2p. CONTENDED (activeParents≥2): 12→5v+2p (never the
+ * Anchors (verified by selftest, single run / activeParents=1): 12→8v+3p,
+ * 8→3v+3p, 6→2v+3p, 4→1v+3p. CONTENDED (activeParents≥2): 12→5v+3p (never the
  * full 8-vitest split — that would oversubscribe at N=2, where each run's
  * grant=floor(24/2)=12).
  *
@@ -421,8 +425,10 @@ function computeGrant(state, myParentRunId, cores) {
  *      filled all cores — Σ=24/24 at 3-way — starved browser render and regressed
  *      the green rate; restoring headroom, Σ≈15/24 at 3-way, is the fix.)
  *
- * Playwright targets PLAYWRIGHT_CAP (=2) chromium workers — the IO-bound sweet
- * spot (2 ≈ 4 workers throughput; 1 doubles isolated wall).
+ * Playwright targets PLAYWRIGHT_CAP (=3) chromium workers. A solo isolated run
+ * measured ~3.8x faster raising browser workers (525 s → 140 s); 3 is a
+ * conservative step into that headroom while the global browser-render lease
+ * keeps concurrent Chromium bounded across runs.
  *
  * FULL-VITEST SPLIT IS GATED ON `activeParents === 1`, NOT on `grant ≥ MAX_BUNDLE`
  * alone. The bug this fixes: at N=2 each run's fair share is floor(24/2)=12 =
@@ -916,20 +922,20 @@ function cliSelftest() {
 	// 5) splitBundle spot-checks + sum-preservation across the whole range.
 	// Default (activeParents=1, a single uncontended run): 2 chromium workers +
 	// UNDER-ALLOCATED vitest under contention (headroom for browser render).
-	// 8→3v+2p (Σ15/24 @ 3-way), 4→1v+2p (Σ15/24 @ 5-way). A lone run at a full
-	// grant uses the full vitest cap: 12→8v+2p.
+	// 8→3v+3p, 4→1v+3p. A lone run at a full grant uses the full vitest cap:
+	// 12→8v+3p.
 	const s4 = splitBundle(4);
 	const s8 = splitBundle(8);
 	const s12 = splitBundle(12);
-	assert(s4.vitest === 1 && s4.playwright === 2, `split(4)=1v+2p got ${s4.vitest}+${s4.playwright}`);
-	assert(s8.vitest === 3 && s8.playwright === 2, `split(8)=3v+2p got ${s8.vitest}+${s8.playwright}`);
-	assert(s12.vitest === 8 && s12.playwright === 2, `split(12,solo)=8v+2p got ${s12.vitest}+${s12.playwright}`);
+	assert(s4.vitest === 1 && s4.playwright === 3, `split(4)=1v+3p got ${s4.vitest}+${s4.playwright}`);
+	assert(s8.vitest === 3 && s8.playwright === 3, `split(8)=3v+3p got ${s8.vitest}+${s8.playwright}`);
+	assert(s12.vitest === 8 && s12.playwright === 3, `split(12,solo)=8v+3p got ${s12.vitest}+${s12.playwright}`);
 	// CONTENDED FULL GRANT (the N=2 oversubscription bug): activeParents≥2 at
 	// grant=12 must NOT take the full 8-vitest split — it takes the contended
-	// 5v+2p, so two N=2 runs total 10v+4p=14 ≤ 24 (not 16v+4p=20 that starved the
+	// 5v+3p, so two N=2 runs total 10v+6p=16 ≤ 24 (not 16v+6p=22 that starved the
 	// box and made N=2 measure WORSE than N=3).
 	const s12c = splitBundle(12, 2);
-	assert(s12c.vitest === 5 && s12c.playwright === 2, `split(12,contended)=5v+2p got ${s12c.vitest}+${s12c.playwright}`);
+	assert(s12c.vitest === 5 && s12c.playwright === 3, `split(12,contended)=5v+3p got ${s12c.vitest}+${s12c.playwright}`);
 	assert(2 * s12c.total <= totalCores(), `two N=2 contended grants (${s12c.total} each) must fit cores=${totalCores()}`);
 	// The uncontended full-vitest split fires ONLY at activeParents≤1.
 	assert(splitBundle(12, 1).vitest === VITEST_CAP, "activeParents=1 keeps the full-vitest split");
@@ -944,7 +950,7 @@ function cliSelftest() {
 			if (ap >= 2) assert(s.vitest <= splitBundle(g, 1).vitest, `splitBundle(${g},${ap}) vitest must not exceed solo`);
 		}
 	}
-	console.log("  splitBundle(4)=1v+2p ✓  split(8)=3v+2p ✓  split(12,solo)=8v+2p ✓  split(12,contended)=5v+2p ✓  no-overshoot 2..12×ap ✓");
+	console.log("  splitBundle(4)=1v+3p ✓  split(8)=3v+3p ✓  split(12,solo)=8v+3p ✓  split(12,contended)=5v+3p ✓  no-overshoot 2..12×ap ✓");
 
 	// 6) Pending-contention: seed 4 live pending markers (distinct runs) so a fresh
 	//    reserve sees activeParents=5 → target=floor(24/5)=4. This is the core
@@ -980,8 +986,8 @@ function cliSelftest() {
 
 	// 7) N=2 reserve path (the fixed oversubscription bug): with exactly ONE live
 	//    pending peer, a fresh reserve sees activeParents=2 and a full grant
-	//    (floor(24/2)=12=MAX_BUNDLE) — but must take the CONTENDED split (5v+2p), NOT
-	//    the uncontended 8v+2p that made two N=2 runs oversubscribe (16v total).
+	//    (floor(24/2)=12=MAX_BUNDLE) — but must take the CONTENDED split (5v+3p), NOT
+	//    the uncontended 8v+3p that made two N=2 runs oversubscribe (16v total).
 	try {
 		rmSync(reservationsPath(), { force: true });
 		rmSync(lockPath(), { force: true });
@@ -998,7 +1004,7 @@ function cliSelftest() {
 	);
 	const n2 = reserveParentBundle({ coalesceMs: 0 });
 	console.log(`  N=2 (1 pending peer, grant=12) -> vitest=${n2.vitest} playwright=${n2.playwright} total=${n2.total}`);
-	assert(n2.vitest === 5 && n2.playwright === 2, `N=2 reserve must take contended 5v+2p, got ${n2.vitest}v+${n2.playwright}p`);
+	assert(n2.vitest === 5 && n2.playwright === 3, `N=2 reserve must take contended 5v+3p, got ${n2.vitest}v+${n2.playwright}p`);
 	assert(2 * n2.total <= totalCores(), `two N=2 grants (${n2.total} each) must fit cores=${totalCores()}`);
 	n2.release();
 	console.log("  N=2 reserve path uses contended split (no oversubscription) ✓");
