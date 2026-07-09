@@ -57,7 +57,7 @@ function fontSizeInput(page: Page): Locator {
 
 async function resetScale(page: Page): Promise<void> {
 	await openApp(page);
-	await page.evaluate((k) => localStorage.removeItem(k), SCALE_KEY);
+	await page.evaluate((k: string) => localStorage.removeItem(k), SCALE_KEY);
 	await page.reload();
 	await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
 }
@@ -71,7 +71,7 @@ async function waitForScale(page: Page, expected: number, precision = 2): Promis
 }
 
 async function persistedScale(page: Page): Promise<number> {
-	const persisted = await page.evaluate((k) => localStorage.getItem(k), SCALE_KEY);
+	const persisted = await page.evaluate((k: string) => localStorage.getItem(k), SCALE_KEY);
 	return Number.parseFloat(persisted ?? "");
 }
 
@@ -91,10 +91,10 @@ async function setFontSizePx(page: Page, value: string): Promise<void> {
 
 async function setSidebarFontSizeDirect(page: Page, px: number): Promise<void> {
 	const scale = scaleForPx(px);
-	await page.evaluate(([key, value]) => {
-		localStorage.setItem(key as string, String(value));
+	await page.evaluate(([key, value]: [string, number]) => {
+		localStorage.setItem(key, String(value));
 		document.documentElement.style.setProperty("--sidebar-font-scale", String(value));
-	}, [SCALE_KEY, scale]);
+	}, [SCALE_KEY, scale] as [string, number]);
 	await waitForScale(page, scale);
 }
 
@@ -136,7 +136,7 @@ async function createSidebarVisualFixture(): Promise<{ goalTitle: string }> {
 }
 
 async function resetSidebarVisualState(page: Page, goalTitle: string): Promise<void> {
-	await page.evaluate((title) => {
+	await page.evaluate((title: string) => {
 		localStorage.removeItem("bobbit-sidebar-collapsed");
 		localStorage.removeItem("bobbit-sidebar-tree-state:v1");
 		localStorage.removeItem("bobbit-expanded-projects");
@@ -155,7 +155,7 @@ async function resetSidebarVisualState(page: Page, goalTitle: string): Promise<v
 }
 
 async function measureSidebarVisualAffordances(page: Page, goalTitle?: string): Promise<SidebarVisualSnapshot> {
-	return page.evaluate((title) => {
+	return page.evaluate((title: string | undefined) => {
 		const metric = (el: Element | null): VisualMetric | null => {
 			if (!el) return null;
 			const rect = el.getBoundingClientRect();
@@ -290,8 +290,8 @@ async function assertSidebarActionGaps(page: Page): Promise<void> {
 	});
 	expect(result.ok, `sidebar action gap cluster must be measurable: ${"reason" in result ? result.reason : ""}`).toBe(true);
 	if ("gap01" in result) {
-		expect(result.gap01, "PR/action-to-action gap should share one cluster gap").toBeCloseTo(result.gap12, 0);
-		expect(result.gap01, "measured action gap should match computed cluster gap").toBeCloseTo(result.computedGap, 0);
+		expect(result.gap01, "PR/action-to-action gap should share one cluster gap").toBeCloseTo(result.gap12 ?? Number.NaN, 0);
+		expect(result.gap01, "measured action gap should match computed cluster gap").toBeCloseTo(result.computedGap ?? Number.NaN, 0);
 	}
 }
 
@@ -371,7 +371,7 @@ async function injectActivityDot(page: Page): Promise<void> {
 async function activityDotSize(page: Page): Promise<number> {
 	await injectActivityDot(page);
 	return page.locator("[data-testid='test-activity-dot']").evaluate(
-		(el) => parseFloat(getComputedStyle(el).fontSize),
+		(el: Element) => parseFloat(getComputedStyle(el).fontSize),
 	);
 }
 

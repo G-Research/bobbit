@@ -43,6 +43,7 @@ async function createChildGoal(projectId: string, parentGoalId: string, title: s
 async function createIndentFixture(): Promise<IndentFixture> {
 	const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 	const projectId = await defaultProjectId();
+	if (!projectId) throw new Error("sidebar-indent fixture: no default project id");
 	const prefs = await apiFetch("/api/preferences", {
 		method: "PUT",
 		body: JSON.stringify({ subgoalsEnabled: true }),
@@ -78,7 +79,7 @@ function indentInput(page: Page) {
 async function setIndentPx(page: Page, value: string): Promise<void> {
 	const input = indentInput(page);
 	await input.fill(value);
-	await input.evaluate((el) => {
+	await input.evaluate((el: HTMLInputElement) => {
 		el.dispatchEvent(new Event("input", { bubbles: true }));
 		el.dispatchEvent(new Event("change", { bubbles: true }));
 	});
@@ -96,7 +97,7 @@ async function waitForRuntimeIndent(page: Page, expected: number): Promise<void>
 }
 
 async function persistedIndentPx(page: Page): Promise<number> {
-	const raw = await page.evaluate((key) => localStorage.getItem(key), INDENT_KEY);
+	const raw = await page.evaluate((key: string) => localStorage.getItem(key), INDENT_KEY);
 	return Number.parseFloat(raw ?? "");
 }
 
@@ -105,7 +106,7 @@ async function inputValueAsNumber(page: Page): Promise<number> {
 }
 
 async function seedSidebarState(page: Page, fixture: IndentFixture, indentPx?: number | string): Promise<void> {
-	await page.evaluate(({ key, parentId, indent }) => {
+	await page.evaluate(({ key, parentId, indent }: { key: string; parentId: string; indent: number | string | undefined }) => {
 		localStorage.removeItem("bobbit-sidebar-collapsed");
 		localStorage.removeItem("bobbit-expanded-projects");
 		localStorage.removeItem("gateway.sessionId");
@@ -139,7 +140,7 @@ function goalRow(page: Page, goalId: string) {
 async function goalLeft(page: Page, goalId: string): Promise<number> {
 	const row = goalRow(page, goalId);
 	await expect(row).toBeVisible({ timeout: 10_000 });
-	return row.evaluate((el) => el.getBoundingClientRect().left);
+	return row.evaluate((el: Element) => el.getBoundingClientRect().left);
 }
 
 async function childOffset(page: Page, fixture: IndentFixture): Promise<number> {
@@ -158,7 +159,7 @@ async function openGeneralSettings(page: Page): Promise<void> {
 async function assertNoSidebarHorizontalOverflow(page: Page, rootSelector: string, label: string): Promise<void> {
 	const root = page.locator(rootSelector).first();
 	await expect(root, `${label} root`).toBeVisible({ timeout: 10_000 });
-	const failures = await root.evaluate((rootEl, scenario) => {
+	const failures = await root.evaluate((rootEl: Element, scenario: string) => {
 		const root = rootEl as HTMLElement;
 		const rootRect = root.getBoundingClientRect();
 		const out: string[] = [];

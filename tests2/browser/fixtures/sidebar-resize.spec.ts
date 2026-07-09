@@ -8,7 +8,7 @@ const SIDEBAR_SELECTOR = ".sidebar-edge";
 const HANDLE_SELECTOR = ".sidebar-resize-handle";
 
 async function sidebarWidth(page: Page): Promise<number> {
-	return page.evaluate((sel) => {
+	return page.evaluate((sel: string) => {
 		const el = document.querySelector(sel) as HTMLElement | null;
 		return el ? el.getBoundingClientRect().width : -1;
 	}, SIDEBAR_SELECTOR);

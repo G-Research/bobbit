@@ -316,8 +316,6 @@ test.describe("Porcelain parsing edge cases", () => {
 		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
-			const raw = " M src/app/api.ts\r\n M src/app/state.ts\r\n";
-			const trimmed = raw.replace(/\\s+$/, "");
 			// Use the fixed parser logic
 			return (window as any).__testData.parsedFiles;
 		});

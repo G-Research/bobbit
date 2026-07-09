@@ -541,11 +541,6 @@ async function terminalScrollMetrics(page: import("@playwright/test").Page): Pro
 	});
 }
 
-async function terminalScrollMetricsAfterAnimationFrames(page: import("@playwright/test").Page): Promise<TerminalScrollMetrics> {
-	await waitForTerminalAnimationFrames(page);
-	return terminalScrollMetrics(page);
-}
-
 async function dispatchTouchDragOverXtermScreen(
 	page: import("@playwright/test").Page,
 	client: { send(method: string, params?: Record<string, unknown>): Promise<unknown> },

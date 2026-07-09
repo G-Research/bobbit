@@ -151,7 +151,7 @@ async function writeRegisteredProjectProposalState(
 async function injectProjectProposal(
 	page: Page,
 	sessionId: string,
-	projectId: string,
+	_projectId: string,
 	rootPath: string,
 ): Promise<void> {
 	await openProjectProposalWorkspaceTab(sessionId);
@@ -240,7 +240,7 @@ test.describe("Project Assistant Saved State", () => {
 		expect(projectId).toBeTruthy();
 
 		// Look up project rootPath so the proposal's root_path matches reality.
-		const projects = await (await apiFetch("/api/projects")).json() as any[];
+		const projects = await (await apiFetch("/api/projects")).json() as any;
 		const project = (Array.isArray(projects) ? projects : projects.projects).find((p: any) => p.id === projectId);
 		expect(project).toBeTruthy();
 

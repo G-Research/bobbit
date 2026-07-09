@@ -30,7 +30,6 @@ const inlineCreate = (page: Page) => page.locator(ADD_PROJECT.statusSlot).locato
 const footerCreateButton = (page: Page) => page.locator(ADD_PROJECT.footer).locator(ADD_PROJECT.createDirectory);
 
 async function expectInlineCreateCentered(page: Page): Promise<void> {
-	const slot = page.locator(ADD_PROJECT.statusSlot);
 	const inline = inlineCreate(page);
 	await expect(inline).toBeVisible({ timeout: 10_000 });
 	await expect(inline).toContainText("Directory doesn't exist");

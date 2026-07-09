@@ -224,7 +224,7 @@ interface PackContributionsMeta {
 	packId: string;
 	packName: string;
 	panels: { id: string; title?: string }[];
-	entrypoints: Array<{ id: string; kind: string; routeId?: string; listName: string }>;
+	entrypoints: Array<{ id: string; kind: string; routeId?: string; listName: string; label?: string }>;
 	routeNames: string[];
 }
 
@@ -284,7 +284,7 @@ async function resetPrWalkthroughActivation(): Promise<void> {
 }
 
 async function expectRuntimePrwTools(enabled: readonly string[], disabled: readonly string[] = []): Promise<void> {
-	const expected = new Map(PRW_TOOL_NAMES.map((name) => [name, enabled.includes(name)]));
+	const expected = new Map<string, boolean>(PRW_TOOL_NAMES.map((name) => [name, enabled.includes(name)]));
 	for (const name of disabled) expected.set(name, false);
 	await expect.poll(async () => {
 		const names = new Set((await listToolNames()).map((t) => t.name));

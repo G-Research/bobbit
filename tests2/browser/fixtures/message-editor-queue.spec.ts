@@ -113,7 +113,7 @@ test.describe("Queue pill rendering", () => {
 		await page.evaluate(() => {
 			const msg = (window as any).getEditCalls()[0];
 			(window as any).setQueue([]); // remove from queue
-			document.getElementById('textarea').value = msg.text; // populate textarea
+			(document.getElementById('textarea') as HTMLTextAreaElement).value = msg.text; // populate textarea
 		});
 
 		expect(await page.inputValue("#textarea")).toBe("edit this message");
@@ -130,9 +130,6 @@ test.describe("Queue pill rendering", () => {
 		});
 
 		// Simulate drag and drop via DataTransfer events
-		const pillA = page.locator('.queue-pill[data-pill-id="a"]');
-		const pillB = page.locator('.queue-pill[data-pill-id="b"]');
-
 		// Dispatch drag events programmatically
 		await page.evaluate(() => {
 			const pillB = document.querySelector('[data-pill-id="b"]');

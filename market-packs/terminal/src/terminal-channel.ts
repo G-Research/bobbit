@@ -201,7 +201,7 @@ type AnsiReplayState = "ground" | "escape" | "csi" | "osc" | "oscEscape" | "stri
 function sanitizeReplayBoundary(chunks: readonly string[], boundaryState: AnsiReplayState): readonly string[] {
 	if (boundaryState === "ground") return chunks;
 	const out: string[] = [];
-	let state = boundaryState;
+	let state: AnsiReplayState = boundaryState;
 	for (const chunk of chunks) {
 		if (state === "ground") {
 			out.push(chunk);

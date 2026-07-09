@@ -80,7 +80,7 @@ const extension: ExtensionFactory = (pi) => {
 			const sessionId = process.env.BOBBIT_SESSION_ID;
 
 			if (!params.html && !params.file) {
-				return { content: [{ type: "text", text: "Error: At least one of 'html' or 'file' must be provided." }] };
+				return { content: [{ type: "text", text: "Error: At least one of 'html' or 'file' must be provided." }], details: undefined };
 			}
 
 			// No session ID — fallback: write directly to disk.
@@ -91,7 +91,7 @@ const extension: ExtensionFactory = (pi) => {
 						try {
 							content = fs.readFileSync(params.file, "utf-8");
 						} catch (err: any) {
-							return { content: [{ type: "text", text: `Error reading file "${params.file}": ${err.message}` }] };
+							return { content: [{ type: "text", text: `Error reading file "${params.file}": ${err.message}` }], details: undefined };
 						}
 					}
 					const stateDir = process.env.BOBBIT_DIR
@@ -100,9 +100,9 @@ const extension: ExtensionFactory = (pi) => {
 					const fallbackPath = path.join(stateDir, `preview-unknown.html`);
 					fs.mkdirSync(path.dirname(fallbackPath), { recursive: true });
 					fs.writeFileSync(fallbackPath, content, "utf-8");
-					return { content: [{ type: "text", text: `No session ID available. Wrote preview HTML to ${fallbackPath}` }] };
+					return { content: [{ type: "text", text: `No session ID available. Wrote preview HTML to ${fallbackPath}` }], details: undefined };
 				} catch (err: any) {
-					return { content: [{ type: "text", text: `Error: No session ID and failed to write fallback file: ${err.message}` }] };
+					return { content: [{ type: "text", text: `Error: No session ID and failed to write fallback file: ${err.message}` }], details: undefined };
 				}
 			}
 
@@ -114,7 +114,7 @@ const extension: ExtensionFactory = (pi) => {
 				});
 				if (!patchResp.ok) {
 					const errText = await patchResp.text();
-					return { content: [{ type: "text", text: `Error enabling preview mode: ${patchResp.status} ${errText}` }] };
+					return { content: [{ type: "text", text: `Error enabling preview mode: ${patchResp.status} ${errText}` }], details: undefined };
 				}
 
 				// Step 2: build mount-endpoint body. `html` wins when both are present.
@@ -153,6 +153,7 @@ const extension: ExtensionFactory = (pi) => {
 							type: "text",
 							text: `Error opening preview: ${mountResp.status} ${errText}`,
 						}],
+						details: undefined,
 					};
 				}
 				const mountResult = await mountResp.json().catch(() => ({} as any)) as {
@@ -171,6 +172,7 @@ const extension: ExtensionFactory = (pi) => {
 							type: "text",
 							text: `Error opening preview: malformed response from /api/preview/mount`,
 						}],
+						details: undefined,
 					};
 				}
 
@@ -195,9 +197,10 @@ const extension: ExtensionFactory = (pi) => {
 							}),
 						},
 					],
+					details: undefined,
 				};
 			} catch (err: any) {
-				return { content: [{ type: "text", text: `Error opening preview: ${err.message}` }] };
+				return { content: [{ type: "text", text: `Error opening preview: ${err.message}` }], details: undefined };
 			}
 		},
 	});

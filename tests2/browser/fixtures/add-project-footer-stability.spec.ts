@@ -39,7 +39,7 @@ async function footerRect(page: Page): Promise<Rect> {
 }
 
 async function setCompletedPickerPath(page: Page, path: string): Promise<void> {
-	await page.locator(ADD_PROJECT.picker).evaluate((el, nextPath) => {
+	await page.locator(ADD_PROJECT.picker).evaluate((el: Element, nextPath: string) => {
 		const picker = el as HTMLElement & { setCompletedPath?: (value: string) => void };
 		picker.setCompletedPath?.(nextPath);
 		picker.dispatchEvent(new CustomEvent("directory-input", {

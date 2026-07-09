@@ -43,7 +43,7 @@ test.describe("Journey: Goal → Team → Gates", () => {
 		}
 	});
 
-	test("goal API returns goal after creation", async ({ page }) => {
+	test("goal API returns goal after creation", async () => {
 		const { apiFetch } = await import("../../../tests/e2e/e2e-setup.js");
 		const goal = await createGoal({ title: "v2-journey-api-check" });
 		try {

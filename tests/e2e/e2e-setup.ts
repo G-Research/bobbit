@@ -71,7 +71,9 @@ export let E2E_PI_DIR: string; // legacy alias
 // Re-define as getters on the module object. The `export let` declarations
 // above create the binding slots; Object.defineProperty replaces them with
 // getters that read process.env each time.
-const _thisModule: Record<string, unknown> = { E2E_PORT, BASE, WS_BASE, E2E_BOBBIT_DIR, E2E_PI_DIR };
+// Placeholder values — every key is immediately replaced by a getter via the
+// Object.defineProperty calls below, so the initial contents are throwaway.
+const _thisModule: Record<string, unknown> = { E2E_PORT: "", BASE: "", WS_BASE: "", E2E_BOBBIT_DIR: "", E2E_PI_DIR: "" };
 Object.defineProperty(_thisModule, "E2E_PORT", { get: port, enumerable: true });
 Object.defineProperty(_thisModule, "BASE", { get: base, enumerable: true });
 Object.defineProperty(_thisModule, "WS_BASE", { get: wsBase, enumerable: true });
@@ -117,7 +119,7 @@ function isInsideGitRepo(dir: string, stopAt: string): boolean {
 export function nonGitCwd(): string {
 	const defaultRoot = harnessDefaultProjectRoot();
 	const key = `${port()}|${defaultRoot}`;
-	let cwd = _nonGitCwdByHarnessRoot[key];
+	let cwd: string | undefined = _nonGitCwdByHarnessRoot[key];
 	// Self-heal cross-test poisoning: the memoized workspace is SHARED across
 	// every default-project session on this worker gateway. A spec that git-inits
 	// its session cwd (e.g. pr-walkthrough-pack calls setupSessionGitRepo on the

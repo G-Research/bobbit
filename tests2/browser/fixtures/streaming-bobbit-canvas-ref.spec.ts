@@ -44,7 +44,7 @@ test.describe("Streaming bobbit canvas eye animation", () => {
 		await page.addInitScript(() => {
 			(window as any).__drawImageCount = 0;
 			const originalDrawImage = CanvasRenderingContext2D.prototype.drawImage;
-			CanvasRenderingContext2D.prototype.drawImage = function (...args: any[]) {
+			CanvasRenderingContext2D.prototype.drawImage = function (this: any, ...args: any[]) {
 				(window as any).__drawImageCount = ((window as any).__drawImageCount ?? 0) + 1;
 				return Reflect.apply(originalDrawImage, this, args);
 			} as any;

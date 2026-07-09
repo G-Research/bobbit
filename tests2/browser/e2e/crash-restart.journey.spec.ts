@@ -11,7 +11,7 @@ import { apiFetch, createSession, deleteSession, waitForSessionStatus } from "..
 import { openApp, navigateToHash } from "../_helpers/journey-fixture.js";
 import type { Page } from "@playwright/test";
 
-async function crashAndRestart(gateway: GatewayInfo, page: Page): Promise<void> {
+async function crashAndRestart(gateway: GatewayInfo, _page: Page): Promise<void> {
 	await gateway.crash();
 	await expect.poll(
 		async () => {

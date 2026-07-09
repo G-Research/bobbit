@@ -41,10 +41,6 @@ test.describe("Sidebar actions menu", () => {
 		return row.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="${kind}"][data-sidebar-actions-id="${id}"]`).first();
 	}
 
-	function popover(page: Page): Locator {
-		return page.locator("sidebar-actions-popover").first();
-	}
-
 	function actionStrip(row: Locator): Locator {
 		return row.locator(".sidebar-actions").first();
 	}
@@ -125,15 +121,6 @@ test.describe("Sidebar actions menu", () => {
 	async function menuLabels(page: Page): Promise<string[]> {
 		return page.locator("sidebar-actions-popover [role='menuitem']").evaluateAll((els) =>
 			els.map((el) => (el.textContent || "").replace(/\s+/g, " ").trim()),
-		);
-	}
-
-	async function menuTitleMap(page: Page): Promise<Record<string, string | null>> {
-		return page.locator("sidebar-actions-popover [role='menuitem']").evaluateAll((els) =>
-			Object.fromEntries(els.map((el) => [
-				(el as HTMLElement).dataset.sidebarActionId || "",
-				el.getAttribute("title"),
-			])),
 		);
 	}
 

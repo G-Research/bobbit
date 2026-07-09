@@ -678,3 +678,4 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 });
 
 export { expect } from "@playwright/test";
+export type { Page } from "@playwright/test";

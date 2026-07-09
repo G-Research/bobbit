@@ -6,7 +6,7 @@
  */
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
-import { readE2ETokenAsync, base, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
+import { readE2ETokenAsync, base, waitForSessionStatus } from "../e2e-setup.js";
 
 function escapeCssAttr(value: string): string {
 	return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");

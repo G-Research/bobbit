@@ -25,10 +25,6 @@ async function ready(page: any) {
 	await page.goto(PAGE);
 	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 10_000 });
 }
-const img = (content: string) => ({
-	id: "a1", type: "image", fileName: "big.png", mimeType: "image/png", size: content.length, content, preview: content,
-});
-
 test.describe("MessageEditor aggregate-size guard (S31)", () => {
 	test("oversized send is rejected: error shown, onSend NOT called, draft retained, no message-send", async ({ page }) => {
 		await ready(page);

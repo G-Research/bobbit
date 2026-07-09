@@ -57,7 +57,7 @@ async function installSpyAndLoad(page: import("@playwright/test").Page): Promise
 		(window as any).__dataUrlCalls = 0;
 		(window as any).__dataUrls = [] as string[];
 		const original = HTMLCanvasElement.prototype.toDataURL;
-		HTMLCanvasElement.prototype.toDataURL = function (...args: any[]) {
+		HTMLCanvasElement.prototype.toDataURL = function (this: any, ...args: any[]) {
 			(window as any).__dataUrlCalls = ((window as any).__dataUrlCalls ?? 0) + 1;
 			const url = Reflect.apply(original, this, args);
 			(window as any).__dataUrls.push(url);

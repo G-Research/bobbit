@@ -59,7 +59,7 @@ async function createChildGoal(projectId: string, parentGoalId: string, title: s
 /** Seed a clean browser state before boot; optionally pre-store explicit
  *  expansion preferences (canonicalKey → "expanded" | "collapsed"). */
 async function seedBrowserState(page: Page, prefs: Record<string, "expanded" | "collapsed"> = {}): Promise<void> {
-	await page.addInitScript(({ treeStateKey, expansion }) => {
+	await page.addInitScript(({ treeStateKey, expansion }: { treeStateKey: string; expansion: Record<string, "expanded" | "collapsed"> }) => {
 		localStorage.removeItem("bobbit-sidebar-collapsed");
 		localStorage.setItem("bobbit-show-archived", "false");
 		if (Object.keys(expansion).length > 0) {
@@ -82,7 +82,7 @@ function navRow(page: Page, navId: string) {
 }
 
 async function storedPreference(page: Page, canonicalKey: string): Promise<string | undefined> {
-	return page.evaluate(({ storageKey, canonicalKey }) => {
+	return page.evaluate(({ storageKey, canonicalKey }: { storageKey: string; canonicalKey: string }) => {
 		const raw = localStorage.getItem(storageKey);
 		if (!raw) return undefined;
 		try { return JSON.parse(raw).expansion?.[canonicalKey]; } catch { return undefined; }
@@ -99,7 +99,7 @@ type RowGeometry = {
 };
 
 async function rowGeometry(page: Page, navId: string): Promise<RowGeometry> {
-	return page.evaluate((navId) => {
+	return page.evaluate((navId: string) => {
 		const sidebar = document.querySelector(".sidebar-edge");
 		const container = sidebar?.querySelector<HTMLElement>("[data-project-reorder-list]");
 		const empty = { found: false, within: false, scrollTop: -1, scrollHeight: -1, clientHeight: -1, overflowing: false };
@@ -140,14 +140,14 @@ async function fullyVisibleNavIds(page: Page): Promise<string[]> {
 }
 
 async function setSidebarScrollTop(page: Page, value: number): Promise<void> {
-	await page.evaluate((value) => {
+	await page.evaluate((value: number) => {
 		const c = document.querySelector<HTMLElement>(".sidebar-edge [data-project-reorder-list]");
 		if (c) c.scrollTop = value;
 	}, value);
 }
 
 async function inAppNavigate(page: Page, hash: string): Promise<void> {
-	await page.evaluate((h) => { window.location.hash = h; }, hash);
+	await page.evaluate((h: string) => { window.location.hash = h; }, hash);
 }
 
 test.describe("Sidebar reveal on nav", () => {

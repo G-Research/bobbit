@@ -51,7 +51,7 @@ test.describe("Canvas eye animation getAnimations() caching", () => {
 		await page.addInitScript(() => {
 			(window as any).__getAnimationsCalls = 0;
 			const original = Element.prototype.getAnimations;
-			Element.prototype.getAnimations = function (...args: any[]) {
+			Element.prototype.getAnimations = function (this: any, ...args: any[]) {
 				(window as any).__getAnimationsCalls = ((window as any).__getAnimationsCalls ?? 0) + 1;
 				return Reflect.apply(original, this, args);
 			} as any;
