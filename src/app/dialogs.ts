@@ -51,7 +51,7 @@ import "../ui/components/ErrorDetails.js";
 import { authenticateGateway, connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type ExpiredAccountOAuthCredential } from "./account-oauth-providers.js";
-import { defaultCwdForProjectSession } from "./headquarters.js";
+import { defaultCwdForProjectSession, HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 // ============================================================================
@@ -1451,6 +1451,27 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create goal assistant", message, { code, stack });
+	} finally {
+		state.creatingSession = false;
+		renderApp();
+	}
+}
+
+export async function showSupportDialog(): Promise<void> {
+	if (state.creatingSession) return;
+	state.creatingSession = true;
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ assistantType: "support", projectId: HEADQUARTERS_PROJECT_ID }),
+		});
+		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		const { id } = await res.json();
+		await connectToSession(id, false, { assistantType: "support" });
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create support session", message, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		renderApp();

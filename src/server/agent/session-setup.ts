@@ -38,7 +38,8 @@ import type { LifecycleHub } from "./lifecycle-hub.js";
 import type { ContextBlock } from "./context-blocks.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
-import { getAssistantDef } from "./assistant-registry.js";
+import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
+import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
@@ -738,8 +739,8 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	applyDisabledToolsFilter(plan, disabledTools);
 
 	if (assistantDef) {
-		// Assistant sessions (goal/role/tool assistants)
-		const assistantRole = lookupRole("assistant", plan, ctx);
+		// Assistant sessions (goal/role/tool/support assistants)
+		const assistantRole = lookupRole(assistantRoleForType(plan.assistantType), plan, ctx);
 		let assistantGoalSpec = "";
 		if (assistantRole?.promptTemplate) {
 			assistantGoalSpec = assistantRole.promptTemplate.replace(
@@ -757,6 +758,11 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 					assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal, ctx.prStatusStore);
 				}
 			}
+		}
+		if (plan.assistantType === "support") {
+			assistantGoalSpec = assistantGoalSpec
+				.replaceAll("{{BOBBIT_DOCS_DIR}}", resolveBundledDocsDir())
+				.replaceAll("{{BOBBIT_SRC_DIR}}", resolveBundledSrcDir());
 		}
 		// Resolve {if:subGoalsEnabled} blocks (e.g. the goal assistant's sub-goal
 		// guidance) against the system feature flag, mirroring the team-lead path.
