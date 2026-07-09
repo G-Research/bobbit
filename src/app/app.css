@@ -19,6 +19,54 @@ bell-toggle button {
 	color: var(--color-muted-foreground) !important;
 }
 
+.sidebar-header-shell {
+	gap: 0.5rem;
+	min-width: 0;
+}
+
+.sidebar-header-brand {
+	flex: 1 1 auto;
+	min-width: 0;
+	max-width: calc(100% - 7.25rem);
+}
+
+.sidebar-header-actions {
+	width: 6.75rem;
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.125rem;
+}
+
+.sidebar-header-actions > *,
+.sidebar-header-actions > [data-testid="support-launcher"] {
+	width: 1.5rem;
+	height: 1.5rem;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 1.5rem;
+}
+
+.sidebar-header-actions button {
+	width: 1.5rem !important;
+	height: 1.5rem !important;
+	min-width: 1.5rem !important;
+	padding: 0 !important;
+	display: inline-flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	line-height: 1 !important;
+}
+
+.sidebar-header-actions svg {
+	width: 1rem !important;
+	height: 1rem !important;
+	display: block;
+	flex-shrink: 0;
+}
+
 /* Sidebar icon affordances that opt in here scale from .sidebar-root font-size.
  * Keep selectors narrow so compound plus overlays are never clipped by generic
  * sidebar SVG/span rules. */
