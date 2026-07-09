@@ -60,3 +60,46 @@ export function missingDependencies(projectRoot: string): string[] {
 		(name) => !fs.existsSync(path.join(projectRoot, "node_modules", name, "package.json")),
 	);
 }
+
+export interface HealDependenciesDeps {
+	exec: (argv: string[], cwd: string) => void;
+	log?: (msg: string) => void;
+}
+
+export interface HealResult {
+	beforeMissing: string[];
+	afterMissing: string[];
+	restored: string[];
+	stillMissing: string[];
+	regressed: string[];
+}
+
+/**
+ * Testable dependency-repair seam for the dev harness.
+ *
+ * Final contract (implemented by the ring-fence fix): run only a safe repair,
+ * then fail loud if any declared dependency that was present before repair is
+ * missing afterward; EBUSY/EPERM failures must surface npm's exact locked
+ * native-file path.
+ *
+ * Current stub intentionally mirrors today's ensureDeps behavior for the TDD
+ * reproducing test: invoke the installer seam, swallow/log install failures,
+ * and do not yet detect post-repair regressions.
+ */
+export function healDependencies(projectRoot: string, deps: HealDependenciesDeps): HealResult {
+	const beforeMissing = missingDependencies(projectRoot);
+	try {
+		deps.exec(["npm", "install"], projectRoot);
+	} catch {
+		deps.log?.("[harness] dependency self-heal failed; run npm install manually.");
+	}
+
+	const afterMissing = missingDependencies(projectRoot);
+	return {
+		beforeMissing,
+		afterMissing,
+		restored: beforeMissing.filter((name) => !afterMissing.includes(name)),
+		stillMissing: afterMissing.filter((name) => beforeMissing.includes(name)),
+		regressed: [],
+	};
+}
