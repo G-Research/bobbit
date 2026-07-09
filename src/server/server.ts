@@ -568,7 +568,7 @@ import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } 
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
-import { initAssistantRegistry } from "./agent/assistant-registry.js";
+import { initAssistantRegistry, assistantRoleForType } from "./agent/assistant-registry.js";
 import {
 	deleteProposalFile,
 	editProposalFile,
@@ -2034,6 +2034,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
 	const sessionManager = new SessionManager({
+		stateDir,
 		agentCliPath: config.agentCliPath,
 		systemPromptPath: config.systemPromptPath,
 		colorStore,
@@ -5958,7 +5959,7 @@ async function handleApiRoute(
 				const parts = sessionManager.getPromptParts(sessionId);
 				if (parts) {
 					parts.dynamicContext = blocks;
-					persistPromptSections(sessionId, parts);
+					persistPromptSections(sessionId, parts, sessionManager.stateDir);
 				}
 			} catch (err) {
 				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
@@ -6538,11 +6539,18 @@ async function handleApiRoute(
 				readOnly: typeof body?.readOnly === "boolean" ? body.readOnly : undefined,
 			});
 
-			// Set assistant role metadata if no explicit role was provided
+			// Set assistant role metadata if no explicit role was provided.
+			// Role-aware: resolve the backing role via `assistantRoleForType` (the
+			// single source of truth) and read its accessory from the resolved role
+			// definition (support -> `support` + `headset`; other assistants ->
+			// `assistant` + `wand`). Never hardcode the accessory string.
 			if (!createOpts?.role && assistantType) {
-				sessionManager.updateSessionMeta(session.id, { role: "assistant", accessory: "wand" });
-				session.role = "assistant";
-				session.accessory = "wand";
+				const resolvedRoleName = assistantRoleForType(assistantType);
+				const resolvedRole = resolveRoleForProject(resolvedRoleName, resolvedProjectId);
+				const resolvedAccessory = resolvedRole?.accessory ?? "wand";
+				sessionManager.updateSessionMeta(session.id, { role: resolvedRoleName, accessory: resolvedAccessory });
+				session.role = resolvedRoleName;
+				session.accessory = resolvedAccessory;
 			}
 
 			// Store reattemptGoalId on the session if provided
@@ -15105,7 +15113,7 @@ async function handleApiRoute(
 		const id = promptSectionsMatch[1];
 
 		// Try persisted snapshot first (captures the actual prompt at creation time)
-		const persisted = loadPersistedPromptSections(id);
+		const persisted = loadPersistedPromptSections(id, sessionManager.stateDir);
 		if (persisted) {
 			json(persisted);
 			return;

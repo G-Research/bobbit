@@ -1,21 +1,23 @@
 /**
  * Journey: Support Launcher — v2 browser smoke
  *
- * Covers the Headquarters-only "Support" launcher (goal: Support Assistant, §5):
- *   - LifeBuoy icon Button wrapped in <span data-testid="support-launcher"> with
- *     title="Support", rendered in BOTH the desktop sidebar header and the mobile
- *     header, immediately to the LEFT of the QR-code button (title="Show QR code").
- *   - Rendered ONLY when isHeadquartersProject(state.activeProjectId) — hidden for
- *     normal projects, visible when Headquarters is the active project.
+ * Covers the "Support" launcher (goal: Support Assistant fix-up, Defects 1-4):
+ *   - MessageCircleQuestion (help / message-question) icon Button wrapped in
+ *     <span data-testid="support-launcher" style="display:contents"> with
+ *     title="Open a new support agent session", rendered in BOTH the desktop
+ *     sidebar header and the mobile header, immediately to the LEFT of the
+ *     QR-code button (title="Show QR code").
+ *   - Rendered whenever Headquarters is shown in project lists
+ *     (state.showHeadquartersInProjectLists !== false) — visible even when a
+ *     NON-Headquarters project is active; hidden ONLY when the
+ *     "Show Headquarters in project lists" preference is off.
+ *   - The desktop launcher Button matches its QR sibling's sizing (h-6 w-6).
  *   - Clicking it POSTs /api/sessions { assistantType:"support",
- *     projectId:"headquarters" } and connects to the new session.
+ *     projectId:"headquarters" } and connects to the new session — even when a
+ *     non-HQ project is the active project.
  *
- * state.activeProjectId becomes "headquarters" via applyProjectPalette(session.projectId)
- * when connecting to a session whose project is Headquarters (session-manager.ts) — so
- * these tests make HQ active by creating + navigating to a Headquarters-project session.
- * (Requires Headquarters to be present in the client project list, i.e. the
- * showHeadquartersInProjectLists preference — see setHeadquartersVisible below — because
- * applyProjectPalette only sets activeProjectId for a project that exists in state.projects.)
+ * The wrapper span uses display:contents so it does not add a flex box; assert
+ * visibility / geometry / title / classes on the inner <button>.
  */
 import type { Page } from "@playwright/test";
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
@@ -24,8 +26,13 @@ const HEADQUARTERS_PROJECT_ID = "headquarters";
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 375, height: 667 };
 
+/** The testid wrapper (display:contents span). Use for presence/absence. */
 const launcher = (page: Page) => page.locator('[data-testid="support-launcher"]').first();
+/** The actual clickable Button inside the launcher. Use for visibility/geometry/title. */
+const launcherBtn = (page: Page) => page.locator('[data-testid="support-launcher"] button').first();
 const qrButton = (page: Page) => page.locator('button[title="Show QR code"]').first();
+
+const SUPPORT_TITLE = "Open a new support agent session";
 
 async function setHeadquartersVisible(visible: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {
@@ -43,19 +50,20 @@ async function centerX(loc: import("@playwright/test").Locator): Promise<number>
 }
 
 /**
- * Create a Headquarters-project session and navigate to it so
- * state.activeProjectId becomes "headquarters" (the launcher's gate).
+ * Create a default (non-Headquarters) project session and navigate to it so
+ * state.activeProjectId is NOT "headquarters" — proving the launcher no longer
+ * depends on the active project being Headquarters.
  * Returns the created session id (caller cleans up).
  */
-async function openHeadquartersSession(page: Page): Promise<string> {
-	const sessionId = await createSession({ projectId: HEADQUARTERS_PROJECT_ID });
+async function openNonHqSession(page: Page): Promise<string> {
+	const sessionId = await createSession();
 	await waitForSessionStatus(sessionId, "idle");
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
-	// Confirm the app considers Headquarters the active project.
+	// Confirm the app does NOT consider Headquarters the active project.
 	await expect
 		.poll(() => page.evaluate(() => (window as any).bobbitState?.activeProjectId ?? null), { timeout: 15_000 })
-		.toBe(HEADQUARTERS_PROJECT_ID);
+		.not.toBe(HEADQUARTERS_PROJECT_ID);
 	return sessionId;
 }
 
@@ -64,83 +72,90 @@ test.describe("Journey: Support Launcher", () => {
 		await setHeadquartersVisible(true);
 	});
 
-	test("launcher is hidden when a normal (non-HQ) project is active", async ({ page }) => {
+	test("launcher is visible (left of QR) with a non-HQ project active when Headquarters is enabled (desktop)", async ({ page }) => {
 		await page.setViewportSize(DESKTOP);
-		// A default-project session keeps the active project non-Headquarters.
-		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
+		let session: string | undefined;
 		try {
 			await openApp(page);
-			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			session = await openNonHqSession(page);
 
-			// Sanity: active project is NOT headquarters for a default-project session.
-			await expect
-				.poll(() => page.evaluate(() => (window as any).bobbitState?.activeProjectId ?? null), { timeout: 15_000 })
-				.not.toBe(HEADQUARTERS_PROJECT_ID);
+			// Present + visible even though the active project is NOT Headquarters.
+			await expect(launcher(page)).toHaveCount(1);
+			await expect(launcherBtn(page)).toBeVisible({ timeout: 15_000 });
 
-			// The QR button is present (proves the header rendered) but the launcher is absent.
-			await expect(qrButton(page)).toBeVisible({ timeout: 15_000 });
-			await expect(page.locator('[data-testid="support-launcher"]')).toHaveCount(0);
-		} finally {
-			await deleteSession(sessionId).catch(() => {});
-		}
-	});
+			// Descriptive tooltip.
+			await expect(launcherBtn(page)).toHaveAttribute("title", SUPPORT_TITLE);
 
-	test("launcher is visible left of the QR button under Headquarters (desktop)", async ({ page }) => {
-		await page.setViewportSize(DESKTOP);
-		let hqSession: string | undefined;
-		try {
-			await openApp(page);
-			hqSession = await openHeadquartersSession(page);
+			// Renders an icon (message-question) — assert an svg is present.
+			await expect(launcherBtn(page).locator("svg").first()).toBeVisible({ timeout: 15_000 });
 
-			await expect(launcher(page)).toBeVisible({ timeout: 15_000 });
-			await expect(launcher(page)).toHaveAttribute("data-testid", "support-launcher");
-			// The launcher wraps a Button titled "Support".
-			await expect(launcher(page).locator('button[title="Support"]')).toBeVisible({ timeout: 15_000 });
+			// Matches sibling sizing (same as the QR button: h-6 w-6).
+			await expect(launcherBtn(page)).toHaveClass(/(?:^|\s)h-6(?:\s|$)/);
+			await expect(launcherBtn(page)).toHaveClass(/(?:^|\s)w-6(?:\s|$)/);
 
 			// Sits immediately LEFT of the QR button (same header row).
 			await expect(qrButton(page)).toBeVisible({ timeout: 15_000 });
-			const supportX = await centerX(launcher(page));
+			const supportX = await centerX(launcherBtn(page));
 			const qrX = await centerX(qrButton(page));
 			expect(supportX, "support launcher should sit left of the QR button").toBeLessThan(qrX);
 		} finally {
-			if (hqSession) await deleteSession(hqSession).catch(() => {});
+			if (session) await deleteSession(session).catch(() => {});
 		}
 	});
 
-	test("launcher is visible left of the QR button under Headquarters (mobile)", async ({ page }) => {
+	test("launcher is hidden when 'Show Headquarters in project lists' is off", async ({ page }) => {
+		await page.setViewportSize(DESKTOP);
+		// Turn the preference off BEFORE the app boots so the client picks it up.
+		await setHeadquartersVisible(false);
+		let session: string | undefined;
+		try {
+			session = await createSession();
+			await waitForSessionStatus(session, "idle");
+			await openApp(page);
+			await navigateToHash(page, `#/session/${session}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+
+			// The QR button proves the header rendered, but the launcher is absent.
+			await expect(qrButton(page)).toBeVisible({ timeout: 15_000 });
+			await expect(page.locator('[data-testid="support-launcher"]')).toHaveCount(0);
+		} finally {
+			if (session) await deleteSession(session).catch(() => {});
+		}
+	});
+
+	test("launcher is visible left of the QR button with a non-HQ project active (mobile)", async ({ page }) => {
 		await page.setViewportSize(MOBILE);
-		let hqSession: string | undefined;
+		let session: string | undefined;
 		try {
 			await openApp(page);
-			hqSession = await openHeadquartersSession(page);
+			session = await openNonHqSession(page);
 
 			// The mobile launcher renders in the mobile landing header (not the in-session
-			// header), so drop back to the landing route — activeProjectId stays Headquarters.
+			// header), so drop back to the landing route.
 			await navigateToHash(page, "#/");
-			await expect(launcher(page)).toBeVisible({ timeout: 20_000 });
-			await expect(launcher(page).locator('button[title="Support"]')).toBeVisible({ timeout: 15_000 });
+			await expect(launcher(page)).toHaveCount(1);
+			await expect(launcherBtn(page)).toBeVisible({ timeout: 20_000 });
+			await expect(launcherBtn(page)).toHaveAttribute("title", SUPPORT_TITLE);
 
 			// Sits left of the QR button in the mobile header too.
 			await expect(qrButton(page)).toBeVisible({ timeout: 15_000 });
-			const supportX = await centerX(launcher(page));
+			const supportX = await centerX(launcherBtn(page));
 			const qrX = await centerX(qrButton(page));
 			expect(supportX, "mobile support launcher should sit left of the QR button").toBeLessThan(qrX);
 		} finally {
-			if (hqSession) await deleteSession(hqSession).catch(() => {});
+			if (session) await deleteSession(session).catch(() => {});
 		}
 	});
 
-	test("clicking the launcher creates + opens an HQ support session that persists across reload", async ({ page }) => {
+	test("clicking the launcher (from a non-HQ project) creates + opens an HQ support session that persists across reload", async ({ page }) => {
 		test.setTimeout(90_000);
 		await page.setViewportSize(DESKTOP);
-		let hqSession: string | undefined;
+		let session: string | undefined;
 		let supportSession: string | undefined;
 		try {
 			await openApp(page);
-			hqSession = await openHeadquartersSession(page);
-			await expect(launcher(page)).toBeVisible({ timeout: 15_000 });
+			session = await openNonHqSession(page);
+			await expect(launcherBtn(page)).toBeVisible({ timeout: 15_000 });
 
 			// Capture the session-create POST driven by showSupportDialog().
 			const reqPromise = page.waitForRequest(
@@ -152,7 +167,7 @@ test.describe("Journey: Support Launcher", () => {
 				{ timeout: 30_000 },
 			);
 
-			await launcher(page).click();
+			await launcherBtn(page).click();
 
 			const req = await reqPromise;
 			const body = JSON.parse(req.postData() || "{}") as { assistantType?: string; projectId?: string };
@@ -187,7 +202,7 @@ test.describe("Journey: Support Launcher", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 		} finally {
 			if (supportSession) await deleteSession(supportSession).catch(() => {});
-			if (hqSession) await deleteSession(hqSession).catch(() => {});
+			if (session) await deleteSession(session).catch(() => {});
 		}
 	});
 });
