@@ -23,6 +23,7 @@ import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
+import { computeConnectGitState, setCachedRepoState, pruneGitRepoCache } from "./git-repo-cache.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
@@ -1410,12 +1411,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		_restorePromptDraft(sessionId);
 		_focusPromptEditor();
 
-		// Reset tri-state on cached switch-back (last-known data still rendered).
+		// Init tri-state from the client-side repo-cache on cached switch-back
+		// (last-known data still rendered). A cached 'no' starts hidden with a
+		// quiet background recheck — no skeleton flash. See git-repo-cache.ts.
+		const fastGit = computeConnectGitState(sessionId);
 		if (state.chatPanel?.agentInterface) {
-			(state.chatPanel.agentInterface as any).gitRepoKnown = "unknown";
+			(state.chatPanel.agentInterface as any).gitRepoKnown = fastGit.gitRepoKnown;
 		}
+		pruneGitRepoCache(state.gatewaySessions.map((s) => s.id));
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
-		refreshGitStatusForSession(sessionId);
+		refreshGitStatusForSession(sessionId, { quiet: fastGit.quietRecheck });
 		refreshBgProcessesForSession(sessionId);
 		startGitStatusPoll(sessionId);
 
@@ -2430,8 +2435,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// `await remote.connect(...)` above. Firing here, after the
 		// refreshSessions()/setAgent() awaits, added ~700ms to every reload.)
 
-		// Initial git status and bg process fetch (fire-and-forget)
-		refreshGitStatusForSession(sessionId);
+		// Initial git status and bg process fetch (fire-and-forget). Seed the
+		// tri-state from the client-side repo-cache so a known git-less session
+		// starts hidden with a quiet recheck (no "Checking git…" skeleton flash).
+		const slowGit = computeConnectGitState(sessionId);
+		if (state.chatPanel?.agentInterface) {
+			(state.chatPanel.agentInterface as any).gitRepoKnown = slowGit.gitRepoKnown;
+		}
+		pruneGitRepoCache(state.gatewaySessions.map((s) => s.id));
+		refreshGitStatusForSession(sessionId, { quiet: slowGit.quietRecheck });
 		refreshBgProcessesForSession(sessionId);
 		startGitStatusPoll(sessionId);
 
@@ -3321,7 +3333,7 @@ function withUntrackedStatusPreserved(current: ClientGitStatus | undefined, inco
 
 async function refreshGitStatusForSession(
 	sessionId: string,
-	opts?: { fetch?: boolean; untracked?: boolean; source?: "event" | "poll" | "user" },
+	opts?: { fetch?: boolean; untracked?: boolean; quiet?: boolean; source?: "event" | "poll" | "user" },
 ): Promise<void> {
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
@@ -3336,7 +3348,12 @@ async function refreshGitStatusForSession(
 	const ctl = new AbortController();
 	_gitStatusAborts.set(sessionId, ctl);
 
-	ai.gitStatusLoading = true;
+	// Quiet recheck: for a session cached as git-less (gitRepoKnown === 'no'),
+	// run the refresh silently in the background — do NOT flip gitStatusLoading
+	// (which would render the "Checking git…" skeleton) and do NOT reveal the
+	// widget while it stays 'no'. Only an onOk (repo now exists) reveals it.
+	const quiet = opts?.quiet === true && (ai as any).gitRepoKnown === "no";
+	if (!quiet) ai.gitStatusLoading = true;
 	gitStatusLastRefreshAt = performance.now();
 
 	await runGitStatusRefresh(ctl.signal, {
@@ -3352,18 +3369,23 @@ async function refreshGitStatusForSession(
 			const next = withUntrackedStatusPreserved(ai.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
 			ai.gitStatus = next as any;
 			ai.partial = !!next.partial;
+			// Repo now exists (quiet recheck may have flipped it from 'no' →
+			// reveals the widget and resumes normal loading/pill behaviour).
 			(ai as any).gitRepoKnown = "yes";
 			if (next.branch) ai.branch = next.branch;
+			setCachedRepoState(sessionId, "yes");
 		},
 		onNotARepo: () => {
 			if (activeSessionId() !== sessionId) return;
 			(ai as any).gitRepoKnown = "no";
 			ai.gitStatus = undefined;
+			setCachedRepoState(sessionId, "no");
 		},
 		onFinally: () => {
 			if (_gitStatusAborts.get(sessionId) === ctl) _gitStatusAborts.delete(sessionId);
 			if (activeSessionId() !== sessionId) return;
-			ai.gitStatusLoading = false;
+			// Never surface loading for a quiet recheck that stayed git-less.
+			if (!(quiet && (ai as any).gitRepoKnown === "no")) ai.gitStatusLoading = false;
 			// Final give-up (4 errors in a row) — leave gitRepoKnown unchanged,
 			// leave last-known data in place, log once.
 			if ((ai as any).gitRepoKnown === "unknown" && !ai.gitStatus) {
