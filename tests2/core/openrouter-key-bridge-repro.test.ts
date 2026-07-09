@@ -39,8 +39,10 @@ const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
+const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
 
 initPromptDirs(stateDir);
+loadOrCreateToken(); // seed admin token so direct-agent spawns find it (mirrors server boot)
 
 const FAKE_OPENROUTER_KEY = "sk-or-repro-openrouter-key-never-persist";
 const PINNED_OPENROUTER_MODEL = { provider: "openrouter", id: "anthropic/claude-3.5-sonnet" };

@@ -27,6 +27,8 @@ const { SessionManager } = await import("../../src/server/agent/session-manager.
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
+const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+loadOrCreateToken(); // seed admin token so direct-agent spawns find it (mirrors server boot)
 
 const managers: any[] = [];
 afterEach(() => {

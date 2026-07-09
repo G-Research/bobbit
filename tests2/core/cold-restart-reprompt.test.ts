@@ -56,6 +56,8 @@ const { SessionManager } = await import("../../src/server/agent/session-manager.
 const { TeamManager } = await import("../../src/server/agent/team-manager.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
+const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+loadOrCreateToken(); // seed admin token so direct-agent spawns find it (mirrors server boot)
 
 // assemblePrompt (invoked deep inside restoreSession) writes to
 // <stateDir>/session-prompts — initialise it once so restoreSession runs
