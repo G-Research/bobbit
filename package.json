@@ -12,6 +12,8 @@
     "dist/",
     "data/",
     "docker/",
+    "docs/",
+    "src/",
     "README.md"
   ],
   "scripts": {

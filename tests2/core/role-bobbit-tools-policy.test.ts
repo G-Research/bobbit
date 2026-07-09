@@ -3,9 +3,12 @@
 // Requirement (see defaults/tools/bobbit/*.yaml + docs/bobbit-gateway-tool.md):
 //   • bobbit_orchestrate + bobbit_admin default to grantPolicy: never (hidden
 //     from every session's toolset).
-//   • ONLY the `general` and `team-lead` roles re-grant bobbit_orchestrate
-//     (resolveGrantPolicy step 1 per-tool > step 5 YAML default).
-//   • ONLY `general` gets bobbit_admin, and only behind an `ask` policy.
+//   • ONLY the `general`, `support`, and `team-lead` roles re-grant
+//     bobbit_orchestrate (resolveGrantPolicy step 1 per-tool > step 5 YAML
+//     default).
+//   • ONLY `general` and `support` get bobbit_admin, and only behind an `ask`
+//     policy. (`support` drives a running Bobbit on the user's behalf — see the
+//     Support Assistant goal / defaults/roles/support.yaml.)
 // This test pins that surface so a role edit can't silently widen it.
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
@@ -110,6 +113,12 @@ describe("bobbit tier resolved role policy", () => {
 		assert.equal(resolve("bobbit_admin", general), "ask");
 	});
 
+	it("support resolves bobbit_orchestrate=allow and bobbit_admin=ask", () => {
+		const support = loadRole("support");
+		assert.equal(resolve("bobbit_orchestrate", support), "allow");
+		assert.equal(resolve("bobbit_admin", support), "ask");
+	});
+
 	it("team-lead resolves bobbit_orchestrate=allow and bobbit_admin=never (not granted)", () => {
 		const lead = loadRole("team-lead");
 		assert.equal(resolve("bobbit_orchestrate", lead), "allow");
@@ -117,29 +126,31 @@ describe("bobbit tier resolved role policy", () => {
 	});
 });
 
-describe("bobbit tier grant surface is exactly {general, team-lead} / {general}", () => {
+describe("bobbit tier grant surface is exactly {general, support, team-lead} / {general, support}", () => {
 	const groupPolicyStore = defaultGroupPolicyProvider();
 	const toolManager = bobbitToolManager();
 
-	it("ONLY general + team-lead resolve bobbit_orchestrate to non-never", () => {
+	it("ONLY general + support + team-lead resolve bobbit_orchestrate to non-never", () => {
 		const granted = allRoleNames().filter(
 			(name) =>
 				resolveGrantPolicy("bobbit_orchestrate", BOBBIT_GROUP, loadRole(name), toolManager as never, groupPolicyStore) !==
 				"never",
 		);
-		assert.deepEqual(granted.sort(), ["general", "team-lead"]);
+		assert.deepEqual(granted.sort(), ["general", "support", "team-lead"]);
 	});
 
-	it("ONLY general resolves bobbit_admin to non-never (and it is `ask`)", () => {
+	it("ONLY general + support resolve bobbit_admin to non-never (and it is `ask`)", () => {
 		const granted = allRoleNames().filter(
 			(name) =>
 				resolveGrantPolicy("bobbit_admin", BOBBIT_GROUP, loadRole(name), toolManager as never, groupPolicyStore) !==
 				"never",
 		);
-		assert.deepEqual(granted.sort(), ["general"]);
-		assert.equal(
-			resolveGrantPolicy("bobbit_admin", BOBBIT_GROUP, loadRole("general"), toolManager as never, groupPolicyStore),
-			"ask",
-		);
+		assert.deepEqual(granted.sort(), ["general", "support"]);
+		for (const role of ["general", "support"]) {
+			assert.equal(
+				resolveGrantPolicy("bobbit_admin", BOBBIT_GROUP, loadRole(role), toolManager as never, groupPolicyStore),
+				"ask",
+			);
+		}
 	});
 });
