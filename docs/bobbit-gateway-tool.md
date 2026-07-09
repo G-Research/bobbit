@@ -27,11 +27,14 @@ session" is a higher-risk action than "list goals", and "mutate config /
 destroy worktrees" is higher-risk still — separate groups let a user grant read
 broadly, gate orchestration behind confirmation, and keep admin locked down.
 
+All three tools share a single `Bobbit` tool-group; tier separation is
+enforced purely by each tool's `grantPolicy`.
+
 | Tool | Group | Default `grantPolicy` | Scope |
 |---|---|---|---|
-| `bobbit_read` | `BobbitRead` | `allow` | Read-only introspection (GET; no side effects) |
-| `bobbit_orchestrate` | `BobbitOrchestrate` | `never` | Runtime state mutations (goals/sessions/tasks/gates/staff/team lifecycle) |
-| `bobbit_admin` | `BobbitAdmin` | `never` | Config + destructive maintenance (highest privilege) |
+| `bobbit_read` | `Bobbit` | `allow` | Read-only introspection (GET; no side effects) |
+| `bobbit_orchestrate` | `Bobbit` | `never` | Runtime state mutations (goals/sessions/tasks/gates/staff/team lifecycle) |
+| `bobbit_admin` | `Bobbit` | `never` | Config + destructive maintenance (highest privilege) |
 
 ### What `never` means and how to enable a tier
 
@@ -46,16 +49,20 @@ which is `grantPolicy: never` for the same reason.
 
 To enable `bobbit_orchestrate` or `bobbit_admin` for a session, do one of:
 
-- **Tool-group policy** — set the policy for the group to `allow` (or `ask`, for
-  confirm-on-use) at the desired scope: `PUT /api/tool-group-policies/:group`
-  (with `:group` = `BobbitOrchestrate` or `BobbitAdmin`). Read current policies
-  via `GET /api/tool-group-policies`.
-- **Role allowlist** — a role definition can enable a group through its `tools`
-  allowlist or `toolPolicies`.
+- **Tool-group policy** — set the policy for the `Bobbit` group to `allow` (or
+  `ask`, for confirm-on-use) at the desired scope: `PUT
+  /api/tool-group-policies/Bobbit`. Read current policies via `GET
+  /api/tool-group-policies`.
+- **Role allowlist** — a role definition can enable the group through its
+  `tools` allowlist or `toolPolicies`.
 
-Because each tier is a distinct group, a typical setup grants `BobbitRead`
-everywhere, gates `BobbitOrchestrate` behind `ask` for orchestration roles, and
-leaves `BobbitAdmin` at `never` except for a trusted admin role.
+Because all three tiers now live in the single `Bobbit` group, a group-level
+`allow` reveals every tier whose own `grantPolicy` is not `never`. `bobbit_read`
+(`grantPolicy: allow`) is visible by default; `bobbit_orchestrate` and
+`bobbit_admin` stay hidden until the group is enabled *and* their `never`
+default is overridden (e.g. a role that lists the tool explicitly). Grouping
+them together means the group policy can no longer gate the tiers independently
+— that separation now rests entirely on the per-tool `grantPolicy`.
 
 ## Registration model
 

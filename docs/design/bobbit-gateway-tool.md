@@ -80,9 +80,9 @@ structured error surfacing the gateway `{ error, code }` shape.
 ```
 defaults/tools/bobbit/
   extension.ts             # single ExtensionFactory; registers all 3 tools
-  bobbit_read.yaml         # group: BobbitRead,        grantPolicy: allow
-  bobbit_orchestrate.yaml  # group: BobbitOrchestrate, grantPolicy: never
-  bobbit_admin.yaml        # group: BobbitAdmin,        grantPolicy: never
+  bobbit_read.yaml         # group: Bobbit, grantPolicy: allow
+  bobbit_orchestrate.yaml  # group: Bobbit, grantPolicy: never
+  bobbit_admin.yaml        # group: Bobbit, grantPolicy: never
 ```
 
 - **`extension.ts`** — one default-export `ExtensionFactory`. Resolves
@@ -221,7 +221,7 @@ All paths are verified against `src/server/server.ts` line references (2026-07
 `handleApiRoute()`). `:x` = path segment from a param. Query params are shown
 as `?k=`. "Body" lists the JSON body keys the handler reads.
 
-### 5.1 `bobbit_read` (group `BobbitRead`, all GET)
+### 5.1 `bobbit_read` (group `Bobbit`, all GET)
 
 | operation | method | path | required | optional |
 |---|---|---|---|---|
@@ -269,7 +269,7 @@ as `?k=`. "Body" lists the JSON body keys the handler reads.
 > no server-scope workflow set). We mark `projectId` **required** at the tool
 > layer for a useful result, but the call itself will not error without it.
 
-### 5.2 `bobbit_orchestrate` (group `BobbitOrchestrate`)
+### 5.2 `bobbit_orchestrate` (group `Bobbit`)
 
 | operation | method | path | required | optional / body |
 |---|---|---|---|---|
@@ -306,7 +306,7 @@ as `?k=`. "Body" lists the JSON body keys the handler reads.
   `team_dismiss`, `team_complete`, `team_abort`, `team_steer`, `team_prompt`
   are NOT re-exposed — use the dedicated `team_*` tools.
 
-### 5.3 `bobbit_admin` (group `BobbitAdmin`)
+### 5.3 `bobbit_admin` (group `Bobbit`)
 
 | operation | method | path | required | optional / body |
 |---|---|---|---|---|
@@ -393,13 +393,13 @@ the fields that tier uses — smaller schema, lower budget.
 
 ## 6. Tiering & `grantPolicy`
 
-Each YAML assigns a distinct `group`:
+All three YAMLs share a single `group`; tier separation rests on `grantPolicy`:
 
 | tool | group | grantPolicy |
 |---|---|---|
-| `bobbit_read` | `BobbitRead` | `allow` |
-| `bobbit_orchestrate` | `BobbitOrchestrate` | `never` |
-| `bobbit_admin` | `BobbitAdmin` | `never` |
+| `bobbit_read` | `Bobbit` | `allow` |
+| `bobbit_orchestrate` | `Bobbit` | `never` |
+| `bobbit_admin` | `Bobbit` | `never` |
 
 - `grantPolicy: allow` — available by default wherever the group registers.
 - `grantPolicy: never` — the tool is registered (visible in `/api/tools`) but
@@ -407,11 +407,14 @@ Each YAML assigns a distinct `group`:
   policy explicitly enables its group. Mechanism is identical to
   `session_prompt` (group `Agent`, `grantPolicy: never`).
 
-**Enabling `orchestrate`/`admin` for a role:** set a tool-group policy for
-`BobbitOrchestrate` / `BobbitAdmin` to `allow` (or `ask`) at the desired scope.
-Tool-group policies are read/written via `GET /api/tool-group-policies` and
-`PUT /api/tool-group-policies/:group` (see `src/server/server.ts` ~8354). A
-role definition can also enable specific groups via its `tools` allowlist.
+**Enabling `orchestrate`/`admin` for a role:** set the tool-group policy for
+`Bobbit` to `allow` (or `ask`) at the desired scope. Because all three tiers
+share the one group, the group policy no longer gates the tiers independently
+— that now rests on each tool's `grantPolicy` (`orchestrate`/`admin` stay
+hidden under `never` until a role lists them explicitly). Tool-group policies
+are read/written via `GET /api/tool-group-policies` and `PUT
+/api/tool-group-policies/:group` (see `src/server/server.ts` ~8354). A role
+definition can also enable the group via its `tools` allowlist.
 Because the three tools carry separate groups, a user can grant `read` broadly,
 gate `orchestrate` behind `ask`, and keep `admin` `never` except for a trusted
 admin role.
@@ -500,8 +503,8 @@ Register new files in `tests2/tests-map.json`.
    includes both message and `[CODE]` and HTTP status; 204 → `{ ok:true }`.
 
 6. **`tests2/core/bobbit-tool-tiers.test.ts` (new, bucket: core).** Parse the
-   three YAMLs; assert `group` values (`BobbitRead`/`BobbitOrchestrate`/
-   `BobbitAdmin`) and `grantPolicy` defaults (`allow`/`never`/`never`), and that
+   three YAMLs; assert all share `group: Bobbit`
+   and `grantPolicy` defaults (`allow`/`never`/`never`), and that
    each YAML `params.operation` union matches the operations the extension
    actually dispatches (guard against catalogue drift between YAML docs and
    code).

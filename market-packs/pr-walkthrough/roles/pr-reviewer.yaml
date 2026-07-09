@@ -31,9 +31,7 @@ toolPolicies:
   "mcp__": never
   "Agent": never
   "Ask": never
-  "BobbitRead": never
-  "BobbitOrchestrate": never
-  "BobbitAdmin": never
+  "Bobbit": never
   "Browser": never
   "Children": never
   "File System": never

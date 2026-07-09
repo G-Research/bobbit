@@ -44,6 +44,12 @@ toolPolicies:
   goal_archive_child: always-allow
   goal_decide_mutation: always-allow
   goal_set_policy: always-allow
+  # Bobbit gateway orchestration tier. bobbit_orchestrate defaults to
+  # grantPolicy: never (defaults/tools/bobbit/bobbit_orchestrate.yaml); this
+  # per-tool grant re-enables it for the lead (resolveGrantPolicy step 1 >
+  # step 5). bobbit_admin is intentionally NOT granted here — only `general`
+  # gets it (behind `ask`).
+  bobbit_orchestrate: always-allow
 createdAt: 1773875507369
 updatedAt: 1775088361805
 promptTemplate: |

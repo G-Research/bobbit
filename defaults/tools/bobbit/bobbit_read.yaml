@@ -5,7 +5,7 @@ params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, v
 provider:
   type: bobbit-extension
   extension: extension.ts
-group: BobbitRead
+group: Bobbit
 grantPolicy: allow
 docs: |-
   Read-only, gateway-wide introspection. Pick an `operation` and pass its required ids. Addresses entities by explicit id (not the current goal), so it complements — never replaces — `task_list`/`gate_list`. Returns the gateway's JSON verbatim.
