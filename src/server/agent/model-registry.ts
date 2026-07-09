@@ -2,7 +2,7 @@
  * Unified Model Registry — single server-side source of truth for all available models.
  *
  * Assembles a merged model list from:
- * 1. Built-in providers (from pi-ai getProviders()/getModels())
+ * 1. Built-in providers (from pi-ai getBuiltinProviders()/getBuiltinModels())
  * 2. AI Gateway models (if configured, live fetch via discoverAigwModels())
  * 3. Custom local providers (Ollama, LM Studio, vLLM, llama.cpp)
  *
@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { getProviders, getModels, getModel } from "@earendil-works/pi-ai";
+import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
@@ -113,7 +113,7 @@ export interface ResolvedModelStateMeta {
  *      IGNORED: model metadata is static per id, so a stale cache entry is
  *      strictly better than dropping to inferMeta. Synchronous, so it serves
  *      the sync broadcast sites (e.g. sendFallbackModelState).
- *   2. pi-ai catalog via `getModel(provider, id)` for known upstream providers
+ *   2. pi-ai catalog via `getBuiltinModel(provider, id)` for known upstream providers
  *      (skip empty / `aigw` / `custom`; aigw strips prefixes and merges no
  *      thinkingLevelMap, so it legitimately falls through to inferMeta). Any
  *      missing numeric is filled from inferMeta.
@@ -139,7 +139,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 	const normalizedProvider = (provider ?? "").toLowerCase();
 	if (normalizedProvider && normalizedProvider !== "aigw" && normalizedProvider !== "custom") {
 		try {
-			const model = getModel(normalizedProvider as any, modelId as any) as {
+			const model = getBuiltinModel(normalizedProvider as any, modelId as any) as {
 				contextWindow?: number; maxTokens?: number; reasoning?: boolean;
 				thinkingLevelMap?: Record<string, string | null>; input?: ("text" | "image")[];
 			} | undefined;
@@ -176,7 +176,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
  * Results are cached for 5 seconds.
  */
 export function getBuiltInProviderIds(): string[] {
-	return getProviders().map(provider => String(provider));
+	return getBuiltinProviders().map((provider) => String(provider));
 }
 
 export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiModel[]> {
@@ -245,9 +245,9 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	if (!aigwExclusive) {
 		// 1. Built-in providers from pi-ai
 		try {
-			const providers = getProviders();
+			const providers = getBuiltinProviders();
 			for (const providerId of providers) {
-				const models = getModels(providerId as any);
+				const models = getBuiltinModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);
 				const bobbitAdditions = getOpenAIModelAdditions(providerId as string);
 				const mergedModels = [
