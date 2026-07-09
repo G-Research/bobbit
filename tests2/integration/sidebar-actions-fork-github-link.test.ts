@@ -22,17 +22,12 @@ import {
 	apiFetch,
 	connectWs,
 	createGoal,
-	createSession,
 	defaultProjectId,
 	deleteGoal,
 	deleteSession,
 	gitCwd,
 	nonGitCwd,
 } from "./_e2e/e2e-setup.js";
-
-async function json(resp: Response): Promise<any> {
-	return resp.json().catch(() => ({}));
-}
 
 async function pollUntil<T>(
 	fn: () => Promise<T> | T,
