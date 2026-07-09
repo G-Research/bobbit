@@ -22,13 +22,28 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const { computeToolActivationArgs } = await import("../../src/server/agent/tool-activation.ts");
+const { ToolManager } = await import("../../src/server/agent/tool-manager.ts");
 import type { ToolProvider } from "../../src/server/agent/tool-manager.ts";
-import path from "node:path";
 
 type ProviderWithGroup = ToolProvider & { groupDir: string; baseDir: string };
 const MOCK_TOOLS_DIR = "/mock/tools";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.join(__dirname, "..", "..");
+const PR_WALKTHROUGH_TOOLS_DIR = path.join(REPO_ROOT, "market-packs", "pr-walkthrough", "tools");
+const PR_WALKTHROUGH_TOOL_NAMES = [
+	"readonly_bash",
+	"read_pr_walkthrough_bundle",
+	"submit_pr_walkthrough_chunk",
+	"read_pr_walkthrough_submission_status",
+	"finalize_pr_walkthrough_submission",
+	"submit_pr_walkthrough_yaml",
+] as const;
 
 function mockToolManager(providers: Map<string, ProviderWithGroup>) {
 	return {
@@ -48,6 +63,23 @@ function providersWithoutMcpMeta(): Map<string, ProviderWithGroup> {
 		["bash_bg", { type: "bobbit-extension", extension: "extension.ts", groupDir: "shell", baseDir: MOCK_TOOLS_DIR }],
 		["mcp_describe", { type: "bobbit-extension", extension: "extension.ts", groupDir: "mcp", baseDir: MOCK_TOOLS_DIR }],
 	]);
+}
+
+function prWalkthroughToolsInactiveManager() {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "tool-activation-prw-inactive-"));
+	const configDir = path.join(root, "config");
+	const builtinToolsDir = path.join(root, "builtin-tools");
+	fs.mkdirSync(path.join(configDir, "tools"), { recursive: true });
+	fs.mkdirSync(builtinToolsDir, { recursive: true });
+
+	const tm = new ToolManager(configDir, builtinToolsDir);
+	tm.setMarketToolRootsProvider(() => [
+		{ dir: PR_WALKTHROUGH_TOOLS_DIR, disabledTools: [...PR_WALKTHROUGH_TOOL_NAMES] },
+	]);
+	return {
+		tm,
+		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+	};
 }
 
 /** Capture console.warn into a buffer; restore on teardown. */
@@ -121,6 +153,51 @@ describe("computeToolActivationArgs — MCP meta-tool warn suppression", () => {
 		assert.ok(
 			matched.length >= 1,
 			`expected a 'has no provider' warn mentioning 'totally_bogus_tool' — got: ${JSON.stringify(cap.buf)}`,
+		);
+	});
+});
+
+describe("computeToolActivationArgs — inactive PR Walkthrough tool warn suppression", () => {
+	it("does not emit repeated missing-provider warnings for known inactive PR Walkthrough tools", () => {
+		const { tm, cleanup } = prWalkthroughToolsInactiveManager();
+		const cap = captureWarn();
+		try {
+			const allowed = PR_WALKTHROUGH_TOOL_NAMES.map((name) => ({ kind: "yaml" as const, name }));
+			computeToolActivationArgs(allowed, tm);
+			computeToolActivationArgs(allowed, tm);
+		} finally {
+			cap.restore();
+			cleanup();
+		}
+
+		const missingProviderWarnings = cap.buf.filter(line => /\[tool-activation\]/.test(line) && /has no provider/.test(line));
+		const prWalkthroughWarnings = missingProviderWarnings.filter(line =>
+			PR_WALKTHROUGH_TOOL_NAMES.some(name => line.includes(`"${name}"`)),
+		);
+		assert.deepEqual(
+			prWalkthroughWarnings,
+			[],
+			`expected no missing-provider warnings for inactive PR Walkthrough tools; got: ${JSON.stringify(prWalkthroughWarnings)}`,
+		);
+	});
+
+	it("dedupes missing-provider warnings for genuinely unknown YAML tool typos", () => {
+		const { tm, cleanup } = prWalkthroughToolsInactiveManager();
+		const cap = captureWarn();
+		const unknownTool = "totally_bogus_prw_activation_typo";
+		try {
+			computeToolActivationArgs([{ kind: "yaml", name: unknownTool }], tm);
+			computeToolActivationArgs([{ kind: "yaml", name: unknownTool }], tm);
+		} finally {
+			cap.restore();
+			cleanup();
+		}
+
+		const matched = cap.buf.filter(line => /has no provider/.test(line) && line.includes(unknownTool));
+		assert.equal(
+			matched.length,
+			1,
+			`expected exactly one deduped missing-provider warning for unknown YAML tool typo "${unknownTool}"; got ${matched.length}: ${JSON.stringify(matched)}`,
 		);
 	});
 });
