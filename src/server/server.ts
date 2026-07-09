@@ -4333,11 +4333,12 @@ async function handleApiRoute(
 	//   Returns { path, created, content }.
 	if (url.pathname === "/api/system-prompt/customise" && req.method === "POST") {
 		const userPath = path.join(bobbitConfigDir(), "system-prompt.md");
-		const defaultPath = path.join(
-			path.dirname(fileURLToPath(import.meta.url)),
-			"defaults",
-			"system-prompt.md",
-		);
+		// Resolve the shipped default via config.builtinsDir when the gateway was
+		// pointed at a repo-root `defaults/` (src-booted test harness); production
+		// leaves builtinsDir undefined and falls back to the dist-relative path.
+		const defaultsBase = config.builtinsDir
+			?? path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults");
+		const defaultPath = path.join(defaultsBase, "system-prompt.md");
 		let created = false;
 		try {
 			if (!fs.existsSync(userPath)) {
