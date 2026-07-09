@@ -322,7 +322,7 @@ test.describe("Journey: Copy Session Link", () => {
 			}
 
 			// Clipboard should contain the session URL
-			const expectedUrl = `${base()}/session/${sessionId}`;
+			const expectedUrl = `${base()}/#/session/${sessionId}`;
 			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).toBe(expectedUrl);
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
@@ -354,7 +354,7 @@ test.describe("Journey: Copy Session Link", () => {
 				test.skip(true, "copy-link not reachable after reload; skipped");
 				return;
 			}
-			const expectedUrl = `${base()}/session/${sessionId}`;
+			const expectedUrl = `${base()}/#/session/${sessionId}`;
 			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).toBe(expectedUrl);
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
