@@ -9,8 +9,15 @@
 >    (`goal/fix-chaos-node-10b9c9aa`). Preserved verbatim below. **It is a DIFFERENT
 >    mechanism and must NOT be reverted or weakened.**
 >
-> **Analysis phase only** — nothing here is a fix. §11 gives fix *direction*; §12 gives
-> the reproducing-test plan. Design + implementation are later gates.
+> **Implementation status.** The safe-repair path and direct-spawn runtime ring-fence are
+> implemented. The implementation lives in `src/server/harness-deps.ts`
+> (`missingDependencies()`, `healDependencies()`), `src/server/harness.ts` (`ensureDeps()`
+> structured before/after logging), `src/server/agent/runtime-ringfence.ts`
+> (`ensureRuntimeSnapshot()`, `resolveAgentRuntimeModulesDir()`), and
+> `src/server/agent/rpc-bridge.ts` (`findAgentCli()`, `resolveAgentModulesDir()`). The
+> pinning coverage is `tests2/core/node-modules-ring-fence.test.ts`. Sections §1–§10 remain
+> the confirmed RCA; §11–§12 describe the implemented design and test invariant. The
+> chaos.mjs vector in §13 is still a distinct, already-fixed mechanism.
 
 ---
 
@@ -287,77 +294,65 @@ functional fix.
 
 ---
 
-## 11. Fix direction (pointers only — full design is a later gate)
+## 11. Implemented fix
 
-**(a) Make the repair/install path safe and fail-loud.**
-- Never let the automatic self-heal run a **destructive/pruning** reify. Keep it strictly
-  **additive** (targeted install of only the missing packages; never a prune/rewrite of the
-  whole tree), so it can never *reduce* the installed-deps set — the invariant experiment D
-  already shows plain `npm install` honoring in the missing-deps case, but the fix should
-  *guarantee* it (e.g. explicit additive semantics) rather than rely on npm's default.
-- On `EBUSY`/`EPERM`, **fail loud** with the exact locked file (from `npm error path`) and
-  a clear "stop vite/gateway, then retry" instruction; and guarantee the tree is **never
-  left worse** than before the heal (leverage npm's rollback; verify post-state via
-  `missingDependencies`).
-- Preserve the `.npmrc shrinkwrap=false` / frozen-lockfile invariant (§4) — do **not**
-  regenerate the lockfile.
-- Consider not auto-firing a reify while native addons are known-locked (stack live), or
-  running it against a location nothing has locked.
+The landed fix has two layers: make the automatic repair observable and fail-loud, then
+remove the direct-spawn runtime's dependency on the mutable working tree.
 
-**(b) Ring-fence the gateway's agent runtime (defense-in-depth).**
-- Materialise an **immutable snapshot** of the pi-coding-agent runtime closure
-  (pi-coding-agent + pi-ai + transitive deps) into a stable location outside the working
-  tree, and point `resolveAgentModulesDir()` / `findAgentCli()` at it (with a documented
-  fallback to the working tree). A full 602 MB copy is prohibitive on Defender NTFS —
-  evaluate a **scoped closure** or a **hardlink farm** (a hardlink survives npm unlinking
-  the working-tree name because the inode persists).
-- Snapshot **refresh must reuse the safe install path from (a)**, fire **only on an actual
-  dep change** (hash `package.json`/lockfile), and **never while the runtime is in use** —
-  so an unsafe refresh can't re-import the wipe into the ring-fence.
-- Result: a half-wiped working `node_modules` can no longer brick live agent/verification
-  spawns; the repair can rebuild the working tree without racing the runtime the gateway
-  holds open.
+### Safe, fail-loud repair
 
-The `EBUSY`-rollback finding (F) means (a) is more about **fail-loud + never-regress +
-never-auto-prune** than about "npm silently half-wipes"; the true durability guarantee is
-(b) the ring-fence, since the *destructive/interrupted* triggers (§6) originate outside
-gateway code.
+`ensureDeps()` still runs only when declared dependencies are physically missing from
+`node_modules`. It delegates to `healDependencies()`, which:
+
+- runs the repair through an injected command seam (`npm install` in production), preserving
+  the `.npmrc` `shrinkwrap=false` / frozen-lockfile invariant;
+- snapshots declared dependency presence before and after repair with `missingDependencies()`;
+- reports `restored`, `stillMissing`, and `regressed` dependency sets;
+- extracts the exact locked file from npm's `EBUSY` / `EPERM` output when available; and
+- throws a `DependencyHealError` if npm fails or if any dependency that was present before
+  repair is missing afterward.
+
+The harness logs a one-line before/after summary and catches repair failures, so a bad heal
+is visible but does not crash the dev-harness boot path. If npm names a locked native file,
+the log tells the operator to stop vite/gateway and rerun `npm install`.
+
+### Runtime ring-fence
+
+Direct host-side agent spawns now prefer a ring-fenced runtime snapshot over the mutable
+working-tree `node_modules`:
+
+- `ensureRuntimeSnapshot()` builds a hardlink-farm snapshot under `<stateDir>/runtime` from
+  the working `node_modules`. It falls back to file copies when hardlinks are unavailable.
+- Snapshot versions are fingerprinted from the snapshot schema plus `package.json` and
+  `package-lock.json`, so refresh happens only when dependency inputs change or the current
+  snapshot is missing/incomplete.
+- A new version is built in a temporary directory, then published by atomically switching a
+  pointer file. The stable `<stateDir>/runtime/node_modules` link is best-effort; the pointer
+  file is authoritative.
+- Any snapshot failure is non-fatal. The resolver falls back to the working tree when it is
+  intact, or to the last intact snapshot when the working tree has already been half-wiped.
+- `resolveAgentModulesDir()` and `findAgentCli()` use the snapshot for direct spawns while
+  preserving `import.meta.resolve` as the working-tree fallback for Node `exports` and subpath
+  behavior.
+
+Docker sandbox spawns remain unchanged: the pi-coding-agent runtime is baked into the image
+and is not mounted from host `node_modules`.
 
 ---
 
-## 12. Reproducing-test plan (for the reproducing-test gate)
+## 12. Implemented reproducing test
 
-**Invariant to pin (red before fix, green after):** *a repair/self-heal run, executed while
-a `node_modules` native-addon-equivalent file is locked, must never reduce the set of
-installed declared deps (no half-wipe), and the gateway's resolved agent-runtime path must
-remain intact/importable.*
+`tests2/core/node-modules-ring-fence.test.ts` pins the two critical invariants with temp-FS
+fixtures and injected seams; it does not run real npm, git, or networked installs.
 
-**Tier:** core (external-free) — vitest, temp-FS only, **no real npm / git / network**.
+The test simulates a destructive/interrupted repair that removes a previously healthy
+package and then throws an `EBUSY` error naming a locked native-addon file. It asserts that
+`healDependencies()` fails loudly with both the regressed dependency name and the exact locked
+file path.
 
-**Seams:**
-- **Injected exec seam** for the install command. `ensureDeps` currently calls `execSync`
-  directly (`harness.ts:234`); the fix should route through an injectable runner so the test
-  supplies a fake that models npm behavior (additive-add of missing; on a "locked" package,
-  either roll back intact or throw a shaped `EBUSY` naming the file) **without** spawning
-  real npm.
-- **Temp-FS** for the tree: build a fake `node_modules` with a few package `package.json`s
-  plus a sentinel "native" file; drive `missingDependencies()` (already pure —
-  `harness-deps.ts:46`) against it.
-
-**Assertions:**
-1. `missingDependencies(root)` **after** repair ⊆ **before** — the repair never *increases*
-   the missing set (no package that was present becomes absent). This directly encodes
-   "no half-wipe" and would fail against a destructive/pruning or interrupted install.
-2. On a simulated locked-file rewrite, the repair either restores the tree or fails **loud**
-   with the **exact locked file name** surfaced (not a generic message), and the tree is
-   **no worse** than before.
-3. **Runtime-intact:** the ring-fenced runtime resolution (the snapshot path from §11b)
-   resolves/imports the agent CLI **even when the working `node_modules` is half-wiped** —
-   assert the resolver returns the snapshot path and that path exists, with the working tree
-   deliberately gutted in the fixture.
-
-A companion assertion can pin experiment A/B/D's semantics (additive install never prunes)
-at the fake-runner contract level, so the invariant is enforced by architecture, not prose.
+The same test creates an intact snapshot `node_modules` and a gutted working `node_modules`,
+then asserts `resolveAgentRuntimeModulesDir()` prefers the snapshot and that the resolved
+runtime still contains `@earendil-works/pi-coding-agent/package.json`.
 
 ---
 
