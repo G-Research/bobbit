@@ -21,9 +21,16 @@
  *
  * ─── Programmatic (imported by run-v2.mjs) ───
  *   createCpuSampler(rootPid, { intervalMs? }) -> { stop() -> {cpuMs, peakProcesses, samples} }
- *   assertBudget({ scope, wallMs, cpuMs, pilot?, argv?, reservations?, rootPid?, processCount? })
+ *   assertBudget({ scope, wallMs, cpuMs, rawCpuMs?, cpuCeilingMs?, cpuOverCount?, pilot?,
+ *                  underLoad?, argv?, reservations?, rootPid?, processCount? })
  *       -> { pass, violations, caps, artifactPath, wallMs, cpuMs }
- *   resolveCaps(scope, pilot?) -> { tier, maxWallMs, maxCpuMs, pilot }
+ *       WALL is the only hard gate; CPU is recorded for observability and NEVER gates.
+ *   resolveCaps(scope, pilot?, underLoadOverride?) -> { tier, maxWallMs, maxCpuMs, underLoad?, pilot }
+ *       WALL cap is load-aware: under load (override or BOBBIT_V2_CONCURRENCY_RUN) it
+ *       switches to budgets.concurrency.perRunMaxWallMs; quiet runs keep the isolated cap.
+ *   clampCpuMs(rawCpuMs, cores, wallMs) -> { cpuMs, rawCpuMs, ceilingMs, overCount }
+ *       clamps a process-tree reading to the physical ceiling (cores × wall).
+ *   isUnderLoad(override?) -> boolean
  *   treeCpuMs(rootPid) -> number    (single cumulative snapshot)
  *
  * Artifacts: .profiles/testing-v2/budgets/<timestamp>-<scope>.json
@@ -32,6 +39,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSy
 import { join, dirname, resolve, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { cpus } from "node:os";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
@@ -53,7 +61,39 @@ export function readBudgets() {
 	return JSON.parse(readFileSync(BUDGETS_PATH, "utf8"));
 }
 
-export function resolveCaps(scope, pilot = false) {
+/**
+ * Is this run competing for the box? WALL is load-aware (design §D7): a run
+ * under peer contention legitimately takes longer than the isolated bar, so the
+ * committed under-load cap (budgets.concurrency.perRunMaxWallMs, 600 s) applies
+ * instead of the quiet isolated cap (300 s). Load is detected two ways:
+ *   1. explicit `underLoadOverride` (run-v2 passes ledger-derived peer load), or
+ *   2. BOBBIT_V2_CONCURRENCY_RUN (the concurrency-proof harness sets this).
+ * We do NOT just raise the isolated cap — quiet runs keep the tight 300 s bar.
+ */
+export function isUnderLoad(underLoadOverride = undefined) {
+	if (underLoadOverride !== undefined) return !!underLoadOverride;
+	return !!(process.env.BOBBIT_V2_CONCURRENCY_RUN && process.env.BOBBIT_V2_CONCURRENCY_RUN !== "0");
+}
+
+/**
+ * Clamp a process-tree CPU-ms reading to the physical ceiling (cores × wall).
+ * The sampler sums per-PID cumulative CPU over the run; on a shared/busy box
+ * PID churn + ppid misattribution demonstrably over-count PAST what the hardware
+ * can physically deliver (observed 465 CPU-min vs a 173 CPU-min ceiling = 2.7×).
+ * CPU is observability-only (never gates — see assertBudget), but the RECORDED
+ * number must be physically honest, so we cap it at cores×wall and flag the
+ * over-count for the artifact. Returns { cpuMs, rawCpuMs, ceilingMs, overCount }.
+ */
+export function clampCpuMs(rawCpuMs, cores, wallMs) {
+	if (!Number.isFinite(rawCpuMs) || !Number.isFinite(cores) || !Number.isFinite(wallMs) || cores <= 0 || wallMs <= 0) {
+		return { cpuMs: Number.isFinite(rawCpuMs) ? rawCpuMs : null, rawCpuMs: Number.isFinite(rawCpuMs) ? rawCpuMs : null, ceilingMs: null, overCount: false };
+	}
+	const ceilingMs = cores * wallMs;
+	const overCount = rawCpuMs > ceilingMs;
+	return { cpuMs: overCount ? ceilingMs : rawCpuMs, rawCpuMs, ceilingMs, overCount };
+}
+
+export function resolveCaps(scope, pilot = false, underLoadOverride = undefined) {
 	const tier = SCOPE_TIER[scope];
 	if (!tier) throw new Error(`assert-budget: unknown scope "${scope}" (allowed: ${Object.keys(SCOPE_TIER).join(", ")})`);
 	const budgets = readBudgets();
@@ -68,7 +108,7 @@ export function resolveCaps(scope, pilot = false) {
 	// (measurement is unreliable under contention — see assertBudget). This keeps
 	// run-v2's exit code an HONEST pass/fail signal for the proof (exit 0 ⇺ tests
 	// green AND wall ≤ under-load cap) with no downgraded assertions in the proof.
-	const underLoad = process.env.BOBBIT_V2_CONCURRENCY_RUN && process.env.BOBBIT_V2_CONCURRENCY_RUN !== "0";
+	const underLoad = isUnderLoad(underLoadOverride);
 	if (underLoad && budgets.concurrency) {
 		const c = budgets.concurrency;
 		// MEASUREMENT decoupling: BOBBIT_V2_PERRUN_WALL_MS overrides the under-load
@@ -269,8 +309,8 @@ function timestamp() {
 
 // ─────────────────────────────── core assert ───────────────────────────────
 
-export function assertBudget({ scope, wallMs = null, cpuMs = null, pilot = false, argv = null, reservations = null, rootPid = null, processCount = null, wallSource = null, cpuSource = null }) {
-	const caps = resolveCaps(scope, pilot);
+export function assertBudget({ scope, wallMs = null, cpuMs = null, rawCpuMs = null, cpuCeilingMs = null, cpuOverCount = false, pilot = false, underLoad = undefined, argv = null, reservations = null, rootPid = null, processCount = null, wallSource = null, cpuSource = null }) {
+	const caps = resolveCaps(scope, pilot, underLoad);
 	const violations = [];
 
 	// In pilot mode the tier cap acts as a generous ceiling for a partial suite;
@@ -280,15 +320,19 @@ export function assertBudget({ scope, wallMs = null, cpuMs = null, pilot = false
 	if (Number.isFinite(wallMs) && wallMs > caps.maxWallMs) {
 		violations.push(`wall ${(wallMs / 1000).toFixed(1)}s > cap ${(caps.maxWallMs / 1000).toFixed(1)}s`);
 	}
-	// CPU-min is OBSERVABILITY, not a hard gate under contention. The process-tree
-	// sampler sums per-PID cumulative CPU across the whole run; on a shared, busy
-	// box it demonstrably over-counts past the physical ceiling (cores × wall) via
-	// PID churn / ppid misattribution, and under N-way concurrency each run's
-	// sampler sees its siblings' descendants. D7 makes wall + zero-flakes the
-	// acceptance bar (CPU-min was the superseded ≤13-CPU-min goal). So we only gate
-	// CPU when NOT under load, and even then against an honest physical-ceiling cap.
-	if (!caps.underLoad && Number.isFinite(cpuMs) && cpuMs > caps.maxCpuMs) {
-		violations.push(`cpu ${(cpuMs / 60000).toFixed(2)} CPU-min > cap ${(caps.maxCpuMs / 60000).toFixed(2)} CPU-min`);
+	// CPU-min is OBSERVABILITY ONLY — it NEVER gates (design §D7 + tests2/budgets.json:
+	// WALL is the hard gate). The process-tree sampler sums per-PID cumulative CPU
+	// across the whole run; on a shared, busy box it demonstrably over-counts past
+	// the physical ceiling (cores × wall) via PID churn / ppid misattribution, and
+	// under N-way concurrency each run's sampler also sees its siblings' descendants.
+	// So we RECORD cpuMs (clamped to the physical ceiling by clampCpuMs upstream)
+	// for observability, warn when the raw reading over-counts, but add ZERO CPU
+	// violations — an honest exit code depends on wall + green tests, never on a
+	// CPU number the platform can't measure reliably under load.
+	if (cpuOverCount) {
+		console.warn(
+			`[assert-budget] CPU over-count clamped: raw ${((rawCpuMs ?? 0) / 60000).toFixed(2)} CPU-min > physical ceiling ${((cpuCeilingMs ?? 0) / 60000).toFixed(2)} CPU-min (cores×wall) — recorded ${((cpuMs ?? 0) / 60000).toFixed(2)} CPU-min (observability only, does not gate).`,
+		);
 	}
 
 	const pass = violations.length === 0;
@@ -300,6 +344,11 @@ export function assertBudget({ scope, wallMs = null, cpuMs = null, pilot = false
 		violations,
 		wallMs: Number.isFinite(wallMs) ? wallMs : null,
 		cpuMs: Number.isFinite(cpuMs) ? cpuMs : null,
+		rawCpuMs: Number.isFinite(rawCpuMs) ? rawCpuMs : null,
+		cpuCeilingMs: Number.isFinite(cpuCeilingMs) ? cpuCeilingMs : null,
+		cpuOverCount: !!cpuOverCount,
+		cpuGated: false,
+		underLoad: caps.underLoad ?? isUnderLoad(underLoad),
 		wallSource,
 		cpuSource,
 		budget: { maxWallMs: caps.maxWallMs, maxCpuMs: caps.maxCpuMs, label: caps.label },
@@ -321,7 +370,7 @@ export function assertBudget({ scope, wallMs = null, cpuMs = null, pilot = false
 // ─────────────────────────────── CLI ───────────────────────────────
 
 function parseCli(argv) {
-	const opts = { pilot: false, scope: null, wallMs: null, cpuMs: null, report: null, pid: null };
+	const opts = { pilot: false, scope: null, wallMs: null, cpuMs: null, report: null, pid: null, cores: null };
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === "--pilot") opts.pilot = true;
@@ -335,6 +384,8 @@ function parseCli(argv) {
 		else if (a.startsWith("--report=")) opts.report = a.slice(9);
 		else if (a === "--pid") opts.pid = Number(argv[++i]);
 		else if (a.startsWith("--pid=")) opts.pid = Number(a.slice(6));
+		else if (a === "--cores") opts.cores = Number(argv[++i]);
+		else if (a.startsWith("--cores=")) opts.cores = Number(a.slice(8));
 		else if (!a.startsWith("-") && !opts.scope) opts.scope = a;
 	}
 	return opts;
@@ -358,7 +409,7 @@ function cli() {
 	let cpuSource = cpuMs != null ? "--cpu-ms" : null;
 	if (cpuMs == null && Number.isFinite(opts.pid)) {
 		cpuMs = treeCpuMs(opts.pid);
-		cpuSource = `pid:${opts.pid}`;
+		cpuSource = `pid:${opts.pid} (subtree)`;
 	}
 	if (cpuMs == null) {
 		const sample = latestSampleCpu(opts.scope);
@@ -368,12 +419,28 @@ function cli() {
 		}
 	}
 
-	const result = assertBudget({ scope: opts.scope, wallMs, cpuMs, pilot: opts.pilot, wallSource, cpuSource });
+	// Clamp the CPU reading to the physical ceiling (cores × wall) so a recorded
+	// over-count can never masquerade as real work. CPU is observability-only.
+	const cores = Number.isFinite(opts.cores) && opts.cores > 0 ? opts.cores : Math.max(1, cpus().length);
+	const clamped = clampCpuMs(cpuMs, cores, wallMs);
+	if (clamped.overCount) cpuSource = `${cpuSource || "cpu"} (clamped cores×wall)`;
+
+	const result = assertBudget({
+		scope: opts.scope,
+		wallMs,
+		cpuMs: clamped.cpuMs,
+		rawCpuMs: clamped.rawCpuMs,
+		cpuCeilingMs: clamped.ceilingMs,
+		cpuOverCount: clamped.overCount,
+		pilot: opts.pilot,
+		wallSource,
+		cpuSource,
+	});
 
 	const caps = result.caps;
 	console.log(`assert-budget: scope=${opts.scope} tier=${caps.tier}${opts.pilot ? " (pilot)" : ""}`);
 	console.log(`  wall: ${wallMs != null ? (wallMs / 1000).toFixed(1) + "s" : "n/a"} (cap ${(caps.maxWallMs / 1000).toFixed(0)}s)  [${wallSource || "unmeasured"}]`);
-	console.log(`  cpu:  ${cpuMs != null ? (cpuMs / 60000).toFixed(2) + " CPU-min" : "n/a"} (cap ${(caps.maxCpuMs / 60000).toFixed(2)} CPU-min)  [${cpuSource || "unmeasured"}]`);
+	console.log(`  cpu:  ${clamped.cpuMs != null ? (clamped.cpuMs / 60000).toFixed(2) + " CPU-min" : "n/a"} (observability-only, not gated; physical ceiling ${clamped.ceilingMs != null ? (clamped.ceilingMs / 60000).toFixed(2) + " CPU-min = " + cores + "×" + (wallMs / 1000).toFixed(0) + "s" : "n/a"})  [${cpuSource || "unmeasured"}]${clamped.overCount ? ` (raw ${(clamped.rawCpuMs / 60000).toFixed(2)} over-counted, clamped)` : ""}`);
 	console.log(`  artifact: ${result.artifactPath}`);
 
 	if (!result.pass) {
