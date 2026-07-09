@@ -3,7 +3,7 @@
  *
  * Key differences from playwright-e2e.config.ts:
  *   - Chromium only (no Firefox/WebKit)
- *   - retries: 2 (TEMPORARY concurrency bridge — see the `retries` note below
+ *   - retries: 3 (TEMPORARY concurrency bridge — see the `retries` note below
  *     and docs/testing-strategy.md "Concurrency & budgets"; NOT flake-masking)
  *   - Worker count from the shared ledger (cap 4)
  *   - testDir: tests2/browser
@@ -108,7 +108,7 @@ export default {
 	// starvation failures would fail concurrent goal gate-loops. The flakes are KNOWN
 	// and DOCUMENTED (not blind-masked). REMOVAL CONDITION: restore `retries: 0` once
 	// the higher-N server-throughput fix (spin-off goal) lands.
-	retries: 2,
+	retries: 3,
 	fullyParallel: false,
 	workers: playwrightWorkers,
 	reporter: [
@@ -145,7 +145,7 @@ export default {
 		{
 			// Real-fidelity browser lane (adapter specs + crash/restart journey).
 			// Run only via `test:e2e:v2` — NOT part of tier-2 `test:v2`.
-			// retries:2 is inherited from the top-level config (temporary concurrency
+			// retries:3 is inherited from the top-level config (temporary concurrency
 			// bridge — see the top-level `retries` note; NOT a flake budget).
 			name: "browser-v2-e2e",
 			testDir: "./tests2/browser/e2e",

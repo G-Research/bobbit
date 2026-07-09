@@ -39,6 +39,7 @@ const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
 const EXTENSION_FILES = [
 	"agent",
 	"ask",
+	"bobbit",
 	"browser",
 	"html",
 	"images",
@@ -78,6 +79,10 @@ beforeAll(async () => {
 	if (!process.env.BOBBIT_SESSION_ID) {
 		process.env.BOBBIT_SESSION_ID = "00000000-0000-0000-0000-000000000000";
 	}
+	// The bobbit extension gates on gateway credentials (not on a goal/session).
+	// Provide non-empty env creds so its three tools register and get budget-checked.
+	if (!process.env.BOBBIT_TOKEN) process.env.BOBBIT_TOKEN = "test-token";
+	if (!process.env.BOBBIT_GATEWAY_URL) process.env.BOBBIT_GATEWAY_URL = "https://127.0.0.1:0";
 
 	for (const group of EXTENSION_FILES) {
 		const file = path.join(REPO_ROOT, "defaults/tools", group, "extension.ts");

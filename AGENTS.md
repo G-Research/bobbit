@@ -7,8 +7,9 @@ npm run build          # Full build (server + UI)
 npm run dev:harness    # Gateway via restart harness + vite (use this for dev)
 npm run restart-server # Rebuild & restart after server changes
 npm run check          # Type-check server + web (no emit)
-npm run test:unit      # Unit phase → v2 fast tier (test:v2): vitest core/dom/integration ‖ Playwright browser (retries:0)
-npm run test:e2e       # E2E phase → v2 real-fidelity (test:e2e:v2): real git/worktree/Docker/MCP/restart (retries:0, external-free)
+npm run test:unit      # Unit phase → vitest core/dom/integration (fast pure-logic/DOM signal)
+npm run test:browser   # Browser phase → Playwright browser-v2 (geometry fixtures + smoke journeys)
+npm run test:e2e       # E2E phase → v2 real-fidelity (test:e2e:v2): real git/worktree/Docker/MCP/restart (external-free)
 npm run test:manual    # Manual integration — real agents/LLM + Docker (~5 min); ONLY gate-exempt path
 ```
 
@@ -37,7 +38,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 
 ## Testing (Test Suite v2)
 
-- **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒vitest (`core`/`dom`/`integration`); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. UI/server → `test:unit` (+`test:e2e`); worktree/Docker/MCP/restart → `e2e:v2` + `test:manual`.
+- **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒vitest (`core`/`dom`/`integration`); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` (vitest) → `test:browser` (Playwright browser-v2) → `test:e2e` (real-fidelity). worktree/Docker/MCP/restart → `e2e:v2` + `test:manual`.
 - **`retries:0`** — a flake is a bug, fixed by architecture (DI seams, one-gateway-per-fork + `scope()` cleanup, observable-state waits). **No daily lane**; **external-free** (fenced runner+fetch). Concurrency via the ledger (`Σworkers≤cores`, N=1 bar).
 - Isolation only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
 - Every user-facing feature needs a `tests2/browser` journey (nav, happy path, reload, cleanup). See [docs/testing-strategy.md](docs/testing-strategy.md), [docs/testing-coverage.md](docs/testing-coverage.md), [docs/testing-v2/](docs/testing-v2/).
@@ -65,3 +66,5 @@ AGENTS.md is loaded into **every** agent turn. Keep it small and general.
 ## Reference docs
 
 [docs/internals.md](docs/internals.md) · [docs/debugging.md](docs/debugging.md) · [docs/logging.md](docs/logging.md) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/architecture.md](docs/architecture.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/nested-goals.md](docs/nested-goals.md) · [docs/rest-api.md](docs/rest-api.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md) · [docs/extension-host-authoring.md](docs/extension-host-authoring.md)
+
+**Driving the gateway from an agent**: prefer the `bobbit_read`/`bobbit_orchestrate`/`bobbit_admin` tools over hand-rolled `curl` where their tool-groups are enabled. See [docs/bobbit-gateway-tool.md](docs/bobbit-gateway-tool.md).

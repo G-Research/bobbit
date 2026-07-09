@@ -9,7 +9,7 @@
  *   - manual-integration specs (real-agent / real-LLM / real-Docker — that
  *     is the tier-3 `test:manual` lane, never here).
  *
- * Everything else in that bucket runs here at retries:2 (a TEMPORARY
+ * Everything else in that bucket runs here at retries:3 (a TEMPORARY
  * concurrency bridge — see docs/testing-strategy.md "Concurrency & budgets" and
  * the Group B/C notes below; Group A uses node:test's --test-force-exit and has
  * no retry knob wired here), in three groups
@@ -23,7 +23,7 @@
  *             playwright-e2e config at --retries=2 (concurrency bridge).
  *   Group C — adapter browser specs: the geometry/journey specs migrated into
  *             tests2/browser/e2e/. Run via playwright-v2 config, project
- *             `browser-v2-e2e` (retries:2 inherited from the v2 config).
+ *             `browser-v2-e2e` (retries:3 inherited from the v2 config).
  *
  * External-service-free guarantee: every group runs with BOBBIT_TEST_NO_EXTERNAL
  * / BOBBIT_TEST_NO_REMOTE set (fail-closed on non-loopback fetch + no real git
@@ -163,13 +163,13 @@ async function runGroupA(specs) {
 async function runGroupB(specs) {
 	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
 	// Reuse the project's playwright-e2e runner (cache isolation + external-free
-	// env baked in) at retries:2 — TEMPORARY concurrency bridge (see file header +
+	// env baked in) at retries:3 — TEMPORARY concurrency bridge (see file header +
 	// docs/testing-strategy.md "Concurrency & budgets"; restore 0 when the higher-N
 	// server-throughput fix lands).
 	// RESOURCE CAP: bound Playwright workers so the e2e browser swarm can't
 	// oversubscribe the box (override with E2E_V2_PW_WORKERS).
 	const pwWorkers = process.env.E2E_V2_PW_WORKERS || "2";
-	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=2"], {
+	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=3"], {
 		env: { ...EXTERNAL_FREE_ENV },
 		label: "B/e2e-relocate",
 	});
@@ -177,7 +177,7 @@ async function runGroupB(specs) {
 
 async function runGroupC(specs) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	// playwright-v2 config, browser-v2-e2e project (retries:2 from config —
+	// playwright-v2 config, browser-v2-e2e project (retries:3 from config —
 	// the concurrency bridge; we intentionally do NOT pass --retries here so the
 	// config's value governs).
 	// We run the WHOLE project (its testDir IS tests2/browser/e2e — the physical

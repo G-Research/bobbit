@@ -512,7 +512,8 @@
 .bobbit-blob--inline .bobbit-blob__flask,
 .bobbit-blob--inline .bobbit-blob__wand,
 .bobbit-blob--inline .bobbit-blob__wizard-hat,
-.bobbit-blob--inline .bobbit-blob__nurse-cap {
+.bobbit-blob--inline .bobbit-blob__nurse-cap,
+.bobbit-blob--inline .bobbit-blob__headset {
 	display: none !important;
 }
 /* Show the accessory when the class is on the blob div itself */
@@ -527,6 +528,7 @@
 .bobbit-blob--inline.bobbit-wand .bobbit-blob__wand { display: block !important; }
 .bobbit-blob--inline.bobbit-wizard-hat .bobbit-blob__wizard-hat { display: block !important; }
 .bobbit-blob--inline.bobbit-nurse-cap .bobbit-blob__nurse-cap { display: block !important; }
+.bobbit-blob--inline.bobbit-headset .bobbit-blob__headset { display: block !important; }
 
 /* Sync accessory idle animations with the same phase stagger as the eyes.
    --bobbit-idle-phase is the canonical var; --bobbit-eye-delay is a fallback. */

@@ -1,0 +1,122 @@
+name: bobbit_read
+description: "Read-only gateway introspection: goals, sessions, projects, tasks, gates, search, maintenance probes."
+summary: "Read gateway state (goals/sessions/projects/…)"
+params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, view?, probe?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: BobbitRead
+grantPolicy: allow
+docs: |-
+  Read-only, gateway-wide introspection. Pick an `operation` and pass its required ids. Addresses entities by explicit id (not the current goal), so it complements — never replaces — `task_list`/`gate_list`. Returns the gateway's JSON verbatim.
+detail_docs: >-
+  ## Purpose
+
+
+  A curated, read-only wrapper over the Bobbit gateway REST API. It resolves the
+  gateway URL + auth token for you (env `BOBBIT_TOKEN`/`BOBBIT_GATEWAY_URL` or the
+  state files) so you never hand-roll `curl`. Every operation is a GET with no
+  side effects.
+
+
+  This tool is **gateway-wide**: it addresses goals/sessions/tasks/gates by
+  explicit id, across projects. It is additive to the current-goal tools
+  (`task_list`, `gate_list`) — those act on *your* goal; `bobbit_read` inspects
+  *any* id.
+
+
+  ## Parameters
+
+
+  - `operation` — which read to run (see the catalogue below).
+
+  - Ids: `goalId`, `sessionId`, `taskId`, `projectId`, `workflowId` — supply the
+  ones the chosen operation requires.
+
+  - Query-ish: `q` (search/list filter), `type`/`limit`/`offset` (search),
+  `archived` (list_goals), `include` (list_sessions, e.g. `archived`),
+  `view` (gates/tasks summary), `probe` (maintenance_inspect selector).
+
+
+  ## Operation catalogue
+
+  | operation | GET path | required |
+
+  |---|---|---|
+
+  | `health` | `/api/health` | — |
+
+  | `connection_info` | `/api/connection-info` | — |
+
+  | `list_goals` | `/api/goals` (`?archived`, `?q`) | — |
+
+  | `get_goal` | `/api/goals/:goalId` | `goalId` |
+
+  | `goal_cost` | `/api/goals/:goalId/cost` | `goalId` |
+
+  | `goal_git_status` | `/api/goals/:goalId/git-status` | `goalId` |
+
+  | `goal_commits` | `/api/goals/:goalId/commits` | `goalId` |
+
+  | `goal_pr_status` | `/api/goals/:goalId/pr-status` | `goalId` |
+
+  | `list_sessions` | `/api/sessions` (`?include`, `?q`, `?projectId`) | — |
+
+  | `get_session` | `/api/sessions/:sessionId` | `sessionId` |
+
+  | `session_cost` | `/api/sessions/:sessionId/cost` | `sessionId` |
+
+  | `search` | `/api/search` (`?q`, `?type`, `?limit`, `?offset`, `?projectId`) | `q` |
+
+  | `list_projects` | `/api/projects` | — |
+
+  | `get_project` | `/api/projects/:projectId` | `projectId` |
+
+  | `list_workflows` | `/api/workflows` (`?projectId`) | `projectId`* |
+
+  | `get_workflow` | `/api/workflows/:workflowId` (`?projectId`) | `workflowId` |
+
+  | `list_roles` | `/api/roles` | — |
+
+  | `list_tools` | `/api/tools` (`?projectId`) | — |
+
+  | `list_gates` | `/api/goals/:goalId/gates` (`?view`) | `goalId` |
+
+  | `list_tasks` | `/api/goals/:goalId/tasks` (`?view`) | `goalId` |
+
+  | `get_task` | `/api/tasks/:taskId` | `taskId` |
+
+  | `list_staff` | `/api/staff` | — |
+
+  | `list_mcp_servers` | `/api/mcp-servers` | — |
+
+  | `maintenance_inspect` | see `probe` below | `probe` |
+
+
+  \* `list_workflows` returns an empty list without `projectId` — the gateway
+  will not error, but pass `projectId` for a useful result.
+
+
+  ### `maintenance_inspect` probes (`probe=`)
+
+  `orphaned_worktrees`, `orphaned_sessions`, `expired_archives`,
+  `orphaned_index_rows` (`?projectId`), `worktrees`,
+  `archived_session_worktrees`, `worktree_pool`, `sandbox_pool`,
+  `sandbox_status`, `search_stats` (`?projectId`).
+
+
+  ## Overlap policy (use the dedicated tool instead)
+
+  - **Transcripts** — do NOT read `/api/sessions/:id/transcript` here; use
+  `read_session`.
+
+  - **Current-goal task/gate board** — `list_tasks`/`list_gates` take an
+  arbitrary `goalId`; for *your* goal prefer `task_list`/`gate_list`.
+
+
+  ## Notes / Gotchas
+
+  - Returns the gateway JSON verbatim; on failure surfaces `{ error, code }`
+  as one readable line including the HTTP status.
+
+  - No side effects — safe to call freely.
