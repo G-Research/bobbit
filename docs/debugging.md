@@ -1061,6 +1061,22 @@ Diagnose:
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts` (the four reminder sites). Tests: `tests/verification-reminder-race.test.ts`, API E2E `tests/e2e/gate-verification-resume.spec.ts`. See [docs/internals.md — Reminder race after restart-resume](internals.md#reminder-race-after-restart-resume).
 
+## Reviewer transcript "resets" / verdict lost / reviewer SIGTERM storm during `llm-review` retries
+
+Symptom: while an `llm-review` gate is verifying, the reviewer's displayed name suddenly changes (a fresh `generateTeamName`) while its `/session/<id>` URL stays the same — ~10 minutes of review work (sometimes a completed pass) is gone. Related reports: "I saw a pass but it never materialised at the server level" (verdict lost) and repeated `Agent process exited (signal SIGTERM)` across reviewer ids (SIGTERM storm).
+
+Three distinct bugs, all in the reviewer session lifecycle:
+
+1. **Transcript reset** — the bounded step-retry loop reused one pre-generated `stepSessionId` across every attempt, and `createSession` keys sessions by id, so a retry built a new agent in place and overwrote the prior transcript. Fix: mint a **fresh** `llm-review-<uuid>` per from-scratch attempt; only attempt 1 keeps the broadcast id. A `createSession` guard (`[session-manager][session-id-clobber]`) now refuses to clobber a live session id unless `allowSessionReuse` (resume path) is set.
+2. **Verdict lost (404 drop)** — teardown deleted the pending resolver *before* terminating the session, so a `verification_result` POST landing during teardown hit an empty `pendingResults` map and was 404-dropped. Fix: terminate first, delete resolver second, and a `capturingResolver` honors a late verdict (`hardFailureNoResult` + `capturedVerdict`) instead of dropping it.
+3. **Premature SIGTERM** — a single under-graced reminder terminated a reviewer that had finished its review but not yet emitted the tool call. Fix: up to `MAX_REVIEWER_REMINDERS` in-session nudges, each with a fair `waitForStreaming` + late-verdict settle window.
+
+Diagnose: grep the gateway log for `[verification][reviewer-lifecycle]` (attempt/retry lineage, reminder count, termination reason, POST accept vs 404-drop) and `[session-manager][session-id-clobber]`.
+
+**Red herring:** the reported log opens with a boot sequence and repeats `read ECONNRESET — gateway likely restarting`. Under `npm run dev:harness` this is usually the **vite dev-proxy** logging a transient disconnect during HMR/reconnect, *not* an actual gateway crash-loop; it does not by itself indicate the reviewer bugs above. Confirm a real restart via the gateway's own `[boot]` lines and process lifetime before blaming restart-resume. If a genuine crash-loop is present, each restart re-drives cold reviewers via `resumeInterruptedVerifications` — see the two entries above.
+
+Key files: `src/server/agent/verification-harness.ts` (`runLlmReviewViaSession`, bounded retry loop in `verifyGateSignal`), `src/server/agent/session-manager.ts` (`createSession` clobber guard). Tests: `tests2/core/verification-harness-review-reliability.test.ts`, `tests2/core/session-id-clobber-guard.test.ts`. Full detail: [docs/llm-review-recovery.md — Reviewer session lifecycle](llm-review-recovery.md#reviewer-session-lifecycle-transcript-preservation).
+
 ## MCP server unavailable / partial outage
 
 Failed MCP servers stay in `error` state but don't break the agent. Look for the stub meta extension at `<stateDir>/mcp-extensions/[<hash>/]<server>.ts` whose `execute` returns `MCP server '<name>' is unavailable: <reason>`. Per-call timeouts: 10 s on `tools/list`, 30 s on `tools/call` (constants in `src/server/mcp/mcp-manager.ts`). Schema-validation drops malformed ops via `isValidOperationSchema` from `src/server/mcp/mcp-meta.ts` — sibling ops on the same server stay usable.

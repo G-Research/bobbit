@@ -13,6 +13,24 @@ Recovery happens at two layers:
 
 The layers are deliberately separate. Session auto-retry preserves the current reviewer context when possible. Step retry is the fallback when the current reviewer cannot recover cleanly.
 
+## Reviewer session lifecycle (transcript preservation)
+
+The reviewer step depends on a live agent session, and that session's *transcript* is a first-class artifact: an operator can open `/session/<id>` to read exactly what the reviewer saw and concluded. Two lifecycle rules protect that transcript. Both fix a regression where a long, sometimes already-complete review was silently destroyed.
+
+### Fresh session id per from-scratch retry attempt
+
+When the bounded step-retry loop re-runs an `llm-review` step from scratch, **each attempt gets a fresh reviewer session id**. Only the first attempt keeps the pre-generated `stepSessionId` (already broadcast to the UI via `gate_verification_step_started`); attempts 2..N mint a new `llm-review-<uuid>` id and re-broadcast the retired→new lineage so the UI can follow it.
+
+Why this matters: the previous behavior generated a single `stepSessionId` *before* the retry loop and threaded the same id into every attempt. `SessionManager.createSession` keys sessions by id, so re-running with the same id built a brand-new agent *in place* and overwrote the prior attempt's transcript. The observable symptom was a reviewer whose displayed name suddenly changed (a fresh `generateTeamName`) while the URL stayed the same, and ~10 minutes of real review work — sometimes a completed pass — vanished. Minting a fresh id per attempt keeps every prior attempt viewable at its original URL.
+
+The restart-*resume* path is the deliberate exception: it re-attaches to the reviewer's existing session (see [Restart resume and rerun](#restart-resume-and-rerun)) rather than starting a new one, because after a gateway restart the goal is to continue the *same* review, not start over.
+
+### `createSession` clobber guard
+
+`SessionManager.createSession` refuses to silently clobber an existing session. If a caller passes a `sessionId` that already maps to a **live** session (and does not set `opts.allowSessionReuse`), the call throws with a clear "Refusing to clobber live session" error; a collision with an **archived** record logs loudly. Both log the greppable prefix `[session-manager][session-id-clobber]`.
+
+Why: the fresh-id-per-attempt rule above is the primary fix, but the guard is defense-in-depth. Any future caller that accidentally reuses a live reviewer id is a bug, and a bug that overwrites a transcript should fail loudly at the source rather than corrupt state silently. `allowSessionReuse` is the single sanctioned escape hatch, reserved for the restart-resume path; it is not used to re-create sessions in the normal flow.
+
 ## Error classification
 
 Classification lives in `src/server/agent/verification-logic.ts`.
@@ -82,21 +100,44 @@ If the session has a pending auto-retry timer, the harness waits for the retry t
 
 Once the retry turn starts, the harness waits for either `verification_result` or idle. If that retry turn errors again and another auto-retry is pending, the grace loop repeats. Only after the recovery path is exhausted does the harness return a failed step and clean up the reviewer session.
 
-## Reminder-first behavior
+## Reminder-first behavior (in-session, multi-reminder)
 
-An idle reviewer that simply forgot to call `verification_result` is reminded before the gate fails.
+An idle reviewer that simply forgot to call `verification_result` is **re-nudged on the same live session** before the gate fails. The session still holds its full analysis in context, so a reminder is far cheaper and more reliable than tearing it down and re-running from scratch.
 
-Live `llm-review` sessions use this order:
+Crucially, "completed the review but missed the tool call" is classified **non-transient** — the same intent the QA path encodes in `QA_NON_TRANSIENT_PATTERNS`. `"Agent did not call verification_result after reminder"` is deliberately *not* in the transient markers, so the bounded step-retry loop does **not** discard the reviewer's work with a fresh-id from-scratch re-run. In-session re-nudging is the recovery mechanism for this case; a from-scratch attempt is reserved for genuine infra-transient failures (socket resets, process death, etc.).
+
+Live `llm-review` sessions use this order (`runLlmReviewViaSession`):
 
 1. Wait for the initial reviewer turn to finish or call `verification_result`.
 2. If the turn errored, run the errored-turn recovery path above.
-3. If the turn ended cleanly without the tool call, send a reminder:
+3. If the turn ended cleanly without the tool call, send up to `MAX_REVIEWER_REMINDERS` (2) reminders, **each with a fair turn**:
    - a targeted JSON/tool-validation retry prompt when the last tool call failed validation;
    - otherwise a context-rich reminder that reattaches the kickoff context.
-4. Wait for `waitForStreaming()` before starting the post-reminder idle race.
-5. If the reminder turn goes idle without `verification_result`, check post-reminder transient recovery before declaring the reminder ignored.
+4. For each reminder, wait for `waitForStreaming()` (up to `REVIEWER_REMINDER_STREAM_SETTLE_MS`, 15s) before racing against idle.
+5. If a reminder turn goes idle without the tool call but *did* stream, give a short late-verdict settle window (`REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS`, 20s) and re-check the channel once — the verdict POST may still be in flight — before deciding to nudge again or give up.
+6. Only after all fair reminders are exhausted does the harness declare the hard failure and tear down.
 
-The `waitForStreaming()` guard is important. Without it, `waitForIdle()` can resolve against the already-idle state immediately after the reminder is queued, causing the harness to fail and terminate the reviewer before the reminder turn starts. This race is pinned by `tests/verification-reminder-race.test.ts`.
+Why multiple fair reminders: the pre-regression path sent exactly **one** reminder and then, if the already-idle reviewer had not started streaming within a tight 10s window, resolved `waitForIdle()` immediately and SIGTERM'd the reviewer — killing a session that had completed its review but simply needed a beat to emit the tool call. Giving each nudge a genuine settle window and allowing a second reminder restores the previously-better reliability.
+
+The `waitForStreaming()` guard is still essential. Without it, `waitForIdle()` can resolve against the already-idle state immediately after the reminder is queued, causing the harness to fail and terminate the reviewer before the reminder turn starts. This race is pinned by `tests/verification-reminder-race.test.ts`.
+
+## Late verdict during teardown is honored (no 404 drop)
+
+A `verification_result` POST can race reviewer teardown: the reviewer emits its verdict at the same moment the harness gives up and starts cleaning up. Two changes ensure that late verdict is captured, not lost:
+
+- **Teardown order.** The `finally` block terminates the session **first**, then deletes the pending resolver. The old order (delete resolver, then terminate) meant a POST landing during teardown hit `server.ts`'s `pendingResults.get()` lookup, found nothing, and was 404-dropped — a real pass silently lost. This matched the reported "I saw a pass but it never materialised at the server level."
+- **Capturing resolver.** The resolver registered for the reviewer (`capturingResolver`) stores the first verdict it receives (`capturedVerdict`). If the reviewer went idle without the tool call (the hard-failure path set `hardFailureNoResult`) but a verdict then lands during teardown, the harness returns that late verdict instead of the "did not call verification_result" failure.
+
+The `POST /api/internal/verification-result` route logs accept vs 404-drop with the greppable `[verification][reviewer-lifecycle]` prefix, so a genuinely dropped verdict is diagnosable rather than invisible.
+
+## Diagnostics: greppable log prefixes
+
+Reviewer lifecycle events emit structured, greppable log lines so a future failure is diagnosable without re-deriving the code path:
+
+- **`[verification][reviewer-lifecycle]`** — reviewer spawn/attempt (attempt N/max, session id, goal, timeout), from-scratch retry lineage (retired id → fresh id), each reminder (number/max, JSON-retry vs context-rich), termination reason (e.g. `reason=reminder-exhausted`), late-verdict-honored-during-teardown, and `verification_result` POST accept vs 404-drop.
+- **`[session-manager][session-id-clobber]`** — a caller tried to reuse a live or archived session id without `allowSessionReuse`; the transcript-clobber guard fired.
+
+Grep these prefixes in the gateway log to reconstruct a reviewer's full lifecycle and transcript lineage across attempts.
 
 ## Restart resume and rerun
 
@@ -143,10 +184,16 @@ Provider-backoff timeouts also include a suffix describing the active provider b
 | Verification retry decision | `shouldRetryVerificationStep`, `verificationRetryDelayMs` |
 | Session auto-retry | `SessionManager.maybeAutoRetryTransient()` |
 | Live reviewer path | `VerificationHarness.runLlmReviewViaSession()` |
+| Fresh session id per attempt | bounded retry loop in `verifyGateSignal` (mints `llm-review-<uuid>` on attempts 2..N) |
+| Transcript-clobber guard | `SessionManager.createSession()` (`opts.sessionId` + `opts.allowSessionReuse`) |
+| In-session reminders | `MAX_REVIEWER_REMINDERS`, `REVIEWER_REMINDER_STREAM_SETTLE_MS`, `REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS` |
+| Late-verdict capture | `capturingResolver` / `capturedVerdict` / `hardFailureNoResult` in `runLlmReviewViaSession()`; teardown order in its `finally` |
+| Verdict POST channel | `POST /api/internal/verification-result` (`pendingResults` lookup) in `server.ts` |
 | Errored-turn grace | `waitForReviewerErroredTurnRecovery()` |
 | Restart resume | `_tryResumeFromSession()`, `_rerunLlmReviewStep()`, `resumeInterruptedVerifications()` |
 | Reminder race guard | `SessionManager.waitForStreaming()` |
 | Exhaustion diagnostics | `appendLlmReviewRecoveryDiagnostics()` |
+| Greppable log prefixes | `[verification][reviewer-lifecycle]`, `[session-manager][session-id-clobber]` |
 
 ## Tests and commands
 
@@ -156,6 +203,8 @@ Relevant unit coverage:
 - `tests/transient-review-error.test.ts` — legacy transient review classifier coverage.
 - `tests/auto-retry-policy.test.ts` — session-level auto-retry policy and schedules.
 - `tests/verification-reminder-race.test.ts` — reminder `waitForStreaming()` guard and post-reminder transient recovery ordering.
+- `tests2/core/verification-harness-review-reliability.test.ts` — fresh session id per from-scratch attempt (attempt 1's transcript preserved), late-`verification_result`-during-teardown honored (not 404-dropped), and the "did not call after reminder" non-transient classification.
+- `tests2/core/session-id-clobber-guard.test.ts` — `createSession` refuses to clobber a live session id, while `allowSessionReuse` bypasses the guard for the sanctioned resume path.
 - `tests/verification-resume-restart-prompt.test.ts` — cold restart resume prompt timeout routes to pending instead of hard failure.
 - `tests/verification-resume-restart-recovery.test.ts` — cold reviewer readiness wait and transient resume failure rerun path.
 - `tests/reviewer-archive-metadata.test.ts` — verifier metadata persistence before startup and legacy SessionStore backfill.
