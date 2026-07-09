@@ -59,6 +59,11 @@ export async function showQrCodeDialog(): Promise<void> {
 	return m.showQrCodeDialog();
 }
 
+export async function showSupportDialog(): Promise<void> {
+	const m = await load();
+	return m.showSupportDialog();
+}
+
 export async function confirmAction(
 	title: string,
 	message: string,

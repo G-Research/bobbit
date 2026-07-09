@@ -8,7 +8,7 @@ import { html, render, nothing } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import type Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FolderPlus, Menu, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Plus, QrCode, RotateCw, Server, Settings, Store, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FolderPlus, LifeBuoy, Menu, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Plus, QrCode, RotateCw, Server, Settings, Store, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -41,7 +41,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // `dialogs.ts` chunk stays out of the entry bundle. Each wrapper
 // fires the same shared `import("./dialogs.js")` on first use; the
 // chunk is shared across all UI surfaces that open dialogs.
-import { openGatewayDialog, showQrCodeDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
+import { openGatewayDialog, showQrCodeDialog, showSupportDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
@@ -2307,6 +2307,15 @@ export function doRenderApp(): void {
 		return html`
 			<div class="flex items-center gap-1 px-2">
 				${settingsBtn}
+				${isHeadquartersProject(state.activeProjectId)
+					? html`<span data-testid="support-launcher">${Button({
+						variant: "ghost",
+						size: "sm",
+						children: html`${icon(LifeBuoy, "sm")}`,
+						onClick: () => { showSupportDialog(); },
+						title: "Support",
+					})}</span>`
+					: nothing}
 				${Button({
 					variant: "ghost",
 					size: "sm",
@@ -3125,6 +3134,16 @@ export function doRenderApp(): void {
 							<span class="text-base font-semibold text-foreground">Bobbit</span>
 						</div>
 						<div class="flex items-center" style="gap:1px;margin-right:-4px">
+							${isHeadquartersProject(state.activeProjectId)
+								? html`<span data-testid="support-launcher">${Button({
+									variant: "ghost",
+									size: "sm",
+									children: html`${icon(LifeBuoy, "xs")}`,
+									onClick: () => { showSupportDialog(); },
+									title: "Support",
+									className: "h-6 w-6 text-muted-foreground",
+								})}</span>`
+								: nothing}
 							${Button({
 								variant: "ghost",
 								size: "sm",
