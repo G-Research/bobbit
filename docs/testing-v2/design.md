@@ -643,7 +643,7 @@ The ledger is a reservation system, not an `activeRuns` estimator. This removes 
 
 State lives under the OS temp root, e.g. `<tmp>/bobbit-test-v2-ledger/`:
 
-- `ledger.lock` — acquired with atomic exclusive create/open (`O_CREAT|O_EXCL` / Node `fs.open(..., "wx")`). Lock acquisition retries with jitter and treats a lock as stale only if its owner PID is dead and its mtime is older than 30 s.
+- `ledger.lock` — acquired with atomic exclusive create/open (`O_CREAT|O_EXCL` / Node `fs.open(..., "wx")`). Lock acquisition retries with jitter and treats a lock as stale only if its owner PID is dead and its mtime is older than 30 s. On POSIX a losing contender sees `EEXIST`; on **Windows**, an `O_EXCL` create against a lock file that a concurrent holder is deleting/recreating surfaces as `EPERM`/`EACCES` (the NTFS *delete-pending* state) instead of `EEXIST`. `acquireLock` therefore treats all three codes as "contended — back off and retry within the timeout" rather than hard-throwing; before this, a busy shared ledger on Windows would abort the whole integration bucket on the first delete-pending race. The same guard lives in `scripts/testing-v2/ledger.mjs` and the lease-bridge probe `tests/e2e/ledger-lease-bridge.mjs`, and the timeout error now reports the last error code for diagnosis.
 - `reservations.json` — authoritative shared budget: `{ totalCores, generation, reservations: [{ id, parentRunId, pid, kind, workerSlots, startedAt, heartbeatAt }] }`.
 - `<id>.heartbeat` — touched every 2 s by live runners; used with PID liveness to sweep stale reservations.
 
