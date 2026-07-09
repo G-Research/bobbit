@@ -80,6 +80,10 @@
       "reason": "The v2 bucket-membership guard itself (self-covering; must not manage itself)."
     },
     {
+      "path": "tests2/core/headset-accessory.test.ts",
+      "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context."
+    },
+    {
       "path": "tests2/core/ledger-lease-bridge-interop.test.ts",
       "reason": "Protocol-compatibility pin: tests/e2e/ledger-lease-bridge.mjs (Playwright-safe lease client) and scripts/testing-v2/ledger.mjs share the same on-disk lease protocol so the global concurrency caps hold across the browser + vitest tiers."
     },
