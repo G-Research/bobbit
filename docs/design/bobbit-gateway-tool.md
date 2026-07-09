@@ -35,6 +35,19 @@ structured error surfacing the gateway `{ error, code }` shape.
    policy). If credentials cannot resolve, the extension logs and returns
    (registers nothing) — matching existing extensions.
 
+   > **Authoritative amendment (supersedes the original spec).** The goal spec
+   > as originally written said "Default availability: Headquarters /
+   > orchestration sessions only" and listed the exact registration signal as an
+   > open question. The **goal owner explicitly directed in-session** that this
+   > be reframed: *"Just make it a normal built in tool."* That directive is
+   > authoritative and resolves the open question — bobbit is a normal built-in
+   > group and `bobbit_read` defaults to `grantPolicy: allow` (available to all
+   > sessions). This is an owner-approved decision, **not** an unresolved
+   > deviation. The higher-risk tiers remain protected by `grantPolicy: never`.
+   > (The spec text could not be edited from the team-lead session — the scoped
+   > token is forbidden from `PUT /api/goals/:id` — so the amendment is recorded
+   > here as the authoritative source.)
+
 2. **`projectId` required for creation.**
    `bobbit_orchestrate.create_session` and `bobbit_orchestrate.create_goal`
    MUST require an explicit `projectId` param. No defaulting to `headquarters`
@@ -49,7 +62,18 @@ structured error surfacing the gateway `{ error, code }` shape.
 
    `never` = registered but hidden unless a role/project/user policy explicitly
    enables the tool (same mechanism `defaults/tools/agent/session_prompt.yaml`
-   uses).
+   uses). The spec framed the options as "allow / ask / deny"; we deliberately
+   chose **`never`** rather than `deny` for the two higher tiers because `never`
+   hides the tool entirely (it never appears in the agent's toolset) rather than
+   showing it and refusing at call time — the correct default for high-privilege
+   surfaces, matching the `session_prompt` precedent. `ask` remains available
+   for users who want a confirm-on-use tier.
+
+4. **`delete_goal` dropped (DECIDED).** There is no hard-delete goal endpoint
+   — `DELETE /api/goals/:id` archives (with cascade). The design exposes only
+   `archive_goal`; `delete_goal` is NOT a separate operation and `detail_docs`
+   documents "delete = archive". This formally resolves the spec's `delete_goal`
+   entry rather than leaving the choice to the implementer.
 
 ## 3. File layout
 
@@ -252,7 +276,6 @@ as `?k=`. "Body" lists the JSON body keys the handler reads.
 | `create_goal` | POST | `/api/goals` | `projectId`, `title` | body: `spec`, `workflowId` (default `general`), `cwd`, `parentGoalId`, `sandboxed`, `autoStartTeam` (default true), `enabledOptionalSteps[]`, `metadata{}` |
 | `update_goal` | PUT | `/api/goals/:goalId` | `goalId` | body: `title`, `spec`, `state`, `cwd`, `branch`, `repoPath`, `reattemptOf` |
 | `archive_goal` | DELETE | `/api/goals/:goalId?cascade=true\|false` | `goalId`, `cascade` | `mergedManually` (`?mergedManually=`) |
-| `delete_goal` | DELETE | `/api/goals/:goalId?cascade=…` | `goalId`, `cascade` | — (alias of archive; see note) |
 | `create_session` | POST | `/api/sessions` | `projectId` | body: `goalId`, `assistantType`, `roleId`, `cwd`, `worktree`, `sandboxed`, `title`, `args`. (Delegate creation via `delegateOf`+`instructions` is intentionally NOT exposed — use `team_delegate`.) |
 | `terminate_session` | DELETE | `/api/sessions/:sessionId` | `sessionId` | — |
 | `restart_session` | POST | `/api/sessions/:sessionId/restart` | `sessionId` | — |
@@ -268,11 +291,10 @@ as `?k=`. "Body" lists the JSON body keys the handler reads.
 | `team_teardown` | POST | `/api/goals/:goalId/team/teardown?cascade=true\|false` | `goalId`, `cascade` | — (409 `HAS_DESCENDANT_TEAMS` when cascade=false + live descendants) |
 
 **Notes / flags:**
-- `archive_goal` and `delete_goal` map to the **same** route
-  (`DELETE /api/goals/:id`, which archives with cascade semantics — see
-  `archiveGoalEndpoint`). There is no hard-delete endpoint. **Recommendation:**
-  keep only `archive_goal` and drop `delete_goal` (documented as an alias) to
-  avoid implying a destructive delete that does not exist. The archive-child
+- **`delete_goal` is dropped (decided — see §2.4).** `DELETE /api/goals/:id`
+  archives with cascade semantics (see `archiveGoalEndpoint`); there is no
+  hard-delete endpoint. Only `archive_goal` is exposed; `detail_docs` documents
+  "delete = archive". The archive-child
   variant `DELETE /api/goals/:parentId/archive-child/:childId` exists but is
   parent-scoped/authz-specialised — **not** exposed here; use `archive_goal` on
   the child id directly.
@@ -501,12 +523,23 @@ No `tests2/browser` journey — the tool surfaces no UI.
   over hand-rolled `curl` for sessions that have the groups enabled, keeping the
   raw-curl instructions as the fallback. One-line pointer only (AGENTS.md bloat
   policy).
+- **`defaults/system-prompt.md`** — REMOVE the verbose `# Gateway API access`
+  section (the token/URL/`curl -sk`/netstat/key-endpoints block, currently ~lines
+  74–96) and REPLACE it with a concise **"Bobbit harness architecture"** section:
+  a short description that the Bobbit gateway/harness supervises agent sessions,
+  goals, teams, projects, worktrees/sandboxes, and workflow gates, and that your
+  session is one managed agent process (reattached across restarts). State that
+  tools *may* be available to inspect/manipulate the harness (the
+  `bobbit_read`/`bobbit_orchestrate`/`bobbit_admin` tiers) — preferred over
+  hand-rolled HTTP — and that their absence means the capability was not granted
+  to the session. Do NOT re-add token/URL/curl recipes to the system prompt.
+  (This is a goal-owner-requested change layered onto the original spec.)
 
 ## 11. Open risks / flagged missing endpoints
 
-- **`delete_goal` has no hard-delete endpoint.** `DELETE /api/goals/:id`
-  archives (cascade). Recommendation: drop `delete_goal`, expose only
-  `archive_goal`; document that "delete" = archive. (Decision for implementer.)
+- **`delete_goal` has no hard-delete endpoint — RESOLVED.** `DELETE /api/goals/:id`
+  archives (cascade). Decided (§2.4): drop `delete_goal`, expose only
+  `archive_goal`; `detail_docs` documents that "delete" = archive.
 - **`tool_override`/`role_override`/`workflow_override` create overrides via the
   `*/customize` copy endpoints;** there is no single "override" verb. Removing an
   override is `DELETE /api/{tools,roles,workflows}/:name/override` — not in the
