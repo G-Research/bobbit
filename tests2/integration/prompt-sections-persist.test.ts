@@ -24,7 +24,7 @@ interface PromptSectionsResponse {
 }
 
 async function waitForPersistedPromptSections(sessionId: string): Promise<PromptSectionsResponse> {
-	return await pollUntil(async () => {
+	const data = await pollUntil<PromptSectionsResponse | null>(async () => {
 		const resp = await apiFetch(`/api/sessions/${sessionId}/prompt-sections`);
 		if (resp.status !== 200) return null;
 		const data = await resp.json();
@@ -36,6 +36,8 @@ async function waitForPersistedPromptSections(sessionId: string): Promise<Prompt
 		if (typeof data.totalTokens !== "number" || data.totalTokens <= 0) return null;
 		return data as PromptSectionsResponse;
 	}, { timeoutMs: 10_000, intervalMs: 50, label: "persisted prompt sections" });
+	if (data === null) throw new Error("pollUntil returned null for persisted prompt sections");
+	return data;
 }
 
 test.describe("Persisted prompt sections", () => {
