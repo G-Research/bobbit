@@ -114,6 +114,10 @@
     {
       "path": "tests2/core/build-workflow-list.test.ts",
       "reason": "Pins buildWorkflowListText (extracted from SessionManager._buildWorkflowList): the workflowless empty branch must not forbid propose_goal and must mention the inline-workflow escape hatch, mirroring the UI guard, propose_goal contract, and goal-manager backstop."
+    },
+    {
+      "path": "tests2/core/chaos-worktree-safety.test.ts",
+      "reason": "Reproducing test for the chaos node_modules-wipe goal: pins junction-safe teardown (unlinkReparsePoint / cleanupChaosRoot preserve an external junction target) and the no-inner-node_modules layout (ensureNodeModulesJunction removed). Temp-FS only, external-free core tier. FAILS on HEAD (helpers absent, ensureNodeModulesJunction still defined), passes post-fix."
     }
   ],
   "journeys": [

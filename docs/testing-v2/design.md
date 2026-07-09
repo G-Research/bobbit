@@ -758,12 +758,12 @@ Invalid mutants are allowed only as runner output, never as counted evidence. A 
 `scripts/testing-v2/chaos.mjs` runs each mutant in an isolated git worktree created from the current branch:
 
 1. Assert the source tree is clean.
-2. Create an ephemeral worktree under the OS temp root at the current HEAD.
+2. Create an ephemeral worktree at the current HEAD as a SIBLING of a campaign-scoped "chaos root" (`os.tmpdir()/bobbit-chaos-root-<pid>-<ts>`). The chaos root holds ONE shared `node_modules` link (Windows junction / POSIX dir symlink → the complete toolchain `node_modules`), created once via `ensureChaosRoot()`; the worktree itself contains **no** `node_modules` link and resolves modules by walking up to `<chaos-root>/node_modules`. This keeps every resolvable `node_modules` outside every deletion root — see [node-modules-corruption-rca.md](node-modules-corruption-rca.md).
 3. Apply the mutant patch with `git apply --index` and assert only the intended files changed.
 4. Run the targeted legacy catchers from `expectedLegacyCatchers` and targeted v2 catchers from `expectedV2Catchers` with retries disabled.
 5. Record `caught` when the targeted command fails with the expected test failure pattern; record `missed` when it passes; record `invalid` for patch/compile/harness failures unrelated to the mutant behavior.
 6. For at least five randomly selected valid mutants marked `fullV2SampleEligible`, also run the full `npm run test:v2`; if a non-listed v2 test catches the mutant, update the corpus/report so targeted catcher lists do not become over-narrow.
-7. Remove the worktree and assert the main branch remains clean so no mutant can leak into normal development.
+7. Remove the worktree (junction-safe: reparse points are unlinked before any recursive delete) and assert the main branch remains clean so no mutant can leak into normal development. At campaign end, `cleanupChaosRoot()` (in `main()`'s `finally`) unlinks the shared `node_modules` reparse point *first* and then removes the whole chaos root, refusing the recursive delete if the reparse point still survives.
 
 Integrity checks:
 

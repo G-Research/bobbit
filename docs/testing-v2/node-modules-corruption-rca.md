@@ -35,16 +35,78 @@ half-wipes the shared tree.
   goal worktree's tree (recoverable, not gateway-bricking) — but the underlying delete-through-
   junction bug is **still present**.
 
-## Safe pattern (the fix)
-- **Never let a recursive delete touch the junction.** Unlink the `node_modules` reparse point
-  *first* (`fs.rmSync(link,{recursive:false})` / `fs.unlinkSync` / `fs.rmdirSync` on the link
-  only), then remove the worktree dir. Also unlink before `git worktree remove`.
-- Prefer not to junction a shared tree at all: use a dedicated/copied `node_modules`, or set
-  `NODE_PATH` / `--preserve-symlinks` so tests resolve without a physical link inside a
-  force-deleted dir.
-- Add a **guard**: assert the junction target is never inside any removal path; fail loud otherwise.
-- **Defensive layer:** a runtime `node_modules` self-heal so a mid-session half-wipe can never
-  block agent/verification spawning (today the harness only self-heals on restart).
+## The fix (IMPLEMENTED)
+
+The fix has two layers. The **primary** fix removes the footgun by design (nothing resolvable
+lives inside any deletion root); the **defensive** layer is belt-and-braces for the per-worktree
+removal path.
+
+### Primary fix — parent-directory resolution via a campaign-scoped "chaos root"
+
+*Why this shape:* the delete-through-junction bug can only wipe a shared tree if a `node_modules`
+link lives *inside* a directory that gets force-deleted. So the fix is to stop putting any
+`node_modules` link inside a throwaway worktree at all. Instead, `chaos.mjs` creates ONE
+campaign-scoped container dir under `os.tmpdir()` — the "chaos root" — holding a single shared
+`node_modules` link plus every per-mutant worktree as a *sibling*:
+
+```
+<CHAOS_ROOT> = os.tmpdir()/bobbit-chaos-root-<pid>-<ts>
+  node_modules/           ← ONE junction (win) / dir symlink (posix) → complete toolchain nm
+  wt-<mutantId>/          ← ephemeral git worktree — NO node_modules inside it
+  wt-fullv2-baseline/, wt-fullv2-<mutantId>/
+```
+
+Node and Vite resolve modules by walking **up** from `<CHAOS_ROOT>/wt-*/…` to
+`<CHAOS_ROOT>/node_modules` — full fidelity (`.bin`, `exports`, transitive + `@earendil-works/*`).
+Because nothing resolvable lives inside a worktree, no force-delete of a worktree can descend
+through a junction into the shared/primary tree.
+
+Implemented in `scripts/testing-v2/chaos.mjs`:
+- **`ensureChaosRoot(root, nmTarget)`** — called once at the top of `main()`. `mkdir -p` the
+  chaos root and, if absent, create the single shared `node_modules` reparse point (Windows
+  `junction`, POSIX `dir` symlink) → the complete toolchain `node_modules`. The "complete
+  toolchain" fail-loud guard (must contain `vitest` AND `@earendil-works/pi-ai`) stays in `main()`.
+- **`createEphemeralWorktree(label)`** — `git worktree add --detach <CHAOS_ROOT>/wt-<label> HEAD`.
+  It creates **no** per-worktree `node_modules` link. `ensureNodeModulesJunction()` (the old
+  in-worktree junction) was **deleted entirely**.
+- **`unlinkReparsePoint(p)`** — removes ONLY the link, never follows it: `lstat`; a Windows
+  directory junction (dir, not symlink) → `fs.rmdirSync`; a symlink → `fs.unlinkSync`; a real
+  entry → **throw** (refuse to reparse-unlink a real dir).
+- **`cleanupChaosRoot(root)`** — campaign teardown, run from `main()`'s `finally`. Unlinks the
+  shared `node_modules` reparse point **first**, then recursively deletes the chaos root. If the
+  reparse point is *still present* after the unlink attempt, it **refuses** the recursive delete
+  and leaves the root in place — so `fs.rmSync` can never traverse a surviving junction.
+- **`finally` + `process.exitCode`** — the null-mutant integrity-check failure path sets
+  `process.exitCode = 1; return` instead of `process.exit(1)`, so the `finally` block (and thus
+  `cleanupChaosRoot()`) always runs and never leaks a junction into `os.tmpdir()`. The CLI-only
+  guard (`import.meta.url === pathToFileURL(process.argv[1]).href`) means importing the module
+  from a test does not launch a campaign.
+
+### Defensive layer (retained, belt-and-braces)
+
+Even though no junction now lives inside a worktree, `removeEphemeralWorktree()` still calls
+`unlinkNodeModulesJunction()` to remove any `node_modules` reparse point *before* `git worktree
+remove` / the recursive `fs.rmSync` fallback, and keeps the fail-loud guard that refuses to
+delete when a junction target resolves inside the removal path.
+
+### Regression test
+
+`tests2/core/chaos-worktree-safety.test.ts` (temp-FS only, no git/network — stays in the
+external-free core tier) pins the invariant: `unlinkReparsePoint` / `cleanupChaosRoot` remove a
+`node_modules` junction pointing at an external sentinel dir while the sentinel and its marker
+file **survive**, and asserts `ensureNodeModulesJunction` is no longer defined (so the
+in-worktree junction can never be reintroduced). It fails against the pre-fix HEAD and passes
+after.
+
+### Options considered and rejected
+- **Pure `NODE_PATH` / `--preserve-symlinks` with no link at all** — tier-1 is vitest, which
+  resolves through Vite's resolver; **Vite ignores `NODE_PATH`**, and `--preserve-symlinks` only
+  changes how an already-linked dep resolves *its* children. Bare / `exports`-mapped /
+  `@earendil-works/*` workspace imports would not resolve.
+- **Per-mutant copy of `node_modules`** — a full copy on Defender-scanned NTFS is minutes /
+  hundreds of MB × 53+ mutants — prohibitive. The reparse-point-first teardown + sibling
+  placement already make it impossible for cleanup to reach the primary tree, so a copy buys
+  nothing.
 
 ## Related latent issues found while fixing chaos-proof
 - `tsx` is **undeclared** in package.json yet the legacy suite runs it via `npx tsx`
