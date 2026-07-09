@@ -28,6 +28,10 @@
       "reason": "Integration coverage for the 'Fix git widget flash' goal (32cd6b4f): pins the session-manager quiet-recheck state machine extracted into runWidgetGitRefresh (src/app/git-status-refresh.ts). Asserts (1) a cached-'no' quiet reconnect NEVER writes gitStatusLoading=true, fires exactly one recheck, keeps gitRepoKnown='no' and caches 'no'; (2) when the quiet recheck's onOk fires the repo now exists so gitRepoKnown flips to 'yes', the widget reveals, cache writes 'yes', and loading is cleared in finally; (3) a genuine first-ever check (quiet=false / gitRepoKnown='unknown') DOES set gitStatusLoading=true (skeleton allowed) with one fetch."
     },
     {
+      "path": "tests2/integration/direct-agent-admin-token.test.ts",
+      "reason": "Pinning test for the 'Direct-agent admin token' interim rollback: non-sandboxed (direct) agents receive the gateway ADMIN token (readToken()) via scopedGatewayEnvForDirectAgent (createSession/createDelegateSession) and applyScopedGatewayCredentials (restore/revive/respawn), while the sandbox path (mintScopedGatewayToken) still produces a per-project SCOPED token distinct from the admin token. Also pins the loud-throw when no admin token is available (no silent fallback)."
+    },
+    {
       "path": "tests2/core/verification-harness-review-reliability.test.ts",
       "reason": "Reproducing test for the 'Fix LLM review reliability' goal: pins per-attempt fresh reviewer session id (transcript not clobbered on retry) and honoring of a verification_result that arrives during teardown (no 404-drop). FAILS on HEAD, passes post-fix. Companion assertions pin the completed-but-missed-tool-call classification (non-transient → no from-scratch re-run) and that within-budget transient failures still retry."
     },
@@ -65,7 +69,15 @@
     },
     {
       "path": "tests2/core/role-bobbit-tools-policy.test.ts",
-      "reason": "bobbit gateway tier role-policy invariant: bobbit_orchestrate/bobbit_admin default never; ONLY general + team-lead re-grant orchestrate, ONLY general gets admin behind ask."
+      "reason": "bobbit gateway tier role-policy invariant: bobbit_orchestrate/bobbit_admin default never; ONLY general + support + team-lead re-grant orchestrate, ONLY general + support get admin behind ask."
+    },
+    {
+      "path": "tests2/core/support-assistant.test.ts",
+      "reason": "Support assistant backend wiring: getAssistantDef('support') registered; defaults/roles/support.yaml loads with accessory headset + bobbit tier policies (orchestrate allow, admin ask); SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction; assistantRoleForType maps support->support else assistant."
+    },
+    {
+      "path": "tests2/core/support-packaging.test.ts",
+      "reason": "Support assistant offline packaging: package.json files ships docs/ + src/; npm pack --dry-run --json lists docs/ + src/ entries; resolveBundledDocsDir/resolveBundledSrcDir return existing directories."
     },
     {
       "path": "tests2/core/cli-real-deps.test.ts",
@@ -195,6 +207,10 @@
     },
     {
       "path": "tests2/browser/journeys/staff-debug.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/support-launcher.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
