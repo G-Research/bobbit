@@ -47,6 +47,24 @@ function getPromptsDir(): string {
 }
 
 /**
+ * Resolve the `session-prompts` directory for a gateway.
+ *
+ * Prefer the explicit per-gateway `stateDir` — this is the DI seam that keeps
+ * multiple in-process gateways (v2 test harness / one-gateway-per-fork) from
+ * clobbering each other's prompt scratch dir. Only when no `stateDir` is
+ * threaded do we fall back to the process-global set once by initPromptDirs()
+ * at server startup (legacy single-gateway path).
+ */
+function resolvePromptsDir(stateDir?: string): string {
+	if (stateDir) {
+		const dir = path.join(stateDir, "session-prompts");
+		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		return dir;
+	}
+	return getPromptsDir();
+}
+
+/**
  * Resolve `@path` references in markdown content, matching Claude Code behavior.
  *
  * `@path/to/file.ext` references are expanded inline wherever they appear on a
@@ -459,11 +477,11 @@ export interface PromptSection {
  * Returns the path to the assembled prompt file, or undefined if all parts
  * are empty (in which case no --system-prompt should be passed to the agent).
  */
-export function assembleSystemPrompt(sessionId: string, parts: PromptParts): string | undefined {
-	return profile("assembleSystemPrompt", () => _assembleSystemPrompt(sessionId, parts));
+export function assembleSystemPrompt(sessionId: string, parts: PromptParts, stateDir?: string): string | undefined {
+	return profile("assembleSystemPrompt", () => _assembleSystemPrompt(sessionId, parts, stateDir));
 }
 
-function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | undefined {
+function _assembleSystemPrompt(sessionId: string, parts: PromptParts, stateDir?: string): string | undefined {
 	const sections: { label: string; content: string }[] = [];
 
 	// 1. Global system prompt (resolve @refs relative to its directory)
@@ -580,7 +598,7 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 	const combined = reorderLabeledSections(sections, parts.sectionOrder).map((s) => s.content).join("\n\n---\n\n") + "\n";
 	bumpCount("assembleSystemPrompt.bytes", combined.length);
 
-	const promptPath = path.join(getPromptsDir(), `${sessionId}.md`);
+	const promptPath = path.join(resolvePromptsDir(stateDir), `${sessionId}.md`);
 	fs.writeFileSync(promptPath, combined, "utf-8");
 	return promptPath;
 }
@@ -714,12 +732,12 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
  * Persist the resolved prompt sections as a JSON snapshot at session creation time.
  * This captures the actual prompt that was used, not a reconstruction from current files.
  */
-export function persistPromptSections(sessionId: string, parts: PromptParts): void {
+export function persistPromptSections(sessionId: string, parts: PromptParts, stateDir?: string): void {
 	try {
 		const sections = getPromptSections(parts);
 		const totalTokens = sections.reduce((sum, s) => sum + s.tokens, 0);
 		const data = { sections, totalTokens, createdAt: new Date().toISOString() };
-		const jsonPath = path.join(getPromptsDir(), `${sessionId}-prompt.json`);
+		const jsonPath = path.join(resolvePromptsDir(stateDir), `${sessionId}-prompt.json`);
 		fs.writeFileSync(jsonPath, JSON.stringify(data), "utf-8");
 	} catch (err) {
 		console.error(`[system-prompt] Failed to persist prompt sections for ${sessionId}:`, err);
@@ -730,9 +748,9 @@ export function persistPromptSections(sessionId: string, parts: PromptParts): vo
  * Load persisted prompt sections snapshot for a session.
  * Returns null if the file doesn't exist or can't be parsed.
  */
-export function loadPersistedPromptSections(sessionId: string): { sections: PromptSection[]; totalTokens: number; createdAt: string } | null {
+export function loadPersistedPromptSections(sessionId: string, stateDir?: string): { sections: PromptSection[]; totalTokens: number; createdAt: string } | null {
 	try {
-		const jsonPath = path.join(getPromptsDir(), `${sessionId}-prompt.json`);
+		const jsonPath = path.join(resolvePromptsDir(stateDir), `${sessionId}-prompt.json`);
 		if (!fs.existsSync(jsonPath)) return null;
 		return JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
 	} catch {
@@ -743,9 +761,9 @@ export function loadPersistedPromptSections(sessionId: string): { sections: Prom
 /**
  * Delete the persisted prompt sections JSON for a session (archive purge only).
  */
-export function purgePromptSectionsJson(sessionId: string): void {
+export function purgePromptSectionsJson(sessionId: string, stateDir?: string): void {
 	try {
-		const jsonPath = path.join(getPromptsDir(), `${sessionId}-prompt.json`);
+		const jsonPath = path.join(resolvePromptsDir(stateDir), `${sessionId}-prompt.json`);
 		if (fs.existsSync(jsonPath)) fs.unlinkSync(jsonPath);
 	} catch { /* ignore */ }
 }
@@ -753,8 +771,8 @@ export function purgePromptSectionsJson(sessionId: string): void {
 /**
  * Clean up a session's assembled prompt file.
  */
-export function cleanupSessionPrompt(sessionId: string): void {
-	const promptPath = path.join(getPromptsDir(), `${sessionId}.md`);
+export function cleanupSessionPrompt(sessionId: string, stateDir?: string): void {
+	const promptPath = path.join(resolvePromptsDir(stateDir), `${sessionId}.md`);
 	try {
 		if (fs.existsSync(promptPath)) fs.unlinkSync(promptPath);
 	} catch { /* ignore */ }
