@@ -21,6 +21,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PackEntry, PackManifest } from "./pack-types.js";
+// Type-only import (erased at runtime → no project-config-store import cycle).
+import type { DisabledRefs } from "./project-config-store.js";
 import { readManifest } from "./pack-manifest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // dist/server/agent/
@@ -58,24 +60,6 @@ export function resolveBuiltinPacksDir(override?: string): string {
  * `builtin: true`. Graceful on a missing dir (returns `[]`).
  */
 /**
- * The stored disabled-entity refs relevant to effective-activation. Kept as a
- * structural subset of `DisabledRefs` so this module stays free of a
- * project-config-store dependency (avoids an import cycle).
- */
-export interface PackEnableState {
-	/** Explicit-enable sentinel for ships-disabled-by-default packs. */
-	enabled?: boolean;
-	/**
-	 * Other stored disabled-entity refs (roles/tools/entrypoints/…) may also be
-	 * present on the override. The effective-activation check reads ONLY
-	 * `enabled`, but the wider shape is accepted so callers can pass a full
-	 * `DisabledRefs` without a cast (and without importing it here — avoids a
-	 * project-config-store import cycle).
-	 */
-	[kind: string]: unknown;
-}
-
-/**
  * Effective activation for a pack given its manifest + stored activation refs
  * — the single chokepoint (design option (a)) that all CONTRIBUTION enumerators
  * consult so a ships-disabled-by-default pack resolves NOTHING until explicitly
@@ -93,7 +77,7 @@ export interface PackEnableState {
  */
 export function isPackEffectivelyEnabled(
 	manifest: Pick<PackManifest, "defaultDisabled"> | undefined,
-	disabled: PackEnableState | undefined,
+	disabled: DisabledRefs | undefined,
 ): boolean {
 	if (!manifest?.defaultDisabled) return true;
 	return disabled?.enabled === true;
@@ -108,7 +92,7 @@ export function isPackEffectivelyEnabled(
  */
 export function activeBuiltinFirstPartyPackEntries(
 	builtinPacksDir: string,
-	activationFor: (packName: string) => PackEnableState | undefined,
+	activationFor: (packName: string) => DisabledRefs | undefined,
 ): PackEntry[] {
 	return builtinFirstPartyPackEntries(builtinPacksDir).filter((e) =>
 		isPackEffectivelyEnabled(e.manifest, e.manifest ? activationFor(e.manifest.name) : undefined),
