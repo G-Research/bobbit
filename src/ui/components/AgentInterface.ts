@@ -56,6 +56,7 @@ import { i18n } from "../utils/i18n.js";
 import { createStreamFn } from "../utils/proxy-utils.js";
 import type { UserMessageWithAttachments } from "./Messages.js";
 import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
+import type { GitRepoKnown } from "../../app/git-status-refresh.js";
 
 @customElement("agent-interface")
 export class AgentInterface extends LitElement {
@@ -96,9 +97,8 @@ export class AgentInterface extends LitElement {
 		status: Array<{ file: string; status: string }>;
 	};
 	@property({ type: Boolean }) gitStatusLoading = false;
-	/** Tri-state repo detection — widget renders whenever this is not 'no'.
-	 *  Only flipped to 'no' on explicit HTTP 400 "Not a git repository". */
-	@property({ attribute: false }) gitRepoKnown: 'yes' | 'no' | 'unknown' = 'unknown';
+	/** Repo detection hint. 'no' and 'hidden' suppress the git pill until a quiet recheck reveals showable content. */
+	@property({ attribute: false }) gitRepoKnown: GitRepoKnown = 'unknown';
 	/** True when the server returned Phase A data but porcelain timed out. */
 	@property({ type: Boolean }) partial = false;
 	// PR status properties for goal-linked sessions
@@ -131,6 +131,7 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onBeforeToolCall?: (toolName: string, args: any) => boolean | Promise<boolean>;
 	// Optional callback called when cost display is clicked
 	@property({ attribute: false }) onCostClick?: () => void;
+	private get _showGitStatusWidget(): boolean { return this.gitRepoKnown !== 'no' && this.gitRepoKnown !== 'hidden'; }
 	// When true, hide the message editor (for archived/read-only sessions)
 	@property({ type: Boolean }) readOnly = false;
 	// When true, show the editor only while agent is streaming (steer-only mode)
@@ -2142,7 +2143,7 @@ export class AgentInterface extends LitElement {
 				<!-- Input Area -->
 				<div class="shrink-0 pt-0 pb-1 agent-input-area">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
-						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' || this.goalId || this.teamGoalId ? html`
+						${this.bgProcesses.length > 0 || this._showGitStatusWidget || this.goalId || this.teamGoalId ? html`
 						<div data-pill-strip class="absolute right-2 bottom-full mb-3 z-10 pointer-events-auto" style="max-width:${this._isNarrow ? '75%' : 'calc(100% - 8rem)'}; --pill-h: 22px">
 							<!-- Real pills with a CSS drop-shadow filter for the glow. Drop-shadow
 							     follows the actual rendered shape per-element, so wrapping or
@@ -2175,7 +2176,7 @@ export class AgentInterface extends LitElement {
 								.token=${localStorage.getItem("gateway.token") || ""}
 								.branch=${this.gitStatus?.branch ?? ''}
 							></goal-status-widget>` : nothing}
-							${this.gitRepoKnown !== 'no' ? html`<git-status-widget
+							${this._showGitStatusWidget ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
 								.token=${localStorage.getItem("gateway.token") || ""}
 								.branch=${this.gitStatus?.branch ?? ''}

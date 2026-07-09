@@ -1416,7 +1416,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// a quiet background recheck — no skeleton flash. See git-repo-cache.ts.
 		const fastGit = computeConnectGitState(sessionId);
 		if (state.chatPanel?.agentInterface) {
-			(state.chatPanel.agentInterface as any).gitRepoKnown = fastGit.gitRepoKnown;
+			state.chatPanel.agentInterface.gitRepoKnown = fastGit.gitRepoKnown;
 		}
 		pruneGitRepoCache(state.gatewaySessions.map((s) => s.id));
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
@@ -2440,7 +2440,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// start hidden with a quiet recheck (no "Checking git…" skeleton flash).
 		const slowGit = computeConnectGitState(sessionId);
 		if (state.chatPanel?.agentInterface) {
-			(state.chatPanel.agentInterface as any).gitRepoKnown = slowGit.gitRepoKnown;
+			state.chatPanel.agentInterface.gitRepoKnown = slowGit.gitRepoKnown;
 		}
 		pruneGitRepoCache(state.gatewaySessions.map((s) => s.id));
 		refreshGitStatusForSession(sessionId, { quiet: slowGit.quietRecheck });
@@ -3238,7 +3238,7 @@ function startGitStatusPoll(sessionId: string): void {
 		if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
 		const ai = state.chatPanel?.agentInterface;
 		if (!ai) return;
-		if (isGitWidgetHiddenState((ai as any).gitRepoKnown)) { stopGitStatusPoll(); return; }
+		if (isGitWidgetHiddenState(ai.gitRepoKnown)) { stopGitStatusPoll(); return; }
 		const elapsed = performance.now() - gitStatusLastRefreshAt;
 		if (elapsed < 10_000) return;
 		refreshGitStatusForSession(sessionId, { source: "poll" });
@@ -3253,7 +3253,7 @@ if (typeof document !== "undefined") {
 		const sid = activeSessionId();
 		if (!sid) return;
 		const ai = state.chatPanel?.agentInterface;
-		if (!ai || isGitWidgetHiddenState((ai as any).gitRepoKnown)) return;
+		if (!ai || isGitWidgetHiddenState(ai.gitRepoKnown)) return;
 		refreshGitStatusForSession(sid, { source: "event" });
 	});
 }
@@ -3377,7 +3377,7 @@ async function refreshGitStatusForSession(
 		isStale: () => activeSessionId() !== sessionId,
 		applyOk: (widget, data) => {
 			const next = withUntrackedStatusPreserved(widget.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
-			widget.gitStatus = next as any;
+			widget.gitStatus = next;
 			widget.partial = !!next.partial;
 			if (next.branch) widget.branch = next.branch;
 		},
@@ -3390,7 +3390,7 @@ async function refreshGitStatusForSession(
 	// Final give-up with no showable data is cached as hidden by runWidgetGitRefresh.
 	// Keep the old retry-exhausted diagnostic without warning for clean empty OKs
 	// or one-shot quiet hidden rechecks.
-	if (activeSessionId() === sessionId && errorAttempts >= GIT_STATUS_BACKOFF_MS.length && (ai as any).gitRepoKnown === "hidden" && !ai.gitStatus && !ctl.signal.aborted) {
+	if (activeSessionId() === sessionId && errorAttempts >= GIT_STATUS_BACKOFF_MS.length && ai.gitRepoKnown === "hidden" && !ai.gitStatus && !ctl.signal.aborted) {
 		console.warn("[git-status] refresh failed after retries", { sessionId });
 	}
 

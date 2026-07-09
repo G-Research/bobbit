@@ -111,7 +111,7 @@ afterEach(() => {
 
 describe("empty/hidden git-widget cache hint", () => {
 	it("persists a hidden hint and computes a quiet hidden reconnect state", () => {
-		setCachedRepoState("hq-session", "hidden" as never);
+		setCachedRepoState("hq-session", "hidden");
 
 		expect(getCachedRepoState("hq-session")).toBe("hidden");
 		expect(computeConnectGitState("hq-session")).toEqual({
@@ -148,7 +148,7 @@ describe("empty/hidden git-widget cache hint", () => {
 	});
 
 	it("quiet hidden reconnect never shows a skeleton and reveals when content appears", async () => {
-		const { ai, loadingWrites } = makeWidget({ gitRepoKnown: "hidden" as never });
+		const { ai, loadingWrites } = makeWidget({ gitRepoKnown: "hidden" });
 		const cacheWrites: string[] = [];
 		let fetches = 0;
 
@@ -171,5 +171,32 @@ describe("empty/hidden git-widget cache hint", () => {
 		expect(ai.branch).toBe("feature/visible");
 		expect(ai.gitStatusLoading).toBe(false);
 		expect(cacheWrites).toEqual(["yes"]);
+	});
+
+	it("quiet hidden reconnect that re-errors stays hidden without showing a skeleton", async () => {
+		const { ai, loadingWrites } = makeWidget({ gitRepoKnown: "hidden" });
+		const cacheWrites: string[] = [];
+		let fetches = 0;
+
+		await runWidgetGitRefresh(ai, {
+			signal: new AbortController().signal,
+			quiet: true,
+			fetch: async () => {
+				fetches++;
+				return hqUnavailable();
+			},
+			sleep: stubSleep,
+			isStale: () => false,
+			applyOk,
+			onCache: (state) => cacheWrites.push(state),
+		});
+
+		expect(fetches).toBe(1);
+		expect(loadingWrites).not.toContain(true);
+		expect(ai.gitRepoKnown).toBe("hidden");
+		expect(ai.gitStatusLoading).toBe(false);
+		expect(ai.gitStatus).toBeUndefined();
+		expect(ai.branch).toBeUndefined();
+		expect(cacheWrites).toEqual(["hidden"]);
 	});
 });
