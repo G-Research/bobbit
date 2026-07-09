@@ -61,7 +61,10 @@ export type Action =
 	| { type: "optimistic-prompt"; message: any }
 	| { type: "optimistic-steer"; message: any }
 	| { type: "permission-needed"; card: any; seq?: number; ts?: number }
-	| { type: "permission-resolved"; messageId: string }
+	| { type: "permission-resolved"; messageId: string; status?: string; error?: string }
+	| { type: "permission-status"; messageId?: string; toolName?: string; status: string; error?: string; actionable?: boolean }
+	| { type: "permission-reconciled"; current: any | null; reason?: string }
+	| { type: "blocked-tool-call-placeholder"; message: any; seq?: number }
 	| { type: "compaction-placeholder"; message: any }
 	| { type: "compaction-result"; message: any; success: boolean; toolResult?: any }
 	| { type: "system-notification"; message: any }
@@ -286,6 +289,40 @@ export function enrichUserMessage(msg: any): any {
 		preview: img.data,
 	}));
 	return { ...msg, role: "user-with-attachments", attachments };
+}
+
+const ACTIVE_PERMISSION_STATUSES = new Set(["active", "granting"]);
+
+function permissionStatus(message: any): string {
+	return typeof message?.status === "string" ? message.status : "active";
+}
+
+function isActionablePermission(message: any): boolean {
+	return message?.role === "tool_permission_needed"
+		&& message.actionable !== false
+		&& ACTIVE_PERMISSION_STATUSES.has(permissionStatus(message));
+}
+
+function settlePermission(message: OrderedMessage, status: string, error?: string): OrderedMessage {
+	return {
+		...message,
+		status,
+		actionable: false,
+		...(error ? { error } : {}),
+	};
+}
+
+function samePermissionRequest(message: any, request: any): boolean {
+	if (!message || !request) return false;
+	if (typeof request.id === "string" && request.id && message.id === request.id) return true;
+	const sameTool = typeof request.toolName === "string" && message.toolName === request.toolName;
+	const sameGroup = typeof request.group === "string" ? message.group === request.group : true;
+	return sameTool && sameGroup;
+}
+
+function containsToolCall(message: any, toolCallId: string): boolean {
+	return !!message && message.role === "assistant" && Array.isArray(message.content)
+		&& message.content.some((c: any) => c?.type === "toolCall" && c?.id === toolCallId);
 }
 
 /**
@@ -834,10 +871,31 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				typeof action.seq === "number"
 					? action.seq
 					: state.highestSeq + 0.25;
-			const messages = [
-				...state.messages,
-				stamp(action.card, "permission", order, tick),
-			];
+			const existingIdx = state.messages.findIndex((m: any) =>
+				m.role === "tool_permission_needed"
+				&& typeof action.seq === "number"
+				&& m._order === action.seq
+				&& m.toolName === action.card.toolName
+				&& m.group === action.card.group,
+			);
+			let messages = state.messages.map((m) => {
+				if (m.role !== "tool_permission_needed") return m;
+				if (existingIdx !== -1 && m === state.messages[existingIdx]) return m;
+				return isActionablePermission(m) ? settlePermission(m, "superseded") : m;
+			});
+			const card = {
+				...action.card,
+				status: action.card.status ?? "active",
+				actionable: action.card.actionable ?? true,
+			};
+			if (existingIdx !== -1) {
+				messages = messages.map((m, idx) => idx === existingIdx ? { ...m, ...card, _order: m._order, _origin: m._origin, _insertionTick: m._insertionTick } : m);
+			} else {
+				messages = [
+					...messages,
+					stamp(card, "permission", order, tick),
+				];
+			}
 			const nextHighest =
 				typeof action.seq === "number"
 					? Math.max(state.highestSeq, action.seq)
@@ -849,10 +907,59 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			};
 		}
 
-		case "permission-resolved":
-		case "deny-permission-filter": {
-			const messages = state.messages.filter((m) => m.id !== action.messageId);
+		case "permission-resolved": {
+			const status = action.status ?? "granted";
+			const messages = state.messages.map((m) => m.id === action.messageId ? settlePermission(m, status, action.error) : m);
 			return { ...state, messages };
+		}
+
+		case "deny-permission-filter": {
+			const messages = state.messages.map((m) => m.id === action.messageId ? settlePermission(m, "denied") : m);
+			return { ...state, messages };
+		}
+
+		case "permission-status": {
+			const messages = state.messages.map((m: any) => {
+				if (m.role !== "tool_permission_needed") return m;
+				const idMatches = action.messageId && m.id === action.messageId;
+				const toolMatches = !action.messageId && action.toolName && m.toolName === action.toolName && isActionablePermission(m);
+				const fallbackActiveMatch = !action.messageId && !action.toolName && isActionablePermission(m);
+				if (!idMatches && !toolMatches && !fallbackActiveMatch) return m;
+				const actionable = action.actionable ?? ACTIVE_PERMISSION_STATUSES.has(action.status);
+				return { ...m, status: action.status, actionable, ...(action.error ? { error: action.error } : {}) };
+			});
+			return { ...state, messages };
+		}
+
+		case "permission-reconciled": {
+			const status = action.reason ?? "expired";
+			const messages = state.messages.map((m: any) => {
+				if (m.role !== "tool_permission_needed" || !isActionablePermission(m)) return m;
+				if (action.current && samePermissionRequest(m, action.current)) return m;
+				return settlePermission(m, status);
+			});
+			return { ...state, messages };
+		}
+
+		case "blocked-tool-call-placeholder": {
+			const tick = state.nextTick;
+			const content = Array.isArray(action.message?.content) ? action.message.content : [];
+			const toolCallIds: string[] = content
+				.filter((c: any) => c?.type === "toolCall" && typeof c.id === "string")
+				.map((c: any) => c.id as string);
+			if (toolCallIds.length === 0) return state;
+			if (state.messages.some((m) => toolCallIds.some((id) => containsToolCall(m, id)))) return state;
+			const order = typeof action.seq === "number" ? action.seq - 0.001 : state.highestSeq + 0.2;
+			const message = {
+				...action.message,
+				id: action.message.id || `blocked_tool_${toolCallIds[0]}`,
+				_permissionBlocked: true,
+			};
+			return {
+				messages: sortMessages([...state.messages, stamp(message, "server", order, tick)]),
+				nextTick: tick + 1,
+				highestSeq: state.highestSeq,
+			};
 		}
 
 		case "compaction-placeholder": {

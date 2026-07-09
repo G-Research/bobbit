@@ -117,6 +117,13 @@ function getToolCalls(msg: AssistantMessageType): ToolCall[] {
 	return (msg.content ?? []).filter((c): c is ToolCall => c.type === "toolCall");
 }
 
+function isPermissionActionable(msg: any): boolean {
+	const status = typeof msg?.status === "string" ? msg.status : "active";
+	return msg?.role === "tool_permission_needed"
+		&& msg.actionable !== false
+		&& (status === "active" || status === "granting");
+}
+
 export class MessageList extends LitElement {
 	@property({ type: Array }) messages: AgentMessage[] = [];
 	@property({ type: Array }) tools: AgentTool[] = [];
@@ -153,7 +160,14 @@ export class MessageList extends LitElement {
 			}
 		}
 
-		const items: Array<{ key: string; template: TemplateResult }> = [];
+		const permissionBlockedTools = new Set<string>();
+		for (const message of this.messages) {
+			if (isPermissionActionable(message) && typeof (message as any).toolName === "string") {
+				permissionBlockedTools.add((message as any).toolName);
+			}
+		}
+
+		const items: Array<{ key: string; template: TemplateResult; eager?: boolean }> = [];
 		let i = 0;
 		const msgs = this.messages;
 
@@ -201,12 +215,19 @@ export class MessageList extends LitElement {
 				const perm = msg as any;
 				items.push({
 					key: `perm:${perm.id}`,
+					eager: true,
 					template: html`<tool-permission-card
+						.permissionId=${perm.id}
 						.toolName=${perm.toolName}
 						.group=${perm.group}
 						.roleName=${perm.roleName}
 						.roleLabel=${perm.roleLabel}
-						.onGrant=${(scope: "tool" | "group", mode?: string) => this.dispatchEvent(new CustomEvent("grant-tool-permission", { detail: { toolName: perm.toolName, scope, group: perm.group, lastPromptText: perm.lastPromptText, mode }, bubbles: true, composed: true }))}
+						.status=${perm.status ?? "active"}
+						.mode=${perm.mode ?? "session-only"}
+						.error=${perm.error ?? ""}
+						.actionable=${perm.actionable !== false}
+						.onModeChange=${(mode: string) => this.dispatchEvent(new CustomEvent("permission-mode-change", { detail: { id: perm.id, mode }, bubbles: true, composed: true }))}
+						.onGrant=${(scope: "tool" | "group", mode?: string) => this.dispatchEvent(new CustomEvent("grant-tool-permission", { detail: { id: perm.id, toolName: perm.toolName, scope, group: perm.group, lastPromptText: perm.lastPromptText, mode }, bubbles: true, composed: true }))}
 						.onDeny=${() => this.dispatchEvent(new CustomEvent("deny-tool-permission", { detail: { id: perm.id, toolName: perm.toolName }, bubbles: true, composed: true }))}
 					></tool-permission-card>`,
 				});
@@ -302,6 +323,7 @@ export class MessageList extends LitElement {
 						.tools=${this.tools}
 						.isStreaming=${false}
 						.pendingToolCalls=${this.pendingToolCalls}
+						.permissionBlockedTools=${permissionBlockedTools}
 						.toolResultsById=${resultByCallId}
 						.toolPartialResults=${this.toolPartialResults}
 						.hideToolCalls=${false}
@@ -352,7 +374,7 @@ export class MessageList extends LitElement {
 				items,
 				(it) => it.key,
 				(it, idx) => {
-					const eager = idx >= tailStart;
+					const eager = it.eager === true || idx >= tailStart;
 					const srcIdx = Math.min(
 						msgs.length - 1,
 						Math.max(0, Math.round((idx / Math.max(1, items.length - 1)) * (msgs.length - 1))),

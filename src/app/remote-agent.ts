@@ -1315,7 +1315,9 @@ export class RemoteAgent {
 		// Re-sending lastPromptText here would create a fresh user turn and can
 		// duplicate side-effecting tools such as session_prompt.
 		void lastPromptText;
+		this.apply({ type: "permission-status", toolName, status: "granting", actionable: true });
 		this.send({ type: "grant_tool_permission", toolName, scope, group, mode });
+		this.emit({ type: "render" });
 	}
 
 	denyToolPermission(messageId: string, toolName?: string): void {
@@ -2101,11 +2103,18 @@ export class RemoteAgent {
 				if (seq !== undefined && !this._advanceTopLevelSeq(seq, "tool_permission_needed")) {
 					break;
 				}
-				// The server has aborted the agent turn. Clean up the streaming
-				// preview — the reducer's permission action handles transcript
-				// insertion. Aborted-turn cleanup (stripping inflight tool error +
-				// agent response) is now the server's responsibility (next snapshot
-				// is authoritative).
+				// Preserve the tool-use card that triggered the permission gate before
+				// clearing the live preview. Otherwise the permission card appears but
+				// the blocked tool call vanishes until a later snapshot/reconnect.
+				const streaming = this._state.streamingMessage;
+				if (streaming?.role === "assistant" && Array.isArray(streaming.content)) {
+					const hasBlockedTool = streaming.content.some((c: any) => c?.type === "toolCall" && c?.name === perm.toolName);
+					if (hasBlockedTool) {
+						this.apply({ type: "blocked-tool-call-placeholder", message: streaming, seq });
+					}
+				}
+				// The server has aborted the agent turn. Clean up the streaming preview;
+				// the frozen placeholder above keeps the blocked tool context visible.
 				this._state.streamingMessage = undefined;
 				this.streamingMessageId = undefined;
 				const permCard = {
@@ -2116,7 +2125,9 @@ export class RemoteAgent {
 					roleLabel: perm.roleLabel,
 					lastPromptText: perm.lastPromptText,
 					timestamp: Date.now(),
-					id: `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+					id: typeof perm.id === "string" ? perm.id : `perm_${seq ?? Date.now()}_${perm.toolName}`,
+					status: "active",
+					actionable: true,
 				};
 				this.apply({ type: "permission-needed", card: permCard, seq, ts });
 				this.emit({ type: "render" });
@@ -2124,8 +2135,27 @@ export class RemoteAgent {
 				break;
 			}
 
+			case "tool_permission_settled": {
+				const settled = msg as any;
+				this.apply({
+					type: "permission-status",
+					toolName: settled.toolName,
+					status: settled.status || "cancelled",
+					actionable: false,
+					error: settled.reason,
+				});
+				this.emit({ type: "render" });
+				break;
+			}
+
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				if ((msg as any).code === "GRANT_ERROR") {
+					this.apply({ type: "permission-reconciled", current: null, reason: "error" });
+					this.apply({ type: "permission-status", status: "error", error: msg.message || "Permission grant failed or became stale.", actionable: false });
+					this.emit({ type: "render" });
+					break;
+				}
 				// Status mutation is the server's job — it broadcasts a matching
 				// `session_status` frame in the same termination path. We only
 				// clear local-only fields here.
