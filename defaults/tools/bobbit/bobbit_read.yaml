@@ -1,14 +1,14 @@
 name: bobbit_read
 description: "Read-only gateway introspection: goals, sessions, projects, tasks, gates, search, maintenance probes."
 summary: "Read gateway state (goals/sessions/projects/…)"
-params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, view?, probe?]
+params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, view?, probe?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Bobbit
 grantPolicy: allow
 docs: |-
-  Read-only, gateway-wide introspection. Pick an `operation` and pass its required ids. Addresses entities by explicit id (not the current goal), so it complements — never replaces — `task_list`/`gate_list`. Returns the gateway's JSON verbatim.
+  Read-only, gateway-wide introspection. Pick an `operation` and pass its required ids. Addresses entities by explicit id (not the current goal), so it complements — never replaces — `task_list`/`gate_list`. List-style operations return bounded pages by default with pagination metadata.
 detail_docs: >-
   ## Purpose
 
@@ -33,76 +33,136 @@ detail_docs: >-
   - Ids: `goalId`, `sessionId`, `taskId`, `projectId`, `workflowId` — supply the
   ones the chosen operation requires.
 
-  - Query-ish: `q` (search/list filter), `type`/`limit`/`offset` (search),
-  `archived` (list_goals), `include` (list_sessions, e.g. `archived`),
-  `view` (gates/tasks summary), `probe` (maintenance_inspect selector).
+  - Semantic filters: `q` (free-text list/search filter), `type` (search result
+  type), `archived` (list_goals), `include` (list_sessions, e.g. `archived`),
+  `view` (gates/tasks projection), `probe` (maintenance_inspect selector).
+
+  - Shared paging: `limit`, `offset`, `after`, `cursor`. List-style operations
+  use `limit=50` and `offset=0` by default, clamp `limit` to a maximum of `200`,
+  and return pagination metadata. `search` keeps its search endpoint defaults
+  (`limit=20`, maximum `100`) unless you pass `limit` explicitly.
+
+  - Cursor aliases: `cursor` is the generic cursor input; `after` is the gateway
+  query name used by archived session/goal paths. If both cursor and offset
+  inputs are present for a cursor-backed call, the cursor form wins.
+
+
+  ## Pagination contract
+
+
+  List-style operations return the endpoint's normal fields plus a
+  `pagination` object. The primary item key is preserved (`sessions`, `goals`,
+  `projects`, `workflows`, `roles`, `tools`, `gates`, `tasks`, `staff`,
+  `servers`, `results`, or probe-specific keys such as `worktrees`/`sample`).
+  Fallback tool-side paging happens only after the gateway has applied semantic
+  filters.
+
+
+  `pagination` includes:
+
+
+  - `limit` — effective page size.
+
+  - `offset` and `nextOffset` for offset pages.
+
+  - `cursor` and `nextCursor` for cursor pages.
+
+  - `total` when the gateway/tool can know the total after filtering.
+
+  - `hasMore` — whether another page is available.
+
+  - `mode` — `offset` or `cursor`.
+
+  - `itemKey` — the response field that was paged.
+
+  - `pagedBy` — `rest` when the gateway endpoint paged, `tool` when the tool
+  bounded an unpaged endpoint response.
 
 
   ## Operation catalogue
 
-  | operation | GET path | required |
+  | operation | GET path | required | semantic filters / paging |
 
-  |---|---|---|
+  |---|---|---|---|
 
-  | `health` | `/api/health` | — |
+  | `health` | `/api/health` | — | — |
 
-  | `connection_info` | `/api/connection-info` | — |
+  | `connection_info` | `/api/connection-info` | — | — |
 
-  | `list_goals` | `/api/goals` (`?archived`, `?q`) | — |
+  | `list_goals` | `/api/goals` (`?projectId`, `?archived`, `?q`, paging) | — | `projectId`, `archived`, `q`, `limit`, `offset`, `after`/`cursor` |
 
-  | `get_goal` | `/api/goals/:goalId` | `goalId` |
+  | `get_goal` | `/api/goals/:goalId` | `goalId` | — |
 
-  | `goal_cost` | `/api/goals/:goalId/cost` | `goalId` |
+  | `goal_cost` | `/api/goals/:goalId/cost` | `goalId` | — |
 
-  | `goal_git_status` | `/api/goals/:goalId/git-status` | `goalId` |
+  | `goal_git_status` | `/api/goals/:goalId/git-status` | `goalId` | — |
 
-  | `goal_commits` | `/api/goals/:goalId/commits` | `goalId` |
+  | `goal_commits` | `/api/goals/:goalId/commits` | `goalId` | — |
 
-  | `goal_pr_status` | `/api/goals/:goalId/pr-status` | `goalId` |
+  | `goal_pr_status` | `/api/goals/:goalId/pr-status` | `goalId` | — |
 
-  | `list_sessions` | `/api/sessions` (`?include`, `?q`, `?projectId`) | — |
+  | `list_sessions` | `/api/sessions` (`?include`, `?q`, `?projectId`, paging) | — | `include`, `q`, `projectId`, `limit`, `offset`, `after`/`cursor` |
 
-  | `get_session` | `/api/sessions/:sessionId` | `sessionId` |
+  | `get_session` | `/api/sessions/:sessionId` | `sessionId` | — |
 
-  | `session_cost` | `/api/sessions/:sessionId/cost` | `sessionId` |
+  | `session_cost` | `/api/sessions/:sessionId/cost` | `sessionId` | — |
 
-  | `search` | `/api/search` (`?q`, `?type`, `?limit`, `?offset`, `?projectId`) | `q` |
+  | `search` | `/api/search` (`?q`, `?type`, `?limit`, `?offset`, `?projectId`) | `q` | `q`, `type`, `projectId`, `limit`, `offset` |
 
-  | `list_projects` | `/api/projects` | — |
+  | `list_projects` | `/api/projects` (paging) | — | `limit`, `offset` |
 
-  | `get_project` | `/api/projects/:projectId` | `projectId` |
+  | `get_project` | `/api/projects/:projectId` | `projectId` | — |
 
-  | `list_workflows` | `/api/workflows` (`?projectId`) | `projectId`* |
+  | `list_workflows` | `/api/workflows` (`?projectId`, paging) | `projectId`* | `projectId`, `limit`, `offset` |
 
-  | `get_workflow` | `/api/workflows/:workflowId` (`?projectId`) | `workflowId` |
+  | `get_workflow` | `/api/workflows/:workflowId` (`?projectId`) | `workflowId` | `projectId` |
 
-  | `list_roles` | `/api/roles` | — |
+  | `list_roles` | `/api/roles` (`?projectId`, paging) | — | `projectId`, `limit`, `offset` |
 
-  | `list_tools` | `/api/tools` (`?projectId`) | — |
+  | `list_tools` | `/api/tools` (`?projectId`, paging) | — | `projectId`, `limit`, `offset` |
 
-  | `list_gates` | `/api/goals/:goalId/gates` (`?view`) | `goalId` |
+  | `list_gates` | `/api/goals/:goalId/gates` (`?view`, paging) | `goalId` | `view`, `limit`, `offset` |
 
-  | `list_tasks` | `/api/goals/:goalId/tasks` (`?view`) | `goalId` |
+  | `list_tasks` | `/api/goals/:goalId/tasks` (`?view`, paging) | `goalId` | `view`, `limit`, `offset` |
 
-  | `get_task` | `/api/tasks/:taskId` | `taskId` |
+  | `get_task` | `/api/tasks/:taskId` | `taskId` | — |
 
-  | `list_staff` | `/api/staff` | — |
+  | `list_staff` | `/api/staff` (`?projectId`, paging) | — | `projectId`, `limit`, `offset` |
 
-  | `list_mcp_servers` | `/api/mcp-servers` | — |
+  | `list_mcp_servers` | `/api/mcp-servers` (`?projectId`, paging) | — | `projectId`, `limit`, `offset` |
 
-  | `maintenance_inspect` | see `probe` below | `probe` |
+  | `maintenance_inspect` | see `probe` below | `probe` | `probe`, supported `projectId`, paging for large array probes |
 
 
   \* `list_workflows` returns an empty list without `projectId` — the gateway
   will not error, but pass `projectId` for a useful result.
 
 
+  ### Semantic filter audit
+
+
+  - `projectId` scopes `list_sessions`, `list_goals`, `list_workflows`,
+  `get_workflow`, `list_roles`, `list_tools`, `list_staff`, `list_mcp_servers`,
+  and supported maintenance probes.
+
+  - `goalId` path-scopes `list_gates` and `list_tasks`; `view` projection is
+  applied before paging.
+
+  - `q` filters `list_sessions`, `list_goals`, and `search`; `type` applies only
+  to `search`.
+
+  - `include` applies only to `list_sessions`; `archived` applies only to
+  `list_goals`.
+
+
   ### `maintenance_inspect` probes (`probe=`)
 
-  `orphaned_worktrees`, `orphaned_sessions`, `expired_archives`,
-  `orphaned_index_rows` (`?projectId`), `worktrees`,
-  `archived_session_worktrees`, `worktree_pool`, `sandbox_pool`,
-  `sandbox_status`, `search_stats` (`?projectId`).
+  `orphaned_worktrees` (paged `worktrees`), `orphaned_sessions` (paged
+  `sessions`), `expired_archives`, `orphaned_index_rows` (`?projectId`, paged
+  `sample`), `worktrees`, `archived_session_worktrees` (paged `worktrees`),
+  `worktree_pool` (`?projectId`), `sandbox_pool`, `sandbox_status`
+  (`?projectId`), `search_stats` (`?projectId`). Scalar/stat probes return
+  unchanged unless they include a large array key.
 
 
   ## Overlap policy (use the dedicated tool instead)
@@ -116,7 +176,10 @@ detail_docs: >-
 
   ## Notes / Gotchas
 
-  - Returns the gateway JSON verbatim; on failure surfaces `{ error, code }`
-  as one readable line including the HTTP status.
+  - List-style operations are bounded by default and include `pagination`.
+  Non-list operations return the gateway JSON unchanged.
+
+  - On failure, the tool surfaces `{ error, code }` as one readable line
+  including the HTTP status.
 
   - No side effects — safe to call freely.
