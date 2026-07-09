@@ -16,8 +16,12 @@
  * Design decisions (see docs/testing-v2/design.md §6):
  *   - One ephemeral git worktree per mutant (isolated, clean after removal)
  *   - Mutation via string-search/replace (more reliable than unified diffs on Windows)
- *   - node_modules junction from primary repo so the ephemeral worktree can
- *     run tests without a full npm install
+ *   - A campaign-scoped "chaos root" under os.tmpdir() holds ONE shared
+ *     node_modules link (junction on Windows / dir symlink on POSIX) to the
+ *     complete toolchain node_modules; every ephemeral worktree is a SIBLING of
+ *     it, so tests resolve modules by walking UP without a full npm install and
+ *     NO node_modules link ever lives inside a throwaway (force-deleted)
+ *     worktree. See docs/testing-v2/node-modules-corruption-rca.md.
  *   - Targeted test runs (seconds per mutant) — never full-suite per mutant
  *   - Null mutant guards harness integrity: both suites must pass
  *   - Full-suite sample for ≥5 random non-null mutants (per spec R8)
