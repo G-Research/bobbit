@@ -66,6 +66,32 @@ describe("ProjectConfigStore — native-YAML migrated fields", () => {
 			const store = new ProjectConfigStore(tmpDir);
 			assert.deepEqual(store.getPackActivation("project", "never-set"), {});
 		});
+
+		// Ships-disabled-by-default explicit-enable sentinel (Part 1).
+		it("persists the `enabled` sentinel and round-trips it across reload", () => {
+			const store = new ProjectConfigStore(tmpDir);
+			store.setPackActivation("server", "pr-walkthrough", { enabled: true });
+			assert.deepEqual(store.getPackActivation("server", "pr-walkthrough"), { enabled: true });
+			// On-disk native YAML carries the sentinel (NOT dropped as "empty").
+			assert.deepEqual(readYaml().pack_activation, { server: { "pr-walkthrough": { enabled: true } } });
+			// Reload preserves the enable (survives restart).
+			const reloaded = new ProjectConfigStore(tmpDir);
+			assert.deepEqual(reloaded.getPackActivation("server", "pr-walkthrough"), { enabled: true });
+		});
+
+		it("keeps the `enabled` sentinel alongside per-entity disable refs", () => {
+			const store = new ProjectConfigStore(tmpDir);
+			store.setPackActivation("server", "pr-walkthrough", { enabled: true, tools: ["pr_walkthrough_bundle"] });
+			assert.deepEqual(store.getPackActivation("server", "pr-walkthrough"), { enabled: true, tools: ["pr_walkthrough_bundle"] });
+		});
+
+		it("clearing the override (disable) drops the `enabled` sentinel back to default", () => {
+			const store = new ProjectConfigStore(tmpDir);
+			store.setPackActivation("server", "pr-walkthrough", { enabled: true });
+			store.setPackActivation("server", "pr-walkthrough", {});
+			assert.deepEqual(store.getPackActivation("server", "pr-walkthrough"), {});
+			assert.equal(readYaml().pack_activation, undefined);
+		});
 	});
 
 	describe("config_directories", () => {

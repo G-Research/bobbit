@@ -52,6 +52,14 @@ export interface PackManifest {
 	schema?: number;
 	author?: string;
 	homepage?: string;
+	/**
+	 * Ships-disabled-by-default flag (built-in first-party packs). When `true`,
+	 * the pack contributes NOTHING unless an explicit enable override is stored
+	 * (`pack_activation … { enabled: true }`). Effectively-OFF =
+	 * `defaultDisabled && enabled !== true` (see `isPackEffectivelyEnabled`).
+	 * Absent/false ⇒ today's behaviour (enabled = absence of a disable override).
+	 */
+	defaultDisabled?: boolean;
 	/** Capability names this pack contributes (schema 2+ metadata). */
 	provides?: string[];
 	/** Capability names this pack depends on (schema 2+ metadata). */

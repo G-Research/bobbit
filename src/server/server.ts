@@ -559,7 +559,7 @@ import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
-import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
@@ -2139,7 +2139,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const effectiveProjectId = normalizeConfigProjectId(projectId);
 		return buildMarketToolRootsForProject({
 			projectId: effectiveProjectId,
-			builtinEntries: builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir)),
+			// Built-in band feeds CONTRIBUTION resolution — drop ships-disabled packs
+			// (e.g. pr-walkthrough default-OFF) so their tool groups never resolve.
+			builtinEntries: activeBuiltinFirstPartyPackEntries(
+				resolveBuiltinPacksDir(config.builtinPacksDir),
+				(packName) => packActivationStore(BUILTIN_PACK_SCOPE, undefined)?.getPackActivation(BUILTIN_PACK_SCOPE, packName),
+			),
 			marketEntries: (scope, pid) => marketPackProvider.marketEntries(scope, pid),
 			disabledTools: (scope, pid, packName) => packActivationStore(scope, pid)?.getPackActivation(scope, packName).tools,
 		});
@@ -2202,7 +2207,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// deduped by resolved path with the same `seen` set, so a user-installed
 		// same-name pack (pushed later from a scope band) still wins when the
 		// registry collapses to one winning pack per packId.
-		for (const e of builtinFirstPartyPackEntries(resolveBuiltinPacksDir(config.builtinPacksDir))) {
+		// Built-in band feeds CONTRIBUTION resolution (providers/entrypoints/routes/
+		// mcp/pi) via PackContributionRegistry — drop ships-disabled packs
+		// (pr-walkthrough default-OFF) so nothing registers until explicitly enabled.
+		for (const e of activeBuiltinFirstPartyPackEntries(
+			resolveBuiltinPacksDir(config.builtinPacksDir),
+			(packName) => packActivationStore(BUILTIN_PACK_SCOPE, undefined)?.getPackActivation(BUILTIN_PACK_SCOPE, packName),
+		)) {
 			const key = path.resolve(e.path);
 			if (seen.has(key)) continue;
 			seen.add(key);
@@ -9229,6 +9240,10 @@ async function handleApiRoute(
 				return Object.keys(out).length > 0 ? out : undefined;
 			};
 			const normalized = {
+				// Explicit-enable sentinel for ships-disabled-by-default packs. Enabling
+				// such a pack persists `{ enabled: true }` (an empty disabled set would
+				// otherwise clear the override and fall back to the default-OFF state).
+				...(reqDisabled.enabled === true ? { enabled: true as const } : {}),
 				roles: normaliseKind("roles", new Set(catalogue.roles)),
 				tools: normaliseKind("tools", new Set(catalogue.tools)),
 				skills: normaliseKind("skills", new Set(catalogue.skills)),
