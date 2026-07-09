@@ -198,6 +198,10 @@
       "type": "smoke-journey"
     },
     {
+      "path": "tests2/browser/journeys/support-launcher.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
       "path": "tests2/browser/journeys/stories-registry.journey.spec.ts",
       "type": "smoke-journey"
     },
