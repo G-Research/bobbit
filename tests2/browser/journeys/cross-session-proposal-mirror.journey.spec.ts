@@ -41,34 +41,6 @@ async function ensureUnifiedProposalReady(page: Page): Promise<void> {
 	}, undefined, { timeout: 20_000 });
 }
 
-async function waitForActiveSessionProjectRoot(page: Page): Promise<void> {
-	await page.waitForFunction(() => {
-		const s = (window as any).bobbitState ?? (window as any).__bobbitState;
-		const projects = Array.isArray(s?.projects) ? s.projects : [];
-		if (projects.length === 0) return false;
-
-		const selectedSessionId = typeof s?.selectedSessionId === "string" ? s.selectedSessionId : "";
-		const routeSessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1] ?? "";
-		const sessionId = selectedSessionId || routeSessionId;
-		if (!sessionId) return false;
-
-		const sessions = [
-			...(Array.isArray(s?.gatewaySessions) ? s.gatewaySessions : []),
-			...(Array.isArray(s?.archivedSessions) ? s.archivedSessions : []),
-		];
-		const session = sessions.find((entry: any) => entry?.id === sessionId);
-		const projectId = session?.projectId || s?.chatPanel?.agentInterface?.projectId;
-		if (typeof projectId !== "string" || projectId.trim() === "") return false;
-
-		const project = projects.find((entry: any) => entry?.id === projectId);
-		return !!project
-			&& project.id !== "headquarters"
-			&& project.kind !== "headquarters"
-			&& typeof project.rootPath === "string"
-			&& project.rootPath.trim() !== "";
-	}, undefined, { timeout: 20_000 });
-}
-
 /**
  * Drive the unified onProposal callback directly — the SAME path a server-pushed
  * `proposal_update {source:"seed"}` frame takes, and the ONLY path a
@@ -189,14 +161,13 @@ test.describe("Journey: cross-session proposal panels populate form-mirror (unif
 		await createSessionViaUI(page);
 		await ensureUnifiedProposalReady(page);
 		await assertNotMatchingAssistant(page, "staff");
-		await waitForActiveSessionProjectRoot(page);
 
 		const fields = {
 			name: "helper-bot",
 			description: "A little helper agent.",
 			prompt: "You are a helpful staff agent.",
 			triggers: '[{"type":"cron","value":"0 9 * * *"}]',
-			cwd: "",
+			cwd: "C:/tmp/bobbit-staff-fixture",
 		};
 		await driveUnifiedProposal(page, "staff", fields, "seed");
 		await activatePanel(page, "Staff", '[data-panel="staff-proposal"]');
@@ -221,7 +192,7 @@ test.describe("Journey: cross-session proposal panels populate form-mirror (unif
 		expect(r.description, "CROSS_SESSION_MIRROR_BUG: staffPreviewDescription not populated").toBe(fields.description);
 		expect(r.prompt, "CROSS_SESSION_MIRROR_BUG: staffPreviewPrompt not populated").toBe(fields.prompt);
 		expect(r.triggers, "CROSS_SESSION_MIRROR_BUG: staffPreviewTriggers not populated").toBe(fields.triggers);
-		expect(r.cwd, "CROSS_SESSION_MIRROR_BUG: staffPreviewCwd not populated (should default to project root)").not.toBe("");
+		expect(r.cwd, "CROSS_SESSION_MIRROR_BUG: staffPreviewCwd not populated from unified onProposal seed path").toBe(fields.cwd);
 		expect(r.submitPresent, "CROSS_SESSION_MIRROR_BUG: staff submit button missing").toBe(true);
 		expect(r.submitDisabled, "CROSS_SESSION_MIRROR_BUG: staff submit disabled — staff form-mirror empty").toBe(false);
 	});
