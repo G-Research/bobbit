@@ -24,6 +24,10 @@
       "reason": "Reproducing test (TDD red) for the 'Fix git widget flash' goal (32cd6b4f): pins the NEW pure module src/app/git-repo-cache.ts — sessionId->'yes'|'no' localStorage cache and computeConnectGitState (cached 'no' => {gitRepoKnown:'no',quietRecheck:true} so no skeleton/loading on reconnect; cached 'yes'/no-entry => {gitRepoKnown:'unknown',quietRecheck:false} so a genuine first check still shows the skeleton), plus prune/cap bounds and broken/absent-localStorage tolerance. FAILS on HEAD (module absent — import cannot resolve), passes post-fix."
     },
     {
+      "path": "tests2/core/git-widget-quiet-refresh.test.ts",
+      "reason": "Integration coverage for the 'Fix git widget flash' goal (32cd6b4f): pins the session-manager quiet-recheck state machine extracted into runWidgetGitRefresh (src/app/git-status-refresh.ts). Asserts (1) a cached-'no' quiet reconnect NEVER writes gitStatusLoading=true, fires exactly one recheck, keeps gitRepoKnown='no' and caches 'no'; (2) when the quiet recheck's onOk fires the repo now exists so gitRepoKnown flips to 'yes', the widget reveals, cache writes 'yes', and loading is cleared in finally; (3) a genuine first-ever check (quiet=false / gitRepoKnown='unknown') DOES set gitStatusLoading=true (skeleton allowed) with one fetch."
+    },
+    {
       "path": "tests2/core/verification-harness-review-reliability.test.ts",
       "reason": "Reproducing test for the 'Fix LLM review reliability' goal: pins per-attempt fresh reviewer session id (transcript not clobbered on retry) and honoring of a verification_result that arrives during teardown (no 404-drop). FAILS on HEAD, passes post-fix. Companion assertions pin the completed-but-missed-tool-call classification (non-transient → no from-scratch re-run) and that within-budget transient failures still retry."
     },

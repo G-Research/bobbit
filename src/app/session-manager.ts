@@ -22,7 +22,7 @@ import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels
 import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
 import { errorDetails } from "./error-helpers.js";
-import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
+import { runWidgetGitRefresh, abortableSleep, type GitWidgetLike } from "./git-status-refresh.js";
 import { computeConnectGitState, setCachedRepoState, pruneGitRepoCache } from "./git-repo-cache.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
@@ -3352,11 +3352,13 @@ async function refreshGitStatusForSession(
 	// run the refresh silently in the background — do NOT flip gitStatusLoading
 	// (which would render the "Checking git…" skeleton) and do NOT reveal the
 	// widget while it stays 'no'. Only an onOk (repo now exists) reveals it.
-	const quiet = opts?.quiet === true && (ai as any).gitRepoKnown === "no";
-	if (!quiet) ai.gitStatusLoading = true;
+	// The loading/visibility/persistence rules live in the DI-friendly
+	// `runWidgetGitRefresh` (git-status-refresh.ts) so they can be unit-tested.
 	gitStatusLastRefreshAt = performance.now();
 
-	await runGitStatusRefresh(ctl.signal, {
+	await runWidgetGitRefresh(ai as unknown as GitWidgetLike, {
+		signal: ctl.signal,
+		quiet: opts?.quiet === true,
 		fetch: (signal) => fetchGitStatus(sessionId, {
 			fetch: opts?.fetch,
 			untracked: opts?.untracked,
@@ -3364,39 +3366,24 @@ async function refreshGitStatusForSession(
 		}),
 		sleep: abortableSleep,
 		isStale: () => activeSessionId() !== sessionId,
-		onOk: (data) => {
-			if (activeSessionId() !== sessionId) return;
-			const next = withUntrackedStatusPreserved(ai.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
-			ai.gitStatus = next as any;
-			ai.partial = !!next.partial;
-			// Repo now exists (quiet recheck may have flipped it from 'no' →
-			// reveals the widget and resumes normal loading/pill behaviour).
-			(ai as any).gitRepoKnown = "yes";
-			if (next.branch) ai.branch = next.branch;
-			setCachedRepoState(sessionId, "yes");
+		applyOk: (widget, data) => {
+			const next = withUntrackedStatusPreserved(widget.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
+			widget.gitStatus = next as any;
+			widget.partial = !!next.partial;
+			if (next.branch) widget.branch = next.branch;
 		},
-		onNotARepo: () => {
-			if (activeSessionId() !== sessionId) return;
-			(ai as any).gitRepoKnown = "no";
-			ai.gitStatus = undefined;
-			setCachedRepoState(sessionId, "no");
-		},
+		onCache: (repoState) => setCachedRepoState(sessionId, repoState),
 		onFinally: () => {
 			if (_gitStatusAborts.get(sessionId) === ctl) _gitStatusAborts.delete(sessionId);
-			if (activeSessionId() !== sessionId) return;
-			// Never surface loading for a quiet recheck that stayed git-less.
-			if (!(quiet && (ai as any).gitRepoKnown === "no")) ai.gitStatusLoading = false;
-			// Final give-up (4 errors in a row) — leave gitRepoKnown unchanged,
-			// leave last-known data in place, log once.
-			if ((ai as any).gitRepoKnown === "unknown" && !ai.gitStatus) {
-				// Only warn on a full miss; successful attempts short-circuit earlier.
-				// Note: we only reach here if all attempts errored or were aborted.
-				if (!ctl.signal.aborted) {
-					console.warn("[git-status] refresh failed after retries", { sessionId });
-				}
-			}
 		},
 	});
+
+	// Final give-up (4 errors in a row) — leave gitRepoKnown unchanged, leave
+	// last-known data in place, log once. Successful attempts short-circuit
+	// earlier; we only reach here on a full miss.
+	if (activeSessionId() === sessionId && (ai as any).gitRepoKnown === "unknown" && !ai.gitStatus && !ctl.signal.aborted) {
+		console.warn("[git-status] refresh failed after retries", { sessionId });
+	}
 
 	refreshPrStatusForSession(sessionId);
 }
