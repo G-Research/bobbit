@@ -1921,24 +1921,50 @@ export class SessionManager {
 		return scopedToken;
 	}
 
+	/**
+	 * Set gateway credentials on restore/revive/respawn for NON-sandboxed (direct)
+	 * agents. Deliberate interim rollback (pre-HQ-split behaviour): direct agents
+	 * receive the gateway ADMIN token rather than a per-project scoped token. A
+	 * host-resident direct agent already runs as the host user and can read the
+	 * admin token off disk, so this grants no new capability — it only removes the
+	 * functional friction where direct agents 403 on gateway-wide routes. The
+	 * scoped-token boundary that still matters is preserved for sandboxed agents
+	 * (see applySandboxWiring). Pending a policy-driven session-authenticated auth
+	 * model, specced separately. sessionId/projectId/goalId are retained to avoid
+	 * churning call sites.
+	 */
 	private applyScopedGatewayCredentials(
 		bridgeOptions: RpcBridgeOptions,
-		sessionId: string,
-		projectId: string | undefined,
-		goalId?: string,
+		_sessionId: string,
+		_projectId: string | undefined,
+		_goalId?: string,
 	): void {
 		const gwUrl = this.readGatewayUrlForAgent();
 		if (gwUrl) bridgeOptions.gatewayUrl = gwUrl;
-		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
-		if (scopedToken) bridgeOptions.gatewayToken = scopedToken;
+		const adminToken = readToken();
+		if (adminToken === null) throw new Error("Cannot read gateway admin token for direct agent");
+		bridgeOptions.gatewayToken = adminToken;
 	}
 
-	private scopedGatewayEnvForDirectAgent(sessionId: string, projectId: string | undefined, goalId?: string): Record<string, string> | undefined {
+	/**
+	 * Build the launch env for a NON-sandboxed (direct) agent. Deliberate interim
+	 * rollback (pre-HQ-split behaviour): direct agents receive the gateway ADMIN
+	 * token rather than a per-project scoped token. A host-resident direct agent
+	 * already runs as the host user and can read the admin token off disk, so this
+	 * grants no new capability — it only removes the functional friction where
+	 * direct agents 403 on gateway-wide routes. The scoped-token boundary that
+	 * still matters is preserved for sandboxed agents (see applySandboxWiring).
+	 * Pending a policy-driven session-authenticated auth model, specced
+	 * separately. sessionId/projectId/goalId are retained to avoid churning call
+	 * sites.
+	 */
+	private scopedGatewayEnvForDirectAgent(_sessionId: string, _projectId: string | undefined, _goalId?: string): Record<string, string> | undefined {
 		const env: Record<string, string> = {};
 		const gwUrl = this.readGatewayUrlForAgent();
 		if (gwUrl) env.BOBBIT_GATEWAY_URL = gwUrl;
-		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, goalId);
-		if (scopedToken) env.BOBBIT_TOKEN = scopedToken;
+		const adminToken = readToken();
+		if (adminToken === null) throw new Error("Cannot read gateway admin token for direct agent");
+		env.BOBBIT_TOKEN = adminToken;
 		return Object.keys(env).length > 0 ? env : undefined;
 	}
 

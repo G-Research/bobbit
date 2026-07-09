@@ -174,6 +174,29 @@ Internal / UI-only endpoints (side-panel workspace, review annotations, preview
 mounts, `ext/*` pack surfaces, provider-hooks, proposal drafts, bg-processes)
 are deliberately out of scope.
 
+## Auth: direct vs sandboxed agents (interim rollback)
+
+The token an agent presents to the gateway depends on where it runs:
+
+- **Non-sandboxed ("direct") agents** run directly on the host as the host user
+  and receive the gateway **admin token** as `BOBBIT_TOKEN`. This is a
+  deliberate **interim rollback** to the pre-HQ-split behaviour: a host-resident
+  agent can already read the admin token off disk (`serverSecretsDir()/token`),
+  so handing it over grants no new capability — it just removes the functional
+  friction where direct agents used to 403 with *"sandbox token cannot access
+  this endpoint"* on gateway-wide routes (`bobbit_read`/`bobbit_orchestrate`/
+  `bobbit_admin`, cross-project `read_session`). Wired in
+  `SessionManager.scopedGatewayEnvForDirectAgent` / `applyScopedGatewayCredentials`.
+- **Sandboxed (Docker) agents** are unchanged: they receive a per-project
+  **scoped token** (`SandboxTokenStore` + `mintScopedGatewayToken`) confined by
+  the `isSandboxAllowed()` route whitelist. The admin token is never injected
+  into the container. This is a real security boundary and must stay.
+
+This direct-agent admin-token behaviour is a stop-gap. The longer-term
+direction is a policy-driven, session-authenticated model where the tool's
+grant policy is the authority and the admin token never leaves the server
+(specced separately).
+
 ## Result and error shape
 
 - **Success** — the tool returns the gateway's JSON verbatim.
