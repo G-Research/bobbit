@@ -739,17 +739,23 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	applyDisabledToolsFilter(plan, disabledTools);
 
 	if (assistantDef) {
-		// Assistant sessions (goal/role/tool/support assistants)
-		const assistantRole = lookupRole(assistantRoleForType(plan.assistantType), plan, ctx);
-		let assistantGoalSpec = "";
-		if (assistantRole?.promptTemplate) {
-			assistantGoalSpec = assistantRole.promptTemplate.replace(
+		// Assistant sessions (goal/role/tool/staff/project/support assistants).
+		// The backing role (support -> `support`, else -> advisor `assistant`) is
+		// rendered as its OWN dedicated "Role" section via rolePrompt/roleName
+		// below — NOT folded into the "Goal" section. `assistantRoleForType` stays
+		// the single source of truth for the assistant-type -> role mapping.
+		const resolvedRoleName = assistantRoleForType(plan.assistantType);
+		const assistantRole = lookupRole(resolvedRoleName, plan, ctx);
+		const assistantRolePrompt = assistantRole?.promptTemplate
+			? assistantRole.promptTemplate.replace(
 				/\{\{AGENT_ID\}\}/g,
 				`assistant-${(plan.goalId || plan.id).slice(0, 8)}`,
-			);
-			assistantGoalSpec += "\n\n---\n\n";
-		}
-		assistantGoalSpec += assistantDef.prompt;
+			)
+			: undefined;
+		// The Goal section carries ONLY the assistant-specific prompt (with its
+		// own substitutions applied below); the role template lives solely in the
+		// Role section, so it is never emitted twice.
+		let assistantGoalSpec = assistantDef.prompt;
 		if (plan.assistantType === "goal") {
 			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList(plan.projectId));
 			if (plan.reattemptGoalId) {
@@ -769,6 +775,12 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, {
 			subGoalsEnabled: ctx.groupPolicyStore?.getSubgoalsEnabled?.() ?? false,
 		});
+
+		// Enforce the backing role's tool policies via the activation cascade:
+		// resolveToolActivation keys off plan.roleName (support gains
+		// bobbit_orchestrate:allow / bobbit_admin:ask; the advisor `assistant`
+		// role has empty toolPolicies -> no behavioural change for the others).
+		plan.roleName = resolvedRoleName;
 
 		// Use assistant role's tool restrictions
 		if (assistantRole && ctx.toolManager) {
@@ -790,6 +802,10 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			goalSpec: assistantGoalSpec,
 			goalTitle: assistantDef.promptTitle,
 			goalState: "active",
+			// Emit the backing role's promptTemplate as a dedicated "Role" section
+			// (source: "Role: <roleName>"), matching the normal/delegate branches.
+			rolePrompt: assistantRolePrompt,
+			roleName: resolvedRoleName,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			sectionOrder,
@@ -1485,7 +1501,10 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	const session: SessionInfo = {
 		id: plan.id,
-		title: assistantDef?.title ?? (plan.mode === "delegate"
+		// Assistant sessions start with the type's short titlePrefix (e.g.
+		// "New Goal", "Support"); after the first genuine user message
+		// tryGenerateTitleFromPrompt renames to "<titlePrefix>: <summary>".
+		title: assistantDef?.titlePrefix ?? (plan.mode === "delegate"
 			? `⚡${plan.title}`
 			: plan.title),
 		cwd: effectiveCwd,
@@ -1502,7 +1521,10 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		// "PR Walkthrough") must NOT be clobbered by first-prompt auto-title generation
 		// (tryGenerateTitleFromPrompt skips when titleGenerated is true). createSession
 		// defaults plan.title to "New session", so any other value is a deliberate title.
-		titleGenerated: !!assistantDef || plan.mode === "delegate" || (!!plan.title && plan.title !== "New session"),
+		// Assistant sessions are NOT force-marked generated: they keep their bare
+		// titlePrefix until the first genuine user message renames them
+		// "<titlePrefix>: <summary>" (the auto-kickoff prompt is suppressed).
+		titleGenerated: plan.mode === "delegate" || (!!plan.title && plan.title !== "New session"),
 		goalId: plan.goalId,
 		teamGoalId: plan.teamGoalId,
 		teamLeadSessionId: plan.teamLeadSessionId,

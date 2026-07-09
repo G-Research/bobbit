@@ -1533,6 +1533,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			tool: "Start the tool assistant session. Help me document, improve, or create tools.",
 			staff: "Start the staff agent creation session.",
 			setup: "Start the project setup session.",
+			support: "Start the support session.",
 		};
 		if (options?.assistantType && !isExisting) {
 			let autoPrompt: string | undefined;
@@ -1554,7 +1555,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else {
 				autoPrompt = AUTO_PROMPTS[options.assistantType];
 			}
-			if (autoPrompt) remote.prompt(autoPrompt);
+			// The kickoff is the assistant's FIRST message. Flag it non-title-generating
+			// so auto-naming keys off the first GENUINE user message, not the kickoff.
+			if (autoPrompt) remote.prompt(autoPrompt, undefined, { suppressTitleGen: true });
 		}
 
 		// Apply restored model (already resolved or resolving in parallel)
