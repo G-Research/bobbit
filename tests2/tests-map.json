@@ -86,6 +86,10 @@
     {
       "path": "tests2/core/session-mcp-projectless-fail-closed.test.ts",
       "reason": "Split-port of tests/headquarters-server-scope-guards.test.ts (projectless-session MCP fail-closed pure-unit case); that file's primary v2Path is tests2/integration/headquarters-server-scope-guards.test.ts, so this second port is tracked here to avoid an orphan."
+    },
+    {
+      "path": "tests2/core/build-workflow-list.test.ts",
+      "reason": "Pins buildWorkflowListText (extracted from SessionManager._buildWorkflowList): the workflowless empty branch must not forbid propose_goal and must mention the inline-workflow escape hatch, mirroring the UI guard, propose_goal contract, and goal-manager backstop."
     }
   ],
   "journeys": [
