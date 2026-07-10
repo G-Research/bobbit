@@ -1,4 +1,4 @@
-import type { PromptSource } from "./session-manager.js";
+import type { ErroredPromptRecoveryDecision, PromptSource } from "./session-manager.js";
 
 export type SessionPromptMode = "prompt" | "steer";
 
@@ -7,6 +7,7 @@ export interface DeliverableSessionLike {
 	status: string;
 	nonInteractive?: boolean;
 	title?: string;
+	lastTurnErrored?: boolean;
 }
 
 export interface DeliverSessionPromptDeps {
@@ -17,6 +18,13 @@ export interface DeliverSessionPromptDeps {
 		opts?: { isSteered?: boolean; source?: PromptSource },
 	): Promise<{ status: "dispatched" | "queued" }>;
 	deliverLiveSteer(id: string, message: string, opts?: { source?: PromptSource }): Promise<unknown>;
+	getErroredPromptRecoveryDecision?(id: string): ErroredPromptRecoveryDecision;
+	enqueuePromptForRetryRecovery?(
+		id: string,
+		message: string,
+		opts?: { isSteered?: boolean; source?: PromptSource },
+	): Promise<{ status: "queued"; queuedId?: string }> | { status: "queued"; queuedId?: string };
+	retryLastPrompt?(id: string, opts?: { auto?: boolean; preserveQueueIds?: string[] }): Promise<void>;
 }
 
 export interface DeliverSessionPromptOptions {
@@ -31,8 +39,16 @@ export interface DeliverSessionPromptTarget {
 	title?: string;
 }
 
+export type DeliverSessionPromptRecovery = {
+	status: "recovered";
+	reason: ErroredPromptRecoveryDecision["reason"];
+	queued: true;
+	queuedId?: string;
+};
+
 export type DeliverSessionPromptResult =
 	| { ok: true; mode: SessionPromptMode; status: "dispatched" | "queued"; target: DeliverSessionPromptTarget }
+	| { ok: true; mode: SessionPromptMode; status: "recovered"; recovered: true; recovery: DeliverSessionPromptRecovery; target: DeliverSessionPromptTarget }
 	| { ok: true; mode: SessionPromptMode; dispatched: true; target: DeliverSessionPromptTarget };
 
 export class SessionPromptDeliveryError extends Error {
@@ -46,6 +62,14 @@ export function parseSessionPromptMode(value: unknown, defaultMode: SessionPromp
 	const mode = value ?? defaultMode;
 	if (mode === "prompt" || mode === "steer") return mode;
 	throw new SessionPromptDeliveryError("Invalid mode. Must be 'prompt' or 'steer'.", "INVALID_MODE", 400);
+}
+
+function canRecoverErroredPrompt(deps: DeliverSessionPromptDeps): boolean {
+	return !!deps.getErroredPromptRecoveryDecision && !!deps.enqueuePromptForRetryRecovery && !!deps.retryLastPrompt;
+}
+
+function recoveryBlockedMessage(decision: Exclude<ErroredPromptRecoveryDecision, { recoverable: true }>): string {
+	return `Cannot recover errored session prompt automatically: ${decision.message}`;
 }
 
 export async function deliverSessionPrompt(
@@ -67,24 +91,20 @@ export async function deliverSessionPrompt(
 		target.title = session.title;
 	}
 
-	if (mode === "prompt") {
-		if (session.nonInteractive && !opts.allowPromptNonInteractive) {
-			throw new SessionPromptDeliveryError(
-				"Cannot prompt a non-interactive (automated review) session.",
-				"NON_INTERACTIVE_PROMPT",
-				400,
-			);
-		}
-		const result = await deps.enqueuePrompt(sessionId, message, { source: opts.source });
-		return { ok: true, mode, status: result.status, target };
+	if (mode === "prompt" && session.nonInteractive && !opts.allowPromptNonInteractive) {
+		throw new SessionPromptDeliveryError(
+			"Cannot prompt a non-interactive (automated review) session.",
+			"NON_INTERACTIVE_PROMPT",
+			400,
+		);
 	}
 
-	if (session.status === "streaming") {
+	if (mode === "steer" && session.status === "streaming") {
 		await deps.deliverLiveSteer(sessionId, message, { source: opts.source });
 		return { ok: true, mode, dispatched: true, target };
 	}
 
-	if (session.nonInteractive) {
+	if (mode === "steer" && session.nonInteractive) {
 		throw new SessionPromptDeliveryError(
 			"Cannot enqueue a steered prompt for a non-interactive (automated review) session; steer can only redirect it while streaming.",
 			"NON_INTERACTIVE_STEER",
@@ -92,6 +112,31 @@ export async function deliverSessionPrompt(
 		);
 	}
 
-	const result = await deps.enqueuePrompt(sessionId, message, { isSteered: true, source: opts.source });
+	if (session.status === "idle" && session.lastTurnErrored && canRecoverErroredPrompt(deps)) {
+		const recovery = deps.getErroredPromptRecoveryDecision!(sessionId);
+		if (!recovery.recoverable) {
+			throw new SessionPromptDeliveryError(recoveryBlockedMessage(recovery), "PROMPT_RECOVERY_BLOCKED", 409);
+		}
+		const queued = await deps.enqueuePromptForRetryRecovery!(sessionId, message, {
+			isSteered: mode === "steer",
+			source: opts.source,
+		});
+		await deps.retryLastPrompt!(sessionId, { auto: true, preserveQueueIds: queued.queuedId ? [queued.queuedId] : undefined });
+		return {
+			ok: true,
+			mode,
+			status: "recovered",
+			recovered: true,
+			recovery: {
+				status: "recovered",
+				reason: recovery.reason,
+				queued: true,
+				...(queued.queuedId ? { queuedId: queued.queuedId } : {}),
+			},
+			target,
+		};
+	}
+
+	const result = await deps.enqueuePrompt(sessionId, message, { isSteered: mode === "steer", source: opts.source });
 	return { ok: true, mode, status: result.status, target };
 }

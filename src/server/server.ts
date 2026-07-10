@@ -11965,6 +11965,9 @@ async function handleApiRoute(
 					getSession: (id) => sessionManager.getSession(id),
 					enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
 					deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
+					getErroredPromptRecoveryDecision: (id) => sessionManager.getErroredPromptRecoveryDecision(id),
+					enqueuePromptForRetryRecovery: (id, text, opts) => sessionManager.enqueuePromptForRetryRecovery(id, text, opts),
+					retryLastPrompt: (id, opts) => sessionManager.retryLastPrompt(id, opts),
 				}, body.sessionId, message, { mode, defaultMode: "steer" });
 			json(result);
 		} catch (err) {
@@ -12378,6 +12381,9 @@ async function handleApiRoute(
 				getSession: (id) => sessionManager.getSession(id),
 				enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
 				deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
+				getErroredPromptRecoveryDecision: (id) => sessionManager.getErroredPromptRecoveryDecision(id),
+				enqueuePromptForRetryRecovery: (id, text, opts) => sessionManager.enqueuePromptForRetryRecovery(id, text, opts),
+				retryLastPrompt: (id, opts) => sessionManager.retryLastPrompt(id, opts),
 			}, targetSessionId, body.message, { mode: body.mode, defaultMode: "prompt" });
 			json(result);
 		} catch (err) {
