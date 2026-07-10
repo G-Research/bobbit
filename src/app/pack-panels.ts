@@ -19,7 +19,7 @@
 // For every pack contribution row it registers each panel keyed by
 // `{packId, panelId}`. `openPackPanel(target, callerPackId)` stays PACK-RELATIVE:
 // the caller surface's bound packId resolves `panelId` → `{packId, panelId}`,
-// lazily imports the panel module through a Blob URL (authed via gatewayFetch —
+// lazily imports the panel module from fetched bytes (authed via gatewayFetch —
 // the bare module URL would not carry the bearer), invokes its default factory
 // handing it the host's own lit toolkit, caches the resulting panel, and
 // mounts/focuses a side-panel tab whose content the render layer pulls by
@@ -28,6 +28,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
+import { importJavaScriptModuleBlob } from "./javascript-module-import.js";
 import { fetchContributions, type PackContributionsWire } from "./api.js";
 import { state, renderApp } from "./state.js";
 import {
@@ -303,8 +304,8 @@ export function panelInfosFromContributions(packs: ReadonlyArray<PackContributio
 
 /**
  * Lazy-load a panel module by `{packId, panelId}`: fetch the pre-built ESM bytes
- * from the pack-addressed bearer-only serving endpoint, import them via a Blob URL
- * (`/* @vite-ignore *​/` so Vite does not pre-bundle a runtime URL), invoke the
+ * from the pack-addressed bearer-only serving endpoint, import them as an ESM
+ * module (Blob URL in browsers; data URL in Node-backed Vitest), invoke the
  * default factory with the host toolkit, and cache the resulting panel.
  * Generation-guarded: a load superseded by a re-register/uninstall while in flight
  * does not write the cache.
@@ -320,24 +321,19 @@ function loadPanelModule(key: string, reg: RegisteredPanel): Promise<PackPanel |
 		const resp = await gatewayFetch(url); // authed (admin bearer); static-asset-equivalent
 		if (!resp.ok) throw new Error(`panel ${reg.packId}/${reg.panelId} HTTP ${resp.status}`);
 		const blob = await resp.blob();
-		const objUrl = URL.createObjectURL(blob.slice(0, blob.size, "text/javascript"));
-		try {
-			const mod = await import(/* @vite-ignore */ objUrl);
-			const factory = (mod as { default?: unknown; createPanel?: unknown }).default
-				?? (mod as { createPanel?: unknown }).createPanel;
-			if (typeof factory !== "function") throw new Error("panel module has no factory export");
-			const out = (factory as PackPanelFactory)(HOST_TOOLKIT);
-			const panel = (out && typeof out === "object" && "default" in out ? out.default : out) as PackPanel;
-			// Generation guard: only cache if not superseded while in flight.
-			if ((loadGeneration.get(key) ?? 0) === gen) {
-				loadedPanels.set(key, panel);
-				// Repaint so a mounted pack-panel tab swaps the placeholder for content.
-				try { renderApp(); } catch { /* non-DOM (unit fixtures) */ }
-			}
-			return panel;
-		} finally {
-			URL.revokeObjectURL(objUrl);
+		const mod = await importJavaScriptModuleBlob(blob);
+		const factory = (mod as { default?: unknown; createPanel?: unknown }).default
+			?? (mod as { createPanel?: unknown }).createPanel;
+		if (typeof factory !== "function") throw new Error("panel module has no factory export");
+		const out = (factory as PackPanelFactory)(HOST_TOOLKIT);
+		const panel = (out && typeof out === "object" && "default" in out ? out.default : out) as PackPanel;
+		// Generation guard: only cache if not superseded while in flight.
+		if ((loadGeneration.get(key) ?? 0) === gen) {
+			loadedPanels.set(key, panel);
+			// Repaint so a mounted pack-panel tab swaps the placeholder for content.
+			try { renderApp(); } catch { /* non-DOM (unit fixtures) */ }
 		}
+		return panel;
 	})()
 		.catch((err) => {
 			// eslint-disable-next-line no-console
