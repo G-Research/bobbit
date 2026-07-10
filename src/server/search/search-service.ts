@@ -499,7 +499,7 @@ export class SearchService {
 			offset: opts.offset,
 			projectId: opts.projectId,
 			types,
-			includeArchived: opts.includeArchived ?? true,
+			includeArchived: opts.includeArchived ?? false,
 		});
 
 		if (opts.projectNames) {

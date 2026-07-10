@@ -63,13 +63,25 @@ The controlled policy covers explicit text-session model bindings across the ses
 
 Spawn-pinned and inherited models are treated as explicit because they represent a previous user or caller selection. Bobbit verifies the model reported by the agent before the session becomes idle/live. If verification fails, the same controlled fallback rules apply.
 
+## Runtime model picker reconciliation
+
+The session model picker uses the same explicit-binding contract as startup and role/review overrides. The picker path requests `setModel`, then verifies the agent-reported model with a short bounded read-back retry. This covers agents that apply `setModel` slightly asynchronously while preserving the hard failure for a real read-back mismatch.
+
+After any picker attempt, the displayed model must converge to server-confirmed state:
+
+- On success, the server persists the verified model and broadcasts a `state` frame with the bound model metadata.
+- If controlled fallback succeeds, that `state` frame names the verified `default.sessionModel` target, not the originally selected model.
+- On failure, the server first broadcasts the actual bound model from `getState()`; if the agent state is unavailable, it falls back to the persisted session model. It then sends `SET_MODEL_FAILED` so the UI can show the error without leaving the optimistic selection stranded.
+
+The browser may render the selected row optimistically while the request is in flight, but durable per-session model storage is updated only from server `state` frames. A `SET_MODEL_FAILED` error also triggers a fresh `get_state` request as a reconciliation fallback. The picker/footer therefore reflect the last server-confirmed model, never a failed optimistic choice.
+
 ## Persistence and visibility
 
 Bobbit persists and displays only the model that was actually verified in the running agent:
 
 - If the selected model succeeds, persisted state remains the selected model.
 - If controlled fallback succeeds, persisted state and the UI model state are updated to the verified `default.sessionModel` target.
-- If fallback is rejected or fails, Bobbit does not persist a replacement model.
+- If fallback is rejected or fails, Bobbit does not persist a replacement model, and the UI is reconciled back to the actual bound model.
 
 Fallback attempts are logged with the failed selected model, the fact that controlled fallback was enabled, and the `default.sessionModel` target. Successful fallback also logs that the session is running on `default.sessionModel` because the selected model failed.
 
@@ -91,7 +103,8 @@ Image generation uses the session image-model selector and `default.imageModel`.
 
 - Session startup, restore, respawn, fork, continue, and spawn-pinned verification: `src/server/agent/session-manager.ts` and `src/server/agent/session-setup.ts`.
 - Shared hard-fail/read-back/fallback binding helper for role and review models: `src/server/agent/review-model-override.ts`.
-- Runtime picker changes: `src/server/ws/runtime-model-selection.ts`.
+- Runtime picker binding and failure reconciliation: `src/server/ws/runtime-model-selection.ts` and the `set_model` branch in `src/server/ws/handler.ts`.
+- Client reconciliation and confirmed-state persistence: `src/app/remote-agent.ts` and `src/app/session-manager.ts`.
 - Settings UI: `src/app/settings-page.ts`.
 - Regression coverage: `tests/controlled-model-fallback.test.ts`, `tests/model-error-redaction.test.ts`, and `tests/e2e/ui/settings-model-fallback.spec.ts`.
 

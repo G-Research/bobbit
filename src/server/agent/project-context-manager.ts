@@ -179,6 +179,7 @@ export class ProjectContextManager {
       offset?: number;
       projectId?: string;
       projectNames?: Map<string, string>;
+      includeArchived?: boolean;
     } = {},
   ): Promise<SearchResults> {
     const rawResults: SearchResult[] = [];
@@ -201,6 +202,7 @@ export class ProjectContextManager {
         offset: 0,
         projectId: undefined, // Already filtered above
         projectNames: opts.projectNames,
+        includeArchived: opts.includeArchived ?? false,
       });
       const { results } = out instanceof Promise ? await out : out;
 

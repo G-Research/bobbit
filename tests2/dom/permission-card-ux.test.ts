@@ -7,6 +7,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import "../../src/app/session-manager.js";
 import { setRenderApp } from "../../src/app/state.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
+import { ensureBgProcessPill, ensureContinueSessionChooser, ensureCostPopover, ensureGitStatusWidget, ensureGoalStatusWidget } from "../../src/app/lazy-widgets.js";
 import "../../src/ui/components/AgentInterface.js";
 import "../../src/ui/components/MessageList.js";
 import "../../src/ui/components/Messages.js";
@@ -14,7 +15,14 @@ import "../../src/ui/components/ToolPermissionCard.js";
 
 setRenderApp(() => {});
 
-beforeAll(() => {
+beforeAll(async () => {
+	await Promise.all([
+		ensureGitStatusWidget(),
+		ensureGoalStatusWidget(),
+		ensureBgProcessPill(),
+		ensureCostPopover(),
+		ensureContinueSessionChooser(),
+	]);
 	if (!(globalThis as any).ResizeObserver) {
 		(globalThis as any).ResizeObserver = class ResizeObserver {
 			observe() {}

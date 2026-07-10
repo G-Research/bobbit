@@ -865,7 +865,7 @@ async function fetchArchivedSearchSessionsPage(limit: number, afterCursor: numbe
 
 export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<{ results: any[]; total: number }> {
 	try {
-		const params = new URLSearchParams({ q: query });
+		const params = new URLSearchParams({ q: query, includeArchived: "true" });
 		if (type && type !== "all") params.set("type", type);
 		if (limit !== undefined) params.set("limit", String(limit));
 		if (offset !== undefined) params.set("offset", String(offset));

@@ -1888,7 +1888,7 @@ These drive the **search status dot** (`src/app/components/search-status-dot.ts`
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/search?q=...&projectId=...&type=...&limit=...&offset=...` | Hybrid query. `projectId` omitted → search across all projects. Results include `projectId`/`projectName`. Returns **503** when the service is disabled. |
+| `GET /api/search?q=...&projectId=...&type=...&limit=...&offset=...&includeArchived=...` | Hybrid query. `projectId` omitted → search across all projects. Archived rows are excluded unless `includeArchived=true` or `include=archived` is supplied. Results include `projectId`/`projectName`. Returns **503** when the service is disabled. |
 | `POST /api/search/rebuild?projectId=...` | Kick off a full rebuild. Runs in background; progress via WS. |
 | `GET /api/search/stats?projectId=...` | Service state, engine name + version, per-source row counts, dataset size on disk, last rebuild timestamp. **400** if `projectId` missing; **503** if disabled. |
 | `POST /api/search/compact?projectId=...` | No-op under FlexSearch. Retained for API compatibility so older clients don't 404; always returns `{ ok: true }`. |
@@ -1907,7 +1907,7 @@ Indexes are a rebuildable cache; the source-of-truth stores repopulate automatic
 
 **1. Filter mode (sidebar):** Live sessions, live goals, staff, and already-loaded archived rows are filtered instantly in the browser using case-insensitive substring matching on goal titles, session titles/roles, and staff names. Archived full-corpus lookup is the exception: when the sidebar query is non-empty and archived rows are visible or auto-opened, the client debounces `q`-backed calls to the archived sessions/goals endpoints so matches beyond the first archive page can appear without loading non-matching pages. Archived sections auto-open for search and auto-collapse when the query is cleared if search opened them. A "Full Search" link navigates to the full search page with the current query. Key files: `src/ui/components/SearchBox.ts`, `src/app/sidebar.ts`, and `src/app/api.ts`; detailed behavior is in [Sidebar Archived Search](sidebar-archived-search.md).
 
-**2. Full search page (`#/search`):** The sole consumer of `GET /api/search` / the FTS index. Large auto-focused input, type filter toggles (Goals, Sessions, Staff, Messages), grouped results with `<b>`-highlighted snippets, relative timestamps, archived badges, and "Load More" pagination. Key file: `search-page.ts`.
+**2. Full search page (`#/search`):** The sole UI consumer of `GET /api/search` / the FTS index. It explicitly sends `includeArchived=true` so archived results and badges remain visible, while agent-facing `bobbit_read.search` remains live-only by default. Large auto-focused input, type filter toggles (Goals, Sessions, Staff, Messages), grouped results with `<b>`-highlighted snippets, relative timestamps, archived badges, and "Load More" pagination. Key file: `search-page.ts`.
 
 > **Design note - gate content:** Gate content (design specs, review findings) is not currently indexed. Tracked for future work; adding it requires bumping `SCHEMA_VERSION` or `CONTENT_POLICY_VERSION` to force a rebuild.
 

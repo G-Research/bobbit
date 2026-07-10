@@ -59,6 +59,8 @@ interface OpSpec {
 	buildBody?: (p: Params) => unknown;
 	/** Param names that must be present (non-empty) before dispatch. */
 	required: string[];
+	/** Optional response sanitizer applied before tool pagination. */
+	postProcess?: (data: unknown, params: Params) => unknown;
 	/** Optional tool-output pagination for list-style read operations. */
 	page?: PageSpec | ((p: Params) => PageSpec | undefined);
 }
@@ -227,6 +229,63 @@ function pageResult(data: unknown, params: Params, spec: PageSpec): unknown {
 	};
 }
 
+function includeHasArchived(include: unknown): boolean {
+	return String(include ?? "")
+		.split(",")
+		.some((part) => part.trim() === "archived");
+}
+
+/** True for boolean `true` or a case-insensitive "true" string (query params arrive as strings). */
+function isTruthyFlag(value: unknown): boolean {
+	return value === true || String(value ?? "").toLowerCase() === "true";
+}
+
+function searchIncludesArchived(params: Params): boolean {
+	return isTruthyFlag(params.includeArchived) || includeHasArchived(params.include);
+}
+
+function isArchivedRow(row: unknown): boolean {
+	return Boolean(row && typeof row === "object" && (row as Record<string, unknown>).archived === true);
+}
+
+/**
+ * Decrement a `total` counter, but ONLY when it counted exactly the array we
+ * just filtered (full-list responses where total === array length). For
+ * REST-paginated responses `total` is a grand total spanning pages, so
+ * subtracting page-level removals would corrupt it — and the downstream
+ * hasMore/nextOffset math derived from it. In that case leave `total` untouched.
+ */
+function adjustFullListTotal(container: Record<string, unknown>, originalLength: number, removed: number): void {
+	const total = container.total;
+	if (typeof total === "number" && Number.isFinite(total) && total === originalLength) {
+		container.total = Math.max(0, total - removed);
+	}
+}
+
+function filterArchivedRows(data: unknown, itemKey: string, stripKeys: string[] = []): unknown {
+	if (Array.isArray(data)) return data.filter((row) => !isArchivedRow(row));
+	if (!data || typeof data !== "object") return data;
+
+	const source = data as Record<string, unknown>;
+	const rows = source[itemKey];
+	const out: Record<string, unknown> = { ...source };
+	if (Array.isArray(rows)) {
+		const filtered = rows.filter((row) => !isArchivedRow(row));
+		const removed = rows.length - filtered.length;
+		out[itemKey] = filtered;
+		if (removed > 0) {
+			adjustFullListTotal(out, rows.length, removed);
+			if (out.pagination && typeof out.pagination === "object" && !Array.isArray(out.pagination)) {
+				const pagination = { ...(out.pagination as Record<string, unknown>) };
+				adjustFullListTotal(pagination, rows.length, removed);
+				out.pagination = pagination;
+			}
+		}
+	}
+	for (const key of stripKeys) delete out[key];
+	return out;
+}
+
 // GET-only maintenance probes for bobbit_read.maintenance_inspect.
 const PROBE_PATHS: Record<string, string> = {
 	orphaned_worktrees: "/api/maintenance/orphaned-worktrees",
@@ -269,10 +328,11 @@ const READ_OPS: Record<string, OpSpec> = {
 		method: "GET",
 		buildPath: (p) => appendPagingQuery("/api/goals", [["archived", p.archived], ["q", p.q], ["projectId", p.projectId]], p, {
 			itemKey: "goals",
-			cursor: (params) => params.archived === true || params.archived === "true",
+			cursor: (params) => isTruthyFlag(params.archived),
 		}),
 		required: [],
-		page: (p) => ({ itemKey: "goals", cursor: p.archived === true || p.archived === "true" }),
+		postProcess: (data, p) => isTruthyFlag(p.archived) ? data : filterArchivedRows(data, "goals", ["archivedSessions"]),
+		page: (p) => ({ itemKey: "goals", cursor: isTruthyFlag(p.archived) }),
 	},
 	get_goal: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}`, required: ["goalId"] },
 	goal_cost: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}/cost`, required: ["goalId"] },
@@ -283,21 +343,23 @@ const READ_OPS: Record<string, OpSpec> = {
 		method: "GET",
 		buildPath: (p) => appendPagingQuery("/api/sessions", [["include", p.include], ["q", p.q], ["projectId", p.projectId]], p, {
 			itemKey: "sessions",
-			cursor: (params) => String(params.include ?? "").split(",").includes("archived"),
+			cursor: (params) => includeHasArchived(params.include),
 		}),
 		required: [],
-		page: (p) => ({ itemKey: "sessions", cursor: String(p.include ?? "").split(",").includes("archived") }),
+		postProcess: (data, p) => includeHasArchived(p.include) ? data : filterArchivedRows(data, "sessions", ["archivedDelegates"]),
+		page: (p) => ({ itemKey: "sessions", cursor: includeHasArchived(p.include) }),
 	},
 	get_session: { method: "GET", buildPath: (p) => `/api/sessions/${p.sessionId}`, required: ["sessionId"] },
 	session_cost: { method: "GET", buildPath: (p) => `/api/sessions/${p.sessionId}/cost`, required: ["sessionId"] },
 	search: {
 		method: "GET",
-		buildPath: (p) => appendPagingQuery("/api/search", [["q", p.q], ["type", p.type], ["projectId", p.projectId]], p, {
+		buildPath: (p) => appendPagingQuery("/api/search", [["q", p.q], ["type", p.type], ["projectId", p.projectId], ["includeArchived", searchIncludesArchived(p)]], p, {
 			itemKey: "results",
 			defaultLimit: DEFAULT_SEARCH_LIMIT,
 			maxLimit: MAX_SEARCH_LIMIT,
 		}),
 		required: ["q"],
+		postProcess: (data, p) => searchIncludesArchived(p) ? data : filterArchivedRows(data, "results"),
 		page: { itemKey: "results", defaultLimit: DEFAULT_SEARCH_LIMIT, maxLimit: MAX_SEARCH_LIMIT },
 	},
 	list_projects: { method: "GET", buildPath: () => "/api/projects", required: [], page: { itemKey: "projects" } },
@@ -594,8 +656,9 @@ export default function (pi: ExtensionAPI) {
 			const urlPath = spec.buildPath(params);
 			const body = spec.buildBody ? spec.buildBody(params) : undefined;
 			const data = await api(method, urlPath, body);
+			const processed = spec.postProcess ? spec.postProcess(data, params) : data;
 			const pageSpec = options?.pageResults ? resolvePageSpec(spec, params) : undefined;
-			return ok(pageSpec ? pageResult(data, params, pageSpec) : data);
+			return ok(pageSpec ? pageResult(processed, params, pageSpec) : processed);
 		} catch (e: any) {
 			return err(e.message);
 		}
@@ -627,6 +690,7 @@ export default function (pi: ExtensionAPI) {
 			cursor: Type.Optional(Type.Union([Type.String(), Type.Number()], { description: "Alias for after on cursor-backed list operations." })),
 			archived: Type.Optional(Type.Boolean({ description: "Include archived items." })),
 			include: Type.Optional(Type.String({ description: "Inclusion flag, e.g. 'archived'." })),
+			includeArchived: Type.Optional(Type.Boolean({ description: "REST-style search archive opt-in." })),
 			view: Type.Optional(Type.String({ description: "Response view, e.g. 'summary'." })),
 			probe: Type.Optional(Type.String({ description: "maintenance_inspect probe selector." })),
 		}),

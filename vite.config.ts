@@ -438,6 +438,7 @@ export default defineConfig(({ mode }) => ({
 					) return "app-bobbit-render";
 					if (normalizedId.endsWith("/src/ui/utils/i18n.ts")) return "app-i18n";
 					if (
+						normalizedId.endsWith("/src/ui/tools/renderer-registry.ts") ||
 						normalizedId.endsWith("/src/ui/components/StreamingMessageContainer.ts") ||
 						normalizedId.endsWith("/src/ui/components/LiveTimer.ts") ||
 						normalizedId.endsWith("/src/ui/components/ToolPermissionCard.ts") ||

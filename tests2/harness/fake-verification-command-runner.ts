@@ -31,6 +31,10 @@ import type { TrackedChild } from "../../src/server/agent/spawn-tree.js";
 
 interface ScriptedResult {
 	exitCode: number;
+	/** Output emitted while the scripted process is still running. */
+	initialStdout: string;
+	initialStderr: string;
+	/** Output emitted as the scripted process completes. */
 	stdout: string;
 	stderr: string;
 	/** Wall delay before the (scripted) process completes. Preserves timing-
@@ -50,7 +54,7 @@ interface ScriptedResult {
  */
 export function interpretFakeCommand(command: string): ScriptedResult {
 	const cmd = command.trim();
-	const res: ScriptedResult = { exitCode: 0, stdout: "", stderr: "", delayMs: 0 };
+	const res: ScriptedResult = { exitCode: 0, initialStdout: "", initialStderr: "", stdout: "", stderr: "", delayMs: 0 };
 
 	// `true` / `false`
 	if (cmd === "true") return res;
@@ -83,29 +87,33 @@ export function interpretFakeCommand(command: string): ScriptedResult {
 }
 
 function interpretNodeEval(script: string): ScriptedResult {
-	const res: ScriptedResult = { exitCode: 0, stdout: "", stderr: "", delayMs: 0 };
+	const res: ScriptedResult = { exitCode: 0, initialStdout: "", initialStderr: "", stdout: "", stderr: "", delayMs: 0 };
 
 	// setTimeout(() => ..., MS) — the body runs after MS; capture the delay.
 	const st = /setTimeout\s*\(\s*\(\)\s*=>\s*([\s\S]*?)\s*,\s*(\d+)\s*\)/.exec(script);
-	let body = script;
+	let immediateBody = script;
+	let completionBody = script;
 	if (st) {
 		res.delayMs = parseInt(st[2], 10) || 0;
-		body = st[1]; // e.g. "process.exit(0)" or "{console.log('done');process.exit(0)}"
+		immediateBody = script.slice(0, st.index) + script.slice(st.index + st[0].length);
+		completionBody = st[1]; // e.g. "process.exit(0)" or "{console.log('done');process.exit(0)}"
 	}
 
 	// console.log('X') / console.log("X") — collect all, newline-joined (Node
 	// prints one line per call). console.error('Y') → stderr (error channel).
-	const collect = (re: RegExp): string => {
+	const collect = (body: string, re: RegExp): string => {
 		let m: RegExpExecArray | null;
 		const lines: string[] = [];
 		while ((m = re.exec(body)) !== null) lines.push(m[2]);
 		return lines.map((l) => `${l}\n`).join("");
 	};
-	res.stdout = collect(/console\.log\(\s*(['"])([\s\S]*?)\1\s*\)/g);
-	res.stderr = collect(/console\.error\(\s*(['"])([\s\S]*?)\1\s*\)/g);
+	res.initialStdout = st ? collect(immediateBody, /console\.log\(\s*(['"])([\s\S]*?)\1\s*\)/g) : "";
+	res.initialStderr = st ? collect(immediateBody, /console\.error\(\s*(['"])([\s\S]*?)\1\s*\)/g) : "";
+	res.stdout = collect(completionBody, /console\.log\(\s*(['"])([\s\S]*?)\1\s*\)/g);
+	res.stderr = collect(completionBody, /console\.error\(\s*(['"])([\s\S]*?)\1\s*\)/g);
 
 	// process.exit(N) — default 0 when the script just logs / falls off the end.
-	const ex = /process\.exit\(\s*(\d+)\s*\)/.exec(body);
+	const ex = /process\.exit\(\s*(\d+)\s*\)/.exec(completionBody);
 	if (ex) res.exitCode = parseInt(ex[1], 10) || 0;
 
 	return res;
@@ -134,12 +142,17 @@ function makeFakeTracked(spec: VerificationCommandSpawnSpec): TrackedChild {
 	let timedOut = false;
 	let completionTimer: ReturnType<typeof setTimeout> | undefined;
 	let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+	let initialOutputTimer: ReturnType<typeof setTimeout> | undefined;
+	let initialOutputEmitted = false;
+	let finalOutputEmitted = false;
 
 	const clearTimers = () => {
 		if (completionTimer) clearTimeout(completionTimer);
 		if (timeoutTimer) clearTimeout(timeoutTimer);
+		if (initialOutputTimer) clearTimeout(initialOutputTimer);
 		completionTimer = undefined;
 		timeoutTimer = undefined;
+		initialOutputTimer = undefined;
 	};
 
 	const emitClose = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -150,36 +163,50 @@ function makeFakeTracked(spec: VerificationCommandSpawnSpec): TrackedChild {
 		child.emit("close", code, signal);
 	};
 
-	// Stream scripted output on the next tick (before completion), mirroring the
-	// attached-pipe live-output path so step_output events + accumulated output
-	// are produced exactly as a real child would.
-	const emitOutput = () => {
+	// Stream scripted output before completion when the script logs before a
+	// delayed exit. This mirrors attached pipes and lets tests observe live output
+	// without waiting for the fake process to close.
+	const emitInitialOutput = () => {
+		if (initialOutputEmitted) return;
+		initialOutputEmitted = true;
+		if (script.initialStdout) child.stdout.emit("data", Buffer.from(script.initialStdout));
+		if (script.initialStderr) child.stderr.emit("data", Buffer.from(script.initialStderr));
+	};
+	const emitFinalOutput = () => {
+		if (finalOutputEmitted) return;
+		finalOutputEmitted = true;
 		if (script.stdout) child.stdout.emit("data", Buffer.from(script.stdout));
 		if (script.stderr) child.stderr.emit("data", Buffer.from(script.stderr));
 	};
+	initialOutputTimer = setTimeout(() => {
+		if (closed || killed) return;
+		emitInitialOutput();
+	}, 0);
+	initialOutputTimer.unref?.();
 
 	// Timeout: the scripted delay exceeds the harness-provided step timeout.
 	if (Number.isFinite(spec.timeoutMs) && spec.timeoutMs > 0 && script.delayMs > spec.timeoutMs) {
 		timeoutTimer = setTimeout(() => {
 			if (closed || killed) return;
 			timedOut = true;
-			emitOutput();
+			emitInitialOutput();
 			emitClose(null, "SIGTERM");
 		}, spec.timeoutMs);
 		timeoutTimer.unref?.();
 	} else {
 		completionTimer = setTimeout(() => {
 			if (closed || killed) return;
-			emitOutput();
+			emitInitialOutput();
+			emitFinalOutput();
 			emitClose(script.exitCode, null);
 		}, script.delayMs);
 		completionTimer.unref?.();
 	}
 
-	const tracked: TrackedChild = {
+	const tracked: TrackedChild & { _timedOut?: boolean } = {
 		child: child as unknown as TrackedChild["child"],
 		killed: () => killed,
-		timedOut: () => timedOut,
+		timedOut: () => timedOut || !!tracked._timedOut,
 		markSurvival: () => { /* fake children never survive shutdown */ },
 		killTree: (_signal, _graceMsOverride) => {
 			if (closed) return;
