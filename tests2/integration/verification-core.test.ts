@@ -428,13 +428,16 @@ test.describe("Verification REST API", () => {
 		});
 		const goalId = goal.id;
 		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
 
 		try {
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
+			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design\n\nTest content for API test" }),
 			});
+			expect(signalResp.status).toBe(201);
+			const signalData = await signalResp.json();
+			const signalId = signalData?.signal?.id;
+			expect(signalId).toBeTruthy();
 
 			// Check active verifications while running
 			const activeResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
@@ -458,10 +461,10 @@ test.describe("Verification REST API", () => {
 				}
 			}
 
-			// Wait for completion. Server deletes from activeVerifications BEFORE
-			// broadcasting gate_status_changed (see verification-harness.ts), so once
-			// this event fires the active list is guaranteed empty — no sleep needed.
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			// This test asserts REST surfaces, not live WS delivery. Poll the gate
+			// summary for the exact signal to avoid racing/missing a transient
+			// gate_status_changed event under full-suite load.
+			await waitForGateStatusByRest(goalId, "design-doc", "passed", signalId, 30_000);
 
 			const afterResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
 			const afterData = await afterResp.json();
@@ -490,7 +493,6 @@ test.describe("Verification REST API", () => {
 			expect(fixedModalContent, "Fixed modal path (liveOutput || output) shows content").toBeTruthy();
 			expect(fixedModalContent).toContain("ok");
 		} finally {
-			ws.close();
 			await deleteSession(sessionId);
 			await deleteGoal(goalId);
 		}
