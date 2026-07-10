@@ -105,7 +105,7 @@ export interface ResolvedModelStateMeta {
  * shows (which is built from `getAvailableModels` / `assembleModels`). Deriving
  * live state from `inferMeta` alone clobbers the correct merged pi-ai metadata
  * (e.g. Claude Fable 5's 1M context, `reasoning:true`, and
- * `thinkingLevelMap {off:null, xhigh:"xhigh"}`).
+ * `thinkingLevelMap {off:null, xhigh:"xhigh", max:"max"}`).
  *
  * Resolution order (first hit wins):
  *   1. Registry cache (`cachedModels`) keyed by exact provider+id — the same
