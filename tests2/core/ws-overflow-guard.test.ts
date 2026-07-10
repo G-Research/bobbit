@@ -14,7 +14,11 @@ import assert from "node:assert/strict";
 import {
 	decideOverflowAction,
 	DEFAULT_OVERFLOW_GUARD,
+	describeWsPayload,
+	formatWsPayloadDiagnostics,
+	guardWebSocketOverflow,
 } from "../../src/server/ws-overflow-guard.ts";
+import { decideResumeReplay, RESUME_REPLAY_MAX_BYTES, waitForReplayDrain } from "../../src/server/replay-pacing.ts";
 
 test("OG-01: under threshold => send", () => {
 	const action = decideOverflowAction(0, false);
@@ -53,4 +57,58 @@ test("OG-07: custom config respected", () => {
 	assert.equal(decideOverflowAction(999, false, cfg).kind, "send");
 	assert.equal(decideOverflowAction(1001, false, cfg).kind, "send-and-defer-check");
 	assert.equal(decideOverflowAction(1001, true, cfg).kind, "terminate");
+});
+
+test("OG-08: diagnostics include outer type, inner event type, and serialized bytes", () => {
+	const msg = { type: "event", data: { type: "message_update", text: "hello" } };
+	const serialized = JSON.stringify(msg);
+	const meta = describeWsPayload(msg, serialized);
+	assert.equal(meta.outerType, "event");
+	assert.equal(meta.innerType, "message_update");
+	assert.equal(meta.bytes, Buffer.byteLength(serialized));
+	assert.match(formatWsPayloadDiagnostics(meta), /outerType=event innerType=message_update bytes=\d+/);
+});
+
+test("OG-09: persistent overflow logs payload diagnostics and terminates on deferred recheck", () => {
+	let terminated = false;
+	const client = {
+		readyState: 1,
+		bufferedAmount: DEFAULT_OVERFLOW_GUARD.overflowBytes + 1,
+		terminate: () => { terminated = true; },
+	};
+	const warnings: string[] = [];
+	let deferred: (() => void) | undefined;
+	const action = guardWebSocketOverflow(
+		client,
+		{ outerType: "event", innerType: "gate_verification_step_output", bytes: 1234, recipientKind: "goal-session" },
+		{ pendingOverflowCheck: new WeakSet(), warnedClients: new WeakSet() },
+		{ setTimeout: (cb) => { deferred = cb; return 0; }, warn: (message) => warnings.push(message) },
+		DEFAULT_OVERFLOW_GUARD,
+	);
+	assert.equal(action.kind, "send-and-defer-check");
+	deferred?.();
+	assert.equal(terminated, true);
+	assert.ok(warnings.some((line) => line.includes("outerType=event") && line.includes("innerType=gate_verification_step_output") && line.includes("bytes=1234") && line.includes("recipient=goal-session")));
+});
+
+test("OG-10: resume replay falls back to resume_gap when retained frames exceed byte budget", () => {
+	const decision = decideResumeReplay([
+		{ bytes: RESUME_REPLAY_MAX_BYTES - 10 },
+		{ bytes: 11 },
+	]);
+	assert.equal(decision.kind, "resume_gap");
+	assert.equal(decision.bytes, RESUME_REPLAY_MAX_BYTES + 1);
+});
+
+test("OG-11: resume replay drain wait reports persistent high bufferedAmount", async () => {
+	let now = 100;
+	const realNow = Date.now;
+	Date.now = () => now;
+	try {
+		const client = { readyState: 1, bufferedAmount: 999_999 };
+		const drained = await waitForReplayDrain(client, 120, async () => { now += 10; });
+		assert.equal(drained, false);
+	} finally {
+		Date.now = realNow;
+	}
 });
