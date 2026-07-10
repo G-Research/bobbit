@@ -1,9 +1,10 @@
 // v2-native — Pi runtime browser boundary canary. Listed in tests-map.json `v2Native`.
 //
-// Pi 0.80 exposes browser-compatible provider modules under
+// Pi 0.80 exposes browser-compatible runtime modules under
+// `@earendil-works/pi-ai/api/*` for streamSimple and provider modules under
 // `@earendil-works/pi-ai/providers/*`; legacy direct subpaths such as
 // `@earendil-works/pi-ai/anthropic` are not package exports. Keep Bobbit's UI
-// streaming boundary lazy, provider-specific, and away from the bare pi-ai
+// streaming boundary lazy, provider/API-specific, and away from the bare pi-ai
 // runtime index.
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
@@ -62,24 +63,24 @@ function isTypeOnlyImportClause(clause: string | undefined): boolean {
 }
 
 describe("src/app/pi-ai-lazy.ts browser pi-ai boundary", () => {
-	it("uses only Pi 0.80 package-exported provider subpaths for runtime streaming imports", () => {
+	it("uses only Pi 0.80 package-exported api/provider subpaths for runtime streaming imports", () => {
 		const runtimePiImports = dynamicImports(source).filter((specifier) => specifier.startsWith("@earendil-works/pi-ai"));
-		expect(runtimePiImports.length, "expected provider-specific dynamic imports in streamSimplePiAi").toBeGreaterThan(0);
+		expect(runtimePiImports.length, "expected API/provider-specific dynamic imports in streamSimplePiAi").toBeGreaterThan(0);
 
 		const offenders = runtimePiImports.filter(
-			(specifier) => !specifier.startsWith("@earendil-works/pi-ai/providers/"),
+			(specifier) => !specifier.startsWith("@earendil-works/pi-ai/api/") && !specifier.startsWith("@earendil-works/pi-ai/providers/"),
 		);
 		expect(
 			offenders,
 			[
-				"Browser runtime imports from pi-ai must use package-exported provider subpaths.",
-				"Pi 0.80 exports ./providers/*, not legacy direct subpaths like @earendil-works/pi-ai/anthropic.",
+				"Browser runtime imports from pi-ai must use package-exported api/provider subpaths.",
+				"Pi 0.80 exports ./api/* and ./providers/*, not legacy direct subpaths like @earendil-works/pi-ai/anthropic.",
 				...offenders.map((specifier) => `  - ${specifier}`),
 			].join("\n"),
 		).toEqual([]);
 	});
 
-	it("does not introduce a bare pi-ai runtime value import while updating provider subpaths", () => {
+	it("does not introduce a bare pi-ai runtime value import while updating api/provider subpaths", () => {
 		const offenders: string[] = [];
 		for (const imp of staticImports(source)) {
 			if (imp.source === "@earendil-works/pi-ai" && !isTypeOnlyImportClause(imp.clause)) {
