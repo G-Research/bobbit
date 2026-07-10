@@ -131,6 +131,11 @@ receive tool results, and continue multi-turn context. The selection persists as
 `provider/modelId` preference and is re-pinned on every spawn (including restart, restore,
 and respawn), so reloads do not silently fall back to another model.
 
+Unauthenticated Code Assist models are deliberately absent from `/api/models` and from the
+agent-side provider's `models[]`. This keeps account-backed Gemini available for late auth
+without letting Pi choose `google-gemini-cli/*` as a default before the user has a usable
+Google credential.
+
 ### How it runs (why there are two Gemini wire paths)
 
 The Code Assist API (`cloudcode-pa.googleapis.com`) is not one of the providers that
@@ -143,9 +148,12 @@ extension** rather than by patching the upstream package:
   `api: "google-code-assist"` inside the agent runtime via `pi.registerProvider(...)`, with a
   custom `streamSimple` handler that talks directly to
   `cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse`.
-- The extension is loaded via the existing `--extension` plumbing **only when a Google
-  account credential is present**, so non-Google users pay zero overhead. The same path works
-  for local and Docker-sandboxed sessions.
+- The extension is loaded via the existing `--extension` plumbing for spawned agents so the
+  `google-code-assist` API can become available without respawning. Before authentication it
+  registers only the API/stream handler, with no `models[]` and no placeholder `apiKey`, so Pi
+  cannot pick unauthenticated Code Assist as an implicit/default model. An auth watcher upgrades
+  the registration once local OAuth, gateway token access, or `GOOGLE_CLOUD_ACCESS_TOKEN` is
+  visible. The same path works for local and Docker-sandboxed sessions.
 - The conversion/streaming core lives in `src/server/agent/google-code-assist.ts`
   (`convertContextToCodeAssist`, `codeAssistStream`, `parseCodeAssistStreamChunk`) and carries
   **no `pi-ai` import**, so the gateway and the embedded extension share one tested wire
