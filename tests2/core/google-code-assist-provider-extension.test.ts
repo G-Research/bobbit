@@ -20,10 +20,10 @@ guardProcessEnv();
  *   2. The generated source parses, transpiles with no errors, and default-exports
  *      a function (the extension factory).
  *   3. No process-wide TLS downgrade (security invariant shared with the bridge).
- *   4. Unconditional registration: the extension is written even with NO Google
- *      account credential present, so a session spawned BEFORE Google sign-in can
- *      still bind a `google-gemini-cli/*` model after the user authenticates (the
- *      Bearer token is fetched per request from the gateway, not at spawn time).
+ *   4. Unconditional API registration without pre-auth model availability: the
+ *      extension is written even with NO Google account credential present, but
+ *      it must not register `models[]`/placeholder auth until a real credential
+ *      is visible, or Pi may pick Code Assist as the implicit/default model.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -162,16 +162,56 @@ describe("generateGoogleCodeAssistProviderExtension", () => {
 		);
 		const file = path.join(tmpDir, "gca-provider.cjs");
 		fs.writeFileSync(file, transpiled.outputText, "utf-8");
-		const mod = await import(pathToFileURL(file).href);
-		assert.equal(typeof mod.default, "function");
 
-		// The factory must call registerProvider on the supplied pi object.
-		let registered: { name?: string; config?: any } = {};
-		mod.default({ registerProvider: (name: string, config: any) => { registered = { name, config }; } });
-		assert.equal(registered.name, "google-gemini-cli");
-		assert.equal(registered.config.api, "google-code-assist");
-		assert.equal(typeof registered.config.streamSimple, "function");
-		assert.ok(Array.isArray(registered.config.models) && registered.config.models.length === 1);
+		// The factory must call registerProvider on the supplied pi object, but a
+		// pre-auth load must not make Code Assist an available/default candidate.
+		const authDir = fs.mkdtempSync(path.join(tmpDir, "no-auth-agent-"));
+		const prevPiDir = process.env.PI_CODING_AGENT_DIR;
+		const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = authDir;
+		delete process.env.BOBBIT_AGENT_DIR;
+		try {
+			const mod = await import(pathToFileURL(file).href);
+			assert.equal(typeof mod.default, "function");
+			let registered: { name?: string; config?: any } = {};
+			mod.default({ registerProvider: (name: string, config: any) => { registered = { name, config }; } });
+			assert.equal(registered.name, "google-gemini-cli");
+			assert.equal(registered.config.api, "google-code-assist");
+			assert.equal(typeof registered.config.streamSimple, "function");
+			assert.equal(registered.config.apiKey, undefined, "pre-auth registration must not mark Code Assist authenticated");
+			assert.equal(registered.config.models, undefined, "pre-auth registration must not expose Code Assist models to Pi defaults");
+		} finally {
+			if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prevPiDir;
+			if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
+		}
+	});
+
+	it("authenticated load exposes Code Assist models for explicit selection", async () => {
+		const transpiled = ts.transpileModule(source, {
+			compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+		});
+		const authDir = fs.mkdtempSync(path.join(tmpDir, "auth-agent-"));
+		fs.writeFileSync(
+			path.join(authDir, "auth.json"),
+			JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "tok", refresh: "r" } }),
+			"utf-8",
+		);
+		const file = path.join(tmpDir, `gca-provider-auth-${Date.now()}.cjs`);
+		fs.writeFileSync(file, transpiled.outputText, "utf-8");
+		const prevPiDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = authDir;
+		try {
+			const mod = await import(pathToFileURL(file).href);
+			let registered: { name?: string; config?: any } = {};
+			mod.default({ registerProvider: (name: string, config: any) => { registered = { name, config }; } });
+			assert.equal(registered.config.apiKey, "code-assist-runtime");
+			assert.ok(Array.isArray(registered.config.models) && registered.config.models.length === 1);
+		} finally {
+			if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prevPiDir;
+		}
 	});
 });
 
@@ -330,7 +370,7 @@ describe("writeGoogleCodeAssistProviderExtension unconditional registration", ()
 
 	it("writes the extension even when NO Google account credential is present", () => {
 		// Regression: PR #826 review #1 — a session spawned before Google sign-in
-		// must still register the provider so the model is bindable after auth.
+		// must still register the API provider, without exposing models as defaults.
 		const p = writeGoogleCodeAssistProviderExtension("sess-no-cred");
 		// Only asserts when pi-ai's google catalog is available; we still write
 		// nothing if no descriptors can be derived (catalog unreadable).
@@ -360,10 +400,11 @@ describe("writeGoogleCodeAssistProviderExtension unconditional registration", ()
 		const srcBefore = fs.readFileSync(before, "utf-8");
 		assert.ok(srcBefore.includes("pi.registerProvider("), "provider registered pre-auth");
 		// The runtime token is NOT baked in at spawn — it is fetched per request
-		// from the gateway, so signing in later makes the already-registered model
-		// runnable with no respawn. Assert the source contains no spawn-time token.
+		// from the gateway. Before auth, the API is registered but model exposure is
+		// gated by the generated auth watcher so Pi cannot default to Code Assist.
 		assert.ok(!srcBefore.includes("ya29."), "must not bake any access token into the source");
 		assert.ok(srcBefore.includes("/google-code-assist/token"), "fetches the Bearer per request from the gateway");
+		assert.ok(srcBefore.includes("startAuthWatcher"), "late auth should upgrade the provider registration");
 
 		// Auth arrives afterward; a respawn (e.g. gateway restart) re-derives the
 		// extension. It must remain valid and still gateway-driven for the token.
