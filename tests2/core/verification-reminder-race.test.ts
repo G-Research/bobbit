@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
+import { VerificationHarness, VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER } from "../../src/server/agent/verification-harness.ts";
 
 /**
  * `SessionManager` transitively pulls in flexsearch (via search-service),
@@ -98,7 +98,317 @@ function waitForIdle(session: FakeSession, timeoutMs: number): Promise<void> {
 	});
 }
 
+async function captureResumePromptForRestoredReviewer(opts: { restoreStartupWasStreaming: boolean }): Promise<string[]> {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-restart-resume-prompt-"));
+	const sessionId = opts.restoreStartupWasStreaming ? "restart-interrupted-reviewer" : "ordinary-idle-reviewer";
+	const prompts: string[] = [];
+	let harness: VerificationHarness;
+	try {
+		const fakeSession = {
+			id: sessionId,
+			status: "idle",
+			nonInteractive: true,
+			restoreStartupWasStreaming: opts.restoreStartupWasStreaming,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				waitForReady: async () => {},
+				prompt: async (text: string) => {
+					prompts.push(text);
+					const resolver = (harness as any).pendingResults.get(sessionId);
+					resolver?.({ verdict: true, summary: "Continuation completed." });
+					return { success: true };
+				},
+				async promptWhenReady(text: string) {
+					return this.prompt(text);
+				},
+			},
+		};
+		const sessionManager = {
+			getSession: () => fakeSession,
+			waitForIdle: () => new Promise<void>(() => {}),
+			waitForStreaming: () => Promise.resolve(),
+			terminateSession: () => Promise.resolve(),
+		} as any;
+		const gateStore = {
+			updateSignalVerification: () => {},
+			updateGateStatus: () => {},
+			getGate: () => undefined,
+			getGatesForGoal: () => [],
+		} as any;
+		harness = new VerificationHarness(
+			stateDir,
+			gateStore,
+			() => {},
+			{ get: () => undefined, getAll: () => [] } as any,
+			undefined,
+			sessionManager,
+			{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
+		) as any;
+
+		await (harness as any)._tryResumeFromSession(
+			{ goalId: "goal-1", gateId: "gate-1", signalId: "signal-1" },
+			{ name: "Restart resume review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId },
+		);
+		return prompts;
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+}
+
+async function runRestartContinuationFallback(opts: { jsonValidationErrorDuringContinuation?: boolean } = {}) {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-post-continuation-fallback-"));
+	const sessionId = "restart-continuation-fallback-reviewer";
+	const prompts: string[] = [];
+	const calls: string[] = [];
+	const listeners: Array<(event: any) => void> = [];
+	let harness: VerificationHarness;
+	try {
+		const fakeSession = {
+			id: sessionId,
+			status: "idle",
+			nonInteractive: true,
+			restoreStartupWasStreaming: true,
+			lastTurnErrored: false,
+			lastTurnErrorMessage: "",
+			rpcClient: {
+				onEvent: (fn: (event: any) => void) => {
+					listeners.push(fn);
+					return () => {
+						const i = listeners.indexOf(fn);
+						if (i >= 0) listeners.splice(i, 1);
+					};
+				},
+				waitForReady: async () => {},
+				prompt: async (text: string) => {
+					return fakeSession.rpcClient.promptWhenReady(text);
+				},
+				promptWhenReady: async (text: string) => {
+					prompts.push(text);
+					calls.push(`prompt:${prompts.length}`);
+					if (prompts.length === 2) {
+						const resolver = (harness as any).pendingResults.get(sessionId);
+						resolver?.({ verdict: true, summary: "Fallback reminder completed." });
+					}
+					return { success: true };
+				},
+			},
+		};
+		const sessionManager = {
+			getSession: () => fakeSession,
+			waitForStreaming: async () => {
+				calls.push(`waitForStreaming:${prompts.length}`);
+				fakeSession.status = "streaming";
+				if (prompts.length === 1 && opts.jsonValidationErrorDuringContinuation) {
+					for (const listener of [...listeners]) {
+						listener({
+							type: "tool_execution_end",
+							isError: true,
+							result: "Validation failed for tool verification_result: Expected property name in JSON at position 2",
+						});
+					}
+				}
+			},
+			waitForIdle: async () => {
+				calls.push(`waitForIdle:${prompts.length}`);
+				fakeSession.status = "idle";
+			},
+			terminateSession: async () => {
+				calls.push(`terminate:${prompts.length}`);
+			},
+		} as any;
+		const gateStore = {
+			updateSignalVerification: () => {},
+			updateGateStatus: () => {},
+			getGate: () => undefined,
+			getGatesForGoal: () => [],
+		} as any;
+		harness = new VerificationHarness(
+			stateDir,
+			gateStore,
+			() => {},
+			{ get: () => undefined, getAll: () => [] } as any,
+			undefined,
+			sessionManager,
+			{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
+		) as any;
+
+		const result = await (harness as any)._tryResumeFromSession(
+			{ goalId: "goal-1", gateId: "gate-1", signalId: "signal-1" },
+			{ name: "Restart resume review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId },
+		);
+		return { prompts, calls, result };
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+}
+
+async function runNetworkDisconnectRecovery() {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-network-disconnect-recovery-"));
+	const sessionId = "sleep-wifi-disconnected-reviewer";
+	const prompts: string[] = [];
+	const calls: string[] = [];
+	let harness: VerificationHarness;
+	try {
+		const fakeSession = {
+			id: sessionId,
+			status: "idle",
+			nonInteractive: true,
+			restoreStartupWasStreaming: false,
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "socket hang up while streaming from provider after Wi-Fi disconnect",
+			pendingAutoRetryTimer: undefined,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				waitForReady: async () => {},
+				prompt: async (text: string) => {
+					prompts.push(text);
+					return { success: true };
+				},
+				promptWhenReady: async (text: string) => {
+					prompts.push(text);
+					return { success: true };
+				},
+			},
+		};
+		const sessionManager = {
+			getSession: () => fakeSession,
+			retryLastPrompt: async () => {
+				calls.push("retryLastPrompt:auto");
+				fakeSession.lastTurnErrored = false;
+				fakeSession.lastTurnErrorMessage = "";
+				fakeSession.status = "streaming";
+			},
+			waitForStreaming: async () => {
+				calls.push("waitForStreaming");
+				fakeSession.status = "streaming";
+			},
+			waitForIdle: async () => {
+				calls.push("waitForIdle");
+				const resolver = (harness as any).pendingResults.get(sessionId);
+				resolver?.({ verdict: true, summary: "Recovered after network disconnect." });
+				await Promise.resolve();
+				fakeSession.status = "idle";
+			},
+			terminateSession: async () => {
+				calls.push("terminateSession");
+			},
+		} as any;
+		const gateStore = {
+			updateSignalVerification: () => {},
+			updateGateStatus: () => {},
+			getGate: () => undefined,
+			getGatesForGoal: () => [],
+		} as any;
+		harness = new VerificationHarness(
+			stateDir,
+			gateStore,
+			() => {},
+			{ get: () => undefined, getAll: () => [] } as any,
+			undefined,
+			sessionManager,
+			{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
+		) as any;
+
+		const result = await (harness as any)._tryResumeFromSession(
+			{ goalId: "goal-1", gateId: "gate-1", signalId: "signal-1" },
+			{ name: "Sleep/Wi-Fi disconnect review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId },
+		);
+		return { prompts, calls, result };
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+}
+
 describe("verification reminder race — Bug 2 (resumed reviewer terminated early)", () => {
+	it("restart-interrupted restored idle nonInteractive reviewer gets a restart-aware continuation prompt first", async () => {
+		const prompts = await captureResumePromptForRestoredReviewer({ restoreStartupWasStreaming: true });
+		const firstPrompt = prompts[0] ?? "";
+
+		assert.equal(prompts.length, 1, `RESTART_RESUME_REGRESSION: expected exactly one first post-restart prompt, got ${prompts.length}: ${JSON.stringify(prompts)}`);
+		assert.notEqual(
+			firstPrompt,
+			VERIFICATION_RESULT_REMINDER,
+			`RESTART_RESUME_REGRESSION: restored idle nonInteractive verifier with restoreStartupWasStreaming=true received VERIFICATION_RESULT_REMINDER as the first post-restart prompt instead of restart-aware continuation instructions. prompt=${JSON.stringify(firstPrompt)}`,
+		);
+		assert.match(
+			firstPrompt,
+			/restart|restarted/i,
+			`RESTART_RESUME_REGRESSION: restart-aware continuation prompt must mention that infrastructure restarted mid-turn. prompt=${JSON.stringify(firstPrompt)}`,
+		);
+		assert.match(
+			firstPrompt,
+			/transcript|context/i,
+			`RESTART_RESUME_REGRESSION: restart-aware continuation prompt must tell the reviewer to use preserved transcript/context. prompt=${JSON.stringify(firstPrompt)}`,
+		);
+		assert.match(
+			firstPrompt,
+			/continue/i,
+			`RESTART_RESUME_REGRESSION: restart-aware continuation prompt must tell the reviewer to continue the interrupted review. prompt=${JSON.stringify(firstPrompt)}`,
+		);
+		assert.match(
+			firstPrompt,
+			/verification_result[\s\S]*complete|complete[\s\S]*verification_result/i,
+			`RESTART_RESUME_REGRESSION: restart-aware continuation prompt must reserve verification_result for when review is complete. prompt=${JSON.stringify(firstPrompt)}`,
+		);
+	});
+
+	it("ordinary restored idle nonInteractive reviewer still gets the idle-without-result reminder", async () => {
+		const prompts = await captureResumePromptForRestoredReviewer({ restoreStartupWasStreaming: false });
+
+		assert.deepEqual(
+			prompts,
+			[VERIFICATION_RESULT_REMINDER],
+			`Ordinary non-restart idle-without-result verifier should still receive VERIFICATION_RESULT_REMINDER. prompts=${JSON.stringify(prompts)}`,
+		);
+	});
+
+	it("post-restart continuation that goes idle without a result falls back to the normal reminder with a fair turn", async () => {
+		const { prompts, calls, result } = await runRestartContinuationFallback();
+
+		assert.deepEqual(
+			prompts,
+			[VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER],
+			`Restart-aware continuation must only be the first post-restart prompt; a no-result continuation turn should receive the normal reminder next. prompts=${JSON.stringify(prompts)}`,
+		);
+		assert.deepEqual(
+			calls.slice(0, 6),
+			["prompt:1", "waitForStreaming:1", "waitForIdle:1", "prompt:2", "waitForStreaming:2", "waitForIdle:2"],
+			`Fallback reminder must use the same promptWhenReady + waitForStreaming + idle wait sequence before completion/failure. calls=${JSON.stringify(calls)}`,
+		);
+		assert.equal(result.passed, true);
+		assert.equal(result.output, "Fallback reminder completed.");
+		assert.ok(calls.includes("terminate:2"), `resumed reviewer should be terminated only after the fallback turn resolves. calls=${JSON.stringify(calls)}`);
+	});
+
+	it("post-restart continuation JSON glitch falls back to JSON retry instead of another restart prompt", async () => {
+		const { prompts, calls, result } = await runRestartContinuationFallback({ jsonValidationErrorDuringContinuation: true });
+
+		assert.equal(prompts[0], VERIFICATION_RESTART_RESUME_PROMPT);
+		assert.notEqual(prompts[1], VERIFICATION_RESTART_RESUME_PROMPT, "restart-aware continuation prompt must not be reused after the first post-restart turn");
+		assert.notEqual(prompts[1], VERIFICATION_RESULT_REMINDER, "a validation error during the continuation turn should use the targeted JSON retry fallback");
+		assert.match(prompts[1], /Validation failed for tool|Expected property name in JSON/i);
+		assert.deepEqual(
+			calls.slice(0, 6),
+			["prompt:1", "waitForStreaming:1", "waitForIdle:1", "prompt:2", "waitForStreaming:2", "waitForIdle:2"],
+			`JSON fallback must still get a fair promptWhenReady + waitForStreaming + idle wait turn. calls=${JSON.stringify(calls)}`,
+		);
+		assert.equal(result.passed, true);
+	});
+
+	it("sleep or Wi-Fi disconnect resumes the same reviewer instead of surfacing a transient rerun", async () => {
+		const { prompts, calls, result } = await runNetworkDisconnectRecovery();
+
+		assert.deepEqual(prompts, [], "Infrastructure disconnect recovery should retry/continue the existing reviewer, not send a reminder or start a fresh prompt path");
+		assert.deepEqual(
+			calls.slice(0, 3),
+			["retryLastPrompt:auto", "waitForStreaming", "waitForIdle"],
+			`Sleep/Wi-Fi disconnect should get one continuation retry and a fair streaming+idle turn before teardown/rerun. calls=${JSON.stringify(calls)}`,
+		);
+		assert.equal(result.passed, true);
+		assert.equal(result.output, "Recovered after network disconnect.");
+		assert.ok(calls.includes("terminateSession"), "session cleanup should happen after the continued reviewer returns a result");
+	});
+
 	it("waitForStreaming resolves when an idle session transitions to streaming", async () => {
 		const session = new FakeSession("rv-1");
 
