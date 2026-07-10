@@ -287,10 +287,17 @@ as `?k=`. "Body" lists the JSON body keys the handler reads.
 | `reset_gate` | POST | `/api/goals/:goalId/gates/:gateId/reset` | `goalId`, `gateId` | — |
 | `cancel_verification` | POST | `/api/goals/:goalId/gates/:gateId/cancel-verification` | `goalId`, `gateId` | — |
 | `create_staff` | POST | `/api/staff` | `name`, `systemPrompt` | body: `description`, `triggers`, `roleId`, `cwd`, `projectId` |
+| `delete_staff` | DELETE | `/api/staff/:staffId` | `staffId` | — |
 | `team_start` | POST | `/api/goals/:goalId/team/start` | `goalId` | — (requires goal spec set → 400 `SPEC_REQUIRED` otherwise) |
 | `team_teardown` | POST | `/api/goals/:goalId/team/teardown?cascade=true\|false` | `goalId`, `cascade` | — (409 `HAS_DESCENDANT_TEAMS` when cascade=false + live descendants) |
 
 **Notes / flags:**
+- **`delete_staff` is a single-id operation.** It reuses the shared
+  `bobbit_orchestrate` dispatch path and access model, validates `staffId`
+  before fetch, and forwards to the existing backend `DELETE /api/staff/:id`
+  handler. Missing `staffId` fails client-side; an unknown id surfaces the
+  backend not-found response. Bulk and wildcard staff deletion are deliberately
+  not exposed.
 - **`delete_goal` is dropped (decided — see §2.4).** `DELETE /api/goals/:id`
   archives with cascade semantics (see `archiveGoalEndpoint`); there is no
   hard-delete endpoint. Only `archive_goal` is exposed; `detail_docs` documents
