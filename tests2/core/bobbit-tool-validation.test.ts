@@ -54,6 +54,30 @@ describe("bobbit tools — operation validation", () => {
 		expect(calls.length).toBe(0);
 	});
 
+	it("delete_staff without staffId → isError, no fetch", async () => {
+		const calls = stubFetch();
+		const result = await tools.get("bobbit_orchestrate")!.execute("id", { operation: "delete_staff" });
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("staffId");
+		expect(calls.length).toBe(0);
+	});
+
+	it("delete_staff not-found response includes clear backend error details", async () => {
+		const calls = stubFetch(() => ({
+			status: 404,
+			body: { error: "Staff not found", code: "STAFF_NOT_FOUND" },
+		}));
+		const result = await tools.get("bobbit_orchestrate")!.execute("id", {
+			operation: "delete_staff",
+			staffId: "missing-staff",
+		});
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("Staff not found");
+		expect(text(result)).toContain("STAFF_NOT_FOUND");
+		expect(text(result)).toContain("HTTP 404");
+		expect(calls.length).toBe(1);
+	});
+
 	it("empty-string required param counts as missing", async () => {
 		const calls = stubFetch();
 		const result = await tools.get("bobbit_read")!.execute("id", { operation: "get_goal", goalId: "" });
