@@ -55,7 +55,9 @@ describe("bobbit_read — archive-hidden list defaults", () => {
 
 		expect.soft(ids(data.sessions)).toEqual(["live-1"]);
 		expect.soft(archivedIds(data.sessions)).toEqual([]);
-		expect.soft(archivedIds(data.archivedDelegates)).toEqual([]);
+		// The whole archive-enrichment key is stripped, not merely emptied.
+		expect.soft(data.archivedDelegates).toBeUndefined();
+		expect.soft("archivedDelegates" in data).toBe(false);
 	});
 
 	it("list_sessions preserves archived rows and delegates when include=archived is explicit", async () => {
@@ -103,7 +105,9 @@ describe("bobbit_read — archive-hidden list defaults", () => {
 
 		expect.soft(ids(data.goals)).toEqual(["live-goal"]);
 		expect.soft(archivedIds(data.goals)).toEqual([]);
-		expect.soft(archivedIds(data.archivedSessions)).toEqual([]);
+		// The whole archive-enrichment key is stripped, not merely emptied.
+		expect.soft(data.archivedSessions).toBeUndefined();
+		expect.soft("archivedSessions" in data).toBe(false);
 	});
 
 	it("list_goals preserves archived goals and archivedSessions when archived=true is explicit", async () => {
@@ -149,6 +153,61 @@ describe("bobbit_read — archive-hidden search default", () => {
 
 		expect.soft(ids(data.results)).toEqual(["live-result"]);
 		expect.soft(archivedIds(data.results)).toEqual([]);
+	});
+
+	it("search preserves archived rows and forwards includeArchived=true when include=archived is explicit", async () => {
+		stubFetch((url) => {
+			expect(new URL(url).searchParams.get("includeArchived")).toBe("true");
+			return {
+				body: {
+					results: [
+						{ id: "live-result", type: "goal", archived: false },
+						{ id: "archived-result", type: "goal", archived: true },
+					],
+					total: 2,
+				},
+			};
+		});
+
+		const result = await tools.get("bobbit_read")!.execute("id", {
+			operation: "search",
+			q: "archive visibility",
+			include: "archived",
+		});
+		const data = json(result);
+
+		expect(ids(data.results)).toEqual(["live-result", "archived-result"]);
+	});
+
+	it("search defensive filtering does not corrupt the REST grand total across pages", async () => {
+		// REST returns one page (limit 2) of a larger result set (total 50). Even if
+		// an archived row slips through the server filter, the page-level removal must
+		// NOT decrement the grand total — doing so corrupts hasMore/nextOffset math.
+		stubFetch(() => ({
+			body: {
+				results: [
+					{ id: "live-1", type: "goal", archived: false },
+					{ id: "archived-slip", type: "goal", archived: true },
+				],
+				total: 50,
+				hasMore: true,
+				nextOffset: 2,
+			},
+		}));
+
+		const result = await tools.get("bobbit_read")!.execute("id", {
+			operation: "search",
+			q: "archive visibility",
+			limit: 2,
+		});
+		const data = json(result);
+
+		expect.soft(ids(data.results)).toEqual(["live-1"]);
+		expect.soft(archivedIds(data.results)).toEqual([]);
+		expect.soft(data.total).toBe(50);
+		expect.soft(data.pagination?.total).toBe(50);
+		expect.soft(data.pagination?.hasMore).toBe(true);
+		expect.soft(data.pagination?.nextOffset).toBe(2);
 	});
 
 	it("SearchService.search defaults the index query to includeArchived=false", async () => {
