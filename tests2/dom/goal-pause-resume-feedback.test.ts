@@ -9,6 +9,7 @@ import type { GatewaySession, Goal } from "../../src/app/state.js";
 type StateModule = typeof import("../../src/app/state.js");
 type DashboardModule = typeof import("../../src/app/goal-dashboard.js");
 type RenderModule = typeof import("../../src/app/render.js");
+type ApiModule = typeof import("../../src/app/api.js");
 
 let state!: StateModule["state"];
 let setRenderApp!: StateModule["setRenderApp"];
@@ -16,6 +17,8 @@ let clearDashboardState!: DashboardModule["clearDashboardState"];
 let loadDashboardData!: DashboardModule["loadDashboardData"];
 let renderGoalDashboard!: DashboardModule["renderGoalDashboard"];
 let doRenderApp!: RenderModule["doRenderApp"];
+let pauseGoalWithDialog!: ApiModule["pauseGoalWithDialog"];
+let resumeGoalWithDialog!: ApiModule["resumeGoalWithDialog"];
 
 type Deferred<T> = {
 	promise: Promise<T>;
@@ -137,6 +140,20 @@ async function nextFrame(): Promise<void> {
 	await Promise.resolve();
 }
 
+async function waitFor(assertion: () => void): Promise<void> {
+	let lastError: unknown;
+	for (let i = 0; i < 30; i++) {
+		try {
+			assertion();
+			return;
+		} catch (err) {
+			lastError = err;
+			await nextFrame();
+		}
+	}
+	throw lastError;
+}
+
 async function waitForElement<T extends Element>(selector: string): Promise<T> {
 	for (let i = 0; i < 20; i++) {
 		const el = host.querySelector<T>(selector) ?? document.querySelector<T>(selector);
@@ -144,6 +161,14 @@ async function waitForElement<T extends Element>(selector: string): Promise<T> {
 		await nextFrame();
 	}
 	throw new Error(`Timed out waiting for ${selector}`);
+}
+
+async function waitForErrorDetailsMessage(message: string): Promise<void> {
+	await waitFor(() => {
+		const detail = document.querySelector("error-details") as (HTMLElement & { message?: string }) | null;
+		expect(detail).toBeTruthy();
+		expect(detail?.message).toContain(message);
+	});
 }
 
 function resetSharedState(): void {
@@ -177,12 +202,15 @@ beforeEach(async () => {
 	const stateMod = await import("../../src/app/state.js");
 	const dashboardMod = await import("../../src/app/goal-dashboard.js");
 	const renderMod = await import("../../src/app/render.js");
+	const apiMod = await import("../../src/app/api.js");
 	state = stateMod.state;
 	setRenderApp = stateMod.setRenderApp;
 	clearDashboardState = dashboardMod.clearDashboardState;
 	loadDashboardData = dashboardMod.loadDashboardData;
 	renderGoalDashboard = dashboardMod.renderGoalDashboard;
 	doRenderApp = renderMod.doRenderApp;
+	pauseGoalWithDialog = apiMod.pauseGoalWithDialog;
+	resumeGoalWithDialog = apiMod.resumeGoalWithDialog;
 	resetSharedState();
 });
 
@@ -218,7 +246,7 @@ describe("goal pause/resume pending feedback", () => {
 		expect(pendingButton.disabled).toBe(true);
 		expect(pendingButton.textContent).toContain("Pausing…");
 
-		pendingButton.click();
+		void pauseGoalWithDialog(activeGoal.id);
 		await Promise.resolve();
 		expect(mutationPosts.filter((path) => path.endsWith("/pause"))).toHaveLength(1);
 	});
@@ -234,7 +262,7 @@ describe("goal pause/resume pending feedback", () => {
 		expect(pendingButton.disabled).toBe(true);
 		expect(pendingButton.textContent).toContain("Resuming…");
 
-		pendingButton.click();
+		void resumeGoalWithDialog(activeGoal.id);
 		await Promise.resolve();
 		expect(mutationPosts.filter((path) => path.endsWith("/resume"))).toHaveLength(1);
 	});
@@ -257,8 +285,68 @@ describe("goal pause/resume pending feedback", () => {
 		expect(pendingButton.disabled).toBe(true);
 		expect(pendingButton.textContent).toContain("Resuming…");
 
-		pendingButton.click();
+		void resumeGoalWithDialog(goal.id);
 		await Promise.resolve();
 		expect(mutationPosts.filter((path) => path.endsWith("/resume"))).toHaveLength(1);
+	});
+
+	it("suppresses duplicate pause helper calls even when DOM disabled suppression is bypassed", async () => {
+		await renderDashboard(makeGoal({ paused: false }));
+
+		void pauseGoalWithDialog(activeGoal.id);
+		void pauseGoalWithDialog(activeGoal.id);
+		await Promise.resolve();
+
+		expect(mutationPosts.filter((path) => path.endsWith("/pause"))).toHaveLength(1);
+		expect(delayedMutations).toHaveLength(1);
+	});
+
+	it("suppresses duplicate resume helper calls even when DOM disabled suppression is bypassed", async () => {
+		await renderDashboard(makeGoal({ paused: true }));
+
+		void resumeGoalWithDialog(activeGoal.id);
+		void resumeGoalWithDialog(activeGoal.id);
+		await Promise.resolve();
+
+		expect(mutationPosts.filter((path) => path.endsWith("/resume"))).toHaveLength(1);
+		expect(delayedMutations).toHaveLength(1);
+	});
+
+	it("clears dashboard Pause pending feedback and renders the connection error path on failed pause", async () => {
+		await renderDashboard(makeGoal({ paused: false }));
+		const button = await waitForElement<HTMLButtonElement>("[data-testid='goal-pause-btn']");
+
+		button.click();
+		await nextFrame();
+		expect((await waitForElement<HTMLButtonElement>("[data-testid='goal-pause-btn']")).textContent).toContain("Pausing…");
+
+		delayedMutations[0].resolve(jsonResponse({ error: "boom" }, { status: 500 }));
+
+		await waitFor(() => {
+			const current = host.querySelector<HTMLButtonElement>("[data-testid='goal-pause-btn']");
+			expect(current?.disabled).toBe(false);
+			expect(current?.textContent).toContain("Pause");
+		});
+		await waitForErrorDetailsMessage("HTTP 500");
+		expect(document.body.textContent).toContain("Failed to pause goal");
+	});
+
+	it("clears dashboard Resume pending feedback and renders the connection error path on failed resume", async () => {
+		await renderDashboard(makeGoal({ paused: true }));
+		const button = await waitForElement<HTMLButtonElement>("[data-testid='goal-resume-btn']");
+
+		button.click();
+		await nextFrame();
+		expect((await waitForElement<HTMLButtonElement>("[data-testid='goal-resume-btn']")).textContent).toContain("Resuming…");
+
+		delayedMutations[0].resolve(jsonResponse({ error: "boom" }, { status: 500 }));
+
+		await waitFor(() => {
+			const current = host.querySelector<HTMLButtonElement>("[data-testid='goal-resume-btn']");
+			expect(current?.disabled).toBe(false);
+			expect(current?.textContent).toContain("Resume");
+		});
+		await waitForErrorDetailsMessage("HTTP 500");
+		expect(document.body.textContent).toContain("Failed to resume goal");
 	});
 });
