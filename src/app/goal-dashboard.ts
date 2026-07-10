@@ -7,7 +7,7 @@ import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { isHeadquartersProject } from "./headquarters.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, isGoalPauseResumeActionPending, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
@@ -1868,6 +1868,8 @@ function renderNavBar(goal: Goal): TemplateResult {
 			&& s.status !== "terminated",
 	);
 	const showReattempt = !teamActive && !hasLiveNonTeamSession;
+	const pausePending = isGoalPauseResumeActionPending(goal.id, "pause");
+	const resumePending = isGoalPauseResumeActionPending(goal.id, "resume");
 
 	return html`
 		<div class="nav">
@@ -1899,8 +1901,8 @@ function renderNavBar(goal: Goal): TemplateResult {
 				${goal.archived ? nothing : html`
 					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
 					${goal.paused
-						? html`<button class="btn-icon" data-testid="goal-resume-btn" @click=${() => resumeGoalWithDialog(goal.id)} title="Resume goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>Resume</span></button>`
-						: html`<button class="btn-icon" data-testid="goal-pause-btn" @click=${() => pauseGoalWithDialog(goal.id)} title="Pause goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span>Pause</span></button>`}
+						? html`<button class="btn-icon" data-testid="goal-resume-btn" ?disabled=${resumePending} aria-busy=${resumePending ? "true" : "false"} @click=${() => resumeGoalWithDialog(goal.id)} title="Resume goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>${resumePending ? "Resuming…" : "Resume"}</span></button>`
+						: html`<button class="btn-icon" data-testid="goal-pause-btn" ?disabled=${pausePending} aria-busy=${pausePending ? "true" : "false"} @click=${() => pauseGoalWithDialog(goal.id)} title="Pause goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span>${pausePending ? "Pausing…" : "Pause"}</span></button>`}
 					${(() => {
 						if (goal.paused) return nothing;
 						// TODO: memoize - O(n × depth) per render is fine at current goal-tree sizes.

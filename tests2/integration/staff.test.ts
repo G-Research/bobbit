@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, defaultProject, apiFetch } from "./_e2e/e2e-setup.js";
+import { readE2EToken, defaultProject, apiFetch, connectWs, createSession, deleteSession, registerProject, type WsConnection } from "./_e2e/e2e-setup.js";
 
 /**
  * End-to-end tests for the Staff Agents feature (persistent session model).
@@ -187,6 +190,110 @@ test.describe("Staff Agents — REST API", () => {
 		expect(sessionRes.status).toBe(200);
 		const sessionBody = await sessionRes.json();
 		expect(sessionBody.archived).toBe(true);
+	});
+
+	test("staff create, update, reassign, and delete broadcast staff_changed metadata", async () => {
+		const observerSessionId = await createSession();
+		cleanupSessionIds.push(observerSessionId);
+		let conn: WsConnection | undefined;
+		const cleanupProjectIds: string[] = [];
+		const cleanupDirs: string[] = [];
+		try {
+			conn = await connectWs(observerSessionId);
+			const defaultProj = await defaultProject();
+
+			const createCursor = conn.messageCount();
+			const created = await apiCreateStaff(token, {
+				name: `Broadcast Agent ${Date.now()}`,
+				systemPrompt: "Broadcast lifecycle events.",
+				projectId: defaultProj.id,
+				cwd: defaultProj.rootPath,
+			});
+			cleanupStaffIds.push(created.id);
+			if (created.currentSessionId) cleanupSessionIds.push(created.currentSessionId);
+
+			await conn.waitForFrom(createCursor, (m) => m.type === "session_created" && m.sessionId === created.currentSessionId, 5_000);
+			const createdMsg = await conn.waitForFrom(createCursor, (m) => m.type === "staff_changed" && m.reason === "created" && m.staffId === created.id, 5_000);
+			expect(createdMsg).toMatchObject({
+				type: "staff_changed",
+				reason: "created",
+				staffId: created.id,
+				projectId: defaultProj.id,
+				sessionId: created.currentSessionId,
+			});
+
+			const updateCursor = conn.messageCount();
+			const updateResp = await apiFetch(`/api/staff/${created.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ description: "Broadcast update" }),
+			});
+			expect(updateResp.ok).toBe(true);
+			const updatedMsg = await conn.waitForFrom(updateCursor, (m) => m.type === "staff_changed" && m.reason === "updated" && m.staffId === created.id, 5_000);
+			expect(updatedMsg).toMatchObject({
+				type: "staff_changed",
+				reason: "updated",
+				staffId: created.id,
+				projectId: defaultProj.id,
+				sessionId: created.currentSessionId,
+			});
+
+			const targetRoot = mkdtempSync(join(tmpdir(), "bobbit-staff-broadcast-"));
+			cleanupDirs.push(targetRoot);
+			const targetProject = await registerProject({
+				name: `staff-broadcast-${Date.now()}`,
+				rootPath: targetRoot,
+				seedWorkflows: false,
+			});
+			cleanupProjectIds.push(targetProject.id);
+
+			const reassignCursor = conn.messageCount();
+			const reassignResp = await apiFetch(`/api/staff/${created.id}`, {
+				method: "PATCH",
+				body: JSON.stringify({ projectId: targetProject.id }),
+			});
+			expect(reassignResp.ok).toBe(true);
+			await conn.waitForFrom(reassignCursor, (m) => m.type === "session_removed" && m.sessionId === created.currentSessionId, 5_000);
+			const reassignedMsg = await conn.waitForFrom(reassignCursor, (m) => m.type === "staff_changed" && m.reason === "reassigned" && m.staffId === created.id, 5_000);
+			expect(reassignedMsg).toMatchObject({
+				type: "staff_changed",
+				reason: "reassigned",
+				staffId: created.id,
+				projectId: targetProject.id,
+				previousProjectId: defaultProj.id,
+				sessionId: created.currentSessionId,
+			});
+
+			const deletable = await apiCreateStaff(token, {
+				name: `Broadcast Delete ${Date.now()}`,
+				systemPrompt: "Delete lifecycle event.",
+				projectId: defaultProj.id,
+				cwd: defaultProj.rootPath,
+			});
+			cleanupStaffIds.push(deletable.id);
+			if (deletable.currentSessionId) cleanupSessionIds.push(deletable.currentSessionId);
+
+			const deleteCursor = conn.messageCount();
+			const deleteResp = await apiFetch(`/api/staff/${deletable.id}`, { method: "DELETE" });
+			expect(deleteResp.ok).toBe(true);
+			await conn.waitForFrom(deleteCursor, (m) => m.type === "session_removed" && m.sessionId === deletable.currentSessionId, 5_000);
+			const deletedMsg = await conn.waitForFrom(deleteCursor, (m) => m.type === "staff_changed" && m.reason === "deleted" && m.staffId === deletable.id, 5_000);
+			expect(deletedMsg).toMatchObject({
+				type: "staff_changed",
+				reason: "deleted",
+				staffId: deletable.id,
+				projectId: defaultProj.id,
+				sessionId: deletable.currentSessionId,
+			});
+		} finally {
+			conn?.close();
+			await deleteSession(observerSessionId).catch(() => {});
+			for (const id of cleanupProjectIds.reverse()) {
+				await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+			}
+			for (const dir of cleanupDirs.reverse()) {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}
 	});
 
 	test("POST /api/staff with triggers auto-generates trigger IDs", async () => {

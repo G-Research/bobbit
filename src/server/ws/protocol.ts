@@ -46,6 +46,8 @@ export interface ProviderAuthRequiredEvent {
 
 export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEvent | ProviderAuthRequiredEvent;
 
+export type StaffChangedReason = "created" | "updated" | "reassigned" | "deleted";
+
 /** A message waiting in the server-side prompt queue */
 export interface QueuedMessage {
 	id: string;
@@ -118,8 +120,8 @@ export type ClientMessage =
 	| { type: "task_update"; taskId: string; updates: { title?: string; spec?: string; state?: string; assignedSessionId?: string; dependsOn?: string[] } }
 	| { type: "task_delete"; taskId: string }
 	| { type: "summarize_goal_title"; goalTitle: string }
-	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" }
-	| { type: "deny_tool_permission"; toolName: string }
+	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time"; permissionId?: string }
+	| { type: "deny_tool_permission"; toolName: string; permissionId?: string }
 	| { type: "reorder_queue"; messageIds: string[] }
 	| { type: "restart_agent" }
 	| { type: "resume"; fromSeq: number }
@@ -221,6 +223,8 @@ export type ServerMessage =
 	| { type: "session_created"; sessionId: string; projectId?: string }
 	/** Broad invalidation fallback for session-list changes. */
 	| { type: "sessions_changed"; projectId?: string }
+	/** Sent to ALL authenticated clients when staff records change so staff and session sidebars can invalidate together. */
+	| { type: "staff_changed"; reason: StaffChangedReason; staffId: string; projectId: string; previousProjectId?: string; sessionId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }
@@ -250,7 +254,7 @@ export type ServerMessage =
 	| { type: "inbox.entry.updated"; staffId: string; entry: InboxEntry }
 	| { type: "inbox.entry.removed"; staffId: string; entryId: string }
 	| { type: "pr_status_changed"; goalId: string }
-	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string; seq?: number; ts?: number }
+	| { type: "tool_permission_needed"; id?: string; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string; requestCount?: number; seq?: number; ts?: number }
 	| { type: "tool_permission_settled"; toolName: string; group?: string; status: "granted" | "denied" | "expired" | "superseded" | "cancelled" | "error"; reason?: string }
 	| { type: "index:progress"; projectId: string; phase: "rebuild" | "incremental"; total: number; completed: number; backlog: number }
 	| { type: "index:complete"; projectId: string; phase: "rebuild" | "incremental"; durationMs: number; rowsWritten: number }

@@ -1,6 +1,8 @@
 // Test entry for DefaultRenderer browser-fixture coverage.
 import { render } from "lit";
 import { DefaultRenderer } from "../../src/ui/tools/renderers/DefaultRenderer.js";
+import { McpDefaultRenderer } from "../../src/ui/tools/renderers/McpDefaultRenderer.js";
+import { renderTool } from "../../src/ui/tools/index.js";
 
 class TestCodeBlock extends HTMLElement {
 	private _code = "";
@@ -65,6 +67,33 @@ function makeResult(payload: any, isError = false) {
 	const renderer = new DefaultRenderer(toolName);
 	const result = resultPayload === undefined ? undefined : makeResult(resultPayload, isError);
 	const out = renderer.render(params, result, isStreaming);
+	render(out.content, container);
+};
+
+(window as any).__renderMcpTool = (
+	toolName: string,
+	params: any,
+	resultPayload: any,
+	isError = false,
+) => {
+	const container = document.getElementById("container");
+	if (!container) throw new Error("missing #container");
+	const renderer = new McpDefaultRenderer(toolName);
+	const result = resultPayload === undefined ? undefined : makeResult(resultPayload, isError);
+	const out = renderer.render(params, result, false);
+	render(out.content, container);
+};
+
+(window as any).__renderCascadeTool = (
+	toolName: string,
+	params: any,
+	resultPayload: any,
+	isError = false,
+) => {
+	const container = document.getElementById("container");
+	if (!container) throw new Error("missing #container");
+	const result = resultPayload === undefined ? undefined : makeResult(resultPayload, isError);
+	const out = renderTool(toolName, params, result, false);
 	render(out.content, container);
 };
 
