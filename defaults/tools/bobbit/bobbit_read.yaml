@@ -1,7 +1,7 @@
 name: bobbit_read
 description: "Read-only gateway introspection: goals, sessions, projects, tasks, gates, search, maintenance probes."
 summary: "Read gateway state (goals/sessions/projects/…)"
-params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, view?, probe?]
+params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, includeArchived?, view?, probe?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -34,8 +34,10 @@ detail_docs: >-
   ones the chosen operation requires.
 
   - Semantic filters: `q` (free-text list/search filter), `type` (search result
-  type), `archived` (list_goals), `include` (list_sessions, e.g. `archived`),
-  `view` (gates/tasks projection), `probe` (maintenance_inspect selector).
+  type), `archived` (list_goals archive opt-in), `include` (list_sessions and
+  search archive opt-in, e.g. `archived`), `includeArchived` (REST-style search
+  archive opt-in), `view` (gates/tasks projection), `probe`
+  (maintenance_inspect selector).
 
   - Shared paging: `limit`, `offset`, `after`, `cursor`. List-style operations
   use `limit=50` and `offset=0` by default, clamp `limit` to a maximum of `200`,
@@ -52,6 +54,41 @@ detail_docs: >-
   - Cursor aliases: `cursor` is the generic cursor input; `after` is the gateway
   query name used by archived session/goal paths. If both cursor and offset
   inputs are present for a cursor-backed call, the cursor form wins.
+
+
+  ## Archive visibility (hidden by default)
+
+
+  Agent-facing list/search reads are **live-only by default**: archived entities
+  are never returned unless the caller explicitly opts in. This keeps stale,
+  archived goals/sessions out of agent context unless they are actually wanted.
+  The filter runs on the tool response *after* the gateway replies, so it also
+  strips archived rows from auxiliary arrays that the REST endpoints attach for
+  the UI (which the agent surface does not need by default).
+
+
+  - `list_sessions` — default calls drop any `archived: true` session rows and
+  strip the `archivedDelegates` auxiliary array. Pass `include: "archived"` to
+  return archived sessions plus the `archivedDelegates` delegate-chain
+  enrichment.
+
+  - `list_goals` — default calls drop any `archived: true` goal rows and strip
+  the `archivedSessions` auxiliary array. Pass `archived: true` to select the
+  archived path, which returns archived goals plus the `archivedSessions`
+  affiliated-session enrichment.
+
+  - `search` — default calls drop any archived hit from `results`. Pass
+  `include: "archived"` (or the REST-style `includeArchived: true`) to include
+  archived rows in the ranked results.
+
+  This is the agent-facing tool contract. UI clients may explicitly call REST
+  `/api/search` with `includeArchived=true` to preserve archived results and
+  archived badges; that UI opt-in does not change `bobbit_read.search`'s
+  live-only default.
+
+  - Other list operations (`list_projects`, `list_tasks`, `list_gates`, etc.)
+  never surface archived rows on their default REST paths, so no extra filtering
+  is applied and there is no archive opt-in for them.
 
 
   ## Pagination contract
@@ -96,7 +133,7 @@ detail_docs: >-
 
   | `connection_info` | `/api/connection-info` | — | — |
 
-  | `list_goals` | `/api/goals` (`?projectId`, `?archived`, `?q`, paging) | — | `projectId`, `archived`, `q`, `limit`, `offset`, `after`/`cursor` |
+  | `list_goals` | `/api/goals` (`?projectId`, `?archived`, `?q`, paging) | — | `projectId`, `q`, `limit`, `offset`; archived hidden unless `archived=true` (then `after`/`cursor`) |
 
   | `get_goal` | `/api/goals/:goalId` | `goalId` | — |
 
@@ -108,13 +145,13 @@ detail_docs: >-
 
   | `goal_pr_status` | `/api/goals/:goalId/pr-status` | `goalId` | — |
 
-  | `list_sessions` | `/api/sessions` (`?include`, `?q`, `?projectId`, paging) | — | `include`, `q`, `projectId`, `limit`, `offset`, `after`/`cursor` |
+  | `list_sessions` | `/api/sessions` (`?include`, `?q`, `?projectId`, paging) | — | `q`, `projectId`, `limit`, `offset`; archived hidden unless `include=archived` (then `after`/`cursor`) |
 
   | `get_session` | `/api/sessions/:sessionId` | `sessionId` | — |
 
   | `session_cost` | `/api/sessions/:sessionId/cost` | `sessionId` | — |
 
-  | `search` | `/api/search` (`?q`, `?type`, `?limit`, `?offset`, `?projectId`) | `q` | `q`, `type`, `projectId`, `limit`, `offset` |
+  | `search` | `/api/search` (`?q`, `?type`, `?limit`, `?offset`, `?projectId`, `?includeArchived`) | `q` | `q`, `type`, `projectId`, `limit`, `offset`; archived hidden unless `include=archived` / `includeArchived=true` |
 
   | `list_projects` | `/api/projects` | — | `limit`, `offset` (tool-side fallback) |
 
@@ -154,8 +191,11 @@ detail_docs: >-
   - `q` filters `list_sessions`, `list_goals`, and `search`; `type` applies only
   to `search`.
 
-  - `include` applies only to `list_sessions`; `archived` applies only to
-  `list_goals`.
+  - `include=archived` is the archive opt-in for both `list_sessions` and
+  `search`; `archived=true` is the archive opt-in for `list_goals`. Without
+  these flags every list/search read is live-only (see “Archive visibility”
+  above). `search` also accepts the REST-style `includeArchived=true` as an
+  equivalent opt-in.
 
 
   ### `maintenance_inspect` probes (`probe=`)
