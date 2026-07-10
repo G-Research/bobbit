@@ -223,12 +223,14 @@ function makeRuntimeHarness(options: {
 	prefs?: Prefs;
 	failModels?: string[];
 	readBack?: { provider: string; id: string };
+	readBackSequence?: Array<{ provider: string; id: string }>;
 } = {}) {
 	const setModelCalls: ModelPair[] = [];
 	const persisted: Array<{ sessionId: string; provider: string; modelId: string }> = [];
 	const modelFiles: string[] = [];
 	const messages: any[] = [];
 	let bound: { provider: string; id: string } | undefined;
+	const readBackSequence = [...(options.readBackSequence ?? [])];
 	const fail = new Set(options.failModels ?? []);
 	const sessionManager = {
 		persistSessionModel(sessionId: string, provider: string, modelId: string) {
@@ -253,7 +255,7 @@ function makeRuntimeHarness(options: {
 				bound = { provider, id: modelId };
 			},
 			async getState() {
-				return { model: options.readBack ?? bound ?? { provider: "unset", id: "unset" } };
+				return { model: readBackSequence.shift() ?? options.readBack ?? bound ?? { provider: "unset", id: "unset" } };
 			},
 		},
 	};
@@ -411,6 +413,31 @@ describe("controlled model fallback policy — session auto-selection", () => {
 });
 
 describe("controlled model fallback policy — runtime WS set_model", () => {
+	it("fallback off: delayed read-back settle succeeds, persists, and broadcasts selected model", async () => {
+		const harness = makeRuntimeHarness({
+			readBackSequence: [
+				{ provider: "anthropic", id: "old-model" },
+				{ provider: "anthropic", id: "selected-new" },
+			],
+		});
+
+		const actual = await applyRuntimeSessionModelSelection(
+			harness.sessionManager as any,
+			harness.session as any,
+			"anthropic",
+			"selected-new",
+			harness.prefs as any,
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { provider: "anthropic", id: "selected-new" });
+		assert.deepEqual(harness.setModelCalls, [["anthropic", "selected-new"]]);
+		assert.deepEqual(harness.persisted, [{ sessionId: "runtime-session", provider: "anthropic", modelId: "selected-new" }]);
+		assert.deepEqual(harness.modelFiles, ["anthropic/selected-new"]);
+		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.provider), ["anthropic"]);
+		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.id), ["selected-new"]);
+	});
+
 	it("fallback off: read-back mismatch rejects and does not persist, broadcast, or update model file", async () => {
 		const harness = makeRuntimeHarness({
 			readBack: { provider: "anthropic", id: "still-old" },
