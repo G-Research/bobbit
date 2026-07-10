@@ -956,9 +956,30 @@ export interface SidebarData {
 let _sidebarDataCache: SidebarData | null = null;
 let _sidebarCacheKey: string = "";
 
+function stableSidebarCachePart(value: unknown): string {
+	if (value === null || value === undefined) return "";
+	if (typeof value !== "object") return String(value);
+	if (Array.isArray(value)) return `[${value.map(stableSidebarCachePart).join(",")}]`;
+	const obj = value as Record<string, unknown>;
+	return `{${Object.keys(obj).sort().map((key) => `${key}:${stableSidebarCachePart(obj[key])}`).join(",")}}`;
+}
+
+function staffSidebarCacheKey(): string {
+	return state.staffList.map((s) => stableSidebarCachePart({
+		id: s.id,
+		name: s.name,
+		description: s.description,
+		state: s.state,
+		projectId: s.projectId,
+		currentSessionId: s.currentSessionId,
+		lastWakeAt: s.lastWakeAt,
+		triggers: s.triggers ?? [],
+	})).join("|");
+}
+
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.parentSessionId || "") + (s.childKind || "") + (s.readOnly ? "R" : "") + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.parentSessionId || "") + (s.childKind || "") + (s.archived ? "A" : "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.parentSessionId || "") + (s.childKind || "") + (s.readOnly ? "R" : "") + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.parentSessionId || "") + (s.childKind || "") + (s.archived ? "A" : "")).join(",")}:${staffSidebarCacheKey()}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
