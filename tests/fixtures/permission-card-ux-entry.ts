@@ -132,16 +132,17 @@ function selectors() {
 function geometryProbe() {
 	const s = selectors();
 	const pinned = document.querySelector(s.pinned) as HTMLElement | null;
-	const editor = document.querySelector(s.editor) as HTMLElement | null;
+	const editor = document.querySelector("message-editor") as HTMLElement | null;
 	const scroller = document.querySelector(s.scroller) as HTMLElement | null;
 	if (!pinned) return { ok: false, error: "pinned permission controls not visible" };
 	if (!editor || !scroller) return { ok: false, error: "editor or scroller missing" };
 	const pr = pinned.getBoundingClientRect();
 	const er = editor.getBoundingClientRect();
 	const sr = scroller.getBoundingClientRect();
-	const visible = pr.width > 0 && pr.height > 0 && pr.bottom <= sr.bottom + 1 && pr.top >= sr.top - 1;
+	const visible = pr.width > 0 && pr.height > 0 && pr.bottom <= window.innerHeight + 1 && pr.top >= -1;
 	const overlapsEditor = !(pr.right <= er.left || pr.left >= er.right || pr.bottom <= er.top || pr.top >= er.bottom);
-	return { ok: visible && !overlapsEditor, visible, overlapsEditor, pinned: pr.toJSON(), editor: er.toJSON(), scroller: sr.toJSON() };
+	const alignedWithEditor = Math.abs(pr.left - er.left) <= 1 && Math.abs(pr.right - er.right) <= 1;
+	return { ok: visible && !overlapsEditor && alignedWithEditor, visible, overlapsEditor, alignedWithEditor, pinned: pr.toJSON(), editor: er.toJSON(), scroller: sr.toJSON() };
 }
 
 async function remountWithoutReplay() {

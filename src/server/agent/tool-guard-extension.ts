@@ -142,7 +142,7 @@ export default function(pi) {
         const groupMatches = grantScope === "group" && r.group === entry.group;
         const coversCurrent = responseTools.length > 0
           ? currentListed && (grantScope !== "group" || groupMatches)
-          : groupMatches;
+          : (grantScope ? groupMatches : true);
         if (!coversCurrent) {
           return { block: true, reason: "Permission grant did not cover tool " + toolName };
         }

@@ -19,6 +19,7 @@ export class ToolPermissionCard extends LitElement {
 	@property() status: PermissionCardStatus | string = "active";
 	@property() mode: string = "session-only";
 	@property() error = "";
+	@property({ type: Number }) requestCount = 1;
 	@property({ type: Boolean }) actionable = true;
 	@property({ attribute: false }) onModeChange?: (mode: string) => void;
 	@property({ attribute: false }) onGrant?: (scope: "tool" | "group", mode?: string) => void | boolean;
@@ -35,6 +36,14 @@ export class ToolPermissionCard extends LitElement {
 
 	private get _effectiveMode(): string {
 		return this.mode || "session-only";
+	}
+
+	private get _callCount(): number {
+		return Number.isFinite(this.requestCount) && this.requestCount > 1 ? Math.floor(this.requestCount) : 1;
+	}
+
+	private get _callCountLabel(): string {
+		return this._callCount > 1 ? `${this._callCount} calls` : "1 call";
 	}
 
 	private _setMode(mode: string) {
@@ -118,6 +127,12 @@ export class ToolPermissionCard extends LitElement {
 
 		return html`
 			<div class="px-3 py-2.5 rounded-md bg-amber-500/10 border border-amber-500/30 space-y-2">
+				${this.error ? html`
+					<div class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-sm text-destructive" role="alert">
+						${icon(AlertTriangle, "sm")}
+						<span>${this.error}</span>
+					</div>
+				` : ""}
 				<div class="flex items-center gap-2 text-sm font-medium text-amber-600 dark:text-amber-400">
 					${icon(ShieldCheck, "sm")}
 					<span>Role "${this.roleLabel}" doesn't have access to <code class="px-1 py-0.5 rounded bg-amber-500/10 text-xs">${this._shortToolName}</code></span>
@@ -130,26 +145,38 @@ export class ToolPermissionCard extends LitElement {
 						@change=${(e: Event) => this._setMode((e.target as HTMLSelectElement).value)}
 					>
 						<option value="session-only">This session</option>
-						<option value="one-time">Just this once</option>
+						<option value="one-time">Just for now${this._callCount > 1 ? ` (${this._callCountLabel})` : ""}</option>
 						<option value="persistent">For all future sessions</option>
 					</select>
 				</div>
-				<div class="flex gap-2 flex-wrap">
-					<button
-						class="px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-						?disabled=${!this._canAct || this._clicked}
-						@click=${() => this._handleGrant("group")}
-					>Allow all tools in ${this._shortGroup}</button>
-					<button
-						class="px-3 py-1.5 text-xs font-medium rounded-md bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-						?disabled=${!this._canAct || this._clicked}
-						@click=${() => this._handleGrant("tool")}
-					>Allow just ${this._shortToolName}</button>
-					<button
-						class="px-3 py-1.5 text-xs font-medium rounded-md border border-border text-muted-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-						?disabled=${!this._canAct || this._clicked}
-						@click=${() => this._handleDeny()}
-					>Deny</button>
+				<div class="space-y-1.5">
+					<div class="text-xs font-medium text-foreground/90">Choose how to continue${this._callCount > 1 ? ` for these ${this._callCountLabel}` : ""}:</div>
+					<div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+						<button
+							class="min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-left text-foreground shadow-xs hover:bg-secondary/50 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+							?disabled=${!this._canAct || this._clicked}
+							@click=${() => this._handleGrant("group")}
+						>
+							<div class="text-sm font-semibold">Allow all tools</div>
+							<div class="mt-0.5 text-[11px] text-foreground/80 truncate">in ${this._shortGroup}</div>
+						</button>
+						<button
+							class="min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-left text-foreground shadow-xs hover:bg-secondary/50 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+							?disabled=${!this._canAct || this._clicked}
+							@click=${() => this._handleGrant("tool")}
+						>
+							<div class="text-sm font-semibold">Allow just this tool</div>
+							<div class="mt-0.5 text-[11px] text-foreground/80 truncate">${this._shortToolName}${this._callCount > 1 ? ` · ${this._callCountLabel}` : ""}</div>
+						</button>
+						<button
+							class="min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-left text-foreground shadow-xs hover:bg-secondary/50 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+							?disabled=${!this._canAct || this._clicked}
+							@click=${() => this._handleDeny()}
+						>
+							<div class="text-sm font-semibold">Deny</div>
+							<div class="mt-0.5 text-[11px] text-foreground/80">Do not run ${this._callCount > 1 ? "them" : "it"}</div>
+						</button>
+					</div>
 				</div>
 			</div>
 		`;

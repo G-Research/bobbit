@@ -1153,13 +1153,15 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "grant_tool_permission": {
-					sessionManager.grantToolPermission(sessionId, msg.toolName, msg.scope, msg.group, msg.mode).catch((err: any) => {
+					sessionManager.grantToolPermission(sessionId, msg.toolName, msg.scope, msg.group, msg.mode, msg.permissionId).catch((err: any) => {
+						const message = String(err?.message ?? err);
+						if (message.startsWith("Ignored stale permission grant")) return;
 						send(ws, { type: "error", message: `Grant failed: ${err}`, code: "GRANT_ERROR" });
 					});
 					break;
 				}
 				case "deny_tool_permission": {
-					sessionManager.denyToolPermission(sessionId, msg.toolName);
+					sessionManager.denyToolPermission(sessionId, msg.toolName, msg.permissionId);
 					break;
 				}
 				case "restart_agent":
