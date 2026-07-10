@@ -25,6 +25,7 @@ import {
 
 const ALL_BASE: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 const ALL_PLUS_XHIGH: ThinkingLevel[] = [...ALL_BASE, "xhigh"];
+const ALL_PLUS_MAX: ThinkingLevel[] = [...ALL_PLUS_XHIGH, "max"];
 
 interface MatrixRow {
 	model: ModelLike;
@@ -51,19 +52,22 @@ const matrix: MatrixRow[] = [
 	{ label: "gpt-5.5", model: { id: "gpt-5.5", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "gpt-5.5-pro", model: { id: "gpt-5.5-pro", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "gpt-5.1-codex-max", model: { id: "gpt-5.1-codex-max", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
-	// Metadata-based detection should light up xhigh even for families Bobbit
-	// doesn't know by regex, and should override the heuristic when present.
+	// Metadata-based detection should light up extended levels even for families
+	// Bobbit doesn't know by regex, and should override the heuristic when present.
 	{ label: "metadata-driven xhigh", model: { id: "future-reasoner", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }, expected: ALL_PLUS_XHIGH },
+	{ label: "metadata-driven max", model: { id: "future-reasoner", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, expected: ALL_PLUS_MAX },
 	{ label: "metadata disables xhigh despite heuristic match", model: { id: "gpt-5.5", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: null } }, expected: ALL_BASE },
 	// thinkingLevelMap semantics mirror pi-ai's getSupportedThinkingLevels: a
 	// level mapped to null is DROPPED (unsupported), an absent level is KEPT,
-	// and xhigh is kept only when present with a non-null value.
+	// and xhigh/max are kept only when present with a non-null value.
 	// Claude Fable 5: off:null = forced adaptive thinking, so "off" is dropped.
 	{ label: "Claude Fable 5 (off:null, xhigh)", model: { id: "claude-fable-5", provider: "anthropic", reasoning: true, thinkingLevelMap: { off: null, xhigh: "xhigh" } }, expected: ["minimal", "low", "medium", "high", "xhigh"] },
 	// Opus-style map that only pins xhigh → full ladder + xhigh (all others absent-so-kept).
 	{ label: "map {xhigh:'xhigh'} keeps full ladder + xhigh", model: { id: "claude-opus-4-8", provider: "anthropic", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }, expected: ALL_PLUS_XHIGH },
 	// gpt-5.5-style map: off remapped (kept), minimal:null (dropped), xhigh pinned.
 	{ label: "map {off:'none', xhigh, minimal:null} drops only minimal", model: { id: "gpt-5.5", provider: "openai", reasoning: true, thinkingLevelMap: { off: "none", xhigh: "xhigh", minimal: null } }, expected: ["off", "low", "medium", "high", "xhigh"] },
+	// gpt-5.6-style map exposes both xhigh and max.
+	{ label: "map {off:'none', xhigh, max} keeps max", model: { id: "gpt-5.6-luna", provider: "openai", reasoning: true, thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" } }, expected: ALL_PLUS_MAX },
 	// A reasoning model WITHOUT a map stays on the family heuristic (unchanged).
 	{ label: "reasoning, no map → heuristic base ladder", model: { id: "claude-sonnet-4-6", provider: "anthropic", reasoning: true }, expected: ALL_BASE },
 	// Non-reasoning short-circuits to off regardless of any map.
@@ -87,10 +91,10 @@ const matrix: MatrixRow[] = [
 	{ label: "aigw/gpt-5.4", model: { id: "gpt-5.4", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
 ];
 
-test("THINKING_LEVELS contains the canonical 6-element ordered set", () => {
+test("THINKING_LEVELS contains the canonical 7-element ordered set", () => {
 	assert.deepEqual(
 		[...THINKING_LEVELS],
-		["off", "minimal", "low", "medium", "high", "xhigh"],
+		["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 	);
 });
 
@@ -145,17 +149,19 @@ for (const row of matrix) {
 }
 
 test("clampThinkingLevel: returns input unchanged when supported", () => {
-	const opus47: ModelLike = { id: "claude-opus-4-7", provider: "anthropic", reasoning: true };
+	const maxCapable: ModelLike = { id: "gpt-5.6-luna", provider: "openai", reasoning: true, thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" } };
 	for (const lvl of THINKING_LEVELS) {
-		assert.equal(clampThinkingLevel(lvl, opus47), lvl);
+		assert.equal(clampThinkingLevel(lvl, maxCapable), lvl);
 	}
 });
 
-test("clampThinkingLevel: xhigh on unsupported reasoning models clamps to high", () => {
+test("clampThinkingLevel: xhigh/max on unsupported reasoning models clamp downward", () => {
 	const opus45: ModelLike = { id: "claude-opus-4-5-20250920", provider: "anthropic", reasoning: true };
 	const crossProviderOpus48: ModelLike = { id: "claude-opus-4-8", provider: "openai", reasoning: true };
 	assert.equal(clampThinkingLevel("xhigh", opus45), "high");
 	assert.equal(clampThinkingLevel("xhigh", crossProviderOpus48), "high");
+	assert.equal(clampThinkingLevel("max", opus45), "high");
+	assert.equal(clampThinkingLevel("max", { id: "claude-opus-4-8", provider: "anthropic", reasoning: true }), "xhigh");
 });
 
 test("clampThinkingLevel: xhigh on Opus 4.8 stays xhigh", () => {
@@ -177,6 +183,7 @@ test("clampThinkingLevel: non-reasoning model collapses everything to off", () =
 	assert.equal(clampThinkingLevel("high", gpt4o), "off");
 	assert.equal(clampThinkingLevel("medium", gpt4o), "off");
 	assert.equal(clampThinkingLevel("xhigh", gpt4o), "off");
+	assert.equal(clampThinkingLevel("max", gpt4o), "off");
 	assert.equal(clampThinkingLevel("minimal", gpt4o), "off");
 	assert.equal(clampThinkingLevel("off", gpt4o), "off");
 });
@@ -241,6 +248,7 @@ test("clampThinkingLevel: Fable (off:null) clamps off UP to minimal, keeps high"
 	assert.equal(clampThinkingLevel("off", fable), "minimal");
 	assert.equal(clampThinkingLevel("high", fable), "high");
 	assert.equal(clampThinkingLevel("xhigh", fable), "xhigh");
+	assert.equal(clampThinkingLevel("max", fable), "xhigh");
 	// Unknown token resolves to off then clamps UP to minimal on Fable.
 	assert.equal(clampThinkingLevel("garbage", fable), "minimal");
 });

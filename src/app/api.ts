@@ -2401,7 +2401,7 @@ export interface RoleData {
 	accessory: string;
 	/** "<provider>/<modelId>" — overrides default.sessionModel / default.reviewModel for sessions running as this role. */
 	model?: string;
-	/** "off" | "minimal" | "low" | "medium" | "high" | "xhigh" — overrides default.sessionThinkingLevel / default.reviewThinkingLevel. "xhigh" is auto-detected from per-model metadata when available; otherwise Bobbit falls back to known family rules (Claude Opus 4.6+, gpt-5.1-codex-max, gpt-5.2* / gpt-5.4* / gpt-5.5*). */
+	/** "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" — overrides default.sessionThinkingLevel / default.reviewThinkingLevel. "xhigh" is auto-detected from per-model metadata when available; otherwise Bobbit falls back to known family rules (Claude Opus 4.6+, gpt-5.1-codex-max, gpt-5.2* / gpt-5.4* / gpt-5.5*). "max" requires per-model metadata. */
 	thinkingLevel?: string;
 	createdAt: number;
 	updatedAt: number;

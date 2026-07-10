@@ -17,7 +17,7 @@ import {
 } from "../../src/shared/thinking-levels.js";
 
 const LABELS: Record<ThinkingLevel, string> = {
-	off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high",
+	off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max",
 };
 
 /** Parse the fixture's `provider|id|reasoning|mapStr` encoding into a ModelLike. */
@@ -154,6 +154,12 @@ describe("Per-model thinking-level selector", () => {
 		h = createHarness();
 		h.setModelByValue("openai|gpt-5.1-codex-max|1");
 		expect(h.getSupported()).toContain("xhigh");
+	});
+
+	it("gpt-5.6 metadata exposes xhigh and max options", () => {
+		h = createHarness();
+		h.setModelByValue("openai|gpt-5.6-luna|1|off=none;xhigh=xhigh;max=max");
+		expect(h.getSupported()).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 	});
 
 	it("gpt-5 (non-max, non-5.2) does not expose xhigh", () => {
