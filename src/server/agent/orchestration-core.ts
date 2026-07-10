@@ -1,6 +1,7 @@
 // src/server/agent/orchestration-core.ts
 //
 import { deliverSessionPrompt, type DeliverSessionPromptResult, type SessionPromptMode } from "./session-prompt-delivery.js";
+import type { ErroredPromptRecoveryDecision } from "./session-manager.js";
 
 // OrchestrationCore — the ONE goal-agnostic implementation of "launch and
 // orchestrate a child agent (a new, properly-scoped principal)".
@@ -333,6 +334,9 @@ export interface OrchestrationSessionView {
 	): Promise<{ id: string }>;
 	enqueuePrompt(sessionId: string, text: string, opts?: Record<string, unknown>): Promise<{ status: string }>;
 	deliverLiveSteer(sessionId: string, message: string, opts?: Record<string, unknown>): Promise<unknown>;
+	getErroredPromptRecoveryDecision?(sessionId: string): ErroredPromptRecoveryDecision;
+	enqueuePromptForRetryRecovery?(sessionId: string, text: string, opts?: Record<string, unknown>): Promise<{ status: "queued"; queuedId?: string }> | { status: "queued"; queuedId?: string };
+	retryLastPrompt?(sessionId: string, opts?: { auto?: boolean; preserveQueueIds?: string[] }): Promise<void>;
 	waitForIdle(sessionId: string, timeoutMs: number): Promise<void>;
 	getSessionOutput(sessionId: string): Promise<string>;
 	getSession(id: string): OrchestrationSessionLike | undefined;
@@ -722,6 +726,15 @@ export class OrchestrationCore {
 				return { status: queued?.status === "queued" ? "queued" : "dispatched" };
 			},
 			deliverLiveSteer: (id, text, steerOpts) => this.deps.sessionManager.deliverLiveSteer(id, text, steerOpts),
+			getErroredPromptRecoveryDecision: this.deps.sessionManager.getErroredPromptRecoveryDecision
+				? (id) => this.deps.sessionManager.getErroredPromptRecoveryDecision!(id)
+				: undefined,
+			enqueuePromptForRetryRecovery: this.deps.sessionManager.enqueuePromptForRetryRecovery
+				? async (id, text, promptOpts) => this.deps.sessionManager.enqueuePromptForRetryRecovery!(id, text, promptOpts)
+				: undefined,
+			retryLastPrompt: this.deps.sessionManager.retryLastPrompt
+				? (id, retryOpts) => this.deps.sessionManager.retryLastPrompt!(id, retryOpts)
+				: undefined,
 		}, childId, message, { mode: opts?.mode, defaultMode: opts ? (opts.defaultMode ?? "steer") : "prompt" });
 		this.audit({ event: result.mode === "steer" ? "steer" : "prompt", ownerSessionId: ownerId, childSessionId: childId });
 		return opts ? result : { status: "status" in result && result.status === "queued" ? "queued" : "dispatched" };

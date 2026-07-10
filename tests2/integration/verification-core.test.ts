@@ -27,7 +27,10 @@ import {
 } from "./_e2e/e2e-setup.js";
 
 const VERIFICATION_WS_TIMEOUT_MS = 60_000;
+const VERIFICATION_LLM_WS_TIMEOUT_MS = 90_000;
 const VERIFICATION_TEST_TIMEOUT_MS = 180_000;
+
+test.setTimeout(VERIFICATION_TEST_TIMEOUT_MS);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -318,7 +321,8 @@ test.describe("Command verification WS event lifecycle", () => {
 // ===========================================================================
 
 test.describe("Multi-step verification", () => {
-	test.describe.configure({ mode: "parallel", timeout: VERIFICATION_TEST_TIMEOUT_MS });
+	test.describe.configure({ mode: "parallel" });
+	test.setTimeout(VERIFICATION_TEST_TIMEOUT_MS);
 
 	test("multi-step verification emits correct events and step_output fields", async () => {
 		const goalId = await createTestFastGoal();
@@ -393,7 +397,7 @@ test.describe("Multi-step verification", () => {
 
 			const stepStarted = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				VERIFICATION_WS_TIMEOUT_MS,
+				VERIFICATION_LLM_WS_TIMEOUT_MS,
 			);
 			expect(stepStarted.goalId).toBe(goalId);
 			expect(stepStarted.signalId).toBeTruthy();
@@ -407,13 +411,13 @@ test.describe("Multi-step verification", () => {
 					m.type === "gate_verification_step_complete" &&
 					m.gateId === "design-doc" &&
 					m.sessionId != null,
-				VERIFICATION_WS_TIMEOUT_MS,
+				VERIFICATION_LLM_WS_TIMEOUT_MS,
 			);
 			expect(stepComplete.sessionId).toBeTruthy();
 			expect(stepComplete.sessionId).toMatch(/^llm-review-/);
 			expect(stepComplete.status).toMatch(/^(passed|failed)$/);
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", VERIFICATION_WS_TIMEOUT_MS);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", VERIFICATION_LLM_WS_TIMEOUT_MS);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -684,7 +688,7 @@ test.describe("LLM Review verification", () => {
 			const signalData = await signalResp.json();
 			expect(signalData.signal.status).toBe("running");
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && (m.status === "passed" || m.status === "failed"), VERIFICATION_WS_TIMEOUT_MS);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && (m.status === "passed" || m.status === "failed"), VERIFICATION_LLM_WS_TIMEOUT_MS);
 
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);
 			expect(signalsResp.status).toBe(200);

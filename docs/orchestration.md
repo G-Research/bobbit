@@ -139,7 +139,7 @@ child settles** (not when all are done), so you can process that result eagerly 
 
 For non-blocking children you spawned, these verbs work over the child's session id:
 
-- **`team_prompt`** — default-steered follow-up. It injects into a streaming child, or queues a steered prompt when the child is idle/non-streaming. Use `mode: "prompt"` for normal run-if-idle / queue-if-busy next-turn semantics.
+- **`team_prompt`** — default-steered follow-up. It injects into a streaming child, queues a steered prompt when the child is idle/non-streaming, and recovers retryable errored-idle children through the shared Retry path before preserving the follow-up as queued intent. Use `mode: "prompt"` for normal run-if-idle / queue-if-busy next-turn semantics.
 - **`team_steer`** — backward-compatible mid-turn redirect; requires the child to be `streaming` (else `409`). Prefer `team_prompt(mode="steer")` for routine nudges because it also handles idle targets.
 - **`team_abort`** — force-abort a stuck child.
 - **`team_dismiss`** — terminate and archive the child.
@@ -199,7 +199,9 @@ retry guidance from `retryable`.
 The team-lead's goal-scoped versions of these verbs (plus `team_spawn`, `team_list`,
 `team_complete`) keep their worktree/role/gate semantics. `team_prompt` also preserves
 `workflowGateId` / `inputGateIds` dependency context injection in both prompt and steer
-modes. `team_delegate` and `team_wait` are *added* alongside the goal-scoped tools.
+modes, and the goal route's own-child fallback uses the same `OrchestrationCore.prompt`
+recovery behavior as `/api/sessions/:ownerId/orchestrate/prompt`. `team_delegate` and
+`team_wait` are *added* alongside the goal-scoped tools.
 
 ### Recursion is fully blocked at all depths
 
