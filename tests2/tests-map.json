@@ -20,6 +20,18 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/permission-reducer.test.ts",
+      "reason": "Failing-first reproducing tests for Permission Card UX reducer lifecycle: denied rows must remain as compact history, timed-out rows settle stale/expired, and superseded rows stop being actionable."
+    },
+    {
+      "path": "tests2/dom/permission-card-ux.test.ts",
+      "reason": "Failing-first reproducing DOM tests for Permission Card UX: blocked no-result tool calls must not render complete, streaming tool-call context must persist through tool_permission_needed, grant errors clear spinners, pinned+inline permission cards share state, pinned grant/deny settles rows, and pinned controls derive from current transcript rows."
+    },
+    {
+      "path": "tests2/browser/fixtures/permission-card-ux.spec.ts",
+      "reason": "Failing-first browser fixture for Permission Card UX: bottom-pinned active permission controls stay visible with a scrolled transcript, do not overlap editor/status/safe-area, grant/deny from pinned controls settle correctly, and reconnect/alive-socket remount derives pinned controls from current rows."
+    },
+    {
       "path": "tests2/browser/journeys/cross-session-proposal-mirror.journey.spec.ts",
       "reason": "Reproducing test for the 'Fix cross-session proposal panels' goal: from a NON-matching session (assistantType === null) a role/tool/staff proposal that reaches the panel through the UNIFIED remote.onProposal path alone (source 'seed'/'rehydrate'/'edit'/'restore'/switch-back — not the live tool-use scan that also fires the legacy per-type callback) leaves the legacy form-mirror (rolePreviewName…, toolPreviewName…, staffPreviewName…) empty, so the panel renders blank and its primary submit stays disabled/absent. Drives onProposal directly (same technique as tests2/browser/e2e/proposal-inline-comments.spec.ts) and asserts the mirror is populated + submit enabled. FAILS on HEAD (no role/tool/staff bridge in the unified callback, only goal is bridged), passes once the bridge is added."
     },

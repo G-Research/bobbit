@@ -251,6 +251,7 @@ export type ServerMessage =
 	| { type: "inbox.entry.removed"; staffId: string; entryId: string }
 	| { type: "pr_status_changed"; goalId: string }
 	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string; seq?: number; ts?: number }
+	| { type: "tool_permission_settled"; toolName: string; group?: string; status: "granted" | "denied" | "expired" | "superseded" | "cancelled" | "error"; reason?: string }
 	| { type: "index:progress"; projectId: string; phase: "rebuild" | "incremental"; total: number; completed: number; backlog: number }
 	| { type: "index:complete"; projectId: string; phase: "rebuild" | "incremental"; durationMs: number; rowsWritten: number }
 	| { type: "index:error"; projectId: string; message: string; recoverable: boolean }
