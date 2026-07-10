@@ -91,7 +91,11 @@ methods, and body keys see each tool's `detail_docs` and
 
 ### `bobbit_read` — read-only introspection
 
-All operations are GETs with no side effects.
+All operations are GETs with no side effects. List-style operations are bounded
+by default (`limit=50`, `offset=0`, max `200`) and return a `pagination` object.
+`list_sessions`, `list_goals`, and `search` use REST pagination; other list
+operations page the already-filtered gateway response in the tool. REST-paged
+responses are annotated, not re-sliced.
 
 - `health`, `connection_info` — gateway liveness + network info.
 - `list_goals` (`archived`, `q`), `get_goal` — enumerate / fetch goals.
@@ -101,8 +105,8 @@ All operations are GETs with no side effects.
   `session_cost` — enumerate / fetch sessions and their cost.
 - `search` — full-text search across goals/sessions/messages/staff.
 - `list_projects`, `get_project` — project registry.
-- `list_workflows`, `get_workflow` — workflow templates (pass `projectId`;
-  `list_workflows` returns an empty list without it — the call does not error).
+- `list_workflows`, `get_workflow` — workflow templates (`list_workflows`
+  requires `projectId`; `get_workflow` accepts it as a scope filter).
 - `list_roles`, `list_tools` — resolved roles and the tool catalogue.
 - `list_gates`, `list_tasks` (by arbitrary `goalId`), `get_task` — cross-goal
   gate/task boards.

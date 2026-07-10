@@ -21,8 +21,9 @@ operation-dispatched surface split into three tools by privilege:
 - **`bobbit_admin`** — config + destructive maintenance (highest privilege).
 
 Each tool takes an `operation` discriminator plus operation-specific params
-(validated with TypeBox), and returns the gateway's JSON verbatim, or a
-structured error surfacing the gateway `{ error, code }` shape.
+(validated with TypeBox). Non-list reads return the gateway JSON unchanged;
+`bobbit_read` list operations return bounded pages with pagination metadata.
+Failures surface the gateway `{ error, code }` shape.
 
 ## 2. Resolved decisions (decided — do not re-litigate)
 
@@ -193,7 +194,8 @@ operations would (a) blow the param-description budget and (b) be unwieldy.
     the catalogue is in `detail_docs`).
   - A flat set of `Type.Optional(...)` shared params covering the union of
     fields the operations use (e.g. `goalId?`, `sessionId?`, `taskId?`,
-    `projectId?`, `gateId?`, `q?`, `archived?`, `include?`, `body?`). Common
+    `projectId?`, `gateId?`, `q?`, `limit?`, `offset?`, `after?`, `cursor?`,
+    `archived?`, `include?`, `body?`). Common
     scalar ids are first-class optional fields; free-form request bodies for the
     richer POST/PUT operations are passed via a single
     `body?: Type.Optional(Type.Record(Type.String(), Type.Unknown()))` (or
@@ -223,51 +225,107 @@ as `?k=`. "Body" lists the JSON body keys the handler reads.
 
 ### 5.1 `bobbit_read` (group `Bobbit`, all GET)
 
-| operation | method | path | required | optional |
+`bobbit_read` is read-only. Non-list operations return the gateway response
+unchanged. List-style operations are bounded by default so agents do not dump
+large collections into context.
+
+#### Shared pagination
+
+Shared paging params for list-style reads:
+
+- `limit` — page size. Default `50`, maximum `200`.
+- `offset` — zero-based offset. Default `0`.
+- `after` — cursor query name used by archived session/goal endpoints.
+- `cursor` — generic alias for cursor-backed calls. If both cursor and offset
+  params are present for a cursor-backed operation, cursor mode wins.
+
+`search` keeps its endpoint-specific defaults (`limit=20`, max `100`) unless a
+caller passes `limit`, but still returns normalized pagination metadata.
+
+List responses preserve the endpoint's normal item key and add:
+
+```ts
+interface PageMetadata {
+  limit: number;
+  offset?: number;
+  total?: number;
+  hasMore: boolean;
+  nextOffset?: number;
+  cursor?: string | number;
+  nextCursor?: string | number;
+  mode: "offset" | "cursor";
+  itemKey: string;
+  pagedBy: "rest" | "tool";
+}
+```
+
+REST-level paging is used by `list_sessions`, `list_goals`, and `search`, which
+return page fields such as `total`, `hasMore`, `nextOffset`, or `nextCursor`.
+When those REST page fields are present, the tool adds normalized `pagination`
+metadata but does **not** slice the returned array again. Other list-style
+operations are paged tool-side after the gateway response has already been
+scoped by semantic filters such as `projectId`, `goalId`, and `view`; ancillary
+fields such as counts, diagnostics, summaries, and delegate/session metadata are
+preserved.
+
+#### Operation catalogue and semantic filters
+
+| operation | method | path | required | semantic filters / paging |
 |---|---|---|---|---|
 | `health` | GET | `/api/health` | — | — |
 | `connection_info` | GET | `/api/connection-info` | — | — |
-| `list_goals` | GET | `/api/goals` | — | `archived` (`?archived=true`), `q` |
+| `list_goals` | GET | `/api/goals` | — | `projectId`, `archived` (`?archived=true`), `q`, `limit`, `offset`, `after`/`cursor` |
 | `get_goal` | GET | `/api/goals/:goalId` | `goalId` | — |
 | `goal_cost` | GET | `/api/goals/:goalId/cost` | `goalId` | — |
 | `goal_git_status` | GET | `/api/goals/:goalId/git-status` | `goalId` | — |
 | `goal_commits` | GET | `/api/goals/:goalId/commits` | `goalId` | — |
 | `goal_pr_status` | GET | `/api/goals/:goalId/pr-status` | `goalId` | — |
-| `list_sessions` | GET | `/api/sessions` | — | `include` (`?include=archived`), `q`, `projectId` |
+| `list_sessions` | GET | `/api/sessions` | — | `include`, `q`, `projectId`, `limit`, `offset`, `after`/`cursor` |
 | `get_session` | GET | `/api/sessions/:sessionId` | `sessionId` | — |
 | `session_cost` | GET | `/api/sessions/:sessionId/cost` | `sessionId` | — |
-| `search` | GET | `/api/search` | `q` | `type` (all\|goals\|sessions\|messages\|staff), `limit`, `offset`, `projectId` |
-| `list_projects` | GET | `/api/projects` | — | — |
+| `search` | GET | `/api/search` | `q` | `q`, `type` (all\|goals\|sessions\|messages\|staff), `projectId`, `limit`, `offset` |
+| `list_projects` | GET | `/api/projects` | — | `limit`, `offset` (tool-side fallback) |
 | `get_project` | GET | `/api/projects/:projectId` | `projectId` | — |
-| `list_workflows` | GET | `/api/workflows` | `projectId` | — (empty list without projectId) |
+| `list_workflows` | GET | `/api/workflows` | `projectId` | `projectId`, `limit`, `offset` (tool-side fallback) |
 | `get_workflow` | GET | `/api/workflows/:workflowId` | `workflowId` | `projectId` (`?projectId=`) |
-| `list_roles` | GET | `/api/roles` | — | — |
-| `list_tools` | GET | `/api/tools` | — | `projectId` (config scope) |
-| `list_gates` | GET | `/api/goals/:goalId/gates` | `goalId` | `view` (`?view=summary`) |
-| `list_tasks` | GET | `/api/goals/:goalId/tasks` | `goalId` | `view` (`?view=summary`) |
+| `list_roles` | GET | `/api/roles` | — | `projectId`, `limit`, `offset` (tool-side fallback) |
+| `list_tools` | GET | `/api/tools` | — | `projectId`, `limit`, `offset` (tool-side fallback) |
+| `list_gates` | GET | `/api/goals/:goalId/gates` | `goalId` | `view` (`?view=summary`), `limit`, `offset` (tool-side fallback) |
+| `list_tasks` | GET | `/api/goals/:goalId/tasks` | `goalId` | `view` (`?view=summary`), `limit`, `offset` (tool-side fallback) |
 | `get_task` | GET | `/api/tasks/:taskId` | `taskId` | — |
-| `list_staff` | GET | `/api/staff` | — | — |
-| `list_mcp_servers` | GET | `/api/mcp-servers` | — | — |
-| `maintenance_inspect` | GET | (see sub-probes) | `probe` | `projectId` |
+| `list_staff` | GET | `/api/staff` | — | `projectId`, `limit`, `offset` (tool-side fallback) |
+| `list_mcp_servers` | GET | `/api/mcp-servers` | — | `projectId`, `limit`, `offset` (tool-side fallback) |
+| `maintenance_inspect` | GET | (see sub-probes) | `probe` | `probe`, supported `projectId`, tool-side paging for large array probes |
+
+Semantic filter notes:
+
+- `projectId` is forwarded for `list_sessions`, `list_goals`,
+  `list_workflows`, `get_workflow`, `list_roles`, `list_tools`, `list_staff`,
+  `list_mcp_servers`, and supported maintenance probes.
+- `goalId` path-scopes `list_gates` and `list_tasks`; `view` projection is
+  applied before paging.
+- `q` filters `list_sessions`, `list_goals`, and `search`; `type` applies only
+  to `search`.
+- `include` applies only to `list_sessions`; `archived` applies only to
+  `list_goals`.
 
 **`maintenance_inspect`** takes a `probe` param selecting one GET-only probe:
 
-| `probe` value | path |
-|---|---|
-| `orphaned_worktrees` | `/api/maintenance/orphaned-worktrees` |
-| `orphaned_sessions` | `/api/maintenance/orphaned-sessions` |
-| `expired_archives` | `/api/maintenance/expired-archives` |
-| `orphaned_index_rows` | `/api/maintenance/orphaned-index-rows` (`?projectId=`) |
-| `worktrees` | `/api/maintenance/worktrees` |
-| `archived_session_worktrees` | `/api/maintenance/archived-session-worktrees` |
-| `worktree_pool` | `/api/worktree-pool` |
-| `sandbox_pool` | `/api/sandbox-pool` |
-| `sandbox_status` | `/api/sandbox-status` |
-| `search_stats` | `/api/search/stats` (`?projectId=`) |
+| `probe` value | path | filters / paging |
+|---|---|---|
+| `orphaned_worktrees` | `/api/maintenance/orphaned-worktrees` | pages `worktrees` |
+| `orphaned_sessions` | `/api/maintenance/orphaned-sessions` | pages `sessions` |
+| `expired_archives` | `/api/maintenance/expired-archives` | scalar/stat response |
+| `orphaned_index_rows` | `/api/maintenance/orphaned-index-rows` | `projectId`, pages `sample` |
+| `worktrees` | `/api/maintenance/worktrees` | scalar/stat response unless an array key is present |
+| `archived_session_worktrees` | `/api/maintenance/archived-session-worktrees` | pages `worktrees` |
+| `worktree_pool` | `/api/worktree-pool` | `projectId` |
+| `sandbox_pool` | `/api/sandbox-pool` | scalar/stat response |
+| `sandbox_status` | `/api/sandbox-status` | `projectId` |
+| `search_stats` | `/api/search/stats` | `projectId` |
 
-> `list_workflows` returns an empty list when `projectId` is omitted (there is
-> no server-scope workflow set). We mark `projectId` **required** at the tool
-> layer for a useful result, but the call itself will not error without it.
+> `list_workflows` has no useful server-scope result, so `projectId` is
+> required at the tool layer.
 
 ### 5.2 `bobbit_orchestrate` (group `Bobbit`)
 
@@ -379,6 +437,11 @@ Type.Object({
   name: Type.Optional(Type.String({ description: "Resource name (tool/role/provider/pack/staff)." })),
   // query-ish
   q: Type.Optional(Type.String({ description: "Free-text query filter." })),
+  type: Type.Optional(Type.String({ description: "search: all|goals|sessions|messages|staff." })),
+  limit: Type.Optional(Type.Number({ description: "Page size for list/search results." })),
+  offset: Type.Optional(Type.Number({ description: "Zero-based offset for paged results." })),
+  after: Type.Optional(Type.String({ description: "Cursor token for cursor-backed endpoints." })),
+  cursor: Type.Optional(Type.String({ description: "Generic cursor alias; cursor wins over offset." })),
   archived: Type.Optional(Type.Boolean({ description: "Include archived items." })),
   include: Type.Optional(Type.String({ description: "Inclusion flag, e.g. 'archived'." })),
   view: Type.Optional(Type.String({ description: "Response view, e.g. 'summary'." })),
@@ -393,10 +456,11 @@ Type.Object({
 })
 ```
 
-Keep every `description` ≤ 80 chars (budget §9). `bobbit_read` omits
-`cascade`/`action`/`body`; `bobbit_orchestrate` omits `probe`;
-`bobbit_admin` omits `probe`/`gateId`. Trim the shared block per tool to only
-the fields that tier uses — smaller schema, lower budget.
+Keep every `description` ≤ 80 chars (budget §9). `bobbit_read` includes the
+shared paging fields (`limit`, `offset`, `after`, `cursor`) and omits
+`cascade`/`action`/`body`; `bobbit_orchestrate` omits `probe` and paging unless
+an operation needs it; `bobbit_admin` omits `probe`/`gateId`. Trim the shared
+block per tool to only the fields that tier uses — smaller schema, lower budget.
 
 ## 6. Tiering & `grantPolicy`
 
