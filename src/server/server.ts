@@ -5717,10 +5717,12 @@ async function handleApiRoute(
 		const typeParam = url.searchParams.get("type") || "all";
 		const validTypes = new Set(["all", "goals", "sessions", "messages", "staff"]);
 		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" | "staff" : "all";
+		const includeArchived = url.searchParams.get("includeArchived") === "true"
+			|| (url.searchParams.get("include") || "").split(",").some(part => part.trim() === "archived");
 		try {
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const projectNames = new Map(projectRegistry.list().map(p => [p.id, p.name]));
-			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames });
+			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames, includeArchived });
 			json(results);
 		} catch (err) {
 			json({ error: `Search failed: ${err}` }, 500);
