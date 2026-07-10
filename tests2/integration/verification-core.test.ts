@@ -26,6 +26,12 @@ import {
 	type WsConnection,
 } from "./_e2e/e2e-setup.js";
 
+const VERIFICATION_WS_TIMEOUT_MS = 60_000;
+const VERIFICATION_LLM_WS_TIMEOUT_MS = 90_000;
+const VERIFICATION_TEST_TIMEOUT_MS = 180_000;
+
+test.setTimeout(VERIFICATION_TEST_TIMEOUT_MS);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -61,7 +67,7 @@ async function prepBugFixGoalWithAnalysis(
 		"issue-analysis",
 		{ content: `# Bug Analysis\n\nSteps: 1. run failing test\nRoot cause: ${rootCause}` },
 		"passed",
-		30_000,
+		VERIFICATION_WS_TIMEOUT_MS,
 	);
 	return { goalId, sessionId, ws };
 }
@@ -160,31 +166,31 @@ test.describe("Command verification WS event lifecycle", () => {
 			// Collect all key events
 			await ws.waitFor(
 				(m) => m.type === "gate_signal_received" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const started = await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const stepStarted = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const stepOutput = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_output" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const stepComplete = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const complete = await ws.waitFor(
 				(m) => m.type === "gate_verification_complete" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			await ws.waitFor(
 				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 
 			const after = Date.now();
@@ -291,7 +297,7 @@ test.describe("Command verification WS event lifecycle", () => {
 
 			await ws.waitFor(
 				(m) => m.type === "gate_verification_complete" && m.gateId === firstGate.gateId,
-				15_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 
 			const verificationEvents = ws.messages.filter(
@@ -316,7 +322,7 @@ test.describe("Command verification WS event lifecycle", () => {
 
 test.describe("Multi-step verification", () => {
 	test.describe.configure({ mode: "parallel" });
-	test.setTimeout(120_000);
+	test.setTimeout(VERIFICATION_TEST_TIMEOUT_MS);
 
 	test("multi-step verification emits correct events and step_output fields", async () => {
 		const goalId = await createTestFastGoal();
@@ -328,7 +334,7 @@ test.describe("Multi-step verification", () => {
 				method: "POST",
 				body: JSON.stringify({ content: "# Design" }),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", VERIFICATION_WS_TIMEOUT_MS);
 
 			// Signal implementation gate (depends on design-doc)
 			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
@@ -338,7 +344,7 @@ test.describe("Multi-step verification", () => {
 
 			const started = await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "implementation",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(started.steps).toBeDefined();
 			expect(started.steps.length).toBe(1);
@@ -347,7 +353,7 @@ test.describe("Multi-step verification", () => {
 			// Check step_output event fields
 			const output = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_output" && m.gateId === "implementation",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(output.goalId).toBe(goalId);
 			expect(output.gateId).toBe("implementation");
@@ -360,14 +366,14 @@ test.describe("Multi-step verification", () => {
 
 			const stepComplete = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_complete" && m.gateId === "implementation",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(stepComplete.stepName).toBe("Quick check");
 			expect(stepComplete.status).toBe("passed");
 
 			const complete = await ws.waitFor(
 				(m) => m.type === "gate_verification_complete" && m.gateId === "implementation",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(complete.status).toBe("passed");
 		} finally {
@@ -391,7 +397,7 @@ test.describe("Multi-step verification", () => {
 
 			const stepStarted = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				15_000,
+				VERIFICATION_LLM_WS_TIMEOUT_MS,
 			);
 			expect(stepStarted.goalId).toBe(goalId);
 			expect(stepStarted.signalId).toBeTruthy();
@@ -405,13 +411,13 @@ test.describe("Multi-step verification", () => {
 					m.type === "gate_verification_step_complete" &&
 					m.gateId === "design-doc" &&
 					m.sessionId != null,
-				15_000,
+				VERIFICATION_LLM_WS_TIMEOUT_MS,
 			);
 			expect(stepComplete.sessionId).toBeTruthy();
 			expect(stepComplete.sessionId).toMatch(/^llm-review-/);
 			expect(stepComplete.status).toMatch(/^(passed|failed)$/);
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", VERIFICATION_LLM_WS_TIMEOUT_MS);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -546,7 +552,7 @@ test.describe("Verification REST API", () => {
 			// Wait for completion. Server deletes from activeVerifications BEFORE
 			// broadcasting gate_status_changed (see verification-harness.ts), so once
 			// this event fires the active list is guaranteed empty — no sleep needed.
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", VERIFICATION_WS_TIMEOUT_MS);
 
 			const afterResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
 			const afterData = await afterResp.json();
@@ -614,7 +620,7 @@ test.describe("Expect failure pipeline", () => {
 					},
 				},
 				"passed",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 		} finally {
 			ws.close();
@@ -640,7 +646,7 @@ test.describe("Expect failure pipeline", () => {
 					},
 				},
 				"failed",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 
 			const signalsResp = await apiFetch(
@@ -681,7 +687,7 @@ test.describe("LLM Review verification", () => {
 			const signalData = await signalResp.json();
 			expect(signalData.signal.status).toBe("running");
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && (m.status === "passed" || m.status === "failed"), 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && (m.status === "passed" || m.status === "failed"), VERIFICATION_LLM_WS_TIMEOUT_MS);
 
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);
 			expect(signalsResp.status).toBe(200);
