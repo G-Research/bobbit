@@ -40,6 +40,10 @@
       "reason": "Reproducing test for the 'Fix cross-session proposal panels' goal: from a NON-matching session (assistantType === null) a role/tool/staff proposal that reaches the panel through the UNIFIED remote.onProposal path alone (source 'seed'/'rehydrate'/'edit'/'restore'/switch-back — not the live tool-use scan that also fires the legacy per-type callback) leaves the legacy form-mirror (rolePreviewName…, toolPreviewName…, staffPreviewName…) empty, so the panel renders blank and its primary submit stays disabled/absent. Drives onProposal directly (same technique as tests2/browser/e2e/proposal-inline-comments.spec.ts) and asserts the mirror is populated + submit enabled. FAILS on HEAD (no role/tool/staff bridge in the unified callback, only goal is bridged), passes once the bridge is added."
     },
     {
+      "path": "tests2/browser/journeys/staff-lifecycle-no-refresh.journey.spec.ts",
+      "reason": "Browser regression coverage for Refresh Staff UI: while the app is open, staff create/delete calls made through API/tool-equivalent endpoints must update desktop and mobile sidebars without reload, show the staff row under Staff, and keep the permanent staff-agent session out of regular Sessions."
+    },
+    {
       "path": "tests2/core/git-repo-cache.test.ts",
       "reason": "Reproducing test (TDD red) for the 'Fix git widget flash' goal (32cd6b4f): pins the NEW pure module src/app/git-repo-cache.ts — sessionId->'yes'|'no' localStorage cache and computeConnectGitState (cached 'no' => {gitRepoKnown:'no',quietRecheck:true} so no skeleton/loading on reconnect; cached 'yes'/no-entry => {gitRepoKnown:'unknown',quietRecheck:false} so a genuine first check still shows the skeleton), plus prune/cap bounds and broken/absent-localStorage tolerance. FAILS on HEAD (module absent — import cannot resolve), passes post-fix."
     },

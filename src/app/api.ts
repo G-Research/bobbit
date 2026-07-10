@@ -285,6 +285,7 @@ const SESSION_LIST_PUSH_RECONNECT_MS = 3_000;
 let sessionListPushRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionListPushRefreshInFlight = false;
 let sessionListPushRefreshQueued = false;
+let sessionListPushStaffRefreshNeeded = false;
 let sessionListPushWs: WebSocket | null = null;
 let sessionListPushReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionListPushIntentionalClose = false;
@@ -302,8 +303,16 @@ function canConnectSessionListPush(): boolean {
 	return !!localStorage.getItem(GW_TOKEN_KEY);
 }
 
-export function scheduleSessionListRefreshFromPush(): void {
+async function refreshClientListsFromPush(includeStaff: boolean): Promise<void> {
+	if (includeStaff) {
+		await refreshStaffStateFromApi();
+	}
+	await refreshSessions();
+}
+
+function scheduleClientListRefreshFromPush(includeStaff: boolean): void {
 	if (!canRefreshSessionListFromPush()) return;
+	if (includeStaff) sessionListPushStaffRefreshNeeded = true;
 	if (sessionListPushRefreshTimer) return;
 	if (sessionListPushRefreshInFlight) {
 		sessionListPushRefreshQueued = true;
@@ -313,17 +322,27 @@ export function scheduleSessionListRefreshFromPush(): void {
 	sessionListPushRefreshTimer = setTimeout(() => {
 		sessionListPushRefreshTimer = null;
 		if (!canRefreshSessionListFromPush()) return;
+		const refreshStaff = sessionListPushStaffRefreshNeeded;
+		sessionListPushStaffRefreshNeeded = false;
 		sessionListPushRefreshInFlight = true;
-		void refreshSessions()
+		void refreshClientListsFromPush(refreshStaff)
 			.catch((err) => console.warn("[session-list-push] refresh failed:", err))
 			.finally(() => {
 				sessionListPushRefreshInFlight = false;
-				if (sessionListPushRefreshQueued) {
+				if (sessionListPushRefreshQueued || sessionListPushStaffRefreshNeeded) {
 					sessionListPushRefreshQueued = false;
-					scheduleSessionListRefreshFromPush();
+					scheduleClientListRefreshFromPush(false);
 				}
 			});
 	}, SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS);
+}
+
+export function scheduleSessionListRefreshFromPush(): void {
+	scheduleClientListRefreshFromPush(false);
+}
+
+export function scheduleStaffListRefreshFromPush(): void {
+	scheduleClientListRefreshFromPush(true);
 }
 
 function sessionListPushWsUrl(): string {
@@ -368,6 +387,8 @@ export function startSessionListPushSync(): void {
 			const msg = JSON.parse(event.data as string);
 			if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
 				scheduleSessionListRefreshFromPush();
+			} else if (msg?.type === "staff_changed") {
+				scheduleStaffListRefreshFromPush();
 			}
 		} catch {
 			// ignore malformed frames
@@ -392,6 +413,7 @@ export function stopSessionListPushSync(): void {
 		sessionListPushRefreshTimer = null;
 	}
 	sessionListPushRefreshQueued = false;
+	sessionListPushStaffRefreshNeeded = false;
 	if (sessionListPushWs && (sessionListPushWs.readyState === WebSocket.OPEN || sessionListPushWs.readyState === WebSocket.CONNECTING)) {
 		sessionListPushWs.close();
 	}
@@ -2335,6 +2357,31 @@ export async function fetchOrphanedStaff(): Promise<StaffAgent[]> {
 	} catch {
 		return [];
 	}
+}
+
+export async function refreshStaffStateFromApi(): Promise<void> {
+	const [staffList, orphanedStaff] = await Promise.all([
+		fetchStaff(),
+		fetchOrphanedStaff(),
+	]);
+	state.staffList = staffList.map((s) => ({
+		id: s.id,
+		name: s.name,
+		description: s.description,
+		state: s.state,
+		lastWakeAt: s.lastWakeAt,
+		currentSessionId: s.currentSessionId,
+		triggers: s.triggers,
+		projectId: s.projectId,
+	}));
+	state.orphanedStaff = orphanedStaff.map((s) => ({
+		id: s.id,
+		name: s.name,
+		description: s.description,
+		state: s.state,
+		projectId: s.projectId,
+	}));
+	renderApp();
 }
 
 export async function reassignStaffProject(id: string, projectId: string): Promise<boolean> {

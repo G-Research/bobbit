@@ -46,6 +46,8 @@ export interface ProviderAuthRequiredEvent {
 
 export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEvent | ProviderAuthRequiredEvent;
 
+export type StaffChangedReason = "created" | "updated" | "reassigned" | "deleted";
+
 /** A message waiting in the server-side prompt queue */
 export interface QueuedMessage {
 	id: string;
@@ -221,6 +223,8 @@ export type ServerMessage =
 	| { type: "session_created"; sessionId: string; projectId?: string }
 	/** Broad invalidation fallback for session-list changes. */
 	| { type: "sessions_changed"; projectId?: string }
+	/** Sent to ALL authenticated clients when staff records change so staff and session sidebars can invalidate together. */
+	| { type: "staff_changed"; reason: StaffChangedReason; staffId: string; projectId: string; previousProjectId?: string; sessionId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }

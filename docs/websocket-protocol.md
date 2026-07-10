@@ -95,6 +95,7 @@ Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` fr
 | `session_created` | `sessionId`, `projectId?` | A visible session was created through REST, UI, or `host.agents`; clients should refresh the session list immediately. |
 | `sessions_changed` | `projectId?` | Broad session-list invalidation fallback; clients should refresh the session list. |
 | `session_removed` | `sessionId`, `projectId?`, `reason` | A session was terminated, archived, or purged; clients should remove or refresh the matching row promptly. |
+| `staff_changed` | `reason`, `staffId`, `projectId`, `previousProjectId?`, `sessionId?` | A staff record was created, updated, reassigned, or deleted through REST/tool paths. Clients should reload staff and orphaned-staff state before refreshing sessions so permanent staff-agent sessions are classified under Staff instead of regular Sessions. |
 | `client_joined` | `clientId` | Another client connected |
 | `client_left` | `clientId` | A client disconnected |
 | `error` | `message`, `code` | Error message |

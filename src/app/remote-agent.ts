@@ -46,7 +46,7 @@ import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanel
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
-import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
+import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./api.js";
 import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
@@ -2085,6 +2085,11 @@ export class RemoteAgent {
 				// non-session surfaces coalesce into one refresh burst.
 				if (isKnownOwnSessionCreatedEvent(msg, this._sessionId)) break;
 				scheduleSessionListRefreshFromPush();
+				break;
+			}
+
+			case "staff_changed": {
+				scheduleStaffListRefreshFromPush();
 				break;
 			}
 
