@@ -2,12 +2,11 @@
 
 ## Observation
 
-Real request against the live gateway for HQ session `0cdf548d-408e-44f8-89c8-31814c61380d`:
+A real request against the live gateway for HQ session `0cdf548d-408e-44f8-89c8-31814c61380d` returned:
 
 ```text
 GET /api/sessions/0cdf548d-408e-44f8-89c8-31814c61380d/git-status
 status: 409 Conflict
-elapsed: 35 ms
 body: {
   "error": "Git status is unavailable. This Headquarters session runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.",
   "code": "GOAL_GIT_UNAVAILABLE",
@@ -18,56 +17,58 @@ body: {
 }
 ```
 
-So the current terminal state is **not** `200` with a parent-repo branch and not `400 Not a git repository`. It is a fast, intentional HQ short-circuit: `src/server/server.ts:13524` returns `409` for `isHeadquartersSession(session)`, using `sessionGitUnavailablePayload()` from `src/server/server.ts:1001`.
+The terminal state is therefore not a parent-repo `200` and not an explicit `400 Not a git repository`. HQ sessions now short-circuit on the server as `409 GOAL_GIT_UNAVAILABLE` because Headquarters runs from Bobbit state, not from a session worktree. That server behavior is unchanged by the client cache fix.
 
-## Client state outcome
+## Client state outcome before the fix
 
-`src/app/api.ts:1540-1564` maps session git-status responses as:
+`fetchGitStatus` maps session git-status responses as:
 
 - `2xx` -> `{ kind: 'ok', data }`
 - `400` with `error === 'Not a git repository'` -> `{ kind: 'not-a-repo' }`
-- everything else -> `{ kind: 'error', status, message: 'HTTP <status>' }`
+- everything else -> `{ kind: 'error', status, message }`
 
-Therefore the observed `409` becomes `{ kind: 'error', status: 409, message: 'HTTP 409' }`; the response body is not inspected.
+The HQ `409` therefore becomes `{ kind: 'error', status: 409, message: 'HTTP 409' }`. For an uncached HQ session, `runWidgetGitRefresh` used a normal refresh: it set `gitStatusLoading = true`, retried the error path through the full backoff schedule, then cleared loading after exhausting retries. No `onOk` or `onNotARepo` callback ran, so no cache entry was written.
 
-`runGitStatusRefresh()` (`src/app/git-status-refresh.ts:39-75`) retries only the `error` case for the full backoff schedule `[0, 500, 2000, 5000]`, then exits without `onOk` or `onNotARepo`.
-
-`runWidgetGitRefresh()` (`src/app/git-status-refresh.ts:139-171`) starts non-quiet for an uncached HQ session because `computeConnectGitState()` (`src/app/git-repo-cache.ts:107-112`) only treats cached `'no'` as quiet. It sets `gitStatusLoading = true` at line 144, then after the four `409` errors clears loading at line 169. Since neither success nor not-a-repo ran, final state is:
+Final widget state was:
 
 ```text
 gitRepoKnown = 'unknown'
 gitStatusLoading = false
 gitStatus = undefined
-branch = ''
+branch = undefined
 cache write = none
 ```
 
-`src/app/session-manager.ts:3381-3385` then logs the give-up warning when active, unknown, and no data.
+## Why the widget showed nothing after the flash
 
-## Why the widget shows nothing
+Two render rules combined:
 
-Two render paths combine:
+1. `AgentInterface` mounted the git widget because it hides only when `gitRepoKnown === 'no'`.
+2. `GitStatusWidget.render()` shows the skeleton while `loading && !branch`, then returns `nothing` when loading is false and no branch exists.
 
-1. `AgentInterface` still mounts the git widget because it gates only on `gitRepoKnown !== 'no'`:
-   - pill strip outer gate: `src/ui/components/AgentInterface.ts:2145`
-   - widget gate: `src/ui/components/AgentInterface.ts:2178`
-2. `GitStatusWidget.render()` hides once loading is false and there is no branch:
-   - skeleton while `loading && !branch`: `src/ui/components/GitStatusWidget.ts:1112`
-   - hidden fallback on `!branch`: `src/ui/components/GitStatusWidget.ts:1130`
+The visible sequence was: `Checking git…` during retries, then an empty/hidden widget after give-up. Because the terminal empty state was never cached, every later connect repeated the same skeleton flash.
 
-So the visible sequence is: skeleton during retries, then empty/nothing after give-up. Because no cache entry is written, every later connect repeats `computeConnectGitState()` -> `{ gitRepoKnown: 'unknown', quietRecheck: false }`, flips `gitStatusLoading = true`, flashes `Checking git…`, then gives up to hidden again.
+## Implemented client-only behavior
 
-## Recommended client-only fix
+The client cache now has three terminal hints in `localStorage` under `bobbit.gitRepoCache`:
 
-Keep the server behaviour unchanged. Treat this as an empty terminal client outcome.
+- `'yes'` — a real git-status payload with showable content was seen.
+- `'no'` — the server explicitly returned `400 Not a git repository`.
+- `'hidden'` — the widget reached a terminal state that renders nothing, such as HQ `409 GOAL_GIT_UNAVAILABLE` exhausting retries with no branch/status data, or a clean `ok` payload with no showable branch.
 
-Recommended implementation shape:
+`computeConnectGitState()` treats cached `'hidden'` like cached `'no'` for UX purposes: the session connects hidden, does not flip `gitStatusLoading = true`, and schedules a quiet background recheck. It remains semantically separate from `'no'` so the UI can distinguish “explicit non-repo” from “empty/unavailable/no showable widget state”.
 
-1. Extend `RepoState` in `src/app/git-repo-cache.ts` from `'yes' | 'no'` to `'yes' | 'no' | 'hidden'` (or `'empty'`). Parse and persist the new value.
-2. Make `computeConnectGitState()` return a hidden-equivalent state with `quietRecheck: true` for cached `'hidden'`, just like cached `'no'`. This likely means extending `GitRepoKnown` / `ConnectGitState.gitRepoKnown` to include `'hidden'`, because reusing `'no'` would make a later quiet recheck reveal only for `ok` but would also semantically conflate explicit non-repo with empty/unavailable.
-3. Update `runWidgetGitRefresh()` so quiet mode is effective for cached hidden as well as cached no. It must never write `gitStatusLoading = true` for that quiet hidden recheck.
-4. Add a terminal hook for “all retries exhausted with no data” (or otherwise return an outcome from `runGitStatusRefresh`) so `session-manager.ts::refreshGitStatusForSession()` can cache `'hidden'` when the final state is no branch/no data. The current post-refresh warning block at `src/app/session-manager.ts:3381-3385` is the exact detection point, but the cache write belongs in the refresh state machine if tests need to pin the DI seam.
-5. Also cache `'hidden'` from any clean `ok` payload that would render nothing (for example `ok` with no `branch`), and cache `'yes'` only when the applied state has showable content.
-6. On a quiet hidden recheck that later returns showable `ok` data, apply the payload, flip `gitRepoKnown = 'yes'`, cache `'yes'`, and reveal the widget.
+A cached hidden reconnect performs exactly one quiet recheck:
 
-This preserves the first-ever skeleton: no cache entry still maps to `{ gitRepoKnown: 'unknown', quietRecheck: false }`. It also preserves explicit `400 Not a git repository` behaviour while covering the observed HQ `409` give-up-with-no-data path.
+- If the recheck returns showable git content, `runWidgetGitRefresh` applies the payload, flips `gitRepoKnown = 'yes'`, writes `'yes'`, and the widget appears.
+- If the recheck returns another empty/error outcome, it writes or keeps `'hidden'` and the widget remains hidden without a skeleton.
+
+A genuine first-ever check still has no cache entry, so it starts `gitRepoKnown = 'unknown'`, runs a normal refresh, and may show the `Checking git…` skeleton. The fix is client render/UX only; it does not change server git-status responses, server caching, single-flight, or `?untracked=1` behavior.
+
+## Tests that pin the contract
+
+- `tests2/core/git-empty-widget-cache.test.ts` covers the HQ `409 GOAL_GIT_UNAVAILABLE` error path, hidden cache persistence, no-loading cached-hidden reconnect, one quiet recheck, and reveal when content later appears.
+- `tests2/core/git-widget-quiet-refresh.test.ts` keeps the existing cached-`'no'` quiet-refresh behavior pinned.
+- `tests2/core/git-repo-cache.test.ts` pins cache parsing, bounded persistence, pruning, broken-storage tolerance, and connect-state mapping.
+
+All three are registered in `tests2/tests-map.json`.
