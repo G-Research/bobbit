@@ -309,6 +309,25 @@ export function panelInfosFromContributions(packs: ReadonlyArray<PackContributio
  * Generation-guarded: a load superseded by a re-register/uninstall while in flight
  * does not write the cache.
  */
+/**
+ * Dynamic-import a pack module from a Blob object URL, guarding the ONE
+ * environment where it cannot work. In a real browser the module loader resolves
+ * and executes a `blob:<origin>/<uuid>` URL natively — production behaviour is
+ * unchanged. Under Vitest / happy-dom (and any Node vite-node context)
+ * `URL.createObjectURL` instead yields a `blob:nodedata:*` URL whose ESM the Node
+ * loader cannot resolve; a bare `import()` there throws `ERR_MODULE_NOT_FOUND` as
+ * a vitest-worker-fatal unhandled error. We reject with a controlled error in that
+ * case so the fetch/register path still runs headlessly (DOM tests assert on the
+ * fetch, not on a cached module — panel-module caching stays a browser E2E
+ * concern) without crashing the worker.
+ */
+export function importPackModuleFromObjectUrl(objUrl: string): Promise<unknown> {
+	if (objUrl.startsWith("blob:nodedata:")) {
+		return Promise.reject(new Error(`blob ESM import unsupported in this (non-browser) environment: ${objUrl}`));
+	}
+	return import(/* @vite-ignore */ objUrl);
+}
+
 function loadPanelModule(key: string, reg: RegisteredPanel): Promise<PackPanel | undefined> {
 	const existing = inFlight.get(key);
 	if (existing) return existing;
@@ -322,7 +341,7 @@ function loadPanelModule(key: string, reg: RegisteredPanel): Promise<PackPanel |
 		const blob = await resp.blob();
 		const objUrl = URL.createObjectURL(blob.slice(0, blob.size, "text/javascript"));
 		try {
-			const mod = await import(/* @vite-ignore */ objUrl);
+			const mod = await importPackModuleFromObjectUrl(objUrl);
 			const factory = (mod as { default?: unknown; createPanel?: unknown }).default
 				?? (mod as { createPanel?: unknown }).createPanel;
 			if (typeof factory !== "function") throw new Error("panel module has no factory export");

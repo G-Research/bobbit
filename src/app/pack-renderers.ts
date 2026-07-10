@@ -28,6 +28,25 @@ import { fetchTools } from "./api.js";
  *  app's single `lit` instance and standard `renderHeader()` shape. */
 const HOST_TOOLKIT = { html, nothing, renderHeader };
 
+/**
+ * Dynamic-import a pack renderer module from a Blob object URL, guarding the ONE
+ * environment where it cannot work. In a real browser the module loader resolves
+ * and executes a `blob:<origin>/<uuid>` URL natively — production behaviour is
+ * unchanged. Under Vitest / happy-dom (and any Node vite-node context)
+ * `URL.createObjectURL` instead yields a `blob:nodedata:*` URL whose ESM the Node
+ * loader cannot resolve; a bare `import()` there throws `ERR_MODULE_NOT_FOUND` as
+ * a vitest-worker-fatal unhandled error. We reject with a controlled error in that
+ * case (the registry's load-failure fallback handles the rejection) so the
+ * fetch/register path still runs headlessly — DOM tests assert on the fetch, not
+ * on a loaded renderer — without crashing the worker.
+ */
+export function importPackModuleFromObjectUrl(objUrl: string): Promise<unknown> {
+	if (objUrl.startsWith("blob:nodedata:")) {
+		return Promise.reject(new Error(`blob ESM import unsupported in this (non-browser) environment: ${objUrl}`));
+	}
+	return import(/* @vite-ignore */ objUrl);
+}
+
 /** Tool metadata subset needed to decide pack-renderer registration. */
 export interface PackRendererToolInfo {
 	name: string;
@@ -90,7 +109,7 @@ export function registerPackRenderers(
 				const blob = await resp.blob();
 				const objUrl = URL.createObjectURL(blob.slice(0, blob.size, "text/javascript"));
 				try {
-					const mod = await import(/* @vite-ignore */ objUrl);
+					const mod = await importPackModuleFromObjectUrl(objUrl);
 					const factory = (mod as any).default ?? (mod as any).createRenderer;
 					if (typeof factory !== "function") throw new Error("renderer module has no factory export");
 					return factory(HOST_TOOLKIT); // → ToolRenderer
