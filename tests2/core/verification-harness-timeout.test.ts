@@ -36,7 +36,7 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
-const { spawnTracked, killAllTracked, killTreeByPid, _trackedCount } = await import("../../src/server/agent/spawn-tree.ts");
+const { spawnTracked, killAllTracked, _trackedCount } = await import("../../src/server/agent/spawn-tree.ts");
 const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
@@ -75,12 +75,6 @@ async function withTimeout<T>(promise: Promise<T>, budgetMs: number, label: stri
 	} finally {
 		if (timer) clearTimeout(timer);
 	}
-}
-
-function killPidBestEffort(pid: number): void {
-	if (!pid || !isAlive(pid)) return;
-	try { killTreeByPid(pid, "SIGKILL"); } catch { /* best-effort */ }
-	try { process.kill(pid, "SIGKILL"); } catch { /* best-effort */ }
 }
 
 /** Minimal stubs for a bare-bones VerificationHarness. */
