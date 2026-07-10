@@ -43,6 +43,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
+import type { ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
@@ -2920,6 +2921,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			sendMs: performance.now() - sendStart,
 		});
 	}
+
 	/**
 	 * Broadcast to all authenticated WebSocket clients whose active session
 	 * belongs to the given project. Clients with no session association (e.g.
@@ -3852,6 +3854,13 @@ async function handleApiRoute(
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
 		return cascadeRole ?? roleManager.getRole(roleId);
+	};
+	const broadcastStaffChanged = (event: Extract<ServerMessage, { type: "staff_changed" }>): void => {
+		try {
+			broadcastToAll(event);
+		} catch (err) {
+			console.error(`[broadcast] staff_changed failed for ${event.staffId}:`, err);
+		}
 	};
 	type RoleCreateOptions = { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
 	const roleCreateOptions = (role: Role): RoleCreateOptions => {
@@ -15410,6 +15419,13 @@ async function handleApiRoute(
 					...(typeof body.worktree === "boolean" ? { worktree: body.worktree } : {}),
 				},
 			);
+			broadcastStaffChanged({
+				type: "staff_changed",
+				reason: "created",
+				staffId: staff.id,
+				projectId,
+				sessionId: staff.currentSessionId,
+			});
 			json(staff, 201);
 		} catch (err: any) {
 			console.error("[server] Failed to create staff agent:", err);
@@ -15443,9 +15459,18 @@ async function handleApiRoute(
 				json({ error: "projectId must reference a registered project" }, 400);
 				return;
 			}
+			const previousStaff = staffManager.getStaff(id);
 			try {
 				const staff = await staffManager.reassignProject(id, targetProjectId, sessionManager);
 				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+				broadcastStaffChanged({
+					type: "staff_changed",
+					reason: "reassigned",
+					staffId: staff.id,
+					projectId: targetProjectId,
+					previousProjectId: previousStaff?.projectId,
+					sessionId: previousStaff?.currentSessionId,
+				});
 				json(staff);
 			} catch (err: any) {
 				jsonError(400, err);
@@ -15535,13 +15560,32 @@ async function handleApiRoute(
 			if (hasAccessoryUpdate && staff?.currentSessionId) {
 				sessionManager.updateSessionMeta(staff.currentSessionId, { accessory: staff.accessory });
 			}
+			if (staff) {
+				broadcastStaffChanged({
+					type: "staff_changed",
+					reason: "updated",
+					staffId: staff.id,
+					projectId: staff.projectId ?? existingStaff.projectId ?? SYSTEM_PROJECT_ID,
+					sessionId: staff.currentSessionId,
+				});
+			}
 			json(staff);
 			return;
 		}
 
 		if (req.method === "DELETE") {
+			const previousStaff = staffManager.getStaff(id);
 			const ok = await staffManager.deleteStaff(id, sessionManager);
 			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
+			if (previousStaff) {
+				broadcastStaffChanged({
+					type: "staff_changed",
+					reason: "deleted",
+					staffId: previousStaff.id,
+					projectId: previousStaff.projectId ?? SYSTEM_PROJECT_ID,
+					sessionId: previousStaff.currentSessionId,
+				});
+			}
 			json({ ok: true });
 			return;
 		}
