@@ -12,7 +12,7 @@ import type { GitStatusResult } from "./api.js";
  *  attempts 2/3/4. Stops after 4 total attempts. */
 export const GIT_STATUS_BACKOFF_MS = [0, 500, 2000, 5000] as const;
 
-export type GitRepoKnown = "yes" | "no" | "unknown";
+export type GitRepoKnown = "yes" | "no" | "hidden" | "unknown";
 
 export interface RefreshCallbacks<T> {
 	/** Fetcher — typically `() => fetchGitStatus(id, { ..., signal })`. */
@@ -25,6 +25,8 @@ export interface RefreshCallbacks<T> {
 	onOk(data: T): void;
 	/** Called on confirmed `not-a-repo` (terminal). */
 	onNotARepo(): void;
+	/** Return false to stop retrying an error result before the next backoff. */
+	shouldRetry?(result: Extract<GitStatusResult, { kind: "error" }>, attempt: number): boolean;
 	/** Called exactly once in the outer `finally` after all attempts/abort. */
 	onFinally(): void;
 }
@@ -68,6 +70,7 @@ export async function runGitStatusRefresh<T>(
 				cb.onNotARepo();
 				return;
 			}
+			if (cb.shouldRetry?.(result, attempt) === false) return;
 			// result.kind === 'error' — loop and retry (unless this was last attempt)
 		}
 	} finally {
@@ -102,8 +105,9 @@ export interface QuietRefreshDeps<T = unknown> {
 	isStale(): boolean;
 	/**
 	 * Whether the caller *requested* a quiet recheck. The refresh only actually
-	 * runs quiet when this is true AND `ai.gitRepoKnown === 'no'` (a cached
-	 * git-less session) — see {@link runWidgetGitRefresh}.
+	 * runs quiet when this is true AND the widget is already cached hidden
+	 * (`gitRepoKnown === 'no' || gitRepoKnown === 'hidden'`) — see
+	 * {@link runWidgetGitRefresh}.
 	 */
 	quiet: boolean;
 	/**
@@ -113,12 +117,30 @@ export interface QuietRefreshDeps<T = unknown> {
 	 */
 	applyOk(ai: GitWidgetLike, data: T): void;
 	/** Persistence hook — `setCachedRepoState(sessionId, state)`. */
-	onCache(state: "yes" | "no"): void;
+	onCache(state: "yes" | "no" | "hidden"): void;
 	/**
 	 * Unconditional teardown, run first inside the outer `finally` (before the
 	 * staleness guard and before loading is cleared) — e.g. abort-map cleanup.
 	 */
 	onFinally?(): void;
+}
+
+function branchFrom(value: unknown): string | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const branch = (value as { branch?: unknown }).branch;
+	return typeof branch === "string" && branch.trim() ? branch : undefined;
+}
+
+function hasShowableGitData(data: unknown): boolean {
+	return branchFrom(data) !== undefined;
+}
+
+function widgetHasShowableGitData(ai: GitWidgetLike): boolean {
+	return branchFrom(ai.gitStatus) !== undefined || (typeof ai.branch === "string" && ai.branch.trim().length > 0);
+}
+
+function cacheHidden<T>(deps: QuietRefreshDeps<T>): void {
+	deps.onCache("hidden");
 }
 
 /**
@@ -127,46 +149,68 @@ export interface QuietRefreshDeps<T = unknown> {
  * against a fake widget-state object.
  *
  * Rules (must stay identical to the session-manager behaviour):
- * - `quiet` is effective only for a cached git-less session
- *   (`deps.quiet && ai.gitRepoKnown === 'no'`). When quiet, `gitStatusLoading`
- *   is NEVER flipped `true` (no "Checking git…" skeleton, widget stays hidden).
- * - `onOk`: apply status via `deps.applyOk`, flip `gitRepoKnown = 'yes'`
- *   (revealing the widget), and persist `'yes'`.
+ * - `quiet` is effective only for cached hidden sessions
+ *   (`deps.quiet && (ai.gitRepoKnown === 'no' || ai.gitRepoKnown === 'hidden')`).
+ *   When quiet, `gitStatusLoading` is NEVER flipped `true` (no "Checking git…"
+ *   skeleton, widget stays hidden).
+ * - `onOk`: apply status via `deps.applyOk`; showable payloads flip
+ *   `gitRepoKnown = 'yes'` and persist `'yes'`, while empty payloads persist
+ *   `'hidden'` and keep the widget hidden.
  * - `onNotARepo`: flip `gitRepoKnown = 'no'`, clear `gitStatus`, persist `'no'`.
+ * - error give-up with no showable data: flip/cache `'hidden'`.
  * - `onFinally`: run `deps.onFinally` unconditionally, then (when not stale)
- *   clear `gitStatusLoading` unless this was a quiet recheck that stayed `'no'`.
+ *   clear `gitStatusLoading` unless this was a quiet recheck that stayed hidden.
  */
 export async function runWidgetGitRefresh<T = unknown>(
 	ai: GitWidgetLike,
 	deps: QuietRefreshDeps<T>,
 ): Promise<void> {
-	const quiet = deps.quiet && ai.gitRepoKnown === "no";
+	const quietHidden = deps.quiet && ai.gitRepoKnown === "hidden";
+	const quiet = deps.quiet && (ai.gitRepoKnown === "no" || ai.gitRepoKnown === "hidden");
+	let terminalResult = false;
 	if (!quiet) ai.gitStatusLoading = true;
 
 	await runGitStatusRefresh<T>(deps.signal, {
 		fetch: deps.fetch,
 		sleep: deps.sleep,
 		isStale: deps.isStale,
+		shouldRetry: () => !quietHidden,
 		onOk: (data) => {
 			if (deps.isStale()) return;
-			deps.applyOk(ai, data);
-			// Repo now exists — reveal the widget and resume normal behaviour.
-			ai.gitRepoKnown = "yes";
-			deps.onCache("yes");
+			terminalResult = true;
+			if (hasShowableGitData(data)) {
+				deps.applyOk(ai, data);
+				// Repo now has visible content — reveal the widget and resume normal behaviour.
+				ai.gitRepoKnown = "yes";
+				deps.onCache("yes");
+				return;
+			}
+			ai.gitRepoKnown = "hidden";
+			ai.gitStatus = undefined;
+			ai.branch = undefined;
+			cacheHidden(deps);
 		},
 		onNotARepo: () => {
 			if (deps.isStale()) return;
+			terminalResult = true;
 			ai.gitRepoKnown = "no";
 			ai.gitStatus = undefined;
+			ai.branch = undefined;
 			deps.onCache("no");
 		},
 		onFinally: () => {
 			// Unconditional teardown (abort-map cleanup) first — must run even
 			// when stale so the in-flight marker cannot leak.
 			deps.onFinally?.();
-			if (deps.isStale()) return;
-			// Never surface loading for a quiet recheck that stayed git-less.
-			if (!(quiet && ai.gitRepoKnown === "no")) ai.gitStatusLoading = false;
+			if (deps.isStale() || deps.signal.aborted) return;
+			if (!terminalResult && ai.gitRepoKnown !== "no" && !widgetHasShowableGitData(ai)) {
+				ai.gitRepoKnown = "hidden";
+				ai.gitStatus = undefined;
+				ai.branch = undefined;
+				cacheHidden(deps);
+			}
+			// Never surface loading for a quiet recheck that stayed hidden.
+			if (!(quiet && (ai.gitRepoKnown === "no" || ai.gitRepoKnown === "hidden"))) ai.gitStatusLoading = false;
 		},
 	});
 }

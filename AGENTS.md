@@ -13,11 +13,11 @@ npm run test:e2e       # E2E v2: git/worktree/Docker/MCP/restart
 npm run test:manual    # Real agents/LLM + Docker (~5 min); ONLY gate-exempt path
 ```
 
-UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Server changes (`src/server/`) require `npm run restart-server`. Always `npm run check` before restarting. Sessions survive restarts via `.bobbit/state/sessions.json`.
+UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Server changes (`src/server/`) require `npm run restart-server`. Run `npm run check` first. Sessions survive restarts via `.bobbit/state/sessions.json`.
 
 ## Architecture map
 
-Where things live. Use this to orient, then `rg` for the symbol.
+Orient here, then `rg` for the symbol.
 
 - **Server REST/WS**: `src/server/` — REST in `server.ts::handleApiRoute()`, WS in `src/server/ws/`.
 - **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md) for `bash_bg`.
@@ -26,7 +26,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 - **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; built-in packs in `market-packs/`. See [docs/marketplace.md](docs/marketplace.md).
 - **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
-- **Tests (v2)**: `tests2/{core,dom,integration}` (vitest), `tests2/browser` (Playwright), `tests2/tests-map.json` (buckets + `v2Path`); `tests/e2e/` = the `e2e:v2` tier; `tests/manual-integration/` (real agents).
+- **Tests (v2)**: `tests2/{core,dom,integration}` (vitest), `tests2/browser` (Playwright), `tests2/tests-map.json`; `tests/e2e/` = `e2e:v2`; `tests/manual-integration/` (real agents).
 - **Docs**: `docs/` (reference + design notes), `docs/design/` (per-feature design docs), `docs/debugging.md` (full diagnostic checklists), `docs/internals.md` (config cascade, sandbox, search, MCP).
 
 ## Before editing anything non-trivial

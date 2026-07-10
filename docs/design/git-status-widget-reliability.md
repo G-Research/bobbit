@@ -705,19 +705,25 @@ If future render-tree changes reintroduce a wedge, the simpler model (sync close
 
 ### 15.1 Problem
 
-The tri-state (§1) resets `gitRepoKnown = 'unknown'` on *every* `connectToSession` — session switch, page reload, WebSocket reconnect. For a working directory with **no git repo** this is pure waste and a visible flake:
+The tri-state (§1) resets `gitRepoKnown = 'unknown'` on *every* `connectToSession` — session switch, page reload, WebSocket reconnect. For a working directory with **no showable git widget state** this is pure waste and a visible flake:
 
-- The render gate shows the pill whenever `gitRepoKnown !== 'no'` (§1.1) and the skeleton state renders on `loading && !branch` (§4.1). So a git-less session flashes the "Checking git…" skeleton on every connect until the fetch resolves `not-a-repo`.
-- Each connect triggers a fresh server `git.exe` fan-out (the revised native path — see the perf revision at the top of this doc) for a directory that has already been proven git-less.
-- The 30s safety poll (§3) already stops once `gitRepoKnown === 'no'`, so *steady-state* is fine; the churn is concentrated at connect/reload, which happen frequently.
+- The render gate shows the pill whenever `gitRepoKnown !== 'no'` (§1.1) and the skeleton state renders on `loading && !branch` (§4.1). So an empty terminal state can flash the "Checking git…" skeleton on every connect, then disappear again.
+- Explicit non-repos already resolve to `400 Not a git repository`, but HQ sessions resolve differently: `/api/sessions/:id/git-status` returns `409 GOAL_GIT_UNAVAILABLE` because Headquarters runs from Bobbit state, not from a session worktree.
+- `fetchGitStatus` maps that `409` to `{ kind: 'error' }`. A normal refresh can exhaust all retry attempts with no branch/status data; after loading clears, `GitStatusWidget.render()` returns `nothing`.
+- The 30s safety poll (§3) already stops once `gitRepoKnown === 'no'`, so *steady-state* is fine for explicit non-repos; the repeated churn is concentrated at connect/reload for terminal empty states that were not cached.
 
-This is a client render/UX fix only. There is deliberately **no** server-side `isGitRepo` field or session-record persistence — the server git-status cache, single-flight, and `?untracked=1` behaviour (§5, §6) are untouched. The goal-dashboard widget (§1.2) is out of scope: goals always have a git worktree, so the flash never occurs there.
+This is a client render/UX fix only. There is deliberately **no** server-side `isGitRepo` field or session-record persistence. The server git-status response contract, server cache, single-flight, native implementation, and `?untracked=1` behaviour (§5, §6) are unchanged. The goal-dashboard widget (§1.2) is out of scope: goals have a git worktree, so the HQ empty-state flash does not occur there.
+
+See also [git empty widget terminal state analysis](git-empty-widget-state-analysis.md), which records the observed HQ `409 GOAL_GIT_UNAVAILABLE` path and why it rendered as skeleton-then-nothing before this addendum.
 
 ### 15.2 The cache (`src/app/git-repo-cache.ts`)
 
 A small, pure, `localStorage`-backed module records the per-session determination so the *next* connect can skip the skeleton. It is a **hint, not an authority** — the connect path always fires a background recheck that corrects the state (see §15.4).
 
-- **Shape / key**: a single `localStorage` entry under `bobbit.gitRepoCache` holding `{ [sessionId]: 'yes' | 'no' }`.
+- **Shape / key**: a single `localStorage` entry under `bobbit.gitRepoCache` holding `{ [sessionId]: 'yes' | 'no' | 'hidden' }`.
+- **`'yes'`**: showable git content was seen. This keeps the existing behaviour for real git repos: reconnect starts `unknown` and a normal refresh may still show the skeleton until fresh data arrives.
+- **`'no'`**: the server explicitly confirmed `400 Not a git repository`.
+- **`'hidden'`**: the refresh reached a terminal state that renders nothing, such as HQ `409 GOAL_GIT_UNAVAILABLE` exhausting retries with no data, or an `ok` response without a showable branch.
 - **Bounded**: capped at `MAX_ENTRIES = 200`. `setCachedRepoState` re-inserts the written key at the end of the map (JS objects preserve string-key insertion order) and drops the oldest keys when over the cap, so fresh entries survive.
 - **Pruned**: `pruneGitRepoCache(liveSessionIds)` drops entries for sessions no longer present; `connectToSession` calls it with the current `state.gatewaySessions` ids so the map cannot accumulate dead sessions.
 - **DI-safe / storage-tolerant**: all reads/writes go through a `storage()` helper that returns `undefined` when `localStorage` is absent or throws, and `readCache()` tolerates broken/absent JSON by returning `{}`. This keeps the module usable under SSR and in unit tests without a DOM, and means a corrupt cache degrades to today's behaviour (skeleton on first check) rather than breaking the widget.
@@ -730,38 +736,46 @@ Instead of unconditionally resetting to `'unknown'`, both `connectToSession` pat
 
 ```ts
 export function computeConnectGitState(sessionId: string): ConnectGitState {
-  if (getCachedRepoState(sessionId) === 'no') {
-    return { gitRepoKnown: 'no', quietRecheck: true };
+  const cached = getCachedRepoState(sessionId);
+  if (cached === 'no' || cached === 'hidden') {
+    return { gitRepoKnown: cached, quietRecheck: true };
   }
   return { gitRepoKnown: 'unknown', quietRecheck: false };
 }
 ```
 
-- **Cached `'no'`** → start `'no'` (widget hidden, no skeleton, `gitStatusLoading` never flipped) and request a **quiet** recheck.
+- **Cached `'no'`** → start `'no'` (widget hidden, no skeleton, `gitStatusLoading` never flipped) and request a quiet recheck.
+- **Cached `'hidden'`** → start `'hidden'` (widget hidden, no skeleton, `gitStatusLoading` never flipped) and request a quiet recheck.
 - **Cached `'yes'` or no entry** → start `'unknown'`, normal check — the skeleton is still allowed. This preserves §1: a session's *genuine first-ever* check (no cache entry) shows the skeleton exactly as before.
 
 `refreshGitStatusForSession(sessionId, { quiet })` is then called with the computed flag.
 
 ### 15.4 Quiet-recheck contract
 
-The quiet recheck exists so a directory that *becomes* a repo (the user runs `git init`) still reveals the widget on the next connect — without ever showing a skeleton for a still-git-less session. There is **no new periodic polling**: connects already happen often enough (switch, reload, WS reconnect) to pick up a new repo, and the 30s poll still stops at `'no'`.
+The quiet recheck exists so a session that *later gains* showable git content still reveals the widget on the next connect — without ever showing a skeleton for a still-empty session. There is **no new periodic polling**: connects already happen often enough (switch, reload, WS reconnect) to pick up a new repo/content, and the existing polling rules remain unchanged.
 
 Rules (identical to the session-manager behaviour, enforced by the extracted state machine — §15.5):
 
-- `quiet` is effective only for a cached git-less session (`deps.quiet && gitRepoKnown === 'no'`). When quiet, `gitStatusLoading` is **never** flipped `true` — no "Checking git…" skeleton, widget stays hidden.
-- **`onOk`** (repo now exists): apply the status, flip `gitRepoKnown = 'yes'` (revealing the widget and resuming normal loading/pill behaviour), and persist `'yes'`.
-- **`onNotARepo`**: keep `gitRepoKnown = 'no'`, clear `gitStatus`, persist `'no'`.
-- **`onFinally`**: run unconditional teardown (abort-map cleanup) first, then — unless stale — clear `gitStatusLoading`, *except* for a quiet recheck that stayed `'no'` (which never set it).
+- `quiet` is effective only for cached hidden/no sessions (`deps.quiet && (gitRepoKnown === 'no' || gitRepoKnown === 'hidden')`). When quiet, `gitStatusLoading` is **never** flipped `true` — no "Checking git…" skeleton, widget stays hidden.
+- A cached `'hidden'` quiet recheck performs exactly one fetch attempt. This avoids repeating the normal error backoff on known-empty HQ sessions while still giving the server one chance to reveal new content.
+- **`onOk` with showable data**: apply the status, flip `gitRepoKnown = 'yes'`, persist `'yes'`, and reveal the widget.
+- **`onOk` without showable data**: clear widget data, keep `gitRepoKnown = 'hidden'`, persist `'hidden'`, and remain hidden.
+- **`onNotARepo`**: flip `gitRepoKnown = 'no'`, clear widget data, persist `'no'`, and remain hidden.
+- **Error give-up with no showable data**: flip/cache `'hidden'`. This covers HQ `409 GOAL_GIT_UNAVAILABLE` and any other terminal empty error path without changing server semantics.
+- **`onFinally`**: run unconditional teardown (abort-map cleanup) first, then — unless stale — clear `gitStatusLoading`, except for quiet rechecks that stayed hidden/no (which never set loading).
 
-Persistence closes the loop: every resolution writes back to the cache (`onOk` → `'yes'`, `onNotARepo` → `'no'`), so the hint stays current.
+Persistence closes the loop: real content writes `'yes'`, explicit non-repo writes `'no'`, and terminal widget-empty outcomes write `'hidden'`.
 
 ### 15.5 `runWidgetGitRefresh` DI seam (`src/app/git-status-refresh.ts`)
 
-The loading/visibility/persistence rules above were extracted out of `session-manager.ts::refreshGitStatusForSession` into `runWidgetGitRefresh(ai, deps)` so they can be unit-tested against a fake widget-state object rather than the live DOM/WebSocket module singletons. It wraps the existing retry-with-backoff `runGitStatusRefresh` (§2) and drives a minimal `GitWidgetLike` shape (`gitRepoKnown`, `gitStatusLoading`, `gitStatus`, `branch`, `partial`). `QuietRefreshDeps` supplies the `fetch`/`sleep`/`isStale`/`quiet` inputs plus hooks: `applyOk` (keeps the session-manager's `withUntrackedStatusPreserved` merge out of the seam), `onCache` (`setCachedRepoState`), and `onFinally` (abort-map cleanup). `refreshGitStatusForSession` now just wires these hooks and, after the refresh, retains the final give-up warning (`console.warn("[git-status] refresh failed after retries")`) when a full miss leaves `gitRepoKnown === 'unknown'` with no data and no abort.
+The loading/visibility/persistence rules above are extracted out of `session-manager.ts::refreshGitStatusForSession` into `runWidgetGitRefresh(ai, deps)` so they can be unit-tested against a fake widget-state object rather than the live DOM/WebSocket module singletons. It wraps the retry-with-backoff `runGitStatusRefresh` (§2) and drives a minimal `GitWidgetLike` shape (`gitRepoKnown`, `gitStatusLoading`, `gitStatus`, `branch`, `partial`).
+
+`QuietRefreshDeps` supplies the `fetch`/`sleep`/`isStale`/`quiet` inputs plus hooks: `applyOk` (keeps the session-manager's `withUntrackedStatusPreserved` merge out of the seam), `onCache` (`setCachedRepoState`), and `onFinally` (abort-map cleanup). `refreshGitStatusForSession` wires these hooks and keeps the final give-up warning for active, non-aborted misses.
 
 ### 15.6 Tests
 
-- **`tests2/core/git-repo-cache.test.ts`** — pins the pure module: `computeConnectGitState` mapping (cached `'no'` → `{ gitRepoKnown: 'no', quietRecheck: true }`; cached `'yes'` / no-entry → `{ gitRepoKnown: 'unknown', quietRecheck: false }`), the 200-entry cap + LRU-ish prune, and broken/absent-`localStorage` tolerance.
-- **`tests2/core/git-widget-quiet-refresh.test.ts`** — pins the `runWidgetGitRefresh` state machine: (1) a cached-`'no'` quiet reconnect never writes `gitStatusLoading = true`, fires exactly one recheck, stays `'no'`, and caches `'no'`; (2) when the quiet recheck's `onOk` fires, `gitRepoKnown` flips to `'yes'`, the widget reveals, `'yes'` is cached, and loading is cleared; (3) a genuine first-ever check (`quiet: false` / `gitRepoKnown: 'unknown'`) *does* set `gitStatusLoading = true` (skeleton allowed).
+- **`tests2/core/git-empty-widget-cache.test.ts`** — pins the HQ `409 GOAL_GIT_UNAVAILABLE` path: git-status maps to error, retries exhaust with no showable data, the hidden hint is cached, cached-hidden reconnect never writes `gitStatusLoading = true`, exactly one quiet recheck fires, and later showable content reveals the widget/caches `'yes'`.
+- **`tests2/core/git-widget-quiet-refresh.test.ts`** — pins the existing `runWidgetGitRefresh` quiet state machine for cached `'no'`: no skeleton/loading on quiet reconnect, one recheck, cache preservation, and reveal/cache `'yes'` when content appears.
+- **`tests2/core/git-repo-cache.test.ts`** — pins the pure cache module: `computeConnectGitState` mapping (no entry → first-ever skeleton still allowed; cached `'no'`/`'hidden'` → quiet hidden start; cached `'yes'` → normal refresh), the 200-entry cap, prune behaviour, and broken/absent-`localStorage` tolerance.
 
-Both land in `tests2/core` and are registered in `tests2/tests-map.json`. The pre-existing tri-state (§1), skeleton (§4.1), poll (§3), and dropdown-lifecycle (§14) suites are unchanged — this fix must not regress them.
+All three land in `tests2/core` and are registered in `tests2/tests-map.json`. The pre-existing tri-state (§1), skeleton (§4.1), poll (§3), and dropdown-lifecycle (§14) suites are unchanged — this fix must not regress them.

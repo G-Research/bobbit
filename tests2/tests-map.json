@@ -44,6 +44,10 @@
       "reason": "Integration coverage for the 'Fix git widget flash' goal (32cd6b4f): pins the session-manager quiet-recheck state machine extracted into runWidgetGitRefresh (src/app/git-status-refresh.ts). Asserts (1) a cached-'no' quiet reconnect NEVER writes gitStatusLoading=true, fires exactly one recheck, keeps gitRepoKnown='no' and caches 'no'; (2) when the quiet recheck's onOk fires the repo now exists so gitRepoKnown flips to 'yes', the widget reveals, cache writes 'yes', and loading is cleared in finally; (3) a genuine first-ever check (quiet=false / gitRepoKnown='unknown') DOES set gitStatusLoading=true (skeleton allowed) with one fetch."
     },
     {
+      "path": "tests2/core/git-empty-widget-cache.test.ts",
+      "reason": "Reproducing test (TDD red) for the 'Cache empty git-widget state' goal (44e3b434): pins the HQ 409 / GOAL_GIT_UNAVAILABLE path where git-status maps to error, retries exhaust with no branch/status data, and the widget renders nothing. Expects a persisted 'hidden' repo hint, cached-hidden reconnect to start quiet with no gitStatusLoading=true skeleton, exactly one quiet showable recheck, and reveal/cache 'yes' when content appears. FAILS on HEAD until the hidden/empty cache state is implemented."
+    },
+    {
       "path": "tests2/integration/direct-agent-admin-token.test.ts",
       "reason": "Pinning test for the 'Direct-agent admin token' interim rollback: non-sandboxed (direct) agents receive the gateway ADMIN token (readToken()) via scopedGatewayEnvForDirectAgent (createSession/createDelegateSession) and applyScopedGatewayCredentials (restore/revive/respawn), while the sandbox path (mintScopedGatewayToken) still produces a per-project SCOPED token distinct from the admin token. Also pins the loud-throw when no admin token is available (no silent fallback)."
     },

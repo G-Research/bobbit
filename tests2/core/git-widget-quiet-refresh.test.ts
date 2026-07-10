@@ -90,7 +90,7 @@ describe("runWidgetGitRefresh — quiet recheck integration", () => {
 	it("case 1: cached-'no' quiet reconnect never sets loading=true, one recheck, stays 'no'", async () => {
 		const { ai, loadingWrites } = makeWidget({ gitRepoKnown: "no" });
 		let fetches = 0;
-		const cacheWrites: Array<"yes" | "no"> = [];
+		const cacheWrites: Array<"yes" | "no" | "hidden"> = [];
 		const ctl = new AbortController();
 
 		await runWidgetGitRefresh(ai, {
@@ -115,7 +115,7 @@ describe("runWidgetGitRefresh — quiet recheck integration", () => {
 	it("case 2: quiet recheck onOk (repo now exists) reveals widget, caches 'yes', clears loading", async () => {
 		const { ai, loadingWrites } = makeWidget({ gitRepoKnown: "no" });
 		let fetches = 0;
-		const cacheWrites: Array<"yes" | "no"> = [];
+		const cacheWrites: Array<"yes" | "no" | "hidden"> = [];
 		const ctl = new AbortController();
 
 		await runWidgetGitRefresh(ai, {
@@ -146,7 +146,7 @@ describe("runWidgetGitRefresh — quiet recheck integration", () => {
 	it("case 3: genuine first-ever check (unknown, quiet=false) sets loading=true, one fetch", async () => {
 		const { ai, loadingWrites } = makeWidget({ gitRepoKnown: "unknown" });
 		let fetches = 0;
-		const cacheWrites: Array<"yes" | "no"> = [];
+		const cacheWrites: Array<"yes" | "no" | "hidden"> = [];
 		const ctl = new AbortController();
 
 		await runWidgetGitRefresh(ai, {

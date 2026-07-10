@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
+const createdProjectIds = new Set<string>();
 
 interface ProjectSummary {
 	id: string;
@@ -21,6 +22,10 @@ function normalProjects(projects: ProjectSummary[]): ProjectSummary[] {
 	return projects.filter(project => !isHeadquartersProject(project));
 }
 
+function createdProjects(projects: ProjectSummary[]): ProjectSummary[] {
+	return projects.filter(project => createdProjectIds.has(project.id));
+}
+
 async function listProjects(): Promise<ProjectSummary[]> {
 	const res = await apiFetch("/api/projects");
 	expect(res.status).toBe(200);
@@ -29,10 +34,6 @@ async function listProjects(): Promise<ProjectSummary[]> {
 
 async function listVisibleProjects(): Promise<ProjectSummary[]> {
 	return (await listProjects()).filter(project => !project.hidden);
-}
-
-async function listNormalVisibleProjects(): Promise<ProjectSummary[]> {
-	return normalProjects(await listVisibleProjects());
 }
 
 async function expectHeadquartersAnchored(projects?: ProjectSummary[]): Promise<void> {
@@ -50,11 +51,35 @@ async function showHeadquarters(): Promise<void> {
 	expect(res.status).toBe(200);
 }
 
-async function clearVisibleProjects(): Promise<void> {
-	for (const project of await listNormalVisibleProjects()) {
-		await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+async function clearCreatedProjects(): Promise<void> {
+	const existingIds = new Set((await listProjects()).map(project => project.id));
+	for (const id of Array.from(createdProjectIds)) {
+		if (!existingIds.has(id)) continue;
+		await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
 	}
-	expect(await listNormalVisibleProjects()).toEqual([]);
+	createdProjectIds.clear();
+}
+
+async function visibleOrderWithCreatedFirst(createdOrder: string[]): Promise<string[]> {
+	const visible = await listVisibleProjects();
+	const rest = projectIds(visible).filter(id => id !== HEADQUARTERS_PROJECT_ID && !createdOrder.includes(id));
+	return [HEADQUARTERS_PROJECT_ID, ...createdOrder, ...rest];
+}
+
+async function resetVisibleOrder(): Promise<void> {
+	const visible = await listVisibleProjects();
+	const fullOrder = [
+		...visible.filter(isHeadquartersProject).map(project => project.id),
+		...projectIds(normalProjects(visible)),
+	];
+	if (fullOrder.length > 0) {
+		const res = await apiFetch("/api/projects/order", {
+			method: "PUT",
+			body: JSON.stringify({ projectIds: fullOrder }),
+		});
+		expect(res.status).toBe(200);
+		await res.json();
+	}
 	await expectHeadquartersAnchored();
 }
 
@@ -65,7 +90,9 @@ async function registerTmpProject(name: string): Promise<ProjectSummary> {
 		body: JSON.stringify({ name, rootPath, __e2e_seed_skip__: true }),
 	});
 	expect(res.status).toBe(201);
-	return await res.json();
+	const project = await res.json() as ProjectSummary;
+	createdProjectIds.add(project.id);
+	return project;
 }
 
 async function seedProjects(names: string[]): Promise<ProjectSummary[]> {
@@ -90,10 +117,10 @@ async function expectProjectOrderJson<T = any>(res: Response): Promise<T> {
 	return JSON.parse(text) as T;
 }
 
-async function expectVisibleOrder(expectedNormalIds: string[]): Promise<void> {
+async function expectVisibleCreatedOrder(expectedCreatedIds: string[]): Promise<void> {
 	const visible = await listVisibleProjects();
 	await expectHeadquartersAnchored(visible);
-	expect(projectIds(normalProjects(visible))).toEqual(expectedNormalIds);
+	expect(projectIds(createdProjects(visible))).toEqual(expectedCreatedIds);
 }
 
 test.describe("PUT /api/projects/order", () => {
@@ -101,11 +128,13 @@ test.describe("PUT /api/projects/order", () => {
 
 	test.beforeEach(async () => {
 		await showHeadquarters();
-		await clearVisibleProjects();
+		await clearCreatedProjects();
+		await resetVisibleOrder();
 	});
 
 	test.afterEach(async () => {
-		await clearVisibleProjects();
+		await clearCreatedProjects();
+		await resetVisibleOrder();
 	});
 
 	test("saves C/A/B order, returns it from GET, and persists reloadable positions", async ({ gateway }) => {
@@ -114,7 +143,7 @@ test.describe("PUT /api/projects/order", () => {
 			const [a, b, c] = projects;
 			const normalOrder = [c.id, a.id, b.id];
 			// Since #933 HQ participates in ordering and must be included in the payload
-			const fullOrder = [HEADQUARTERS_PROJECT_ID, ...normalOrder];
+			const fullOrder = await visibleOrderWithCreatedFirst(normalOrder);
 
 			const putRes = await apiFetch("/api/projects/order", {
 				method: "PUT",
@@ -124,16 +153,16 @@ test.describe("PUT /api/projects/order", () => {
 			expect(putRes.status).toBe(200);
 			expect(putBody).toMatchObject({ projects: expect.any(Array) });
 			await expectHeadquartersAnchored(putBody.projects);
-			expect(projectIds(normalProjects(putBody.projects))).toEqual(normalOrder);
-			expect(projectNames(normalProjects(putBody.projects))).toEqual(["C", "A", "B"]);
-			// HQ is position 0, normals are 1, 2, 3
-			expect(normalProjects(putBody.projects).map((project: ProjectSummary) => project.position)).toEqual([1, 2, 3]);
+			expect(projectIds(createdProjects(putBody.projects))).toEqual(normalOrder);
+			expect(projectNames(createdProjects(putBody.projects))).toEqual(["C", "A", "B"]);
+			// HQ is position 0, newly ordered projects are 1, 2, 3; pre-existing baseline projects follow them.
+			expect(createdProjects(putBody.projects).map((project: ProjectSummary) => project.position)).toEqual([1, 2, 3]);
 
 			const getProjects = await listProjects();
 			await expectHeadquartersAnchored(getProjects);
-			expect(projectIds(normalProjects(getProjects))).toEqual(normalOrder);
-			expect(projectNames(normalProjects(getProjects))).toEqual(["C", "A", "B"]);
-			expect(normalProjects(getProjects).map(project => project.position)).toEqual([1, 2, 3]);
+			expect(projectIds(createdProjects(getProjects))).toEqual(normalOrder);
+			expect(projectNames(createdProjects(getProjects))).toEqual(["C", "A", "B"]);
+			expect(createdProjects(getProjects).map(project => project.position)).toEqual([1, 2, 3]);
 
 			const stored = JSON.parse(readFileSync(join(gateway.bobbitDir, "state", "projects.json"), "utf-8")) as ProjectSummary[];
 			const storedHeadquarters = stored.find(project => project.id === HEADQUARTERS_PROJECT_ID);
@@ -149,7 +178,7 @@ test.describe("PUT /api/projects/order", () => {
 			expect(reloadedList[0]).toMatchObject({ id: HEADQUARTERS_PROJECT_ID, kind: "headquarters" });
 			expect(reloadedList.filter((project: ProjectSummary) => normalOrder.includes(project.id)).map((project: ProjectSummary) => project.id)).toEqual(normalOrder);
 		} finally {
-			await clearVisibleProjects();
+			await clearCreatedProjects();
 		}
 	});
 
@@ -158,6 +187,13 @@ test.describe("PUT /api/projects/order", () => {
 		try {
 			const [a, b, c] = projects;
 			const original = [a.id, b.id, c.id];
+			const validFullOrder = await visibleOrderWithCreatedFirst(original);
+			const seedOrder = await apiFetch("/api/projects/order", {
+				method: "PUT",
+				body: JSON.stringify({ projectIds: validFullOrder }),
+			});
+			expect(seedOrder.status).toBe(200);
+			await seedOrder.json();
 			expect((await listProjects()).some(project => project.id === "system")).toBe(false);
 
 			const malformed = await apiFetch("/api/projects/order", {
@@ -167,7 +203,7 @@ test.describe("PUT /api/projects/order", () => {
 			const malformedBody = await expectProjectOrderJson(malformed);
 			expect(malformed.status).toBe(400);
 			expect(malformedBody).toMatchObject({ code: "invalid_project_order" });
-			await expectVisibleOrder(original);
+			await expectVisibleCreatedOrder(original);
 
 			const nonString = await apiFetch("/api/projects/order", {
 				method: "PUT",
@@ -176,7 +212,7 @@ test.describe("PUT /api/projects/order", () => {
 			const nonStringBody = await expectProjectOrderJson(nonString);
 			expect(nonString.status).toBe(400);
 			expect(nonStringBody).toMatchObject({ code: "invalid_project_order" });
-			await expectVisibleOrder(original);
+			await expectVisibleCreatedOrder(original);
 
 			const duplicate = await apiFetch("/api/projects/order", {
 				method: "PUT",
@@ -185,7 +221,7 @@ test.describe("PUT /api/projects/order", () => {
 			const duplicateBody = await expectProjectOrderJson(duplicate);
 			expect(duplicate.status).toBe(400);
 			expect(duplicateBody).toMatchObject({ code: "invalid_project_order" });
-			await expectVisibleOrder(original);
+			await expectVisibleCreatedOrder(original);
 
 			const unknown = await apiFetch("/api/projects/order", {
 				method: "PUT",
@@ -194,17 +230,17 @@ test.describe("PUT /api/projects/order", () => {
 			const unknownBody = await expectProjectOrderJson(unknown);
 			expect(unknown.status).toBe(400);
 			expect(unknownBody).toMatchObject({ code: "invalid_project_order" });
-			await expectVisibleOrder(original);
+			await expectVisibleCreatedOrder(original);
 
 			// #933: HQ now MUST be included; omitting it → stale (409), not invalid (400)
 			const missingHq = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: [a.id, b.id, c.id] }),
+				body: JSON.stringify({ projectIds: validFullOrder.filter(id => id !== HEADQUARTERS_PROJECT_ID) }),
 			});
 			const missingHqBody = await expectProjectOrderJson(missingHq);
 			expect(missingHq.status).toBe(409);
 			expect(missingHqBody).toMatchObject({ code: "stale_project_order" });
-			await expectVisibleOrder(original);
+			await expectVisibleCreatedOrder(original);
 
 			const systemProjectRes = await apiFetch("/api/projects/system");
 			expect(systemProjectRes.status).toBe(200);
@@ -212,24 +248,24 @@ test.describe("PUT /api/projects/order", () => {
 
 			const hiddenSystem = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: [a.id, b.id, c.id, "system"] }),
+				body: JSON.stringify({ projectIds: [...validFullOrder, "system"] }),
 			});
 			const hiddenSystemBody = await expectProjectOrderJson(hiddenSystem);
 			expect(hiddenSystem.status).toBe(400);
 			expect(hiddenSystemBody).toMatchObject({ code: "invalid_project_order" });
-			await expectVisibleOrder(original);
+			await expectVisibleCreatedOrder(original);
 
-			// Stale: missing a normal project (payload has HQ + only 2 of 3 normals)
+			// Stale: missing a normal project (payload has HQ + all visible projects except C)
 			const stale = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: [HEADQUARTERS_PROJECT_ID, a.id, b.id] }),
+				body: JSON.stringify({ projectIds: validFullOrder.filter(id => id !== c.id) }),
 			});
 			const staleBody = await expectProjectOrderJson(stale);
 			expect(stale.status).toBe(409);
 			expect(staleBody).toMatchObject({ code: "stale_project_order" });
-			await expectVisibleOrder(original);
+			await expectVisibleCreatedOrder(original);
 		} finally {
-			await clearVisibleProjects();
+			await clearCreatedProjects();
 		}
 	});
 
@@ -240,7 +276,7 @@ test.describe("PUT /api/projects/order", () => {
 			// #933: must include HQ in the payload
 			const reordered = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: [HEADQUARTERS_PROJECT_ID, c.id, a.id, b.id] }),
+				body: JSON.stringify({ projectIds: await visibleOrderWithCreatedFirst([c.id, a.id, b.id]) }),
 			});
 			await expectProjectOrderJson(reordered);
 			expect(reordered.status).toBe(200);
@@ -249,19 +285,21 @@ test.describe("PUT /api/projects/order", () => {
 			expect(del.status).toBe(200);
 			let visible = await listVisibleProjects();
 			await expectHeadquartersAnchored(visible);
-			let normalVisible = normalProjects(visible);
-			expect(normalVisible.map(project => project.id)).toEqual([c.id, b.id]);
-			// HQ=0, normals start at 1
-			expect(normalVisible.map(project => project.position)).toEqual([1, 2]);
+			let createdVisible = createdProjects(visible);
+			expect(createdVisible.map(project => project.id)).toEqual([c.id, b.id]);
+			// HQ=0, remaining newly ordered projects compact to 1 and 2.
+			expect(createdVisible.map(project => project.position)).toEqual([1, 2]);
 
 			const d = await registerTmpProject("D");
 			visible = await listVisibleProjects();
 			await expectHeadquartersAnchored(visible);
-			normalVisible = normalProjects(visible);
-			expect(normalVisible.map(project => project.id)).toEqual([c.id, b.id, d.id]);
-			expect(normalVisible.map(project => project.position)).toEqual([1, 2, 3]);
+			createdVisible = createdProjects(visible);
+
+			expect(createdVisible.map(project => project.id)).toEqual([c.id, b.id, d.id]);
+			expect(createdVisible.slice(0, 2).map(project => project.position)).toEqual([1, 2]);
+			expect(createdVisible[2].position).toBe(visible.length - 1);
 		} finally {
-			await clearVisibleProjects();
+			await clearCreatedProjects();
 		}
 	});
 });

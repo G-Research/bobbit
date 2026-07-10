@@ -9,8 +9,6 @@
  *  C. Empty PrStatusStore omits the line cleanly.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { apiFetch, defaultProjectId, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
@@ -34,6 +32,18 @@ async function createGoal(opts?: { title?: string }): Promise<{ id: string; proj
 
 async function deleteGoal(id: string): Promise<void> {
 	await apiFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+}
+
+async function waitForReattemptPromptText(sessionId: string): Promise<string> {
+	return await pollUntil(async () => {
+		const resp = await apiFetch(`/api/sessions/${sessionId}/prompt-sections`);
+		if (resp.status !== 200) return null;
+		const data = await resp.json();
+		const text = Array.isArray(data.sections)
+			? data.sections.map((section: { content?: unknown }) => typeof section.content === "string" ? section.content : "").join("\n\n")
+			: "";
+		return text.includes("## Re-attempt Context") ? text : null;
+	}, { timeoutMs: 10_000, intervalMs: 50, label: "prompt sections with re-attempt context" });
 }
 
 test.describe("Goal.prUrl removal — PrStatusStore is source of truth", () => {
@@ -81,15 +91,7 @@ test.describe("Goal.prUrl removal — PrStatusStore is source of truth", () => {
 			const sess = await sessResp.json();
 			expect(sess.reattemptGoalId).toBe(origGoalId);
 
-			// Prompt is written at <bobbitDir>/state/session-prompts/<sid>.md
-			const promptPath = join(gateway.bobbitDir, "state", "session-prompts", `${sess.id}.md`);
-			const prompt = await pollUntil(async () => {
-				try {
-					return readFileSync(promptPath, "utf-8");
-				} catch {
-					return null;
-				}
-			}, { timeoutMs: 10_000, intervalMs: 50, label: "prompt file written" });
+			const prompt = await waitForReattemptPromptText(sess.id);
 
 			expect(prompt).toContain("**PR URL:** " + seededUrl);
 			expect(prompt).toContain("## Re-attempt Context");
@@ -121,14 +123,7 @@ test.describe("Goal.prUrl removal — PrStatusStore is source of truth", () => {
 			expect(sessResp.status).toBe(201);
 			const sess = await sessResp.json();
 
-			const promptPath = join(gateway.bobbitDir, "state", "session-prompts", `${sess.id}.md`);
-			const prompt = await pollUntil(async () => {
-				try {
-					return readFileSync(promptPath, "utf-8");
-				} catch {
-					return null;
-				}
-			}, { timeoutMs: 10_000, intervalMs: 50, label: "prompt file written" });
+			const prompt = await waitForReattemptPromptText(sess.id);
 
 			expect(prompt).toContain("## Re-attempt Context");
 			expect(prompt).not.toContain("**PR URL:");
