@@ -24,16 +24,24 @@ type Deferred<T> = {
 	promise: Promise<T>;
 	resolve: (value: T) => void;
 	reject: (reason?: unknown) => void;
+	settled: boolean;
 };
 
 function deferred<T>(): Deferred<T> {
 	let resolve!: (value: T) => void;
 	let reject!: (reason?: unknown) => void;
+	const deferredState = { settled: false };
 	const promise = new Promise<T>((res, rej) => {
-		resolve = res;
-		reject = rej;
+		resolve = (value) => {
+			deferredState.settled = true;
+			res(value);
+		};
+		reject = (reason) => {
+			deferredState.settled = true;
+			rej(reason);
+		};
 	});
-	return { promise, resolve, reject };
+	return { promise, resolve, reject, get settled() { return deferredState.settled; } };
 }
 
 class MockWebSocket extends EventTarget {
@@ -114,6 +122,19 @@ function installFetchStub(): void {
 		if (path === `/api/goals/${activeGoal.id}/gates`) return Promise.resolve(jsonResponse({ gates: [] }));
 		if (path === `/api/goals/${activeGoal.id}/git-status`) return Promise.resolve(jsonResponse({ error: "Not a git repository" }, { status: 400 }));
 		if (path === `/api/goals/${activeGoal.id}/cost`) return Promise.resolve(jsonResponse({ total: 0, sessions: [] }));
+		if (path === `/api/goals/${activeGoal.id}/tree-cost`) return Promise.resolve(jsonResponse({
+			totalCostUsd: 0,
+			totalTokensIn: 0,
+			totalTokensOut: 0,
+			breakdown: [{
+				goalId: activeGoal.id,
+				depth: 0,
+				title: activeGoal.title,
+				costUsd: 0,
+				tokensIn: 0,
+				tokensOut: 0,
+			}],
+		}));
 		if (path === `/api/goals/${activeGoal.id}/pr-status?optional=1`) return Promise.resolve(emptyResponse());
 		if (path === `/api/goals/${activeGoal.id}/team`) return Promise.resolve(emptyResponse(404));
 		if (path === `/api/goals/${activeGoal.id}/descendants`) return Promise.resolve(jsonResponse({ goals: [] }));
@@ -214,12 +235,20 @@ beforeEach(async () => {
 	resetSharedState();
 });
 
-afterEach(() => {
-	// Leave delayed pause/resume promises unresolved: resolving them would let the
-	// production helper continue into refreshSessions() after fetch has been
-	// restored, producing real network noise unrelated to this pending-state test.
-	if (host) render(null, host);
+afterEach(async () => {
+	// Stop production continuations from scheduling more full-app renders, then
+	// settle any deliberately delayed pause/resume requests before jsdom globals
+	// (including customElements) are restored by Vitest.
 	setRenderApp?.(() => {});
+	for (const pending of delayedMutations) {
+		if (!pending.settled) pending.resolve(jsonResponse({ paused: 0, resumed: 0 }));
+	}
+	await Promise.allSettled(delayedMutations.map((pending) => pending.promise));
+	await Promise.resolve();
+	await Promise.resolve();
+	await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+	if (host) render(null, host);
 	if (state) resetSharedState();
 	document.body.innerHTML = "";
 	vi.restoreAllMocks();
