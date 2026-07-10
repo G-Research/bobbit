@@ -8,7 +8,6 @@
 // dispatches).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { syncCustomElements } from "./_setup/custom-elements.js";
-import { html, render } from "lit";
 
 // Under vitest pool:forks + isolate:false each test file runs in its OWN
 // happy-dom window while the module graph is cached across files — so a
@@ -104,9 +103,15 @@ async function mountGoalStatusWidget(fixture: {
 
 	const container = document.createElement("div");
 	document.body.appendChild(container);
-	render(html`<goal-status-widget goalId=${fixture.goalId} token="test-token" branch="fixture/branch"></goal-status-widget>`, container);
 	await customElements.whenDefined("goal-status-widget");
-	const el = container.querySelector("goal-status-widget") as any;
+	// Create the host element with the current happy-dom document. Rendering the
+	// host tag through lit can use another file's cached template document under
+	// isolate:false and leave the widget unupgraded in full-suite runs.
+	const el = document.createElement("goal-status-widget") as any;
+	el.goalId = fixture.goalId;
+	el.token = "test-token";
+	el.branch = "fixture/branch";
+	container.appendChild(el);
 	await el.updateComplete;
 	await sleep(20);
 	await el.updateComplete;
