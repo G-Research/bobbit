@@ -1313,20 +1313,20 @@ export class RemoteAgent {
 		// no-op: tools are server-side for the coding agent
 	}
 
-	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, mode?: "persistent" | "session-only" | "one-time"): void {
+	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, mode?: "persistent" | "session-only" | "one-time", permissionId?: string): void {
 		// The guard long-poll/server grant path owns resuming the blocked tool call.
 		// Re-sending lastPromptText here would create a fresh user turn and can
 		// duplicate side-effecting tools such as session_prompt.
 		void lastPromptText;
 		this.apply({ type: "permission-status", toolName, status: "granting", actionable: true });
-		this.send({ type: "grant_tool_permission", toolName, scope, group, mode });
+		this.send({ type: "grant_tool_permission", toolName, scope, group, mode, permissionId });
 		this.emit({ type: "render" });
 	}
 
 	denyToolPermission(messageId: string, toolName?: string): void {
 		// Notify the server so the guard extension's long-poll resolves immediately
 		if (toolName) {
-			this.send({ type: "deny_tool_permission", toolName });
+			this.send({ type: "deny_tool_permission", toolName, permissionId: messageId });
 		}
 		this.apply({ type: "deny-permission-filter", messageId });
 		this.emit({ type: "render" });
@@ -2127,6 +2127,7 @@ export class RemoteAgent {
 					roleName: perm.roleName,
 					roleLabel: perm.roleLabel,
 					lastPromptText: perm.lastPromptText,
+					requestCount: typeof perm.requestCount === "number" && perm.requestCount > 1 ? perm.requestCount : undefined,
 					timestamp: Date.now(),
 					id: typeof perm.id === "string" ? perm.id : `perm_${seq ?? Date.now()}_${perm.toolName}`,
 					status: "active",
@@ -2154,8 +2155,13 @@ export class RemoteAgent {
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
 				if ((msg as any).code === "GRANT_ERROR") {
-					this.apply({ type: "permission-reconciled", current: null, reason: "error" });
-					this.apply({ type: "permission-status", status: "error", error: msg.message || "Permission grant failed or became stale.", actionable: false });
+					// The error frame does not carry a permission request id, so do not
+					// settle/disable all active cards client-side. Refresh from the server
+					// instead; stale grants are ignored by the server handler, and real
+					// failures should not hide a still-pending current request. Reset any
+					// local granting spinner back to an actionable error state.
+					this.apply({ type: "permission-status", status: "active", error: msg.message || "Permission grant failed.", actionable: true, fromStatus: "granting" });
+					this.requestMessages();
 					this.emit({ type: "render" });
 					break;
 				}

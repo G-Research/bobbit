@@ -647,9 +647,18 @@ export interface SessionInfo {
 	pendingGrantRequest?: {
 		resolve: (result: ToolGrantResolution) => void;
 		reject: (err: Error) => void;
+		id: string;
 		toolName: string;
 		toolGroup: string;
 		timer: ReturnType<typeof setTimeout>;
+		/** Same-tool parallel guard calls waiting on the same user decision. */
+		requests?: Array<{
+			resolve: (result: ToolGrantResolution) => void;
+			reject: (err: Error) => void;
+			timer: ReturnType<typeof setTimeout>;
+			seq: number;
+			ts: number;
+		}>;
 		/** seq/ts of the original `tool_permission_needed` broadcast — replayed
 		 * verbatim to late-joining clients so we never burn a fresh global seq
 		 * on a unicast frame. See tests/perm-frame-late-joiner-seq-gap.test.ts. */
@@ -1007,11 +1016,13 @@ function spliceSkillExpansionsIntoEvent(
  * broadcast — never allocating a fresh sequence number. Pinned by
  * tests/perm-frame-late-joiner-seq-gap.test.ts. */
 export interface PendingToolPermissionSnapshot {
+	id?: string;
 	toolName: string;
 	group: string;
 	roleName: string;
 	roleLabel: string;
 	lastPromptText?: string;
+	requestCount?: number;
 	seq: number;
 	ts: number;
 }
@@ -4534,7 +4545,7 @@ export class SessionManager {
 	 *   - "session-only": adds to session.allowedTools in memory only (survives Refresh agent, not gateway restart)
 	 *   - "one-time": adds to session.allowedTools + tracks for revocation on agent_end
 	 */
-	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string, mode?: ToolGrantMode): Promise<string[]> {
+	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string, mode?: ToolGrantMode, permissionId?: string): Promise<string[]> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 		if (!this.roleManager) throw new Error("No role manager available");
@@ -4575,8 +4586,15 @@ export class SessionManager {
 		}
 		const approvedGrantTools = this.mergeToolNames(undefined, grantScopeTools.length > 0 ? grantScopeTools : [toolName]) ?? [toolName];
 
+		if (permissionId && !session.pendingGrantRequest) {
+			throw new Error(`Ignored stale permission grant for ${toolName}; request is no longer pending.`);
+		}
+
 		if (session.pendingGrantRequest) {
 			const pending = session.pendingGrantRequest;
+			if (permissionId && pending.id !== permissionId) {
+				throw new Error(`Ignored stale permission grant for ${toolName}; active request changed.`);
+			}
 			const requestedToolMatches = pending.toolName.toLowerCase() === toolName.toLowerCase();
 			const requestedGroupMatches = !!group && pending.toolGroup.toLowerCase() === group.toLowerCase();
 			const approvedToolsCoverPending = approvedGrantTools.some(t => t.toLowerCase() === pending.toolName.toLowerCase());
@@ -4584,13 +4602,17 @@ export class SessionManager {
 				? requestedGroupMatches && approvedToolsCoverPending
 				: requestedToolMatches && approvedToolsCoverPending;
 			if (!grantCoversPending) {
-				this.clock.clearTimeout(pending.timer);
-				session.pendingGrantRequest = undefined;
 				const reason = `Ignored stale permission grant for ${toolName}; active request is for ${pending.toolName}.`;
-				pending.resolve({
-					granted: false,
-					reason,
-				});
+				if (permissionId) {
+					// Id-based UI actions are stale; leave the current request pending.
+					throw new Error(reason);
+				}
+				// Legacy callers have no request id, so fail closed by resolving the
+				// active guard immediately rather than letting its long-poll timeout.
+				const requests = pending.requests?.length ? pending.requests : [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }];
+				for (const req of requests) this.clock.clearTimeout(req.timer);
+				session.pendingGrantRequest = undefined;
+				for (const req of requests) req.resolve({ granted: false, reason });
 				broadcast(session.clients, {
 					type: "tool_permission_settled",
 					toolName: pending.toolName,
@@ -4605,9 +4627,13 @@ export class SessionManager {
 		let resultTools: string[];
 
 		if (mode === "one-time") {
-			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
+			// Temporary grant: add to session.allowedTools, but only track newly
+			// introduced tools for revocation on agent_end. Group grants may include
+			// tools already allowed/session-only; those must survive the one-time turn.
+			const previouslyAllowed = new Set((session.allowedTools ?? []).map(t => t.toLowerCase()));
+			const newlyAllowed = approvedGrantTools.filter(t => !previouslyAllowed.has(t.toLowerCase()));
 			session.allowedTools = this.mergeToolNames(session.allowedTools, approvedGrantTools) ?? [];
-			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, approvedGrantTools);
+			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, newlyAllowed);
 			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
@@ -4638,14 +4664,15 @@ export class SessionManager {
 		}
 
 		if (session.pendingGrantRequest) {
-			// Single-owner grant resumption: the active guard long-poll receives only
-			// the approved grant scope/delta and lets the original tool call continue.
+			// Batched grant resumption: every same-tool guard long-poll receives only
+			// the approved grant scope/delta and lets its blocked call continue.
 			// Returning the full effective surface here would let unrelated ask-gated
 			// tools bypass future prompts in the active process.
-			this.clock.clearTimeout(session.pendingGrantRequest.timer);
 			const pending = session.pendingGrantRequest;
+			const requests = pending.requests?.length ? pending.requests : [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }];
+			for (const req of requests) this.clock.clearTimeout(req.timer);
 			session.pendingGrantRequest = undefined;
-			pending.resolve({ granted: true, tools: approvedGrantTools, scope, group, mode: mode ?? "persistent" });
+			for (const req of requests) req.resolve({ granted: true, tools: approvedGrantTools, scope, group, mode: mode ?? "persistent" });
 			broadcast(session.clients, {
 				type: "tool_permission_settled",
 				toolName: pending.toolName,
@@ -4668,12 +4695,30 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
-		// If a previous grant request is still pending, resolve it as denied and
+		// A later same-tool guard call can arrive after the user already approved
+		// a session-scoped grant. Short-circuit only explicit session grants here:
+		// one-time grants are intentionally invocation/batch-scoped and are resolved
+		// through the pending request list, not treated as broad tool access.
+		const toolLower = toolName.toLowerCase();
+		const hasTool = (tools?: string[]) => tools?.some((t) => t.toLowerCase() === toolLower) ?? false;
+		if (hasTool(session.sessionOnlyGrantedTools)) {
+			return { granted: true, tools: [toolName], scope: "tool", group: toolGroup, mode: "session-only" };
+		}
+
+		// If a different grant request is still pending, resolve it as denied and
 		// tell clients it is no longer actionable before broadcasting the new one.
-		if (session.pendingGrantRequest) {
-			const pending = session.pendingGrantRequest;
-			this.clock.clearTimeout(pending.timer);
-			pending.resolve({ granted: false });
+		// Same-tool parallel calls are batched under one user decision instead.
+		const existingPending = session.pendingGrantRequest;
+		const samePendingTool = !!existingPending
+			&& existingPending.toolName.toLowerCase() === toolName.toLowerCase()
+			&& existingPending.toolGroup.toLowerCase() === toolGroup.toLowerCase();
+		if (existingPending && !samePendingTool) {
+			const pending = existingPending;
+			const requests = pending.requests?.length ? pending.requests : [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }];
+			for (const req of requests) {
+				this.clock.clearTimeout(req.timer);
+				req.resolve({ granted: false });
+			}
 			session.pendingGrantRequest = undefined;
 			broadcast(session.clients, {
 				type: "tool_permission_settled",
@@ -4684,19 +4729,77 @@ export class SessionManager {
 			});
 		}
 
+		let seq: number;
+		let ts: number;
+		let requestCount = 1;
+
+		if (samePendingTool && session.pendingGrantRequest) {
+			const pending = session.pendingGrantRequest;
+			seq = pending.seq;
+			ts = pending.ts;
+			const promise = new Promise<ToolGrantResolution>((resolve, reject) => {
+				let request: NonNullable<typeof pending.requests>[number];
+				const timer = this.clock.setTimeout(() => {
+					const live = session.pendingGrantRequest;
+					if (live?.requests?.length && request) {
+						live.requests = live.requests.filter((req) => req !== request);
+						if (live.requests.length > 0) {
+							resolve({ granted: false, reason: "Permission request expired." });
+							return;
+						}
+					}
+					session.pendingGrantRequest = undefined;
+					broadcast(session.clients, {
+						type: "tool_permission_settled",
+						toolName,
+						group: toolGroup,
+						status: "expired",
+						reason: "Permission request expired.",
+					});
+					resolve({ granted: false, reason: "Permission request expired." });
+				}, 5 * 60 * 1000);
+				request = { resolve, reject, timer, seq, ts };
+				pending.requests = pending.requests?.length
+					? [...pending.requests, request]
+					: [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }, request];
+				requestCount = pending.requests.length;
+			});
+			const roleName = session.role || "general";
+			const role = this.roleManager?.getRole(roleName);
+			broadcast(session.clients, {
+				type: "tool_permission_needed",
+				id: pending.id,
+				toolName,
+				group: toolGroup,
+				roleName: role?.name ?? roleName,
+				roleLabel: role?.label ?? roleName,
+				lastPromptText: session.lastPromptText,
+				requestCount,
+			});
+			return promise;
+		}
+
 		// Stamp seq+ts so client reducer can order this frame relative to live
 		// `event` frames. See docs/design/unified-message-ordering-reducer.md §3.1.
 		// IMPORTANT: this is the ONLY frame-allocation callsite in src/server/.
-		// Late-joiners that attach while this perm is pending must REPLAY the
-		// same seq/ts (via getPendingToolPermission) — never allocate a fresh
-		// seq — or already-attached clients will gap-buffer the next live
-		// event. Pinned by tests/perm-frame-late-joiner-seq-gap.test.ts.
-		const { seq, ts } = session.eventBuffer.pushFrame();
+		const frame = session.eventBuffer.pushFrame();
+		seq = frame.seq;
+		ts = frame.ts;
+		const permissionId = `perm_${seq}_${toolName}`;
 
-		// Create promise that will be resolved by grantToolPermission
 		const promise = new Promise<ToolGrantResolution>((resolve, reject) => {
+			let request: NonNullable<NonNullable<SessionInfo["pendingGrantRequest"]>["requests"]>[number];
 			const timer = this.clock.setTimeout(() => {
+				const live = session.pendingGrantRequest;
+				if (live?.requests?.length && request) {
+					live.requests = live.requests.filter((req) => req !== request);
+					if (live.requests.length > 0) {
+						resolve({ granted: false, reason: "Permission request expired." });
+						return;
+					}
+				}
 				session.pendingGrantRequest = undefined;
+				resolve({ granted: false, reason: "Permission request expired." });
 				broadcast(session.clients, {
 					type: "tool_permission_settled",
 					toolName,
@@ -4704,10 +4807,9 @@ export class SessionManager {
 					status: "expired",
 					reason: "Permission request expired.",
 				});
-				resolve({ granted: false });
 			}, 5 * 60 * 1000); // 5 minute timeout
-
-			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer, seq, ts };
+			request = { resolve, reject, timer, seq, ts };
+			session.pendingGrantRequest = { id: permissionId, resolve, reject, toolName, toolGroup, timer, seq, ts, requests: [request] };
 		});
 
 		// Broadcast to UI clients
@@ -4715,11 +4817,13 @@ export class SessionManager {
 		const role = this.roleManager?.getRole(roleName);
 		broadcast(session.clients, {
 			type: "tool_permission_needed",
+			id: permissionId,
 			toolName,
 			group: toolGroup,
 			roleName: role?.name ?? roleName,
 			roleLabel: role?.label ?? roleName,
 			lastPromptText: session.lastPromptText,
+			requestCount,
 			seq,
 			ts,
 		});
@@ -4732,13 +4836,18 @@ export class SessionManager {
 	 * Resolves the pending grant request with `{ granted: false }` so the
 	 * guard extension's long-poll returns immediately instead of waiting 5 min.
 	 */
-	denyToolPermission(sessionId: string, _toolName: string): void {
+	denyToolPermission(sessionId: string, _toolName: string, permissionId?: string): void {
 		const session = this.sessions.get(sessionId);
 		if (!session?.pendingGrantRequest) return;
-		this.clock.clearTimeout(session.pendingGrantRequest.timer);
 		const pending = session.pendingGrantRequest;
+		if (_toolName && pending.toolName.toLowerCase() !== _toolName.toLowerCase()) return;
+		if (permissionId && pending.id !== permissionId) return;
+		const requests = pending.requests?.length ? pending.requests : [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }];
+		for (const req of requests) {
+			this.clock.clearTimeout(req.timer);
+			req.resolve({ granted: false });
+		}
 		session.pendingGrantRequest = undefined;
-		pending.resolve({ granted: false });
 		broadcast(session.clients, {
 			type: "tool_permission_settled",
 			toolName: pending.toolName,
@@ -7047,11 +7156,13 @@ export class SessionManager {
 		const roleName = session.role || "general";
 		const role = this.roleManager?.getRole(roleName);
 		return {
+			id: session.pendingGrantRequest.id,
 			toolName: session.pendingGrantRequest.toolName,
 			group: session.pendingGrantRequest.toolGroup,
 			roleName: role?.name ?? roleName,
 			roleLabel: role?.label ?? roleName,
 			lastPromptText: session.lastPromptText,
+			requestCount: session.pendingGrantRequest.requests?.length ?? 1,
 			seq: session.pendingGrantRequest.seq,
 			ts: session.pendingGrantRequest.ts,
 		};
@@ -7910,8 +8021,11 @@ export class SessionManager {
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
 			const pending = session.pendingGrantRequest;
-			this.clock.clearTimeout(pending.timer);
-			pending.resolve({ granted: false });
+			const requests = pending.requests?.length ? pending.requests : [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }];
+			for (const req of requests) {
+				this.clock.clearTimeout(req.timer);
+				req.resolve({ granted: false });
+			}
 			session.pendingGrantRequest = undefined;
 			broadcast(session.clients, {
 				type: "tool_permission_settled",

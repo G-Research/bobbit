@@ -10,6 +10,7 @@ import { BrowserNavigateRenderer } from "./renderers/BrowserNavigateRenderer.js"
 import { BrowserTypeRenderer } from "./renderers/BrowserTypeRenderer.js";
 import { BrowserWaitRenderer } from "./renderers/BrowserWaitRenderer.js";
 import { DefaultRenderer } from "./renderers/DefaultRenderer.js";
+import { isMcpToolName, McpDefaultRenderer } from "./renderers/McpDefaultRenderer.js";
 import { EditRenderer } from "./renderers/EditRenderer.js";
 import { FindRenderer } from "./renderers/FindRenderer.js";
 import { GrepRenderer } from "./renderers/GrepRenderer.js";
@@ -181,6 +182,7 @@ registerLazyClass("goal_decide_mutation", () => import("./renderers/GoalDecideMu
 registerLazyClass("goal_set_policy", () => import("./renderers/GoalSetPolicyRenderer.js"), "GoalSetPolicyRenderer");
 
 const defaultRenderer = new DefaultRenderer();
+const mcpDefaultRenderer = new McpDefaultRenderer("mcp");
 
 // Global flag to force default JSON rendering for all tools
 let showJsonMode = false;
@@ -211,6 +213,9 @@ export function renderTool(
 	const renderer = getToolRenderer(toolName);
 	if (renderer) {
 		return renderer.render(params, result, isStreaming, ctx);
+	}
+	if (isMcpToolName(toolName)) {
+		return mcpDefaultRenderer.withToolName(toolName).render(params, result, isStreaming, ctx);
 	}
 	return defaultRenderer.withToolName(toolName).render(params, result, isStreaming);
 }

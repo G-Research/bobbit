@@ -137,6 +137,8 @@ export class MessageList extends LitElement {
 	@property({ attribute: false }) onDismissError?: (id: string) => void;
 	@property({ attribute: false }) onRestartAgent?: () => void;
 	@property({ attribute: false }) onRetry?: () => void;
+	/** Hide active permission request cards when the same controls are pinned near the prompt. */
+	@property({ type: Boolean }) hideActionablePermissionRows: boolean = false;
 	/** Session id — forwarded to `<bobbit-pre-compaction-history>` when a
 	 *  compaction card appears in the transcript, so the inline expand
 	 *  affordance can call the orphan-transcript API. */
@@ -210,26 +212,34 @@ export class MessageList extends LitElement {
 				continue;
 			}
 
-			// Render tool permission request cards
+			// Render settled permission request cards as transcript history. Active rows
+			// can be suppressed when AgentInterface pins the actionable controls above
+			// the prompt, avoiding duplicate grant/deny cards for the same request.
 			if ((msg as any).role === "tool_permission_needed") {
 				const perm = msg as any;
+				if (this.hideActionablePermissionRows && isPermissionActionable(perm)) {
+					i++;
+					continue;
+				}
 				items.push({
 					key: `perm:${perm.id}`,
 					eager: true,
-					template: html`<tool-permission-card
-						.permissionId=${perm.id}
-						.toolName=${perm.toolName}
-						.group=${perm.group}
-						.roleName=${perm.roleName}
-						.roleLabel=${perm.roleLabel}
-						.status=${perm.status ?? "active"}
-						.mode=${perm.mode ?? "session-only"}
-						.error=${perm.error ?? ""}
-						.actionable=${perm.actionable !== false}
-						.onModeChange=${(mode: string) => this.dispatchEvent(new CustomEvent("permission-mode-change", { detail: { id: perm.id, mode }, bubbles: true, composed: true }))}
-						.onGrant=${(scope: "tool" | "group", mode?: string) => this.dispatchEvent(new CustomEvent("grant-tool-permission", { detail: { id: perm.id, toolName: perm.toolName, scope, group: perm.group, lastPromptText: perm.lastPromptText, mode }, bubbles: true, composed: true }))}
-						.onDeny=${() => this.dispatchEvent(new CustomEvent("deny-tool-permission", { detail: { id: perm.id, toolName: perm.toolName }, bubbles: true, composed: true }))}
-					></tool-permission-card>`,
+					template: html`<div class="px-2 sm:px-4">
+						<tool-permission-card
+							.permissionId=${perm.id}
+							.toolName=${perm.toolName}
+							.group=${perm.group}
+							.roleName=${perm.roleName}
+							.roleLabel=${perm.roleLabel}
+							.status=${perm.status ?? "active"}
+							.mode=${perm.mode ?? "session-only"}
+							.error=${perm.error ?? ""}
+							.actionable=${perm.actionable !== false}
+							.onModeChange=${(mode: string) => this.dispatchEvent(new CustomEvent("permission-mode-change", { detail: { id: perm.id, mode }, bubbles: true, composed: true }))}
+							.onGrant=${(scope: "tool" | "group", mode?: string) => this.dispatchEvent(new CustomEvent("grant-tool-permission", { detail: { id: perm.id, toolName: perm.toolName, scope, group: perm.group, lastPromptText: perm.lastPromptText, mode }, bubbles: true, composed: true }))}
+							.onDeny=${() => this.dispatchEvent(new CustomEvent("deny-tool-permission", { detail: { id: perm.id, toolName: perm.toolName }, bubbles: true, composed: true }))}
+						></tool-permission-card>
+					</div>`,
 				});
 				i++;
 				continue;

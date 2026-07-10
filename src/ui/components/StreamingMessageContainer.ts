@@ -11,6 +11,7 @@ export class StreamingMessageContainer extends LitElement {
 	@property({ type: Boolean }) archived = false;
 
 	@property({ type: Object }) pendingToolCalls?: Set<string>;
+	@property({ type: Object }) permissionBlockedTools?: Set<string>;
 	@property({ type: Object }) toolResultsById?: Map<string, ToolResultMessage>;
 	@property({ type: Object }) toolPartialResults?: Record<string, any>;
 	@property({ attribute: false }) onCostClick?: () => void;
@@ -356,6 +357,15 @@ export class StreamingMessageContainer extends LitElement {
 		}
 	}
 
+	private _isOnlyPermissionBlockedToolCalls(msg: AgentMessage | null): boolean {
+		if (!msg || msg.role !== "assistant") return false;
+		const content = Array.isArray((msg as any).content) ? (msg as any).content : [];
+		const toolCalls = content.filter((c: any) => c?.type === "toolCall");
+		return toolCalls.length > 0
+			&& toolCalls.length === content.length
+			&& toolCalls.every((c: any) => this.permissionBlockedTools?.has(c.name));
+	}
+
 	override render() {
 		// Unified render: the blob lives in a single, stable DOM slot so its
 		// CSS animations keep their clock across message transitions (e.g.
@@ -369,12 +379,13 @@ export class StreamingMessageContainer extends LitElement {
 		// Message content: only assistant messages render inline here. User
 		// and toolResult messages are rendered by the stable message-list.
 		let content: unknown = nothing;
-		if (msg && msg.role === "assistant") {
+		if (msg && msg.role === "assistant" && !this._isOnlyPermissionBlockedToolCalls(msg)) {
 			content = html`<assistant-message
 				.message=${msg}
 				.tools=${this.tools}
 				.isStreaming=${this.isStreaming}
 				.pendingToolCalls=${this.pendingToolCalls}
+				.permissionBlockedTools=${this.permissionBlockedTools}
 				.toolResultsById=${this.toolResultsById}
 				.toolPartialResults=${this.toolPartialResults}
 				.hideToolCalls=${false}

@@ -41,6 +41,7 @@ test.describe("Permission Card UX pinned browser fixture", () => {
 	test("keeps bottom-pinned permission controls visible with a scrolled transcript and clear of the editor", async ({ page }) => {
 		await loadFixture(page);
 		await expectPinnedVisible(page);
+		await expect(page.locator("message-list tool-permission-card"), "active permission cards should not duplicate inline while pinned").toHaveCount(0);
 
 		const probe = await page.evaluate(() => (window as any).__permissionFixtureGeometry());
 		expect(probe.visible, "pinned permission controls should remain inside the chat viewport").toBe(true);
