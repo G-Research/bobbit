@@ -252,6 +252,49 @@ describe("gate verification WS event previews", () => {
 		assert.match(sanitized.text, /LAST_LIVE_MARKER/);
 	});
 
+	it("bounds multibyte previews within byte caps including the truncation marker", () => {
+		const fullText = "€".repeat(20_000);
+		const stepOutput = sanitizeVerificationWsEvent({
+			type: "gate_verification_step_output",
+			goalId: "goal-1",
+			gateId: "gate-1",
+			signalId: "signal-1",
+			stepIndex: 0,
+			stream: "stdout",
+			text: fullText,
+		}) as { text: string; previewTextBytes?: number };
+		const stepOutputBytes = Buffer.byteLength(stepOutput.text, "utf8");
+
+		assert.ok(
+			stepOutputBytes <= VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES,
+			`multibyte step-output preview exceeded ${VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES} bytes: ${stepOutputBytes}`,
+		);
+		assert.equal(stepOutput.previewTextBytes, stepOutputBytes);
+		assert.match(stepOutput.text, /truncated for live WebSocket delivery/);
+		assert.doesNotMatch(stepOutput.text, /�/, "UTF-8 suffix truncation must not introduce replacement characters");
+
+		const stepComplete = sanitizeVerificationWsEvent({
+			type: "gate_verification_step_complete",
+			goalId: "goal-1",
+			gateId: "gate-1",
+			signalId: "signal-1",
+			stepIndex: 0,
+			stepName: "review",
+			status: "failed",
+			durationMs: 10,
+			output: fullText,
+		}) as { output: string; previewOutputBytes?: number };
+		const stepCompleteBytes = Buffer.byteLength(stepComplete.output, "utf8");
+
+		assert.ok(
+			stepCompleteBytes <= VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES,
+			`multibyte step-complete preview exceeded ${VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES} bytes: ${stepCompleteBytes}`,
+		);
+		assert.equal(stepComplete.previewOutputBytes, stepCompleteBytes);
+		assert.match(stepComplete.output, /truncated for live WebSocket delivery/);
+		assert.doesNotMatch(stepComplete.output, /�/, "UTF-8 suffix truncation must not introduce replacement characters");
+	});
+
 	it("bounds step-complete output frames while preserving harness seq stamping", () => {
 		const stateDir = makeTempDir();
 		const fullOutput = `reviewer summary start\n${"very large reviewer diagnostics ".repeat(20_000)}\nLAST_COMPLETE_MARKER`;
