@@ -1,10 +1,10 @@
 /**
- * Truncates large tool_use content in agent events before broadcasting
+ * Truncates large message content in agent events before broadcasting
  * over WebSocket and storing in EventBuffer.
  *
  * This prevents catastrophic memory pressure when agents write large files
- * (10MB+) — each streaming token would otherwise broadcast the full
- * accumulated content through multiple JSON serialization stages.
+ * or produce large verification artifacts — each event would otherwise carry
+ * the full accumulated payload through JSON serialization and replay buffers.
  *
  * The original event is never mutated — a shallow clone is returned when
  * truncation occurs. Events that don't need truncation are returned as-is
@@ -13,6 +13,8 @@
 
 /** Default threshold: 32KB. Normal code files pass through untouched. */
 export const LARGE_CONTENT_THRESHOLD = 32 * 1024;
+
+const PREVIEW_LENGTH = 512;
 
 /**
  * Sentinel prefixes on preview_open snapshot tool_result text blocks.
@@ -30,6 +32,8 @@ const PREVIEW_SNAPSHOT_MARKERS = [
 	"__preview_snapshot_v3__\n",
 ] as const;
 
+const VERIFICATION_RESULT_LARGE_FIELDS = ["summary", "report_html"] as const;
+
 /** Return the matched marker prefix, or undefined if none matches. */
 function matchMarker(text: string): string | undefined {
 	for (const m of PREVIEW_SNAPSHOT_MARKERS) {
@@ -42,6 +46,18 @@ export interface TruncatedContent {
 	_truncated: true;
 	_originalLength: number;
 	preview: string;
+}
+
+function truncatedStringDescriptor(text: string): TruncatedContent {
+	return {
+		_truncated: true,
+		_originalLength: text.length,
+		preview: text.slice(0, PREVIEW_LENGTH),
+	};
+}
+
+function isLargeString(value: any, threshold: number): value is string {
+	return typeof value === "string" && value.length > threshold;
 }
 
 /**
@@ -65,13 +81,24 @@ export function truncateSnapshotBlock(block: any, threshold: number = LARGE_CONT
 		text: marker,
 		_truncated: true,
 		_originalLength: block.text.length,
-		preview: html.slice(0, 512),
+		preview: html.slice(0, PREVIEW_LENGTH),
 	};
 }
 
-/** True if the message's role marks it as a tool_result. */
-function isToolResultMessage(msg: any): boolean {
-	return msg?.role === "toolResult" || msg?.role === "tool_result" || msg?.role === "tool";
+function truncateTextBlock(block: any, threshold: number): any {
+	const snapshot = truncateSnapshotBlock(block, threshold);
+	if (snapshot !== block) return snapshot;
+	if (!block || block.type !== "text" || typeof block.text !== "string") return block;
+	if (block._truncated) return block;
+	if (block.text.length <= threshold) return block;
+	const preview = block.text.slice(0, PREVIEW_LENGTH);
+	return {
+		...block,
+		text: preview,
+		_truncated: true,
+		_originalLength: block.text.length,
+		preview,
+	};
 }
 
 /** Helper: check if a content block is a tool call (either format) */
@@ -79,13 +106,55 @@ function isToolBlock(block: any): boolean {
 	return block?.type === "toolCall" || block?.type === "tool_use";
 }
 
+function isVerificationResultTool(block: any): boolean {
+	return block?.name === "verification_result";
+}
+
+function truncateToolPayload(payload: any, block: any, threshold: number): any {
+	if (!payload || typeof payload !== "object") return payload;
+	let next = payload;
+
+	if (isLargeString(payload.content, threshold)) {
+		next = { ...next, content: truncatedStringDescriptor(payload.content) };
+	}
+
+	if (isVerificationResultTool(block)) {
+		for (const field of VERIFICATION_RESULT_LARGE_FIELDS) {
+			if (isLargeString(payload[field], threshold)) {
+				if (next === payload) next = { ...payload };
+				next[field] = truncatedStringDescriptor(payload[field]);
+			}
+		}
+	}
+
+	return next;
+}
+
+function truncateToolBlock(block: any, threshold: number): any {
+	if (!isToolBlock(block)) return block;
+
+	const nextArguments = truncateToolPayload(block.arguments, block, threshold);
+	const nextInput = truncateToolPayload(block.input, block, threshold);
+	if (nextArguments === block.arguments && nextInput === block.input) return block;
+
+	const nextBlock = { ...block };
+	if (nextArguments !== block.arguments) nextBlock.arguments = nextArguments;
+	if (nextInput !== block.input) nextBlock.input = nextInput;
+	return nextBlock;
+}
+
+function truncateMessageContentBlock(block: any, threshold: number): any {
+	const textBlock = truncateTextBlock(block, threshold);
+	if (textBlock !== block) return textBlock;
+	return truncateToolBlock(block, threshold);
+}
+
 /**
- * Truncate large tool content inside a list of persisted messages (as
- * returned by the agent's `get_messages` RPC). Used when sending history
- * to clients on session open / reconnect / tab wake — previously, the full
- * untruncated history was serialized into a single WebSocket frame, which
- * caused very slow (and sometimes failing) history loads for sessions with
- * large file writes/reads.
+ * Truncate large content inside a list of persisted messages (as returned by
+ * the agent's `get_messages` RPC). Used when sending history to clients on
+ * session open / reconnect / tab wake — previously, the full untruncated
+ * history was serialized into a single WebSocket frame, which caused very slow
+ * (and sometimes failing) history loads for sessions with large payloads.
  *
  * Returns the original array when nothing needs truncation.
  */
@@ -96,29 +165,13 @@ export function truncateLargeToolContentInMessages(messages: any, threshold: num
 		const content = msg?.content;
 		if (!Array.isArray(content)) return msg;
 		let msgChanged = false;
-		const isToolResult = isToolResultMessage(msg);
 		const newContent = content.map((block: any) => {
-			if (isToolResult) {
-				const truncatedSnap = truncateSnapshotBlock(block, threshold);
-				if (truncatedSnap !== block) {
-					msgChanged = true;
-					return truncatedSnap;
-				}
-				return block;
+			const truncated = truncateMessageContentBlock(block, threshold);
+			if (truncated !== block) {
+				msgChanged = true;
+				return truncated;
 			}
-			if (!isToolBlock(block)) return block;
-			const c = getToolContent(block);
-			if (c === undefined || c.length <= threshold) return block;
-			msgChanged = true;
-			const truncatedContent: TruncatedContent = {
-				_truncated: true,
-				_originalLength: c.length,
-				preview: c.slice(0, 512),
-			};
-			if (block.arguments?.content !== undefined) {
-				return { ...block, arguments: { ...block.arguments, content: truncatedContent } };
-			}
-			return { ...block, input: { ...block.input, content: truncatedContent } };
+			return block;
 		});
 		if (!msgChanged) return msg;
 		changed = true;
@@ -127,16 +180,10 @@ export function truncateLargeToolContentInMessages(messages: any, threshold: num
 	return changed ? out : messages;
 }
 
-/** Helper: get the string content from a tool block (either format) */
-function getToolContent(block: any): string | undefined {
-	const c = block.arguments?.content ?? block.input?.content;
-	return typeof c === "string" ? c : undefined;
-}
-
 /**
- * If the event is a `message_update` or `message_end` containing tool_use
- * or toolCall blocks with large string content, return a shallow clone with
- * those content values replaced by a truncated descriptor.
+ * If the event is a `message_update` or `message_end` containing large text,
+ * tool content, or verification_result artifact fields, return a shallow clone
+ * with those values replaced by bounded previews and metadata.
  *
  * Supports both formats:
  *  - Anthropic API: `{ type: "tool_use", input: { content: "..." } }`
@@ -152,57 +199,18 @@ export function truncateLargeToolContent(event: any, threshold: number = LARGE_C
 	const content = event.message?.content;
 	if (!Array.isArray(content)) return event;
 
-	const isToolResult = isToolResultMessage(event.message);
-
-	// Scan for any block that needs truncation
 	let needsTruncation = false;
 	for (const block of content) {
-		if (isToolResult) {
-			if (truncateSnapshotBlock(block, threshold) !== block) {
-				needsTruncation = true;
-				break;
-			}
-		}
-		if (isToolBlock(block)) {
-			const c = getToolContent(block);
-			if (c !== undefined && c.length > threshold) {
-				needsTruncation = true;
-				break;
-			}
+		if (truncateMessageContentBlock(block, threshold) !== block) {
+			needsTruncation = true;
+			break;
 		}
 	}
 
 	if (!needsTruncation) return event;
 
 	// Build a shallow clone of the event with truncated content blocks
-	const newContent = content.map((block: any) => {
-		if (isToolResult) {
-			const truncatedSnap = truncateSnapshotBlock(block, threshold);
-			if (truncatedSnap !== block) return truncatedSnap;
-			return block;
-		}
-		if (!isToolBlock(block)) return block;
-		const c = getToolContent(block);
-		if (c === undefined || c.length <= threshold) return block;
-
-		const truncatedContent: TruncatedContent = {
-			_truncated: true,
-			_originalLength: c.length,
-			preview: c.slice(0, 512),
-		};
-
-		// Preserve the original field structure (arguments vs input)
-		if (block.arguments?.content !== undefined) {
-			return {
-				...block,
-				arguments: { ...block.arguments, content: truncatedContent },
-			};
-		}
-		return {
-			...block,
-			input: { ...block.input, content: truncatedContent },
-		};
-	});
+	const newContent = content.map((block: any) => truncateMessageContentBlock(block, threshold));
 
 	return {
 		...event,

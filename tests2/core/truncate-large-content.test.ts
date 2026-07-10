@@ -347,6 +347,27 @@ describe("truncateLargeToolContent", () => {
 		assert.strictEqual(event.message.content[0].arguments.report_html, reportHtml, "original event report_html must not be mutated");
 	});
 
+	it("truncates marker-less large text blocks before session event broadcast", () => {
+		const big = "event text\n".repeat(6000);
+		const event = {
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				content: [{ type: "text", text: big }],
+			},
+		};
+
+		const result = truncateLargeToolContent(event);
+
+		assert.notStrictEqual(result, event);
+		const block = result.message.content[0];
+		assert.strictEqual(block.text, big.slice(0, 512));
+		assert.strictEqual(block._truncated, true);
+		assert.strictEqual(block._originalLength, big.length);
+		assert.strictEqual(block.preview, big.slice(0, 512));
+		assert.strictEqual(event.message.content[0].text, big, "original text block must not be mutated");
+	});
+
 	it("exports the threshold constant", () => {
 		assert.strictEqual(LARGE_CONTENT_THRESHOLD, 32 * 1024);
 	});
@@ -430,6 +451,22 @@ describe("truncateLargeToolContentInMessages", () => {
 		assertTruncatedStringDescriptor(input.report_html, reportHtml, "WS backpressure regression: history verification_result.report_html");
 		assert.strictEqual(msg.content[0].input.summary, summary, "original history summary must not be mutated");
 		assert.strictEqual(msg.content[0].input.report_html, reportHtml, "original history report_html must not be mutated");
+	});
+
+	it("truncates large assistant text blocks in persisted history", () => {
+		const big = "assistant text\n".repeat(6000);
+		const msg = { role: "assistant", content: [{ type: "text", text: big }] };
+		const messages = [msg];
+
+		const result = truncateLargeToolContentInMessages(messages) as any[];
+
+		assert.notStrictEqual(result, messages);
+		const block = result[0].content[0];
+		assert.strictEqual(block.text, big.slice(0, 512));
+		assert.strictEqual(block._truncated, true);
+		assert.strictEqual(block._originalLength, big.length);
+		assert.strictEqual(block.preview, big.slice(0, 512));
+		assert.strictEqual(msg.content[0].text, big, "original assistant text must not be mutated");
 	});
 
 	it("ignores non-array input", () => {
