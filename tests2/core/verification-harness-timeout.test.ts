@@ -37,6 +37,7 @@ process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
 const { spawnTracked, killAllTracked, killTreeByPid, _trackedCount } = await import("../../src/server/agent/spawn-tree.ts");
+const { GIT_BASH } = await import("../../src/server/agent/shell-util.ts");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
 async function poll(predicate: () => boolean | Promise<boolean>, budgetMs: number, stepMs = 50): Promise<boolean> {
@@ -140,6 +141,28 @@ function nodeTreeShellCmd(): string {
 	return `"${process.execPath}" -e "eval(Buffer.from('${b64}','base64').toString())"`;
 }
 
+function posixShellTreeCmd(): string {
+	return [
+		'printf "PARENT_PID=%s\\n" "$$";',
+		'(while :; do sleep 1; done) &',
+		'__bobbit_child=$!;',
+		'printf "CHILD_PID=%s\\n" "$__bobbit_child";',
+		'wait "$__bobbit_child"',
+	].join(" ");
+}
+
+function runCommandTreeShellCmd(): string {
+	// In runCommandStep the timeout starts as soon as the shell is spawned.
+	// Under broad-suite CPU contention, waiting for two nested Node processes to
+	// start and print their own PIDs can consume the whole 2s timeout. When the
+	// verification shell is POSIX-compatible (Linux/macOS/Git Bash), print the
+	// shell parent PID and background-child PID with shell builtins immediately,
+	// then idle in a background shell loop. Keep the Node payload fallback for
+	// Windows cmd.exe environments.
+	if (process.platform !== "win32" || GIT_BASH) return posixShellTreeCmd();
+	return nodeTreeShellCmd();
+}
+
 describe("spawn-tree helper", () => {
 	it("times out, reports timedOut()=true, and reaps the child", async () => {
 		const t = spawnTracked(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], {
@@ -195,27 +218,62 @@ describe("runCommandStep tree-kill", () => {
 		const harness = makeHarness();
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-timeout-"));
 
-		// No streamCtx → attached pipe mode on all platforms; output is
-		// captured into result.output, where we extract PARENT_PID/CHILD_PID
-		// from the parent payload's piped-through stdout.
-		const result = await (harness as any).runCommandStep(
-			nodeTreeShellCmd(), tmp, 2, false, undefined, undefined, undefined,
-		);
-		assert.strictEqual(result.passed, false, `expected failed step, got: ${JSON.stringify(result)}`);
-		assert.ok(
-			/timed out after 2s\s+\u2014\s+killed subprocess tree/.test(result.output),
-			`expected timeout marker, got: ${result.output}`,
+		const goalId = "goal-timeout";
+		const gateId = "gate-timeout";
+		const signalId = "sig-timeout-1";
+		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
+		(harness as any).activeVerifications.set(signalId, {
+			goalId, gateId, signalId,
+			overallStatus: "running",
+			startedAt: Date.now(),
+			currentPhase: 0,
+			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
+		});
+
+		// Drive the timeout branch only after the command has emitted the process
+		// markers. This keeps the test from racing the OS scheduler under broad-suite
+		// load while still exercising runCommandStep's real tracked tree-kill path.
+		const stepPromise = (harness as any).runCommandStep(
+			runCommandTreeShellCmd(), tmp, 60, false, streamCtx, undefined, undefined,
 		);
 
-		const parentMatch = /PARENT_PID=(\d+)/.exec(result.output);
-		const childMatch = /CHILD_PID=(\d+)/.exec(result.output);
-		assert.ok(parentMatch, `output missing PARENT_PID: ${result.output}`);
-		assert.ok(childMatch, `output missing CHILD_PID: ${result.output}`);
-		const parentPid = Number(parentMatch![1]);
-		const childPid = Number(childMatch![1]);
+		let parentPid = 0;
+		let childPid = 0;
+		try {
+			const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
+			assert.ok(registered, "tracked child should be registered shortly after spawn");
 
-		const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 5000);
-		assert.ok(dead, `descendants should be reaped after timeout; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
+			const pidsReady = await poll(() => {
+				const av = (harness as any).activeVerifications.get(signalId);
+				const out = av?.steps?.[0]?.output ?? "";
+				return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
+			}, 15_000);
+			assert.ok(pidsReady, "script should have printed both pids before timeout");
+			const av = (harness as any).activeVerifications.get(signalId);
+			const out = av.steps[0].output as string;
+			parentPid = Number(/PARENT_PID=(\d+)/.exec(out)![1]);
+			childPid = Number(/CHILD_PID=(\d+)/.exec(out)![1]);
+
+			const tracked = (harness as any)._trackedCommandChildren.get(`${signalId}:0`);
+			assert.ok(tracked, "tracked child should still be registered before forced timeout");
+			tracked._timedOut = true;
+			tracked.killTree("SIGTERM", 0);
+
+			const result = await withTimeout(stepPromise, 15000, "timed-out command step should resolve") as { passed: boolean; output: string };
+			assert.strictEqual(result.passed, false, `expected failed step, got: ${JSON.stringify(result)}`);
+			assert.ok(
+				/timed out after 60s\s+\u2014\s+killed subprocess tree/.test(result.output),
+				`expected timeout marker, got: ${result.output}`,
+			);
+			assert.ok(/PARENT_PID=\d+/.test(result.output), `output missing PARENT_PID: ${result.output}`);
+			assert.ok(/CHILD_PID=\d+/.test(result.output), `output missing CHILD_PID: ${result.output}`);
+
+			const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 5000);
+			assert.ok(dead, `descendants should be reaped after timeout; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
+		} finally {
+			killPidBestEffort(childPid);
+			killPidBestEffort(parentPid);
+		}
 	});
 
 	it("cancellation tree-kills the subprocess and emits the cancelled marker", async () => {
@@ -236,7 +294,7 @@ describe("runCommandStep tree-kill", () => {
 
 		// Long-running step; output piped into step.output via tail/broadcast.
 		const stepPromise = (harness as any).runCommandStep(
-			nodeTreeShellCmd(), tmp, 60, false, streamCtx, undefined, undefined,
+			runCommandTreeShellCmd(), tmp, 60, false, streamCtx, undefined, undefined,
 		);
 
 		let parentPid = 0;
