@@ -118,7 +118,19 @@ function readState(name, envVar) {
 }
 const gwUrl = readState("gateway-url", "BOBBIT_GATEWAY_URL");
 const gwToken = readState("token", "BOBBIT_TOKEN");
+const agentDir = process.env.PI_CODING_AGENT_DIR || process.env.BOBBIT_AGENT_DIR || path.join(os.homedir(), ".bobbit", "agent");
+const authPath = path.join(agentDir, "auth.json");
 const fetchImpl = (...args) => globalThis.fetch(...args);
+
+function hasLocalCredential() {
+  try {
+    const auth = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+    const cred = auth && auth[PROVIDER];
+    return !!(cred && cred.type === "oauth" && (cred.access || cred.refresh));
+  } catch {
+    return false;
+  }
+}
 
 // Minimal token redaction for surfaced error bodies — strip long Bearer-ish blobs.
 function redact(s) {
@@ -499,18 +511,55 @@ function codeAssistStreamSimple(model, context, options) {
   return stream;
 }
 
-export default function (pi) {
-  pi.registerProvider(PROVIDER, {
+function providerConfig(includeModels) {
+  return {
     name: "Google (Gemini, account)",
     api: API,
     baseUrl: BASE_URL,
-    // Token is fetched per request inside streamSimple, not via apiKey. A literal
-    // keeps pi-coding-agent's validateProviderConfig happy (it requires apiKey or
-    // oauth when models are defined).
-    apiKey: "code-assist-runtime",
     streamSimple: codeAssistStreamSimple,
-    models: MODELS,
-  });
+    ...(includeModels ? {
+      // Token is fetched per request inside streamSimple, not via apiKey. A
+      // literal only marks the provider authenticated inside pi-coding-agent once
+      // Bobbit has observed a real Google credential, preventing unauthenticated
+      // Code Assist from becoming Pi's implicit/default model.
+      apiKey: "code-assist-runtime",
+      models: MODELS,
+    } : {}),
+  };
+}
+
+function startAuthWatcher(pi) {
+  if (!gwUrl && !process.env.GOOGLE_CLOUD_ACCESS_TOKEN) return;
+  let stopped = false;
+  let timer;
+  const arm = () => {
+    if (!stopped) {
+      timer = setTimeout(check, 10_000);
+      if (timer && typeof timer.unref === "function") timer.unref();
+    }
+  };
+  const check = async () => {
+    if (stopped) return;
+    try {
+      if (hasLocalCredential()) {
+        pi.registerProvider(PROVIDER, providerConfig(true));
+        stopped = true;
+        return;
+      }
+      await fetchCredential(undefined);
+      pi.registerProvider(PROVIDER, providerConfig(true));
+      stopped = true;
+    } catch {
+      arm();
+    }
+  };
+  arm();
+}
+
+export default function (pi) {
+  const authenticatedAtLoad = hasLocalCredential() || !!process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+  pi.registerProvider(PROVIDER, providerConfig(authenticatedAtLoad));
+  if (!authenticatedAtLoad) startAuthWatcher(pi);
 }
 `;
 }
@@ -525,15 +574,17 @@ const extFileCache = new Map<string, string>();
  * catalog is unreadable).
  *
  * The extension is written UNCONDITIONALLY — even with no Google account
- * credential present — so the `google-code-assist` provider is registered inside
- * every spawned agent. This closes a gap where a session spawned BEFORE Google
- * sign-in had no provider registered, so selecting a `google-gemini-cli/*` model
- * in that already-running session failed with "No API provider registered for
- * api: google-code-assist". Registering always is safe: the runtime Bearer token
- * is fetched per request from the gateway (which returns a clear re-auth error
- * when no account is authenticated), nothing account-scoped is baked in at spawn
- * time, the gateway-side model selector still only surfaces these models once
- * authenticated, and the generated source contains no secrets.
+ * credential present — so the `google-code-assist` API provider is registered
+ * inside every spawned agent. Until a real credential is observed, it deliberately
+ * registers no `models[]` and no provider `apiKey`; otherwise Pi 0.80 treats the
+ * extension's placeholder auth as configured and may choose Code Assist as the
+ * implicit/default model before Google login. A lightweight auth watcher upgrades
+ * the registration with the model list after local auth/env/gateway auth becomes
+ * visible, preserving late-auth availability without making pre-auth Code Assist
+ * a default candidate. The runtime Bearer token is still fetched per request from
+ * the gateway, nothing account-scoped is baked in at spawn time, the gateway-side
+ * model selector still only surfaces these models once authenticated, and the
+ * generated source contains no secrets.
  *
  * Content-addressed under `.bobbit/state/google-code-assist/<hash>/provider.ts`
  * for dedup, mirroring `writeProviderBridgeExtension`.
