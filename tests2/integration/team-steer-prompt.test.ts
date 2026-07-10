@@ -295,6 +295,121 @@ test.describe("team prompt — dispatch behavior", () => {
 		}
 	});
 
+	test("POST /team/prompt recovers a retryable errored idle team agent instead of only parking the lead prompt", async ({ gateway }) => {
+		const agentId = await createSession();
+		const leadMessage = `RECOVER_TEAM_PROMPT_FETCH_FAILED_${Date.now()}`;
+		try {
+			seedTeamAgent(gateway, goalId, agentId);
+			await waitForSessionStatus(agentId, "idle");
+
+			const sm = gateway.sessionManager;
+			const session = sm.getSession(agentId);
+			expect(session, "seeded test session").toBeTruthy();
+			for (const row of session.promptQueue.toArray()) session.promptQueue.remove(row.id);
+			session.status = "idle";
+			session.lastTurnErrored = true;
+			session.lastTurnErrorMessage = "fetch failed";
+			session.consecutiveErrorTurns = 3;
+			session.transientRetryAttempts = 0;
+			session.turnHadToolCalls = false;
+			session.lastPromptText = "original team task that hit fetch failed";
+
+			const origRetry = sm.retryLastPrompt;
+			let retryCalls = 0;
+			let retryOpts: { auto?: boolean } | undefined;
+			let queueSnapshotAtRetry: string[] = [];
+			const deliveredAfterRecovery: string[] = [];
+			sm.retryLastPrompt = async (sessionId: string, opts?: { auto?: boolean }) => {
+				retryCalls++;
+				retryOpts = opts;
+				const target = sm.getSession(sessionId);
+				queueSnapshotAtRetry = target?.promptQueue.toArray().map((row: any) => row.text) ?? [];
+				target.lastTurnErrored = false;
+				target.status = "idle";
+				for (const row of target.promptQueue.toArray().filter((queued: any) => queued.text.includes(leadMessage))) {
+					deliveredAfterRecovery.push(row.text);
+					target.promptQueue.remove(row.id);
+				}
+			};
+
+			try {
+				const promptResp = await apiFetch(`/api/goals/${goalId}/team/prompt`, {
+					method: "POST",
+					body: JSON.stringify({ sessionId: agentId, message: leadMessage, mode: "prompt" }),
+				});
+				const data = await promptResp.json();
+
+				expect(promptResp.status, JSON.stringify(data)).toBe(200);
+				expect(data).toMatchObject({ ok: true, mode: "prompt" });
+				expect(
+					retryCalls,
+					`team_prompt must invoke retryLastPrompt(..., { auto: true }) for retryable fetch failed targets instead of parking behind lastTurnErrored; response was ${JSON.stringify(data)}`,
+				).toBe(1);
+				expect(retryOpts).toMatchObject({ auto: true });
+				expect(
+					data.recovered === true || data.status === "recovered" || data.status === "dispatched",
+					`team_prompt must report retry recovery, not only ${JSON.stringify(data)}`,
+				).toBe(true);
+				expect(queueSnapshotAtRetry.filter(text => text.includes(leadMessage)), "lead prompt should be queued exactly once before retry recovery").toHaveLength(1);
+				expect(deliveredAfterRecovery.filter(text => text.includes(leadMessage)), "lead prompt should dispatch exactly once after retry recovery").toHaveLength(1);
+			} finally {
+				sm.retryLastPrompt = origRetry;
+			}
+		} finally {
+			unseedTeamAgent(gateway, goalId, agentId);
+			await deleteSession(agentId);
+		}
+	});
+
+	test("POST /team/prompt does not auto-retry non-retryable provider auth failures", async ({ gateway }) => {
+		const agentId = await createSession();
+		const leadMessage = `DO_NOT_RECOVER_AUTH_FAILURE_${Date.now()}`;
+		try {
+			seedTeamAgent(gateway, goalId, agentId);
+			await waitForSessionStatus(agentId, "idle");
+
+			const sm = gateway.sessionManager;
+			const session = sm.getSession(agentId);
+			expect(session, "seeded test session").toBeTruthy();
+			for (const row of session.promptQueue.toArray()) session.promptQueue.remove(row.id);
+			session.status = "idle";
+			session.lastTurnErrored = true;
+			session.lastTurnErrorMessage = "Provider authentication failed: invalid API key";
+			session.consecutiveErrorTurns = 3;
+			session.transientRetryAttempts = 0;
+			session.turnHadToolCalls = false;
+			session.lastPromptText = "original team task with auth failure";
+
+			const origRetry = sm.retryLastPrompt;
+			let retryCalls = 0;
+			sm.retryLastPrompt = async () => {
+				retryCalls++;
+			};
+
+			try {
+				const promptResp = await apiFetch(`/api/goals/${goalId}/team/prompt`, {
+					method: "POST",
+					body: JSON.stringify({ sessionId: agentId, message: leadMessage, mode: "prompt" }),
+				});
+				const data = await promptResp.json();
+				const clearBlockedResult = promptResp.status >= 400 || data.ok === false || data.status === "blocked" || data.status === "requires_action";
+
+				expect(retryCalls, "non-retryable provider auth failures must not invoke retryLastPrompt").toBe(0);
+				expect(
+					clearBlockedResult,
+					`non-retryable provider auth failures must return a clear blocked/action-required result instead of only ${JSON.stringify(data)}`,
+				).toBe(true);
+				expect(JSON.stringify(data)).toMatch(/non.?retryable|auth|manual|human|upstream|action|required|recover/i);
+				expect(session.promptQueue.toArray().filter((row: any) => row.text.includes(leadMessage)), "non-retryable prompt must not be silently parked behind lastTurnErrored").toHaveLength(0);
+			} finally {
+				sm.retryLastPrompt = origRetry;
+			}
+		} finally {
+			unseedTeamAgent(gateway, goalId, agentId);
+			await deleteSession(agentId);
+		}
+	});
+
 	test("POST /team/prompt injects workflow gate context in prompt and steer modes", async ({ gateway }) => {
 		const workflowGoal = await createGoal({ title: "prompt-context-injection", team: true, workflowId: "general" });
 		const contextSessionId = await createSession({ goalId: workflowGoal.id });
