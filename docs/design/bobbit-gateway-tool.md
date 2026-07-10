@@ -229,6 +229,30 @@ as `?k=`. "Body" lists the JSON body keys the handler reads.
 unchanged. List-style operations are bounded by default so agents do not dump
 large collections into context.
 
+#### Archive visibility (hidden by default)
+
+List/search reads are live-only by default: archived entities never enter agent
+context unless the caller opts in. The filter runs on the tool response after
+the gateway replies (a `postProcess` step per operation), so it removes both
+archived rows from the primary array **and** the archive-only auxiliary arrays
+the REST endpoints attach for the UI. This is deliberately stricter than the
+REST defaults: `GET /api/sessions` and `GET /api/goals` return
+`archivedDelegates` / `archivedSessions` side arrays for the sidebar even on
+live-only calls, and the tool strips them so an agent listing “current” state
+never sees archived rows it did not ask for.
+
+- `list_sessions` — drops `archived: true` rows and strips `archivedDelegates`;
+  `include=archived` returns archived sessions plus the delegate enrichment.
+- `list_goals` — drops `archived: true` rows and strips `archivedSessions`;
+  `archived=true` selects the archived path plus the affiliated-session
+  enrichment.
+- `search` — drops archived hits from `results`; `include=archived` (or the
+  REST query `includeArchived=true`) forwards `includeArchived=true` to
+  `/api/search` and keeps archived hits.
+
+Other list operations do not surface archived rows on their default REST paths,
+so no filter is applied and there is no archive opt-in for them.
+
 #### Shared pagination
 
 Shared paging params for list-style reads:
@@ -274,16 +298,16 @@ preserved.
 |---|---|---|---|---|
 | `health` | GET | `/api/health` | — | — |
 | `connection_info` | GET | `/api/connection-info` | — | — |
-| `list_goals` | GET | `/api/goals` | — | `projectId`, `archived` (`?archived=true`), `q`, `limit`, `offset`, `after`/`cursor` |
+| `list_goals` | GET | `/api/goals` | — | `projectId`, `q`, `limit`, `offset`; archived hidden unless `archived=true` (then `after`/`cursor`) |
 | `get_goal` | GET | `/api/goals/:goalId` | `goalId` | — |
 | `goal_cost` | GET | `/api/goals/:goalId/cost` | `goalId` | — |
 | `goal_git_status` | GET | `/api/goals/:goalId/git-status` | `goalId` | — |
 | `goal_commits` | GET | `/api/goals/:goalId/commits` | `goalId` | — |
 | `goal_pr_status` | GET | `/api/goals/:goalId/pr-status` | `goalId` | — |
-| `list_sessions` | GET | `/api/sessions` | — | `include`, `q`, `projectId`, `limit`, `offset`, `after`/`cursor` |
+| `list_sessions` | GET | `/api/sessions` | — | `q`, `projectId`, `limit`, `offset`; archived hidden unless `include=archived` (then `after`/`cursor`) |
 | `get_session` | GET | `/api/sessions/:sessionId` | `sessionId` | — |
 | `session_cost` | GET | `/api/sessions/:sessionId/cost` | `sessionId` | — |
-| `search` | GET | `/api/search` | `q` | `q`, `type` (all\|goals\|sessions\|messages\|staff), `projectId`, `limit`, `offset` |
+| `search` | GET | `/api/search` | `q` | `q`, `type` (all\|goals\|sessions\|messages\|staff), `projectId`, `limit`, `offset`; archived hidden unless `include=archived` / `includeArchived=true` |
 | `list_projects` | GET | `/api/projects` | — | `limit`, `offset` (tool-side fallback) |
 | `get_project` | GET | `/api/projects/:projectId` | `projectId` | — |
 | `list_workflows` | GET | `/api/workflows` | `projectId` | `projectId`, `limit`, `offset` (tool-side fallback) |
@@ -306,8 +330,10 @@ Semantic filter notes:
   applied before paging.
 - `q` filters `list_sessions`, `list_goals`, and `search`; `type` applies only
   to `search`.
-- `include` applies only to `list_sessions`; `archived` applies only to
-  `list_goals`.
+- `include=archived` is the archive opt-in for `list_sessions` **and**
+  `search`; `archived=true` is the archive opt-in for `list_goals`. Without
+  them, every list/search read is live-only (see “Archive visibility” above).
+  `search` also accepts the REST-style `includeArchived=true`.
 
 **`maintenance_inspect`** takes a `probe` param selecting one GET-only probe:
 
