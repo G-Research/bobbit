@@ -5,7 +5,7 @@
  * registry that supports rebinding, persistence, and conflict detection.
  */
 
-import { gatewayFetch } from "./api.js";
+import { gatewayFetch } from "./gateway-fetch.js";
 
 // ============================================================================
 // TYPES
