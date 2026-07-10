@@ -53,6 +53,8 @@ Routing rules:
 | `abort` | — | Abort the current agent turn |
 | `retry` | — | Retry the last failed turn |
 | `restart_agent` | — | Restart the agent process for this socket's session. This is the active-session path; the sidebar `Refresh agent` action uses `POST /api/sessions/:id/restart` to target any live row by id. Both paths call the same session-manager restart implementation. |
+| `grant_tool_permission` | `toolName`, `scope`, `group?`, `mode?` | Grant the active `ask`-gated tool request for one tool or a tool group. `mode` is `persistent`, `session-only`, or `one-time`; see [Permission Card UX](permission-card-ux.md). |
+| `deny_tool_permission` | `toolName` | Deny the active `ask`-gated tool request so the guard long-poll returns immediately. |
 | `set_model` | `provider`, `modelId` | Switch the AI model |
 | `set_image_model` | `provider`, `modelId` | Switch the per-session image generation model. Server validates `(provider, modelId)` against `getAvailableImageModels()`; on unknown the server replies with `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and does **not** mutate session state. On valid, persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state to all attached clients. |
 | `compact` | — | Trigger context compaction |
@@ -112,6 +114,8 @@ Routing rules:
 | `team_agent_dismissed` | `goalId`, `sessionId`, `role`, `name` | Team agent was dismissed |
 | `team_agent_finished` | `goalId`, `sessionId`, `role`, `name` | Team agent finished its turn |
 | `pr_status_changed` | `goalId?`, `sessionId?`, `status` | PR status changed for a goal or session |
+| `tool_permission_needed` | `toolName`, `group`, `roleName`, `roleLabel`, `lastPromptText?`, `seq?`, `ts?` | A guarded tool call is blocked pending user approval. The frame is ordered with the transcript so the client can render the blocked tool call and permission row coherently. |
+| `tool_permission_settled` | `toolName`, `group?`, `status`, `reason?` | The active permission request settled as `granted`, `denied`, `expired`, `superseded`, `cancelled`, or `error`. Clients keep inline history and remove non-actionable rows from pinned controls. |
 | `index:progress` | `projectId`, `phase`, `total`, `completed`, `backlog` | Search index progress. `phase` is `"rebuild"` or `"incremental"`. Debounced to 500ms per project. |
 | `index:complete` | `projectId`, `phase`, `durationMs`, `rowsWritten` | Search index run finished (full rebuild or incremental drain) |
 | `index:error` | `projectId`, `message`, `recoverable` | Search index error. `recoverable: true` for model/download failures; `false` for native-binary failures. |
