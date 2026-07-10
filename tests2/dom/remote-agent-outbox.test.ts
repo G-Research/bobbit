@@ -9,7 +9,7 @@ __syncBeforeAll(() => __syncCE());
 // is pre-imported so any fire-and-forget lazy define resolves during the test
 // rather than racing env teardown.
 import { afterEach, describe, expect, it } from "vitest";
-import "../../src/app/session-manager.js";
+import { installConfirmedSessionModelPersistence } from "../../src/app/session-manager.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
 import "../../src/ui/lazy/safe-markdown-block.js";
 import { setRenderApp, state } from "../../src/app/state.js";
@@ -46,6 +46,7 @@ const nextRenderFrame = () => new Promise<void>((resolve) => {
 
 afterEach(() => {
 	state.showHeadquartersInProjectLists = false;
+	localStorage.clear();
 });
 
 describe("RemoteAgent live preference sync", () => {
@@ -79,6 +80,51 @@ describe("RemoteAgent live preference sync", () => {
 		expect(hidden.renders).toBeGreaterThan(0);
 		expect(defaultVisible.visible).toBe(true);
 		expect(defaultVisible.renders).toBeGreaterThan(0);
+	});
+});
+
+describe("RemoteAgent model switch reconciliation", () => {
+	const modelA = { provider: "openai-codex", id: "gpt-5.5", contextWindow: 128000 };
+	const modelB = { provider: "anthropic", id: "claude-opus-4-8", contextWindow: 200000 };
+
+	it("reconciles optimistic display from authoritative state and refreshes after SET_MODEL_FAILED", async () => {
+		const ra = makeAgent(OPEN);
+		const events: any[] = [];
+		ra.subscribe((event: any) => events.push(event));
+
+		await ra.handleServerMessage({ type: "state", data: { model: modelA } });
+		ra.setModel(modelB);
+		expect(ra.state.model).toMatchObject(modelB);
+
+		await ra.handleServerMessage({ type: "state", data: { model: modelA } });
+		await ra.handleServerMessage({ type: "error", code: "SET_MODEL_FAILED", message: "read-back mismatch" });
+
+		expect(ra.state.model).toMatchObject(modelA);
+		expect(snapshot(ra).sent).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "set_model", provider: modelB.provider, modelId: modelB.id }),
+			expect.objectContaining({ type: "get_state" }),
+		]));
+		expect(events).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "state_update", data: expect.objectContaining({ model: modelA }) }),
+		]));
+	});
+
+	it("persists only server-confirmed model states, not optimistic selections", async () => {
+		const ra = makeAgent(OPEN);
+		installConfirmedSessionModelPersistence(ra, "session-model-test");
+		const saved = () => JSON.parse(localStorage.getItem("session.session-model-test.model") || "null");
+
+		await ra.handleServerMessage({ type: "state", data: { model: modelA } });
+		expect(saved()).toMatchObject({ provider: modelA.provider, modelId: modelA.id });
+
+		ra.setModel(modelB);
+		expect(saved()).toMatchObject({ provider: modelA.provider, modelId: modelA.id });
+
+		await ra.handleServerMessage({ type: "error", code: "SET_MODEL_FAILED", message: "rejected" });
+		expect(saved()).toMatchObject({ provider: modelA.provider, modelId: modelA.id });
+
+		await ra.handleServerMessage({ type: "state", data: { model: modelB } });
+		expect(saved()).toMatchObject({ provider: modelB.provider, modelId: modelB.id });
 	});
 });
 

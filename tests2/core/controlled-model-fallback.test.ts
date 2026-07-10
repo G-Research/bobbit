@@ -23,7 +23,7 @@ import {
 	applyReviewModelOverrides,
 	type ReviewModelRpc,
 } from "../../src/server/agent/review-model-override.js";
-import { applyRuntimeSessionModelSelection } from "../../src/server/ws/runtime-model-selection.js";
+import { applyRuntimeSessionModelSelection, broadcastRuntimeSessionActualModelState } from "../../src/server/ws/runtime-model-selection.js";
 import { generateImage } from "../../src/server/agent/image-generation.js";
 import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
@@ -34,6 +34,7 @@ const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 const VERIFICATION_HARNESS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/verification-harness.ts");
 const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");
+const WS_HANDLER_SOURCE = path.join(PROJECT_ROOT, "src/server/ws/handler.ts");
 
 type Prefs = Record<string, unknown>;
 type ModelPair = [string, string];
@@ -223,12 +224,14 @@ function makeRuntimeHarness(options: {
 	prefs?: Prefs;
 	failModels?: string[];
 	readBack?: { provider: string; id: string };
+	readBackSequence?: Array<{ provider: string; id: string }>;
 } = {}) {
 	const setModelCalls: ModelPair[] = [];
 	const persisted: Array<{ sessionId: string; provider: string; modelId: string }> = [];
 	const modelFiles: string[] = [];
 	const messages: any[] = [];
 	let bound: { provider: string; id: string } | undefined;
+	const readBackSequence = [...(options.readBackSequence ?? [])];
 	const fail = new Set(options.failModels ?? []);
 	const sessionManager = {
 		persistSessionModel(sessionId: string, provider: string, modelId: string) {
@@ -253,7 +256,7 @@ function makeRuntimeHarness(options: {
 				bound = { provider, id: modelId };
 			},
 			async getState() {
-				return { model: options.readBack ?? bound ?? { provider: "unset", id: "unset" } };
+				return { model: readBackSequence.shift() ?? options.readBack ?? bound ?? { provider: "unset", id: "unset" } };
 			},
 		},
 	};
@@ -411,6 +414,31 @@ describe("controlled model fallback policy — session auto-selection", () => {
 });
 
 describe("controlled model fallback policy — runtime WS set_model", () => {
+	it("fallback off: delayed read-back settle succeeds, persists, and broadcasts selected model", async () => {
+		const harness = makeRuntimeHarness({
+			readBackSequence: [
+				{ provider: "anthropic", id: "old-model" },
+				{ provider: "anthropic", id: "selected-new" },
+			],
+		});
+
+		const actual = await applyRuntimeSessionModelSelection(
+			harness.sessionManager as any,
+			harness.session as any,
+			"anthropic",
+			"selected-new",
+			harness.prefs as any,
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { provider: "anthropic", id: "selected-new" });
+		assert.deepEqual(harness.setModelCalls, [["anthropic", "selected-new"]]);
+		assert.deepEqual(harness.persisted, [{ sessionId: "runtime-session", provider: "anthropic", modelId: "selected-new" }]);
+		assert.deepEqual(harness.modelFiles, ["anthropic/selected-new"]);
+		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.provider), ["anthropic"]);
+		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.id), ["selected-new"]);
+	});
+
 	it("fallback off: read-back mismatch rejects and does not persist, broadcast, or update model file", async () => {
 		const harness = makeRuntimeHarness({
 			readBack: { provider: "anthropic", id: "still-old" },
@@ -432,6 +460,35 @@ describe("controlled model fallback policy — runtime WS set_model", () => {
 		assert.deepEqual(harness.persisted, [], "runtime set_model mismatch must not persist the selected model");
 		assert.deepEqual(harness.modelFiles, [], "runtime set_model mismatch must not update .model state");
 		assert.deepEqual(harness.messages, [], "runtime set_model mismatch must not broadcast a successful model state");
+	});
+
+	it("fallback off: failed set_model reconciliation broadcasts the actual RPC-bound model", async () => {
+		const harness = makeRuntimeHarness({
+			readBack: { provider: "anthropic", id: "still-old" },
+		});
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"anthropic",
+				"selected-new",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			/read-back mismatch|mismatch/i,
+		);
+		const actual = await broadcastRuntimeSessionActualModelState(
+			harness.sessionManager as any,
+			harness.session as any,
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { provider: "anthropic", id: "still-old" });
+		assert.deepEqual(harness.persisted, [], "reconciliation must not persist the rejected selected model");
+		assert.deepEqual(harness.modelFiles, [], "reconciliation must not update .model state");
+		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.provider), ["anthropic"]);
+		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.id), ["still-old"]);
 	});
 
 	it("fallback on: failed non-default runtime selection falls back only to default.sessionModel and displays that actual model", async () => {
@@ -484,6 +541,15 @@ describe("controlled model fallback policy — runtime WS set_model", () => {
 		assert.deepEqual(harness.setModelCalls, [["anthropic", "dead-selected"]]);
 		assert.deepEqual(harness.persisted, []);
 		assert.deepEqual(harness.modelFiles, []);
+	});
+
+	it("handler emits authoritative state before SET_MODEL_FAILED on runtime set_model failure", () => {
+		const src = readFileSync(WS_HANDLER_SOURCE, "utf-8");
+		const setModelCase = extractRouteSlice(src, 'case "set_model":', 'case "set_image_model":');
+		const reconcileIdx = setModelCase.indexOf("await broadcastRuntimeSessionActualModelState(sessionManager, session, broadcast)");
+		const errorIdx = setModelCase.indexOf("SET_MODEL_FAILED");
+		assert.ok(reconcileIdx >= 0, "set_model failure must broadcast the authoritative actual model");
+		assert.ok(errorIdx > reconcileIdx, "SET_MODEL_FAILED should be sent after the corrective model state frame");
 	});
 });
 

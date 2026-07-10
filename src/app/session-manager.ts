@@ -15,7 +15,6 @@ import {
 	type GatewaySession,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision, readProposalSnapshot, type GitStatusData } from "./api.js";
-import { getPiAiModel } from "./pi-ai-lazy.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
@@ -25,7 +24,7 @@ import { errorDetails } from "./error-helpers.js";
 import { runWidgetGitRefresh, abortableSleep, GIT_STATUS_BACKOFF_MS, type GitWidgetLike } from "./git-status-refresh.js";
 import { computeConnectGitState, setCachedRepoState, pruneGitRepoCache } from "./git-repo-cache.js";
 import { startTimeRefresh } from "./render-helpers.js";
-import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
+import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
 import { showConnectionError, confirmAction, showOAuthExpiryModal } from "./dialogs-lazy.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
@@ -1269,6 +1268,13 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // sidebar passes for a fresh switch + hydrate).
 setSessionSwitcher((sessionId: string) => { void connectToSession(sessionId, false); });
 
+export function installConfirmedSessionModelPersistence(remote: RemoteAgent, sessionId: string): () => void {
+	return remote.subscribe((event: any) => {
+		const model = event?.type === "state_update" ? event.data?.model : null;
+		if (model?.provider && model?.id) saveSessionModel(sessionId, model.provider, model.id);
+	});
+}
+
 export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal"; refetchMessagesOnReady?: boolean }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
@@ -1497,19 +1503,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		const remote = new RemoteAgent();
 
-		// Start model restore in parallel with WebSocket connect
-		const modelRestorePromise = (async () => {
-			const savedModel = loadSessionModel(sessionId);
-			if (!savedModel) return null;
-			try {
-				return await getPiAiModel(savedModel.provider, savedModel.modelId) ?? null;
-			} catch {
-				return null; // Model no longer available
-			}
-		})();
-
 		await remote.connect(url, token, sessionId);
 		if (isStale()) { remote.disconnect(); return; }
+		installConfirmedSessionModelPersistence(remote, sessionId);
 		await hydrateSidePanelWorkspace(sessionId);
 		if (isStale()) { remote.disconnect(); return; }
 
@@ -1565,20 +1561,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (autoPrompt) remote.prompt(autoPrompt, undefined, { suppressTitleGen: true });
 		}
 
-		// Apply restored model (already resolved or resolving in parallel)
-		const restoredModel = await modelRestorePromise;
-		if (isStale()) { remote.disconnect(); return; }
-		if (restoredModel) {
-			remote.setModel(restoredModel);
-		}
-
-		// Intercept setModel to persist
+		// Keep selection UX optimistic, but only persist server-confirmed model state.
 		const originalSetModel = remote.setModel.bind(remote);
 		remote.setModel = (model: any) => {
 			originalSetModel(model);
-			if (model?.provider && model?.id) {
-				saveSessionModel(sessionId, model.provider, model.id);
-			}
 			renderApp();
 		};
 
