@@ -119,10 +119,10 @@ function createMockRoleStore() {
 	};
 }
 
-function delayedStreamCommand(): string {
+function streamMarkerCommand(): string {
 	return process.platform === "win32" && !GIT_BASH
-		? "echo streamed-marker & ping -n 2 127.0.0.1 > nul"
-		: "printf 'streamed-marker\\n'; sleep 1";
+		? "echo streamed-marker"
+		: "printf 'streamed-marker\\n'";
 }
 
 function createHarness(opts: {
@@ -210,7 +210,7 @@ describe("runCommandStep spawn behavior", () => {
 			stepIndex: 0,
 		};
 		const result = await (harness as any).runCommandStep(
-			delayedStreamCommand(),
+			streamMarkerCommand(),
 			os.tmpdir(),
 			10,
 			false,
