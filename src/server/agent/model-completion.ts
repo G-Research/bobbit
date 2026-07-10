@@ -1,4 +1,6 @@
-import { complete, completeSimple, getModel, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
+import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
+import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai/compat";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -198,7 +200,7 @@ export async function testProviderApiKey(
 	if (!provider || !modelId || !apiKey.trim()) {
 		return { ok: false, status: 400, error: "Missing provider, modelId, or key" };
 	}
-	const model = getModel(provider as any, modelId) as Model<Api> | undefined;
+	const model = getBuiltinModel(provider as any, modelId as any) as Model<Api> | undefined;
 	if (!model) {
 		return { ok: false, status: 404, error: `Model "${provider}/${modelId}" is not in the built-in pi-ai catalog.` };
 	}

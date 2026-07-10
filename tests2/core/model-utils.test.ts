@@ -11,7 +11,7 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { getModels } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { inferMeta } from "../../src/server/agent/aigw-manager.ts";
 import { modelRecencyRank } from "../../src/server/agent/model-registry.ts";
 
@@ -172,7 +172,7 @@ describe("inferMeta()", () => {
 
 const piAnthropicOpus48 = (() => {
 	try {
-		return getModels("anthropic" as any).find((model) => model.id.includes("claude-opus-4-8"));
+		return getBuiltinModels("anthropic").find((model) => model.id.includes("claude-opus-4-8"));
 	} catch {
 		return undefined;
 	}

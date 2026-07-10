@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { getModels } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 
 let tmp: string;
@@ -73,7 +73,7 @@ function findEntry(data: any, provider: string, id: string): any {
 }
 
 function hasBuiltIn(provider: string, id: string): boolean {
-	return getModels(provider as any).some((m: any) => m.id === id);
+	return getBuiltinModels(provider as any).some((m: any) => m.id === id);
 }
 
 function customAdditionSample(): (typeof OPENAI_MODEL_ADDITIONS)[number] | undefined {
@@ -222,7 +222,7 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 	it("user-edited duplicate keeps edits but migrates Bobbit-owned fields to built-in metadata", () => {
 		const sample = OPENAI_MODEL_ADDITIONS.find((m) => m.provider === "openai-codex" && m.id === "gpt-5.5");
 		assert.ok(sample, "expected legacy openai-codex/gpt-5.5 addition");
-		const builtIn = getModels(sample.provider as any).find((m: any) => m.id === sample.id) as any;
+		const builtIn = getBuiltinModels(sample.provider as any).find((m: any) => m.id === sample.id) as any;
 		assert.ok(builtIn, "expected pi-ai built-in metadata");
 		const seeded = {
 			providers: {
