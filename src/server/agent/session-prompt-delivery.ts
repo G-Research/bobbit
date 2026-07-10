@@ -72,6 +72,10 @@ function recoveryBlockedMessage(decision: Exclude<ErroredPromptRecoveryDecision,
 	return `Cannot recover errored session prompt automatically: ${decision.message}`;
 }
 
+function queuePromptOptions(mode: SessionPromptMode, source?: PromptSource): { isSteered?: boolean; source?: PromptSource } {
+	return mode === "steer" ? { isSteered: true, source } : { source };
+}
+
 export async function deliverSessionPrompt(
 	deps: DeliverSessionPromptDeps,
 	sessionId: string,
@@ -117,10 +121,7 @@ export async function deliverSessionPrompt(
 		if (!recovery.recoverable) {
 			throw new SessionPromptDeliveryError(recoveryBlockedMessage(recovery), "PROMPT_RECOVERY_BLOCKED", 409);
 		}
-		const queued = await deps.enqueuePromptForRetryRecovery!(sessionId, message, {
-			isSteered: mode === "steer",
-			source: opts.source,
-		});
+		const queued = await deps.enqueuePromptForRetryRecovery!(sessionId, message, queuePromptOptions(mode, opts.source));
 		await deps.retryLastPrompt!(sessionId, { auto: true, preserveQueueIds: queued.queuedId ? [queued.queuedId] : undefined });
 		return {
 			ok: true,
@@ -137,6 +138,6 @@ export async function deliverSessionPrompt(
 		};
 	}
 
-	const result = await deps.enqueuePrompt(sessionId, message, { isSteered: mode === "steer", source: opts.source });
+	const result = await deps.enqueuePrompt(sessionId, message, queuePromptOptions(mode, opts.source));
 	return { ok: true, mode, status: result.status, target };
 }
