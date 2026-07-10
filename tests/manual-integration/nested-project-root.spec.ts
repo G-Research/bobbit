@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { dirname, join, normalize, relative, resolve, sep } from "node:path";
 import { manualTmpRoot } from "./manual-test-paths.ts";
+import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 import { fileURLToPath } from "node:url";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.js";
 
@@ -46,6 +47,7 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	seedManualTestModelPreferences(dir);
 	const proc = spawn(process.execPath, [
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
