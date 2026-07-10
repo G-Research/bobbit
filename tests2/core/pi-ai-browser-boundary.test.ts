@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const lazyBoundaryPath = path.join(repoRoot, "src", "app", "pi-ai-lazy.ts");
 const source = fs.readFileSync(lazyBoundaryPath, "utf-8");
+const browserFixtureRoot = path.join(repoRoot, "tests", "fixtures");
 
 function stripTypeOnlyImportExpressions(text: string): string {
 	return text.replace(/\btypeof\s+import\s*\(\s*["'][^"']+["']\s*\)/g, "unknown");
@@ -62,6 +63,23 @@ function isTypeOnlyImportClause(clause: string | undefined): boolean {
 	return specifiers.length > 0 && specifiers.every((specifier) => specifier.startsWith("type "));
 }
 
+function walkTsFiles(dir: string): string[] {
+	const out: string[] = [];
+	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+		const full = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			out.push(...walkTsFiles(full));
+		} else if (/\.tsx?$/.test(entry.name) && !entry.name.endsWith(".d.ts")) {
+			out.push(full);
+		}
+	}
+	return out;
+}
+
+function rel(file: string): string {
+	return path.relative(repoRoot, file).split(path.sep).join("/");
+}
+
 describe("src/app/pi-ai-lazy.ts browser pi-ai boundary", () => {
 	it("uses only Pi 0.80 package-exported api/provider subpaths for runtime streaming imports", () => {
 		const runtimePiImports = dynamicImports(source).filter((specifier) => specifier.startsWith("@earendil-works/pi-ai"));
@@ -91,5 +109,39 @@ describe("src/app/pi-ai-lazy.ts browser pi-ai boundary", () => {
 			if (specifier === "@earendil-works/pi-ai") offenders.push(`dynamic import from ${specifier}`);
 		}
 		expect(offenders).toEqual([]);
+	});
+});
+
+describe("browser fixture pi-ai boundary", () => {
+	it("keeps bundled browser fixtures off the bare pi-ai runtime index", () => {
+		const offenders: string[] = [];
+		for (const file of walkTsFiles(browserFixtureRoot)) {
+			const fixtureSource = fs.readFileSync(file, "utf-8");
+			for (const imp of staticImports(fixtureSource)) {
+				if (!imp.source.startsWith("@earendil-works/pi-ai")) continue;
+				if (isTypeOnlyImportClause(imp.clause)) continue;
+				if (imp.source === "@earendil-works/pi-ai") {
+					offenders.push(`${rel(file)}: static value import from bare @earendil-works/pi-ai`);
+				} else if (!imp.source.startsWith("@earendil-works/pi-ai/api/") && !imp.source.startsWith("@earendil-works/pi-ai/providers/")) {
+					offenders.push(`${rel(file)}: static value import from unsupported pi-ai subpath ${imp.source}`);
+				}
+			}
+			for (const specifier of dynamicImports(fixtureSource)) {
+				if (!specifier.startsWith("@earendil-works/pi-ai")) continue;
+				if (specifier === "@earendil-works/pi-ai") {
+					offenders.push(`${rel(file)}: dynamic import from bare @earendil-works/pi-ai`);
+				} else if (!specifier.startsWith("@earendil-works/pi-ai/api/") && !specifier.startsWith("@earendil-works/pi-ai/providers/")) {
+					offenders.push(`${rel(file)}: dynamic import from unsupported pi-ai subpath ${specifier}`);
+				}
+			}
+		}
+
+		expect(
+			offenders,
+			[
+				"Browser fixture runtime imports from pi-ai must use package-exported api/provider subpaths, never the bare runtime index.",
+				...offenders,
+			].join("\n"),
+		).toEqual([]);
 	});
 });
