@@ -4,6 +4,9 @@ __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// doRenderApp can lazy-load the dashboard git widget after teardown; import it
+// while happy-dom customElements is live so decorators cannot race teardown.
+import "../../src/ui/components/GitStatusWidget.js";
 import type { GatewaySession, Goal } from "../../src/app/state.js";
 
 type StateModule = typeof import("../../src/app/state.js");
