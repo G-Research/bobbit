@@ -2910,16 +2910,22 @@ export async function showStopTeamDialog(
 
 export async function showPauseGoalDialog(goal: Goal, descendantCount: number): Promise<CascadePauseResult> {
 	if (descendantCount === 0) {
-		const res = await gatewayFetch(`/api/goals/${goal.id}/pause`, {
-			method: "POST",
-			body: JSON.stringify({ cascade: false }),
-		});
-		const data = await res.json().catch(() => null);
-		if (!res.ok) {
-			showConnectionError("Failed to pause goal", `HTTP ${res.status}`);
+		try {
+			const res = await gatewayFetch(`/api/goals/${goal.id}/pause`, {
+				method: "POST",
+				body: JSON.stringify({ cascade: false }),
+			});
+			const data = await res.json().catch(() => null);
+			if (!res.ok) {
+				showConnectionError("Failed to pause goal", `HTTP ${res.status}`);
+				return { paused: 0 };
+			}
+			return { paused: typeof data?.paused === "number" ? data.paused : 0 };
+		} catch (err) {
+			const { message, code, stack } = errorDetails(err);
+			showConnectionError("Failed to pause goal", message, { code, stack });
 			return { paused: 0 };
 		}
-		return { paused: typeof data?.paused === "number" ? data.paused : 0 };
 	}
 
 	return new Promise<CascadePauseResult>((resolve) => {
@@ -3022,16 +3028,22 @@ export interface CascadeResumeResult { resumed: number }
 /** Resume a goal with optional cascade. Checkbox defaults OFF (resume target only). */
 export async function showResumeGoalDialog(goal: Goal, descendantCount: number): Promise<CascadeResumeResult> {
 	if (descendantCount === 0) {
-		const res = await gatewayFetch(`/api/goals/${goal.id}/resume`, {
-			method: "POST",
-			body: JSON.stringify({ cascade: false }),
-		});
-		const data = await res.json().catch(() => null);
-		if (!res.ok) {
-			showConnectionError("Failed to resume goal", `HTTP ${res.status}`);
+		try {
+			const res = await gatewayFetch(`/api/goals/${goal.id}/resume`, {
+				method: "POST",
+				body: JSON.stringify({ cascade: false }),
+			});
+			const data = await res.json().catch(() => null);
+			if (!res.ok) {
+				showConnectionError("Failed to resume goal", `HTTP ${res.status}`);
+				return { resumed: 0 };
+			}
+			return { resumed: typeof data?.resumed === "number" ? data.resumed : 0 };
+		} catch (err) {
+			const { message, code, stack } = errorDetails(err);
+			showConnectionError("Failed to resume goal", message, { code, stack });
 			return { resumed: 0 };
 		}
-		return { resumed: typeof data?.resumed === "number" ? data.resumed : 0 };
 	}
 
 	return new Promise<CascadeResumeResult>((resolve) => {
