@@ -149,11 +149,12 @@ Reviewer and QA sessions are `nonInteractive`: normal user prompts are blocked, 
 In-flight reviewer steps also persist in active verification state. After a gateway restart, `resumeInterruptedVerifications()` tries to recover them through `_tryResumeFromSession()`:
 
 - If the reviewer session still exists, it is re-registered with the team store and wired to a fresh `verification_result` resolver.
-- If the restored reviewer is already `idle`, the harness sends the reminder immediately instead of waiting for the long busy-session window.
-- If the restored reviewer is still busy, the harness waits for either `verification_result` or actual idle before reminding it. This keeps the harness from interrupting an active turn while making the waiting behavior explicit.
-- Reminder dispatch to a cold restored reviewer uses `promptWhenReady()` so the agent has time to load before the prompt timeout starts.
-- After a reminder is accepted, the harness waits for `waitForStreaming()` before racing against post-reminder idle, so an already-idle status cannot instantly fail and terminate the reviewer before it reads the reminder.
-- If the resume reminder cannot reach the reviewer because of a cold-agent timeout or process/runtime transient, the result is marked as transient and restart-interrupted, not as a hard review failure.
+- If the restored reviewer is already `idle` because the gateway interrupted its turn, the first harness prompt is restart-aware continuation guidance, not `VERIFICATION_RESULT_REMINDER`. It tells the reviewer that infrastructure restarted mid-turn, the transcript/context were preserved, it should continue the interrupted analysis, and it should call `verification_result` only when the review is complete.
+- If the restored reviewer is idle for an ordinary non-restart reason, or if the post-restart continuation turn later goes idle without a result, the normal idle-without-result path still applies: a JSON/tool-validation retry prompt when appropriate, otherwise `VERIFICATION_RESULT_REMINDER`.
+- If the restored reviewer is still busy, the harness waits for either `verification_result` or actual idle before prompting it. This keeps the harness from interrupting an active turn while making the waiting behavior explicit.
+- Prompt dispatch to a cold restored reviewer uses `promptWhenReady()` so the agent has time to load before the prompt timeout starts.
+- After the continuation or reminder prompt is accepted, the harness waits for `waitForStreaming()` before racing against post-prompt idle, so an already-idle status cannot instantly fail and terminate the reviewer before it has a real continuation turn.
+- If the resume prompt cannot reach the reviewer because of a cold-agent timeout or process/runtime transient, the result is marked as transient and restart-interrupted, not as a hard review failure.
 - `_resumeOneVerification()` then re-runs the original `llm-review` step from the workflow definition when context is available.
 - If the restart interruption cannot be safely re-run, the gate is left pending so it can be re-signaled instead of being marked failed for an infrastructure interruption.
 
@@ -199,22 +200,22 @@ Provider-backoff timeouts also include a suffix describing the active provider b
 
 Relevant unit coverage:
 
-- `tests/verification-logic.test.ts` — socket/WebSocket/process classifiers, generic runtime retry, deterministic non-retryable failures, provider backoff classification, retry decisions.
-- `tests/transient-review-error.test.ts` — legacy transient review classifier coverage.
-- `tests/auto-retry-policy.test.ts` — session-level auto-retry policy and schedules.
-- `tests/verification-reminder-race.test.ts` — reminder `waitForStreaming()` guard and post-reminder transient recovery ordering.
+- `tests2/core/verification-logic.test.ts` — socket/WebSocket/process classifiers, generic runtime retry, deterministic non-retryable failures, provider backoff classification, retry decisions.
+- `tests2/core/transient-review-error.test.ts` — legacy transient review classifier coverage.
+- `tests2/core/auto-retry-policy.test.ts` — session-level auto-retry policy and schedules.
+- `tests2/core/verification-reminder-race.test.ts` — restart-aware continuation prompt selection, ordinary idle reminder behavior, and the reminder `waitForStreaming()` guard.
 - `tests2/core/verification-harness-review-reliability.test.ts` — fresh session id per from-scratch attempt (attempt 1's transcript preserved), late-`verification_result`-during-teardown honored (not 404-dropped), and the "did not call after reminder" non-transient classification.
 - `tests2/core/session-id-clobber-guard.test.ts` — `createSession` refuses to clobber a live session id, while `allowSessionReuse` bypasses the guard for the sanctioned resume path.
-- `tests/verification-resume-restart-prompt.test.ts` — cold restart resume prompt timeout routes to pending instead of hard failure.
-- `tests/verification-resume-restart-recovery.test.ts` — cold reviewer readiness wait and transient resume failure rerun path.
-- `tests/reviewer-archive-metadata.test.ts` — verifier metadata persistence before startup and legacy SessionStore backfill.
-- `tests/ui-fixtures/sidebar-archived-fixture.spec.ts` — archived verifier bucketing and transcript/placeholder fallback visibility.
+- `tests2/core/verification-resume-restart-prompt.test.ts` — cold restart resume prompt timeout routes to pending instead of hard failure.
+- `tests2/core/verification-resume-restart-recovery.test.ts` — cold reviewer readiness wait and transient resume failure rerun path.
+- `tests2/core/reviewer-archive-metadata.test.ts` — verifier metadata persistence before startup and legacy SessionStore backfill.
+- `tests2/browser/fixtures/sidebar-archived-fixture.spec.ts` — archived verifier bucketing and transcript/placeholder fallback visibility.
 
 Focused checks while changing this area:
 
 ```bash
-npx tsx --test tests/verification-logic.test.ts tests/transient-review-error.test.ts tests/verification-reminder-race.test.ts tests/verification-resume-restart-prompt.test.ts tests/verification-resume-restart-recovery.test.ts tests/reviewer-archive-metadata.test.ts
-npx playwright test tests/ui-fixtures/sidebar-archived-fixture.spec.ts
+npx tsx --test tests2/core/verification-logic.test.ts tests2/core/transient-review-error.test.ts tests2/core/verification-reminder-race.test.ts tests2/core/verification-resume-restart-prompt.test.ts tests2/core/verification-resume-restart-recovery.test.ts tests2/core/reviewer-archive-metadata.test.ts
+npx playwright test tests2/browser/fixtures/sidebar-archived-fixture.spec.ts
 ```
 
 Full required checks for production changes in this area:

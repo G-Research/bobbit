@@ -157,6 +157,7 @@ import {
 	isPreImplementationGate,
 	isProviderBackoffError,
 	isRetryableGenericAgentError,
+	TRANSIENT_INFRA_ERROR_REGEXES,
 	shouldRetryVerificationStep,
 	isRestartInterruptError,
 	isRestartInterruptedStep,
@@ -704,6 +705,12 @@ export const VERIFICATION_RESULT_REMINDER =
 	"Call the `verification_result` tool now with your verdict and summary. " +
 	"This is REQUIRED — the verification system only receives results through this tool.";
 
+/** Prompt sent to verifier sessions whose turn was interrupted by a server restart. */
+export const VERIFICATION_RESTART_RESUME_PROMPT =
+	"The Bobbit server/infrastructure restarted while your verification turn was in progress. " +
+	"Your transcript and verification context were preserved. Review the recent context, continue the interrupted review/QA analysis from where you left off, " +
+	"and call `verification_result` only when your analysis is complete.";
+
 /**
  * Build a context-rich reminder for live (not resumed) reviewers
  * who emit their verdict as chat-text and end the turn instead of calling
@@ -723,8 +730,9 @@ export const VERIFICATION_RESULT_REMINDER =
  *      agent has the original task spec back in context.
  *
  * Wire this into BOTH the LLM-review reminder path and the agent-QA reminder
- * path. The resume path (`_tryResumeFromSession`) keeps the legacy terse
- * reminder because it doesn't have access to rebuild the kickoff.
+ * path. The resume path (`_tryResumeFromSession`) uses either the legacy terse
+ * reminder or a restart-aware continuation prompt because it doesn't have
+ * access to rebuild the kickoff.
  */
 export function buildContextRichReminder(originalKickoff: string): string {
 	return `## STOP — verification_result not called
@@ -1163,6 +1171,14 @@ const REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS = 20_000;
 
 function isRetryableLlmReviewRecovery(output: string): boolean {
 	return isTransientReviewError(output) || isRetryableGenericAgentError(output);
+}
+
+function isVerifierInfrastructureDisconnectError(output: string): boolean {
+	if (!output) return false;
+	if (TRANSIENT_INFRA_ERROR_REGEXES.some(re => re.test(output))) return true;
+	return /\b(?:ECONNRESET|ENOTCONN|EPIPE|WebSocket error|socket error|socket hang up|connect ECONNREFUSED)\b/i.test(output)
+		|| /\b(?:network|internet|connection|wifi|wi-fi)\b.{0,80}\b(?:lost|reset|closed|dropped|disconnected|unavailable|timeout|timed out|failed|error)\b/i.test(output)
+		|| /\b(?:lost|reset|closed|dropped|disconnected|unavailable|timeout|timed out|failed|error)\b.{0,80}\b(?:network|internet|connection|wifi|wi-fi)\b/i.test(output);
 }
 
 function classifyLlmReviewRecoveryError(output: string): string {
@@ -2015,10 +2031,14 @@ export class VerificationHarness {
 		});
 
 		try {
-			// If restoreSession already revived the reviewer to idle, remind it
+			const restartInterruptedTurn = session.restoreStartupWasStreaming === true;
+			// If restoreSession already revived the reviewer to idle, prompt it
 			// immediately. Otherwise wait for the active turn to finish before sending
-			// a reminder, so the harness remains the only driver for nonInteractive
-			// reviewers and never races the generic restoreSession boot prompt.
+			// a prompt, so the harness remains the only driver for nonInteractive
+			// reviewers and never races the generic restoreSession boot prompt. A
+			// restart-interrupted reviewer gets continuation instructions as its first
+			// post-restart prompt; the generic idle-without-result reminder remains for
+			// ordinary resumed sessions.
 			const idleResult = session.status === "idle"
 				? ({ type: "idle" as const })
 				: await Promise.race([
@@ -2057,10 +2077,18 @@ export class VerificationHarness {
 
 			// Agent went idle without calling verification_result — inspect whether
 			// the previous turn hit a JSON / tool-argument validation glitch, and
-			// send a targeted nudge if so. Falls back to the generic reminder.
+			// send a targeted nudge if so. If this was the first post-restart prompt
+			// after an interrupted turn, send restart-aware continuation instructions
+			// instead of the generic idle-without-result reminder.
 			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
-			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder...`);
+			const useRestartContinuationPrompt = restartInterruptedTurn && !jsonErr;
+			const reminderPrompt = jsonErr
+				? buildJsonRetryPrompt(jsonErr)
+				: useRestartContinuationPrompt
+					? VERIFICATION_RESTART_RESUME_PROMPT
+					: VERIFICATION_RESULT_REMINDER;
+			const reminderKind = jsonErr ? "JSON-retry" : useRestartContinuationPrompt ? "restart-resume" : "generic";
+			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending ${reminderKind} reminder...`);
 			// A freshly-revived reviewer is COLD (model init + MCP extension load),
 			// often needing 30-90s to first respond — worse under 5-way parallel
 			// session restore. So (1) wait for the agent to become ready before
@@ -2120,6 +2148,62 @@ export class VerificationHarness {
 					output: postReminderRecovery.output,
 					duration_ms: Date.now() - step.startedAt,
 				};
+			}
+
+			// The restart-aware continuation prompt is only the first post-restart
+			// prompt. If that continuation turn ends without verification_result,
+			// fall back to the normal idle-without-result reminder (or JSON retry if
+			// the continuation turn exposed a tool-argument validation error) and give
+			// that reminder the same fair start/idle window before hard failure.
+			if (useRestartContinuationPrompt) {
+				const fallbackJsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
+				const fallbackPrompt = fallbackJsonErr ? buildJsonRetryPrompt(fallbackJsonErr) : VERIFICATION_RESULT_REMINDER;
+				const fallbackKind = fallbackJsonErr ? "JSON-retry" : "generic";
+				console.log(`[verification] Restart continuation for resumed session ${step.sessionId} ended without verification_result, sending ${fallbackKind} fallback reminder...`);
+				try {
+					await session.rpcClient.promptWhenReady(fallbackPrompt, undefined);
+					await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).catch(() => {});
+				} catch (resumeErr) {
+					const msg = (resumeErr as Error)?.message || String(resumeErr);
+					console.warn(`[verification] Post-continuation fallback reminder for ${step.sessionId} could not reach the revived reviewer: ${msg}`);
+					return {
+						name: step.name, type: step.type, passed: false,
+						output: `Reviewer agent was not ready / timed out while sending post-continuation reminder after server restart: ${msg}`,
+						duration_ms: Date.now() - step.startedAt,
+					};
+				}
+
+				const fallbackResult = await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(step.sessionId, 120_000).then(() => ({ type: "idle" as const })),
+				]).catch(() => ({ type: "idle" as const }));
+
+				if (fallbackResult.type === "result") {
+					return {
+						name: step.name, type: step.type,
+						passed: fallbackResult.verdict,
+						output: fallbackResult.summary,
+						duration_ms: Date.now() - step.startedAt,
+					};
+				}
+
+				const postFallbackRecovery = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, 120_000, step.name);
+				if (postFallbackRecovery.type === "result") {
+					return {
+						name: step.name, type: step.type,
+						passed: postFallbackRecovery.verdict,
+						output: postFallbackRecovery.summary,
+						duration_ms: Date.now() - step.startedAt,
+					};
+				}
+				if (postFallbackRecovery.type === "errored") {
+					return {
+						name: step.name, type: step.type,
+						passed: false,
+						output: postFallbackRecovery.output,
+						duration_ms: Date.now() - step.startedAt,
+					};
+				}
 			}
 
 			return {
@@ -3896,6 +3980,7 @@ export class VerificationHarness {
 		| { type: "idle" }
 		| { type: "errored"; output: string }
 	> {
+		let dispatchedInfrastructureRecovery = false;
 		for (;;) {
 			const session = this.sessionManager?.getSession(sessionId);
 			const errMsg = session?.lastTurnErrored ? (session.lastTurnErrorMessage || "") : "";
@@ -3907,7 +3992,18 @@ export class VerificationHarness {
 			}
 
 			if (!session?.pendingAutoRetryTimer) {
-				return { type: "errored", output: `LLM review failed: ${errMsg}${backoffSuffix}` };
+				if (!dispatchedInfrastructureRecovery && isVerifierInfrastructureDisconnectError(errMsg)) {
+					dispatchedInfrastructureRecovery = true;
+					console.log(`[verification] Reviewer ${sessionId} for "${stepName}" ended with infrastructure/network error and no pending auto-retry; dispatching one continuation retry before failing...`);
+					try {
+						await this.sessionManager!.retryLastPrompt(sessionId, { auto: true });
+					} catch (retryErr) {
+						const retryMsg = (retryErr as Error)?.message || String(retryErr);
+						return { type: "errored", output: `LLM review failed to resume after infrastructure/network disconnect: ${retryMsg}${backoffSuffix}` };
+					}
+				} else {
+					return { type: "errored", output: `LLM review failed: ${errMsg}${backoffSuffix}` };
+				}
 			}
 
 			const graceMs = Math.min(
