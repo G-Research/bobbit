@@ -87,7 +87,7 @@ describe("RemoteAgent model switch reconciliation", () => {
 	const modelA = { provider: "openai-codex", id: "gpt-5.5", contextWindow: 128000 };
 	const modelB = { provider: "anthropic", id: "claude-opus-4-8", contextWindow: 200000 };
 
-	it("rolls back optimistic display and refreshes state after SET_MODEL_FAILED", async () => {
+	it("reconciles optimistic display from authoritative state and refreshes after SET_MODEL_FAILED", async () => {
 		const ra = makeAgent(OPEN);
 		const events: any[] = [];
 		ra.subscribe((event: any) => events.push(event));
@@ -96,6 +96,7 @@ describe("RemoteAgent model switch reconciliation", () => {
 		ra.setModel(modelB);
 		expect(ra.state.model).toMatchObject(modelB);
 
+		await ra.handleServerMessage({ type: "state", data: { model: modelA } });
 		await ra.handleServerMessage({ type: "error", code: "SET_MODEL_FAILED", message: "read-back mismatch" });
 
 		expect(ra.state.model).toMatchObject(modelA);
@@ -104,7 +105,7 @@ describe("RemoteAgent model switch reconciliation", () => {
 			expect.objectContaining({ type: "get_state" }),
 		]));
 		expect(events).toEqual(expect.arrayContaining([
-			expect.objectContaining({ type: "state_update", data: expect.objectContaining({ model: modelA, modelRollback: true }) }),
+			expect.objectContaining({ type: "state_update", data: expect.objectContaining({ model: modelA }) }),
 		]));
 	});
 

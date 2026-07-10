@@ -281,7 +281,6 @@ export class RemoteAgent {
 	private _gatewayUrl = "";
 	private _authToken = "";
 	private _sessionId = "";
-	private _lastServerConfirmedModel: any | null = null;
 	private _toolCallInputsById = new Map<string, unknown>();
 	private _proposalToolCallsById = new Map<string, { type: ProposalType; input: Record<string, unknown> }>();
 	// Server-authoritative prompt queue
@@ -726,7 +725,6 @@ export class RemoteAgent {
 	async connect(gatewayUrl: string, token: string, sessionId: string): Promise<void> {
 		this._gatewayUrl = gatewayUrl;
 		this._authToken = token;
-		if (this._sessionId !== sessionId) this._lastServerConfirmedModel = null;
 		this._sessionId = sessionId;
 		this._intentionalDisconnect = false;
 		this._reconnectAttempt = 0;
@@ -1299,29 +1297,6 @@ export class RemoteAgent {
 		this.emit({ type: "render" });
 	}
 
-	private _rememberServerConfirmedModel(model: any): void {
-		if (!model?.provider || !model?.id) return;
-		this._lastServerConfirmedModel = model;
-	}
-
-	private _sameModel(a: any, b: any): boolean {
-		return !!a && !!b && a.provider === b.provider && a.id === b.id;
-	}
-
-	private _reconcileFailedModelSwitch(): void {
-		const confirmed = this._lastServerConfirmedModel;
-		if (confirmed?.provider && confirmed?.id && !this._sameModel(this._state.model, confirmed)) {
-			this._state.model = confirmed;
-			state.chatPanel?.agentInterface?.requestUpdate();
-			this.emit({ type: "state_update", data: { model: confirmed, modelRollback: true } });
-			this.emit({ type: "render" });
-		}
-		// Ask the server for a fresh authoritative snapshot too. If the failure was
-		// a stale read-back race and the running agent later converged, this lets the
-		// UI/persistence move from the rollback model to the real bound model.
-		this.send({ type: "get_state" });
-	}
-
 	setThinkingLevel(level: any): void {
 		this._state.thinkingLevel = level;
 		this.send({ type: "set_thinking_level", level });
@@ -1679,7 +1654,6 @@ export class RemoteAgent {
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
-					this._rememberServerConfirmedModel(msg.data.model);
 				}
 				if (msg.data?.thinkingLevel) {
 					this._state.thinkingLevel = msg.data.thinkingLevel;
@@ -2186,7 +2160,7 @@ export class RemoteAgent {
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
 				if ((msg as any).code === "SET_MODEL_FAILED") {
-					this._reconcileFailedModelSwitch();
+					this.send({ type: "get_state" });
 				}
 				if ((msg as any).code === "GRANT_ERROR") {
 					// The error frame does not carry a permission request id, so do not
