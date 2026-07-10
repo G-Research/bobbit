@@ -32,7 +32,7 @@ export interface ApiModel {
 	reasoning: boolean;
 	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; tiers?: Array<{ input: number; output: number; cacheRead: number; cacheWrite: number; inputTokensAbove: number }> };
 	headers?: Record<string, string>;
 	compat?: unknown;
 	authenticated: boolean;
