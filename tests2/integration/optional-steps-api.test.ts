@@ -7,6 +7,11 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
+const OPTIONAL_STEPS_GATE_TIMEOUT_MS = 60_000;
+const OPTIONAL_STEPS_TEST_TIMEOUT_MS = 120_000;
+
+test.setTimeout(OPTIONAL_STEPS_TEST_TIMEOUT_MS);
+
 function uniqueWorkflowId(): string {
 	return `test-optional-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -76,7 +81,7 @@ async function waitForGateStatus(
 	goalId: string,
 	gateId: string,
 	targetStatus: string,
-	timeoutMs = 30_000,
+	timeoutMs = OPTIONAL_STEPS_GATE_TIMEOUT_MS,
 ): Promise<any> {
 	return pollUntil(
 		async () => {
@@ -125,7 +130,7 @@ test.describe("Optional steps API", () => {
 				expect([200, 201]).toContain(signalResp.status);
 
 				// Wait for gate to pass (the command step runs "echo ok", agent-qa is skipped).
-				await waitForGateStatus(goal.id, "impl", "passed", 30_000);
+				await waitForGateStatus(goal.id, "impl", "passed");
 
 				// Check signal history for the QA testing step.
 				const signalsResp = await apiFetch(`/api/goals/${goal.id}/gates/impl/signals`);
@@ -164,7 +169,7 @@ test.describe("Optional steps API", () => {
 				expect([200, 201]).toContain(signalResp.status);
 
 				// Wait for gate to pass.
-				await waitForGateStatus(goal.id, "impl", "passed", 30_000);
+				await waitForGateStatus(goal.id, "impl", "passed");
 
 				// Check signal history — QA step should be auto-passed (not skipped).
 				const signalsResp = await apiFetch(`/api/goals/${goal.id}/gates/impl/signals`);

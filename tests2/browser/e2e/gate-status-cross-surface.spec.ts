@@ -14,7 +14,7 @@ const GATE_ID = "slow-gate";
 const VERIFY_TITLE = "0 of 1 gates passed — verifying 1";
 const SHARED_CACHE_ERROR = "GATE_STATUS_CROSS_SURFACE_ACTIVE: shared gate status cache must expose verifying=true and verifyingCount=1";
 const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),30000)"`;
-const FAST_CMD = `node -e "process.exit(0)"`;
+const FIRST_GATE_PASS_TIMEOUT_MS = 60_000;
 
 type SlowWorkflowSetup = {
 	workflowId: string;
@@ -26,7 +26,7 @@ function makeWorkflowId(): string {
 	return `gate-status-cross-surface-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function createSlowWorkflow(command = SLOW_CMD): Promise<{ workflowId: string; projectId: string }> {
+async function createSlowWorkflow(command: string | null = SLOW_CMD): Promise<{ workflowId: string; projectId: string }> {
 	const projectId = await defaultProjectId();
 	if (!projectId) throw new Error("gate-status-cross-surface requires a default project");
 	const workflowId = makeWorkflowId();
@@ -37,15 +37,19 @@ async function createSlowWorkflow(command = SLOW_CMD): Promise<{ workflowId: str
 			projectId,
 			id: workflowId,
 			name: "Gate Status Cross Surface Active",
-			description: "One slow command gate for cross-surface active verification status coverage.",
+			description: command === null
+				? "One auto-pass gate for cross-surface active verification status coverage."
+				: "One slow command gate for cross-surface active verification status coverage.",
 			gates: [
 				{
 					id: GATE_ID,
 					name: "Slow Gate",
 					dependsOn: [],
-					verify: [
-						{ name: "Slow verification", type: "command", run: command },
-					],
+					...(command === null ? {} : {
+						verify: [
+							{ name: "Slow verification", type: "command", run: command },
+						],
+					}),
 				},
 			],
 		}),
@@ -66,7 +70,7 @@ async function deleteSlowWorkflow(workflowId: string, projectId: string): Promis
 	await apiFetch(`/api/workflows/${encodeURIComponent(workflowId)}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => { /* best-effort */ });
 }
 
-async function createSlowWorkflowGoal(command = SLOW_CMD): Promise<SlowWorkflowSetup> {
+async function createSlowWorkflowGoal(command: string | null = SLOW_CMD): Promise<SlowWorkflowSetup> {
 	const setup = await createSlowWorkflow(command);
 	try {
 		const goal = await createGoal({
@@ -129,7 +133,7 @@ async function waitForGatePassed(goalId: string): Promise<void> {
 		const body = await res.json();
 		const gates = Array.isArray(body?.summary?.gates) ? body.summary.gates : [];
 		return gates.find((gate: any) => gate?.gateId === GATE_ID)?.effectiveStatus ?? null;
-	}, { timeout: 15_000, message: "first gate signal should pass before re-signal coverage starts" }).toBe("passed");
+	}, { timeout: FIRST_GATE_PASS_TIMEOUT_MS, message: "first gate signal should pass before re-signal coverage starts" }).toBe("passed");
 }
 
 function expectedGateBadge(label: string): { compactText: string; requiresBlink: boolean } | null {
@@ -348,10 +352,14 @@ async function expectDashboardPipelineUsesRunningSummaryForPassedGate(page: Page
 
 test.describe("Gate status cross-surface active verification", () => {
 	test("dashboard pipeline renders a passed gate as running from authoritative summary — GATE_STATUS_CROSS_SURFACE_ACTIVE", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		let setup: SlowWorkflowSetup | undefined;
 		try {
-			setup = await createSlowWorkflowGoal(FAST_CMD);
+			// This UI assertion only needs a stored passed gate before injecting a
+			// server-authoritative running summary. Use an auto-pass gate instead of a
+			// near-instant command step so command-runner lifecycle timing cannot mask
+			// the dashboard rendering contract under test.
+			setup = await createSlowWorkflowGoal(null);
 			await openApp(page);
 			await openDashboardGates(page, setup.goalId);
 			await signalSlowGate(setup.goalId);

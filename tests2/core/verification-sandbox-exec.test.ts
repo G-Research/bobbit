@@ -31,6 +31,7 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
+const { GIT_BASH } = await import("../../src/server/agent/shell-util.ts");
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -118,6 +119,12 @@ function createMockRoleStore() {
 	};
 }
 
+function delayedStreamCommand(): string {
+	return process.platform === "win32" && !GIT_BASH
+		? "echo streamed-marker & ping -n 2 127.0.0.1 > nul"
+		: "printf 'streamed-marker\\n'; sleep 1";
+}
+
 function createHarness(opts: {
 	sandboxed?: boolean;
 	teamLeadSessionId?: string;
@@ -202,8 +209,8 @@ describe("runCommandStep spawn behavior", () => {
 			signalId: "sig-1",
 			stepIndex: 0,
 		};
-		await (harness as any).runCommandStep(
-			"echo streamed-marker",
+		const result = await (harness as any).runCommandStep(
+			delayedStreamCommand(),
 			os.tmpdir(),
 			10,
 			false,
@@ -211,6 +218,7 @@ describe("runCommandStep spawn behavior", () => {
 			undefined,
 			undefined, // host path — more reliable for streaming test
 		);
+		assert.ok(result.output.includes("streamed-marker"), `Expected output to contain marker, got: ${result.output}`);
 		// Should have broadcast stdout data
 		const outputEvents = broadcastCalls.filter(
 			c => c.event.type === "gate_verification_step_output" && c.event.stream === "stdout",

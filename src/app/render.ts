@@ -21,7 +21,7 @@ import {
 	type GatewaySession,
 	type Project,
 } from "./state.js";
-import { fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog } from "./api.js";
+import { fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog, isGoalPauseResumeActionPending } from "./api.js";
 import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
@@ -2032,6 +2032,7 @@ function renderGoalPausedBannerIfNeeded(activeSession: import("./state.js").Gate
 	if (!activeGoalId) return "";
 	const goal = state.goals.find(g => g.id === activeGoalId);
 	if (!goal?.paused) return "";
+	const resumePending = isGoalPauseResumeActionPending(activeGoalId, "resume");
 	return html`
 		<div class="shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-sm"
 		     style="background: color-mix(in oklch, var(--warning) 12%, transparent); border-bottom: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);"
@@ -2041,8 +2042,10 @@ function renderGoalPausedBannerIfNeeded(activeSession: import("./state.js").Gate
 				class="shrink-0 rounded border px-2 py-1 text-xs font-medium hover:opacity-80 transition-opacity"
 				style="border-color: color-mix(in oklch, var(--warning) 40%, transparent); color: var(--warning);"
 				data-testid="goal-paused-banner-resume-btn"
+				?disabled=${resumePending}
+				aria-busy=${resumePending ? "true" : "false"}
 				@click=${() => resumeGoalWithDialog(activeGoalId)}>
-				Resume
+				${resumePending ? "Resuming…" : "Resume"}
 			</button>
 		</div>
 	`;

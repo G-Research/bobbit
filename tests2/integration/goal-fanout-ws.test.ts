@@ -14,23 +14,60 @@ import {
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
 
+const FANOUT_WS_READY_TIMEOUT_MS = 30_000;
+const FANOUT_WS_EVENT_TIMEOUT_MS = 60_000;
+const FANOUT_TEST_TIMEOUT_MS = 120_000;
+
 function isGoalBroadcast(msg: WsMsg, goalId: string): boolean {
 	return msg.goalId === goalId && typeof msg.type === "string" && (
 		msg.type.startsWith("gate_") || msg.type.startsWith("team_") || msg.type.startsWith("goal_")
 	);
 }
 
-async function flushWs(conn: WsConnection): Promise<void> {
-	const cursor = conn.messageCount();
-	conn.send({ type: "ping" });
-	await conn.waitForFrom(cursor, (m) => m.type === "pong");
-}
 
 function connectViewerWs(goalId?: string): Promise<WsConnection> {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(`${wsBase()}/ws/viewer`);
 		const messages: WsMsg[] = [];
 		const waiters: Array<{ fromIndex: number; pred: (m: WsMsg) => boolean; res: (m: WsMsg) => void; rej: (e: Error) => void; timer: NodeJS.Timeout }> = [];
+		let settled = false;
+
+		function waitForFrom(fromIndex: number, pred: (m: WsMsg) => boolean, timeoutMs = FANOUT_WS_EVENT_TIMEOUT_MS): Promise<WsMsg> {
+			const existing = messages.slice(fromIndex).find(pred);
+			if (existing) return Promise.resolve(existing);
+			return new Promise((res, rej) => {
+				const timer = setTimeout(() => {
+					const idx = waiters.findIndex((w) => w.timer === timer);
+					if (idx >= 0) waiters.splice(idx, 1);
+					rej(new Error(`viewer WS waitForFrom timed out (${timeoutMs}ms)`));
+				}, timeoutMs);
+				waiters.push({ fromIndex, pred, res, rej, timer });
+			});
+		}
+
+		function fail(error: Error): void {
+			if (settled) return;
+			settled = true;
+			for (const waiter of waiters.splice(0)) {
+				clearTimeout(waiter.timer);
+				waiter.rej(error);
+			}
+			reject(error);
+		}
+
+		function buildConnection(): WsConnection {
+			return {
+				ws,
+				messages,
+				waitFor(pred, timeoutMs = FANOUT_WS_EVENT_TIMEOUT_MS) {
+					return waitForFrom(0, pred, timeoutMs);
+				},
+				waitForFrom,
+				messageCount: () => messages.length,
+				send: (msg) => ws.send(JSON.stringify(msg)),
+				close: () => ws.close(),
+			};
+		}
 
 		ws.on("message", (raw) => {
 			const msg: WsMsg = JSON.parse(raw.toString());
@@ -44,43 +81,35 @@ function connectViewerWs(goalId?: string): Promise<WsConnection> {
 				}
 			}
 		});
-		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: readE2EToken(), ...(goalId ? { goalId } : {}) })));
-		ws.on("error", reject);
+		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: readE2EToken() })));
+		ws.on("error", fail);
+		ws.on("close", () => fail(new Error("viewer WS closed before ready")));
 
-		const authTimer = setTimeout(() => reject(new Error("viewer WS auth timeout")), 10_000);
-		const authPoll = setInterval(() => {
-			if (!messages.some((m) => m.type === "auth_ok")) return;
-			clearTimeout(authTimer);
-			clearInterval(authPoll);
-			const conn: WsConnection = {
-				ws,
-				messages,
-				waitFor(pred, timeoutMs = 15_000) {
-					const existing = messages.find(pred);
-					if (existing) return Promise.resolve(existing);
-					return new Promise((res, rej) => {
-						const timer = setTimeout(() => rej(new Error(`viewer WS waitFor timed out (${timeoutMs}ms)`)), timeoutMs);
-						waiters.push({ fromIndex: 0, pred, res, rej, timer });
-					});
-				},
-				waitForFrom(fromIndex, pred, timeoutMs = 15_000) {
-					const existing = messages.slice(fromIndex).find(pred);
-					if (existing) return Promise.resolve(existing);
-					return new Promise((res, rej) => {
-						const timer = setTimeout(() => rej(new Error(`viewer WS waitForFrom timed out (${timeoutMs}ms)`)), timeoutMs);
-						waiters.push({ fromIndex, pred, res, rej, timer });
-					});
-				},
-				messageCount: () => messages.length,
-				send: (msg) => ws.send(JSON.stringify(msg)),
-				close: () => ws.close(),
-			};
-			resolve(conn);
-		}, 25);
+		void waitForFrom(0, (m) => m.type === "auth_ok", FANOUT_WS_READY_TIMEOUT_MS)
+			.then(async () => {
+				const cursor = messages.length;
+				if (goalId) ws.send(JSON.stringify({ type: "subscribe_goal", goalId }));
+				ws.send(JSON.stringify({ type: "ping" }));
+				await waitForFrom(cursor, (m) => m.type === "pong", FANOUT_WS_READY_TIMEOUT_MS);
+				if (settled) return;
+				settled = true;
+				resolve(buildConnection());
+			})
+			.catch(fail);
 	});
 }
 
+async function waitForWsRoundTrip(conn: WsConnection): Promise<void> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "ping" });
+	await conn.waitForFrom(cursor, (m) => m.type === "pong", FANOUT_WS_EVENT_TIMEOUT_MS);
+}
+
+test.setTimeout(180_000);
+
 test.describe("Goal WebSocket fanout", () => {
+	test.setTimeout(FANOUT_TEST_TIMEOUT_MS);
+
 	test("subscribed viewer and matching goal session receive goal events while unrelated viewers and sessions do not", async () => {
 		const goal = await createGoal({ title: `Goal fanout WS ${Date.now()}`, workflowId: "test-fast" });
 		const otherGoal = await createGoal({ title: `Other fanout WS ${Date.now()}`, workflowId: "test-fast" });
@@ -93,6 +122,14 @@ test.describe("Goal WebSocket fanout", () => {
 		const unrelatedConn = await connectWs(unrelatedSessionId);
 
 		try {
+			await Promise.all([
+				waitForWsRoundTrip(viewerConn),
+				waitForWsRoundTrip(unscopedViewerConn),
+				waitForWsRoundTrip(otherGoalViewerConn),
+				waitForWsRoundTrip(goalConn),
+				waitForWsRoundTrip(unrelatedConn),
+			]);
+
 			const viewerCursor = viewerConn.messageCount();
 			const unscopedViewerCursor = unscopedViewerConn.messageCount();
 			const otherGoalViewerCursor = otherGoalViewerConn.messageCount();
@@ -106,16 +143,16 @@ test.describe("Goal WebSocket fanout", () => {
 			expect(signalResp.status).toBe(201);
 
 			await Promise.all([
-				viewerConn.waitForFrom(viewerCursor, (m) => m.type === "gate_signal_received" && m.goalId === goal.id && m.gateId === "design-doc"),
-				goalConn.waitForFrom(goalCursor, (m) => m.type === "gate_signal_received" && m.goalId === goal.id && m.gateId === "design-doc"),
+				viewerConn.waitForFrom(viewerCursor, (m) => m.type === "gate_signal_received" && m.goalId === goal.id && m.gateId === "design-doc", FANOUT_WS_EVENT_TIMEOUT_MS),
+				goalConn.waitForFrom(goalCursor, (m) => m.type === "gate_signal_received" && m.goalId === goal.id && m.gateId === "design-doc", FANOUT_WS_EVENT_TIMEOUT_MS),
 			]);
 			// This fanout test only needs the synchronous signal broadcast. Do not wait
 			// for async verification completion; broad unit runs can delay it past the
 			// short WS timeout and make the routing assertion flaky.
 			await Promise.all([
-				flushWs(unrelatedConn),
-				flushWs(unscopedViewerConn),
-				flushWs(otherGoalViewerConn),
+				waitForWsRoundTrip(unrelatedConn),
+				waitForWsRoundTrip(unscopedViewerConn),
+				waitForWsRoundTrip(otherGoalViewerConn),
 			]);
 
 			const unrelatedGoalMessages = unrelatedConn.messages.slice(unrelatedCursor).filter((m) => isGoalBroadcast(m, goal.id));

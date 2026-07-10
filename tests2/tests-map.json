@@ -20,6 +20,10 @@
   },
   "v2Native": [
     {
+      "path": "tests2/dom/goal-pause-resume-feedback.test.ts",
+      "reason": "Failing-first reproducing DOM test for Pause Feedback: no-descendant dashboard Pause, dashboard Resume, and transcript paused-banner Resume controls must immediately disable, show Pausing…/Resuming…, and suppress duplicate POSTs while the gateway request is pending."
+    },
+    {
       "path": "tests2/core/permission-reducer.test.ts",
       "reason": "Failing-first reproducing tests for Permission Card UX reducer lifecycle: denied rows must remain as compact history, timed-out rows settle stale/expired, and superseded rows stop being actionable."
     },
