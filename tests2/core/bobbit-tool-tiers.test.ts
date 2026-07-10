@@ -35,7 +35,7 @@ const EXPECTED_OPS = {
 		"create_goal", "update_goal", "archive_goal", "create_session",
 		"terminate_session", "restart_session", "create_task", "update_task",
 		"transition_task", "assign_task", "signal_gate", "reset_gate",
-		"cancel_verification", "create_staff", "team_start", "team_teardown",
+		"cancel_verification", "create_staff", "delete_staff", "team_start", "team_teardown",
 	],
 	bobbit_admin: [
 		"update_project_config", "set_provider_key", "delete_provider_key",
@@ -89,4 +89,31 @@ describe("bobbit tiers — operation catalogue drift guard", () => {
 			expect(operationUnion(tools.get(name)!).sort()).toEqual(expected);
 		});
 	}
+});
+
+describe("bobbit_read docs — pagination and semantic filters", () => {
+	const readYaml = () => readFileSync(path.join(YAML_DIR, "bobbit_read.yaml"), "utf8");
+
+	it("documents shared paging params, defaults, max, and pagination metadata", () => {
+		const raw = readYaml();
+		const paramsLine = raw.match(/^params:\s*(.+)$/m)?.[1] ?? "";
+		for (const param of ["limit?", "offset?", "after?", "cursor?"]) {
+			expect(paramsLine, `params should include ${param}`).toContain(param);
+		}
+		expect(raw).toMatch(/limit=50[^\n]*default|default[^\n]*limit=50/i);
+		expect(raw).toMatch(/maximum[^\n]*200|200[^\n]*maximum/i);
+		expect(raw).toMatch(/pagination/i);
+		for (const field of ["hasMore", "nextOffset", "nextCursor", "pagedBy", "itemKey"]) {
+			expect(raw).toContain(field);
+		}
+		expect(raw).not.toMatch(/Returns the gateway(?:'s)? JSON verbatim; on failure/i);
+	});
+
+	it("documents projectId support for list operations that are project-scoped", () => {
+		const raw = readYaml();
+		for (const operation of ["list_goals", "list_sessions", "list_workflows", "list_roles", "list_tools", "list_staff", "list_mcp_servers"]) {
+			const row = raw.match(new RegExp("\\| `" + operation + "` \\|[^\\n]+", "i"))?.[0] ?? "";
+			expect(row, `${operation} docs should mention projectId`).toContain("projectId");
+		}
+	});
 });

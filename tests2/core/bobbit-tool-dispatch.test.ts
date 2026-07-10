@@ -23,6 +23,10 @@ async function run(tool: string, params: any): Promise<FetchCall> {
 	return calls[0];
 }
 
+function query(url: string): URLSearchParams {
+	return new URL(url).searchParams;
+}
+
 describe("bobbit_read — path & query building", () => {
 	it("get_goal builds GET /api/goals/:id", async () => {
 		const c = await run("bobbit_read", { operation: "get_goal", goalId: "g1" });
@@ -49,7 +53,82 @@ describe("bobbit_read — path & query building", () => {
 			probe: "orphaned_index_rows",
 			projectId: "p1",
 		});
-		expect(c.url).toBe("https://gw.test/api/maintenance/orphaned-index-rows?projectId=p1");
+		expect(c.url).toContain("/api/maintenance/orphaned-index-rows?");
+		expect(query(c.url).get("projectId")).toBe("p1");
+	});
+
+	it("list_sessions defaults to a bounded first page", async () => {
+		const c = await run("bobbit_read", { operation: "list_sessions" });
+		expect(c.method).toBe("GET");
+		expect(c.url).toContain("/api/sessions?");
+		expect(query(c.url).get("limit")).toBe("50");
+		expect(query(c.url).get("offset")).toBe("0");
+	});
+
+	it("list_sessions composes semantic filters with explicit limit/offset", async () => {
+		const c = await run("bobbit_read", {
+			operation: "list_sessions",
+			projectId: "proj-1",
+			include: "archived",
+			q: "review",
+			limit: 25,
+			offset: 75,
+		});
+		const qs = query(c.url);
+		expect(c.url).toContain("/api/sessions?");
+		expect(qs.get("projectId")).toBe("proj-1");
+		expect(qs.get("include")).toBe("archived");
+		expect(qs.get("q")).toBe("review");
+		expect(qs.get("limit")).toBe("25");
+		expect(qs.get("offset")).toBe("75");
+	});
+
+	it("list_goals forwards projectId and paging without dropping existing filters", async () => {
+		const c = await run("bobbit_read", {
+			operation: "list_goals",
+			projectId: "proj-2",
+			archived: true,
+			q: "ship",
+			limit: 10,
+			offset: 20,
+		});
+		const qs = query(c.url);
+		expect(c.url).toContain("/api/goals?");
+		expect(qs.get("projectId")).toBe("proj-2");
+		expect(qs.get("archived")).toBe("true");
+		expect(qs.get("q")).toBe("ship");
+		expect(qs.get("limit")).toBe("10");
+		expect(qs.get("offset")).toBe("20");
+	});
+
+	it("archived list operations forward cursor-style after tokens", async () => {
+		const sessionCall = await run("bobbit_read", {
+			operation: "list_sessions",
+			include: "archived",
+			limit: 25,
+			after: "sess-cur-1",
+		});
+		const goalCall = await run("bobbit_read", {
+			operation: "list_goals",
+			archived: true,
+			limit: 25,
+			after: "goal-cur-1",
+		});
+		expect(query(sessionCall.url).get("after")).toBe("sess-cur-1");
+		expect(query(goalCall.url).get("after")).toBe("goal-cur-1");
+	});
+
+	it("project-scoped list operations forward projectId without read-time side effects", async () => {
+		const roleCall = await run("bobbit_read", { operation: "list_roles", projectId: "proj-3" });
+		const staffCall = await run("bobbit_read", { operation: "list_staff", projectId: "proj-3" });
+		const mcpCall = await run("bobbit_read", { operation: "list_mcp_servers", projectId: "proj-3" });
+
+		for (const c of [roleCall, staffCall, mcpCall]) {
+			const qs = query(c.url);
+			expect(qs.get("projectId")).toBe("proj-3");
+			expect(qs.has("ensure")).toBe(false);
+			expect(qs.has("cwd")).toBe(false);
+		}
 	});
 });
 
@@ -77,6 +156,13 @@ describe("bobbit_orchestrate — method, query & body building", () => {
 		expect(c.method).toBe("PUT");
 		expect(c.url).toBe("https://gw.test/api/goals/g1");
 		expect(c.body).toEqual({ title: "x" });
+	});
+
+	it("delete_staff is DELETE with no body", async () => {
+		const c = await run("bobbit_orchestrate", { operation: "delete_staff", staffId: "staff-1" });
+		expect(c.method).toBe("DELETE");
+		expect(c.url).toBe("https://gw.test/api/staff/staff-1");
+		expect(c.body).toBeUndefined();
 	});
 
 	it("transition_task sends { state } in the body", async () => {
