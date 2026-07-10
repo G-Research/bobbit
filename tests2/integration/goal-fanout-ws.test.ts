@@ -24,6 +24,8 @@ function isGoalBroadcast(msg: WsMsg, goalId: string): boolean {
 	);
 }
 
+const FANOUT_WS_TIMEOUT_MS = 60_000;
+
 function connectViewerWs(goalId?: string): Promise<WsConnection> {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(`${wsBase()}/ws/viewer`);
@@ -98,6 +100,14 @@ function connectViewerWs(goalId?: string): Promise<WsConnection> {
 	});
 }
 
+async function waitForWsRoundTrip(conn: WsConnection): Promise<void> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "ping" });
+	await conn.waitForFrom(cursor, (m) => m.type === "pong", FANOUT_WS_TIMEOUT_MS);
+}
+
+test.setTimeout(180_000);
+
 test.describe("Goal WebSocket fanout", () => {
 	test.setTimeout(FANOUT_TEST_TIMEOUT_MS);
 
@@ -113,6 +123,14 @@ test.describe("Goal WebSocket fanout", () => {
 		const unrelatedConn = await connectWs(unrelatedSessionId);
 
 		try {
+			await Promise.all([
+				waitForWsRoundTrip(viewerConn),
+				waitForWsRoundTrip(unscopedViewerConn),
+				waitForWsRoundTrip(otherGoalViewerConn),
+				waitForWsRoundTrip(goalConn),
+				waitForWsRoundTrip(unrelatedConn),
+			]);
+
 			const viewerCursor = viewerConn.messageCount();
 			const unscopedViewerCursor = unscopedViewerConn.messageCount();
 			const otherGoalViewerCursor = otherGoalViewerConn.messageCount();

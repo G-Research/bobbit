@@ -1811,25 +1811,75 @@ function eagerMarkArchived(ids: string[]): void {
 	}
 }
 
+export type GoalPauseResumeAction = "pause" | "resume";
+
+const goalPauseResumePending = new Map<string, { fetchRef: unknown }>();
+
+function goalPauseResumePendingKey(goalId: string, action: GoalPauseResumeAction): string {
+	return `${goalId}:${action}`;
+}
+
+function currentFetchRef(): unknown {
+	return typeof globalThis !== "undefined" ? globalThis.fetch : undefined;
+}
+
+export function isGoalPauseResumeActionPending(goalId: string | undefined | null, action: GoalPauseResumeAction): boolean {
+	if (!goalId) return false;
+	const key = goalPauseResumePendingKey(goalId, action);
+	const entry = goalPauseResumePending.get(key);
+	if (!entry) return false;
+	if (entry.fetchRef !== currentFetchRef()) {
+		goalPauseResumePending.delete(key);
+		return false;
+	}
+	return true;
+}
+
+export function getGoalPauseResumePendingAction(goalId: string | undefined | null): GoalPauseResumeAction | null {
+	if (!goalId) return null;
+	if (isGoalPauseResumeActionPending(goalId, "pause")) return "pause";
+	if (isGoalPauseResumeActionPending(goalId, "resume")) return "resume";
+	return null;
+}
+
+function setGoalPauseResumeActionPending(goalId: string, action: GoalPauseResumeAction, pending: boolean): void {
+	const key = goalPauseResumePendingKey(goalId, action);
+	if (pending) goalPauseResumePending.set(key, { fetchRef: currentFetchRef() });
+	else goalPauseResumePending.delete(key);
+	renderApp();
+}
+
 /** Pause a goal with cascade-confirm UX. */
 export async function pauseGoalWithDialog(id: string): Promise<void> {
-	const goal = state.goals.find((g) => g.id === id);
-	if (!goal) return;
-	const descendants = countDescendants(id);
-	const result = await showPauseGoalDialog(goal, descendants);
-	if (result.paused > 0) {
-		await refreshSessions();
+	if (isGoalPauseResumeActionPending(id, "pause")) return;
+	setGoalPauseResumeActionPending(id, "pause", true);
+	try {
+		const goal = state.goals.find((g) => g.id === id);
+		if (!goal) return;
+		const descendants = countDescendants(id);
+		const result = await showPauseGoalDialog(goal, descendants);
+		if (result.paused > 0) {
+			await refreshSessions();
+		}
+	} finally {
+		setGoalPauseResumeActionPending(id, "pause", false);
 	}
 }
 
 /** Resume a goal with cascade-confirm UX. */
 export async function resumeGoalWithDialog(id: string): Promise<void> {
-	const goal = state.goals.find((g) => g.id === id);
-	if (!goal) return;
-	const descendants = countDescendants(id);
-	const result = await showResumeGoalDialog(goal, descendants);
-	if (result.resumed > 0) {
-		await refreshSessions();
+	if (isGoalPauseResumeActionPending(id, "resume")) return;
+	setGoalPauseResumeActionPending(id, "resume", true);
+	try {
+		const goal = state.goals.find((g) => g.id === id);
+		if (!goal) return;
+		const descendants = countDescendants(id);
+		const result = await showResumeGoalDialog(goal, descendants);
+		if (result.resumed > 0) {
+			await refreshSessions();
+		}
+	} finally {
+		setGoalPauseResumeActionPending(id, "resume", false);
 	}
 }
 

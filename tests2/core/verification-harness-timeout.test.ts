@@ -198,12 +198,13 @@ describe("runCommandStep tree-kill", () => {
 		// No streamCtx → attached pipe mode on all platforms; output is
 		// captured into result.output, where we extract PARENT_PID/CHILD_PID
 		// from the parent payload's piped-through stdout.
+		const timeoutSec = 10;
 		const result = await (harness as any).runCommandStep(
-			nodeTreeShellCmd(), tmp, 2, false, undefined, undefined, undefined,
+			nodeTreeShellCmd(), tmp, timeoutSec, false, undefined, undefined, undefined,
 		);
 		assert.strictEqual(result.passed, false, `expected failed step, got: ${JSON.stringify(result)}`);
 		assert.ok(
-			/timed out after 2s\s+\u2014\s+killed subprocess tree/.test(result.output),
+			new RegExp(`timed out after ${timeoutSec}s\\s+\\u2014\\s+killed subprocess tree`).test(result.output),
 			`expected timeout marker, got: ${result.output}`,
 		);
 

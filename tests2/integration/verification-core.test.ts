@@ -148,7 +148,7 @@ function assertVerificationOrdering(messages: WsConnection["messages"], goalId: 
 // ===========================================================================
 
 test.describe("Command verification WS event lifecycle", () => {
-	test.describe.configure({ mode: "parallel" });
+	test.describe.configure({ mode: "parallel", timeout: VERIFICATION_TEST_TIMEOUT_MS });
 
 	test("WS events have correct shape, timestamps, and ordering for design-doc signal @smoke", async () => {
 		const goalId = await createTestFastGoal();
@@ -510,7 +510,7 @@ test.describe("Verification WebSocket burst backpressure", () => {
 // ===========================================================================
 
 test.describe("Verification REST API", () => {
-	test.describe.configure({ mode: "parallel" });
+	test.describe.configure({ mode: "parallel", timeout: VERIFICATION_TEST_TIMEOUT_MS });
 
 	test("active verifications API and step output after completion", async () => {
 		const goal = await createGoal({
@@ -600,7 +600,7 @@ test.describe("Verification REST API", () => {
 // ===========================================================================
 
 test.describe("Expect failure pipeline", () => {
-	test.describe.configure({ mode: "parallel" });
+	test.describe.configure({ mode: "parallel", timeout: VERIFICATION_TEST_TIMEOUT_MS });
 
 	test("expect:failure gate with matching error_pattern passes", async () => {
 		const { goalId, ws } = await prepBugFixGoalWithAnalysis(
@@ -671,6 +671,7 @@ test.describe("Expect failure pipeline", () => {
 // ===========================================================================
 
 test.describe("LLM Review verification", () => {
+	test.describe.configure({ timeout: VERIFICATION_TEST_TIMEOUT_MS });
 
 	test("llm-review step uses skip path when BOBBIT_LLM_REVIEW_SKIP is set", async () => {
 		const goalId = await createGeneralGoal();

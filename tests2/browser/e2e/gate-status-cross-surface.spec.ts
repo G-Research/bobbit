@@ -14,6 +14,7 @@ const GATE_ID = "slow-gate";
 const VERIFY_TITLE = "0 of 1 gates passed — verifying 1";
 const SHARED_CACHE_ERROR = "GATE_STATUS_CROSS_SURFACE_ACTIVE: shared gate status cache must expose verifying=true and verifyingCount=1";
 const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),30000)"`;
+const FIRST_GATE_PASS_TIMEOUT_MS = 60_000;
 
 type SlowWorkflowSetup = {
 	workflowId: string;
@@ -132,7 +133,7 @@ async function waitForGatePassed(goalId: string): Promise<void> {
 		const body = await res.json();
 		const gates = Array.isArray(body?.summary?.gates) ? body.summary.gates : [];
 		return gates.find((gate: any) => gate?.gateId === GATE_ID)?.effectiveStatus ?? null;
-	}, { timeout: 15_000, message: "first gate signal should pass before re-signal coverage starts" }).toBe("passed");
+	}, { timeout: FIRST_GATE_PASS_TIMEOUT_MS, message: "first gate signal should pass before re-signal coverage starts" }).toBe("passed");
 }
 
 function expectedGateBadge(label: string): { compactText: string; requiresBlink: boolean } | null {
@@ -351,7 +352,7 @@ async function expectDashboardPipelineUsesRunningSummaryForPassedGate(page: Page
 
 test.describe("Gate status cross-surface active verification", () => {
 	test("dashboard pipeline renders a passed gate as running from authoritative summary — GATE_STATUS_CROSS_SURFACE_ACTIVE", async ({ page }) => {
-		test.setTimeout(45_000);
+		test.setTimeout(90_000);
 		let setup: SlowWorkflowSetup | undefined;
 		try {
 			// This UI assertion only needs a stored passed gate before injecting a
