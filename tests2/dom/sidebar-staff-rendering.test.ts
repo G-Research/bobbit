@@ -202,3 +202,54 @@ describe("staff sidebar invalidation from external lifecycle pushes", () => {
 		expect(ids, "staff permanent session must move out of regular Sessions after external staff lifecycle push").not.toContain(STAFF_SESSION_ID);
 	});
 });
+
+describe("staff sidebar cache invalidation", () => {
+	beforeEach(() => {
+		Object.assign(state, {
+			gatewaySessions: [
+				makeGatewaySession({ id: "plain-session", title: "Plain Session", createdAt: 1 }),
+				makeGatewaySession({ id: STAFF_ASSISTANT_SESSION_ID, title: "Staff Creation Assistant", assistantType: "staff", createdAt: 2 }),
+				makeGatewaySession({ id: STAFF_SESSION_ID, title: "greeter", createdAt: 3 }),
+			],
+			archivedSessions: [] as GatewaySession[],
+			goals: [],
+			projects: [],
+			activeProjectId: PROJECT_ID,
+			staffList: [{ id: "staff-1", name: "greeter", description: "hello", state: "active", triggers: [{ id: "manual", type: "manual" }], projectId: PROJECT_ID, currentSessionId: STAFF_SESSION_ID, lastWakeAt: 1 }],
+		});
+	});
+
+	afterEach(() => {
+		Object.assign(state, {
+			gatewaySessions: [] as GatewaySession[],
+			archivedSessions: [] as GatewaySession[],
+			goals: [],
+			projects: [],
+			staffList: [],
+			orphanedStaff: [],
+		});
+	});
+
+	it("keeps staff-creation assistant sessions in regular Sessions while excluding linked permanent staff sessions", () => {
+		const ids = getSidebarData().ungroupedSessions.map((s) => s.id);
+		expect(ids).toContain("plain-session");
+		expect(ids).toContain(STAFF_ASSISTANT_SESSION_ID);
+		expect(ids).not.toContain(STAFF_SESSION_ID);
+	});
+
+	it.each([
+		["id", { id: "staff-2" }],
+		["name", { name: "renamed-greeter" }],
+		["description", { description: "updated description" }],
+		["state", { state: "paused" }],
+		["projectId", { projectId: "other-project" }],
+		["currentSessionId", { currentSessionId: "other-staff-session" }],
+		["lastWakeAt", { lastWakeAt: 2 }],
+		["triggers", { triggers: [{ id: "schedule", type: "schedule", cron: "* * * * *" }] }],
+	])("invalidates memoized sidebar data when staff %s changes", (_field, patch) => {
+		const first = getSidebarData();
+		state.staffList = [{ ...state.staffList[0], ...patch } as any];
+		const second = getSidebarData();
+		expect(second).not.toBe(first);
+	});
+});
