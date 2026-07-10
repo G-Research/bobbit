@@ -4,7 +4,7 @@
  *
  * Upstream pi-ai ships correct metadata for `claude-fable-5`
  * (contextWindow 1_000_000, maxTokens 128_000, reasoning true,
- * thinkingLevelMap {off:null, xhigh:"xhigh"}). Bobbit's bug was that live
+ * thinkingLevelMap {off:null, xhigh:"xhigh", max:"max"}). Bobbit's bug was that live
  * `state.model` frames were derived from `inferMeta` alone — the `/claude/`
  * catch-all — which clobbered those values (200k / reasoning:false) and never
  * carried `thinkingLevelMap`, so the client hid the thinking selector and
@@ -24,7 +24,7 @@ import {
 } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
-const FABLE_MAP = { off: null, xhigh: "xhigh" } as const;
+const FABLE_MAP = { off: null, xhigh: "xhigh", max: "max" } as const;
 
 /**
  * A state frame is the correct Fable frame once it reports the 1M context
