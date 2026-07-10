@@ -38,6 +38,14 @@ describe("bobbit_read — paging schema", () => {
 	});
 });
 
+describe("bobbit_admin — create_project schema", () => {
+	it("exposes rootPath as a top-level parameter", () => {
+		const props = tools.get("bobbit_admin")!.parameters?.properties ?? {};
+		expect(props.rootPath, "rootPath should be registered in the bobbit_admin schema").toBeTruthy();
+		expect(props.rootPath.description).toMatch(/project root path|create_project/i);
+	});
+});
+
 describe("bobbit tools — operation validation", () => {
 	it("unknown operation → isError, no fetch", async () => {
 		const calls = stubFetch();
@@ -76,6 +84,40 @@ describe("bobbit tools — operation validation", () => {
 		const result = await tools.get("bobbit_orchestrate")!.execute("id", { operation: "delete_staff" });
 		expect(result.isError).toBe(true);
 		expect(text(result)).toContain("staffId");
+		expect(calls.length).toBe(0);
+	});
+
+	it("create_project without name → isError, no fetch", async () => {
+		const calls = stubFetch();
+		const result = await tools.get("bobbit_admin")!.execute("id", {
+			operation: "create_project",
+			rootPath: "/workspace/demo",
+		});
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("name");
+		expect(calls.length).toBe(0);
+	});
+
+	it("create_project without rootPath → isError, no fetch", async () => {
+		const calls = stubFetch();
+		const result = await tools.get("bobbit_admin")!.execute("id", {
+			operation: "create_project",
+			name: "Demo Project",
+		});
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("rootPath");
+		expect(calls.length).toBe(0);
+	});
+
+	it("create_project with empty rootPath → isError, no fetch", async () => {
+		const calls = stubFetch();
+		const result = await tools.get("bobbit_admin")!.execute("id", {
+			operation: "create_project",
+			name: "Demo Project",
+			rootPath: "",
+		});
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("rootPath");
 		expect(calls.length).toBe(0);
 	});
 
