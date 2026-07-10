@@ -690,6 +690,7 @@ export default function (pi: ExtensionAPI) {
 			cursor: Type.Optional(Type.Union([Type.String(), Type.Number()], { description: "Alias for after on cursor-backed list operations." })),
 			archived: Type.Optional(Type.Boolean({ description: "Include archived items." })),
 			include: Type.Optional(Type.String({ description: "Inclusion flag, e.g. 'archived'." })),
+			includeArchived: Type.Optional(Type.Boolean({ description: "REST-style search archive opt-in." })),
 			view: Type.Optional(Type.String({ description: "Response view, e.g. 'summary'." })),
 			probe: Type.Optional(Type.String({ description: "maintenance_inspect probe selector." })),
 		}),

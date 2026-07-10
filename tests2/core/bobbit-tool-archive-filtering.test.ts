@@ -179,6 +179,30 @@ describe("bobbit_read — archive-hidden search default", () => {
 		expect(ids(data.results)).toEqual(["live-result", "archived-result"]);
 	});
 
+	it("search preserves archived rows and forwards includeArchived=true when includeArchived is explicit", async () => {
+		stubFetch((url) => {
+			expect(new URL(url).searchParams.get("includeArchived")).toBe("true");
+			return {
+				body: {
+					results: [
+						{ id: "live-result", type: "goal", archived: false },
+						{ id: "archived-result", type: "goal", archived: true },
+					],
+					total: 2,
+				},
+			};
+		});
+
+		const result = await tools.get("bobbit_read")!.execute("id", {
+			operation: "search",
+			q: "archive visibility",
+			includeArchived: true,
+		});
+		const data = json(result);
+
+		expect(ids(data.results)).toEqual(["live-result", "archived-result"]);
+	});
+
 	it("search defensive filtering does not corrupt the REST grand total across pages", async () => {
 		// REST returns one page (limit 2) of a larger result set (total 50). Even if
 		// an archived row slips through the server filter, the page-level removal must
