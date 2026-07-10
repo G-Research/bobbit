@@ -235,24 +235,31 @@ function includeHasArchived(include: unknown): boolean {
 		.some((part) => part.trim() === "archived");
 }
 
-function booleanishTrue(value: unknown): boolean {
+/** True for boolean `true` or a case-insensitive "true" string (query params arrive as strings). */
+function isTruthyFlag(value: unknown): boolean {
 	return value === true || String(value ?? "").toLowerCase() === "true";
 }
 
-function archivedFlag(value: unknown): boolean {
-	return value === true || value === "true";
-}
-
 function searchIncludesArchived(params: Params): boolean {
-	return booleanishTrue(params.includeArchived) || includeHasArchived(params.include);
+	return isTruthyFlag(params.includeArchived) || includeHasArchived(params.include);
 }
 
 function isArchivedRow(row: unknown): boolean {
 	return Boolean(row && typeof row === "object" && (row as Record<string, unknown>).archived === true);
 }
 
-function decrementNumber(value: unknown, amount: number): unknown {
-	return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value - amount) : value;
+/**
+ * Decrement a `total` counter, but ONLY when it counted exactly the array we
+ * just filtered (full-list responses where total === array length). For
+ * REST-paginated responses `total` is a grand total spanning pages, so
+ * subtracting page-level removals would corrupt it — and the downstream
+ * hasMore/nextOffset math derived from it. In that case leave `total` untouched.
+ */
+function adjustFullListTotal(container: Record<string, unknown>, originalLength: number, removed: number): void {
+	const total = container.total;
+	if (typeof total === "number" && Number.isFinite(total) && total === originalLength) {
+		container.total = Math.max(0, total - removed);
+	}
 }
 
 function filterArchivedRows(data: unknown, itemKey: string, stripKeys: string[] = []): unknown {
@@ -262,22 +269,20 @@ function filterArchivedRows(data: unknown, itemKey: string, stripKeys: string[] 
 	const source = data as Record<string, unknown>;
 	const rows = source[itemKey];
 	const out: Record<string, unknown> = { ...source };
-	let removed = 0;
 	if (Array.isArray(rows)) {
 		const filtered = rows.filter((row) => !isArchivedRow(row));
-		removed = rows.length - filtered.length;
+		const removed = rows.length - filtered.length;
 		out[itemKey] = filtered;
-	}
-	for (const key of stripKeys) delete out[key];
-	if (removed > 0) {
-		out.total = decrementNumber(out.total, removed);
-		if (out.pagination && typeof out.pagination === "object" && !Array.isArray(out.pagination)) {
-			out.pagination = {
-				...(out.pagination as Record<string, unknown>),
-				total: decrementNumber((out.pagination as Record<string, unknown>).total, removed),
-			};
+		if (removed > 0) {
+			adjustFullListTotal(out, rows.length, removed);
+			if (out.pagination && typeof out.pagination === "object" && !Array.isArray(out.pagination)) {
+				const pagination = { ...(out.pagination as Record<string, unknown>) };
+				adjustFullListTotal(pagination, rows.length, removed);
+				out.pagination = pagination;
+			}
 		}
 	}
+	for (const key of stripKeys) delete out[key];
 	return out;
 }
 
@@ -323,11 +328,11 @@ const READ_OPS: Record<string, OpSpec> = {
 		method: "GET",
 		buildPath: (p) => appendPagingQuery("/api/goals", [["archived", p.archived], ["q", p.q], ["projectId", p.projectId]], p, {
 			itemKey: "goals",
-			cursor: (params) => archivedFlag(params.archived),
+			cursor: (params) => isTruthyFlag(params.archived),
 		}),
 		required: [],
-		postProcess: (data, p) => archivedFlag(p.archived) ? data : filterArchivedRows(data, "goals", ["archivedSessions"]),
-		page: (p) => ({ itemKey: "goals", cursor: archivedFlag(p.archived) }),
+		postProcess: (data, p) => isTruthyFlag(p.archived) ? data : filterArchivedRows(data, "goals", ["archivedSessions"]),
+		page: (p) => ({ itemKey: "goals", cursor: isTruthyFlag(p.archived) }),
 	},
 	get_goal: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}`, required: ["goalId"] },
 	goal_cost: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}/cost`, required: ["goalId"] },
