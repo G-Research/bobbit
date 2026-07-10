@@ -1,4 +1,4 @@
-import { getModel } from "@earendil-works/pi-ai";
+import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import { inferMeta } from "./aigw-manager.js";
 import { clampThinkingLevel, type ModelLike, type ThinkingLevel } from "../../shared/thinking-levels.js";
 
@@ -15,7 +15,7 @@ export type ThinkingClampModel = ModelLike & { metadataSource: ThinkingClampMeta
 
 function lookupPiCatalogModel(provider: string, modelId: string): CatalogThinkingMetadata | undefined {
 	try {
-		return getModel(provider as any, modelId) as CatalogThinkingMetadata | undefined;
+		return getBuiltinModel(provider as any, modelId as any) as CatalogThinkingMetadata | undefined;
 	} catch {
 		return undefined;
 	}
