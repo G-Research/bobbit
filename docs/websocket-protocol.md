@@ -36,6 +36,17 @@ Routing rules:
 - Extension-channel operations (`ext_channel_open_grant`, `ext_channel_open`, `ext_channel_attach`, `ext_channel_list`, `ext_channel_send`, `ext_channel_close`, `ext_channel_detach`) remain capped by `MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES`. If one is too large, the server returns a structured size error and leaves the socket usable. With a `requestId`, callers receive an `ext_channel_result` or `ext_channel_open_grant_result` failure; without one, the fallback is a normal `error` frame with code `FRAME_TOO_LARGE`.
 - The 1 MiB cap is only an envelope guard. It does not replace per-channel quotas such as declared frame and inbound-byte limits, pack identity checks, open grants, attachment checks, or session-write permits.
 
+## Outbound payload bounding and backpressure
+
+Bobbit keeps normal streaming responsive by bounding payloads before they enter the session EventBuffer or high-fanout goal broadcasts. The goal is not to hide diagnostic data; it is to keep the live socket path small and make large data available through explicit inspection endpoints.
+
+- **Session events and history** — agent `message_update` / `message_end` events pass through large-content truncation before `emitSessionEvent()` pushes them into the EventBuffer and broadcasts them. The same truncation is applied to `get_messages` snapshots. Large tool text, preview snapshots, and `verification_result.summary` / `verification_result.report_html` are replaced with preview descriptors while the full transcript remains in the agent history or artifact store.
+- **Gate verification output** — `gate_verification_step_output.text` is capped to a live preview, and `gate_verification_step_complete.output` is capped separately. Truncated events carry `textTruncated` / `outputTruncated` plus original and preview byte counts. Use `gate_inspect(section="verification", mode=...)` or retained diagnostics for full logs.
+- **Goal broadcasts** — gate/team/goal events fan out to every matching goal session socket plus subscribed `/ws/viewer` sockets. This path uses the same overflow guard as per-session broadcasts and logs whether the backed-up recipient was a `goal-session` or `goal-viewer`.
+- **Overflow guard** — when `bufferedAmount` exceeds the warning threshold, the server logs payload diagnostics. When it exceeds the overflow threshold, the server sends the current frame, waits for a short drain window, and terminates only if the socket remains backed up. The reconnect/resume path then recovers with either a bounded replay or `resume_gap`.
+
+Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` frames, serialized `bytes`, recipient kind, and context such as `goalId`. These fields are the first place to look when a reconnect storm follows verification or reviewer activity.
+
 ## Client → Server
 
 | Type | Fields | Description |
@@ -78,7 +89,7 @@ Routing rules:
 | `state` | `data` | Current agent state snapshot |
 | `messages` | `data` | Full message history array |
 | `event` | `data`, `seq?`, `ts?` | Streaming agent event (message_start, content_delta, tool calls, etc.). `seq` is a monotonic per-session counter starting at 1; `ts` is wall-clock ms at broadcast time. Both are optional for backward compatibility — old clients that ignore them still function correctly. |
-| `resume_gap` | `lastSeq` | Server's reply to a `resume` whose `fromSeq` is older than the retained EventBuffer window. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
+| `resume_gap` | `lastSeq` | Server's reply when `resume` cannot safely replay the missed tail. This can mean the requested `fromSeq` is outside the retained EventBuffer window, the replay would exceed the resume byte budget, or the socket is already backed up. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
 | `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
 | `session_title` | `sessionId`, `title` | Title changed |
 | `session_created` | `sessionId`, `projectId?` | A visible session was created through REST, UI, or `host.agents`; clients should refresh the session list immediately. |
@@ -102,8 +113,8 @@ Routing rules:
 | `gate_signal_received` | `goalId`, `gateId`, `signalId` | Gate signal received |
 | `gate_verification_started` | `goalId`, `gateId`, `signalId` | Gate verification began |
 | `gate_verification_step_started` | `goalId`, `gateId`, `stepIndex`, `stepName` | A verification step began |
-| `gate_verification_step_output` | `goalId`, `gateId`, `stepIndex`, `stream`, `text` | Live output from a verification step |
-| `gate_verification_step_complete` | `goalId`, `gateId`, `stepIndex`, `status` | A verification step finished (passed/failed) |
+| `gate_verification_step_output` | `goalId`, `gateId`, `stepIndex`, `stream`, `text`, `textTruncated?`, `originalTextBytes?`, `previewTextBytes?` | Live output from a verification step. Large chunks are truncated to a bounded WS preview; full output remains available through gate inspection/retained diagnostics. |
+| `gate_verification_step_complete` | `goalId`, `gateId`, `stepIndex`, `status`, `outputTruncated?`, `originalOutputBytes?`, `previewOutputBytes?` | A verification step finished (passed/failed). Large completion output is truncated to a bounded WS preview; full output remains available through gate inspection/retained diagnostics. |
 | `gate_verification_awaiting_human` | `goalId`, `gateId`, `signalId`, `stepIndex`, `stepName`, `label`, `prompt` | A `human-signoff` step parked waiting on a human decision. Resolution emits `gate_verification_step_complete` (no separate event). See [goals-workflows-tasks.md — Human sign-off steps](goals-workflows-tasks.md#human-sign-off-steps). |
 | `gate_verification_complete` | `goalId`, `gateId`, `signalId`, `status` | All verification steps finished |
 | `gate_status_changed` | `goalId`, `gateId`, `status` | Gate status changed |
@@ -161,7 +172,11 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details and null sem
 
 ### Streaming resume
 
-Every `event` broadcast carries a server-assigned monotonic `seq` (per session, starting at 1) and wall-clock `ts`. The client tracks the highest `seq` it has seen and, on WebSocket reopen, sends `{ type: "resume", fromSeq: <highest> }` so the server replays only the tail it missed. If `fromSeq` is older than the oldest entry retained in the session's EventBuffer ring, the server replies `{ type: "resume_gap", lastSeq }` — the client then fetches a full snapshot via `get_messages` and resets its counter to `lastSeq`. This eliminates the duplicate/out-of-order frames that could appear during mid-stream reconnects. See [docs/internals.md — Event stream ordering & dedup](internals.md#event-stream-ordering--dedup) and [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md).
+Every `event` broadcast carries a server-assigned monotonic `seq` (per session, starting at 1) and wall-clock `ts`. The client tracks the highest `seq` it has seen and, on WebSocket reopen, sends `{ type: "resume", fromSeq: <highest> }` so the server replays only the tail it missed.
+
+Resume replay is bounded twice: the EventBuffer retains only the recent ring of session events, and the serialized replay tail must fit within the resume byte budget. Before replaying, the server also waits briefly for an already-backed-up socket to drain, then paces individual event sends. If the window is missed, the replay would be too large, or the socket remains backed up, the server replies `{ type: "resume_gap", lastSeq }`. The client then fetches a full snapshot via `get_messages` and resets its counter to `lastSeq`.
+
+The fallback preserves ordering without rebuilding the same multi-megabyte send queue that caused the reconnect. Full snapshots are also payload-bounded before delivery, so large tool output or verification reports do not re-enter the socket as one unbounded history frame. See [docs/internals.md — Event stream ordering & dedup](internals.md#event-stream-ordering--dedup) and [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md).
 
 ### Search index events
 
