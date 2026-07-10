@@ -120,6 +120,10 @@
       "reason": "Pi 0.80 browser import boundary canary: src/app/pi-ai-lazy.ts must keep runtime streaming imports lazy/provider-specific and use only package-exported @earendil-works/pi-ai/providers/* subpaths, while preserving the no bare pi-ai runtime import invariant."
     },
     {
+      "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
+      "reason": "Pi 0.80.5 browser journey coverage: pins user-facing /api/models metadata in the settings model selector, browser-safe pi-ai provider/key-test routes, and session reload/restore after transcript parsing."
+    },
+    {
       "path": "tests2/core/headset-accessory.test.ts",
       "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context."
     },
@@ -203,6 +207,10 @@
     },
     {
       "path": "tests2/browser/journeys/project-settings.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
