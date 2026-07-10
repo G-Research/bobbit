@@ -12,7 +12,7 @@ import { ref, createRef } from "lit/directives/ref.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import { Check, Copy, Eye, FolderOpen, Goal as GoalIcon, Minus, Pencil, Plus, UserCheck, Users, Wrench } from "lucide";
+import { Check, Copy, Eye, FolderOpen, Goal as GoalIcon, LoaderCircle, Minus, Pencil, Plus, UserCheck, Users, Wrench } from "lucide";
 
 import { state, renderApp, activeSessionId, isProposalStreaming } from "./state.js";
 import {
@@ -2772,10 +2772,12 @@ const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 
 // Module-level state for the project proposal panel's tab UI.
 let _projectProposalView: ProjectViewMode = "components";
+let _projectProposalAcceptPending = false;
 
 /** Reset module-level proposal panel state. Called on session disconnect. */
 export function resetProjectProposalPanel(): void {
 	_projectProposalView = "components";
+	_projectProposalAcceptPending = false;
 }
 
 function projectProposalPanel() {
@@ -2868,8 +2870,16 @@ function projectProposalPanel() {
 	}
 
 	const handleAccept = async () => {
-		const { acceptProjectProposal } = await import("./session-manager.js");
-		await acceptProjectProposal();
+		if (_projectProposalAcceptPending) return;
+		_projectProposalAcceptPending = true;
+		renderApp();
+		try {
+			const { acceptProjectProposal } = await import("./session-manager.js");
+			await acceptProjectProposal();
+		} finally {
+			_projectProposalAcceptPending = false;
+			renderApp();
+		}
 	};
 
 	const handleDismiss = () => {
@@ -2923,7 +2933,9 @@ function projectProposalPanel() {
 		return known?.label ?? key;
 	};
 
-	const acceptLabel = isRegistered ? "Apply Changes" : "Accept Project";
+	const acceptLabel = _projectProposalAcceptPending
+		? isRegistered ? "Applying…" : "Accepting…"
+		: isRegistered ? "Apply Changes" : "Accept Project";
 	const acceptDisabled = !fields.name?.trim();
 
 	const activeView = _projectProposalView;
@@ -2986,8 +2998,8 @@ function projectProposalPanel() {
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleAccept,
-					disabled: acceptDisabled || streaming,
-					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
+					disabled: acceptDisabled || streaming || _projectProposalAcceptPending,
+					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${_projectProposalAcceptPending ? icon(LoaderCircle, "sm", "animate-spin") : icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
 				})}</span>
 			</div>
 		</div>

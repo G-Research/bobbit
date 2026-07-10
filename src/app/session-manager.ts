@@ -2908,28 +2908,88 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 // PROJECT PROPOSAL ACCEPTANCE
 // ============================================================================
 
-export async function acceptProjectProposal(): Promise<void> {
+export async function acceptProjectProposal(): Promise<boolean> {
 	const proposal = state.activeProposals.project;
-	if (!proposal) return;
+	if (!proposal) {
+		showConnectionError(
+			"Project proposal accept failed",
+			"There is no active project proposal to accept. Re-open the proposal and try again.",
+		);
+		return false;
+	}
 	if (proposal.mode === "registered") {
 		return acceptRegisteredProjectProposal();
 	}
 	return acceptProvisionalProjectProposal();
 }
 
-async function acceptProvisionalProjectProposal(): Promise<void> {
+async function showProjectProposalResponseError(res: Response, title: string, fallback: string): Promise<void> {
+	const data = await res.json().catch(() => ({}));
+	const details = Array.isArray(data?.details) && data.details.length > 0
+		? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
+		: "";
+	showConnectionError(
+		title,
+		details || data?.error || `${fallback} (${res.status})`,
+		{ code: data?.code, stack: data?.stack },
+	);
+}
+
+function showProjectProposalCaughtError(title: string, err: unknown): void {
+	const { message, code, stack } = errorDetails(err);
+	showConnectionError(title, message, { code, stack });
+}
+
+async function writeProjectProposalConfig(projectId: string, fields: Record<string, unknown>): Promise<boolean> {
+	const diff = buildProjectConfigDiff(fields);
+	if (Object.keys(diff).length === 0) return true;
+	try {
+		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
+			method: 'PUT',
+			body: JSON.stringify(diff),
+		});
+		if (!res.ok) {
+			await showProjectProposalResponseError(res, "Failed to save project config", "Config write failed");
+			return false;
+		}
+		return true;
+	} catch (err) {
+		showProjectProposalCaughtError("Failed to save project config", err);
+		return false;
+	}
+}
+
+async function acceptProvisionalProjectProposal(): Promise<boolean> {
 	const proposal = state.activeProposals.project;
-	if (!proposal) return;
+	if (!proposal) {
+		showConnectionError(
+			"Project proposal accept failed",
+			"There is no active project proposal to accept. Re-open the proposal and try again.",
+		);
+		return false;
+	}
 	const { fields, sessionId: propSessionId } = proposal;
 
 	// Find the provisional project for this session
 	const session = state.gatewaySessions.find(s => s.id === propSessionId);
 	const projectId = session?.projectId;
-	if (!projectId) return;
+	if (!projectId) {
+		showConnectionError(
+			"Project proposal accept failed",
+			"This proposal is not linked to a project session. Re-open the project assistant or create the project again.",
+		);
+		return false;
+	}
 
 	// Promote the provisional project
 	const promoted = await promoteProject(projectId, typeof fields.name === "string" ? fields.name : "");
-	if (!promoted) return;
+	if (!promoted) {
+		showConnectionError(
+			"Project proposal accept failed",
+			"The provisional project could not be promoted. Check the gateway error above, then try again.",
+		);
+		return false;
+	}
 
 	// Write config fields. Forward every proposed field — including structured
 	// `components` / `workflows` — to the config endpoint via the shared
@@ -2937,29 +2997,8 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	// so the provisional accept doesn't silently drop the assistant's proposed
 	// workflows and components. Per-component QA config (`config.qa_start_command`
 	// etc.) rides through inside `components[].config`.
-	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
-	if (Object.keys(diff).length > 0) {
-		try {
-			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
-				method: 'PUT',
-				body: JSON.stringify(diff),
-			});
-			if (!res.ok) {
-				const data = await res.json().catch(() => ({}));
-				const details = Array.isArray(data?.details) && data.details.length > 0
-					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
-					: "";
-				showConnectionError(
-					data?.error || `Config write failed (${res.status})`,
-					details || (data?.error ?? ""),
-					{ code: data?.code, stack: data?.stack },
-				);
-				return;
-			}
-		} catch (err) {
-			console.error('[project-proposal] Config write error:', err);
-		}
-	}
+	const wroteConfig = await writeProjectProposalConfig(projectId, fields as Record<string, unknown>);
+	if (!wroteConfig) return false;
 
 	// Refresh
 	setProjects(await fetchProjects());
@@ -2978,6 +3017,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 
 	// Terminate the project assistant session silently (no confirmation dialog)
 	await terminateProjectAssistantSession(propSessionId);
+	return true;
 }
 
 /**
@@ -3018,25 +3058,42 @@ export async function terminateProjectAssistantSession(sessionId: string): Promi
 /** Registered-mode accept: apply the proposal's full config payload to the
  *  live project without terminating or navigating away. The server diffs
  *  against persisted state — we just send everything the proposal carries. */
-async function acceptRegisteredProjectProposal(): Promise<void> {
+async function acceptRegisteredProjectProposal(): Promise<boolean> {
 	const proposal = state.activeProposals.project;
-	if (!proposal) return;
+	if (!proposal) {
+		showConnectionError(
+			"Project proposal accept failed",
+			"There is no active project proposal to accept. Re-open the proposal and try again.",
+		);
+		return false;
+	}
 	const { fields, sessionId: propSessionId } = proposal;
 	const session = state.gatewaySessions.find(s => s.id === propSessionId);
 	const projectId = session?.projectId;
-	if (!projectId) return;
+	if (!projectId) {
+		showConnectionError(
+			"Project proposal accept failed",
+			"This proposal is not linked to a project session. Re-open the project assistant or create the project again.",
+		);
+		return false;
+	}
 
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 
 	// 1. Rename via PUT /api/projects/:id if a name is supplied.
 	if (fieldNameStr) {
 		try {
-			await gatewayFetch(`/api/projects/${projectId}`, {
+			const res = await gatewayFetch(`/api/projects/${projectId}`, {
 				method: "PUT",
 				body: JSON.stringify({ name: fieldNameStr }),
 			});
+			if (!res.ok) {
+				await showProjectProposalResponseError(res, "Failed to rename project", "Project rename failed");
+				return false;
+			}
 		} catch (err) {
-			console.error('[project-proposal] Rename failed:', err);
+			showProjectProposalCaughtError("Failed to rename project", err);
+			return false;
 		}
 	}
 
@@ -3044,32 +3101,11 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	//    persisted state; empty/null values are skipped client-side. Native-YAML
 	//    migrated fields ride through as structured payloads (server rejects
 	//    JSON-encoded strings) — parse if the agent supplied them as a string.
-	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
-	if (Object.keys(diff).length > 0) {
-		try {
-			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
-				method: 'PUT',
-				body: JSON.stringify(diff),
-			});
-			if (!res.ok) {
-				const data = await res.json().catch(() => ({}));
-				const details = Array.isArray(data?.details) && data.details.length > 0
-					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
-					: "";
-				showConnectionError(
-					data?.error || `Config write failed (${res.status})`,
-					details || (data?.error ?? ""),
-					{ code: data?.code, stack: data?.stack },
-				);
-				return;
-			}
-		} catch (err) {
-			console.error('[project-proposal] Config write error:', err);
-		}
-	}
+	const wroteConfig = await writeProjectProposalConfig(projectId, fields as Record<string, unknown>);
+	if (!wroteConfig) return false;
 
 	// 3. Refresh projects list; clear proposal; stay connected.
-	try { setProjects(await fetchProjects()); } catch { /* ignore */ }
+	setProjects(await fetchProjects());
 	// Invalidate the Settings page's per-project config cache so its tab picks
 	// up the just-applied changes the next time it renders (no hard reload).
 	invalidateProjectScopeConfig(projectId);
@@ -3089,6 +3125,7 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	// is a no-op.
 	void notifyProposalDecision(propSessionId, "project", "accepted", fieldNameStr || "(unnamed)");
 	renderApp();
+	return true;
 }
 
 // ============================================================================
