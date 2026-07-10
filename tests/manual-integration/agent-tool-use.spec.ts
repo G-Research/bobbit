@@ -82,6 +82,17 @@ interface GW {
 	proc: ChildProcess; port: number; dir: string;
 	token: string; base: string;
 	defaultProjectId?: string;
+	stdoutTail: () => string;
+	stderrTail: () => string;
+}
+
+interface ApiModel {
+	id: string;
+	name?: string;
+	provider: string;
+	authenticated: boolean;
+	sessionSelectable?: boolean;
+	sessionUnavailableReason?: string;
 }
 
 const PROJECT_REQUIRED_POST = new Set(["/api/sessions", "/api/goals", "/api/staff"]);
@@ -119,8 +130,10 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
-	proc.stderr!.on("data", (c: Buffer) => { stderr += c; });
-	proc.stdout!.on("data", () => {});
+	let stdout = "";
+	const appendTail = (current: string, chunk: Buffer) => (current + chunk.toString()).slice(-12_000);
+	proc.stderr!.on("data", (c: Buffer) => { stderr = appendTail(stderr, c); });
+	proc.stdout!.on("data", (c: Buffer) => { stdout = appendTail(stdout, c); });
 	const deadline = Date.now() + 120_000;
 	while (Date.now() < deadline) {
 		if (proc.exitCode !== null) throw new Error(`Gateway exited (${proc.exitCode}):\n${stderr}`);
@@ -143,7 +156,15 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		`http://host.docker.internal:${port}`,
 		"utf-8",
 	);
-	return { proc, port, dir, token, base: `http://127.0.0.1:${port}` };
+	return {
+		proc,
+		port,
+		dir,
+		token,
+		base: `http://127.0.0.1:${port}`,
+		stdoutTail: () => stdout,
+		stderrTail: () => stderr,
+	};
 }
 
 async function stopGW(gw: GW): Promise<void> {
@@ -180,25 +201,184 @@ function api(gw: GW, path: string, opts: RequestInit = {}) {
 	return fetch(`${gw.base}${path}`, { ...opts, headers: { "Content-Type": "application/json", Authorization: `Bearer ${gw.token}`, ...(opts.headers as Record<string, string> || {}) } });
 }
 
+function truncateDiagnostic(text: string, max = 4_000): string {
+	return text.length > max ? `${text.slice(0, max)}\n...<truncated ${text.length - max} chars>` : text;
+}
+
+function jsonDiagnostic(value: unknown, max = 4_000): string {
+	try { return truncateDiagnostic(JSON.stringify(value, null, 2), max); } catch { return String(value); }
+}
+
+async function buildSessionDiagnostics(gw: GW, id: string): Promise<string> {
+	const lines: string[] = [];
+	lines.push(`sessionId=${id}`);
+	lines.push(`gateway=${gw.base}`);
+	lines.push(`stateDir=${join(gw.dir, ".bobbit", "state")}`);
+	lines.push(`sessionsJson=${join(gw.dir, ".bobbit", "state", "sessions.json")}`);
+	try {
+		const session = await getSession(gw, id);
+		lines.push(`latestSessionApi=${jsonDiagnostic(session)}`);
+		if (session?.agentSessionFile) lines.push(`agentSessionFile=${session.agentSessionFile}`);
+		if (session?.worktreePath) lines.push(`worktreePath=${session.worktreePath}`);
+	} catch (err) {
+		lines.push(`latestSessionApiError=${err instanceof Error ? err.message : String(err)}`);
+	}
+	try {
+		const status = await (await api(gw, "/api/sandbox-status")).json();
+		lines.push(`sandboxStatus=${jsonDiagnostic(status, 2_000)}`);
+	} catch (err) {
+		lines.push(`sandboxStatusError=${err instanceof Error ? err.message : String(err)}`);
+	}
+	try {
+		const sessionsPath = join(gw.dir, ".bobbit", "state", "sessions.json");
+		if (existsSync(sessionsPath)) {
+			const parsed = JSON.parse(readFileSync(sessionsPath, "utf-8"));
+			const sessions = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+			const persisted = sessions.find((s: any) => s?.id === id);
+			if (persisted) lines.push(`persistedSession=${jsonDiagnostic(persisted)}`);
+		}
+	} catch (err) {
+		lines.push(`persistedSessionError=${err instanceof Error ? err.message : String(err)}`);
+	}
+	const stderr = gw.stderrTail().trim();
+	const stdout = gw.stdoutTail().trim();
+	if (stderr) lines.push(`gatewayStderrTail=\n${truncateDiagnostic(stderr)}`);
+	if (stdout) lines.push(`gatewayStdoutTail=\n${truncateDiagnostic(stdout)}`);
+	return lines.join("\n");
+}
+
 async function pollIdle(gw: GW, id: string, ms = 120_000) {
 	const t0 = Date.now();
+	let lastSession: any;
+	let lastStatus = "unknown";
 	while (Date.now() - t0 < ms) {
 		let res: Response;
 		try { res = await api(gw, `/api/sessions/${id}`); } catch { await new Promise(r => setTimeout(r, 1_000)); continue; }
-		if (res.status === 404) { await new Promise(r => setTimeout(r, 1_000)); continue; }
+		if (res.status === 404) { lastStatus = "404"; await new Promise(r => setTimeout(r, 1_000)); continue; }
 		const s = await res.json();
+		lastSession = s;
+		lastStatus = s.status || "unknown";
 		if (s.status === "idle") return s;
-		if (s.status === "archived") throw new Error(`Session ${id} archived`);
+		if (s.status === "archived") throw new Error(`Session ${id} archived\n${await buildSessionDiagnostics(gw, id)}`);
 		if (s.status === "error" || s.status === "terminated") {
 			const extra = s.restoreError ? `\n  restoreError: ${s.restoreError}` : "";
-			throw new Error(`Session ${id} ${s.status}${extra}`);
+			throw new Error(`Session ${id} ${s.status}${extra}\n${await buildSessionDiagnostics(gw, id)}`);
 		}
 		await new Promise(r => setTimeout(r, 1_000));
 	}
-	throw new Error(`Session ${id} not idle in ${ms}ms`);
+	const diagnostics = await buildSessionDiagnostics(gw, id);
+	throw new Error(`Session ${id} not idle in ${ms}ms (last status: ${lastStatus}; last session: ${jsonDiagnostic(lastSession, 1_500)})\n${diagnostics}`);
 }
 
 async function getSession(gw: GW, id: string) { return (await api(gw, `/api/sessions/${id}`)).json(); }
+
+function splitModelPref(pref: string): { provider: string; id: string } | undefined {
+	const slash = pref.indexOf("/");
+	if (slash <= 0 || slash === pref.length - 1) return undefined;
+	return { provider: pref.slice(0, slash), id: pref.slice(slash + 1) };
+}
+
+function credentialHint(provider: string): string {
+	switch (provider) {
+		case "anthropic": return "ANTHROPIC_API_KEY or Anthropic OAuth";
+		case "openai": return "OPENAI_API_KEY";
+		case "openai-codex": return "OpenAI Codex OAuth/login credentials";
+		case "google": return "GOOGLE_API_KEY";
+		case "google-gemini-cli": return "Google Code Assist OAuth/login credentials";
+		case "amazon-bedrock": return "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (and region)";
+		case "aigw": return "AI Gateway configuration";
+		default: return `provider credentials for ${provider}`;
+	}
+}
+
+function summarizeModels(models: ApiModel[]): string {
+	const byProvider = new Map<string, { total: number; authed: number; selectable: number }>();
+	for (const m of models) {
+		const current = byProvider.get(m.provider) ?? { total: 0, authed: 0, selectable: 0 };
+		current.total++;
+		if (m.authenticated) current.authed++;
+		if (m.authenticated && m.sessionSelectable !== false) current.selectable++;
+		byProvider.set(m.provider, current);
+	}
+	return Array.from(byProvider.entries())
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([provider, s]) => `${provider}: ${s.authed}/${s.total} authenticated, ${s.selectable} session-selectable`)
+		.join("; ") || "none";
+}
+
+async function getGoogleCodeAssistStatus(gw: GW): Promise<string> {
+	try {
+		const res = await api(gw, "/api/oauth/status?provider=google-gemini-cli");
+		if (!res.ok) return `status ${res.status}`;
+		const body = await res.json();
+		return body?.authenticated ? "authenticated" : `not authenticated${body?.expires ? ` (expires=${body.expires})` : ""}`;
+	} catch (err) {
+		return `unavailable: ${err instanceof Error ? err.message : String(err)}`;
+	}
+}
+
+async function manualToolUsePreflight(gw: GW): Promise<string | undefined> {
+	const [modelsRes, prefsRes] = await Promise.all([api(gw, "/api/models"), api(gw, "/api/preferences")]);
+	if (!modelsRes.ok) throw new Error(`Manual tool-use preflight failed to load /api/models: ${modelsRes.status} ${await modelsRes.text().catch(() => "")}`);
+	if (!prefsRes.ok) throw new Error(`Manual tool-use preflight failed to load /api/preferences: ${prefsRes.status} ${await prefsRes.text().catch(() => "")}`);
+	const models = await modelsRes.json() as ApiModel[];
+	const prefs = await prefsRes.json() as Record<string, unknown>;
+	const manualModel = process.env.MANUAL_TEST_MODEL?.trim();
+	const configuredModel = manualModel || (typeof prefs["default.sessionModel"] === "string" ? String(prefs["default.sessionModel"]).trim() : "");
+	const googleCodeAssistStatus = await getGoogleCodeAssistStatus(gw);
+	const modelSummary = summarizeModels(models);
+	const authenticatedCandidates = models
+		.filter(m => m.authenticated && m.sessionSelectable !== false)
+		.slice(0, 8)
+		.map(m => `${m.provider}/${m.id}`);
+
+	if (configuredModel) {
+		const parsed = splitModelPref(configuredModel);
+		if (!parsed) {
+			throw new Error(`Manual tool-use preflight: ${manualModel ? "MANUAL_TEST_MODEL" : "default.sessionModel"} must be \"<provider>/<model>\", got \"${configuredModel}\".`);
+		}
+		const match = models.find(m => m.provider === parsed.provider && m.id === parsed.id);
+		if (!match) {
+			throw new Error(
+				`Manual tool-use preflight: configured model \"${configuredModel}\" is not present in /api/models. ` +
+				`Configure ${credentialHint(parsed.provider)} or choose an available authenticated model. ` +
+				`Model summary: ${modelSummary}. Google Code Assist OAuth: ${googleCodeAssistStatus}.`,
+			);
+		}
+		if (!match.authenticated) {
+			throw new Error(
+				`Manual tool-use preflight: configured model \"${configuredModel}\" is present but not authenticated. ` +
+				`Configure ${credentialHint(parsed.provider)} before running this real-agent tool-use canary. ` +
+				`Model summary: ${modelSummary}. Google Code Assist OAuth: ${googleCodeAssistStatus}.`,
+			);
+		}
+		if (match.sessionSelectable === false) {
+			throw new Error(
+				`Manual tool-use preflight: configured model \"${configuredModel}\" is authenticated but not session-selectable` +
+				`${match.sessionUnavailableReason ? ` (${match.sessionUnavailableReason})` : ""}. Choose a session-capable MANUAL_TEST_MODEL.`,
+			);
+		}
+		console.log(`  Manual model preflight: using ${configuredModel} (${match.name || match.id})`);
+		return undefined;
+	}
+
+	if (authenticatedCandidates.length === 0 && googleCodeAssistStatus !== "authenticated") {
+		return [
+			"Manual agent-tool-use skipped: no usable MANUAL_TEST_MODEL/default.sessionModel or provider credentials are configured.",
+			"With an unpinned spawned agent, pi-coding-agent can fall back to its default Code Assist model; in this environment Google Code Assist is unauthenticated, so the test would fail before exercising Bobbit/Pi tool cards.",
+			"Set MANUAL_TEST_MODEL=\"<provider>/<model>\" and configure that provider's credentials (for example ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, OpenAI Codex OAuth, Google Code Assist OAuth, or AI Gateway), then rerun this spec.",
+			`Model summary: ${modelSummary}.`,
+			`Google Code Assist OAuth: ${googleCodeAssistStatus}.`,
+		].join(" ");
+	}
+
+	console.log(
+		`  Manual model preflight: no MANUAL_TEST_MODEL/default.sessionModel set; ` +
+		`/api/models has authenticated candidates (${authenticatedCandidates.join(", ") || "none"}). ` +
+		`If this run binds the unauthenticated Code Assist default, rerun with MANUAL_TEST_MODEL set explicitly.`,
+	);
+	return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Browser helpers
@@ -454,6 +634,11 @@ test.describe.serial("Agent tool use", () => {
 	let dir: string;
 	let port: number;
 	let sandboxAvailable = false;
+	let manualPreflightSkipMessage: string | undefined;
+
+	test.beforeEach(() => {
+		if (manualPreflightSkipMessage) test.skip(true, manualPreflightSkipMessage);
+	});
 
 	test.beforeAll(async ({}, ti) => {
 		ti.setTimeout(180_000);
@@ -492,6 +677,12 @@ test.describe.serial("Agent tool use", () => {
 
 		gw = await startGW(dir, port);
 		console.log(`  Gateway :${port}  cwd=${dir}`);
+
+		manualPreflightSkipMessage = await manualToolUsePreflight(gw);
+		if (manualPreflightSkipMessage) {
+			console.log(`  ${manualPreflightSkipMessage}`);
+			return;
+		}
 
 		const regRes = await api(gw, "/api/projects", {
 			method: "POST",
