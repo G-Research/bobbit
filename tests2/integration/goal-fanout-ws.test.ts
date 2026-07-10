@@ -25,6 +25,44 @@ function connectViewerWs(goalId?: string): Promise<WsConnection> {
 		const ws = new WebSocket(`${wsBase()}/ws/viewer`);
 		const messages: WsMsg[] = [];
 		const waiters: Array<{ fromIndex: number; pred: (m: WsMsg) => boolean; res: (m: WsMsg) => void; rej: (e: Error) => void; timer: NodeJS.Timeout }> = [];
+		let settled = false;
+
+		function waitForFrom(fromIndex: number, pred: (m: WsMsg) => boolean, timeoutMs = 15_000): Promise<WsMsg> {
+			const existing = messages.slice(fromIndex).find(pred);
+			if (existing) return Promise.resolve(existing);
+			return new Promise((res, rej) => {
+				const timer = setTimeout(() => {
+					const idx = waiters.findIndex((w) => w.timer === timer);
+					if (idx >= 0) waiters.splice(idx, 1);
+					rej(new Error(`viewer WS waitForFrom timed out (${timeoutMs}ms)`));
+				}, timeoutMs);
+				waiters.push({ fromIndex, pred, res, rej, timer });
+			});
+		}
+
+		function fail(error: Error): void {
+			if (settled) return;
+			settled = true;
+			for (const waiter of waiters.splice(0)) {
+				clearTimeout(waiter.timer);
+				waiter.rej(error);
+			}
+			reject(error);
+		}
+
+		function buildConnection(): WsConnection {
+			return {
+				ws,
+				messages,
+				waitFor(pred, timeoutMs = 15_000) {
+					return waitForFrom(0, pred, timeoutMs);
+				},
+				waitForFrom,
+				messageCount: () => messages.length,
+				send: (msg) => ws.send(JSON.stringify(msg)),
+				close: () => ws.close(),
+			};
+		}
 
 		ws.on("message", (raw) => {
 			const msg: WsMsg = JSON.parse(raw.toString());
@@ -38,39 +76,21 @@ function connectViewerWs(goalId?: string): Promise<WsConnection> {
 				}
 			}
 		});
-		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: readE2EToken(), ...(goalId ? { goalId } : {}) })));
-		ws.on("error", reject);
+		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: readE2EToken() })));
+		ws.on("error", fail);
+		ws.on("close", () => fail(new Error("viewer WS closed before ready")));
 
-		const authTimer = setTimeout(() => reject(new Error("viewer WS auth timeout")), 10_000);
-		const authPoll = setInterval(() => {
-			if (!messages.some((m) => m.type === "auth_ok")) return;
-			clearTimeout(authTimer);
-			clearInterval(authPoll);
-			const conn: WsConnection = {
-				ws,
-				messages,
-				waitFor(pred, timeoutMs = 15_000) {
-					const existing = messages.find(pred);
-					if (existing) return Promise.resolve(existing);
-					return new Promise((res, rej) => {
-						const timer = setTimeout(() => rej(new Error(`viewer WS waitFor timed out (${timeoutMs}ms)`)), timeoutMs);
-						waiters.push({ fromIndex: 0, pred, res, rej, timer });
-					});
-				},
-				waitForFrom(fromIndex, pred, timeoutMs = 15_000) {
-					const existing = messages.slice(fromIndex).find(pred);
-					if (existing) return Promise.resolve(existing);
-					return new Promise((res, rej) => {
-						const timer = setTimeout(() => rej(new Error(`viewer WS waitForFrom timed out (${timeoutMs}ms)`)), timeoutMs);
-						waiters.push({ fromIndex, pred, res, rej, timer });
-					});
-				},
-				messageCount: () => messages.length,
-				send: (msg) => ws.send(JSON.stringify(msg)),
-				close: () => ws.close(),
-			};
-			resolve(conn);
-		}, 25);
+		void waitForFrom(0, (m) => m.type === "auth_ok", 10_000)
+			.then(async () => {
+				const cursor = messages.length;
+				if (goalId) ws.send(JSON.stringify({ type: "subscribe_goal", goalId }));
+				ws.send(JSON.stringify({ type: "ping" }));
+				await waitForFrom(cursor, (m) => m.type === "pong", 10_000);
+				if (settled) return;
+				settled = true;
+				resolve(buildConnection());
+			})
+			.catch(fail);
 	});
 }
 
