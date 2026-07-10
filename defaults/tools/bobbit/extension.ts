@@ -494,6 +494,12 @@ const ORCH_OPS: Record<string, OpSpec> = {
 
 // ── bobbit_admin operation catalogue ──────────────────────────────────
 const ADMIN_OPS: Record<string, OpSpec> = {
+	create_project: {
+		method: "POST",
+		buildPath: () => "/api/projects",
+		buildBody: (p) => ({ ...(p.body ?? {}), name: p.name, rootPath: p.rootPath }),
+		required: ["name", "rootPath"],
+	},
 	update_project_config: {
 		method: "PUT",
 		buildPath: (p) => `/api/projects/${p.projectId}/config`,
@@ -738,7 +744,8 @@ export default function (pi: ExtensionAPI) {
 			operation: opUnion(ADMIN_OPS),
 			projectId: Type.Optional(Type.String({ description: "Project id." })),
 			workflowId: Type.Optional(Type.String({ description: "Workflow id." })),
-			name: Type.Optional(Type.String({ description: "Resource name (tool/role)." })),
+			name: Type.Optional(Type.String({ description: "Resource name (tool/role) or project name for create_project." })),
+			rootPath: Type.Optional(Type.String({ description: "Project root path for create_project." })),
 			provider: Type.Optional(Type.String({ description: "Provider id for provider-key ops." })),
 			key: Type.Optional(Type.String({ description: "API key value for set_provider_key." })),
 			scope: Type.Optional(Type.String({ description: "Config scope: server or project." })),
