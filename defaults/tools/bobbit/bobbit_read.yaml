@@ -1,7 +1,7 @@
 name: bobbit_read
 description: "Read-only gateway introspection: goals, sessions, projects, tasks, gates, search, maintenance probes."
 summary: "Read gateway state (goals/sessions/projects/…)"
-params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, view?, probe?]
+params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, includeArchived?, view?, probe?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -35,8 +35,9 @@ detail_docs: >-
 
   - Semantic filters: `q` (free-text list/search filter), `type` (search result
   type), `archived` (list_goals archive opt-in), `include` (list_sessions and
-  search archive opt-in, e.g. `archived`), `view` (gates/tasks projection),
-  `probe` (maintenance_inspect selector).
+  search archive opt-in, e.g. `archived`), `includeArchived` (REST-style search
+  archive opt-in), `view` (gates/tasks projection), `probe`
+  (maintenance_inspect selector).
 
   - Shared paging: `limit`, `offset`, `after`, `cursor`. List-style operations
   use `limit=50` and `offset=0` by default, clamp `limit` to a maximum of `200`,
@@ -79,6 +80,11 @@ detail_docs: >-
   - `search` — default calls drop any archived hit from `results`. Pass
   `include: "archived"` (or the REST-style `includeArchived: true`) to include
   archived rows in the ranked results.
+
+  This is the agent-facing tool contract. UI clients may explicitly call REST
+  `/api/search` with `includeArchived=true` to preserve archived results and
+  archived badges; that UI opt-in does not change `bobbit_read.search`'s
+  live-only default.
 
   - Other list operations (`list_projects`, `list_tasks`, `list_gates`, etc.)
   never surface archived rows on their default REST paths, so no extra filtering
@@ -145,7 +151,7 @@ detail_docs: >-
 
   | `session_cost` | `/api/sessions/:sessionId/cost` | `sessionId` | — |
 
-  | `search` | `/api/search` (`?q`, `?type`, `?limit`, `?offset`, `?projectId`, `?includeArchived`) | `q` | `q`, `type`, `projectId`, `limit`, `offset`; archived hidden unless `include=archived` |
+  | `search` | `/api/search` (`?q`, `?type`, `?limit`, `?offset`, `?projectId`, `?includeArchived`) | `q` | `q`, `type`, `projectId`, `limit`, `offset`; archived hidden unless `include=archived` / `includeArchived=true` |
 
   | `list_projects` | `/api/projects` | — | `limit`, `offset` (tool-side fallback) |
 
