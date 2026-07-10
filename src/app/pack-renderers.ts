@@ -8,8 +8,8 @@
 // over any eager built-in of the same name) that:
 //   1. fetches the pre-built ESM renderer bytes from GET /api/tools/:tool/renderer
 //      (authed via gatewayFetch — the bare module URL would not carry the bearer);
-//   2. imports it through a Blob URL with /* @vite-ignore */ so Vite does not try
-//      to pre-bundle a runtime URL (works identically in dev + static dist);
+//   2. imports it as an ESM module (Blob URL in the browser; data URL under
+//      Node-backed Vitest, where blob:nodedata:* is not importable);
 //   3. invokes the module's default factory, handing it the host's own lit
 //      toolkit (`html`/`nothing` + `renderHeader`) so the pack renderer shares the
 //      app's single lit instance and standard header shape.
@@ -23,6 +23,7 @@ import { html, nothing } from "lit";
 import { registerLazyToolRenderer, unregisterPackRenderer, renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { fetchTools } from "./api.js";
+import { importJavaScriptModuleBlob } from "./javascript-module-import.js";
 
 /** Host toolkit handed to a pack renderer's factory. Keeps the pack on the
  *  app's single `lit` instance and standard `renderHeader()` shape. */
@@ -88,15 +89,10 @@ export function registerPackRenderers(
 				const resp = await gatewayFetch(url); // authed (admin bearer); no session binding needed
 				if (!resp.ok) throw new Error(`renderer ${t.name} HTTP ${resp.status}`);
 				const blob = await resp.blob();
-				const objUrl = URL.createObjectURL(blob.slice(0, blob.size, "text/javascript"));
-				try {
-					const mod = await import(/* @vite-ignore */ objUrl);
-					const factory = (mod as any).default ?? (mod as any).createRenderer;
-					if (typeof factory !== "function") throw new Error("renderer module has no factory export");
-					return factory(HOST_TOOLKIT); // → ToolRenderer
-				} finally {
-					URL.revokeObjectURL(objUrl);
-				}
+				const mod = await importJavaScriptModuleBlob(blob);
+				const factory = (mod as any).default ?? (mod as any).createRenderer;
+				if (typeof factory !== "function") throw new Error("renderer module has no factory export");
+				return factory(HOST_TOOLKIT); // → ToolRenderer
 			},
 			{ override: true },
 		);
