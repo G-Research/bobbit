@@ -383,6 +383,63 @@ export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedr
  * terminal assistant message OR on an explicit `retryLastPrompt` call.
  */
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
+const BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS = 3;
+
+export type ErroredPromptRecoveryDecision =
+	| {
+		recoverable: true;
+		reason: "provider-backoff" | "transient" | "generic";
+		attempts: number;
+		maxAttempts?: number;
+	}
+	| {
+		recoverable: false;
+		reason: "not-errored" | "missing-error" | "non-retryable" | "not-retryable" | "retry-budget-exhausted";
+		message: string;
+		attempts?: number;
+		maxAttempts?: number;
+	};
+
+export function classifyErroredPromptRecovery(input: {
+	lastTurnErrored?: boolean;
+	lastTurnErrorMessage?: string;
+	transientRetryAttempts?: number;
+}): ErroredPromptRecoveryDecision {
+	if (!input.lastTurnErrored) {
+		return { recoverable: false, reason: "not-errored", message: "Session is not in an errored turn state." };
+	}
+	const errMsg = input.lastTurnErrorMessage || "";
+	if (!errMsg) {
+		return { recoverable: false, reason: "missing-error", message: "Session has no recorded retryable error message." };
+	}
+	if (isNonRetryableAgentError(errMsg)) {
+		return { recoverable: false, reason: "non-retryable", message: "Last session error is non-retryable and requires human/upstream action." };
+	}
+	if (isProviderBackoffError(errMsg)) {
+		return { recoverable: true, reason: "provider-backoff", attempts: input.transientRetryAttempts ?? 0 };
+	}
+	const isTransient = isTransientReviewError(errMsg);
+	const isGeneric = !isTransient && isRetryableGenericAgentError(errMsg);
+	if (!isTransient && !isGeneric) {
+		return { recoverable: false, reason: "not-retryable", message: "Last session error is not classified as retryable/transient." };
+	}
+	const attempts = input.transientRetryAttempts ?? 0;
+	if (attempts >= BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS) {
+		return {
+			recoverable: false,
+			reason: "retry-budget-exhausted",
+			message: "Retryable session error has exhausted its automatic retry budget and requires human/upstream action.",
+			attempts,
+			maxAttempts: BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS,
+		};
+	}
+	return {
+		recoverable: true,
+		reason: isGeneric ? "generic" : "transient",
+		attempts,
+		maxAttempts: BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS,
+	};
+}
 
 /**
  * Upper bound on the number of consecutive immediate (tick-0) redrains that
@@ -4278,7 +4335,7 @@ export class SessionManager {
 	 *   system errors): bounded 3 attempts at 1s/5s/60s, then manual retry.
 	 */
 	private maybeAutoRetryTransient(session: SessionInfo): boolean {
-		const BOUNDED_MAX_ATTEMPTS = 3;
+		const BOUNDED_MAX_ATTEMPTS = BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS;
 		const PROVIDER_BACKOFF_MAX_MS = 300_000; // 5 minutes
 		const GENERIC_RETRY_DELAYS_MS = [1000, 5000, 60_000] as const;
 		const errMsg = session.lastTurnErrorMessage || "";
@@ -4422,11 +4479,17 @@ export class SessionManager {
 		return removedAny;
 	}
 
-	private consumeQueuedRetryRow(session: SessionInfo, candidateTexts: Array<string | undefined>, images?: Array<{ type: "image"; data: string; mimeType: string }>): boolean {
+	private consumeQueuedRetryRow(
+		session: SessionInfo,
+		candidateTexts: Array<string | undefined>,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		excludeIds?: ReadonlySet<string>,
+	): boolean {
 		const textSet = new Set(candidateTexts.filter((text): text is string => typeof text === "string"));
 		if (textSet.size === 0) return false;
 		const imageSignature = JSON.stringify(images ?? []);
 		const row = session.promptQueue.toArray().find((queued) => {
+			if (excludeIds?.has(queued.id)) return false;
 			if (!textSet.has(queued.text)) return false;
 			return JSON.stringify(queued.images ?? []) === imageSignature;
 		});
@@ -4436,16 +4499,47 @@ export class SessionManager {
 		return removed;
 	}
 
+	getErroredPromptRecoveryDecision(sessionId: string): ErroredPromptRecoveryDecision {
+		const session = this.sessions.get(sessionId);
+		if (!session) {
+			return { recoverable: false, reason: "not-errored", message: "Session not found." };
+		}
+		return classifyErroredPromptRecovery(session);
+	}
+
+	enqueuePromptForRetryRecovery(sessionId: string, text: string, opts?: {
+		images?: Array<{ type: "image"; data: string; mimeType: string }>;
+		attachments?: unknown[];
+		isSteered?: boolean;
+		modelText?: string;
+		suppressTitleGen?: boolean;
+		source?: PromptSource;
+	}): { status: "queued"; queuedId?: string } {
+		const session = this.sessions.get(sessionId);
+		if (!session) return { status: "queued" };
+		session.lastPromptSource = opts?.source ?? "user";
+		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
+		const queued = session.promptQueue.enqueue(dispatchText, {
+			images: opts?.images,
+			attachments: opts?.attachments,
+			isSteered: opts?.isSteered,
+			suppressTitleGen: opts?.suppressTitleGen,
+		});
+		this.broadcastQueue(session);
+		return { status: "queued", queuedId: queued.id };
+	}
+
 	/**
 	 * Retry after a model/API error. Behaviour depends on context:
 	 * - Fresh response error (no tool calls): re-sends the original user prompt
 	 * - Mid-work error (tool calls already executed): sends a system continuation
 	 */
-	async retryLastPrompt(sessionId: string, opts?: { auto?: boolean }): Promise<void> {
+	async retryLastPrompt(sessionId: string, opts?: { auto?: boolean; preserveQueueIds?: string[] }): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
 		const isAuto = opts?.auto === true;
+		const preserveQueueIds = new Set(opts?.preserveQueueIds ?? []);
 		const hadToolCalls = session.turnHadToolCalls;
 		// Capture before clearing — used to route a live blank-text-poisoned
 		// session through respawn so it rehydrates from the sanitized transcript.
@@ -4512,7 +4606,7 @@ export class SessionManager {
 			// send it a second time. Prefer tracked recovery row IDs; fall back to
 			// text matching for sessions created before the ID ledger existed.
 			if (!this.consumeRecoveredPromptDispatchRows(session)) {
-				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages);
+				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
 			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
 		} else {
