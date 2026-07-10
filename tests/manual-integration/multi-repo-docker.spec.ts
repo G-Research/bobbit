@@ -40,6 +40,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { manualTmpRoot } from "./manual-test-paths.ts";
+import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 import { fileURLToPath } from "node:url";
 import { setupMultiRepoFixture } from "../fixtures/multi-repo/setup-fixture.mjs";
 
@@ -75,6 +76,7 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	seedManualTestModelPreferences(dir);
 	const proc = spawn(process.execPath, [
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,

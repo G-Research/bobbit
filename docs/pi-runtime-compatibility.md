@@ -131,6 +131,8 @@ The `0.80.6` upgrade found two environment-sensitive blockers that the manual su
 - **Missing usable model credentials** — if no explicit `MANUAL_TEST_MODEL`/provider credential is configured and the gateway default resolves to unauthenticated Code Assist, `agent-tool-use` skips/fails early with an actionable credential message instead of timing out after sandbox setup. Tool-card assertions remain strict.
 - **Docker/local transport availability** — Docker must be reachable for sandboxed manual coverage. Multi-repo goal-readiness polling retries transient local fetch resets such as `TypeError: fetch failed` / `ECONNRESET`, but still fails immediately on HTTP errors, `setupStatus=error`, or deadline expiry.
 
+For live developer smoke runs, set `BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1` so isolated manual gateways inherit the current server's model/provider preferences and Pi agent auth/config files from `BOBBIT_DIR` without copying live sessions, goals, projects, gateway tokens, or TLS material. `MANUAL_TEST_MODEL` and `MANUAL_TEST_THINKING_LEVEL` remain highest precedence and override the inherited session model/thinking defaults.
+
 Use the manual diagnostics as blockers, not as proof of compatibility. A skipped credential-backed run does not verify Pi built-in tools, Bobbit extension tools, MCP/meta tools, or OAuth-backed providers.
 
 ## Upgrade checklist
