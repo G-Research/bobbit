@@ -114,6 +114,11 @@ auxiliary arrays the REST endpoints attach for the UI:
 - `search` — drops archived hits from `results`. Pass `include=archived` (or
   the REST-style `includeArchived=true`) to include archived rows.
 
+This is the agent-facing tool contract. UI clients can still opt REST
+`/api/search` into archived results with `includeArchived=true` so the full
+search page keeps archived results and badges; `bobbit_read.search` remains
+live-only unless its caller opts in.
+
 Other list operations (`list_projects`, `list_tasks`, `list_gates`, etc.) do
 not expose archived rows on their default REST paths and have no archive
 opt-in.
@@ -232,7 +237,9 @@ grant policy is the authority and the admin token never leaves the server
 
 ## Result and error shape
 
-- **Success** — the tool returns the gateway's JSON verbatim.
+- **Success** — non-list operations return the gateway JSON unchanged. List-style
+  `bobbit_read` operations may add pagination metadata and apply the
+  archive-hidden postprocessor described above.
 - **204 No Content** (e.g. marketplace uninstall) — returns `{ ok: true }`.
 - **Failure** — the gateway's structured `{ error, code }` body is surfaced as a
   single readable error line that includes the human message, the machine

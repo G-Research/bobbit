@@ -195,7 +195,7 @@ operations would (a) blow the param-description budget and (b) be unwieldy.
   - A flat set of `Type.Optional(...)` shared params covering the union of
     fields the operations use (e.g. `goalId?`, `sessionId?`, `taskId?`,
     `projectId?`, `gateId?`, `q?`, `limit?`, `offset?`, `after?`, `cursor?`,
-    `archived?`, `include?`, `body?`). Common
+    `archived?`, `include?`, `includeArchived?`, `body?`). Common
     scalar ids are first-class optional fields; free-form request bodies for the
     richer POST/PUT operations are passed via a single
     `body?: Type.Optional(Type.Record(Type.String(), Type.Unknown()))` (or
@@ -249,6 +249,11 @@ never sees archived rows it did not ask for.
 - `search` — drops archived hits from `results`; `include=archived` (or the
   REST query `includeArchived=true`) forwards `includeArchived=true` to
   `/api/search` and keeps archived hits.
+
+This is the agent-facing tool contract. UI clients that intentionally need
+archived search rows, such as the full search page, may call REST `/api/search`
+with `includeArchived=true`; that explicit UI opt-in preserves REST
+compatibility without changing the live-only default for `bobbit_read.search`.
 
 Other list operations do not surface archived rows on their default REST paths,
 so no filter is applied and there is no archive opt-in for them.
@@ -470,6 +475,7 @@ Type.Object({
   cursor: Type.Optional(Type.String({ description: "Generic cursor alias; cursor wins over offset." })),
   archived: Type.Optional(Type.Boolean({ description: "Include archived items." })),
   include: Type.Optional(Type.String({ description: "Inclusion flag, e.g. 'archived'." })),
+  includeArchived: Type.Optional(Type.Boolean({ description: "REST-style search archive opt-in." })),
   view: Type.Optional(Type.String({ description: "Response view, e.g. 'summary'." })),
   scope: Type.Optional(Type.String({ description: "Config scope: server or project." })),
   cascade: Type.Optional(Type.Boolean({ description: "Cascade to descendants (archive/teardown)." })),
