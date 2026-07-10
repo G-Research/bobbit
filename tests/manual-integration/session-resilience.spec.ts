@@ -1178,7 +1178,7 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			// Non-sandbox worktree sessions: verify host worktree directory exists on disk
 			if (!v.sandboxed && v.worktree && restored && existsSync(s.cwd)) {
 				const br = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: s.cwd, encoding: "utf-8" }).trim();
-				expect(br).not.toBe("master");
+				expect(br).not.toMatch(/^(main|master)$/);
 				console.log(`    worktree dir exists, branch=${br} ✓`);
 			} else if (!v.sandboxed && v.worktree && restored) {
 				console.log(`    WARNING: worktree dir ${s.cwd} does not exist on disk`);
@@ -1186,20 +1186,22 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 
 			// ── Git status API check ──
 			// After restart, the git-status endpoint should still return valid data
+			let primaryBranch = "master";
 			if (restored) {
 				const gitStatus = await fetchGitStatusApi(gw, s.id);
 				if (gitStatus) {
+					primaryBranch = gitStatus.primaryBranch || primaryBranch;
 					expect(gitStatus.branch).toBeTruthy();
 					if (!v.sandboxed) {
 						if (v.worktree) {
-							expect(gitStatus.branch).not.toBe("master");
+							expect(gitStatus.branch).not.toBe(primaryBranch);
 							expect(gitStatus.isOnPrimary).toBe(false);
 						} else {
-							expect(gitStatus.branch).toBe("master");
+							primaryBranch = gitStatus.branch;
 							expect(gitStatus.isOnPrimary).toBe(true);
 						}
 					}
-					console.log(`    git-status API: branch=${gitStatus.branch} clean=${gitStatus.clean} isOnPrimary=${gitStatus.isOnPrimary} ✓`);
+					console.log(`    git-status API: branch=${gitStatus.branch} primary=${primaryBranch} clean=${gitStatus.clean} isOnPrimary=${gitStatus.isOnPrimary} ✓`);
 				} else {
 					console.log(`    git-status API: not available (may be expected for sandbox after restart)`);
 				}
@@ -1226,9 +1228,9 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			if (widgetText) {
 				expect(widgetText).toContain("⎇");
 				if (!v.sandboxed && !v.worktree) {
-					expect(widgetText).toContain("master");
+					expect(widgetText).toContain(primaryBranch);
 				} else if (!v.sandboxed && v.worktree) {
-					expect(widgetText).not.toContain("master");
+					expect(widgetText).not.toContain(primaryBranch);
 				}
 				console.log(`    git-status widget: "${widgetText}" ✓`);
 			} else {
