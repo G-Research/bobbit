@@ -10,6 +10,12 @@ import path from "node:path";
 
 import { GateArtifactResolutionError, buildArtifactLookup, resolveArtifactFromLookup } from "../../src/server/gate-artifacts.ts";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "../../src/server/gate-verification-snapshot.ts";
+import {
+	VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES,
+	VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES,
+	VerificationHarness,
+	sanitizeVerificationWsEvent,
+} from "../../src/server/agent/verification-harness.ts";
 
 const tempDirs: string[] = [];
 
@@ -215,6 +221,117 @@ describe("gate verification per-step (stepName) filter", () => {
 		assert.doesNotMatch(step.output ?? "", /build-out-5\b/);
 		assert.equal(step.selection?.mode, "slice");
 		assert.deepEqual(step.selection?.range, { from: 2, to: 4 });
+	});
+});
+
+describe("gate verification WS event previews", () => {
+	it("bounds live step-output frames without mutating the full source payload", () => {
+		const fullText = `first live line\n${"output burst ".repeat(20_000)}\nLAST_LIVE_MARKER`;
+		const event = {
+			type: "gate_verification_step_output",
+			goalId: "goal-1",
+			gateId: "gate-1",
+			signalId: "signal-1",
+			stepIndex: 0,
+			stream: "stdout",
+			text: fullText,
+			seq: 123,
+		};
+
+		const sanitized = sanitizeVerificationWsEvent(event) as typeof event & { textTruncated?: boolean; originalTextBytes?: number; previewTextBytes?: number };
+
+		assert.notEqual(sanitized, event);
+		assert.equal(event.text, fullText, "sanitizing the WS frame must not destroy retained/full diagnostics input");
+		assert.equal(sanitized.seq, 123);
+		assert.equal(sanitized.textTruncated, true);
+		assert.equal(sanitized.originalTextBytes, Buffer.byteLength(fullText, "utf8"));
+		assert.ok(Buffer.byteLength(sanitized.text, "utf8") <= VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES);
+		assert.equal(sanitized.previewTextBytes, Buffer.byteLength(sanitized.text, "utf8"));
+		assert.match(sanitized.text, /truncated for live WebSocket delivery/);
+		assert.match(sanitized.text, /Full output remains available via gate inspection\/retained diagnostics/);
+		assert.match(sanitized.text, /LAST_LIVE_MARKER/);
+	});
+
+	it("bounds multibyte previews within byte caps including the truncation marker", () => {
+		const fullText = "€".repeat(20_000);
+		const stepOutput = sanitizeVerificationWsEvent({
+			type: "gate_verification_step_output",
+			goalId: "goal-1",
+			gateId: "gate-1",
+			signalId: "signal-1",
+			stepIndex: 0,
+			stream: "stdout",
+			text: fullText,
+		}) as { text: string; previewTextBytes?: number };
+		const stepOutputBytes = Buffer.byteLength(stepOutput.text, "utf8");
+
+		assert.ok(
+			stepOutputBytes <= VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES,
+			`multibyte step-output preview exceeded ${VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES} bytes: ${stepOutputBytes}`,
+		);
+		assert.equal(stepOutput.previewTextBytes, stepOutputBytes);
+		assert.match(stepOutput.text, /truncated for live WebSocket delivery/);
+		assert.doesNotMatch(stepOutput.text, /�/, "UTF-8 suffix truncation must not introduce replacement characters");
+
+		const stepComplete = sanitizeVerificationWsEvent({
+			type: "gate_verification_step_complete",
+			goalId: "goal-1",
+			gateId: "gate-1",
+			signalId: "signal-1",
+			stepIndex: 0,
+			stepName: "review",
+			status: "failed",
+			durationMs: 10,
+			output: fullText,
+		}) as { output: string; previewOutputBytes?: number };
+		const stepCompleteBytes = Buffer.byteLength(stepComplete.output, "utf8");
+
+		assert.ok(
+			stepCompleteBytes <= VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES,
+			`multibyte step-complete preview exceeded ${VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES} bytes: ${stepCompleteBytes}`,
+		);
+		assert.equal(stepComplete.previewOutputBytes, stepCompleteBytes);
+		assert.match(stepComplete.output, /truncated for live WebSocket delivery/);
+		assert.doesNotMatch(stepComplete.output, /�/, "UTF-8 suffix truncation must not introduce replacement characters");
+	});
+
+	it("bounds step-complete output frames while preserving harness seq stamping", () => {
+		const stateDir = makeTempDir();
+		const fullOutput = `reviewer summary start\n${"very large reviewer diagnostics ".repeat(20_000)}\nLAST_COMPLETE_MARKER`;
+		const broadcasts: Array<{ goalId: string; event: any }> = [];
+		const harness = new VerificationHarness(
+			stateDir,
+			undefined,
+			(goalId, event) => broadcasts.push({ goalId, event }),
+			{ get: () => undefined, getAll: () => [] } as any,
+		);
+
+		const originalEvent = {
+			type: "gate_verification_step_complete",
+			goalId: "goal-1",
+			gateId: "gate-1",
+			signalId: "signal-1",
+			stepIndex: 0,
+			stepName: "review",
+			status: "failed",
+			durationMs: 10,
+			output: fullOutput,
+		};
+		(harness as any).broadcastFn("goal-1", originalEvent);
+
+		assert.equal(broadcasts.length, 1);
+		assert.equal(broadcasts[0].goalId, "goal-1");
+		const sent = broadcasts[0].event;
+		assert.notEqual(sent, originalEvent);
+		assert.equal((originalEvent as any).seq, 1, "seq stamping remains on the original event before sanitization");
+		assert.equal(originalEvent.output, fullOutput, "only the outbound WS frame is previewed");
+		assert.equal(sent.seq, 1);
+		assert.equal(sent.outputTruncated, true);
+		assert.equal(sent.originalOutputBytes, Buffer.byteLength(fullOutput, "utf8"));
+		assert.ok(Buffer.byteLength(sent.output, "utf8") <= VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES);
+		assert.equal(sent.previewOutputBytes, Buffer.byteLength(sent.output, "utf8"));
+		assert.match(sent.output, /truncated for live WebSocket delivery/);
+		assert.match(sent.output, /LAST_COMPLETE_MARKER/);
 	});
 });
 

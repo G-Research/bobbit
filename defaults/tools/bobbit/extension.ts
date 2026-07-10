@@ -39,6 +39,19 @@ class ApiError extends Error {
 
 type Params = Record<string, any>;
 
+interface PageSpec {
+	/** Primary array key exposed in the response and pagination metadata. */
+	itemKey: string;
+	/** Optional nested path to the array; defaults to [itemKey]. */
+	itemPath?: string[];
+	/** Default page size for this operation. */
+	defaultLimit?: number;
+	/** Maximum page size for this operation. */
+	maxLimit?: number;
+	/** Whether this operation should use cursor (`after`) pagination for these params. */
+	cursor?: boolean | ((p: Params) => boolean);
+}
+
 interface OpSpec {
 	/** HTTP method, or a function of params for verb-multiplexed operations. */
 	method: string | ((p: Params) => string);
@@ -46,6 +59,22 @@ interface OpSpec {
 	buildBody?: (p: Params) => unknown;
 	/** Param names that must be present (non-empty) before dispatch. */
 	required: string[];
+	/** Optional tool-output pagination for list-style read operations. */
+	page?: PageSpec | ((p: Params) => PageSpec | undefined);
+}
+
+const DEFAULT_PAGE_LIMIT = 50;
+const MAX_PAGE_LIMIT = 200;
+const DEFAULT_SEARCH_LIMIT = 20;
+const MAX_SEARCH_LIMIT = 100;
+
+type PageMode = "offset" | "cursor";
+
+interface NormalizedPaging {
+	limit: number;
+	offset: number;
+	cursor?: string | number;
+	mode: PageMode;
 }
 
 /** Build a path with a query string, skipping undefined/null/"" values. */
@@ -56,6 +85,146 @@ function withQuery(base: string, entries: Array<[string, unknown]>): string {
 	}
 	const s = qs.toString();
 	return s ? `${base}?${s}` : base;
+}
+
+function parseInteger(value: unknown): number | undefined {
+	if (value === undefined || value === null || value === "") return undefined;
+	const n = typeof value === "number" ? value : Number.parseInt(String(value), 10);
+	return Number.isFinite(n) ? Math.trunc(n) : undefined;
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+	const n = parseInteger(value) ?? fallback;
+	return Math.min(Math.max(n, min), max);
+}
+
+function isCursorPaging(params: Params, spec: PageSpec): boolean {
+	return typeof spec.cursor === "function" ? spec.cursor(params) : spec.cursor === true;
+}
+
+function normalizePaging(params: Params, spec: PageSpec): NormalizedPaging {
+	const limit = clampInteger(params.limit, spec.defaultLimit ?? DEFAULT_PAGE_LIMIT, 1, spec.maxLimit ?? MAX_PAGE_LIMIT);
+	const offset = Math.max(0, parseInteger(params.offset) ?? 0);
+	const rawCursor = params.cursor ?? params.after;
+	const cursor = rawCursor !== undefined && rawCursor !== null && rawCursor !== "" ? rawCursor as string | number : undefined;
+	const mode: PageMode = isCursorPaging(params, spec) ? "cursor" : "offset";
+	return { limit, offset, cursor, mode };
+}
+
+function appendPagingQuery(base: string, entries: Array<[string, unknown]>, params: Params, spec: PageSpec): string {
+	const paging = normalizePaging(params, spec);
+	const pagingEntries: Array<[string, unknown]> = [["limit", paging.limit]];
+	if (paging.mode === "cursor" && paging.cursor !== undefined) {
+		pagingEntries.push(["after", paging.cursor]);
+	} else {
+		pagingEntries.push(["offset", paging.offset]);
+	}
+	return withQuery(base, [...entries, ...pagingEntries]);
+}
+
+function getAtPath(value: unknown, itemPath: string[]): unknown {
+	let current = value as any;
+	for (const key of itemPath) {
+		if (current === undefined || current === null) return undefined;
+		current = current[key];
+	}
+	return current;
+}
+
+function setAtPath(value: Record<string, unknown>, itemPath: string[], replacement: unknown): Record<string, unknown> {
+	const clone: Record<string, unknown> = Array.isArray(value) ? [...value] as any : { ...value };
+	let current: any = clone;
+	for (let i = 0; i < itemPath.length - 1; i += 1) {
+		const key = itemPath[i];
+		const next = current[key];
+		current[key] = next && typeof next === "object" ? (Array.isArray(next) ? [...next] : { ...next }) : {};
+		current = current[key];
+	}
+	current[itemPath[itemPath.length - 1]] = replacement;
+	return clone;
+}
+
+function numberField(source: unknown, field: string): number | undefined {
+	if (!source || typeof source !== "object") return undefined;
+	const value = (source as Record<string, unknown>)[field];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function booleanField(source: unknown, field: string): boolean | undefined {
+	if (!source || typeof source !== "object") return undefined;
+	const value = (source as Record<string, unknown>)[field];
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function valueField(source: unknown, field: string): string | number | undefined {
+	if (!source || typeof source !== "object") return undefined;
+	const value = (source as Record<string, unknown>)[field];
+	return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
+
+function sliceByPath(data: unknown, spec: PageSpec, paging: NormalizedPaging): {
+	result: unknown;
+	items: unknown[];
+	total?: number;
+	hasRestPagination: boolean;
+	pagedBy: "rest" | "tool";
+	start: number;
+	sourceLength: number;
+} | undefined {
+	const itemPath = spec.itemPath ?? [spec.itemKey];
+	const pagination = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>).pagination : undefined;
+	const hasRestPagination = Boolean(
+		pagination
+		|| numberField(data, "total") !== undefined
+		|| booleanField(data, "hasMore") !== undefined
+		|| valueField(data, "nextCursor") !== undefined
+		|| numberField(data, "nextOffset") !== undefined,
+	);
+	const sourceItems = Array.isArray(data) ? data : getAtPath(data, itemPath);
+	if (!Array.isArray(sourceItems)) return undefined;
+
+	const start = hasRestPagination ? 0 : paging.mode === "offset" ? paging.offset : 0;
+	const end = start + paging.limit;
+	const shouldSlice = !hasRestPagination;
+	const items = shouldSlice ? sourceItems.slice(start, end) : sourceItems;
+	const total = numberField(data, "total") ?? numberField(pagination, "total") ?? (hasRestPagination ? undefined : sourceItems.length);
+	const pagedBy = shouldSlice ? "tool" : "rest";
+	const result = Array.isArray(data)
+		? { [spec.itemKey]: items }
+		: setAtPath(data as Record<string, unknown>, itemPath, items);
+	return { result, items, total, hasRestPagination, pagedBy, start, sourceLength: sourceItems.length };
+}
+
+function pageResult(data: unknown, params: Params, spec: PageSpec): unknown {
+	const paging = normalizePaging(params, spec);
+	const sliced = sliceByPath(data, spec, paging);
+	if (!sliced) return data;
+	const pagination = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>).pagination : undefined;
+	const total = sliced.total;
+	const computedHasMore = (sliced.start + sliced.items.length) < (total ?? sliced.sourceLength);
+	const topLevelHasMore = booleanField(data, "hasMore") ?? booleanField(pagination, "hasMore");
+	const hasMore = Boolean(sliced.pagedBy === "tool" ? (topLevelHasMore || computedHasMore) : (topLevelHasMore ?? computedHasMore));
+	const nextOffset = paging.mode === "offset" && hasMore
+		? numberField(data, "nextOffset") ?? numberField(pagination, "nextOffset") ?? paging.offset + sliced.items.length
+		: undefined;
+	const nextCursor = paging.mode === "cursor"
+		? valueField(data, "nextCursor") ?? valueField(pagination, "nextCursor")
+		: undefined;
+	return {
+		...(sliced.result as Record<string, unknown>),
+		pagination: {
+			limit: paging.limit,
+			...(paging.mode === "offset" ? { offset: paging.offset } : {}),
+			...(total !== undefined ? { total } : {}),
+			hasMore,
+			...(nextOffset !== undefined ? { nextOffset } : {}),
+			...(paging.mode === "cursor" && paging.cursor !== undefined ? { cursor: paging.cursor } : {}),
+			...(nextCursor !== undefined ? { nextCursor } : {}),
+			mode: paging.mode,
+			itemKey: spec.itemKey,
+			pagedBy: sliced.pagedBy,
+		},
+	};
 }
 
 // GET-only maintenance probes for bobbit_read.maintenance_inspect.
@@ -70,6 +239,15 @@ const PROBE_PATHS: Record<string, string> = {
 	sandbox_pool: "/api/sandbox-pool",
 	sandbox_status: "/api/sandbox-status",
 	search_stats: "/api/search/stats",
+};
+
+const MAINTENANCE_PROJECT_FILTER_PROBES = new Set(["orphaned_index_rows", "search_stats", "worktree_pool", "sandbox_status"]);
+
+const MAINTENANCE_PAGE_SPECS: Record<string, PageSpec | undefined> = {
+	orphaned_worktrees: { itemKey: "worktrees" },
+	orphaned_sessions: { itemKey: "sessions" },
+	orphaned_index_rows: { itemKey: "sample" },
+	archived_session_worktrees: { itemKey: "worktrees" },
 };
 
 // POST maintenance/search actions for bobbit_admin.maintenance_cleanup.
@@ -89,8 +267,12 @@ const READ_OPS: Record<string, OpSpec> = {
 	connection_info: { method: "GET", buildPath: () => "/api/connection-info", required: [] },
 	list_goals: {
 		method: "GET",
-		buildPath: (p) => withQuery("/api/goals", [["archived", p.archived], ["q", p.q]]),
+		buildPath: (p) => appendPagingQuery("/api/goals", [["archived", p.archived], ["q", p.q], ["projectId", p.projectId]], p, {
+			itemKey: "goals",
+			cursor: (params) => params.archived === true || params.archived === "true",
+		}),
 		required: [],
+		page: (p) => ({ itemKey: "goals", cursor: p.archived === true || p.archived === "true" }),
 	},
 	get_goal: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}`, required: ["goalId"] },
 	goal_cost: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}/cost`, required: ["goalId"] },
@@ -99,61 +281,66 @@ const READ_OPS: Record<string, OpSpec> = {
 	goal_pr_status: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}/pr-status`, required: ["goalId"] },
 	list_sessions: {
 		method: "GET",
-		buildPath: (p) => withQuery("/api/sessions", [["include", p.include], ["q", p.q], ["projectId", p.projectId]]),
+		buildPath: (p) => appendPagingQuery("/api/sessions", [["include", p.include], ["q", p.q], ["projectId", p.projectId]], p, {
+			itemKey: "sessions",
+			cursor: (params) => String(params.include ?? "").split(",").includes("archived"),
+		}),
 		required: [],
+		page: (p) => ({ itemKey: "sessions", cursor: String(p.include ?? "").split(",").includes("archived") }),
 	},
 	get_session: { method: "GET", buildPath: (p) => `/api/sessions/${p.sessionId}`, required: ["sessionId"] },
 	session_cost: { method: "GET", buildPath: (p) => `/api/sessions/${p.sessionId}/cost`, required: ["sessionId"] },
 	search: {
 		method: "GET",
-		buildPath: (p) =>
-			withQuery("/api/search", [
-				["q", p.q],
-				["type", p.type],
-				["limit", p.limit],
-				["offset", p.offset],
-				["projectId", p.projectId],
-			]),
+		buildPath: (p) => appendPagingQuery("/api/search", [["q", p.q], ["type", p.type], ["projectId", p.projectId]], p, {
+			itemKey: "results",
+			defaultLimit: DEFAULT_SEARCH_LIMIT,
+			maxLimit: MAX_SEARCH_LIMIT,
+		}),
 		required: ["q"],
+		page: { itemKey: "results", defaultLimit: DEFAULT_SEARCH_LIMIT, maxLimit: MAX_SEARCH_LIMIT },
 	},
-	list_projects: { method: "GET", buildPath: () => "/api/projects", required: [] },
+	list_projects: { method: "GET", buildPath: () => "/api/projects", required: [], page: { itemKey: "projects" } },
 	get_project: { method: "GET", buildPath: (p) => `/api/projects/${p.projectId}`, required: ["projectId"] },
 	list_workflows: {
 		method: "GET",
 		buildPath: (p) => withQuery("/api/workflows", [["projectId", p.projectId]]),
 		required: ["projectId"],
+		page: { itemKey: "workflows" },
 	},
 	get_workflow: {
 		method: "GET",
 		buildPath: (p) => withQuery(`/api/workflows/${p.workflowId}`, [["projectId", p.projectId]]),
 		required: ["workflowId"],
 	},
-	list_roles: { method: "GET", buildPath: () => "/api/roles", required: [] },
-	list_tools: { method: "GET", buildPath: (p) => withQuery("/api/tools", [["projectId", p.projectId]]), required: [] },
+	list_roles: { method: "GET", buildPath: (p) => withQuery("/api/roles", [["projectId", p.projectId]]), required: [], page: { itemKey: "roles" } },
+	list_tools: { method: "GET", buildPath: (p) => withQuery("/api/tools", [["projectId", p.projectId]]), required: [], page: { itemKey: "tools" } },
 	list_gates: {
 		method: "GET",
 		buildPath: (p) => withQuery(`/api/goals/${p.goalId}/gates`, [["view", p.view]]),
 		required: ["goalId"],
+		page: { itemKey: "gates" },
 	},
 	list_tasks: {
 		method: "GET",
 		buildPath: (p) => withQuery(`/api/goals/${p.goalId}/tasks`, [["view", p.view]]),
 		required: ["goalId"],
+		page: { itemKey: "tasks" },
 	},
 	get_task: { method: "GET", buildPath: (p) => `/api/tasks/${p.taskId}`, required: ["taskId"] },
-	list_staff: { method: "GET", buildPath: () => "/api/staff", required: [] },
-	list_mcp_servers: { method: "GET", buildPath: () => "/api/mcp-servers", required: [] },
+	list_staff: { method: "GET", buildPath: (p) => withQuery("/api/staff", [["projectId", p.projectId]]), required: [], page: { itemKey: "staff" } },
+	list_mcp_servers: { method: "GET", buildPath: (p) => withQuery("/api/mcp-servers", [["projectId", p.projectId]]), required: [], page: { itemKey: "servers" } },
 	maintenance_inspect: {
 		method: "GET",
 		buildPath: (p) => {
 			const base = PROBE_PATHS[p.probe];
 			if (!base) throw new Error(`unknown maintenance_inspect probe '${p.probe}'`);
-			if (p.probe === "orphaned_index_rows" || p.probe === "search_stats") {
-				return withQuery(base, [["projectId", p.projectId]]);
-			}
-			return base;
+			return MAINTENANCE_PROJECT_FILTER_PROBES.has(p.probe)
+				? withQuery(base, [["projectId", p.projectId]])
+				: base;
 		},
 		required: ["probe"],
+		page: (p) => MAINTENANCE_PAGE_SPECS[p.probe],
 	},
 };
 
@@ -229,6 +416,11 @@ const ORCH_OPS: Record<string, OpSpec> = {
 		buildPath: () => "/api/staff",
 		buildBody: (p) => ({ name: p.name, systemPrompt: p.systemPrompt, ...(p.body ?? {}) }),
 		required: ["name", "systemPrompt"],
+	},
+	delete_staff: {
+		method: "DELETE",
+		buildPath: (p) => `/api/staff/${encodeURIComponent(p.staffId)}`,
+		required: ["staffId"],
 	},
 	team_start: { method: "POST", buildPath: (p) => `/api/goals/${p.goalId}/team/start`, required: ["goalId"] },
 	team_teardown: {
@@ -383,8 +575,12 @@ export default function (pi: ExtensionAPI) {
 		return { content: [{ type: "text" as const, text: msg }], details: undefined, isError: true };
 	}
 
+	function resolvePageSpec(spec: OpSpec, params: Params): PageSpec | undefined {
+		return typeof spec.page === "function" ? spec.page(params) : spec.page;
+	}
+
 	/** Dispatch an operation through a tier's OpSpec table. */
-	async function dispatch(ops: Record<string, OpSpec>, params: Params) {
+	async function dispatch(ops: Record<string, OpSpec>, params: Params, options?: { pageResults?: boolean }) {
 		const spec = ops[params.operation];
 		if (!spec) return err(`unknown operation '${params.operation}'`);
 		for (const field of spec.required) {
@@ -397,7 +593,9 @@ export default function (pi: ExtensionAPI) {
 			const method = typeof spec.method === "function" ? spec.method(params) : spec.method;
 			const urlPath = spec.buildPath(params);
 			const body = spec.buildBody ? spec.buildBody(params) : undefined;
-			return ok(await api(method, urlPath, body));
+			const data = await api(method, urlPath, body);
+			const pageSpec = options?.pageResults ? resolvePageSpec(spec, params) : undefined;
+			return ok(pageSpec ? pageResult(data, params, pageSpec) : data);
 		} catch (e: any) {
 			return err(e.message);
 		}
@@ -423,15 +621,17 @@ export default function (pi: ExtensionAPI) {
 			workflowId: Type.Optional(Type.String({ description: "Workflow id." })),
 			q: Type.Optional(Type.String({ description: "Free-text query filter." })),
 			type: Type.Optional(Type.String({ description: "search type: all|goals|sessions|messages|staff." })),
-			limit: Type.Optional(Type.Number({ description: "search: max results." })),
-			offset: Type.Optional(Type.Number({ description: "search: result offset." })),
+			limit: Type.Optional(Type.Number({ description: "Page size. Defaults: lists 50, search 20; max: lists 200, search 100." })),
+			offset: Type.Optional(Type.Number({ description: "Offset for list operations. Defaults to 0; ignored when cursor/after is used." })),
+			after: Type.Optional(Type.Union([Type.String(), Type.Number()], { description: "Cursor for cursor-backed list operations." })),
+			cursor: Type.Optional(Type.Union([Type.String(), Type.Number()], { description: "Alias for after on cursor-backed list operations." })),
 			archived: Type.Optional(Type.Boolean({ description: "Include archived items." })),
 			include: Type.Optional(Type.String({ description: "Inclusion flag, e.g. 'archived'." })),
 			view: Type.Optional(Type.String({ description: "Response view, e.g. 'summary'." })),
 			probe: Type.Optional(Type.String({ description: "maintenance_inspect probe selector." })),
 		}),
 		async execute(_id: string, params: Params) {
-			return dispatch(READ_OPS, params);
+			return dispatch(READ_OPS, params, { pageResults: true });
 		},
 	});
 
@@ -452,6 +652,7 @@ export default function (pi: ExtensionAPI) {
 			type: Type.Optional(Type.String({ description: "Task type for create_task." })),
 			state: Type.Optional(Type.String({ description: "Target task state for transition_task." })),
 			name: Type.Optional(Type.String({ description: "Staff name for create_staff." })),
+			staffId: Type.Optional(Type.String({ description: "Staff id for delete_staff." })),
 			systemPrompt: Type.Optional(Type.String({ description: "System prompt for create_staff." })),
 			cascade: Type.Optional(Type.Boolean({ description: "Cascade to descendants (archive/teardown)." })),
 			mergedManually: Type.Optional(Type.Boolean({ description: "archive_goal: mark merged manually." })),

@@ -23,6 +23,10 @@ function normalProjects(projects: ProjectSummary[]): ProjectSummary[] {
 	return projects.filter(project => !isHeadquartersProject(project));
 }
 
+function createdProjects(projects: ProjectSummary[]): ProjectSummary[] {
+	return projects.filter(project => createdProjectIds.has(project.id));
+}
+
 async function listProjects(): Promise<ProjectSummary[]> {
 	const res = await apiFetch("/api/projects");
 	expect(res.status).toBe(200);
@@ -53,8 +57,10 @@ async function showHeadquarters(): Promise<void> {
 }
 
 async function cleanupCreatedProjects(): Promise<void> {
+	const existingIds = new Set((await listProjects()).map(project => project.id));
 	const ids = Array.from(createdProjectIds);
 	for (const id of ids) {
+		if (!existingIds.has(id)) continue;
 		await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
 	}
 	const remaining = projectIds(await listNormalVisibleProjects());
@@ -82,7 +88,7 @@ async function registerTmpProject(name: string): Promise<ProjectSummary> {
 		body: JSON.stringify({ name, rootPath, __e2e_seed_skip__: true }),
 	});
 	expect(res.status).toBe(201);
-	const project = await res.json();
+	const project = await res.json() as ProjectSummary;
 	createdProjectIds.add(project.id);
 	return project;
 }
@@ -107,10 +113,6 @@ async function expectProjectOrderJson<T = any>(res: Response): Promise<T> {
 	const text = await res.text();
 	expect(text, "PUT /api/projects/order must not be routed to PUT /api/projects/:id").not.toContain("Project not found: order");
 	return JSON.parse(text) as T;
-}
-
-function createdProjects(projects: ProjectSummary[]): ProjectSummary[] {
-	return projects.filter(project => createdProjectIds.has(project.id));
 }
 
 async function orderPayloadWithCreatedFirst(createdOrder: string[]): Promise<string[]> {
@@ -192,6 +194,13 @@ test.describe("PUT /api/projects/order", () => {
 		try {
 			const [a, b, c] = projects;
 			const original = [a.id, b.id, c.id];
+			const validFullOrder = await orderPayloadWithCreatedFirst(original);
+			const seedOrder = await apiFetch("/api/projects/order", {
+				method: "PUT",
+				body: JSON.stringify({ projectIds: validFullOrder }),
+			});
+			expect(seedOrder.status).toBe(200);
+			await seedOrder.json();
 			expect((await listProjects()).some(project => project.id === "system")).toBe(false);
 
 			const malformed = await apiFetch("/api/projects/order", {
@@ -233,7 +242,7 @@ test.describe("PUT /api/projects/order", () => {
 			// #933: HQ now MUST be included; omitting it → stale (409), not invalid (400)
 			const missingHq = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: [a.id, b.id, c.id] }),
+				body: JSON.stringify({ projectIds: validFullOrder.filter(id => id !== HEADQUARTERS_PROJECT_ID) }),
 			});
 			const missingHqBody = await expectProjectOrderJson(missingHq);
 			expect(missingHq.status).toBe(409);
@@ -246,17 +255,17 @@ test.describe("PUT /api/projects/order", () => {
 
 			const hiddenSystem = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: [a.id, b.id, c.id, "system"] }),
+				body: JSON.stringify({ projectIds: [...validFullOrder, "system"] }),
 			});
 			const hiddenSystemBody = await expectProjectOrderJson(hiddenSystem);
 			expect(hiddenSystem.status).toBe(400);
 			expect(hiddenSystemBody).toMatchObject({ code: "invalid_project_order" });
 			await expectCreatedVisibleOrder(original);
 
-			// Stale: missing a normal project (payload has HQ + only 2 of 3 normals)
+			// Stale: missing a normal project (payload has HQ + all visible projects except C)
 			const stale = await apiFetch("/api/projects/order", {
 				method: "PUT",
-				body: JSON.stringify({ projectIds: [HEADQUARTERS_PROJECT_ID, a.id, b.id] }),
+				body: JSON.stringify({ projectIds: validFullOrder.filter(id => id !== c.id) }),
 			});
 			const staleBody = await expectProjectOrderJson(stale);
 			expect(stale.status).toBe(409);

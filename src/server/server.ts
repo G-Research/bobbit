@@ -34,7 +34,7 @@ import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
@@ -44,6 +44,7 @@ import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
+import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
@@ -593,6 +594,9 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
  *  aggregate-send guard (src/ui/components/MessageEditor.ts) so the composer
  *  rejects an oversized send with a clear error BEFORE it can tear down the socket. */
 export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
+
+const _goalPendingOverflowCheck = new WeakSet<WebSocket>();
+const _goalWarnedClients = new WeakSet<WebSocket>();
 
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
@@ -2803,15 +2807,34 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	function broadcastToGoal(goalId: string, event: any): void {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
+			const baseMeta = describeWsPayload(event, data);
 			for (const ws of wss.clients) {
 				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
-					if (session?.teamGoalId === goalId || session?.goalId === goalId) ws.send(data);
+					if (session?.teamGoalId === goalId || session?.goalId === goalId) {
+						guardWebSocketOverflow(ws, { ...baseMeta, recipientKind: "goal-session", context: `goalId=${goalId}` }, {
+							pendingOverflowCheck: _goalPendingOverflowCheck,
+							warnedClients: _goalWarnedClients,
+						}, {
+							setTimeout: (cb, ms) => setTimeout(cb, ms),
+							warn: (message) => console.warn(message),
+						}, DEFAULT_OVERFLOW_GUARD);
+						ws.send(data);
+					}
 					continue;
 				}
-				if (viewerSubscribedToGoal(ws as any, goalId)) ws.send(data);
+				if (viewerSubscribedToGoal(ws as any, goalId)) {
+					guardWebSocketOverflow(ws, { ...baseMeta, recipientKind: "goal-viewer", context: `goalId=${goalId}` }, {
+						pendingOverflowCheck: _goalPendingOverflowCheck,
+						warnedClients: _goalWarnedClients,
+					}, {
+						setTimeout: (cb, ms) => setTimeout(cb, ms),
+						warn: (message) => console.warn(message),
+					}, DEFAULT_OVERFLOW_GUARD);
+					ws.send(data);
+				}
 			}
 			return;
 		}
@@ -2820,6 +2843,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const data = JSON.stringify(event);
 		const stringifyMs = performance.now() - stringifyStart;
 		const sendStart = performance.now();
+		const baseMeta = describeWsPayload(event, data);
 		let scanned = 0;
 		let recipients = 0;
 		let matchedGoal = 0;
@@ -2838,6 +2862,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			if (sid) {
 				const session = sessionManager.getSession(sid);
 				if (session?.teamGoalId === goalId || session?.goalId === goalId) {
+					guardWebSocketOverflow(ws, { ...baseMeta, recipientKind: "goal-session", context: `goalId=${goalId}` }, {
+						pendingOverflowCheck: _goalPendingOverflowCheck,
+						warnedClients: _goalWarnedClients,
+					}, {
+						setTimeout: (cb, ms) => setTimeout(cb, ms),
+						warn: (message) => console.warn(message),
+					}, DEFAULT_OVERFLOW_GUARD);
 					ws.send(data);
 					recipients++;
 					matchedGoal++;
@@ -2851,6 +2882,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 			if ((ws as any).isViewer) {
 				if (viewerSubscribedToGoal(ws as any, goalId)) {
+					guardWebSocketOverflow(ws, { ...baseMeta, recipientKind: "goal-viewer", context: `goalId=${goalId}` }, {
+						pendingOverflowCheck: _goalPendingOverflowCheck,
+						warnedClients: _goalWarnedClients,
+					}, {
+						setTimeout: (cb, ms) => setTimeout(cb, ms),
+						warn: (message) => console.warn(message),
+					}, DEFAULT_OVERFLOW_GUARD);
 					ws.send(data);
 					recipients++;
 					viewer++;
@@ -3930,6 +3968,32 @@ async function handleApiRoute(
 		console.error(`[api] ${status} error:`, e.stack ?? e.message);
 		json({ error: e.message, ...extra }, status);
 	};
+	const hasPagingParams = (): boolean => ["limit", "offset", "after", "cursor"].some(param => url.searchParams.has(param));
+	const parsePagingInt = (value: string | null, fallback: number, min: number, max: number): number => {
+		const parsed = value === null ? fallback : parseInt(value, 10);
+		const safe = Number.isFinite(parsed) ? parsed : fallback;
+		return Math.min(Math.max(min, safe), max);
+	};
+	const readOffsetPaging = (): { enabled: boolean; limit: number; offset: number } => ({
+		enabled: hasPagingParams(),
+		limit: parsePagingInt(url.searchParams.get("limit"), 50, 1, 200),
+		offset: parsePagingInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER),
+	});
+	const pageArray = <T>(items: T[], paging = readOffsetPaging()): { items: T[]; total: number; limit: number; offset: number; hasMore: boolean; nextOffset?: number } => {
+		const total = items.length;
+		const start = Math.min(paging.offset, total);
+		const end = start + paging.limit;
+		const pagedItems = items.slice(start, end);
+		const hasMore = end < total;
+		return {
+			items: pagedItems,
+			total,
+			limit: paging.limit,
+			offset: paging.offset,
+			hasMore,
+			...(hasMore ? { nextOffset: end } : {}),
+		};
+	};
 
 	const canonicalPathForCompare = (inputPath: string): string => {
 		let resolved = path.resolve(inputPath);
@@ -4844,7 +4908,14 @@ async function handleApiRoute(
 
 	// GET /api/projects
 	if (url.pathname === "/api/projects" && req.method === "GET") {
-		json(listProjectsForApi());
+		const projects = listProjectsForApi();
+		const paging = readOffsetPaging();
+		if (paging.enabled) {
+			const page = pageArray(projects, paging);
+			json({ projects: page.items, total: page.total, limit: page.limit, offset: page.offset, hasMore: page.hasMore, ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}) });
+			return;
+		}
+		json(projects);
 		return;
 	}
 
@@ -5760,26 +5831,29 @@ async function handleApiRoute(
 				}
 			}
 
-			const limitParam = url.searchParams.get("limit");
-			const afterParam = url.searchParams.get("after");
-			if (limitParam) {
-				// Paginated archived sessions
-				const limit = Math.min(Math.max(1, parseInt(limitParam, 10) || 50), 200);
-				const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
-				let page = filteredArchived;
-				if (afterCursor !== undefined) {
-					page = page.filter((s: any) => ((s as any).archivedAt ?? 0) < afterCursor);
+			if (hasPagingParams()) {
+				// Paginated archived sessions. Cursor pagination wins over offset when supplied.
+				const paging = readOffsetPaging();
+				const cursorParam = url.searchParams.get("cursor") ?? url.searchParams.get("after");
+				const afterCursor = cursorParam !== null ? parseInt(cursorParam, 10) : undefined;
+				const hasCursor = afterCursor !== undefined && Number.isFinite(afterCursor);
+				let pagePool = filteredArchived;
+				if (hasCursor) {
+					pagePool = pagePool.filter((s: any) => ((s as any).archivedAt ?? 0) < afterCursor!);
+				} else if (paging.offset > 0) {
+					pagePool = pagePool.slice(paging.offset);
 				}
 				const total = filteredArchived.length;
-				const hasMore = page.length > limit;
-				const sliced = page.slice(0, limit);
+				const hasMore = pagePool.length > paging.limit;
+				const sliced = pagePool.slice(0, paging.limit);
 				const nextCursor = sliced.length > 0 ? (sliced[sliced.length - 1] as any).archivedAt : undefined;
+				const nextOffset = hasMore && !hasCursor ? paging.offset + paging.limit : undefined;
 
 				// BFS: collect archived children reachable from live sessions and goals
 				const liveIdSet = new Set(sessions.map(s => s.id));
 				const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIds], allArchivedForBfs);
 
-				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, hasMore, nextCursor, archivedDelegates: archivedDelegatesOfLive });
+				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, limit: paging.limit, offset: !hasCursor ? paging.offset : undefined, hasMore, nextCursor, ...(nextOffset !== undefined ? { nextOffset } : {}), archivedDelegates: archivedDelegatesOfLive });
 			} else {
 				// BFS: collect archived children reachable from live sessions and goals
 				const liveIdSet = new Set(sessions.map(s => s.id));
@@ -5807,7 +5881,13 @@ async function handleApiRoute(
 			}
 			// BFS: live parents/goals → their archived children → children of those, etc.
 			const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIdsNonPaginated], allArchivedForBfsNonPaginated);
-			json({ generation: currentGen, sessions, archivedDelegates: archivedDelegatesOfLive });
+			const paging = readOffsetPaging();
+			if (paging.enabled) {
+				const page = pageArray(sessions, paging);
+				json({ generation: currentGen, sessions: page.items, total: page.total, limit: page.limit, offset: page.offset, hasMore: page.hasMore, ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}), archivedDelegates: archivedDelegatesOfLive });
+			} else {
+				json({ generation: currentGen, sessions, archivedDelegates: archivedDelegatesOfLive });
+			}
 		}
 		return;
 	}
@@ -6717,9 +6797,10 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "GET") {
 		// Paginated archived goals — aggregate across all projects
 		if (url.searchParams.get("archived") === "true") {
-			const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10) || 50), 200);
-			const afterParam = url.searchParams.get("after");
-			const afterCursor = afterParam ? parseInt(afterParam, 10) : undefined;
+			const paging = readOffsetPaging();
+			const cursorParam = url.searchParams.get("cursor") ?? url.searchParams.get("after");
+			const afterCursor = cursorParam !== null ? parseInt(cursorParam, 10) : undefined;
+			const hasCursor = afterCursor !== undefined && Number.isFinite(afterCursor);
 			const filterProjectId = url.searchParams.get("projectId") || undefined;
 			const archivedQuery = normalizedArchivedQuery(url.searchParams.get("q"));
 			// Aggregate archived goals across all project contexts
@@ -6741,12 +6822,15 @@ async function handleApiRoute(
 			}
 			allArchived.sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
 			const total = allArchived.length;
-			if (afterCursor !== undefined) {
-				allArchived = allArchived.filter(g => (g.archivedAt ?? 0) < afterCursor);
+			if (hasCursor) {
+				allArchived = allArchived.filter(g => (g.archivedAt ?? 0) < afterCursor!);
+			} else if (paging.offset > 0) {
+				allArchived = allArchived.slice(paging.offset);
 			}
-			const page = allArchived.slice(0, limit);
-			const hasMore = allArchived.length > limit;
+			const page = allArchived.slice(0, paging.limit);
+			const hasMore = allArchived.length > paging.limit;
 			const nextCursor = page.length > 0 ? page[page.length - 1].archivedAt : undefined;
+			const nextOffset = hasMore && !hasCursor ? paging.offset + paging.limit : undefined;
 
 			// Collect archived sessions affiliated with goals in this page
 			const goalIdsInPage = new Set(page.map((g: any) => g.id));
@@ -6775,7 +6859,7 @@ async function handleApiRoute(
 				}
 			}
 
-			json({ goals: page, total, hasMore, nextCursor, archivedSessions: affiliatedSessions });
+			json({ goals: page, total, limit: paging.limit, offset: !hasCursor ? paging.offset : undefined, hasMore, nextCursor, ...(nextOffset !== undefined ? { nextOffset } : {}), archivedSessions: affiliatedSessions });
 			return;
 		}
 
@@ -6790,6 +6874,12 @@ async function handleApiRoute(
 		}
 		const filterProjectId = url.searchParams.get("projectId") || undefined;
 		const goals = listGoalsAcrossProjects({ projectId: filterProjectId });
+		const paging = readOffsetPaging();
+		if (paging.enabled) {
+			const page = pageArray(goals, paging);
+			json({ generation: currentGen, goals: page.items, total: page.total, limit: page.limit, offset: page.offset, hasMore: page.hasMore, ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}) });
+			return;
+		}
 		json({ generation: currentGen, goals });
 		return;
 	}
@@ -10117,6 +10207,12 @@ async function handleApiRoute(
 	const goalTasksMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tasks$/);
 	if (goalTasksMatch && req.method === "GET") {
 		const tasks = getTaskManagerForGoal(goalTasksMatch[1]).getTasksForGoal(goalTasksMatch[1]);
+		const paging = readOffsetPaging();
+		const withTaskPaging = <T>(items: T[]): Record<string, unknown> => {
+			if (!paging.enabled) return { tasks: items };
+			const page = pageArray(items, paging);
+			return { tasks: page.items, total: page.total, limit: page.limit, offset: page.offset, hasMore: page.hasMore, ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}) };
+		};
 		if (url.searchParams.get("view") === "summary") {
 			const slim = tasks.map(t => ({
 				id: t.id,
@@ -10129,10 +10225,10 @@ async function handleApiRoute(
 				workflowGateId: t.workflowGateId,
 				dependsOn: t.dependsOn || [],
 			}));
-			json({ tasks: slim });
+			json(withTaskPaging(slim));
 			return;
 		}
-		json({ tasks });
+		json(withTaskPaging(tasks));
 		return;
 	}
 
@@ -10200,6 +10296,12 @@ async function handleApiRoute(
 			}
 			return base;
 		});
+		const paging = readOffsetPaging();
+		const gatePagingMetadata = <T>(items: T[]): { gates: T[]; total?: number; limit?: number; offset?: number; hasMore?: boolean; nextOffset?: number } => {
+			if (!paging.enabled) return { gates: items };
+			const page = pageArray(items, paging);
+			return { gates: page.items, total: page.total, limit: page.limit, offset: page.offset, hasMore: page.hasMore, ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}) };
+		};
 		if (url.searchParams.get("view") === "summary") {
 			const summary = buildGateStatusSummary({
 				workflow: goal.workflow,
@@ -10207,13 +10309,14 @@ async function handleApiRoute(
 				activeVerifications: verificationHarness.getActiveVerifications(goalId),
 			});
 			const { gates: summaryGates, ...counts } = summary;
-			json({ gates: summaryGates, ...counts, summary });
+			const page = gatePagingMetadata(summaryGates);
+			json({ ...page, ...counts, summary: paging.enabled ? { ...summary, gates: page.gates } : summary });
 			return;
 		}
 		// Slim the list payload: strip inline step output / artifact bodies /
 		// diagnostics. Full step text is fetched lazily on expand via the
 		// gate-detail + verification-snapshot paths below.
-		json({ gates: enriched.map(g => projectGateForList(g)) });
+		json(gatePagingMetadata(enriched.map(g => projectGateForList(g))));
 		return;
 	}
 

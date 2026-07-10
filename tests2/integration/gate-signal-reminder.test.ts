@@ -112,7 +112,9 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 				name: "Cached Gate",
 				dependsOn: [],
 				verify: [
-					{ name: "Fast cached verification", type: "command", run: "node -e \"console.log('CACHEABLE_PASS')\"" },
+					// Use the harness-skipped llm-review path instead of a real command step;
+					// this test only needs a prior passed verification for the route-level cache.
+					{ name: "Fast cached verification", type: "llm-review", prompt: "Review cached response fixture." },
 				],
 			},
 		]);

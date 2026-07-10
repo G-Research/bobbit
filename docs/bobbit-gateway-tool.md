@@ -91,7 +91,11 @@ methods, and body keys see each tool's `detail_docs` and
 
 ### `bobbit_read` — read-only introspection
 
-All operations are GETs with no side effects.
+All operations are GETs with no side effects. List-style operations are bounded
+by default (`limit=50`, `offset=0`, max `200`) and return a `pagination` object.
+`list_sessions`, `list_goals`, and `search` use REST pagination; other list
+operations page the already-filtered gateway response in the tool. REST-paged
+responses are annotated, not re-sliced.
 
 - `health`, `connection_info` — gateway liveness + network info.
 - `list_goals` (`archived`, `q`), `get_goal` — enumerate / fetch goals.
@@ -101,8 +105,8 @@ All operations are GETs with no side effects.
   `session_cost` — enumerate / fetch sessions and their cost.
 - `search` — full-text search across goals/sessions/messages/staff.
 - `list_projects`, `get_project` — project registry.
-- `list_workflows`, `get_workflow` — workflow templates (pass `projectId`;
-  `list_workflows` returns an empty list without it — the call does not error).
+- `list_workflows`, `get_workflow` — workflow templates (`list_workflows`
+  requires `projectId`; `get_workflow` accepts it as a scope filter).
 - `list_roles`, `list_tools` — resolved roles and the tool catalogue.
 - `list_gates`, `list_tasks` (by arbitrary `goalId`), `get_task` — cross-goal
   gate/task boards.
@@ -118,12 +122,17 @@ All operations are GETs with no side effects.
 - `create_task`, `update_task`, `transition_task`, `assign_task` — task board.
 - `signal_gate`, `reset_gate`, `cancel_verification` — workflow gates by id.
 - `create_staff` — create a staff agent.
+- `delete_staff` (`staffId`) — delete exactly one staff agent.
 - `team_start`, `team_teardown` — goal-level team lifecycle by explicit `goalId`.
 
 Notes:
 
 - **`create_goal` and `create_session` require an explicit `projectId`** — there
   is no defaulting to `headquarters` or the system project.
+- **`delete_staff` is single-resource only.** It requires `staffId`, validates
+  that id before making a request, then dispatches through the same shared
+  `bobbit_orchestrate` API helper to `DELETE /api/staff/:id`. Unknown ids return
+  the backend not-found error. There is no bulk or wildcard staff delete.
 - **`delete_goal` is intentionally absent.** There is no hard-delete goal
   endpoint; `archive_goal` (`DELETE /api/goals/:id`) archives with cascade
   semantics. Delete = archive.

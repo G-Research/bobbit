@@ -8,20 +8,21 @@
  * path always fires a quiet background recheck that corrects the state (see
  * `computeConnectGitState` + `session-manager.ts::refreshGitStatusForSession`).
  *
- * See docs/design/git-status-widget-reliability.md and the reproducing test
- * `tests2/core/git-repo-cache.test.ts` which pins this module's contract.
+ * See docs/design/git-status-widget-reliability.md and the reproducing tests
+ * `tests2/core/git-repo-cache.test.ts` / `git-empty-widget-cache.test.ts`
+ * which pin this module's contract.
  */
 
-export type RepoState = "yes" | "no";
+export type RepoState = "yes" | "no" | "hidden";
 
-/** Single localStorage key holding `{ [sessionId]: 'yes'|'no' }`. */
+/** Single localStorage key holding `{ [sessionId]: 'yes'|'no'|'hidden' }`. */
 const CACHE_KEY = "bobbit.gitRepoCache";
 
 /** Upper bound on cached entries so the map cannot grow unbounded. */
 const MAX_ENTRIES = 200;
 
 export interface ConnectGitState {
-	gitRepoKnown: "yes" | "no" | "unknown";
+	gitRepoKnown: "yes" | "no" | "hidden" | "unknown";
 	quietRecheck: boolean;
 }
 
@@ -46,7 +47,7 @@ function readCache(): Record<string, RepoState> {
 		if (!parsed || typeof parsed !== "object") return {};
 		const out: Record<string, RepoState> = {};
 		for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-			if (v === "yes" || v === "no") out[k] = v;
+			if (v === "yes" || v === "no" || v === "hidden") out[k] = v;
 		}
 		return out;
 	} catch {
@@ -102,11 +103,13 @@ export function pruneGitRepoCache(liveSessionIds: Iterable<string>): void {
  * Decide the initial `gitRepoKnown` state (and whether the recheck should be
  * quiet) for a session about to connect:
  *   cached 'no'            → start 'no' + quiet recheck (no skeleton/loading)
+ *   cached 'hidden'        → start hidden + quiet recheck (no skeleton/loading)
  *   cached 'yes' | no entry→ start 'unknown', normal check (skeleton allowed)
  */
 export function computeConnectGitState(sessionId: string): ConnectGitState {
-	if (getCachedRepoState(sessionId) === "no") {
-		return { gitRepoKnown: "no", quietRecheck: true };
+	const cached = getCachedRepoState(sessionId);
+	if (cached === "no" || cached === "hidden") {
+		return { gitRepoKnown: cached, quietRecheck: true };
 	}
 	return { gitRepoKnown: "unknown", quietRecheck: false };
 }
