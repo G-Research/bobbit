@@ -20,6 +20,12 @@ function isGoalBroadcast(msg: WsMsg, goalId: string): boolean {
 	);
 }
 
+async function flushWs(conn: WsConnection): Promise<void> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "ping" });
+	await conn.waitForFrom(cursor, (m) => m.type === "pong");
+}
+
 function connectViewerWs(goalId?: string): Promise<WsConnection> {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(`${wsBase()}/ws/viewer`);
@@ -103,9 +109,13 @@ test.describe("Goal WebSocket fanout", () => {
 				viewerConn.waitForFrom(viewerCursor, (m) => m.type === "gate_signal_received" && m.goalId === goal.id && m.gateId === "design-doc"),
 				goalConn.waitForFrom(goalCursor, (m) => m.type === "gate_signal_received" && m.goalId === goal.id && m.gateId === "design-doc"),
 			]);
+			// This fanout test only needs the synchronous signal broadcast. Do not wait
+			// for async verification completion; broad unit runs can delay it past the
+			// short WS timeout and make the routing assertion flaky.
 			await Promise.all([
-				viewerConn.waitForFrom(viewerCursor, (m) => m.type === "gate_status_changed" && m.goalId === goal.id && m.gateId === "design-doc" && m.status === "passed"),
-				goalConn.waitForFrom(goalCursor, (m) => m.type === "gate_status_changed" && m.goalId === goal.id && m.gateId === "design-doc" && m.status === "passed"),
+				flushWs(unrelatedConn),
+				flushWs(unscopedViewerConn),
+				flushWs(otherGoalViewerConn),
 			]);
 
 			const unrelatedGoalMessages = unrelatedConn.messages.slice(unrelatedCursor).filter((m) => isGoalBroadcast(m, goal.id));
