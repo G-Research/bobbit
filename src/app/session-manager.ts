@@ -1269,6 +1269,19 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // sidebar passes for a fresh switch + hydrate).
 setSessionSwitcher((sessionId: string) => { void connectToSession(sessionId, false); });
 
+export function persistConfirmedSessionModel(sessionId: string, model: any): boolean {
+	if (!model?.provider || !model?.id) return false;
+	saveSessionModel(sessionId, model.provider, model.id);
+	return true;
+}
+
+export function installConfirmedSessionModelPersistence(remote: RemoteAgent, sessionId: string): () => void {
+	return remote.subscribe((event: any) => {
+		if (event?.type !== "state_update") return;
+		persistConfirmedSessionModel(sessionId, event.data?.model);
+	});
+}
+
 export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal"; refetchMessagesOnReady?: boolean }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
@@ -1510,6 +1523,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		await remote.connect(url, token, sessionId);
 		if (isStale()) { remote.disconnect(); return; }
+		installConfirmedSessionModelPersistence(remote, sessionId);
 		await hydrateSidePanelWorkspace(sessionId);
 		if (isStale()) { remote.disconnect(); return; }
 
@@ -1572,13 +1586,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			remote.setModel(restoredModel);
 		}
 
-		// Intercept setModel to persist
+		// Keep selection UX optimistic, but only persist server-confirmed model state.
 		const originalSetModel = remote.setModel.bind(remote);
 		remote.setModel = (model: any) => {
 			originalSetModel(model);
-			if (model?.provider && model?.id) {
-				saveSessionModel(sessionId, model.provider, model.id);
-			}
 			renderApp();
 		};
 
