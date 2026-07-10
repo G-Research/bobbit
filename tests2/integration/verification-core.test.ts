@@ -122,7 +122,7 @@ function gateEvent(
 	return (m) => m.type === type && m.goalId === goalId && m.gateId === gateId && m.signalId === signalId;
 }
 
-const HIGH_VOLUME_WS_BURST_CMD = `node -e "process.stdout.write('OUT_BURST_START\n'+'x'.repeat(160*1024)+'\nOUT_BURST_END\n'); process.stderr.write('ERR_BURST_START\n'+'y'.repeat(128*1024)+'\nERR_BURST_END\n')"`;
+const HIGH_VOLUME_WS_BURST_CMD = `node -e "process.stdout.write('OUT_BURST_START\\n'+'x'.repeat(160*1024)+'\\nOUT_BURST_END\\n'); process.stderr.write('ERR_BURST_START\\n'+'y'.repeat(128*1024)+'\\nERR_BURST_END\\n')"`;
 const STEP_OUTPUT_FRAME_CAP_BYTES = 24 * 1024;
 const STEP_COMPLETE_FRAME_CAP_BYTES = 40 * 1024;
 
@@ -515,6 +515,22 @@ test.describe("Verification WebSocket burst backpressure", () => {
 				body: JSON.stringify({ content: "# Burst gate\n\nRun the high-volume command fixture." }),
 			});
 			expect(signalResp.status).toBe(201);
+			const signalData = await signalResp.json();
+			const signalId = signalData?.signal?.id;
+			expect(signalId).toBeTruthy();
+
+			const completeA = await wsA.waitForFrom(
+				cursorA,
+				(m) => m.type === "gate_verification_complete" && m.goalId === goalId && m.gateId === "burst-gate" && m.signalId === signalId,
+				45_000,
+			);
+			const completeB = await wsB.waitForFrom(
+				cursorB,
+				(m) => m.type === "gate_verification_complete" && m.goalId === goalId && m.gateId === "burst-gate" && m.signalId === signalId,
+				45_000,
+			);
+			expect(completeA.status).toBe("passed");
+			expect(completeB.status).toBe("passed");
 
 			await wsA.waitForFrom(
 				cursorA,
