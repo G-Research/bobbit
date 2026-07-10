@@ -6,7 +6,7 @@
  * and git.ts. On Windows, prefers Git Bash so bash syntax (pipes, redirects,
  * $(), etc.) works reliably. On Linux/macOS, uses /bin/sh.
  */
-import { execSync } from "node:child_process";
+import { execFile, execSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { statSync } from "node:fs";
 import path from "node:path";
 
@@ -146,14 +146,108 @@ export async function execShellCommand(
 	command: string,
 	opts: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number },
 ): Promise<{ stdout: string; stderr: string }> {
-	const { execFile } = await import("node:child_process");
-	const { promisify } = await import("node:util");
-	const pExecFile = promisify(execFile);
 	const { shell, args } = getShellConfig();
-	return pExecFile(shell, [...args, command], {
-		cwd: opts.cwd,
-		env: opts.env,
-		timeout: opts.timeout,
-		windowsHide: true,
-	}) as Promise<{ stdout: string; stderr: string }>;
+	let spawnArgs = [...args, command];
+	let timeoutWrapped = false;
+	let nodeTimeout = opts.timeout;
+	if (process.platform === "win32" && GIT_BASH && shell === GIT_BASH && opts.timeout && opts.timeout > 0) {
+		// Node's timeout/taskkill can kill the Git Bash wrapper while leaving MSYS
+		// children (for example `sleep`) holding cwd handles. Let Git Bash's own
+		// coreutils `timeout` own the process group, with the Node timer as a later
+		// safety net.
+		spawnArgs = ["-c", "timeout -k 1s \"$1\" bash -c \"$2\"", "bobbit-timeout", `${opts.timeout / 1000}s`, command];
+		timeoutWrapped = true;
+		nodeTimeout = opts.timeout + 5_000;
+	}
+	return spawnShellCommand(shell, spawnArgs, { ...opts, timeout: nodeTimeout }, command, timeoutWrapped, opts.timeout);
+}
+
+function spawnShellCommand(
+	file: string,
+	args: string[],
+	opts: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number },
+	displayCommand: string,
+	timeoutWrapped: boolean,
+	declaredTimeoutMs?: number,
+): Promise<{ stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(file, args, {
+			cwd: opts.cwd,
+			env: opts.env,
+			windowsHide: true,
+			detached: process.platform !== "win32",
+		});
+		let stdout = "";
+		let stderr = "";
+		let settled = false;
+		let timedOut = false;
+		let timeoutTimer: NodeJS.Timeout | undefined;
+		let hardTimeoutTimer: NodeJS.Timeout | undefined;
+
+		const cleanup = () => {
+			if (timeoutTimer) clearTimeout(timeoutTimer);
+			if (hardTimeoutTimer) clearTimeout(hardTimeoutTimer);
+		};
+		const finish = (fn: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			fn();
+		};
+
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+		child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+		child.on("error", (err) => finish(() => reject(err)));
+		child.on("close", (code, signal) => {
+			finish(() => {
+				if (timedOut || (timeoutWrapped && (code === 124 || code === 137 || code === 2304))) {
+					const err = new Error(`Command timed out after ${declaredTimeoutMs ?? opts.timeout}ms: ${displayCommand}`) as Error & { code?: string; stdout?: string; stderr?: string; signal?: NodeJS.Signals | null };
+					err.code = "ETIMEDOUT";
+					err.stdout = stdout;
+					err.stderr = stderr;
+					err.signal = signal;
+					reject(err);
+					return;
+				}
+				if (code === 0) {
+					resolve({ stdout, stderr });
+					return;
+				}
+				const err = new Error(`Command failed with exit code ${code ?? `signal ${signal}`}: ${displayCommand}`) as Error & { code?: number | null; stdout?: string; stderr?: string; signal?: NodeJS.Signals | null };
+				err.code = code;
+				err.stdout = stdout;
+				err.stderr = stderr;
+				err.signal = signal;
+				reject(err);
+			});
+		});
+
+		if (opts.timeout && opts.timeout > 0) {
+			timeoutTimer = setTimeout(() => {
+				timedOut = true;
+				killShellProcessTree(child);
+				hardTimeoutTimer = setTimeout(() => {
+					try { child.kill("SIGKILL"); } catch { /* already exited */ }
+				}, 5_000);
+			}, opts.timeout);
+		}
+	});
+}
+
+function killShellProcessTree(child: ChildProcessWithoutNullStreams): void {
+	if (!child.pid) return;
+	if (process.platform === "win32") {
+		execFile("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true, timeout: 5_000 }, () => {
+			try { child.kill("SIGKILL"); } catch { /* already exited */ }
+		});
+		return;
+	}
+	try { process.kill(-child.pid, "SIGTERM"); }
+	catch { try { child.kill("SIGTERM"); } catch { /* already exited */ } }
+	setTimeout(() => {
+		try { process.kill(-child.pid!, "SIGKILL"); }
+		catch { try { child.kill("SIGKILL"); } catch { /* already exited */ } }
+	}, 500).unref();
 }

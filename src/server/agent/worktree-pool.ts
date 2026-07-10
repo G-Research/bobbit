@@ -860,8 +860,9 @@ export class WorktreePool {
 								timeoutMs: setupTimeoutMs,
 								skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
 								recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
-								exec: async (cmd, cwd, env) => {
-									await execShellCommand(cmd, { cwd, env, timeout: setupTimeoutMs });
+								execHandlesTimeout: true,
+								exec: async (cmd, cwd, env, timeoutMs) => {
+									await execShellCommand(cmd, { cwd, env, timeout: timeoutMs });
 								},
 							});
 						} catch (err) {
