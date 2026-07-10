@@ -1101,7 +1101,9 @@ function utf8Suffix(value: string, maxBytes: number): string {
 	if (maxBytes <= 0) return "";
 	const buf = Buffer.from(value, "utf8");
 	if (buf.byteLength <= maxBytes) return value;
-	return buf.subarray(Math.max(0, buf.byteLength - maxBytes)).toString("utf8");
+	let start = Math.max(0, buf.byteLength - maxBytes);
+	while (start < buf.byteLength && (buf[start] & 0xc0) === 0x80) start++;
+	return buf.subarray(start).toString("utf8");
 }
 
 function truncateVerificationWsText(value: string, maxBytes: number, fieldLabel: string): { text: string; originalBytes: number; truncated: boolean } {
@@ -1122,16 +1124,24 @@ export function sanitizeVerificationWsEvent<T>(event: T): T {
 	if (e.type === "gate_verification_step_output" && typeof e.text === "string") {
 		const preview = truncateVerificationWsText(e.text, VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES, "verification step output");
 		if (!preview.truncated) return event;
-		const sanitized = { ...e, text: preview.text, textTruncated: true, originalTextBytes: preview.originalBytes };
-		sanitized.previewTextBytes = Buffer.byteLength(sanitized.text, "utf8");
-		return sanitized;
+		return {
+			...e,
+			text: preview.text,
+			textTruncated: true,
+			originalTextBytes: preview.originalBytes,
+			previewTextBytes: Buffer.byteLength(preview.text, "utf8"),
+		};
 	}
 	if (e.type === "gate_verification_step_complete" && typeof e.output === "string") {
 		const preview = truncateVerificationWsText(e.output, VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES, "verification step completion output");
 		if (!preview.truncated) return event;
-		const sanitized = { ...e, output: preview.text, outputTruncated: true, originalOutputBytes: preview.originalBytes };
-		sanitized.previewOutputBytes = Buffer.byteLength(sanitized.output, "utf8");
-		return sanitized;
+		return {
+			...e,
+			output: preview.text,
+			outputTruncated: true,
+			originalOutputBytes: preview.originalBytes,
+			previewOutputBytes: Buffer.byteLength(preview.text, "utf8"),
+		};
 	}
 	return event;
 }
