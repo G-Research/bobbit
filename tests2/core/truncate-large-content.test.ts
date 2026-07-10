@@ -13,6 +13,16 @@ import {
 
 const PREVIEW_MARKER = "__preview_snapshot_v1__\n";
 
+function assertTruncatedStringDescriptor(value: any, original: string, label: string): void {
+	assert.strictEqual(
+		value?._truncated,
+		true,
+		`${label}: expected large string to be replaced by a truncation descriptor before WS serialization`,
+	);
+	assert.strictEqual(value._originalLength, original.length, `${label}: original length must be recorded`);
+	assert.strictEqual(value.preview, original.slice(0, 512), `${label}: preview must be bounded`);
+}
+
 describe("truncateLargeToolContent", () => {
 	it("returns the same object for non-message events", () => {
 		const event = { type: "agent_start", data: {} };
@@ -306,6 +316,58 @@ describe("truncateLargeToolContent", () => {
 		assert.strictEqual(result.type, "message_update");
 	});
 
+	it("truncates verification_result summary/report_html before session event broadcast", () => {
+		const summary = "summary-line\n".repeat(6000);
+		const reportHtml = `<main>${"<p>full html artifact</p>".repeat(6000)}</main>`;
+		const event = {
+			type: "message_update",
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						name: "verification_result",
+						arguments: { verdict: "fail", summary, report_html: reportHtml },
+					},
+				],
+			},
+		};
+
+		const result = truncateLargeToolContent(event);
+
+		assert.notStrictEqual(
+			result,
+			event,
+			"WS backpressure regression: verification_result tool-call payloads must be cloned and truncated before session event broadcast",
+		);
+		const args = result.message.content[0].arguments;
+		assertTruncatedStringDescriptor(args.summary, summary, "WS backpressure regression: verification_result.summary");
+		assertTruncatedStringDescriptor(args.report_html, reportHtml, "WS backpressure regression: verification_result.report_html");
+		assert.strictEqual(event.message.content[0].arguments.summary, summary, "original event summary must not be mutated");
+		assert.strictEqual(event.message.content[0].arguments.report_html, reportHtml, "original event report_html must not be mutated");
+	});
+
+	it("truncates marker-less large text blocks before session event broadcast", () => {
+		const big = "event text\n".repeat(6000);
+		const event = {
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				content: [{ type: "text", text: big }],
+			},
+		};
+
+		const result = truncateLargeToolContent(event);
+
+		assert.notStrictEqual(result, event);
+		const block = result.message.content[0];
+		assert.strictEqual(block.text, big.slice(0, 512));
+		assert.strictEqual(block._truncated, true);
+		assert.strictEqual(block._originalLength, big.length);
+		assert.strictEqual(block.preview, big.slice(0, 512));
+		assert.strictEqual(event.message.content[0].text, big, "original text block must not be mutated");
+	});
+
 	it("exports the threshold constant", () => {
 		assert.strictEqual(LARGE_CONTENT_THRESHOLD, 32 * 1024);
 	});
@@ -360,6 +422,51 @@ describe("truncateLargeToolContentInMessages", () => {
 		const block = result[0].content[0];
 		assert.strictEqual(block.arguments.content._truncated, true);
 		assert.strictEqual(block.arguments.content._originalLength, large.length);
+	});
+
+	it("truncates verification_result summary/report_html in persisted history", () => {
+		const summary = "history summary\n".repeat(6000);
+		const reportHtml = `<section>${"<article>artifact body</article>".repeat(6000)}</section>`;
+		const msg = {
+			role: "assistant",
+			content: [
+				{
+					type: "tool_use",
+					name: "verification_result",
+					input: { verdict: "pass", summary, report_html: reportHtml },
+				},
+			],
+		};
+		const messages = [msg];
+
+		const result = truncateLargeToolContentInMessages(messages) as any[];
+
+		assert.notStrictEqual(
+			result,
+			messages,
+			"WS backpressure regression: verification_result tool-use payloads must be cloned and truncated before session history replay",
+		);
+		const input = result[0].content[0].input;
+		assertTruncatedStringDescriptor(input.summary, summary, "WS backpressure regression: history verification_result.summary");
+		assertTruncatedStringDescriptor(input.report_html, reportHtml, "WS backpressure regression: history verification_result.report_html");
+		assert.strictEqual(msg.content[0].input.summary, summary, "original history summary must not be mutated");
+		assert.strictEqual(msg.content[0].input.report_html, reportHtml, "original history report_html must not be mutated");
+	});
+
+	it("truncates large assistant text blocks in persisted history", () => {
+		const big = "assistant text\n".repeat(6000);
+		const msg = { role: "assistant", content: [{ type: "text", text: big }] };
+		const messages = [msg];
+
+		const result = truncateLargeToolContentInMessages(messages) as any[];
+
+		assert.notStrictEqual(result, messages);
+		const block = result[0].content[0];
+		assert.strictEqual(block.text, big.slice(0, 512));
+		assert.strictEqual(block._truncated, true);
+		assert.strictEqual(block._originalLength, big.length);
+		assert.strictEqual(block.preview, big.slice(0, 512));
+		assert.strictEqual(msg.content[0].text, big, "original assistant text must not be mutated");
 	});
 
 	it("ignores non-array input", () => {
@@ -444,7 +551,7 @@ describe("preview_open snapshot truncation", () => {
 		assert.strictEqual(truncateLargeToolContentInMessages(messages), messages);
 	});
 
-	it("truncateLargeToolContentInMessages: leaves marker-less text blocks untouched even when large", () => {
+	it("truncateLargeToolContentInMessages: truncates marker-less toolResult text blocks before history replay", () => {
 		const big = "x".repeat(LARGE_CONTENT_THRESHOLD + 100);
 		const msg = {
 			role: "toolResult",
@@ -452,12 +559,23 @@ describe("preview_open snapshot truncation", () => {
 			content: [{ type: "text", text: big }],
 		};
 		const messages = [msg];
-		const result = truncateLargeToolContentInMessages(messages);
-		// Marker-less text blocks in toolResult are not snapshots — untouched,
-		// so the array reference is returned as-is.
-		assert.strictEqual(result, messages);
-		assert.strictEqual((result as any[])[0].content[0].text, big);
-		assert.strictEqual((result as any[])[0].content[0]._truncated, undefined);
+
+		const result = truncateLargeToolContentInMessages(messages) as any[];
+
+		assert.notStrictEqual(
+			result,
+			messages,
+			"WS backpressure regression: marker-less toolResult text must be cloned and truncated before session history replay",
+		);
+		const block = result[0].content[0];
+		assert.strictEqual(
+			block._truncated,
+			true,
+			"WS backpressure regression: marker-less toolResult text block must carry truncation metadata",
+		);
+		assert.strictEqual(block._originalLength, big.length);
+		assert.ok(JSON.stringify(result).length < LARGE_CONTENT_THRESHOLD, "truncated history payload must stay below the large-content threshold");
+		assert.strictEqual(msg.content[0].text, big, "original marker-less toolResult text must not be mutated");
 	});
 
 	it("truncateLargeToolContent on message_end toolResult with large snapshot returns new event", () => {

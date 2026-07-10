@@ -1096,6 +1096,64 @@ function verificationRetryDelayMs(attempt: number, isBackoff: boolean): number {
 		: nextBackoffDelay(attempt, { baseMs: 2000 });
 }
 
+export const VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES = 16 * 1024;
+export const VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES = 32 * 1024;
+
+function formatByteCount(bytes: number): string {
+	if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+	if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+	return `${bytes} B`;
+}
+
+function utf8Suffix(value: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	const buf = Buffer.from(value, "utf8");
+	if (buf.byteLength <= maxBytes) return value;
+	let start = Math.max(0, buf.byteLength - maxBytes);
+	while (start < buf.byteLength && (buf[start] & 0xc0) === 0x80) start++;
+	return buf.subarray(start).toString("utf8");
+}
+
+function truncateVerificationWsText(value: string, maxBytes: number, fieldLabel: string): { text: string; originalBytes: number; truncated: boolean } {
+	const originalBytes = Buffer.byteLength(value, "utf8");
+	if (originalBytes <= maxBytes) return { text: value, originalBytes, truncated: false };
+	const marker = `\n\n[Bobbit: ${fieldLabel} truncated for live WebSocket delivery from ${formatByteCount(originalBytes)} to a bounded preview. Full output remains available via gate inspection/retained diagnostics.]`;
+	const markerBytes = Buffer.byteLength(marker, "utf8");
+	const previewBudget = Math.max(0, maxBytes - markerBytes);
+	const text = previewBudget > 0
+		? `${utf8Suffix(value, previewBudget)}${marker}`
+		: utf8Suffix(marker, maxBytes);
+	return { text, originalBytes, truncated: true };
+}
+
+export function sanitizeVerificationWsEvent<T>(event: T): T {
+	if (!event || typeof event !== "object") return event;
+	const e = event as any;
+	if (e.type === "gate_verification_step_output" && typeof e.text === "string") {
+		const preview = truncateVerificationWsText(e.text, VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES, "verification step output");
+		if (!preview.truncated) return event;
+		return {
+			...e,
+			text: preview.text,
+			textTruncated: true,
+			originalTextBytes: preview.originalBytes,
+			previewTextBytes: Buffer.byteLength(preview.text, "utf8"),
+		};
+	}
+	if (e.type === "gate_verification_step_complete" && typeof e.output === "string") {
+		const preview = truncateVerificationWsText(e.output, VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES, "verification step completion output");
+		if (!preview.truncated) return event;
+		return {
+			...e,
+			output: preview.text,
+			outputTruncated: true,
+			originalOutputBytes: preview.originalBytes,
+			previewOutputBytes: Buffer.byteLength(preview.text, "utf8"),
+		};
+	}
+	return event;
+}
+
 const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
 const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
 // Reminder-path fairness (see runLlmReviewViaSession). A reviewer that went
@@ -2371,7 +2429,7 @@ export class VerificationHarness {
 					this.projectContextManager?.getContextForGoal(goalId)?.goalStore.bumpGeneration?.();
 				}
 			}
-			this._rawBroadcastFn(goalId, event);
+			this._rawBroadcastFn(goalId, sanitizeVerificationWsEvent(event));
 		};
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
