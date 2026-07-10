@@ -58,6 +58,8 @@ export interface ApplyReviewModelOptions {
 	maxAttempts?: number;
 	/** Delay between retries in ms. Defaults to 250. */
 	retryDelayMs?: number;
+	/** Retry attempts for post-setModel read-back verification. Defaults to maxAttempts. */
+	readBackAttempts?: number;
 	/**
 	 * Skip the `setModel` RPC and go straight to read-back verification.
 	 * Use when the agent was spawned with `--model <provider>/<modelId>`
@@ -77,6 +79,8 @@ export interface ApplyModelStringOptions {
 	maxAttempts?: number;
 	/** Delay between retries in ms. Defaults to 250. */
 	retryDelayMs?: number;
+	/** Retry attempts for post-setModel read-back verification. Defaults to maxAttempts. */
+	readBackAttempts?: number;
 	/**
 	 * Skip the `setModel` RPC and go straight to read-back verification.
 	 * Use when the agent was spawned with `--model <provider>/<modelId>`
@@ -142,6 +146,7 @@ async function bindModelString(
 
 	const maxAttempts = Math.max(1, opts.maxAttempts ?? 2);
 	const retryDelayMs = Math.max(0, opts.retryDelayMs ?? 250);
+	const readBackAttempts = Math.max(1, opts.readBackAttempts ?? maxAttempts);
 
 	if (!opts.skipSetModel) {
 		let lastErr: unknown;
@@ -165,20 +170,36 @@ async function bindModelString(
 		}
 	}
 
-	// Read-back verification
-	let stateRaw: unknown;
-	try {
-		stateRaw = await rpc.getState();
-	} catch (err) {
-		throw new Error(`setModel read-back failed (getState threw) for "${modelString}": ${errorMessage(err)}`);
+	// Read-back verification. Some agents apply setModel asynchronously enough
+	// that the first getState() can still report the previous model; keep the
+	// hard-fail contract, but give the read-back a bounded retry window before
+	// declaring a genuine mismatch.
+	let lastReadBackErr: unknown;
+	let lastBoundModel: ModelShape | undefined;
+	for (let attempt = 1; attempt <= readBackAttempts; attempt++) {
+		try {
+			const stateRaw = await rpc.getState();
+			// Accept both the real RpcBridge shape `{ success, data: { model } }` and
+			// the simpler `{ model }` shape used by unit-test mocks.
+			const s = (stateRaw ?? {}) as { data?: { model?: ModelShape }; model?: ModelShape };
+			lastBoundModel = s.data?.model ?? s.model;
+			if (lastBoundModel?.id === modelId && lastBoundModel?.provider === provider) {
+				lastReadBackErr = undefined;
+				break;
+			}
+		} catch (err) {
+			lastReadBackErr = err;
+		}
+		if (attempt < readBackAttempts) {
+			await sleep(retryDelayMs);
+		}
 	}
-	// Accept both the real RpcBridge shape `{ success, data: { model } }` and
-	// the simpler `{ model }` shape used by unit-test mocks.
-	const s = (stateRaw ?? {}) as { data?: { model?: ModelShape }; model?: ModelShape };
-	const boundModel: ModelShape | undefined = s.data?.model ?? s.model;
-	const boundId = boundModel?.id;
-	const boundProvider = boundModel?.provider;
+	const boundId = lastBoundModel?.id;
+	const boundProvider = lastBoundModel?.provider;
 	if (boundId !== modelId || boundProvider !== provider) {
+		if (lastReadBackErr && !lastBoundModel) {
+			throw new Error(`setModel read-back failed (getState threw) for "${modelString}": ${errorMessage(lastReadBackErr)}`);
+		}
 		throw new Error(
 			`setModel read-back mismatch for "${modelString}": expected ${provider}/${modelId}, ` +
 				`agent reports ${boundProvider ?? "?"}/${boundId ?? "?"}`,
@@ -221,6 +242,7 @@ export async function applyModelString(
 				contextLabel: "default.sessionModel fallback",
 				maxAttempts: opts.maxAttempts,
 				retryDelayMs: opts.retryDelayMs,
+				readBackAttempts: opts.readBackAttempts,
 			});
 			return;
 		} catch (fallbackErr) {
@@ -254,6 +276,7 @@ export async function applyReviewModelOverrides(
 		contextLabel: prefKey,
 		maxAttempts: opts.maxAttempts,
 		retryDelayMs: opts.retryDelayMs,
+		readBackAttempts: opts.readBackAttempts,
 		skipSetModel: opts.skipSetModel,
 		controlledFallback,
 	});

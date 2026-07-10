@@ -36,6 +36,14 @@ describe("bobbit_read — paging schema", () => {
 		expect(props.after.description).toMatch(/cursor|after/i);
 		expect(props.cursor.description).toMatch(/cursor|after/i);
 	});
+
+	it("exposes the REST-style search archive opt-in", () => {
+		const props = tools.get("bobbit_read")!.parameters?.properties ?? {};
+
+		expect(props.includeArchived, "includeArchived should be registered in the bobbit_read schema").toBeTruthy();
+		expect(props.includeArchived.type).toBe("boolean");
+		expect(props.includeArchived.description).toMatch(/search|archive/i);
+	});
 });
 
 describe("bobbit_admin — create_project schema", () => {
