@@ -259,9 +259,14 @@ interface PageMetadata {
 }
 ```
 
-REST-level paging is preferred when the endpoint supports it. Otherwise the tool
-pages the already-filtered gateway response and preserves ancillary fields such
-as counts, diagnostics, summaries, and delegate/session metadata.
+REST-level paging is used by `list_sessions`, `list_goals`, and `search`, which
+return page fields such as `total`, `hasMore`, `nextOffset`, or `nextCursor`.
+When those REST page fields are present, the tool adds normalized `pagination`
+metadata but does **not** slice the returned array again. Other list-style
+operations are paged tool-side after the gateway response has already been
+scoped by semantic filters such as `projectId`, `goalId`, and `view`; ancillary
+fields such as counts, diagnostics, summaries, and delegate/session metadata are
+preserved.
 
 #### Operation catalogue and semantic filters
 
@@ -279,18 +284,18 @@ as counts, diagnostics, summaries, and delegate/session metadata.
 | `get_session` | GET | `/api/sessions/:sessionId` | `sessionId` | — |
 | `session_cost` | GET | `/api/sessions/:sessionId/cost` | `sessionId` | — |
 | `search` | GET | `/api/search` | `q` | `q`, `type` (all\|goals\|sessions\|messages\|staff), `projectId`, `limit`, `offset` |
-| `list_projects` | GET | `/api/projects` | — | `limit`, `offset` |
+| `list_projects` | GET | `/api/projects` | — | `limit`, `offset` (tool-side fallback) |
 | `get_project` | GET | `/api/projects/:projectId` | `projectId` | — |
-| `list_workflows` | GET | `/api/workflows` | `projectId` | `projectId`, `limit`, `offset` |
+| `list_workflows` | GET | `/api/workflows` | `projectId` | `projectId`, `limit`, `offset` (tool-side fallback) |
 | `get_workflow` | GET | `/api/workflows/:workflowId` | `workflowId` | `projectId` (`?projectId=`) |
-| `list_roles` | GET | `/api/roles` | — | `projectId`, `limit`, `offset` |
-| `list_tools` | GET | `/api/tools` | — | `projectId`, `limit`, `offset` |
-| `list_gates` | GET | `/api/goals/:goalId/gates` | `goalId` | `view` (`?view=summary`), `limit`, `offset` |
-| `list_tasks` | GET | `/api/goals/:goalId/tasks` | `goalId` | `view` (`?view=summary`), `limit`, `offset` |
+| `list_roles` | GET | `/api/roles` | — | `projectId`, `limit`, `offset` (tool-side fallback) |
+| `list_tools` | GET | `/api/tools` | — | `projectId`, `limit`, `offset` (tool-side fallback) |
+| `list_gates` | GET | `/api/goals/:goalId/gates` | `goalId` | `view` (`?view=summary`), `limit`, `offset` (tool-side fallback) |
+| `list_tasks` | GET | `/api/goals/:goalId/tasks` | `goalId` | `view` (`?view=summary`), `limit`, `offset` (tool-side fallback) |
 | `get_task` | GET | `/api/tasks/:taskId` | `taskId` | — |
-| `list_staff` | GET | `/api/staff` | — | `projectId`, `limit`, `offset` |
-| `list_mcp_servers` | GET | `/api/mcp-servers` | — | `projectId`, `limit`, `offset` |
-| `maintenance_inspect` | GET | (see sub-probes) | `probe` | `probe`, supported `projectId`, paging for large array probes |
+| `list_staff` | GET | `/api/staff` | — | `projectId`, `limit`, `offset` (tool-side fallback) |
+| `list_mcp_servers` | GET | `/api/mcp-servers` | — | `projectId`, `limit`, `offset` (tool-side fallback) |
+| `maintenance_inspect` | GET | (see sub-probes) | `probe` | `probe`, supported `projectId`, tool-side paging for large array probes |
 
 Semantic filter notes:
 
@@ -319,9 +324,8 @@ Semantic filter notes:
 | `sandbox_status` | `/api/sandbox-status` | `projectId` |
 | `search_stats` | `/api/search/stats` | `projectId` |
 
-> `list_workflows` returns an empty list when `projectId` is omitted (there is
-> no server-scope workflow set). We mark `projectId` **required** at the tool
-> layer for a useful result, but the call itself will not error without it.
+> `list_workflows` has no useful server-scope result, so `projectId` is
+> required at the tool layer.
 
 ### 5.2 `bobbit_orchestrate` (group `Bobbit`)
 

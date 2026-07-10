@@ -1,10 +1,19 @@
 # Design: `bobbit_read` pagination
 
-Status: **design** · Goal: Page Bobbit Tools · Author: coder-861a
+Status: **implemented** · Goal: Page Bobbit Tools · Author: coder-861a
 
 ## 1. Problem
 
-`defaults/tools/bobbit/extension.ts` currently returns gateway JSON verbatim. For list-style `bobbit_read` operations this can emit unbounded arrays into the agent context, especially sessions, goals, tools, MCP servers, and maintenance probes. The fix should make tool calls bounded by default while keeping REST/UI behaviour backward-compatible unless a caller explicitly opts into paging.
+`defaults/tools/bobbit/extension.ts` previously returned gateway JSON verbatim. For list-style `bobbit_read` operations this could emit unbounded arrays into the agent context, especially sessions, goals, tools, MCP servers, and maintenance probes. The implemented fix makes tool calls bounded by default while keeping REST/UI behaviour backward-compatible unless a caller explicitly opts into paging.
+
+## 1.1 Implemented behaviour
+
+- `bobbit_read` list operations default to `limit=50`, `offset=0`, and clamp list limits to `200`; `search` defaults to `20` and clamps to `100`.
+- The tool forwards REST paging only for `list_sessions`, `list_goals`, and `search`. These are the high-volume endpoints where the gateway returns page fields such as `total`, `hasMore`, `nextOffset`, or `nextCursor`.
+- When a gateway response already includes REST paging fields or a `pagination` object, the tool adds normalized `pagination` metadata and marks `pagedBy: "rest"`; it does **not** re-slice the returned array. This matters for responses such as `include=archived` sessions, where the REST payload can include live sessions plus an archived page.
+- Other list-style operations use tool-side fallback paging after the endpoint has applied semantic filters (`projectId`, `goalId`, `view`, `q`, `include`, or `archived` as applicable). Fallback responses are marked `pagedBy: "tool"`.
+- Tool-side fallback preserves ancillary fields such as `generation`, `archivedDelegates`, `archivedSessions`, diagnostics, summary counts, and maintenance probe counts.
+- Cursor inputs use `cursor` as the generic alias and `after` as the gateway query name for archived session/goal paths. Cursor mode wins over offset mode only when the operation is cursor-backed and a cursor value is supplied.
 
 ## 2. Scope
 
@@ -22,7 +31,7 @@ Out of scope:
 - UI migration to paged list endpoints. UI callers remain unpaged unless they pass paging params.
 - Replacing `read_session`; transcript pagination stays in the dedicated tool.
 
-## 3. Files and functions to change
+## 3. Implementation surface
 
 ### Tool extension
 
@@ -49,7 +58,7 @@ Out of scope:
 
 ### Gateway REST endpoints
 
-Change only when the endpoint can safely expose optional paging without changing default responses:
+REST-level changes are optional and must not change default responses for callers that omit paging params. The implemented `bobbit_read` tool forwards paging only where it relies on REST-paged output; otherwise it uses tool-side fallback after semantic filters have run.
 
 - `src/server/server.ts::handleApiRoute()`
   - `GET /api/sessions` block: add offset pagination for live/default sessions when `limit` or `offset` is present; keep existing archived `limit + after` path, and optionally accept `offset` for archived too.
@@ -145,22 +154,22 @@ async function dispatch(ops: Record<string, OpSpec>, params: Params, opts?: { pa
 }
 ```
 
-## 6. Operation-by-operation plan
+## 6. Operation-by-operation behaviour
 
-| operation | primary array | semantic filters | paging plan |
+| operation | primary array | semantic filters | paging behaviour |
 |---|---:|---|---|
-| `list_sessions` | `sessions` | `include`, `q`, `projectId` | Forward `projectId`, `include`, `q`, `limit`, `offset`; use `after` for archived cursor path. Add REST paging for live sessions so filtering happens before slicing. |
-| `list_goals` | `goals` | `archived`, `q`, `projectId` | Add missing `projectId` forwarding. Archived REST already pages with `limit + after`; live REST should add optional `limit`/`offset` after `listGoalsAcrossProjects({ projectId })`. |
-| `list_projects` | `projects` or bare array today | hidden/system/HQ preference filter inside `listProjectsForApi()` | Prefer optional REST paging after `listProjectsForApi()`. If kept as array response, tool should normalize to `{ projects, pagination }` only for tool output. |
-| `list_workflows` | `workflows` | `projectId` required | Forward paging if REST added; otherwise tool fallback after `configCascade.resolveWorkflows(projectId)`. |
-| `list_roles` | `roles` | `projectId` config scope | Add `projectId` forwarding; REST requires explicit config scope. Tool fallback is acceptable. |
-| `list_tools` | `tools` | `projectId` config scope | Already forwards `projectId`; fallback page `tools` and preserve `diagnostics`/`toolDiagnostics`. |
-| `list_gates` | `gates` | `goalId`, `view` | Add optional REST paging after summary/full projection. Preserve summary count fields; do not page before computing counts. |
-| `list_tasks` | `tasks` | `goalId`, `view` | Add optional REST paging after summary/full projection. |
-| `list_staff` | `staff` | `projectId` supported by REST | Add missing `projectId` forwarding. Fallback page `staff` if REST remains unpaged. |
-| `list_mcp_servers` | bare array today | `projectId` supported by REST; `cwd`/`ensure` exist in REST but not schema | Add `projectId` forwarding. Tool can normalize bare array to `{ servers, pagination }`. Do not expose `ensure` through `bobbit_read` unless explicitly desired, because it can initialize managers. |
-| `maintenance_inspect` | varies | `probe`, sometimes `projectId` | See §7. Page probes with large arrays/samples; scalar/stat probes return unchanged or metadata only when an array is present. |
-| `search` | `results` | `q`, `type`, `limit`, `offset`, `projectId` | Already forwards paging. Add normalized `pagination` from `{ results, total }`: `hasMore = offset + results.length < total`. |
+| `list_sessions` | `sessions` | `include`, `q`, `projectId` | Forwards filters plus `limit`; forwards `offset` for offset mode and `after` for archived cursor mode. REST-paged results are not re-sliced. |
+| `list_goals` | `goals` | `archived`, `q`, `projectId` | Forwards filters plus `limit`; forwards `offset` for live/offset mode and `after` for archived cursor mode. REST-paged results are not re-sliced. |
+| `list_projects` | `projects` or bare array | hidden/system/HQ preference filter inside `listProjectsForApi()` | Tool fallback pages the filtered response and normalizes tool output to `{ projects, pagination }` when needed. |
+| `list_workflows` | `workflows` | `projectId` required | Forwards `projectId`; tool fallback pages after workflow resolution. |
+| `list_roles` | `roles` | `projectId` config scope | Forwards `projectId`; tool fallback pages after config-scope resolution. |
+| `list_tools` | `tools` | `projectId` config scope | Forwards `projectId`; tool fallback pages `tools` and preserves `diagnostics`/`toolDiagnostics`. |
+| `list_gates` | `gates` | `goalId`, `view` | Path-scoped by `goalId`; tool fallback pages the selected `view` output and preserves summary fields. |
+| `list_tasks` | `tasks` | `goalId`, `view` | Path-scoped by `goalId`; tool fallback pages the selected `view` output. |
+| `list_staff` | `staff` | `projectId` supported by REST | Forwards `projectId`; tool fallback pages `staff`. |
+| `list_mcp_servers` | bare array | `projectId` supported by REST; `cwd`/`ensure` exist in REST but not schema | Forwards `projectId`; tool fallback normalizes the array to `{ servers, pagination }`. Does not expose `ensure`, because it can initialize managers. |
+| `maintenance_inspect` | varies | `probe`, sometimes `projectId` | See §7. Tool fallback pages probes with large arrays/samples; scalar/stat probes return unchanged unless an array key is present. |
+| `search` | `results` | `q`, `type`, `limit`, `offset`, `projectId` | Forwards paging. Adds normalized `pagination` from REST results without re-slicing. |
 
 Non-list read operations are unchanged and do not receive pagination metadata.
 
@@ -217,17 +226,17 @@ If a probe returns a bare array, normalize it to `{ items: [...], pagination: { 
 
 ## 9. REST vs tool fallback policy
 
-Prefer REST paging when:
+Use REST paging when:
 
-- The endpoint already supports paging (`search`, archived `goals`, archived `sessions`).
-- The endpoint performs expensive semantic filtering or aggregation and can cheaply slice after filtering (`sessions`, live `goals`, tasks/gates).
-- Returning the full response to the tool would defeat the main goal for common large datasets.
+- The endpoint already supports paging and the tool forwards page params (`search`, `list_sessions`, `list_goals`).
+- The endpoint returns page fields (`total`, `hasMore`, `nextOffset`, `nextCursor`, or `pagination`); the tool treats these responses as already paged and does not re-slice them.
 
 Use tool fallback when:
 
 - The endpoint is primarily used by UI and changing response shape would be risky.
 - The endpoint returns small config lists but can still be noisy in agent context (`roles`, `tools`, `workflows`).
 - The endpoint returns a bare array and REST-level shape changes might break consumers (`mcp-servers`, possibly `projects`).
+- The implemented `bobbit_read` path does not forward paging for that operation; fallback still happens after forwarded semantic filters are applied.
 
 Backward compatibility rule: REST endpoints must keep their existing response shape when no paging params are present. If REST receives `limit`, `offset`, `after`, or `cursor`, it may return page metadata. The `bobbit_read` tool should always request or apply paging for list operations, so agents get bounded output by default without forcing UI changes.
 

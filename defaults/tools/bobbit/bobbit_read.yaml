@@ -42,6 +42,13 @@ detail_docs: >-
   and return pagination metadata. `search` keeps its search endpoint defaults
   (`limit=20`, maximum `100`) unless you pass `limit` explicitly.
 
+  - REST vs tool paging: paging is forwarded to REST for `list_sessions`,
+  `list_goals`, and `search`. Other list-style operations are paged in the tool
+  after the gateway applies semantic filters such as `projectId`, `goalId`, or
+  `view`. If a response already contains REST page fields (`total`, `hasMore`,
+  `nextOffset`, `nextCursor`, or `pagination`), the tool treats it as REST-paged
+  and does **not** slice the array again.
+
   - Cursor aliases: `cursor` is the generic cursor input; `after` is the gateway
   query name used by archived session/goal paths. If both cursor and offset
   inputs are present for a cursor-backed call, the cursor form wins.
@@ -55,7 +62,7 @@ detail_docs: >-
   `projects`, `workflows`, `roles`, `tools`, `gates`, `tasks`, `staff`,
   `servers`, `results`, or probe-specific keys such as `worktrees`/`sample`).
   Fallback tool-side paging happens only after the gateway has applied semantic
-  filters.
+  filters, and REST-paged responses are annotated rather than re-sliced.
 
 
   `pagination` includes:
@@ -109,33 +116,29 @@ detail_docs: >-
 
   | `search` | `/api/search` (`?q`, `?type`, `?limit`, `?offset`, `?projectId`) | `q` | `q`, `type`, `projectId`, `limit`, `offset` |
 
-  | `list_projects` | `/api/projects` (paging) | — | `limit`, `offset` |
+  | `list_projects` | `/api/projects` | — | `limit`, `offset` (tool-side fallback) |
 
   | `get_project` | `/api/projects/:projectId` | `projectId` | — |
 
-  | `list_workflows` | `/api/workflows` (`?projectId`, paging) | `projectId`* | `projectId`, `limit`, `offset` |
+  | `list_workflows` | `/api/workflows` (`?projectId`) | `projectId` | `projectId`, `limit`, `offset` (tool-side fallback) |
 
   | `get_workflow` | `/api/workflows/:workflowId` (`?projectId`) | `workflowId` | `projectId` |
 
-  | `list_roles` | `/api/roles` (`?projectId`, paging) | — | `projectId`, `limit`, `offset` |
+  | `list_roles` | `/api/roles` (`?projectId`) | — | `projectId`, `limit`, `offset` (tool-side fallback) |
 
-  | `list_tools` | `/api/tools` (`?projectId`, paging) | — | `projectId`, `limit`, `offset` |
+  | `list_tools` | `/api/tools` (`?projectId`) | — | `projectId`, `limit`, `offset` (tool-side fallback) |
 
-  | `list_gates` | `/api/goals/:goalId/gates` (`?view`, paging) | `goalId` | `view`, `limit`, `offset` |
+  | `list_gates` | `/api/goals/:goalId/gates` (`?view`) | `goalId` | `view`, `limit`, `offset` (tool-side fallback) |
 
-  | `list_tasks` | `/api/goals/:goalId/tasks` (`?view`, paging) | `goalId` | `view`, `limit`, `offset` |
+  | `list_tasks` | `/api/goals/:goalId/tasks` (`?view`) | `goalId` | `view`, `limit`, `offset` (tool-side fallback) |
 
   | `get_task` | `/api/tasks/:taskId` | `taskId` | — |
 
-  | `list_staff` | `/api/staff` (`?projectId`, paging) | — | `projectId`, `limit`, `offset` |
+  | `list_staff` | `/api/staff` (`?projectId`) | — | `projectId`, `limit`, `offset` (tool-side fallback) |
 
-  | `list_mcp_servers` | `/api/mcp-servers` (`?projectId`, paging) | — | `projectId`, `limit`, `offset` |
+  | `list_mcp_servers` | `/api/mcp-servers` (`?projectId`) | — | `projectId`, `limit`, `offset` (tool-side fallback) |
 
-  | `maintenance_inspect` | see `probe` below | `probe` | `probe`, supported `projectId`, paging for large array probes |
-
-
-  \* `list_workflows` returns an empty list without `projectId` — the gateway
-  will not error, but pass `projectId` for a useful result.
+  | `maintenance_inspect` | see `probe` below | `probe` | `probe`, supported `projectId`, tool-side paging for large array probes |
 
 
   ### Semantic filter audit
