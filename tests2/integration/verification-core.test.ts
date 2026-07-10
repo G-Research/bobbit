@@ -69,6 +69,72 @@ async function prepBugFixGoalWithAnalysis(
 	return { goalId, sessionId, ws };
 }
 
+const HIGH_VOLUME_WS_BURST_CMD = `node -e "process.stdout.write('OUT_BURST_START\\n'+'x'.repeat(160*1024)+'\\nOUT_BURST_END\\n'); process.stderr.write('ERR_BURST_START\\n'+'y'.repeat(128*1024)+'\\nERR_BURST_END\\n')"`;
+const STEP_OUTPUT_FRAME_CAP_BYTES = 24 * 1024;
+const STEP_COMPLETE_FRAME_CAP_BYTES = 40 * 1024;
+
+function makeWorkflowId(prefix: string): string {
+	return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function createWorkflow(id: string, gates: Array<Record<string, unknown>>): Promise<void> {
+	const res = await apiFetch("/api/workflows", {
+		method: "POST",
+		body: JSON.stringify({
+			id,
+			name: `Verification Core ${id}`,
+			description: "Fixture workflow for verification integration tests.",
+			gates,
+		}),
+	});
+	expect(res.status, `workflow create failed: ${res.status} ${await res.text().catch(() => "")}`).toBe(201);
+}
+
+async function deleteWorkflow(id: string): Promise<void> {
+	await apiFetch(`/api/workflows/${id}`, { method: "DELETE" }).catch(() => undefined);
+}
+
+function serializedBytes(value: unknown): number {
+	return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+async function assertSocketStillUsable(ws: WsConnection): Promise<void> {
+	const cursor = ws.messageCount();
+	ws.send({ type: "ping" });
+	await ws.waitForFrom(cursor, (m) => m.type === "pong", 5_000);
+}
+
+function assertVerificationOrdering(messages: WsConnection["messages"], goalId: string, gateId: string): void {
+	const indexOf = (type: string) => messages.findIndex((m) => m.type === type && m.goalId === goalId && m.gateId === gateId);
+	const signalIdx = indexOf("gate_signal_received");
+	const startedIdx = indexOf("gate_verification_started");
+	const firstOutputIdx = indexOf("gate_verification_step_output");
+	const stepCompleteIdx = indexOf("gate_verification_step_complete");
+	const completeIdx = indexOf("gate_verification_complete");
+	const statusIdx = messages.findIndex((m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === gateId && m.status === "passed");
+
+	expect(signalIdx, "gate_signal_received should be observed").toBeGreaterThanOrEqual(0);
+	expect(startedIdx, "gate_verification_started should be observed").toBeGreaterThanOrEqual(0);
+	expect(firstOutputIdx, "gate_verification_step_output should be observed").toBeGreaterThanOrEqual(0);
+	expect(stepCompleteIdx, "gate_verification_step_complete should be observed").toBeGreaterThanOrEqual(0);
+	expect(completeIdx, "gate_verification_complete should be observed").toBeGreaterThanOrEqual(0);
+	expect(statusIdx, "passed gate_status_changed should be observed").toBeGreaterThanOrEqual(0);
+
+	expect(signalIdx).toBeLessThan(startedIdx);
+	expect(startedIdx).toBeLessThan(firstOutputIdx);
+	expect(firstOutputIdx).toBeLessThan(stepCompleteIdx);
+	expect(stepCompleteIdx).toBeLessThan(completeIdx);
+	expect(completeIdx).toBeLessThan(statusIdx);
+
+	const verificationSeqs = messages
+		.filter((m) => typeof m.type === "string" && m.type.startsWith("gate_verification_") && m.goalId === goalId && m.gateId === gateId)
+		.map((m) => m.seq)
+		.filter((seq): seq is number => typeof seq === "number");
+	for (let i = 1; i < verificationSeqs.length; i++) {
+		expect(verificationSeqs[i], "verification seq values should remain monotonic").toBeGreaterThan(verificationSeqs[i - 1]);
+	}
+}
+
 // Gate status waiting uses WS events via ws.waitFor() — no polling needed.
 
 // ===========================================================================
@@ -357,7 +423,84 @@ test.describe("Multi-step verification", () => {
 });
 
 // ===========================================================================
-// 3. Active verification & step output REST API
+// 3. WebSocket backpressure regression
+// ===========================================================================
+
+test.describe("Verification WebSocket burst backpressure", () => {
+	test.setTimeout(120_000);
+
+	test("high-volume verification output is delivered as bounded frames to multiple subscribers while preserving order", async () => {
+		const workflowId = makeWorkflowId("verification-ws-burst");
+		await createWorkflow(workflowId, [
+			{
+				id: "burst-gate",
+				name: "Burst Gate",
+				dependsOn: [],
+				verify: [{ name: "High-volume command output", type: "command", run: HIGH_VOLUME_WS_BURST_CMD }],
+			},
+		]);
+
+		const goal = await createGoal({ title: `Verification WS Burst ${Date.now()}`, workflowId, team: false, autoStartTeam: false });
+		const goalId = goal.id;
+		const sessionA = await createSession({ goalId });
+		const sessionB = await createSession({ goalId });
+		const wsA = await connectWs(sessionA);
+		const wsB = await connectWs(sessionB);
+
+		try {
+			const cursorA = wsA.messageCount();
+			const cursorB = wsB.messageCount();
+			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/burst-gate/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "# Burst gate\n\nRun the high-volume command fixture." }),
+			});
+			expect(signalResp.status).toBe(201);
+
+			await wsA.waitForFrom(
+				cursorA,
+				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "burst-gate" && m.status === "passed",
+				45_000,
+			);
+			await wsB.waitForFrom(
+				cursorB,
+				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "burst-gate" && m.status === "passed",
+				45_000,
+			);
+
+			for (const [label, conn] of [["subscriber A", wsA], ["subscriber B", wsB]] as const) {
+				const burstMessages = conn.messages.slice(label === "subscriber A" ? cursorA : cursorB)
+					.filter((m) => m.goalId === goalId && m.gateId === "burst-gate");
+				const outputFrames = burstMessages.filter((m) => m.type === "gate_verification_step_output");
+				const completeFrames = burstMessages.filter((m) => m.type === "gate_verification_step_complete");
+
+				expect(outputFrames.length, `${label} should receive streamed burst output`).toBeGreaterThan(0);
+				expect(completeFrames.length, `${label} should receive terminal step completion`).toBe(1);
+				expect(outputFrames.some((m) => m.textTruncated === true && m.originalTextBytes > 16 * 1024), `${label} should observe sanitized high-volume output frames`).toBe(true);
+
+				for (const frame of outputFrames) {
+					expect(serializedBytes(frame), `${label} step_output frame must stay bounded`).toBeLessThanOrEqual(STEP_OUTPUT_FRAME_CAP_BYTES);
+					expect(Buffer.byteLength(frame.text ?? "", "utf8"), `${label} step_output text must stay bounded`).toBeLessThanOrEqual(16 * 1024);
+				}
+				for (const frame of completeFrames) {
+					expect(serializedBytes(frame), `${label} step_complete frame must stay bounded`).toBeLessThanOrEqual(STEP_COMPLETE_FRAME_CAP_BYTES);
+				}
+
+				assertVerificationOrdering(conn.messages, goalId, "burst-gate");
+				await assertSocketStillUsable(conn);
+			}
+		} finally {
+			wsA.close();
+			wsB.close();
+			await deleteSession(sessionA);
+			await deleteSession(sessionB);
+			await deleteGoal(goalId);
+			await deleteWorkflow(workflowId);
+		}
+	});
+});
+
+// ===========================================================================
+// 4. Active verification & step output REST API
 //    Combines: active verifications endpoint (running + empty), modal output
 //    bug path, and step output availability after execution.
 // ===========================================================================
@@ -449,7 +592,7 @@ test.describe("Verification REST API", () => {
 });
 
 // ===========================================================================
-// 4. Expect-failure pipeline
+// 5. Expect-failure pipeline
 // ===========================================================================
 
 test.describe("Expect failure pipeline", () => {
@@ -520,7 +663,7 @@ test.describe("Expect failure pipeline", () => {
 });
 
 // ===========================================================================
-// 5. LLM Review verification
+// 6. LLM Review verification
 // ===========================================================================
 
 test.describe("LLM Review verification", () => {
