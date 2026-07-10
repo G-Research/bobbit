@@ -118,12 +118,17 @@ All operations are GETs with no side effects.
 - `create_task`, `update_task`, `transition_task`, `assign_task` — task board.
 - `signal_gate`, `reset_gate`, `cancel_verification` — workflow gates by id.
 - `create_staff` — create a staff agent.
+- `delete_staff` (`staffId`) — delete exactly one staff agent.
 - `team_start`, `team_teardown` — goal-level team lifecycle by explicit `goalId`.
 
 Notes:
 
 - **`create_goal` and `create_session` require an explicit `projectId`** — there
   is no defaulting to `headquarters` or the system project.
+- **`delete_staff` is single-resource only.** It requires `staffId`, validates
+  that id before making a request, then dispatches through the same shared
+  `bobbit_orchestrate` API helper to `DELETE /api/staff/:id`. Unknown ids return
+  the backend not-found error. There is no bulk or wildcard staff delete.
 - **`delete_goal` is intentionally absent.** There is no hard-delete goal
   endpoint; `archive_goal` (`DELETE /api/goals/:id`) archives with cascade
   semantics. Delete = archive.

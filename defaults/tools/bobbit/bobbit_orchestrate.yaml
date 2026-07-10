@@ -88,6 +88,11 @@ detail_docs: >-
   - `create_goal`/`create_session` **require** an explicit `projectId` — no
   defaulting.
 
+  - `delete_staff` requires `staffId`, validates it before fetch, and dispatches
+  to `DELETE /api/staff/:staffId` through the same Bobbit tool API helper and
+  `bobbit_orchestrate` grant model. Unknown ids surface the backend not-found
+  error. Bulk/wildcard staff deletion is not exposed.
+
   - `team_start` returns 400 `SPEC_REQUIRED` if the goal has no spec;
   `team_teardown` with `cascade=false` returns 409 `HAS_DESCENDANT_TEAMS` when
   live descendants exist.
