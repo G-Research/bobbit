@@ -162,6 +162,32 @@ describe("bobbit_read — normalized REST pagination metadata", () => {
 		});
 	});
 
+	it("does not re-slice REST-paged archived session pages that include live sessions", async () => {
+		const sessions = [
+			{ id: "live-0" },
+			...Array.from({ length: 5 }, (_, i) => ({ id: `archived-${i}` })),
+		];
+		stubFetch(() => ({ body: { sessions, total: 12, hasMore: true, nextCursor: "archived-cur-4" } }));
+
+		const result = await tools.get("bobbit_read")!.execute("id", {
+			operation: "list_sessions",
+			include: "archived",
+			limit: 5,
+		});
+		const data = json(result);
+
+		expect(data.sessions).toEqual(sessions);
+		expect(data.pagination).toMatchObject({
+			limit: 5,
+			total: 12,
+			hasMore: true,
+			nextCursor: "archived-cur-4",
+			mode: "cursor",
+			itemKey: "sessions",
+			pagedBy: "rest",
+		});
+	});
+
 	it("adds pagination metadata to search without re-slicing REST results", async () => {
 		const results = Array.from({ length: 5 }, (_, i) => ({ id: `result-${i + 10}` }));
 		stubFetch(() => ({ body: { results, total: 18 } }));

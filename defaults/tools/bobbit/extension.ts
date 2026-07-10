@@ -185,7 +185,7 @@ function sliceByPath(data: unknown, spec: PageSpec, paging: NormalizedPaging): {
 
 	const start = hasRestPagination ? 0 : paging.mode === "offset" ? paging.offset : 0;
 	const end = start + paging.limit;
-	const shouldSlice = !hasRestPagination || sourceItems.length > paging.limit;
+	const shouldSlice = !hasRestPagination;
 	const items = shouldSlice ? sourceItems.slice(start, end) : sourceItems;
 	const total = numberField(data, "total") ?? numberField(pagination, "total") ?? (hasRestPagination ? undefined : sourceItems.length);
 	const pagedBy = shouldSlice ? "tool" : "rest";
