@@ -18,9 +18,10 @@ import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
  *   1. VITEST_MAX_FORKS env override wins (dev/debug); skips the ledger entirely.
  *   2. reserveWorkerSlots("vitest") — under run-v2.mjs this re-uses the parent
  *      grant (BOBBIT_V2_SLOTS_VITEST) with a no-op release; standalone
- *      `test:v2:core` performs its own cross-run reservation. release() is
- *      registered on process exit so the slot isn't leaked.
- *   3. Fallback to 6 only if the ledger call throws.
+ *      `test:v2:core` performs its own cross-run reservation with the ledger's
+ *      direct-vitest safety cap. release() is registered on process exit so the
+ *      slot isn't leaked.
+ *   3. Fallback to 2 only if the ledger call throws.
  */
 function resolveMaxForks(): number {
 	const override = process.env.VITEST_MAX_FORKS;
@@ -33,8 +34,8 @@ function resolveMaxForks(): number {
 		process.once("exit", release);
 		return Math.max(1, workerSlots);
 	} catch (e) {
-		console.warn(`[vitest.config] ledger reserve failed, falling back to 6 forks: ${(e as Error)?.message ?? e}`);
-		return 6;
+		console.warn(`[vitest.config] ledger reserve failed, falling back to 2 forks: ${(e as Error)?.message ?? e}`);
+		return 2;
 	}
 }
 

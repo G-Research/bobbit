@@ -29,7 +29,9 @@
  *           no double registration).
  *         • Otherwise it performs a full standalone reservation for this kind,
  *           registers ONE child reservation, starts a 2s heartbeat, and returns
- *           the granted count + a release() that removes the entry.
+ *           the granted count + a release() that removes the entry. Standalone
+ *           vitest is capped below the parent-suite fast path to keep direct
+ *           verification commands from starving Vitest's own worker RPC loop.
  *
  *   reserveParentBundle(opts?) -> { vitest: number, playwright: number, total: number,
  *                                   parentRunId: string, release: () => void,
@@ -110,6 +112,14 @@ const DEFAULT_GRANT_TIMEOUT_MS = 180_000;
 const MIN_BUNDLE = 4;
 const MAX_BUNDLE = 12;
 const VITEST_CAP = 8;
+// Direct `npx vitest --config vitest.config.ts` runs do not have the parent
+// run-v2 bundle's browser/render split and have repeatedly starved Vitest's own
+// worker RPC loop at higher fork counts (`Timeout calling "onTaskUpdate"`) or
+// starved gateway verification polling before it could pass. Keep the full
+// 8-fork fast path for parent-ledger grants, but make standalone vitest a
+// conservative verification-safe throttle; VITEST_MAX_FORKS remains the explicit
+// local/debug override when speed is preferred over gate stability.
+const STANDALONE_VITEST_CAP = 2;
 // Cap on chromium workers per run. Earlier tuning claimed "2 ≈ 4 workers
 // throughput" (IO-bound), but a fresh isolated measurement on the 24-core box
 // disproved that for a SOLO run: the tier-2 browser suite (~620 specs) took
@@ -587,7 +597,7 @@ function allocateKinds(kinds, grant, activeParents = 1) {
 		];
 	}
 	const kind = kinds[0];
-	const cap = kind === "playwright" ? PLAYWRIGHT_CAP : VITEST_CAP;
+	const cap = kind === "playwright" ? PLAYWRIGHT_CAP : STANDALONE_VITEST_CAP;
 	return [{ id: newId(kind), kind, workerSlots: clamp(Math.min(grant, cap), 1, cap) }];
 }
 
@@ -916,6 +926,7 @@ function cliSelftest() {
 	console.log(`  reserveWorkerSlots("vitest") -> ${solo.workerSlots} slots (id=${solo.reservationId})`);
 	const afterSolo = readLedger();
 	const sum2 = afterSolo.reservations.reduce((s, r) => s + r.workerSlots, 0);
+	assert(solo.workerSlots <= STANDALONE_VITEST_CAP, `standalone vitest capped at ${STANDALONE_VITEST_CAP}, got ${solo.workerSlots}`);
 	assert(sum2 <= totalCores(), `sum(workerSlots)=${sum2} <= cores=${totalCores()} after standalone reserve`);
 
 	// 4) Release everything; ledger returns to empty.
