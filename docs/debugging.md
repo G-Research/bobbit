@@ -1247,6 +1247,19 @@ If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-s
 - **Reference**: `src/ui/tools/artifacts/artifacts.ts` is the browser-side example — runtime schema helpers come from `typebox` / local helpers, while `Static` and `ToolCall` stay type-only from pi-ai.
 - **Diagnosis tip**: if the error count is large (dozens to hundreds) and all variants of `TSchema is not assignable to TSchema` originate from the same module, you're looking at a flavor mismatch, not a real type bug. Pick one schema flavor in that file and re-run `npm run check` before changing any schema definitions.
 
+## Browser build fails or pulls Node shims after Pi 0.80 import changes
+
+- **Symptom**: Vite warns about `node:fs` / Node shims from UI code, or `npm run check` / browser tests fail after changing `src/app/pi-ai-lazy.ts` imports during a Pi upgrade.
+- **Rule**: browser runtime code must not import the bare `@earendil-works/pi-ai` package. Pi `0.80.x` first-message streaming imports belong under package-exported `@earendil-works/pi-ai/api/*` subpaths, while provider catalog/key-test flows stay behind `/api/pi-ai/*` server routes.
+- **Pinning test**: `tests2/core/pi-ai-browser-boundary.test.ts`. See [Pi runtime compatibility](pi-runtime-compatibility.md#browser-safe-pi-ai-boundary).
+
+## Session goes idle or drains queued prompts during Pi internal retry
+
+- **Symptom**: after a transient provider failure, the session briefly becomes idle, queued prompts dispatch early, or one-time tool grants are revoked while Pi is still retrying the same turn.
+- **Cause**: Pi `0.80.x` emits retryable `agent_end` events with `willRetry: true`; those are not final turn boundaries.
+- **Fix**: `SessionManager` must ignore `agent_end.willRetry === true` for idle transition, queue drain, one-time grant revocation, and `waitForIdle()` resolution. Only the final non-retry `agent_end` completes the Bobbit turn.
+- **Pinning test**: `tests2/core/pi-rpc-agent-end-retry.test.ts`.
+
 ## Bundle-size assertion fails
 
 `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json` to find the entry chunk and enforces three budgets: entry ≤ 250 kB gzipped, any non-worker chunk ≤ 200 kB gzipped, and no non-worker chunk > 600 kB raw (the raw guard pins Vite's `chunkSizeWarningLimit: 600`). Ensure `dist/ui/.vite/manifest.json` exists (`npm run build:ui` first — the test is skipped when `dist/ui` is absent); sizes are read directly from `dist/ui/assets/`. The `pdf.worker.min-*.mjs` chunk is whitelisted. Run the build-then-assert in one shot with `npm run test:bundle`. **Raw-guard regression?** The usual cause is the app-shell SCC or an eager seam such as `app-review` growing back past 600 kB raw — split stable app seams or cycle-free leaf modules into named eager chunks via `manualChunks` rather than raising the budget. Profile with [docs/perf/bundle-profile.md](perf/bundle-profile.md); see the bundle-shrink history in [docs/design/ui-bundle-size-reduction.md](design/ui-bundle-size-reduction.md) → [shrink-initial-bundle.md](design/shrink-initial-bundle.md) → [shrink-main-ui-manualchunks.md](design/shrink-main-ui-manualchunks.md).

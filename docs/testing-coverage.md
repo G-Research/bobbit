@@ -26,10 +26,10 @@ no dangling `v2Path`, no retired-without-replacement. `*.test.ts`⇒vitest,
 
 ## Build warning regression coverage
 
-- **File**: `tests/clean-build-warnings-regression.test.ts`.
+- **File**: `tests2/core/clean-build-warnings-regression.test.ts`.
 - **Why it exists**: Vite/Rollup warning output is easy to miss when the build still exits 0, so warning classes that previously hid real issues are pinned as fast unit checks.
 - **What it covers**: browser code cannot use runtime static or dynamic bare imports from `@earendil-works/pi-ai`; dynamic imports of known warning targets must either split a real chunk or have an explicit rationale; expected temp git primary-branch fallbacks stay quiet while origin-backed production-shaped repos still warn once.
-- **Related guard**: `tests2/core/bundle-size.test.ts` still owns the concrete chunk budgets, including the 600 kB raw budget that mirrors Vite's `chunkSizeWarningLimit` (run standalone via `npm run test:bundle`).
+- **Related guards**: `tests2/core/pi-ai-browser-boundary.test.ts` pins the Pi `0.80.x` browser streaming import contract (`@earendil-works/pi-ai/api/*`, no bare runtime import), and `tests2/core/bundle-size.test.ts` still owns the concrete chunk budgets, including the 600 kB raw budget that mirrors Vite's `chunkSizeWarningLimit` (run standalone via `npm run test:bundle`).
 
 ## Prompt interactions
 
@@ -110,6 +110,15 @@ When a new tool category appears (e.g. a new MCP meta-tool, a new Bobbit extensi
 5. Use a fresh sandboxed session per scenario so failures don't cross-contaminate.
 
 Do **not** add a scenario per individual tool — the unit contract test is the canary's complement and pins the rest of the surface.
+
+## Pi runtime compatibility
+
+Pi runtime upgrades affect package exports, browser import safety, RPC lifecycle events, transcript metadata, and tool-result event shapes. The durable contract is documented in [Pi runtime compatibility](pi-runtime-compatibility.md).
+
+- **Browser boundary** — `tests2/core/pi-ai-browser-boundary.test.ts` checks that `src/app/pi-ai-lazy.ts` keeps runtime streaming imports lazy and limited to Pi package-exported API subpaths, with no runtime bare `@earendil-works/pi-ai` import.
+- **User-facing journey** — `tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts` covers `/api/models` metadata in the model selector, provider/key-test routes, and session reload/restore after transcript parsing.
+- **RPC retry lifecycle** — `tests2/core/pi-rpc-agent-end-retry.test.ts` checks that `agent_end.willRetry=true` is non-final: no idle transition, prompt drain, one-time grant revocation, or `waitForIdle()` resolution until the final `agent_end`.
+- **Transcript/tool-result normalization** — `tests2/core/transcript-sanitizer.test.ts` and `tests2/core/tool-result-error-normalizer.test.ts` cover Pi `0.80.x` session-tree metadata and nested serialized tool-result error flags.
 
 ## Sidebar child auto-loading
 

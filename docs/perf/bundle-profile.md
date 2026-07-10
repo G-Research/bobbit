@@ -40,7 +40,7 @@ the entry chunk and you didn't expect it, you've found a static-import
 boundary that should be dynamic. Grep `src/` for `from "<dep>"` to find
 the offender. Browser code must not use runtime static or dynamic bare
 imports from `@earendil-works/pi-ai`; use server-backed APIs or narrow
-browser-safe provider subpaths instead.
+browser-safe Pi package-exported API/provider subpaths instead.
 
 **3. Why didn't my lazy-loading shrink the entry chunk?**
 Rollup hoists a module into its earliest static importer. If the
@@ -82,9 +82,9 @@ Build-size and build-warning checks live in the repo:
    build if the entry chunk exceeds 250 KB gzipped, any non-worker
    chunk exceeds 200 KB gzipped, or any non-worker chunk exceeds
    600 KB raw. Pinned thresholds, raise only after a measured win.
-3. **`tests/clean-build-warnings-regression.test.ts`** — pins warning
+3. **`tests2/core/clean-build-warnings-regression.test.ts`** and `tests2/core/pi-ai-browser-boundary.test.ts` — pin warning
    classes that are easy to miss in green builds: no browser runtime
-   bare imports from `@earendil-works/pi-ai`, no misleading dynamic
+   bare imports from `@earendil-works/pi-ai`, Pi `0.80.x` streaming imports limited to package-exported API/provider subpaths, no misleading dynamic
    import of modules already statically imported, and quiet expected
    primary-branch fallback logging for temp test repos.
 4. **The eye test** — when a chunk size jumps, re-run the profiler and

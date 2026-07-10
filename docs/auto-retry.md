@@ -58,6 +58,12 @@ A pending timer is cancelled when the user sends a new prompt, clicks explicit R
 
 If a bounded retry budget is exhausted, the server clears the stale countdown with `auto_retry_cancelled` and leaves manual Retry available.
 
+## Pi internal retry events
+
+Pi `0.80.x` can emit `agent_end` with `willRetry: true` before its own retry loop has produced the final turn outcome. Bobbit treats that event as non-final: the session stays streaming, one-time tool grants remain active, queued prompts are not drained, and `waitForIdle()` keeps waiting. Only a later `agent_end` where `willRetry !== true` completes the Bobbit turn lifecycle.
+
+This keeps Pi's internal retry attempts from looking like separate user-visible turns or opening a queue window before the retry settles. The contract is pinned by `tests2/core/pi-rpc-agent-end-retry.test.ts`.
+
 ## Dispatch-time prompt failures
 
 A prompt can fail before the agent starts a turn and before any assistant `message_end` exists. For retryable delivery failures:
