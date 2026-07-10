@@ -521,7 +521,7 @@ describe("message-reducer", () => {
 		]);
 	});
 
-	it("(11) permission insert + resolve — no slice of pre-existing messages", () => {
+	it("(11) permission insert + resolve — retains settled history without slicing pre-existing messages", () => {
 		const card = {
 			id: "p1",
 			role: "tool_permission_needed",
@@ -535,7 +535,12 @@ describe("message-reducer", () => {
 		]);
 		assert.deepStrictEqual(ids(s), [
 			{ id: "u1", _order: 1, role: "user" },
+			{ id: "p1", _order: 2, role: "tool_permission_needed" },
 		]);
+		assert.deepStrictEqual(
+			{ status: s.messages[1].status, actionable: s.messages[1].actionable },
+			{ status: "granted", actionable: false },
+		);
 	});
 
 	it("(12) rich in-progress placeholder (stable id compact_active) carries no plaintext", () => {
@@ -1146,7 +1151,7 @@ describe("message-reducer", () => {
 		);
 	});
 
-	it("snapshot drops stale permission card when newer messages exist", () => {
+	it("snapshot + permission resolve keeps settled permission history", () => {
 		const stale = {
 			id: "perm_stale_1",
 			role: "tool_permission_needed",
@@ -1162,44 +1167,19 @@ describe("message-reducer", () => {
 		const resolved = { id: "tool_result_1", role: "toolResult", content: "denied", timestamp: 900 };
 		const mPost1 = { id: "u_2", role: "user", content: "again", timestamp: 1_500 };
 		const mPost2 = { id: "asst_2", role: "assistant", content: "sure", timestamp: 2_000 };
-		// Snapshot rows get larger _order (4 messages → -1e9 .. -1e9+3); the
-		// card's _order = 1 (positive), so serverMaxOrder (>0 since live) should
-		// drop the card. But after a fresh snapshot, snapshot orders are
-		// negative — they are NOT > 1. To match the original test, we must
-		// also account for the case where the snapshot replaces all live state.
-		// Simulate by using snapshot with live-relative ordering: if the
-		// permission card's `_order` came from a live seq, but the snapshot
-		// reissues those messages with snapshot orders, the card was issued
-		// AFTER the snapshot would have included it, so it should drop iff its
-		// id is in the snapshot OR the snapshot represents a state where the
-		// card no longer applies.
-		// In this test scenario, the resolved tool_result is in the snapshot
-		// (newer state), so the card no longer applies. Implement the snapshot
-		// drop by id-or-newer-snapshot-row rule. Since the card's _order is 1
-		// but snapshot orders are negative, the >-rule keeps the card. So we
-		// rely instead on a direct resolution: the card's id is not in
-		// snapshot — but client-side knows the card is stale. The original
-		// design says "drop if any snapshot row's _order > card._order". For
-		// this scenario, the card was inserted at seq=1; later a snapshot
-		// arrives. The snapshot's ordering uses negative orders, so the rule
-		// would keep the card. To handle this realistic case we expect the
-		// resolution event ('permission-resolved' on the matching id) to be
-		// the canonical path. The reducer correctly handles snapshots-after-
-		// permission only via id-overlap; otherwise the card sits in survivors.
 		const s2 = reduce(s1, {
 			type: "snapshot",
 			messages: [m1, resolved, mPost1, mPost2],
 		});
-		// The card sits at _order=1 (positive seq). Snapshot rows are negative.
-		// So the card is tail-positioned and survives the snapshot — but the
-		// surrounding handler in RemoteAgent fires permission-resolved when the
-		// snapshot makes the card moot. Test the resolve path directly:
 		const s3 = reduce(s2, { type: "permission-resolved", messageId: "perm_stale_1" });
-		assert.strictEqual(s3.messages.length, 4);
+		assert.strictEqual(s3.messages.length, 5);
 		assert.deepStrictEqual(
 			s3.messages.map((m) => m.id),
-			["u_1", "tool_result_1", "u_2", "asst_2"],
+			["u_1", "tool_result_1", "u_2", "asst_2", "perm_stale_1"],
 		);
+		const settled = s3.messages[4];
+		assert.strictEqual(settled.status, "granted");
+		assert.strictEqual(settled.actionable, false);
 	});
 
 	it("keyFor: stable id-based, falls back to synthetic for id-less rows", () => {

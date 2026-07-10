@@ -6,7 +6,7 @@ import type {
 	ToolResultMessage as ToolResultMessageType,
 	UserMessage as UserMessageType,
 } from "@earendil-works/pi-ai";
-import { html, LitElement, type TemplateResult } from "lit";
+import { html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
@@ -302,6 +302,7 @@ export class AssistantMessage extends LitElement {
 	@property({ type: Object }) message!: AssistantMessageType;
 	@property({ type: Array }) tools?: AgentTool<any>[];
 	@property({ type: Object }) pendingToolCalls?: Set<string>;
+	@property({ type: Object }) permissionBlockedTools?: Set<string>;
 	@property({ type: Boolean }) hideToolCalls = false;
 	@property({ type: Object }) toolResultsById?: Map<string, ToolResultMessageType>;
 	@property({ type: Object }) toolPartialResults?: Record<string, any>;
@@ -443,7 +444,8 @@ export class AssistantMessage extends LitElement {
 					const tool = this.tools?.find((t) => t.name === tc.name);
 					const pending = this.pendingToolCalls?.has(tc.id) ?? false;
 					const result = this.toolResultsById?.get(tc.id);
-					if (this.hidePendingToolCalls && pending && !result) {
+					const permissionBlocked = !result && (this.permissionBlockedTools?.has(tc.name) || (this.message as any)._permissionBlocked === true);
+					if (this.hidePendingToolCalls && pending && !result && !permissionBlocked) {
 						i++;
 						continue;
 					}
@@ -456,6 +458,7 @@ export class AssistantMessage extends LitElement {
 							.result=${result}
 							.partialResult=${this.toolPartialResults?.[tc.id]}
 							.pending=${pending}
+							.permissionBlocked=${permissionBlocked}
 							.aborted=${aborted}
 							.isStreaming=${this.isStreaming}
 						></tool-message>`,
@@ -593,6 +596,7 @@ export class ToolMessage extends LitElement {
 	@property({ type: Object }) result?: ToolResultMessageType;
 	@property({ type: Object }) partialResult?: any;
 	@property({ type: Boolean }) pending: boolean = false;
+	@property({ type: Boolean }) permissionBlocked: boolean = false;
 	@property({ type: Boolean }) aborted: boolean = false;
 	@property({ type: Boolean }) isStreaming: boolean = false;
 	/** Server-stamped timestamp of the assistant message that issued this call.
@@ -731,7 +735,7 @@ export class ToolMessage extends LitElement {
 			toolName,
 			this.toolCall.arguments,
 			result,
-			!this.aborted && (this.isStreaming || this.pending),
+			!this.aborted && (this.isStreaming || this.pending || this.permissionBlocked),
 			{
 				toolUseId: this.toolCall.id,
 				toolCallInput: (this.toolCall as any).input,
@@ -752,6 +756,11 @@ export class ToolMessage extends LitElement {
 		// Default: wrap in card
 		return html`
 			<div data-tool-name="${toolName}" class="p-2.5 border border-border rounded-md bg-card text-card-foreground shadow-xs">
+				${this.permissionBlocked ? html`
+					<div class="mb-2 px-2 py-1 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400">
+						Waiting for permission before running this tool.
+					</div>
+				` : nothing}
 				${renderResult.content}
 			</div>
 		`;

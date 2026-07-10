@@ -255,6 +255,7 @@ export class AgentInterface extends LitElement {
 
 	private _contextPopoverOpen = false;
 	private _costPopoverOpen = false;
+	private _permissionGrantClickLocked = false;
 
 	// --- Scroll-lock state — vanilla-TS port of `use-stick-to-bottom`
 	// (https://github.com/stackblitz-labs/use-stick-to-bottom, 731⭐, powers
@@ -1679,6 +1680,71 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
+	private _permissionRows(): any[] {
+		const rows = ((this.session?.state as any)?.messages || []) as any[];
+		return rows.filter((m) => m?.role === "tool_permission_needed");
+	}
+
+	private _activePermissionRows(): any[] {
+		return this._permissionRows().filter((m) => {
+			const status = typeof m.status === "string" ? m.status : "active";
+			return m.actionable !== false && (status === "active" || status === "granting");
+		});
+	}
+
+	private _patchPermissionRow(id: string | undefined, patch: Record<string, unknown>) {
+		if (!id || !this.session?.state) return;
+		const current = ((this.session.state as any).messages || []) as any[];
+		(this.session.state as any).messages = current.map((m) => m?.role === "tool_permission_needed" && m.id === id ? { ...m, ...patch } : m);
+		this.requestUpdate();
+	}
+
+	private _beginPermissionGrant(): boolean {
+		if (this._permissionGrantClickLocked) return false;
+		this._permissionGrantClickLocked = true;
+		setTimeout(() => { this._permissionGrantClickLocked = false; }, 250);
+		return true;
+	}
+
+	private _renderPinnedPermissions() {
+		const rows = this._activePermissionRows();
+		if (rows.length === 0) return nothing;
+		return html`
+			<div
+				data-permission-pinned
+				data-pinned-permission-controls
+				class="pinned-permission-controls sticky bottom-0 z-20 mt-3 pt-2 pb-2 px-2 sm:px-4 pointer-events-auto"
+				style="position: sticky; bottom: 0;"
+			>
+				<div class="max-w-5xl mx-auto rounded-lg border border-amber-500/30 bg-background shadow-sm p-2 space-y-2 overflow-y-auto" style="max-height: min(45vh, 22rem); background: color-mix(in oklch, var(--background) 95%, transparent); backdrop-filter: blur(8px);">
+					<div class="text-xs font-medium text-amber-600 dark:text-amber-400 px-1">Permission required</div>
+					${rows.map((perm) => html`<tool-permission-card
+						.permissionId=${perm.id}
+						.toolName=${perm.toolName}
+						.group=${perm.group}
+						.roleName=${perm.roleName}
+						.roleLabel=${perm.roleLabel}
+						.status=${perm.status ?? "active"}
+						.mode=${perm.mode ?? "session-only"}
+						.error=${perm.error ?? ""}
+						.actionable=${perm.actionable !== false}
+						.onModeChange=${(mode: string) => this._patchPermissionRow(perm.id, { mode })}
+						.onGrant=${(scope: "tool" | "group", mode?: string) => {
+							if (!this._beginPermissionGrant()) return false;
+							this._patchPermissionRow(perm.id, { status: "granting", actionable: true, mode: mode ?? perm.mode ?? "session-only" });
+							(this.session as any)?.grantToolPermission?.(perm.toolName, scope, perm.group, perm.lastPromptText, mode ?? perm.mode ?? "session-only");
+							return true;
+						}}
+						.onDeny=${() => {
+							this._patchPermissionRow(perm.id, { status: "denied", actionable: false });
+							(this.session as any)?.denyToolPermission?.(perm.id, perm.toolName);
+						}}
+					></tool-permission-card>`)}
+				</div>
+			</div>
+		`;
+	}
+
 	private renderMessages() {
 		if (!this.session)
 			return html`<div class="p-4 text-center text-muted-foreground">${i18n("No session available")}</div>`;
@@ -1730,14 +1796,20 @@ export class AgentInterface extends LitElement {
 					.onRetry=${!state.isStreaming && typeof (this.session as any)?.retry === 'function'
 						? () => (this.session as any).retry()
 						: undefined}
+					@permission-mode-change=${(e: CustomEvent) => {
+						const { id, mode } = e.detail;
+						this._patchPermissionRow(id, { mode });
+					}}
 					@grant-tool-permission=${(e: CustomEvent) => {
-						if (!this.session) return;
-						const { toolName, scope, group, lastPromptText, mode } = e.detail;
+						if (!this.session || !this._beginPermissionGrant()) return;
+						const { id, toolName, scope, group, lastPromptText, mode } = e.detail;
+						this._patchPermissionRow(id, { status: "granting", actionable: true, mode });
 						(this.session as any).grantToolPermission?.(toolName, scope, group, lastPromptText, mode);
 					}}
 					@deny-tool-permission=${(e: CustomEvent) => {
 						if (!this.session) return;
 						const { id, toolName } = e.detail;
+						this._patchPermissionRow(id, { status: "denied", actionable: false });
 						(this.session as any).denyToolPermission?.(id, toolName);
 					}}
 				></message-list>
@@ -2135,6 +2207,7 @@ export class AgentInterface extends LitElement {
 				<div class="flex-1 min-h-0 relative">
 					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden" style="overflow-anchor: none;">
 						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
+						${this._renderPinnedPermissions()}
 					</div>
 					${this._renderJumpToLastPrompt()}
 					${this._renderJumpToBottom()}

@@ -4586,9 +4586,17 @@ export class SessionManager {
 			if (!grantCoversPending) {
 				this.clock.clearTimeout(pending.timer);
 				session.pendingGrantRequest = undefined;
+				const reason = `Ignored stale permission grant for ${toolName}; active request is for ${pending.toolName}.`;
 				pending.resolve({
 					granted: false,
-					reason: `Ignored stale permission grant for ${toolName}; active request is for ${pending.toolName}.`,
+					reason,
+				});
+				broadcast(session.clients, {
+					type: "tool_permission_settled",
+					toolName: pending.toolName,
+					group: pending.toolGroup,
+					status: "error",
+					reason,
 				});
 				return session.allowedTools ?? [];
 			}
@@ -4638,6 +4646,12 @@ export class SessionManager {
 			const pending = session.pendingGrantRequest;
 			session.pendingGrantRequest = undefined;
 			pending.resolve({ granted: true, tools: approvedGrantTools, scope, group, mode: mode ?? "persistent" });
+			broadcast(session.clients, {
+				type: "tool_permission_settled",
+				toolName: pending.toolName,
+				group: pending.toolGroup,
+				status: "granted",
+			});
 			return resultTools;
 		}
 
@@ -4654,11 +4668,20 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
-		// If a previous grant request is still pending, resolve it as denied
+		// If a previous grant request is still pending, resolve it as denied and
+		// tell clients it is no longer actionable before broadcasting the new one.
 		if (session.pendingGrantRequest) {
-			this.clock.clearTimeout(session.pendingGrantRequest.timer);
-			session.pendingGrantRequest.resolve({ granted: false });
+			const pending = session.pendingGrantRequest;
+			this.clock.clearTimeout(pending.timer);
+			pending.resolve({ granted: false });
 			session.pendingGrantRequest = undefined;
+			broadcast(session.clients, {
+				type: "tool_permission_settled",
+				toolName: pending.toolName,
+				group: pending.toolGroup,
+				status: "superseded",
+				reason: "A newer permission request replaced this one.",
+			});
 		}
 
 		// Stamp seq+ts so client reducer can order this frame relative to live
@@ -4674,6 +4697,13 @@ export class SessionManager {
 		const promise = new Promise<ToolGrantResolution>((resolve, reject) => {
 			const timer = this.clock.setTimeout(() => {
 				session.pendingGrantRequest = undefined;
+				broadcast(session.clients, {
+					type: "tool_permission_settled",
+					toolName,
+					group: toolGroup,
+					status: "expired",
+					reason: "Permission request expired.",
+				});
 				resolve({ granted: false });
 			}, 5 * 60 * 1000); // 5 minute timeout
 
@@ -4709,6 +4739,12 @@ export class SessionManager {
 		const pending = session.pendingGrantRequest;
 		session.pendingGrantRequest = undefined;
 		pending.resolve({ granted: false });
+		broadcast(session.clients, {
+			type: "tool_permission_settled",
+			toolName: pending.toolName,
+			group: pending.toolGroup,
+			status: "denied",
+		});
 	}
 
 	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
@@ -7873,9 +7909,17 @@ export class SessionManager {
 
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
-			this.clock.clearTimeout(session.pendingGrantRequest.timer);
-			session.pendingGrantRequest.resolve({ granted: false });
+			const pending = session.pendingGrantRequest;
+			this.clock.clearTimeout(pending.timer);
+			pending.resolve({ granted: false });
 			session.pendingGrantRequest = undefined;
+			broadcast(session.clients, {
+				type: "tool_permission_settled",
+				toolName: pending.toolName,
+				group: pending.toolGroup,
+				status: "cancelled",
+				reason: "Session ended before permission was resolved.",
+			});
 		}
 
 		// Cancel any pending transient auto-retry so it doesn't fire after terminate
