@@ -820,6 +820,8 @@ export function handleWebSocketConnection(
 						skillExpansions: expansions.length ? expansions : undefined,
 						fileMentions: wireFileMentions,
 						modelText: modelChanged ? mergedModelText : undefined,
+						// Assistant auto-kickoff prompts opt out of first-message title-gen.
+						suppressTitleGen: msg.suppressTitleGen === true,
 					});
 					break;
 				}

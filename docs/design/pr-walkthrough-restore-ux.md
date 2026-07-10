@@ -106,7 +106,7 @@ cascade-aware today:
 | Path | Function / symbol | Module | Cascade-aware? | Consequence if not |
 |---|---|---|---|---|
 | Spawn-time **allowlist** | `resolveRoleAllowedTools` dep | `server.ts` | **Yes** (cascade-first, then `roleManager`) | — (this is why the allowlist looked right) |
-| Tool **guard** + MCP proxy | `_resolveToolActivation` | `session-setup.ts` | **No** (`roleManager.getRole` only) | `effectiveRole = undefined` → guard falls back to **group defaults** → `PR Walkthrough: never` → the three tools get `never` guard entries → **every call rejected** |
+| Tool **guard** + MCP proxy | `_resolveToolActivation` | `session-setup.ts` | **No** (`roleManager.getRole` only) | `effectiveRole = undefined` → guard falls back to **group defaults** → `PR Walkthrough: never` → the reviewer tools get `never` guard entries → **every call rejected** |
 | Restore / force-respawn | `resolveSessionRole` | `session-manager.ts` | **No** (`roleManager.getRole` only) | a reviewer surviving a gateway restart re-resolves to `undefined` → loses its tools again |
 | Role **promptTemplate** (schema) | `resolveRolePromptTemplate` | `session-manager.ts` | **Yes** (cascade-first via `configCascade.resolveRolePromptTemplate`, then `roleManager`) | — (verified; see §2.4) |
 
@@ -115,10 +115,11 @@ into **both** `writeMcpProxyExtensions` and `writeToolGuardExtension`. The guard
 extension is emitted whenever any tool resolves to `ask`/`never`; with
 `effectiveRole = undefined` the cascade falls through to `groupPolicyStore`
 defaults, where `PR Walkthrough: never` (`defaults/tool-group-policies.yaml`)
-stamps `never` on `readonly_bash`, `read_pr_walkthrough_bundle`, and
-`submit_pr_walkthrough_yaml`. The agent holds the tools in its allowlist (spawn
-path resolved them) but the guard rejects every call — exactly the reported
-symptom.
+stamps `never` on `readonly_bash`, `read_pr_walkthrough_bundle`,
+`submit_pr_walkthrough_chunk`, `read_pr_walkthrough_submission_status`,
+`finalize_pr_walkthrough_submission`, and compatibility `submit_pr_walkthrough_yaml`.
+The agent holds the tools in its allowlist (spawn path resolved them) but the guard
+rejects every call — exactly the reported symptom.
 
 ### 2.3 The fix pattern is already in the file
 
@@ -183,7 +184,7 @@ const effectiveRole = plan.roleName ? lookupRole(plan.roleName, plan, ctx) : und
 `roleManager.getRole`. `effectiveRole` flows unchanged into
 `writeMcpProxyExtensions` and `writeToolGuardExtension`; with the real
 `pr-reviewer` role resolved, its `toolPolicies: { "PR Walkthrough": allow }` beats
-the group default, so the guard emits **no `never` entry** for the three tools.
+the group default, so the guard emits **no `never` entry** for the reviewer tools.
 
 **A2. `session-manager.ts::resolveSessionRole`.** Make it cascade-aware
 and give it a `projectId`:
@@ -218,12 +219,12 @@ in the PR description either way.
 host.agents.spawn({role:"pr-reviewer"})  (run route)
   → OrchestrationCore.spawn → childAllowedTools(owner, readOnly, "pr-reviewer")
         → resolveRoleAllowedTools("pr-reviewer", ownerProjectId)         [server.ts resolveRoleAllowedTools dep — cascade-first ✓]
-        → child allowlist = [readonly_bash, read_pr_walkthrough_bundle, submit_pr_walkthrough_yaml]
+        → child allowlist = PR Walkthrough reviewer tools
   → createSession (full lifecycle):
         roleName "pr-reviewer" → role (cascade) → accessory "review", promptTemplate (schema) ✓
         → session-setup.resolveToolActivation:
               effectiveRole = lookupRole("pr-reviewer")                  [FIX A1 — cascade-first ✓]
-              → guard has NO `never` for the three tools                  ← was the bug
+              → guard has NO `never` for the reviewer tools               ← was the bug
 ```
 
 ### Area B — one-click auto-run from the git widget
@@ -538,10 +539,10 @@ under the `ui` capability).
 
 | # | Acceptance criterion | Test (new / extended) | Phase |
 |---|---|---|---|
-| A1 | The generated tool **guard** for `pr-reviewer` contains **no `never`** entry for `readonly_bash` / `read_pr_walkthrough_bundle` / `submit_pr_walkthrough_yaml` | **New unit**: drive `writeToolGuardExtension` (or assert via `resolveGrantPolicy` over the cascade-resolved `pr-reviewer` role + `groupPolicyStore`) and assert none of the three resolve to `never`. Complements the existing `tests/pr-walkthrough-role-tools-policy.test.ts` (which proves the *role* policy; this proves the *guard generation* path that was bugged). | unit·node |
-| A2 | A spawned reviewer child can actually **call** ALL THREE tools (not merely hold them) | **Extend** `tests/e2e/pr-walkthrough-host-agents.spec.ts`: after `run`, assert the child's guard does not block **any** of the three. Drive each through its real path with the child secret and assert **none** is rejected as "not permitted for this role": (i) `read_pr_walkthrough_bundle` (bundle endpoint); (ii) `readonly_bash` (a read-only `git`/`gh` command admitted by `walkthrough-readonly-policy.ts`); (iii) `submit_pr_walkthrough_yaml` (submit-yaml endpoint with a minimal valid YAML → routed to the bound job, not a role-permission rejection). Covering all three is mandatory: the reported failure class was that `readonly_bash`/`submit_pr_walkthrough_yaml` could stay blocked even when `read_pr_walkthrough_bundle` worked, so a one-tool E2E would not pin the regression. Where calling the real tool has side effects, the assertion is specifically that the failure (if any) is NOT a guard "not permitted for this role" rejection. | E2E·api |
+| A1 | The generated tool **guard** for `pr-reviewer` contains **no `never`** entry for the PR Walkthrough reviewer tools | **New unit**: drive `writeToolGuardExtension` (or assert via `resolveGrantPolicy` over the cascade-resolved `pr-reviewer` role + `groupPolicyStore`) and assert none of the reviewer tools resolve to `never`. Complements the existing `tests/pr-walkthrough-role-tools-policy.test.ts` (which proves the *role* policy; this proves the *guard generation* path that was bugged). | unit·node |
+| A2 | A spawned reviewer child can actually **call** the reviewer tools (not merely hold them) | **Extend** `tests/e2e/pr-walkthrough-host-agents.spec.ts`: after `run`, assert the child's guard does not block the PR Walkthrough tools. Drive representative real paths with the child secret and assert **none** is rejected as "not permitted for this role": bundle read, read-only shell, and durable submission/finalization. | E2E·api |
 | A3 | The YAML schema is present in the reviewer's prompt | **Extend** the same E2E: read the reviewer child's system prompt (prompt-sections API / persisted snapshot) and assert it contains `submit_pr_walkthrough_yaml` schema markers (`schema_version`, `merge_assessment`). | E2E·api |
-| A4 | Reviewer survives a gateway restart with its tools | **New/extend** restart test: spawn reviewer → simulate restart → assert `resolveSessionRole(ps.role, …, ps.projectId)` resolves the cascade role and the restored allowlist + guard still grant the three tools. | E2E·api |
+| A4 | Reviewer survives a gateway restart with its tools | **New/extend** restart test: spawn reviewer → simulate restart → assert `resolveSessionRole(ps.role, …, ps.projectId)` resolves the cascade role and the restored allowlist + guard still grant the reviewer tools. | E2E·api |
 | B1 | git-widget click → child auto-spawns with **no** second click | **New browser E2E** (`tests/e2e/ui/pr-walkthrough-pack.spec.ts` extension): click the git-widget launcher → assert a reviewer child appears with the `review` accessory and `run` fired exactly once (no Run-button click). | E2E·browser |
 | B2 | autorun is one-shot (reload does not double-spawn) | **New browser E2E**: after autorun, reload → assert no second reviewer (route idempotency); `created:false` on the dedup path. | E2E·browser |
 | B3 | deep-link / non-autorun keeps the manual Run button | **Extend** browser E2E: open `#/ext/pr-walkthrough` (no `autorun`) → assert the Run button is present and nothing auto-runs. | E2E·browser |

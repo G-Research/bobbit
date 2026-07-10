@@ -2,8 +2,8 @@
 //
 // Pins the backend surface for the built-in Support assistant:
 //   • getAssistantDef("support") is registered (title/promptTitle).
-//   • defaults/roles/support.yaml loads with accessory: headset and the
-//     bobbit tier tool policies (orchestrate: allow, admin: ask).
+//   • defaults/roles/support.yaml loads with accessory: headset, bobbit tier
+//     tool policies (orchestrate: allow, admin: ask), and session_prompt: allow.
 //   • SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction.
 //   • assistantRoleForType maps support -> support, everything else -> assistant.
 import { guardProcessEnv } from "./helpers/env-guard.js";
@@ -15,7 +15,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
-const { getAssistantDef, assistantRoleForType } = await import("../../src/server/agent/assistant-registry.ts");
+const { getAssistantDef, assistantRoleForType, composeAssistantTitle } = await import("../../src/server/agent/assistant-registry.ts");
 const { SUPPORT_ASSISTANT_PROMPT } = await import("../../src/server/agent/support-assistant.ts");
 
 const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "defaults");
@@ -51,8 +51,34 @@ describe("assistantRoleForType", () => {
 	});
 });
 
+describe("assistant titlePrefix", () => {
+	it("exposes the exact type prefixes used for initial title + auto-rename", () => {
+		const cases: Record<string, string> = {
+			goal: "New Goal",
+			role: "New Role",
+			tool: "New Tool",
+			staff: "New Staff",
+			project: "New Project",
+			"project-scaffolding": "New Project",
+			support: "Support",
+		};
+		for (const [type, prefix] of Object.entries(cases)) {
+			const def = getAssistantDef(type);
+			assert.ok(def, `assistant def must be registered for ${type}`);
+			assert.equal(def!.titlePrefix, prefix, `titlePrefix for ${type}`);
+		}
+	});
+});
+
+describe("composeAssistantTitle", () => {
+	it("composes '<prefix>: <summary>'", () => {
+		assert.equal(composeAssistantTitle("Support", "reset worktree pool"), "Support: reset worktree pool");
+		assert.equal(composeAssistantTitle("New Goal", "add dark mode"), "New Goal: add dark mode");
+	});
+});
+
 describe("support role definition", () => {
-	it("defaults/roles/support.yaml loads with headset accessory + bobbit tier policies", () => {
+	it("defaults/roles/support.yaml loads with headset accessory + support tool policies", () => {
 		const raw = fs.readFileSync(SUPPORT_ROLE_FILE, "utf-8");
 		const role = YAML.parse(raw) as {
 			name?: string;
@@ -64,6 +90,7 @@ describe("support role definition", () => {
 		assert.equal(role.accessory, "headset");
 		assert.equal(role.toolPolicies?.bobbit_orchestrate, "allow");
 		assert.equal(role.toolPolicies?.bobbit_admin, "ask");
+		assert.equal(role.toolPolicies?.session_prompt, "allow");
 		// bobbit_read must NOT be listed — its `allow` default already applies.
 		assert.equal(role.toolPolicies?.bobbit_read, undefined);
 		assert.ok(role.promptTemplate && role.promptTemplate.length > 0, "support role needs a promptTemplate");

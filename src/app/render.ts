@@ -8,7 +8,7 @@ import { html, render, nothing } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import type Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FolderPlus, LifeBuoy, Menu, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Plus, QrCode, RotateCw, Server, Settings, Store, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FolderPlus, MessageCircleQuestion, Menu, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Plus, QrCode, RotateCw, Server, Settings, Store, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -2307,13 +2307,13 @@ export function doRenderApp(): void {
 		return html`
 			<div class="flex items-center gap-1 px-2">
 				${settingsBtn}
-				${isHeadquartersProject(state.activeProjectId)
-					? html`<span data-testid="support-launcher">${Button({
+				${state.showHeadquartersInProjectLists !== false
+					? html`<span data-testid="support-launcher" style="display:contents">${Button({
 						variant: "ghost",
 						size: "sm",
-						children: html`${icon(LifeBuoy, "sm")}`,
+						children: html`${icon(MessageCircleQuestion, "sm")}`,
 						onClick: () => { showSupportDialog(); },
-						title: "Support",
+						title: "Open a new support agent session",
 					})}</span>`
 					: nothing}
 				${Button({
@@ -3128,20 +3128,20 @@ export function doRenderApp(): void {
 						${bobbitIcon}
 					</div>
 					` : html`
-					<div class="shrink-0 flex items-center justify-between px-3 self-stretch" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
-						<div class="flex items-center gap-2">
+					<div class="sidebar-header-shell shrink-0 flex items-center justify-between px-3 self-stretch" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
+						<div class="sidebar-header-brand flex items-center gap-2">
 							${bobbitIcon}
-							<span class="text-base font-semibold text-foreground">Bobbit</span>
+							<span class="text-base font-semibold text-foreground truncate">Bobbit</span>
 						</div>
-						<div class="flex items-center" style="gap:1px;margin-right:-4px">
-							${isHeadquartersProject(state.activeProjectId)
-								? html`<span data-testid="support-launcher">${Button({
+						<div class="sidebar-header-actions" aria-label="Sidebar shortcuts">
+							${state.showHeadquartersInProjectLists !== false
+								? html`<span data-testid="support-launcher" style="display:contents">${Button({
 									variant: "ghost",
 									size: "sm",
-									children: html`${icon(LifeBuoy, "xs")}`,
+									children: html`${icon(MessageCircleQuestion, "xs")}`,
 									onClick: () => { showSupportDialog(); },
-									title: "Support",
-									className: "h-6 w-6 text-muted-foreground",
+									title: "Open a new support agent session",
+									className: "sidebar-header-icon-btn h-6 w-6 text-muted-foreground",
 								})}</span>`
 								: nothing}
 							${Button({
@@ -3150,7 +3150,7 @@ export function doRenderApp(): void {
 								children: html`${icon(QrCode, "xs")}`,
 								onClick: showQrCodeDialog,
 								title: "Show QR code",
-								className: "h-6 w-6 text-muted-foreground",
+								className: "sidebar-header-icon-btn h-6 w-6 text-muted-foreground",
 							})}
 							<bell-toggle></bell-toggle>
 							<theme-toggle></theme-toggle>

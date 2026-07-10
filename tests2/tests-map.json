@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, then reconciled (migrated/v2Path/v2Native) against tests2/ on disk",
   "note": "Buckets/methods/rationale come from `node scripts/testing-v2/gen-inventory.mjs` (curated overrides live in the generator). The `migrated`/`v2Path` per-entry fields and the top-level `v2Native` allowlist are reconciled against the tests2/ tree and are validated by scripts/testing-v2/parity.mjs and tests2/core/guard-v2.test.ts â€” do not hand-edit them blindly.",
-  "censusTotal": 1125,
+  "censusTotal": 1126,
   "buckets": {
     "daily": 56,
     "v2-browser": 216,
-    "v2-core": 508,
+    "v2-core": 509,
     "v2-dom": 144,
     "v2-integration": 201
   },
@@ -19,6 +19,10 @@
     "port": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/browser/journeys/cross-session-proposal-mirror.journey.spec.ts",
+      "reason": "Reproducing test for the 'Fix cross-session proposal panels' goal: from a NON-matching session (assistantType === null) a role/tool/staff proposal that reaches the panel through the UNIFIED remote.onProposal path alone (source 'seed'/'rehydrate'/'edit'/'restore'/switch-back — not the live tool-use scan that also fires the legacy per-type callback) leaves the legacy form-mirror (rolePreviewName…, toolPreviewName…, staffPreviewName…) empty, so the panel renders blank and its primary submit stays disabled/absent. Drives onProposal directly (same technique as tests2/browser/e2e/proposal-inline-comments.spec.ts) and asserts the mirror is populated + submit enabled. FAILS on HEAD (no role/tool/staff bridge in the unified callback, only goal is bridged), passes once the bridge is added."
+    },
     {
       "path": "tests2/core/git-repo-cache.test.ts",
       "reason": "Reproducing test (TDD red) for the 'Fix git widget flash' goal (32cd6b4f): pins the NEW pure module src/app/git-repo-cache.ts — sessionId->'yes'|'no' localStorage cache and computeConnectGitState (cached 'no' => {gitRepoKnown:'no',quietRecheck:true} so no skeleton/loading on reconnect; cached 'yes'/no-entry => {gitRepoKnown:'unknown',quietRecheck:false} so a genuine first check still shows the skeleton), plus prune/cap bounds and broken/absent-localStorage tolerance. FAILS on HEAD (module absent — import cannot resolve), passes post-fix."
@@ -77,11 +81,15 @@
     },
     {
       "path": "tests2/core/support-assistant.test.ts",
-      "reason": "Support assistant backend wiring: getAssistantDef('support') registered; defaults/roles/support.yaml loads with accessory headset + bobbit tier policies (orchestrate allow, admin ask); SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction; assistantRoleForType maps support->support else assistant."
+      "reason": "Support assistant backend wiring: getAssistantDef('support') registered; defaults/roles/support.yaml loads with accessory headset + support policies (orchestrate allow, admin ask, session_prompt allow); SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction; assistantRoleForType maps support->support else assistant."
     },
     {
       "path": "tests2/core/support-packaging.test.ts",
       "reason": "Support assistant offline packaging: package.json files ships docs/ + src/; npm pack --dry-run --json lists docs/ + src/ entries; resolveBundledDocsDir/resolveBundledSrcDir return existing directories."
+    },
+    {
+      "path": "tests2/integration/support-session-role-wiring.test.ts",
+      "reason": "Reproducing integration test for the Support Assistant fix-up (defects 5 & 6): a running Support session (assistantType=support, projectId=headquarters) must persist role=support + accessory=headset (not the hardcoded assistant/wand), and its prompt-sections must expose a dedicated Role section (source 'Role: support') carrying the support role promptTemplate WITHOUT folding it into the Goal section (no duplication)."
     },
     {
       "path": "tests2/core/cli-real-deps.test.ts",
@@ -6944,6 +6952,15 @@
       "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
       "migrated": true,
       "v2Path": "tests2/core/pi-offline-env.test.ts"
+    },
+    {
+      "file": "tests/node-modules-ring-fence.test.ts",
+      "bucket": "v2-core",
+      "method": "rewrite",
+      "replacement": [],
+      "rationale": "Core-tier TDD reproducing test for the node_modules ring-fence goal: temp-FS + injected seams pin that repair cannot half-wipe declared deps and agent runtime resolution prefers an intact ring-fenced snapshot over a gutted working node_modules.",
+      "migrated": true,
+      "v2Path": "tests2/core/node-modules-ring-fence.test.ts"
     },
     {
       "file": "tests/plan-archived-children.test.ts",

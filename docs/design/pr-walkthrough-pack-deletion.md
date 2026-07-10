@@ -75,10 +75,11 @@ is a pack DESIGN CHOICE (keep `bundle` deterministic), not a credential limitati
 > litmus path — register `market-packs/` as a local-dir marketplace source,
 > *install* `pr-walkthrough`, later *uninstall*. **That is not how it ships.**
 > `pr-walkthrough` is now a **built-in first-party pack** resolved **in place**
-> active-by-default via the built-in first-party band in `buildPackList()`
+> via the built-in first-party band in `buildPackList()`
 > (`builtinFirstPartyPackEntries()`) — **no manual install**, and it cannot be
-> uninstalled, only **disabled** via the activation toggles. It is no longer a
-> no-tools/UI-only pack: it owns its reviewer tools under
+> uninstalled, only enabled/disabled via activation toggles. Current builds ship
+> it `defaultDisabled: true`, so its contributions activate only after an explicit
+> enable override. It is no longer a no-tools/UI-only pack: it owns its reviewer tools under
 > `market-packs/pr-walkthrough/tools/pr-walkthrough/`, and `pack.yaml` advertises
 > the `pr-walkthrough` tool group. Marketplace expands that group into concrete
 > tool toggles. See [built-in-first-party-packs.md](./built-in-first-party-packs.md)
@@ -101,7 +102,7 @@ contributions + the durable Host API:
 | Submitted YAML handoff | bespoke transcript access / viewer feed | the pack-spawned reviewer calls `submit_pr_walkthrough_yaml`; the server resolves the caller session, writes the pack-store submitted marker, and the panel observes it through `status`/`recover` |
 
 The mandatory E2E `tests/e2e/ui/pr-walkthrough-pack.spec.ts` exercises the full
-chain end-to-end (the pack resolves active-by-default via the built-in band →
+chain end-to-end (the pack comes from the built-in band with no install step →
 session-menu launcher opens the panel at `#/ext/pr-walkthrough` →
 `bundle` recomputes the **REAL changeset LIVE via `git`** in the confined worker
 over a freshly-`git init`'d repo → real diff block renders → publish LLM-enhanced

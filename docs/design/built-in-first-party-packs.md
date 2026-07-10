@@ -33,7 +33,7 @@ deletion plan — authoritative on the deletion scope and parity argument),
 ## 1. Summary & goals
 
 Add a **built-in, auto-registered source of first-party packs** that ship with
-Bobbit and resolve as **active-by-default** market packs, so that:
+Bobbit and resolve from their manifest-controlled default state, so that:
 
 1. the **core app dogfoods the Extension Host / pack API** — a real shipped
    feature is delivered through the same `PackResolver` + Host API + activation
@@ -44,10 +44,12 @@ Bobbit and resolve as **active-by-default** market packs, so that:
 The dogfood is proven by migrating **`pr-walkthrough`** from a litmus/test market
 pack into the first-party built-in source and **deleting its built-in
 implementation** so the pack is the sole provider of the viewer/route/store/
-deep-link surface. The `submit_pr_walkthrough_yaml` (+ `read_pr_walkthrough_bundle`
-/ `readonly_bash`) capabilities remain normal agent tools granted through role and
-tool-policy resolution; they now ship inside the first-party pack rather than
-`defaults/tools`.
+deep-link surface. The reviewer capabilities (`readonly_bash`,
+`read_pr_walkthrough_bundle`, `submit_pr_walkthrough_chunk`,
+`read_pr_walkthrough_submission_status`, `finalize_pr_walkthrough_submission`, and
+compatibility `submit_pr_walkthrough_yaml`) remain normal agent tools granted
+through role and tool-policy resolution; they now ship inside the first-party pack
+rather than `defaults/tools`.
 
 This is **pre-release**: no backwards-compatibility burden.
 
@@ -61,7 +63,8 @@ This is **pre-release**: no backwards-compatibility burden.
 ### Definition of done (mirrors the goal)
 
 - A built-in source auto-registers (idempotent, non-removable) and ships ≥1
-  first-party pack resolved active-by-default via a new resolver band.
+  first-party pack resolved via a new resolver band, with its default activation
+  controlled by the pack manifest.
 - `pr-walkthrough` is delivered solely by the first-party pack; its built-in
   twin surfaces are deleted with no dead references.
 - Market UI shows the built-in source/section with enable/disable toggles (no
@@ -80,10 +83,11 @@ shipped first-party packs directory, and resolve those packs *in place* as a
 dedicated band in `buildPackList()`.** They are NOT copied into any scope's
 `.bobbit/config/market-packs/`.
 
-"Auto-installed" therefore means **present + active by default**: a built-in pack
-is always resolvable; the only opt-out is **disable** via the #734 activation
-overrides (default = enabled). Updates ride the app upgrade for free (the shipped
-dir is replaced on install/upgrade).
+"Auto-installed" therefore means **present + manifest default state**: a normal
+built-in pack is enabled until disabled, while a `defaultDisabled: true` pack
+resolves no contributions until an explicit activation override enables it.
+Updates ride the app upgrade for free (the shipped dir is replaced on
+install/upgrade).
 
 ### Rejected alternative — copy-install + opt-out ledger
 
@@ -594,10 +598,11 @@ ledger entry (a server-scope user override of the same name is fully uninstallab
 `pr-walkthrough` already exists as a complete pack at
 `market-packs/pr-walkthrough/` (current pack.yaml: `contents.tools: [pr-walkthrough]`,
 one panel, pack-level `routes: { module: lib/routes.mjs, names: [bundle, publish,
-run, status, recover] }`, four entrypoints). Migration = **add `"pr-walkthrough"`
-to the `FIRST_PARTY_PACKS` allowlist** in
-`scripts/copy-builtin-packs.mjs` (§3.3). No manual install: the §5 band resolves it
-active-by-default. The mandatory E2E (§11) drives it with **no install step**.
+run, status, recover] }`, three entrypoints, and `defaultDisabled: true`). Migration =
+**add `"pr-walkthrough"` to the `FIRST_PARTY_PACKS` allowlist** in
+`scripts/copy-builtin-packs.mjs` (§3.3). No manual install: the §5 band lists it as
+built-in, and contribution resolution follows its manifest default/activation override.
+The mandatory E2E (§11) drives it with **no install step**.
 
 ### 8.2 Parity argument (must be confirmed green before deletion)
 
@@ -668,7 +673,9 @@ delete until that is green in CI.
 
 **Tool defs** — historical note: this design originally kept the reviewer tools in
 the default tool tree. The current implementation ships the agent-driving tools
-(`submit_pr_walkthrough_yaml`, `read_pr_walkthrough_bundle`, `readonly_bash`) from
+(`readonly_bash`, `read_pr_walkthrough_bundle`, `submit_pr_walkthrough_chunk`,
+`read_pr_walkthrough_submission_status`, `finalize_pr_walkthrough_submission`, and
+compatibility `submit_pr_walkthrough_yaml`) from
 `market-packs/pr-walkthrough/tools/pr-walkthrough/` so the pack owns both its UI
 surfaces and its reviewer tool group.
 
@@ -750,15 +757,16 @@ green **before** removing the viewer-feed routes.
 
 ### 8.5 Agent-tool carve-out
 
-The `submit_pr_walkthrough_yaml`, `read_pr_walkthrough_bundle`, and
-`readonly_bash` tools, `WalkthroughAgentManager`, `github-adapter.ts`,
-`card-synthesis.ts`, `export-mapper.ts`, `walkthrough-agent-manager.ts`,
-`walkthrough-agent-store.ts`, `walkthrough-analysis-bundle.ts`,
-`walkthrough-yaml-schema.ts`, and `walkthrough-readonly-policy.ts` **all stay** —
-they are genuine agent capabilities (model-backed synthesis + GitHub network/auth),
-not contribution surfaces. The three tools now live in
-`market-packs/pr-walkthrough/tools/pr-walkthrough/`, while the viewer/route/store/
-deep-link surfaces are pack-bound Host API surfaces.
+The reviewer tools (`readonly_bash`, `read_pr_walkthrough_bundle`,
+`submit_pr_walkthrough_chunk`, `read_pr_walkthrough_submission_status`,
+`finalize_pr_walkthrough_submission`, and compatibility `submit_pr_walkthrough_yaml`),
+`WalkthroughAgentManager`, `github-adapter.ts`, `card-synthesis.ts`,
+`export-mapper.ts`, `walkthrough-agent-manager.ts`, `walkthrough-agent-store.ts`,
+`walkthrough-analysis-bundle.ts`, `walkthrough-yaml-schema.ts`, and
+`walkthrough-readonly-policy.ts` **all stay** — they are genuine agent capabilities
+(model-backed synthesis + GitHub network/auth), not contribution surfaces. The
+tools now live in `market-packs/pr-walkthrough/tools/pr-walkthrough/`, while the
+viewer/route/store/deep-link surfaces are pack-bound Host API surfaces.
 
 **The YAML→cards synthesis moved out of the agent-only side** (§8.4): it is
 extracted to a PURE `src/shared/pr-walkthrough/yaml-to-cards.ts`, imported by the
@@ -974,8 +982,9 @@ independent.
   `tests/marketplace-source-builtin.test.ts`.**
 - **Task D — Market UI** (`src/app/marketplace-page.ts`): built-in source section
   (no Remove), built-in pack rows (toggle, no Uninstall), reuse #734 activation.
-- **Task E — pr-walkthrough migration** (allowlist add): confirm the band resolves
-  it active-by-default; the mandatory E2E runs with no install.
+- **Task E — pr-walkthrough migration** (allowlist add): confirm the band lists it
+  as built-in and contribution resolution follows its manifest default/activation
+  override; the mandatory E2E runs with no install.
 - **Task F — built-in twin deletion** (§8.3 file list; routes.ts split per §8.4):
   gated on Task E's E2E green. Includes `routing.ts` / `render.ts` /
   `panel-workspace.ts` cleanup and the `ext`-route empty-state check (§7.3).

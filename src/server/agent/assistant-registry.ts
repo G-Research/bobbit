@@ -29,6 +29,22 @@ export interface AssistantDef {
 	title: string;
 	promptTitle: string;
 	prompt: string;
+	/**
+	 * Short prefix used for BOTH the initial session title (shown before the
+	 * first message) AND the auto-rename prefix, so the two always agree. After
+	 * the first genuine user message an assistant session is renamed to
+	 * `"<titlePrefix>: <AI summary>"`.
+	 */
+	titlePrefix: string;
+}
+
+/**
+ * Compose an assistant session title from its type prefix and an AI-generated
+ * summary. Pure + tiny so the `"<prefix>: <summary>"` shape is unit-testable
+ * without a running gateway.
+ */
+export function composeAssistantTitle(titlePrefix: string, summary: string): string {
+	return `${titlePrefix}: ${summary}`;
 }
 
 /** Hardcoded fallback defaults used when YAML files don't exist on disk. */
@@ -38,42 +54,49 @@ const FALLBACK_DEFAULTS: Record<string, AssistantDef> = {
 		title: "Goal Assistant",
 		promptTitle: "Goal Creation Assistant",
 		prompt: GOAL_ASSISTANT_PROMPT,
+		titlePrefix: "New Goal",
 	},
 	role: {
 		type: "role",
 		title: "Role Assistant",
 		promptTitle: "Role Creation Assistant",
 		prompt: ROLE_ASSISTANT_PROMPT,
+		titlePrefix: "New Role",
 	},
 	tool: {
 		type: "tool",
 		title: "Tool Assistant",
 		promptTitle: "Tool Management Assistant",
 		prompt: TOOL_ASSISTANT_PROMPT,
+		titlePrefix: "New Tool",
 	},
 	staff: {
 		type: "staff",
 		title: "Staff Assistant",
 		promptTitle: "Staff Agent Creation Assistant",
 		prompt: STAFF_ASSISTANT_PROMPT,
+		titlePrefix: "New Staff",
 	},
 	project: {
 		type: "project",
 		title: "Project Assistant",
 		promptTitle: "Project Registration Assistant",
 		prompt: PROJECT_ASSISTANT_PROMPT,
+		titlePrefix: "New Project",
 	},
 	"project-scaffolding": {
 		type: "project-scaffolding",
 		title: "Project Scaffolding Assistant",
 		promptTitle: "New Project Setup Assistant",
 		prompt: PROJECT_ASSISTANT_SCAFFOLDING_PROMPT,
+		titlePrefix: "New Project",
 	},
 	support: {
 		type: "support",
 		title: "Support",
 		promptTitle: "Bobbit Support Assistant",
 		prompt: SUPPORT_ASSISTANT_PROMPT,
+		titlePrefix: "Support",
 	},
 };
 
@@ -103,6 +126,7 @@ function loadYamlDef(filePath: string): AssistantDef | undefined {
 				title: data.title || data.type,
 				promptTitle: data.promptTitle || data.title || data.type,
 				prompt: data.prompt,
+				titlePrefix: data.titlePrefix || FALLBACK_DEFAULTS[data.type]?.titlePrefix || data.title || data.type,
 			};
 		}
 	} catch {
@@ -176,6 +200,7 @@ export function updateAssistantDef(
 		title: updates.title ?? existing.title,
 		promptTitle: updates.promptTitle ?? existing.promptTitle,
 		prompt: updates.prompt ?? existing.prompt,
+		titlePrefix: existing.titlePrefix,
 	};
 
 	// Write to disk

@@ -61,6 +61,16 @@ export interface PiExtensionExternalTool {
 export interface MarketToolRoot {
 	dir: string;
 	disabledTools?: string[];
+	/** Whole-pack inactive root: known contributions, but never active providers. */
+	inactiveReason?: "disabled-market-pack";
+}
+
+export interface InactiveToolContribution {
+	reason: "disabled-market-pack-tool" | "disabled-market-pack";
+	toolName: string;
+	rootDir: string;
+	filePath: string;
+	groupDir: string;
 }
 
 /** Base tool definition loaded from YAML */
@@ -407,6 +417,9 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 	const layers: Array<{ dir: string; isBuiltin: boolean; disabledTools?: Set<string> }> = [];
 	if (builtinToolsDir) layers.push({ dir: builtinToolsDir, isBuiltin: true });
 	for (const r of marketRoots) {
+		// Whole inactive/default-disabled packs remain classified for diagnostics via
+		// getInactiveToolContribution(), but must not register any active providers.
+		if (r.inactiveReason) continue;
 		layers.push({
 			dir: r.dir,
 			isBuiltin: false,
@@ -550,6 +563,39 @@ export class ToolManager {
 	/** Get the builtins tools directory (dist/server/defaults/tools/). */
 	getBuiltinToolsDir(): string | undefined {
 		return this.builtinToolsDir;
+	}
+
+	/**
+	 * Classify a missing provider as a known, intentionally inactive market-pack
+	 * contribution. Disabled pack tools are filtered out before provider maps are
+	 * built, so activation should quietly skip stale/persisted allowlist entries
+	 * for those names while still warning for genuine typos.
+	 */
+	getInactiveToolContribution(name: string, _scopedContext?: ScopedToolContext): InactiveToolContribution | undefined {
+		const target = name.toLowerCase();
+		for (const root of this.marketRoots()) {
+			const tool = scanToolsDirCached(root.dir, root.dir).find((entry) => entry.name.toLowerCase() === target);
+			if (!tool) continue;
+			if (root.inactiveReason) {
+				return {
+					reason: root.inactiveReason,
+					toolName: tool.name,
+					rootDir: root.dir,
+					filePath: tool.filePath,
+					groupDir: tool.groupDir,
+				};
+			}
+			const disabledTools = root.disabledTools ?? [];
+			if (!disabledTools.some((toolName) => toolName.toLowerCase() === target)) continue;
+			return {
+				reason: "disabled-market-pack-tool",
+				toolName: tool.name,
+				rootDir: root.dir,
+				filePath: tool.filePath,
+				groupDir: tool.groupDir,
+			};
+		}
+		return undefined;
 	}
 
 	/**

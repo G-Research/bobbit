@@ -38,7 +38,7 @@ import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
 import { readToken } from "../auth/token.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
-import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
+import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
@@ -1060,6 +1060,13 @@ export interface SessionManagerOptions {
 	remoteGitPolicy?: RemoteGitPolicy;
 	testPreparingDelayMs?: string;
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
+	/**
+	 * Gateway state directory used to resolve the per-gateway `session-prompts`
+	 * scratch dir. Threaded so prompt persistence is isolated per gateway rather
+	 * than sharing a process-global (multi-gateway v2 test harness safety).
+	 * Defaults to bobbitStateDir() when omitted.
+	 */
+	stateDir?: string;
 }
 
 type RestoreCoordinator = {
@@ -1102,6 +1109,12 @@ export class SessionManager {
 	private readonly remoteGitPolicy: RemoteGitPolicy;
 	private readonly testPreparingDelayMs?: string;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
+	/**
+	 * Gateway state dir for resolving the per-gateway session-prompts scratch dir.
+	 * Single source of truth for prompt persistence/cleanup, threaded into the
+	 * system-prompt functions so multiple in-process gateways don't collide.
+	 */
+	public readonly stateDir: string;
 	/** @internal Test-only session store (used when no PCM is available). */
 	private _testStore: SessionStore | null = null;
 	private _testBgProcessStore: BgProcessStore | null = null;
@@ -1504,6 +1517,7 @@ export class SessionManager {
 		this.remoteGitPolicy = options?.remoteGitPolicy ?? {};
 		this.testPreparingDelayMs = options?.testPreparingDelayMs;
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
+		this.stateDir = options?.stateDir ?? bobbitStateDir();
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -2848,8 +2862,8 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (session) session.promptParts = parts;
 		// Persist prompt sections snapshot for the inspector
-		persistPromptSections(sessionId, parts);
-		return assembleSystemPrompt(sessionId, parts);
+		persistPromptSections(sessionId, parts, this.stateDir);
+		return assembleSystemPrompt(sessionId, parts, this.stateDir);
 	}
 
 	/**
@@ -3022,13 +3036,15 @@ export class SessionManager {
 		let parts: PromptParts;
 
 		if (assistantDef) {
-			const assistantTemplate = this.resolveRolePromptTemplate(assistantRoleForType(session.assistantType), session.projectId);
-			let assistantGoalSpec = "";
-			if (assistantTemplate) {
-				assistantGoalSpec = assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(session.goalId || session.id).slice(0, 8)}`);
-				assistantGoalSpec += "\n\n---\n\n";
-			}
-			assistantGoalSpec += assistantDef.prompt;
+			// Mirror the spawn/restore paths: the backing role's template is a
+			// dedicated "Role" section (rolePrompt/roleName), NOT folded into Goal,
+			// so the reconstructed prompt-sections snapshot matches what was spawned.
+			const assistantRoleName = assistantRoleForType(session.assistantType);
+			const assistantTemplate = this.resolveRolePromptTemplate(assistantRoleName, session.projectId);
+			const assistantRolePrompt = assistantTemplate
+				? assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(session.goalId || session.id).slice(0, 8)}`)
+				: undefined;
+			let assistantGoalSpec = assistantDef.prompt;
 			if (session.assistantType === "goal") {
 				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(session.projectId));
 				// Inject re-attempt context if this is a re-attempt session
@@ -3055,6 +3071,8 @@ export class SessionManager {
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
+				rolePrompt: assistantRolePrompt,
+				roleName: assistantRoleName,
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
 				sectionOrder,
@@ -3190,6 +3208,11 @@ export class SessionManager {
 		 *  RpcBridge.promptWhenReady, so the boot-resume nudge actually lands
 		 *  instead of timing out on the default 30s. */
 		coldStart?: boolean;
+		/** When true, this prompt must NOT trigger first-message auto-title
+		 *  generation. Set for assistant auto-kickoff prompts so naming fires on
+		 *  the first GENUINE user message rather than the kickoff text. Does NOT
+		 *  mark the session titleGenerated, so the next real prompt still names it. */
+		suppressTitleGen?: boolean;
 	}): Promise<{ status: "dispatched" | "queued" }> {
 		let session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
@@ -3285,6 +3308,7 @@ export class SessionManager {
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
+					suppressTitleGen: opts?.suppressTitleGen,
 				});
 				this.broadcastQueue(session);
 				return { status: "queued" };
@@ -3312,7 +3336,9 @@ export class SessionManager {
 			session.transientRetryAttempts = 0;
 
 			// Title generation uses the user-visible original text (better UX).
-			this.tryGenerateTitleFromPrompt(sessionId, text);
+			// Skip for suppressed kickoff prompts so naming fires on the first
+			// genuine user message instead.
+			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
 
 			// Blank-text poison: the live process's in-memory history still holds
 			// the committed blank ContentBlock, so dispatching this follow-up to
@@ -3349,7 +3375,7 @@ export class SessionManager {
 		// before awaiting rpcClient.prompt(): Pi 0.77 OpenAI/Codex preflight can be
 		// slow, and clients/API polling must see the turn as in-flight immediately.
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
-			this.tryGenerateTitleFromPrompt(sessionId, text);
+			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
 			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
 			return { status: "dispatched" };
 		}
@@ -3362,6 +3388,7 @@ export class SessionManager {
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
+			suppressTitleGen: opts?.suppressTitleGen,
 		});
 		this.broadcastQueue(session);
 
@@ -3773,8 +3800,10 @@ export class SessionManager {
 		this.broadcastQueue(session);
 		if (!next) return;
 
-		// Title generation for the first real prompt
-		this.tryGenerateTitleFromPrompt(session.id, next.text);
+		// Title generation for the first real prompt. Suppressed kickoff prompts
+		// (assistant auto-kickoff) never seed the title — naming fires on the
+		// first genuine user message.
+		if (!next.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, next.text);
 
 		// Track for retry
 		session.lastPromptText = next.text;
@@ -5421,14 +5450,16 @@ export class SessionManager {
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
 		if (assistantDef) {
-			// Combine assistant role's shared prompt with per-type specialized prompt
-			const assistantTemplate = this.resolveRolePromptTemplate(assistantRoleForType(ps.assistantType), ps.projectId);
-			let assistantGoalSpec = "";
-			if (assistantTemplate) {
-				assistantGoalSpec = assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`);
-				assistantGoalSpec += "\n\n---\n\n";
-			}
-			assistantGoalSpec += assistantDef.prompt;
+			// Mirror the spawn path (session-setup.ts): the backing role's template
+			// is rendered as its OWN dedicated "Role" section via rolePrompt/roleName
+			// below — NOT folded into the Goal section — so restored assistant
+			// sessions keep the same Role/Goal split as freshly-spawned ones.
+			const assistantRoleName = assistantRoleForType(ps.assistantType);
+			const assistantTemplate = this.resolveRolePromptTemplate(assistantRoleName, ps.projectId);
+			const assistantRolePrompt = assistantTemplate
+				? assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`)
+				: undefined;
+			let assistantGoalSpec = assistantDef.prompt;
 			if (ps.assistantType === "goal") {
 				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(ps.projectId));
 				// Inject re-attempt context if this is a re-attempt session
@@ -5454,6 +5485,8 @@ export class SessionManager {
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
+				rolePrompt: assistantRolePrompt,
+				roleName: assistantRoleName,
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
@@ -5557,7 +5590,13 @@ export class SessionManager {
 			eventBuffer,
 			unsubscribe: () => {},
 			isCompacting: false,
-			titleGenerated: ps.title !== "New session",
+			// Assistant sessions: a title still equal to the bare type prefix (e.g.
+			// "Support", "New Goal") is not yet generated — stay eligible so the first
+			// genuine user message renames it; a renamed title ("<prefix>: …") must NOT
+			// regenerate. Non-assistant sessions keep the "New session" rule.
+			titleGenerated: assistantDef?.titlePrefix
+				? ps.title !== assistantDef.titlePrefix
+				: ps.title !== "New session",
 			goalId: ps.goalId,
 			assistantType: ps.assistantType,
 			delegateOf: ps.delegateOf,
@@ -7074,7 +7113,7 @@ export class SessionManager {
 			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
 			extStore.remove(id);
-			cleanupSessionPrompt(id);
+			cleanupSessionPrompt(id, this.stateDir);
 			console.log(`[session-manager] Unregistered external session ${id}`);
 		};
 	}
@@ -7572,8 +7611,13 @@ export class SessionManager {
 
 	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {
 		const messages = [{ role: "user", content: userText }];
-		const title = await generateSessionTitle(messages, this.getTitleGenOptions());
-		if (title) {
+		const summary = await generateSessionTitle(messages, this.getTitleGenOptions());
+		if (summary) {
+			// Assistant sessions keep a type prefix (e.g. "Support: <summary>",
+			// "New Goal: <summary>") so the rename stays identifiable; the prefix
+			// matches the initial session title. Non-assistant sessions are unchanged.
+			const titlePrefix = session.assistantType ? getAssistantDef(session.assistantType)?.titlePrefix : undefined;
+			const title = titlePrefix ? composeAssistantTitle(titlePrefix, summary) : summary;
 			session.title = title;
 			this.resolveStoreForSession(session.id).update(session.id, { title });
 			broadcast(session.clients, { type: "session_title", sessionId: session.id, title });
@@ -8950,13 +8994,13 @@ export class SessionManager {
 
 		// Delete session prompt file
 		try {
-			cleanupSessionPrompt(ps.id);
+			cleanupSessionPrompt(ps.id, this.stateDir);
 		} catch (err) {
 			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
 		}
 
 		// Delete persisted prompt sections JSON
-		purgePromptSectionsJson(ps.id);
+		purgePromptSectionsJson(ps.id, this.stateDir);
 
 		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
 		// worktree for server bookkeeping, so we clean those up too.  Skip paths that

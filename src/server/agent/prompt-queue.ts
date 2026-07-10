@@ -20,6 +20,7 @@ export class PromptQueue {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
+		suppressTitleGen?: boolean;
 	}): QueuedMessage {
 		const msg: QueuedMessage = {
 			id: randomUUID(),
@@ -29,6 +30,7 @@ export class PromptQueue {
 		};
 		if (opts?.images?.length) msg.images = opts.images;
 		if (opts?.attachments?.length) msg.attachments = opts.attachments;
+		if (opts?.suppressTitleGen) msg.suppressTitleGen = true;
 
 		this.queue.push(msg);
 		if (msg.isSteered) this.reorder();
