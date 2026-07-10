@@ -2479,7 +2479,7 @@ The existing session restore path (on gateway restart) also benefits from worktr
 
 When an agent writes a large file, the `pi-coding-agent` RPC protocol emits `message_update` events containing the **full accumulated message** on every streaming chunk. For a 40MB file write, this means ~40MB of JSON is serialized, broadcast via WebSocket, parsed by the browser, and held in the EventBuffer - on every token. With multiple agents writing simultaneously, this creates catastrophic memory pressure and freezes the Node.js event loop.
 
-The truncation system intercepts events before they reach the broadcast layer and EventBuffer, replacing large tool input content with a lightweight stub while preserving the full content in the agent's `.jsonl` session file for on-demand access.
+The truncation system intercepts live events and history snapshots before they reach the WebSocket layer or EventBuffer, replacing large tool input/content fields with lightweight stubs while preserving the full content in the agent's `.jsonl` session file or retained diagnostics for on-demand access.
 
 ### Architecture
 
@@ -2491,16 +2491,20 @@ Agent process → message_update (full content)
        │
        └─→ truncateLargeToolContent(event)
               │
-              ├─→ eventBuffer.push()  - truncated (ring buffer stays small)
-              └─→ broadcast()         - truncated (WebSocket payloads stay small)
+              └─→ emitSessionEvent(session, truncated)
+                     ├─→ eventBuffer.push()  - truncated (ring buffer stays small)
+                     └─→ broadcast()         - truncated (WebSocket payloads stay small)
 ```
+
+Session history snapshots (`get_messages`, attach/reconnect hydration, archived reads) pass through `truncateLargeToolContentInMessages()` before they are sent to the browser, so reconnect cannot replay a large report or tool result as one unbounded frame.
 
 ### Key design decisions
 
 - **32KB threshold** - generous enough that normal code files (<10KB) pass through untouched, but catches generated data files, large test fixtures, and minified bundles. Exported as `LARGE_CONTENT_THRESHOLD` from `truncate-large-content.ts`.
 - **Zero overhead for small content** - no cloning occurs unless truncation is actually needed. The function returns the original event reference unchanged.
 - **Original event never mutated** - `handleAgentLifecycle()` and `trackCostFromEvent()` receive the unmodified event. Only the broadcast/buffer path sees the truncated version.
-- **Dual format support** - both `toolCall`/`arguments` (pi-coding-agent RPC format) and `tool_use`/`input` (Anthropic API format) are handled for robustness.
+- **Dual format support** - both `toolCall`/`arguments` (pi-coding-agent RPC format) and `tool_use`/`input` (Anthropic API format) are handled for robustness. Text blocks and marker-less toolResult blocks are also bounded on history replay.
+- **Reviewer/QA report fields** - `verification_result.summary` and `verification_result.report_html` are truncated in both live session events and persisted-history snapshots. Large HTML reports remain available through the QA/report artifact paths instead of riding the chat WebSocket repeatedly.
 - **UI lazy loading** - `WriteRenderer` shows a preview (first 512 chars) with a "Load full content" button. Full content is fetched via `GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`. The endpoint reads `block.arguments?.content ?? block.input?.content` for tool-call blocks and falls back to `block.text` for text blocks (used by `preview_open` snapshots - see [Preview snapshots & reopening](#preview-snapshots--reopening)). See [docs/rest-api.md - Large content truncation](rest-api.md#large-content-truncation).
 - **`preview_open` snapshot blocks** - `preview_open` tool_results carry a second `{type:"text"}` block whose text begins with one of the `__preview_snapshot_v{1,2,3}__\n` sentinels. `truncateSnapshotBlock()` walks `toolResult` messages, and when a snapshot exceeds the threshold it rewrites the block to `{ type:"text", text: marker, _truncated:true, _originalLength, preview }` - the matched marker is preserved so downstream consumers (UI renderer, further truncation passes) can still detect the block. The 512-char preview applies to v1 (legacy raw-HTML) snapshots; v2/v3 snapshots are constant ~250 bytes and never trip the threshold, so the truncation path only fires for legacy v1 archived snapshots in practice. Agent-facing context therefore only ever sees the 512-char preview; the UI hydrates the full HTML via the tool-content endpoint.
 - **Streaming throttle** - `remote-agent.ts` throttles `streamMessage` updates to 2x/sec when content is truncated, reducing Lit re-render pressure in the browser.
@@ -2509,9 +2513,8 @@ Agent process → message_update (full content)
 
 | File | Purpose |
 |---|---|
-| `truncate-large-content.ts` | `truncateLargeToolContent()` function and `LARGE_CONTENT_THRESHOLD` constant |
-| `session-setup.ts` | Applies truncation in `subscribeToEvents()` before broadcast/buffer |
-| `session-manager.ts` | Same truncation at all event listener sites |
+| `truncate-large-content.ts` | `truncateLargeToolContent()`, `truncateLargeToolContentInMessages()`, and `LARGE_CONTENT_THRESHOLD` |
+| `session-manager.ts` | Applies live-event truncation at event listener sites and history truncation before snapshot sends |
 | `server.ts` | REST endpoint for lazy-loading full content from `.jsonl` |
 | `fetch-tool-content.ts` (UI) | Client-side REST helper for lazy loading |
 | `WriteRenderer.ts` (UI) | Detects truncation, shows preview + "Load full content" button |
@@ -2634,7 +2637,7 @@ Full reasoning and alternatives considered are in [docs/design/streaming-dedup-r
 - `canResumeFrom(fromSeq)` - false if `fromSeq` is older than the retained window (ring eviction).
 - `lastSeq` - highest assigned seq (used in `resume_gap` so the client can resync).
 
-All `{type:"event"}` broadcasts flow through a single helper `emitSessionEvent(session, event)` in `src/server/agent/session-manager.ts`. It truncates large content, pushes into the buffer, and broadcasts `{type:"event", data, seq, ts}` in lockstep. This replaces the previous pattern of paired `eventBuffer.push(...) + broadcast(...)` calls at six call sites; the helper is the only place that can assign a seq, which keeps the stream strictly monotonic even across call sites.
+All `{type:"event"}` broadcasts flow through a single helper `emitSessionEvent(session, event)` in `src/server/agent/session-manager.ts`. Callers pass an already-bounded event, and the helper pushes it into the buffer and broadcasts `{type:"event", data, seq, ts}` in lockstep. This replaces the previous pattern of paired `eventBuffer.push(...) + broadcast(...)` calls; the helper is the only place that can assign a seq, which keeps the stream strictly monotonic even across call sites.
 
 Other broadcast types (`session_status`, `session_title`, `messages`, `state`, `queue_update`, ...) do **not** carry `seq` - they are idempotent snapshots, not stream deltas, and the dup/reorder class of bug doesn't apply.
 

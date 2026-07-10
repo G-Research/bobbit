@@ -38,6 +38,7 @@ import type { PreferencesStore } from "../agent/preferences-store.js";
 import { applyRuntimeSessionModelSelection } from "./runtime-model-selection.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
+import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -1197,32 +1198,54 @@ export function handleWebSocketConnection(
 					// still in the EventBuffer window, replay buffered entries as
 					// individual {type:"event"} frames with their original seq/ts
 					// so the client can dedupe. Otherwise signal a gap — the client
-					// will fall back to a full get_messages snapshot.
+					// will fall back to a full get_messages snapshot. Replay is now
+					// byte-budgeted and paced so reconnect cannot immediately rebuild
+					// enough buffered output to trip the overflow guard again.
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
 					let replayed = 0;
-					let bytes = 0;
 					const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : 0;
-					if (!session.eventBuffer.canResumeFrom(fromSeq)) {
+					const sendResumeGap = (_reason: string, bytes = 0) => {
 						send(ws, { type: "resume_gap", lastSeq: session.eventBuffer.lastSeq });
 						if (diagEnabled) {
-							getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "resume_gap", { frames: 1, recipients: 1, bytes: 0, replayed: 0, gaps: 1, sendMs: performance.now() - diagStart });
+							getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "resume_gap", { frames: 1, recipients: 1, bytes, replayed, gaps: 1, sendMs: performance.now() - diagStart });
+						}
+					};
+					if (!session.eventBuffer.canResumeFrom(fromSeq)) {
+						sendResumeGap("window_miss");
+						break;
+					}
+					const frames = session.eventBuffer.since(fromSeq).map((entry) => {
+						const frame = { type: "event" as const, data: entry.event, seq: entry.seq, ts: entry.ts };
+						const data = JSON.stringify(frame);
+						return { data, bytes: Buffer.byteLength(data) };
+					});
+					if (frames.length === 0) {
+						if (diagEnabled) {
+							getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: 0, recipients: 0, bytes: 0, replayed: 0, sendMs: performance.now() - diagStart });
 						}
 						break;
 					}
-					for (const entry of session.eventBuffer.since(fromSeq)) {
-						if (diagEnabled) {
-							const frame = { type: "event" as const, data: entry.event, seq: entry.seq, ts: entry.ts };
-							const data = JSON.stringify(frame);
-							if (ws.readyState === 1) ws.send(data);
-							bytes += Buffer.byteLength(data);
-						} else {
-							send(ws, { type: "event", data: entry.event, seq: entry.seq, ts: entry.ts });
-						}
+					const decision = decideResumeReplay(frames);
+					if (decision.kind === "resume_gap") {
+						sendResumeGap(decision.reason, decision.bytes);
+						break;
+					}
+					const drained = await waitForReplayDrain(
+						ws as any,
+						Date.now() + RESUME_REPLAY_DRAIN_TIMEOUT_MS,
+					);
+					if (!drained) {
+						sendResumeGap("backpressure", decision.bytes);
+						break;
+					}
+					const deadline = Date.now() + PACE_TIMEOUT_MS;
+					for (const frame of frames) {
+						await paceAndSend(ws as any, frame.data, deadline);
 						replayed++;
 					}
 					if (diagEnabled) {
-						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes, replayed, sendMs: performance.now() - diagStart });
+						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: decision.bytes, replayed, sendMs: performance.now() - diagStart });
 					}
 					break;
 				}

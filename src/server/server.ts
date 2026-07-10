@@ -34,7 +34,7 @@ import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
@@ -44,6 +44,7 @@ import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
+import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
@@ -593,6 +594,9 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
  *  aggregate-send guard (src/ui/components/MessageEditor.ts) so the composer
  *  rejects an oversized send with a clear error BEFORE it can tear down the socket. */
 export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
+
+const _goalPendingOverflowCheck = new WeakSet<WebSocket>();
+const _goalWarnedClients = new WeakSet<WebSocket>();
 
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
@@ -2803,15 +2807,34 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	function broadcastToGoal(goalId: string, event: any): void {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
+			const baseMeta = describeWsPayload(event, data);
 			for (const ws of wss.clients) {
 				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
-					if (session?.teamGoalId === goalId || session?.goalId === goalId) ws.send(data);
+					if (session?.teamGoalId === goalId || session?.goalId === goalId) {
+						guardWebSocketOverflow(ws, { ...baseMeta, recipientKind: "goal-session", context: `goalId=${goalId}` }, {
+							pendingOverflowCheck: _goalPendingOverflowCheck,
+							warnedClients: _goalWarnedClients,
+						}, {
+							setTimeout: (cb, ms) => setTimeout(cb, ms),
+							warn: (message) => console.warn(message),
+						}, DEFAULT_OVERFLOW_GUARD);
+						ws.send(data);
+					}
 					continue;
 				}
-				if (viewerSubscribedToGoal(ws as any, goalId)) ws.send(data);
+				if (viewerSubscribedToGoal(ws as any, goalId)) {
+					guardWebSocketOverflow(ws, { ...baseMeta, recipientKind: "goal-viewer", context: `goalId=${goalId}` }, {
+						pendingOverflowCheck: _goalPendingOverflowCheck,
+						warnedClients: _goalWarnedClients,
+					}, {
+						setTimeout: (cb, ms) => setTimeout(cb, ms),
+						warn: (message) => console.warn(message),
+					}, DEFAULT_OVERFLOW_GUARD);
+					ws.send(data);
+				}
 			}
 			return;
 		}
@@ -2820,6 +2843,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const data = JSON.stringify(event);
 		const stringifyMs = performance.now() - stringifyStart;
 		const sendStart = performance.now();
+		const baseMeta = describeWsPayload(event, data);
 		let scanned = 0;
 		let recipients = 0;
 		let matchedGoal = 0;
@@ -2838,6 +2862,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			if (sid) {
 				const session = sessionManager.getSession(sid);
 				if (session?.teamGoalId === goalId || session?.goalId === goalId) {
+					guardWebSocketOverflow(ws, { ...baseMeta, recipientKind: "goal-session", context: `goalId=${goalId}` }, {
+						pendingOverflowCheck: _goalPendingOverflowCheck,
+						warnedClients: _goalWarnedClients,
+					}, {
+						setTimeout: (cb, ms) => setTimeout(cb, ms),
+						warn: (message) => console.warn(message),
+					}, DEFAULT_OVERFLOW_GUARD);
 					ws.send(data);
 					recipients++;
 					matchedGoal++;
@@ -2851,6 +2882,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 			if ((ws as any).isViewer) {
 				if (viewerSubscribedToGoal(ws as any, goalId)) {
+					guardWebSocketOverflow(ws, { ...baseMeta, recipientKind: "goal-viewer", context: `goalId=${goalId}` }, {
+						pendingOverflowCheck: _goalPendingOverflowCheck,
+						warnedClients: _goalWarnedClients,
+					}, {
+						setTimeout: (cb, ms) => setTimeout(cb, ms),
+						warn: (message) => console.warn(message),
+					}, DEFAULT_OVERFLOW_GUARD);
 					ws.send(data);
 					recipients++;
 					viewer++;

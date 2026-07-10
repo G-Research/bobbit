@@ -63,7 +63,7 @@ import type { GrantPolicy, Role } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
-import { decideOverflowAction } from "../ws-overflow-guard.js";
+import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "../ws-overflow-guard.js";
 
 let sessionManagerModuleClock: Clock = realClock;
 
@@ -825,8 +825,8 @@ function rewriteUserMessageText(message: any, newText: string): any {
  * client-side reconnect path takes over cleanly instead of waiting for a
  * TCP timeout.
  */
-const WS_BUFFER_OVERFLOW_BYTES = 4 * 1024 * 1024; // 4 MiB
-const WS_BUFFER_WARN_BYTES = 1 * 1024 * 1024;     // 1 MiB — log only
+const WS_BUFFER_OVERFLOW_BYTES = DEFAULT_OVERFLOW_GUARD.overflowBytes;
+const WS_BUFFER_WARN_BYTES = DEFAULT_OVERFLOW_GUARD.warnBytes;
 const _warnedClients = new WeakSet<WebSocket>();
 
 /**
@@ -868,39 +868,19 @@ function buildModelStateData(provider: string, id: string): { model: Record<stri
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	if (!cpuDiagnosticsEnabled()) {
 		const data = JSON.stringify(msg);
+		const baseMeta = describeWsPayload(msg, data);
 		for (const client of clients) {
 			if (client.readyState !== 1) continue;
-			const buffered = (client as any).bufferedAmount ?? 0;
-			const action = decideOverflowAction(buffered, /* isDeferredRecheck */ false, {
+			guardWebSocketOverflow(client, { ...baseMeta, recipientKind: "session" }, {
+				pendingOverflowCheck: _pendingOverflowCheck,
+				warnedClients: _warnedClients,
+			}, {
+				setTimeout: (cb, ms) => sessionManagerModuleClock.setTimeout(cb, ms),
+				warn: (message) => console.warn(message),
+			}, {
 				overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
 				warnBytes: WS_BUFFER_WARN_BYTES,
 			});
-			if (action.kind === "send-and-defer-check" && !_pendingOverflowCheck.has(client)) {
-				_pendingOverflowCheck.add(client);
-				console.warn(
-					`[ws] bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; deferring terminate decision 10ms.`,
-				);
-				sessionManagerModuleClock.setTimeout(() => {
-					_pendingOverflowCheck.delete(client);
-					if (client.readyState !== 1) return;
-					const bufferedNow = (client as any).bufferedAmount ?? 0;
-					const recheck = decideOverflowAction(bufferedNow, /* isDeferredRecheck */ true, {
-						overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
-						warnBytes: WS_BUFFER_WARN_BYTES,
-					});
-					if (recheck.kind === "terminate") {
-						console.warn(
-							`[ws] confirmed overflow after 10ms drain attempt: ${bufferedNow}B; terminating client. ` +
-							`Last msg type=${(msg as any).type}.`,
-						);
-						try { client.terminate(); } catch { /* ignore */ }
-					}
-				}, 10);
-			}
-			if (buffered > WS_BUFFER_WARN_BYTES && !_warnedClients.has(client)) {
-				_warnedClients.add(client);
-				console.warn(`[ws] client bufferedAmount=${buffered}B (warn threshold ${WS_BUFFER_WARN_BYTES}B); type=${(msg as any).type}`);
-			}
 			client.send(data);
 		}
 		return;
@@ -910,43 +890,23 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	const data = JSON.stringify(msg);
 	const stringifyMs = performance.now() - stringifyStart;
 	const sendStart = performance.now();
+	const baseMeta = describeWsPayload(msg, data);
 	let scanned = 0;
 	let recipients = 0;
 	let skipped = 0;
 	for (const client of clients) {
 		scanned++;
 		if (client.readyState !== 1) { skipped++; continue; }
-		const buffered = (client as any).bufferedAmount ?? 0;
-		const action = decideOverflowAction(buffered, /* isDeferredRecheck */ false, {
+		guardWebSocketOverflow(client, { ...baseMeta, recipientKind: "session" }, {
+			pendingOverflowCheck: _pendingOverflowCheck,
+			warnedClients: _warnedClients,
+		}, {
+			setTimeout: (cb, ms) => sessionManagerModuleClock.setTimeout(cb, ms),
+			warn: (message) => console.warn(message),
+		}, {
 			overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
 			warnBytes: WS_BUFFER_WARN_BYTES,
 		});
-		if (action.kind === "send-and-defer-check" && !_pendingOverflowCheck.has(client)) {
-			_pendingOverflowCheck.add(client);
-			console.warn(
-				`[ws] bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; deferring terminate decision 10ms.`,
-			);
-			sessionManagerModuleClock.setTimeout(() => {
-				_pendingOverflowCheck.delete(client);
-				if (client.readyState !== 1) return;
-				const bufferedNow = (client as any).bufferedAmount ?? 0;
-				const recheck = decideOverflowAction(bufferedNow, /* isDeferredRecheck */ true, {
-					overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
-					warnBytes: WS_BUFFER_WARN_BYTES,
-				});
-				if (recheck.kind === "terminate") {
-					console.warn(
-						`[ws] confirmed overflow after 10ms drain attempt: ${bufferedNow}B; terminating client. ` +
-						`Last msg type=${(msg as any).type}.`,
-					);
-					try { client.terminate(); } catch { /* ignore */ }
-				}
-			}, 10);
-		}
-		if (buffered > WS_BUFFER_WARN_BYTES && !_warnedClients.has(client)) {
-			_warnedClients.add(client);
-			console.warn(`[ws] client bufferedAmount=${buffered}B (warn threshold ${WS_BUFFER_WARN_BYTES}B); type=${(msg as any).type}`);
-		}
 		client.send(data);
 		recipients++;
 	}
