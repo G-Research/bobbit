@@ -1185,21 +1185,24 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			}
 
 			// ── Git status API check ──
-			// After restart, the git-status endpoint should still return valid data
+			// After restart, the git-status endpoint should still return valid data.
+			// Do not assume a plain project-root session is necessarily on the configured
+			// primary branch: live-config runs may carry project-level base_ref state, and
+			// this smoke only needs the endpoint/widget to report the branch truthfully.
 			let primaryBranch = "master";
+			let gitStatusBranch = "";
+			let gitStatusIsOnPrimary = false;
 			if (restored) {
 				const gitStatus = await fetchGitStatusApi(gw, s.id);
 				if (gitStatus) {
 					primaryBranch = gitStatus.primaryBranch || primaryBranch;
+					gitStatusBranch = gitStatus.branch;
+					gitStatusIsOnPrimary = gitStatus.isOnPrimary;
 					expect(gitStatus.branch).toBeTruthy();
-					if (!v.sandboxed) {
-						if (v.worktree) {
-							expect(gitStatus.branch).not.toBe(primaryBranch);
-							expect(gitStatus.isOnPrimary).toBe(false);
-						} else {
-							primaryBranch = gitStatus.branch;
-							expect(gitStatus.isOnPrimary).toBe(true);
-						}
+					expect(gitStatus.isOnPrimary).toBe(gitStatus.branch === primaryBranch);
+					if (!v.sandboxed && v.worktree) {
+						expect(gitStatus.branch).not.toBe(primaryBranch);
+						expect(gitStatus.isOnPrimary).toBe(false);
 					}
 					console.log(`    git-status API: branch=${gitStatus.branch} primary=${primaryBranch} clean=${gitStatus.clean} isOnPrimary=${gitStatus.isOnPrimary} ✓`);
 				} else {
@@ -1227,10 +1230,11 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			const widgetText = await checkGitStatusWidget(page);
 			if (widgetText) {
 				expect(widgetText).toContain("⎇");
-				if (!v.sandboxed && !v.worktree) {
-					expect(widgetText).toContain(primaryBranch);
-				} else if (!v.sandboxed && v.worktree) {
-					expect(widgetText).not.toContain(primaryBranch);
+				if (!v.sandboxed && gitStatusBranch) {
+					expect(widgetText).toContain(gitStatusBranch);
+					if (v.worktree || !gitStatusIsOnPrimary) {
+						expect(widgetText).not.toContain(primaryBranch);
+					}
 				}
 				console.log(`    git-status widget: "${widgetText}" ✓`);
 			} else {
