@@ -20,6 +20,7 @@ import {
 	createRole,
 	gatewayFetch,
 	refreshSessions,
+	fetchProjects,
 	fetchSandboxStatus,
 	fetchWorkflows,
 	fetchGroupPolicies,
@@ -2812,13 +2813,6 @@ function projectIdForProjectProposal(sessionId: string): string | null {
 	return projectId || null;
 }
 
-async function fetchProjectsForProjectProposal(): Promise<any[]> {
-	const res = await gatewayFetch("/api/projects");
-	if (!res.ok) throw new Error(`Failed: ${res.status}`);
-	const data = await res.json();
-	return Array.isArray(data?.projects) ? data.projects : Array.isArray(data) ? data : [];
-}
-
 async function invalidateProjectProposalConfig(projectId: string): Promise<void> {
 	const m = await import("./settings-page.js");
 	m.invalidateProjectScopeConfig(projectId);
@@ -2908,7 +2902,7 @@ async function acceptProvisionalProjectProposalFromPanel(proposal: NonNullable<t
 	if (!await promoteProjectProposal(projectId, typeof fields.name === "string" ? fields.name : "")) return false;
 	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
 
-	setProjects(await fetchProjectsForProjectProposal());
+	setProjects(await fetchProjects());
 	void invalidateProjectProposalConfig(projectId);
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
@@ -2941,7 +2935,7 @@ async function acceptRegisteredProjectProposalFromPanel(proposal: NonNullable<ty
 	}
 	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
 
-	setProjects(await fetchProjectsForProjectProposal());
+	setProjects(await fetchProjects());
 	void invalidateProjectProposalConfig(projectId);
 	state.projectProposalAcceptedBySessionId[propSessionId] = true;
 	delete state.activeProposals.project;
@@ -3171,7 +3165,7 @@ function projectProposalPanel() {
 					variant: "default",
 					onClick: handleAccept,
 					disabled: acceptDisabled || streaming || _projectProposalAcceptPending,
-					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${_projectProposalAcceptPending ? "" : icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
+					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${_projectProposalAcceptPending ? html`<span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden="true"></span>` : icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
 				})}</span>
 			</div>
 		</div>
