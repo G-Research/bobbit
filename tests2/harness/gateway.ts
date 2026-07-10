@@ -24,7 +24,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type WebSocket from "ws";
 
-import { setProjectRoot } from "../../src/server/bobbit-dir.js";
+import { getAgentDirState, initializeAgentDirRuntime, setProjectRoot } from "../../src/server/bobbit-dir.js";
 import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
 import { loadOrCreateToken } from "../../src/server/auth/token.js";
 // createGateway (+ configureAigwRuntimeFlags) pull the WHOLE src/server graph.
@@ -98,6 +98,8 @@ export interface GatewayFixture {
 	countEntities(): EntityCounts;
 	/** Re-create/reseed the default project after a test deletes or mutates it. */
 	restoreDefaultProject(): Promise<void>;
+	/** Restore process-global runtime singletons after fork-mate tests reset them. */
+	restoreAgentDirRuntime(): void;
 	/**
 	 * Reset the default project's seeded workflows + component config back to the
 	 * baseline when a fork-mate mutated them in place (the default project still
@@ -317,6 +319,20 @@ async function boot(): Promise<BootedGateway> {
 	// exposes `defaultProjectId` as a getter over this holder rather than a value
 	// captured once at boot (which would dangle at a deleted project → 404 flakes).
 	let currentDefaultProjectId = defaultProjectId;
+	const sameRuntimePath = (a: string | undefined, b: string): boolean => {
+		if (!a) return false;
+		try { return realpathSync(a) === realpathSync(b); } catch { return resolve(a) === resolve(b); }
+	};
+	const restoreAgentDirRuntime = (): void => {
+		process.env.BOBBIT_DIR = bobbitDir;
+		process.env.BOBBIT_AGENT_DIR = agentDir;
+		setProjectRoot(bobbitDir);
+		try {
+			const state = getAgentDirState();
+			if (sameRuntimePath(state.startup.dir, agentDir) && sameRuntimePath(state.startup.projectRoot, bobbitDir)) return;
+		} catch { /* singleton was reset by a fork-mate test */ }
+		initializeAgentDirRuntime({ projectRoot: bobbitDir, stateDir });
+	};
 
 	const authHeaders = (extra?: HeadersInit): HeadersInit => ({ Authorization: `Bearer ${token}`, ...(extra ?? {}) });
 
@@ -332,7 +348,9 @@ async function boot(): Promise<BootedGateway> {
 		orchestrationCore: (gw as any).orchestrationCore,
 		bgProcessManager: gw.bgProcessManager,
 		projectContextManager: gw.projectContextManager,
+		restoreAgentDirRuntime,
 		async api(path, init) {
+			restoreAgentDirRuntime();
 			const headers = new Headers(init?.headers);
 			headers.set("Authorization", `Bearer ${token}`);
 			if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -345,6 +363,7 @@ async function boot(): Promise<BootedGateway> {
 			return (text ? JSON.parse(text) : undefined) as T;
 		},
 		async connectWs(suffix, opts) {
+			restoreAgentDirRuntime();
 			const { default: WS } = await import("ws");
 			const target = `${wsBase}/ws/${suffix}`;
 			return await new Promise<WebSocket>((resolvePromise, reject) => {
@@ -445,9 +464,11 @@ async function boot(): Promise<BootedGateway> {
  * Return the fork-scoped gateway, booting it on first call. Subsequent calls in
  * the same fork return the identical instance (isolate:false keeps the module).
  */
-export function getGateway(): Promise<GatewayFixture> {
+export async function getGateway(): Promise<GatewayFixture> {
 	if (!bootPromise) bootPromise = boot();
-	return bootPromise;
+	const gw = await bootPromise;
+	gw.restoreAgentDirRuntime();
+	return gw;
 }
 
 /** Best-effort synchronous cleanup for a stray temp dir left by a crashed run. */

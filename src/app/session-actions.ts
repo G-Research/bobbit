@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
 import type { TemplateResult } from "lit";
-import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
+import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionDeepLink, type SidebarCopyLinkTitle } from "./api.js";
 import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
 import { confirmAction, showConnectionError, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
@@ -201,7 +201,7 @@ export function buildArchivedSessionActions(input: BuildArchivedSessionActionsIn
 			run: (event: Event) => {
 				event.preventDefault();
 				event.stopPropagation();
-				void copyLink(sessionPathDeepLink(session.id), "Copy session link");
+				void copyLink(sessionDeepLink(session.id), "Copy session link");
 			},
 		},
 		{
@@ -349,7 +349,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			quick: false,
 			run: (event: Event) => {
 				event.stopPropagation();
-				void copyLink(sessionPathDeepLink(session.id), "Copy session link");
+				void copyLink(sessionDeepLink(session.id), "Copy session link");
 			},
 		},
 		{
@@ -484,5 +484,5 @@ function openExternalUrl(url: string): void {
 }
 
 export function openSessionInNewWindow(sessionId: string): void {
-	openExternalUrl(sessionPathDeepLink(sessionId));
+	openExternalUrl(sessionDeepLink(sessionId));
 }

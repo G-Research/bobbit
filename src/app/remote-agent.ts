@@ -969,7 +969,7 @@ export class RemoteAgent {
 
 	// ── Agent commands (proxied to gateway) ──────────────────────────
 
-	async prompt(input: string | any | any[], _images?: any[]): Promise<void> {
+	async prompt(input: string | any | any[], _images?: any[], promptOpts?: { suppressTitleGen?: boolean }): Promise<void> {
 		this._clearProviderAuthRequired();
 		this.emit({ type: "render" });
 		let text: string;
@@ -1030,6 +1030,9 @@ export class RemoteAgent {
 			text,
 			...(imageData?.length ? { images: imageData } : {}),
 			...(attachments?.length ? { attachments } : {}),
+			// Assistant auto-kickoff prompts must not seed the session title —
+			// naming fires on the first genuine user message instead.
+			...(promptOpts?.suppressTitleGen ? { suppressTitleGen: true } : {}),
 		});
 	}
 

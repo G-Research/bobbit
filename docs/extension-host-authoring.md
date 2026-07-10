@@ -1799,7 +1799,9 @@ ambitious pack:
   duplicated logic to drift.
 
 What stays outside the Host API is the explicit **agent-tool** carve-out: the
-`submit_pr_walkthrough_yaml` / `read_pr_walkthrough_bundle` / `readonly_bash` tools, the
+reviewer tools (`readonly_bash`, `read_pr_walkthrough_bundle`,
+`submit_pr_walkthrough_chunk`, `read_pr_walkthrough_submission_status`,
+`finalize_pr_walkthrough_submission`, and compatibility `submit_pr_walkthrough_yaml`), the
 `/resolve` + `/export/*` lifecycle, and GitHub network/auth. Those are genuine *agent*
 capabilities (model-backed synthesis, credentialed network), not panel/route/entrypoint
 surfaces. The tools now ship from the pack at `market-packs/pr-walkthrough/tools/pr-walkthrough/`

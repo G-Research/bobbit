@@ -54,6 +54,12 @@ export interface QueuedMessage {
 	attachments?: unknown[];
 	isSteered: boolean;
 	createdAt: number;
+	/**
+	 * When true, this prompt must NOT trigger first-message auto-title
+	 * generation (used for assistant auto-kickoff prompts so naming fires on
+	 * the first genuine user message instead of the kickoff text).
+	 */
+	suppressTitleGen?: boolean;
 }
 
 export interface SessionCostSnapshot {
@@ -93,7 +99,7 @@ export type ClientMessage =
 	// unspoofable browser authority signal; endpoint auth still comes from the bearer
 	// token plus server-side session/surface/capability checks.
 	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel" }
-	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[] }
+	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[]; suppressTitleGen?: boolean }
 	| { type: "steer"; text: string }
 	| { type: "steer_queued"; messageId: string }
 	| { type: "remove_queued"; messageId: string }

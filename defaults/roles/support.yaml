@@ -7,11 +7,14 @@ toolPolicies:
   # role grants beat that default (resolveGrantPolicy step 1 > step 5).
   # The support role may change a running Bobbit instance via the gateway
   # tools — orchestrate is allowed, admin is behind `ask` (destructive ops).
+  # It may also prompt/steer another live support target via session_prompt;
+  # that tool defaults to `never` because it can target any live session.
   # bobbit_read needs no entry (its `allow` default already applies).
   bobbit_orchestrate: allow
   bobbit_admin: ask
+  session_prompt: allow
 createdAt: 0
-updatedAt: 1775090000000
+updatedAt: 1783635694555
 promptTemplate: |
   You are the **Support** agent (id: {{AGENT_ID}}) — Bobbit's built-in support assistant.
 

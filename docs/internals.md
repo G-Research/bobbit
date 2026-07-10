@@ -1129,6 +1129,22 @@ Current proposal tabs are keyed as `proposal:<type>` for `goal`, `project`, `rol
 
 The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, rev | fields }`. `session-manager.ts` clears any dismissal fingerprint, explicitly opens/selects the live proposal tab for the current rev, or reads an older snapshot into a read-only historical workspace tab. Legacy archived cards without a rev marker still replay `fields`. Rehydrated drafts (`proposal_update { source: "rehydrate" }`) and `GET /api/sessions/:id/proposals` populate content slots only; the archived footer's Resubmit button is the explicit tab reopen path.
 
+### Form-mirror bridge for legacy panels
+
+`state.activeProposals[type].fields` is the canonical parsed content slot, but not every proposal panel renders from it directly. The role, tool, and staff preview forms still read legacy form-mirror state (`rolePreview*`, `toolPreview*`, `staffPreview*`) because the same panel implementations are reused inside and outside assistant sessions.
+
+The unified `remote.onProposal` callback is therefore responsible for keeping those mirrors in sync after it applies `withSessionProjectId` and the type plugin's `mergeFields`. This bridge is deliberately **not** gated on `assistantType`: a staff-creation assistant can propose a role before the staff member, and staff/team/general sessions can emit `propose_role`, `propose_tool`, or `propose_staff`. If only matching assistants updated the mirror, proposals that arrived through `seed`, `rehydrate`, `edit`, `restore`, or fast-path switch-back would populate `activeProposals` while the rendered form stayed blank and its submit button stayed disabled.
+
+The bridge copies only from the merged fields and preserves the same field mapping as the legacy live callbacks:
+
+- role: `name`, `label`, `prompt`, `tools`, `accessory`, then `saveRoleDraft`;
+- tool: `tool` to `toolPreviewName`, `action` to the checklist item, and docs/renderer `content` to the corresponding preview body;
+- staff: `name`, `description`, `prompt`, `triggers` (default `"[]"`), and `cwd` resolved through the project-root fallback.
+
+Per-field `*Edited` guards still win. A rehydrate or reconcile may fill an untouched field, but it must not clobber text the user has already edited in the open panel. The goal-assistant bridge keeps its existing `type === "goal" && assistantType === "goal"` gate; goal behaviour did not change.
+
+Server-side tab opening was already type-agnostic: the `/seed` endpoint writes the proposal draft, opens/focuses `proposal:<type>`, and broadcasts `proposal_update` for any proposal type. The bug class was client-only: the content slot was hydrated, but the legacy form mirror used by the panel was not.
+
 ### Flow: `propose_*` → file-seed → broadcast → parsed projection
 
 ```
@@ -1143,7 +1159,7 @@ agent calls propose_<type>(args)
                                            streaming: false,
                                            source: "seed" })
                     └─> client remote.onProposal(type, fields, false)
-                          └─> mergeFields, reveal only because source is explicit, renderApp
+                          └─> mergeFields, bridge legacy mirrors, reveal only because source is explicit, renderApp
 ```
 
 `seed` opens the workspace tab on the server before broadcasting the content update, so all clients converge on the same server-backed tab state. `restore` has the same explicit open/focus side effect after copying a historical snapshot back to the live draft. `edit_proposal` follows the content-write/broadcast flow via `POST /api/sessions/:id/proposal/:type/edit` with `source: "edit"`, but it is content-only: it must not open or focus `proposal:<type>`. `view_proposal` is a pure `GET` that returns the raw file body for the agent to read.
@@ -1476,6 +1492,12 @@ This happens transparently in `normalizeGrantPolicy()` - existing role YAML and 
 > **Important:** Session creation must not use `role.allowedTools` directly to determine which tools are active, because that excludes `ask`-policy tools entirely. Instead, `server.ts` calls `computeEffectiveAllowedTools()` from `tool-activation.ts`, which returns both `allow` and `ask` tools. This ensures `resolveToolActivation()` in the session setup pipeline sees the full set and generates the guard extension for `ask`-policy tools. Without this, roles with only `ask` policies would produce sessions with no tool guard - the agent could use guarded tools without user approval.
 
 > **Activation flag contract (pi 0.70+).** `computeToolActivationArgs()` emits `--no-builtin-tools` + `--no-extensions` + an explicit `--extension <…>/defaults/tools/_builtins/extension.ts` with `env.BOBBIT_BUILTIN_TOOLS` carrying the sorted list of pi file-builtins to re-register. The shape is pinned by `tests/tool-activation-contract.test.ts` (unit, seconds) and end-to-end by `tests/manual-integration/agent-tool-use.spec.ts`. Background and the diagnostic flow live in [docs/debugging.md — Agent silently substitutes file tools](debugging.md#agent-silently-substitutes-file-tools-when-prompted-for-bash--web--mcp) and [docs/testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers).
+
+### Tool activation diagnostics
+
+`computeToolActivationArgs()` warns for real YAML allowlist mistakes, not for expected inactive pack contributions. If a YAML tool has no active provider but `ToolManager.getInactiveToolContribution()` can identify it in an inactive marketplace or built-in pack root, activation skips it quietly and emits only a deduped debug diagnostic. This covers default-disabled first-party packs such as PR Walkthrough when their persisted role/session references still mention pack-owned tools.
+
+Unknown YAML names still warn once per process and scope with `reason=unknown-yaml-tool`, preserving typo visibility without repeating on every session spawn. `tests2/core/tool-activation-mcp-warn.test.ts` pins both behaviours.
 
 ---
 

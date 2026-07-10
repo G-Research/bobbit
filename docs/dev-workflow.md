@@ -83,21 +83,54 @@ it. Often appears right after running `npm audit fix --force`, `npm ci`, or
 **Cause**: a running dev stack (vite, the gateway) loads native `.node` addons
 into memory — e.g. `lightningcss.win32-x64-msvc.node`,
 `@mariozechner/clipboard-*`, `photon-node`. On Windows you cannot `unlink` a
-native module file while a process has it loaded. A *destructive* npm operation
-wipes and rewrites `node_modules`; it removes additive deps as planned, then
-aborts with `EPERM` the instant it tries to unlink the locked native binary —
-leaving `node_modules` half-wiped with core runtime packages missing.
+native module file while a process has it loaded. The confirmed half-wipe is **not**
+caused by a normal `npm install`: under the repo's `shrinkwrap=false` /
+`package-lock=false` setting, plain install does not prune the tree and modern npm
+rolls back cleanly on a locked-file `EBUSY` in the tested case.
+
+The half-wipe needs either:
+
+- a destructive npm operation against the primary tree, such as `npm ci`,
+  `npm install --force`, or `npm audit fix --force`; or
+- an interrupted reify — for example a crash, kill, or resource exhaustion during
+  npm's bulk-remove/retire window.
+
+Those paths can leave `node_modules` partially repopulated with core runtime
+packages missing.
+
+**Why it used to brick every spawn**: direct host-side agent and verification
+spawns resolved `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` from
+the primary working tree at spawn time. If that tree was half-wiped, every direct
+spawn failed. Docker spawns were not exposed because the sandbox image already
+contains the agent runtime and does not bind-mount host `node_modules` for it.
+
+**Protection**: the gateway now resolves the direct-spawn agent runtime from a
+ring-fenced snapshot under `<stateDir>/runtime` when available, with
+`<stateDir>/runtime/node_modules` as the best-effort stable link. The snapshot is
+a fingerprinted hardlink farm of the working `node_modules`, rebuilt only when
+dependency inputs change, written to a versioned directory, and switched
+atomically via a pointer. If snapshot creation fails or the snapshot is incomplete,
+the resolver falls back to the working tree instead of blocking boot.
+
+The dev harness self-heal is also fail-loud and non-destructive. `ensureDeps()`
+checks declared dependency presence with `missingDependencies()` and, only if
+some are missing, calls `healDependencies()` to run plain `npm install`. It logs
+before/after counts, restored/still-missing/regressed deps, and the exact locked
+file reported by npm on `EBUSY`/`EPERM`. A failed heal is logged and boot
+continues; it does not silently leave a worse tree unidentified.
 
 **Avoid**: never run `npm ci`, `npm install --force`, or `npm audit fix --force`
 while the dev stack (`npm run dev:harness` / vite) is up. Stop it first, run the
 destructive command, then restart.
 
-**Recover**: a plain `npm install` is *additive* — it does not pre-wipe, so it
-restores the missing packages around any locked file. The harness now does this
-automatically on every boot/restart (`ensureDeps()` in `src/server/harness.ts`,
-backed by the pure `missingDependencies()` helper in
-`src/server/harness-deps.ts`); if the install itself fails because a native file
-is still locked, stop vite/the gateway and run `npm install` by hand.
+**Recover**: a plain `npm install` is still the recovery path. It is additive in
+the missing-dependency case and preserves the `.npmrc` `shrinkwrap=false`
+lockfile-freeze invariant, so it restores missing packages without regenerating
+`package-lock.json`. If npm reports a locked native file, stop vite/the gateway
+and run `npm install` again.
+
+For the full RCA, experiments, and regression coverage, see
+[docs/testing-v2/node-modules-corruption-rca.md](testing-v2/node-modules-corruption-rca.md).
 
 ## For agents making changes
 
