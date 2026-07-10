@@ -406,7 +406,8 @@ Semantic filter notes:
 
 | operation | method | path | required | optional / body |
 |---|---|---|---|---|
-| `update_project_config` | PUT | `/api/projects/:projectId/config` | `projectId`, `config{}` | body = config key/values (merged) |
+| `update_project_config` | PUT | `/api/projects/:projectId/config` | `projectId`, `config{}` | body = config key/values for an existing project (merged) |
+| `create_project` | POST | `/api/projects` | top-level `name`, `rootPath` | `body` may include `upsert`, `acceptCanonical`, `color`, `palette`, `colorLight`, `colorDark`, `components`, `workflows` |
 | `set_provider_key` | POST | `/api/provider-keys/:provider` | `provider`, `key` | — |
 | `delete_provider_key` | DELETE | `/api/provider-keys/:provider` | `provider` | — |
 | `custom_providers` | GET/POST/DELETE | `/api/custom-providers[/:id]` | `action` (list\|upsert\|delete) | `id` (delete), `config{}` (upsert body) |
@@ -436,6 +437,11 @@ Semantic filter notes:
 | `search_compact` | `/api/search/compact` | — |
 
 **Notes / flags:**
+- `create_project` is a highest-privilege support/automation path for
+  non-interactive project registration through the curated tool surface. It
+  wraps existing `POST /api/projects`, does not replace `propose_project` / Add
+  Project for interactive registration, and should not be used for config
+  changes on existing projects; use `update_project_config` for that.
 - `custom_providers` and `aigw_configure` fold multiple HTTP verbs behind an
   `action` sub-discriminator because they share a base path. `set_provider_key`
   stores under `preferencesStore` key `providerKey.<provider>` (body `{ key }`);
@@ -465,7 +471,8 @@ Type.Object({
   gateId: Type.Optional(Type.String({ description: "Gate id." })),
   projectId: Type.Optional(Type.String({ description: "Project id." })),
   workflowId: Type.Optional(Type.String({ description: "Workflow id." })),
-  name: Type.Optional(Type.String({ description: "Resource name (tool/role/provider/pack/staff)." })),
+  name: Type.Optional(Type.String({ description: "Resource name or project name." })),
+  rootPath: Type.Optional(Type.String({ description: "Project root path for create_project." })),
   // query-ish
   q: Type.Optional(Type.String({ description: "Free-text query filter." })),
   type: Type.Optional(Type.String({ description: "search: all|goals|sessions|messages|staff." })),
@@ -590,16 +597,21 @@ Register new files in `tests2/tests-map.json`.
    - Path building: `get_goal` → `GET /api/goals/:id`; `search` →
      `/api/search?q=…&type=…`; `maintenance_inspect{probe}` → correct probe
      path; `archive_goal{cascade}` → `?cascade=` appended;
-     `maintenance_cleanup{action}` → correct POST path.
+     `maintenance_cleanup{action}` → correct POST path; `create_project` →
+     `POST /api/projects`.
    - Body building: `create_goal` sends `{projectId,title,spec,workflowId,…}`;
-     `signal_gate` sends `{sessionId?,content?,metadata?}`.
+     `signal_gate` sends `{sessionId?,content?,metadata?}`; `create_project`
+     sends top-level `name` and `rootPath` plus optional `body` fields without
+     allowing body values to clobber the required fields.
    - Method correctness (GET/POST/PUT/DELETE) per op.
 
 4. **`tests2/core/bobbit-tool-validation.test.ts` (new, bucket: core).**
    - Unknown `operation` → `isError` result with clear message.
    - Missing required param (e.g. `get_goal` without `goalId`, `create_goal`
-     without `projectId`) → `isError`, no `fetch` call made.
+     without `projectId`, `create_project` without `name` or `rootPath`) →
+     `isError`, no `fetch` call made.
    - `create_session`/`create_goal` require `projectId` (decision #2).
+   - `bobbit_admin` schema exposes top-level `rootPath`.
 
 5. **`tests2/core/bobbit-tool-errors.test.ts` (new, bucket: core).** Stub
    `fetch` to return `{ error, code }` with non-2xx → assert `err()` output
@@ -609,8 +621,8 @@ Register new files in `tests2/tests-map.json`.
    three YAMLs; assert all share `group: Bobbit`
    and `grantPolicy` defaults (`allow`/`never`/`never`), and that
    each YAML `params.operation` union matches the operations the extension
-   actually dispatches (guard against catalogue drift between YAML docs and
-   code).
+   actually dispatches, including `bobbit_admin.create_project` (guard against
+   catalogue drift between YAML docs and code).
 
 No `tests2/browser` journey — the tool surfaces no UI.
 
