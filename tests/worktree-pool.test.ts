@@ -398,7 +398,7 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 			}
 			assert.equal(pool.size, 1, "pool should still expose the entry (setup failure is non-fatal)");
 			const u = await pool.claim("session/abcd1234");
-			assert.ok(u);
+			assert.ok(u, "claim should succeed after timed-out setup cleanup releases worktree handles");
 			assert.equal(
 				fs.existsSync(path.join(u!.worktreePath, "SETUP_RAN")),
 				false,

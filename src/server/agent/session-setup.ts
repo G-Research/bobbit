@@ -1243,8 +1243,9 @@ export async function executeWorktreeAsync(
 					primaryWorktreeRoot: plan.repoPath!,
 					skipNpmCi: ctx.worktreeSetupRuntime?.skipNpmCi,
 					recordSetupPath: ctx.worktreeSetupRuntime?.recordSetupPath,
-					exec: async (cmd, cwd, env) => {
-						await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
+					execHandlesTimeout: true,
+					exec: async (cmd, cwd, env, timeoutMs) => {
+						await execShellCommand(cmd, { cwd, env, timeout: timeoutMs });
 					},
 				});
 			} catch (err) {
