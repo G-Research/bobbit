@@ -9822,7 +9822,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "node:test logic suite â€” codemod to vitest; runs in v2-core-isolated because it mutates BOBBIT_AGENT_DIR and asserts agent-dir singleton-sensitive sanitizer path guards.",
       "migrated": true,
       "v2Path": "tests2/core/transcript-sanitizer.test.ts"
     },

@@ -68,6 +68,7 @@ const singleForkFiles = [
 	"tests2/core/sandbox-wiring-goal-provisioned.test.ts",
 	"tests2/core/session-recovery-agent-dir.test.ts",
 	"tests2/core/transcript-sanitizer-agent-dir.test.ts",
+	"tests2/core/transcript-sanitizer.test.ts",
 ];
 
 // Long-running core files that legitimately exercise git/worktree flows. Keep
