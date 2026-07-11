@@ -774,18 +774,38 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	let accUrl = "";
 	let accCssW = 0;
 	let accCssH = 0;
+	let accLeft = 0;
+	let sidebarOriginX = 0;
+	const sidebarContainerWidth = 20;
 	if (hasAccessory) {
 		const spriteData = SPRITE_ACCESSORIES[acc.id];
 		if (spriteData && spriteData.pixels.length > 0) {
-			let minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+			let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 			for (const [x, y] of spriteData.pixels) {
+				if (x < minX) minX = x;
 				if (y < minY) minY = y;
 				if (x > maxX) maxX = x;
 				if (y > maxY) maxY = y;
 			}
+			const xShift = Math.min(0, minX);
 			const yShift = Math.min(0, minY);
-			const srcW = maxX + 1;
+			const srcW = maxX - xShift + 1;
 			const srcH = maxY - yShift + 1;
+
+			// Preserve coordinate alignment between body + accessory, but use spare
+			// sidebar wrapper width when an accessory has left-of-body pixels (e.g.
+			// headset at x=-1). Other accessories keep the historical x=0 body origin
+			// so right-hand tools don't shift further into the clipped edge.
+			if (xShift < 0) {
+				const groupRight = Math.max(BODY_WIDTH, maxX + 1);
+				const groupWidth = (groupRight - xShift) * S;
+				const groupLeft = groupWidth <= sidebarContainerWidth
+					? (sidebarContainerWidth - groupWidth) / 2
+					: 0;
+				sidebarOriginX = groupLeft - xShift * S;
+			}
+			accLeft = sidebarOriginX + xShift * S;
+
 			// CSS geometry is derived from the (static) pixel bounds — cheap to
 			// recompute. Only the data-URL encode is cached, keyed by accessory
 			// id alone since each accessory's pixels are immutable.
@@ -800,7 +820,7 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 				accCtx.imageSmoothingEnabled = false;
 				for (const [x, y, color] of spriteData.pixels) {
 					accCtx.fillStyle = color;
-					accCtx.fillRect(x * HI, (y - yShift) * HI, HI, HI);
+					accCtx.fillRect((x - xShift) * HI, (y - yShift) * HI, HI, HI);
 				}
 				cached = accCanvas.toDataURL();
 				sidebarAccessoryUrlCache.set(acc.id, cached);
@@ -842,8 +862,8 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	// Accessory transform — smooth variants
 	const isBandanaStyle = acc.id === "bandana";
 	const isCrown = acc.id === "crown";
-	// The headset seats half a sprite-pixel DOWN (mirrors the bandana's -0.5 up
-	// seat and the nurse-cap's blob `translate: 0 2px`).
+	// The headset seats half a sprite-pixel DOWN in sidebar canvas, mirroring its
+	// deliberately lower chat seating.
 	const isHeadset = acc.id === "headset";
 	const accFilter = hueRotate && status !== "starting" && status !== "terminated" && acc.id !== "flask"
 		? `filter:hue-rotate(${-hueRotate}deg);`
@@ -861,25 +881,25 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	const eyeTop = innerTop;
 	const accTop = addsHeight ? `${acc.yOffset}px` : "0px";
 	const containerHeight = addsHeight ? "19px" : "15px";
-	const containerWidth = "20px";
+	const containerWidth = `${sidebarContainerWidth}px`;
 
 	// Body layer: high-res canvas img displayed at CSS target size, smooth downsampling
-	const bodyLayer = html`<img src="${bodyUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:0;top:${innerTop};width:${cssW}px;height:${cssH}px;will-change:transform;${bodyTransform}">`;
+	const bodyLayer = html`<img src="${bodyUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:${sidebarOriginX}px;top:${innerTop};width:${cssW}px;height:${cssH}px;will-change:transform;${bodyTransform}">`;
 
 	// Unread blink layer: a copy of the body with eyes blinked, stacked on top
 	// and animated via CSS to flick visible for a brief moment each cycle.
 	const blinkLayer = unread && blinkUrl
-		? html`<img src="${blinkUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" class="bobbit-sidebar-unread-blink" style="position:absolute;left:0;top:${innerTop};width:${cssW}px;height:${cssH}px;will-change:opacity,transform;${bodyTransform}">`
+		? html`<img src="${blinkUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" class="bobbit-sidebar-unread-blink" style="position:absolute;left:${sidebarOriginX}px;top:${innerTop};width:${cssW}px;height:${cssH}px;will-change:opacity,transform;${bodyTransform}">`
 		: "";
 
 	// Eye layer (only when selected)
 	const eyeLayer = isSelected && eyeUrl
-		? html`<img src="${eyeUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:0;top:${eyeTop};width:${cssW}px;height:${cssH}px;will-change:transform;${eyeAnim}">`
+		? html`<img src="${eyeUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:${sidebarOriginX}px;top:${eyeTop};width:${cssW}px;height:${cssH}px;will-change:transform;${eyeAnim}">`
 		: "";
 
 	// Accessory layer
 	const accessoryLayer = accUrl
-		? html`<img src="${accUrl}" style="position:absolute;left:0;top:${accTop};width:${accCssW}px;height:${accCssH}px;will-change:transform;${accTransform}${accFilter}">`
+		? html`<img src="${accUrl}" style="position:absolute;left:${accLeft}px;top:${accTop};width:${accCssW}px;height:${accCssH}px;will-change:transform;${accTransform}${accFilter}">`
 		: "";
 
 	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${blinkLayer}${eyeLayer}${accessoryLayer}</span>`;

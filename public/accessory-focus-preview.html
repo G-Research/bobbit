@@ -297,7 +297,22 @@ function updateCustomStyle(id, sprite) {
   if (id === "headset") {
     const busyTranslatePx = fineYOffsetBusy * 4;
     const idleTransformYPx = (fineYOffsetIdle - fineYOffsetBusy) * 4;
-    const hiddenShadow = pixelsToBoxShadow(sprite.pixels.filter(([x, y]) => x <= 6 || (x === 7 && y === 0)));
+    const hiddenPixelMap = new Map(sprite.pixels.map(([x, y, color]) => [`${x},${y}`, color]));
+    const hiddenPixels = sprite.pixels
+      .filter(([x, y]) => (x <= 6 && y !== 7) || (x === 7 && (y === 0 || y === 1)) || (x === 8 && y === 1))
+      .map(([x, y, color]) => [x, y, color]);
+    const setHiddenPixel = (x, y, color) => {
+      const existing = hiddenPixels.find((pixel) => pixel[0] === x && pixel[1] === y);
+      if (existing) existing[2] = color;
+      else hiddenPixels.push([x, y, color]);
+    };
+    setHiddenPixel(2, 4, hiddenPixelMap.get("2,4") || "#000");
+    setHiddenPixel(2, 5, hiddenPixelMap.get("2,5") || "#000");
+    setHiddenPixel(8, 6, "#000");
+    setHiddenPixel(9, 6, "#000");
+    setHiddenPixel(7, 7, "#f97316");
+    setHiddenPixel(8, 7, "#1f2937");
+    const hiddenShadow = pixelsToBoxShadow(hiddenPixels);
     rules.push(`.${cls} .${divClass} { translate: 0 ${busyTranslatePx}px !important; }`);
     rules.push(`@keyframes blob-headset-shadow {
 \t0% { box-shadow:\n\t\t${shadow};\n\t}

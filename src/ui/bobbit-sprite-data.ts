@@ -519,10 +519,10 @@ export const ACCESSORY_NURSE_CAP: AccessorySpriteData = {
  * windscreen in front of the mouth. Sidebar coordinates (yOffset=2,
  * addsHeight=true, blobYAdjust=2).
  *
- * Seated half a sprite-pixel DOWN in chat (`translate: 0 2px`) and sidebar
- * canvas (`translateY(0.5 * S)`). Neutral greys only (NOT in the flask
- * exception set) so it is counter-hue-rotated and stays neutral across every
- * session palette.
+ * Seated a quarter sprite-pixel DOWN in chat (`translate: 0 1px`) and a half
+ * sprite-pixel DOWN in sidebar canvas (`translateY(0.5 * S)`). Neutral greys
+ * only (NOT in the flask exception set) so it is counter-hue-rotated and stays
+ * neutral across every session palette.
  */
 export const ACCESSORY_HEADSET: AccessorySpriteData = {
   id: 'headset',
