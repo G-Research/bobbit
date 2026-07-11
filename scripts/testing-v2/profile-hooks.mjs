@@ -423,7 +423,7 @@ function renderMarkdown(report) {
 		lines.push("| Metric | Count |", "|---|---:|");
 		for (const key of CLEANUP_STAT_KEYS) lines.push(`| ${key} | ${report.cleanupStats[key] ?? 0} |`);
 	} else {
-		lines.push("Not available. The profiler sets `BOBBIT_V2_HOOK_PROFILE_DIR` for future harness exporters; until the integration harness writes cleanup stats there, this report is limited to Vitest file/test timing.");
+		lines.push("Not available. The profiler sets `BOBBIT_V2_HOOK_PROFILE_DIR`; integration specs using the compat harness should export cleanup stats there during `afterAll`. If this is a non-integration run, no cleanup stats are expected.");
 	}
 	lines.push("", "## Slowest files", "");
 	pushFileTable(lines, report.slowestFiles);
