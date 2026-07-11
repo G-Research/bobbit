@@ -464,6 +464,87 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 	});
 });
 
+describe("Restart round-trip: pool worktrees left in place are reclaimed, not rebuilt", () => {
+	// Pins the shutdown fix: the gateway must NOT drain worktree pools on
+	// shutdown. Pool entries are local-only `pool/_pool-*` worktrees; leaving
+	// them on disk lets the next boot's reclaimOrphaned() re-adopt them
+	// instantly instead of destroying them (git worktree remove + branch -D +
+	// pointless remote delete) and rebuilding from scratch (worktree add + npm
+	// ci) over the minutes after start.
+	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
+	before(() => {
+		process.env.BOBBIT_TEST_NO_PUSH = "1";
+		process.env.BOBBIT_SKIP_NPM_CI = "1";
+	});
+	after(() => {
+		if (originalNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
+		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
+		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
+		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
+	});
+
+	it("a fresh pool reclaims the worktrees an abandoned (undrained) pool left behind", async () => {
+		const repo = await makeRepo();
+		try {
+			// Boot #1: fill the pool to two ready worktrees.
+			const pool1 = new WorktreePool({ repoPath: repo, targetSize: 2 });
+			pool1.startFilling();
+			for (let i = 0; i < 100 && pool1.size < 2; i++) await new Promise(r => setTimeout(r, 100));
+			assert.equal(pool1.size, 2, "pool should fill to two entries on first boot");
+			const firstBootPaths = pool1.snapshotEntries().entries.map(e => e.worktreePath).sort();
+			const firstBootBranches = pool1.snapshotEntries().entries.map(e => e.branchName).sort();
+
+			// Shutdown WITHOUT draining: simply abandon the in-memory pool object.
+			// The worktrees remain on disk (this is the invariant under test).
+			for (const p of firstBootPaths) {
+				assert.ok(fs.existsSync(p), `worktree ${p} must survive an undrained shutdown`);
+			}
+
+			// Boot #2: a fresh pool over the same repo reclaims — no rebuild.
+			const pool2 = new WorktreePool({ repoPath: repo, targetSize: 2 });
+			await (pool2 as any).reclaimOrphaned();
+			const secondBootPaths = pool2.snapshotEntries().entries.map(e => e.worktreePath).sort();
+			const secondBootBranches = pool2.snapshotEntries().entries.map(e => e.branchName).sort();
+
+			assert.deepEqual(secondBootPaths, firstBootPaths, "second boot must reclaim the exact worktrees left in place");
+			assert.deepEqual(secondBootBranches, firstBootBranches, "second boot must reclaim the same pool branches (no new ones built)");
+		} finally {
+			await rmRepo(repo);
+		}
+	});
+});
+
+describe("Regression: gateway shutdown must not drain worktree pools", () => {
+	it("server.ts shutdown() does not call .drain() and documents why", () => {
+		const serverTs = fs.readFileSync(path.resolve(__dirname, "..", "src", "server", "server.ts"), "utf-8");
+		// Brace-match the shutdown() body (opening `{` to its matching close) so we
+		// scan exactly the method — not a fixed-size window that can spill into the
+		// next declaration or truncate as shutdown() grows. Inner braces
+		// (template `${…}`, arrow bodies) are balanced, so depth-counting lands on
+		// the true close.
+		const start = serverTs.indexOf("async shutdown()");
+		assert.ok(start >= 0, "shutdown() method must exist in server.ts");
+		const braceStart = serverTs.indexOf("{", start);
+		assert.ok(braceStart > start, "shutdown() opening brace not found");
+		let depth = 0, end = -1;
+		for (let i = braceStart; i < serverTs.length; i++) {
+			const c = serverTs[i];
+			if (c === "{") depth++;
+			else if (c === "}" && --depth === 0) { end = i; break; }
+		}
+		assert.ok(end > braceStart, "shutdown() closing brace not found");
+		const body = serverTs.slice(braceStart, end + 1);
+		// Draining on shutdown destroys pool worktrees the next boot must rebuild —
+		// see the restart round-trip suite above.
+		assert.equal(/\.drain\s*\(/.test(body), false,
+			"gateway shutdown() must not drain worktree pools — leave them on disk for reclaimOrphaned() on next boot");
+		// Pin the WHY so a future edit can't silently reintroduce the drain.
+		assert.match(body, /intentionally NOT drained on shutdown/,
+			"shutdown() must document why pools are not drained (guards against silent reintroduction)");
+	});
+});
+
 describe("Regression: rename helpers and claimUnnamed must stay deleted", () => {
 	it("no source file references renameSessionFromPool / claimUnnamed / UnnamedClaim", () => {
 		const srcRoot = path.resolve(__dirname, "..", "src");
