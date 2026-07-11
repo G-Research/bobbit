@@ -13,10 +13,7 @@
 
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import yaml from "yaml";
 
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
 import { GoalManager } from "../../src/server/agent/goal-manager.ts";
@@ -35,23 +32,22 @@ import {
 	SYSTEM_MAX_NESTING_DEPTH_MAX,
 	SYSTEM_MAX_NESTING_DEPTH_MIN,
 } from "../../src/server/agent/subgoal-nesting-limit.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
-let tmpRoot: string;
-let stateDir: string;
-let configDir: string;
+let memfs: MemFs;
+const tmpRoot = path.resolve("/memfs/subgoal-nesting/work");
+const stateDir = path.resolve("/memfs/subgoal-nesting/state");
+const configDir = path.resolve("/memfs/subgoal-nesting/config");
 
 beforeEach(() => {
-	tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "subgoal-nesting-"));
-	stateDir = path.join(tmpRoot, "state");
-	configDir = path.join(tmpRoot, "config");
-	fs.mkdirSync(stateDir);
-	fs.mkdirSync(configDir);
-	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
+	memfs = createMemFs();
+	memfs.mkdirSync(stateDir);
+	memfs.mkdirSync(configDir);
 });
 
 function makeManager(): { gm: GoalManager; store: GoalStore } {
-	const goalStore = new GoalStore(stateDir);
-	const cfg = new ProjectConfigStore(configDir);
+	const goalStore = new GoalStore(stateDir, memfs);
+	const cfg = new ProjectConfigStore(configDir, memfs);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
 		{
@@ -93,7 +89,7 @@ describe("clampMaxDepth", () => {
 
 describe("readSubgoalNestingPrefs", () => {
 	it("returns defaults when prefs are empty", () => {
-		const prefs = new PreferencesStore(stateDir);
+		const prefs = new PreferencesStore(stateDir, memfs);
 		const r = readSubgoalNestingPrefs((k) => prefs.get(k));
 		// Default OFF: subgoals are disabled unless the pref is explicitly
 		// set to true (an unset pref reads as disabled — see
@@ -103,14 +99,14 @@ describe("readSubgoalNestingPrefs", () => {
 	});
 
 	it("returns subgoalsEnabled=true only when the pref is explicitly true", () => {
-		const prefs = new PreferencesStore(stateDir);
+		const prefs = new PreferencesStore(stateDir, memfs);
 		prefs.set("subgoalsEnabled", true);
 		const r = readSubgoalNestingPrefs((k) => prefs.get(k));
 		assert.equal(r.subgoalsEnabled, true);
 	});
 
 	it("round-trips maxNestingDepth via preferencesStore", () => {
-		const prefs = new PreferencesStore(stateDir);
+		const prefs = new PreferencesStore(stateDir, memfs);
 		prefs.set("subgoalsEnabled", true);
 		prefs.set("maxNestingDepth", 5);
 		const r = readSubgoalNestingPrefs((k) => prefs.get(k));
@@ -119,14 +115,14 @@ describe("readSubgoalNestingPrefs", () => {
 	});
 
 	it("clamps an out-of-range stored value", () => {
-		const prefs = new PreferencesStore(stateDir);
+		const prefs = new PreferencesStore(stateDir, memfs);
 		prefs.set("maxNestingDepth", 50); // outside [1, 10]
 		const r = readSubgoalNestingPrefs((k) => prefs.get(k));
 		assert.equal(r.maxNestingDepth, SYSTEM_MAX_NESTING_DEPTH_MAX);
 	});
 
 	it("falls back to default on a non-numeric stored value", () => {
-		const prefs = new PreferencesStore(stateDir);
+		const prefs = new PreferencesStore(stateDir, memfs);
 		prefs.set("maxNestingDepth", "nonsense");
 		const r = readSubgoalNestingPrefs((k) => prefs.get(k));
 		assert.equal(r.maxNestingDepth, SYSTEM_MAX_NESTING_DEPTH_DEFAULT);
@@ -150,7 +146,7 @@ describe("nestingDepth", () => {
 
 	it("bounded walk does not loop on corrupt cycle", async () => {
 		// Synthesize a record whose parent chain loops back to itself.
-		const store = new GoalStore(stateDir);
+		const store = new GoalStore(stateDir, memfs);
 		const a: PersistedGoal = {
 			id: "A", title: "A", cwd: tmpRoot, state: "todo", spec: "",
 			createdAt: 0, updatedAt: 0, parentGoalId: "B", rootGoalId: "A",

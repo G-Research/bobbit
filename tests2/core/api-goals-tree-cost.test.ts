@@ -3,9 +3,6 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
-guardProcessEnv();
-
 /**
  * Phase 6 — endpoint contract for `GET /api/goals/:id/tree-cost`.
  *
@@ -21,18 +18,15 @@ guardProcessEnv();
  * descendant dashboards would otherwise leak the whole project's
  * grand total. See also `tests/e2e/ui/tree-cost-rollup.spec.ts`.
  */
-import { describe, it, afterAll } from "vitest";
+import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "api-tree-cost-test-"));
-process.env.BOBBIT_DIR = tmpDir;
-const stateDir = path.join(tmpDir, "state");
-fs.mkdirSync(stateDir, { recursive: true });
+import { CostTracker, computeTreeCost, _resetTreeCostCacheForTesting } from "../../src/server/agent/cost-tracker.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
-const { CostTracker, computeTreeCost, _resetTreeCostCacheForTesting } = await import("../../src/server/agent/cost-tracker.ts");
+const stateDir = path.resolve("/memfs/api-tree-cost/state");
+let memfs: MemFs;
 
 interface G {
 	id: string; title?: string; createdAt?: number;
@@ -54,13 +48,14 @@ function rollupRootOf(g: G): string {
 /** Build a tracker on a clean costs file each call. */
 function freshTracker(): InstanceType<typeof CostTracker> {
 	const file = path.join(stateDir, "session-costs.json");
-	try { fs.unlinkSync(file); } catch { /* ok */ }
-	return new CostTracker(stateDir);
+	try { memfs.unlinkSync(file); } catch { /* ok */ }
+	return new CostTracker(stateDir, memfs);
 }
 
 describe("GET /api/goals/:id/tree-cost — endpoint contract", () => {
-	afterAll(() => {
-		try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
+	beforeEach(() => {
+		memfs = createMemFs();
+		memfs.mkdirSync(stateDir);
 	});
 
 	it("returns expected structure {rootGoalId, totalCostUsd, totalTokensIn, totalTokensOut, breakdown[]}", () => {

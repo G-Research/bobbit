@@ -20,11 +20,8 @@
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import yaml from "yaml";
 
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
 import { GoalManager } from "../../src/server/agent/goal-manager.ts";
@@ -33,7 +30,8 @@ import { PlanMutationStore } from "../../src/server/agent/plan-mutation-store.ts
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
-import { CookieStore } from "../../src/server/auth/cookie.ts";
+import type { CookieStore } from "../../src/server/auth/cookie.ts";
+import { createMemFs } from "../harness/mem-fs.js";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
 
 interface Harness {
@@ -61,17 +59,18 @@ interface Harness {
 }
 
 async function makeHarness(): Promise<Harness> {
-	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nested-findings-"));
-	const stateDir = path.join(tmpRoot, "state");
-	const configDir = path.join(tmpRoot, "config");
-	fs.mkdirSync(stateDir);
-	fs.mkdirSync(configDir);
-	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
+	const memfs = createMemFs();
+	const tmpRoot = path.resolve("/memfs/nested-findings/work");
+	const stateDir = path.resolve("/memfs/nested-findings/state");
+	const configDir = path.resolve("/memfs/nested-findings/config");
+	memfs.mkdirSync(stateDir);
+	memfs.mkdirSync(configDir);
 
-	const goalStore = new GoalStore(stateDir);
-	const cookieStore = new CookieStore(stateDir);
-	const humanCookieHeader = `bobbit_session=${cookieStore.mint()}`;
-	const cfg = new ProjectConfigStore(configDir);
+	const goalStore = new GoalStore(stateDir, memfs);
+	const humanCookieValue = "human-cookie";
+	const cookieStore = { verify: (value: string) => value === humanCookieValue } as unknown as CookieStore;
+	const humanCookieHeader = `bobbit_session=${humanCookieValue}`;
+	const cfg = new ProjectConfigStore(configDir, memfs);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
 		{
@@ -92,8 +91,8 @@ async function makeHarness(): Promise<Harness> {
 		},
 	]);
 	const goalManager = new GoalManager(goalStore, wf);
-	const gateStore = new GateStore(stateDir);
-	const planMutationStore = new PlanMutationStore(stateDir, { startSweep: false });
+	const gateStore = new GateStore(stateDir, memfs);
+	const planMutationStore = new PlanMutationStore(stateDir, { startSweep: false }, memfs);
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
 
@@ -188,7 +187,7 @@ async function makeHarness(): Promise<Harness> {
 				"x-bobbit-session-secret": sessionSecretStore.getOrCreateSecret(sessionId),
 			};
 		},
-		cleanup() { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {} },
+		cleanup() {},
 		call,
 	};
 }
