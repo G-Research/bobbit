@@ -6,7 +6,15 @@ Bobbit auto-retries agent turns when the failure looks transient: provider overl
 
 Auto-retry always dispatches through the same `retryLastPrompt(sessionId, { auto: true })` path as the chat **Retry** button. That keeps continuation safety centralized: if the failed turn already ran tools, Retry resumes the work instead of replaying side effects.
 
-`llm-review` gate verification uses the same retry classifiers for reviewer failures; see [llm-review Recovery](llm-review-recovery.md).
+`llm-review` and `agent-qa` gate verification use the same retry classifiers and session-level scheduler for verifier failures; see [Verifier Recovery](llm-review-recovery.md).
+
+## Verifier-session use
+
+Verifier sessions are server-managed, non-interactive agent sessions. `VerificationHarness` owns the verification prompt and `verification_result` resolver, but retryable fetch, connection, provider, and prompt-dispatch failures should flow through `SessionManager.maybeAutoRetryTransient()` whenever possible.
+
+That keeps verifier recovery on the same continuation-safe path as regular agents: retry the existing session, preserve id/history/metadata/workdir/tool context, and avoid creating an empty replacement just because a provider stream or transport failed.
+
+If a verifier process is dead rather than merely errored, the verification harness uses same-session resurrection before considering a step-level retry. That process-death policy is documented in [Verifier Recovery](llm-review-recovery.md#same-session-process-death-resurrection).
 
 ## Retry policies
 
@@ -121,10 +129,11 @@ See [Auto-Nudge Recovery for Errored Team Leads](design/auto-nudge-stuck-team-le
 
 Relevant coverage runs under `npm run test:unit` unless noted:
 
-- `tests/auto-retry-policy.test.ts` covers provider overload, generic unexpected retries at 1 s / 5 s / 60 s, retry exhaustion, deterministic exclusions, and `fetch failed` message-end scheduling.
-- `tests/session-manager-direct-prompt-lifecycle.test.ts` covers direct and queued `fetch failed` delivery failures before `message_end`, recovered queue rows, client-visible `auto_retry_pending`, `auto_retry_cancelled` on exhaustion/cancellation, no duplicate replay, fresh-prompt supersession, and stale tool-call-state clearing.
-- `tests/verification-logic.test.ts` and `tests/transient-review-error.test.ts` cover `fetch failed`, undici transport codes, deterministic exclusions, and `shouldRetryVerificationStep()` behavior.
-- `tests/team-manager-idle-nudge-backoff.test.ts` covers no-start auto-nudge accounting and errored-idle recovery: retryable errors use `retryLastPrompt(..., { auto: true })`, unknown/non-retryable/exhausted errors suppress team nudges, and repeated timer ticks do not emit duplicate `[AUTO-NUDGE]` cards.
-- `tests/team-manager.test.ts` covers worker-idle notification recovery for errored idle team leads.
-- `tests/queue-dispatch.spec.ts` covers queue-level cancellation and retry/unstick invariants.
+- `tests2/core/auto-retry-policy.test.ts` covers provider overload, generic unexpected retries at 1 s / 5 s / 60 s, retry exhaustion, deterministic exclusions, and `fetch failed` message-end scheduling.
+- `tests2/core/session-manager-direct-prompt-lifecycle.test.ts` covers direct and queued `fetch failed` delivery failures before `message_end`, recovered queue rows, client-visible `auto_retry_pending`, `auto_retry_cancelled` on exhaustion/cancellation, no duplicate replay, fresh-prompt supersession, and stale tool-call-state clearing.
+- `tests2/core/verification-logic.test.ts` and `tests2/core/transient-review-error.test.ts` cover `fetch failed`, undici transport codes, deterministic exclusions, and `shouldRetryVerificationStep()` behavior.
+- `tests2/core/verification-verifier-lifecycle-repro.test.ts` covers verifier use of same-session auto-retry for retryable `agent-qa` fetch failures.
+- `tests2/core/team-manager-idle-nudge-backoff.test.ts` covers no-start auto-nudge accounting and errored-idle recovery: retryable errors use `retryLastPrompt(..., { auto: true })`, unknown/non-retryable/exhausted errors suppress team nudges, and repeated timer ticks do not emit duplicate `[AUTO-NUDGE]` cards.
+- `tests2/core/team-manager.test.ts` covers worker-idle notification recovery for errored idle team leads.
+- `tests2/dom/queue-dispatch.test.ts` covers queue-level cancellation and retry/unstick invariants.
 - `tests/e2e/ui/auto-retry-banner.spec.ts` covers the UI banner state for `auto_retry_pending`, `auto_retry_cancelled`, and `agent_start`.
