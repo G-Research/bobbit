@@ -3,16 +3,11 @@
 // Bucket: v2-core | Method: codemod | Classification: clean
 
 /**
- * Fixture-based parity tests for `runBatchGitStatusNative`. Each test
- * bootstraps a real git repo in `os.tmpdir()` via `execFileSync("git", [...])`
- * and asserts every field of the `GitStatusResult` shape matches the legacy
- * bash-script behavior.
- *
- * Run with: `node --test --test-force-exit` via tsx (see package.json
- * `test:unit`). Each fixture is created in a `before` hook and cleaned up in
- * `after`.
+ * Fixture-based parity tests for `runBatchGitStatusNative`. The suite builds a
+ * small set of real git template repos once per file, then copies them per test
+ * so native git coverage stays intact without paying repeated init/commit setup.
  */
-import { describe, it, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -21,7 +16,7 @@ import path from "node:path";
 import { runBatchGitStatusNative } from "../../src/server/skills/git-status-native.ts";
 
 function rmDir(p: string): void {
-	try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
+	try { fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* ignore */ }
 }
 
 function git(cwd: string, ...args: string[]): string {
@@ -29,8 +24,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 function makeFixtureDir(name: string): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-git-status-${name}-`));
-	return root;
+	return fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-git-status-${name}-`));
 }
 
 function initRepo(cwd: string, branch = "master"): void {
@@ -38,6 +32,7 @@ function initRepo(cwd: string, branch = "master"): void {
 	git(cwd, "config", "user.email", "test@example.com");
 	git(cwd, "config", "user.name", "Test");
 	git(cwd, "config", "commit.gpgsign", "false");
+	git(cwd, "config", "core.autocrlf", "false");
 	// Force the initial branch name regardless of git's `init.defaultBranch`.
 	git(cwd, "checkout", "-q", "-b", branch);
 }
@@ -49,15 +44,75 @@ function commit(cwd: string, file: string, content: string, message: string): st
 	return git(cwd, "rev-parse", "HEAD");
 }
 
+type TemplateName = "clean" | "feature" | "detached" | "masterAndMain" | "mainOnly" | "upstreamAhead";
+
+type TemplateSet = Record<TemplateName, string>;
+
+function copyTemplate(src: string, name: string): string {
+	const dst = makeFixtureDir(name);
+	fs.cpSync(src, dst, { recursive: true, verbatimSymlinks: true });
+	return dst;
+}
+
+function buildTemplates(root: string): TemplateSet {
+	const clean = path.join(root, "clean");
+	fs.mkdirSync(clean, { recursive: true });
+	initRepo(clean, "master");
+	commit(clean, "README.md", "hello\n", "init");
+
+	const feature = path.join(root, "feature");
+	fs.cpSync(clean, feature, { recursive: true, verbatimSymlinks: true });
+	git(feature, "checkout", "-q", "-b", "feature/x");
+
+	const detached = path.join(root, "detached");
+	fs.cpSync(clean, detached, { recursive: true, verbatimSymlinks: true });
+	const firstSha = git(detached, "rev-parse", "HEAD");
+	commit(detached, "b.txt", "b\n", "second");
+	git(detached, "checkout", "-q", firstSha);
+
+	const masterAndMain = path.join(root, "master-and-main");
+	fs.cpSync(clean, masterAndMain, { recursive: true, verbatimSymlinks: true });
+	git(masterAndMain, "branch", "main");
+
+	const mainOnly = path.join(root, "main-only");
+	fs.mkdirSync(mainOnly, { recursive: true });
+	initRepo(mainOnly, "main");
+	commit(mainOnly, "a.txt", "a\n", "init");
+
+	const upstreamAhead = path.join(root, "upstream-ahead-root");
+	const upstreamRepo = path.join(upstreamAhead, "repo");
+	const upstreamOrigin = path.join(upstreamAhead, "origin.git");
+	fs.mkdirSync(upstreamRepo, { recursive: true });
+	execFileSync("git", ["init", "-q", "--bare", "origin.git"], { cwd: upstreamAhead, windowsHide: true });
+	initRepo(upstreamRepo, "master");
+	commit(upstreamRepo, "a.txt", "a\n", "init");
+	git(upstreamRepo, "remote", "add", "origin", "../origin.git");
+	git(upstreamRepo, "push", "-q", "-u", "origin", "master");
+	commit(upstreamRepo, "b.txt", "b\n", "second");
+	commit(upstreamRepo, "c.txt", "c\n", "third");
+	assert.equal(fs.existsSync(upstreamOrigin), true, "upstream template origin should exist");
+
+	return { clean, feature, detached, masterAndMain, mainOnly, upstreamAhead };
+}
+
 describe("runBatchGitStatusNative — fixtures", () => {
 	const cleanup: string[] = [];
-	afterAll(() => { for (const d of cleanup) rmDir(d); });
+	let templateRoot = "";
+	let templates: TemplateSet;
+
+	beforeAll(() => {
+		templateRoot = makeFixtureDir("templates");
+		templates = buildTemplates(templateRoot);
+	});
+
+	afterAll(() => {
+		for (const d of cleanup) rmDir(d);
+		if (templateRoot) rmDir(templateRoot);
+	});
 
 	it("clean repo on master, no remote", async () => {
-		const cwd = makeFixtureDir("clean");
+		const cwd = copyTemplate(templates.clean, "clean");
 		cleanup.push(cwd);
-		initRepo(cwd, "master");
-		commit(cwd, "README.md", "hello\n", "init");
 
 		const r = await runBatchGitStatusNative(cwd);
 		assert.ok(r, "result not null");
@@ -81,11 +136,9 @@ describe("runBatchGitStatusNative — fixtures", () => {
 	});
 
 	it("dirty: tracked-modified + untracked, untracked=false omits untracked", async () => {
-		const cwd = makeFixtureDir("dirty");
+		const cwd = copyTemplate(templates.clean, "dirty");
 		cleanup.push(cwd);
-		initRepo(cwd, "master");
-		commit(cwd, "tracked.txt", "v1\n", "init");
-		fs.writeFileSync(path.join(cwd, "tracked.txt"), "v2\n");
+		fs.writeFileSync(path.join(cwd, "README.md"), "v2\n");
 		fs.writeFileSync(path.join(cwd, "untracked.txt"), "new\n");
 
 		const rNoUntracked = await runBatchGitStatusNative(cwd, { untracked: false });
@@ -93,7 +146,7 @@ describe("runBatchGitStatusNative — fixtures", () => {
 		assert.equal(rNoUntracked!.untrackedIncluded, false);
 		// -uno hides the untracked file → only the modified tracked file shows
 		assert.equal(rNoUntracked!.status.length, 1);
-		assert.equal(rNoUntracked!.status[0].file, "tracked.txt");
+		assert.equal(rNoUntracked!.status[0].file, "README.md");
 		assert.equal(rNoUntracked!.status[0].status, "M");
 		assert.equal(rNoUntracked!.clean, false);
 		assert.equal(rNoUntracked!.summary, "1M");
@@ -110,11 +163,8 @@ describe("runBatchGitStatusNative — fixtures", () => {
 	});
 
 	it("feature branch, no upstream, primary detected as master", async () => {
-		const cwd = makeFixtureDir("no-upstream");
+		const cwd = copyTemplate(templates.feature, "no-upstream");
 		cleanup.push(cwd);
-		initRepo(cwd, "master");
-		commit(cwd, "a.txt", "a\n", "init");
-		git(cwd, "checkout", "-q", "-b", "feature/x");
 
 		const r = await runBatchGitStatusNative(cwd);
 		assert.ok(r);
@@ -134,12 +184,8 @@ describe("runBatchGitStatusNative — fixtures", () => {
 	});
 
 	it("detached HEAD: branch === 'HEAD'", async () => {
-		const cwd = makeFixtureDir("detached");
+		const cwd = copyTemplate(templates.detached, "detached");
 		cleanup.push(cwd);
-		initRepo(cwd, "master");
-		const sha = commit(cwd, "a.txt", "a\n", "init");
-		commit(cwd, "b.txt", "b\n", "second");
-		git(cwd, "checkout", "-q", sha);
 
 		const r = await runBatchGitStatusNative(cwd);
 		assert.ok(r);
@@ -154,12 +200,8 @@ describe("runBatchGitStatusNative — fixtures", () => {
 	});
 
 	it("master and main both present, on master, primaryBranch=master", async () => {
-		const cwd = makeFixtureDir("master-and-main");
+		const cwd = copyTemplate(templates.masterAndMain, "master-and-main");
 		cleanup.push(cwd);
-		initRepo(cwd, "master");
-		commit(cwd, "a.txt", "a\n", "init");
-		git(cwd, "branch", "main");
-		// stay on master
 
 		const r = await runBatchGitStatusNative(cwd);
 		assert.ok(r);
@@ -170,10 +212,8 @@ describe("runBatchGitStatusNative — fixtures", () => {
 	});
 
 	it("only main exists (no master), no origin/HEAD → primaryBranch=main", async () => {
-		const cwd = makeFixtureDir("main-only");
+		const cwd = copyTemplate(templates.mainOnly, "main-only");
 		cleanup.push(cwd);
-		initRepo(cwd, "main");
-		commit(cwd, "a.txt", "a\n", "init");
 
 		const r = await runBatchGitStatusNative(cwd);
 		assert.ok(r);
@@ -183,19 +223,9 @@ describe("runBatchGitStatusNative — fixtures", () => {
 	});
 
 	it("with-upstream-ahead: 2 commits past origin/master via local bare remote", async () => {
-		const remote = makeFixtureDir("upstream-ahead-remote");
-		cleanup.push(remote);
-		// Create a bare repo to act as 'origin'.
-		execFileSync("git", ["init", "-q", "--bare"], { cwd: remote, windowsHide: true });
-
-		const cwd = makeFixtureDir("upstream-ahead");
-		cleanup.push(cwd);
-		initRepo(cwd, "master");
-		commit(cwd, "a.txt", "a\n", "init");
-		git(cwd, "remote", "add", "origin", remote);
-		git(cwd, "push", "-q", "-u", "origin", "master");
-		commit(cwd, "b.txt", "b\n", "second");
-		commit(cwd, "c.txt", "c\n", "third");
+		const root = copyTemplate(templates.upstreamAhead, "upstream-ahead");
+		cleanup.push(root);
+		const cwd = path.join(root, "repo");
 
 		const r = await runBatchGitStatusNative(cwd);
 		assert.ok(r);

@@ -108,6 +108,7 @@ describe("verification command-step runner: fake ⇔ real observable contract", 
 		{ name: "node exit 1", command: `node -e "process.exit(1)"`, timeoutMs: 30_000 },
 		{ name: "node exit 7", command: `node -e "process.exit(7)"`, timeoutMs: 30_000 },
 		{ name: "node delayed exit", command: `node -e "setTimeout(()=>process.exit(0),300)"`, timeoutMs: 30_000 },
+		{ name: "node delayed exit with spaced comma", command: `node -e "setTimeout(()=>process.exit(0), 300)"`, timeoutMs: 30_000 },
 		{ name: "node delayed log+exit", command: `node -e "setTimeout(()=>{console.log('done');process.exit(0)},200)"`, timeoutMs: 30_000 },
 		// Error channel: nonzero exit WITH stderr output — pins the stderr contract.
 		{ name: "node stderr + exit 3", command: `node -e "console.error('boom'); process.exit(3)"`, timeoutMs: 30_000 },

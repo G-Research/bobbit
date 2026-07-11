@@ -15,6 +15,8 @@ type GitFixture = {
 	cleanup: () => Promise<void>;
 };
 
+type GitFixtureRefs = Pick<GitFixture, "cwd" | "baseSha" | "headSha">;
+
 function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -35,6 +37,7 @@ function makeGitFixture(): GitFixture {
 	git(cwd, ["init"]);
 	git(cwd, ["config", "user.name", "Bobbit E2E"]);
 	git(cwd, ["config", "user.email", "bobbit-e2e@example.test"]);
+	git(cwd, ["config", "core.autocrlf", "false"]);
 	writeFileSync(join(cwd, "README.md"), "# Demo\n\nFirst line\n", "utf-8");
 	git(cwd, ["add", "."]);
 	git(cwd, ["commit", "-m", "base"]);
@@ -48,10 +51,19 @@ function makeGitFixture(): GitFixture {
 	return { cwd, baseSha, headSha, cleanup: () => cleanupGitFixture(cwd) };
 }
 
-async function resolveLocal(fixture: GitFixture): Promise<any> {
+async function resolveLocal(fixture: GitFixtureRefs, overrides: Record<string, unknown> = {}): Promise<any> {
 	const resp = await apiFetch("/api/pr-walkthrough/resolve", {
 		method: "POST",
-		body: JSON.stringify({ cwd: fixture.cwd, baseSha: fixture.baseSha, headSha: fixture.headSha }),
+		body: JSON.stringify({ cwd: fixture.cwd, baseSha: fixture.baseSha, headSha: fixture.headSha, ...overrides }),
+	});
+	expect(resp.status).toBe(200);
+	return resp.json();
+}
+
+async function resolveFixtureWalkthrough(): Promise<any> {
+	const resp = await apiFetch("/api/pr-walkthrough/resolve", {
+		method: "POST",
+		body: JSON.stringify({ fixture: true }),
 	});
 	expect(resp.status).toBe(200);
 	return resp.json();
@@ -94,6 +106,12 @@ test.describe("PR walkthrough REST API", () => {
 	// can no longer resolve its store — the server then throws
 	// "Cannot resolve store for session prw-session-...: not found in any project".
 	const createdSessionIds: string[] = [];
+	let sharedLocalFixture: GitFixture;
+
+	function localFixture(): GitFixtureRefs {
+		if (!sharedLocalFixture) throw new Error("shared local PR walkthrough fixture was not initialized");
+		return sharedLocalFixture;
+	}
 
 	async function cleanupCreatedSessions(): Promise<void> {
 		// Delete in reverse creation order so children are removed before their
@@ -104,10 +122,17 @@ test.describe("PR walkthrough REST API", () => {
 		}
 	}
 
+	test.beforeAll(() => {
+		// Reuse one immutable two-commit repo for route tests that only read diffs.
+		// The large-diff truncation test keeps its own purpose-built repo.
+		sharedLocalFixture = makeGitFixture();
+	});
+
 	test.afterEach(cleanupCreatedSessions);
 
 	test.afterAll(async () => {
 		await cleanupCreatedSessions();
+		if (sharedLocalFixture) await sharedLocalFixture.cleanup();
 		// Safety-net sweep: delete any walkthrough child session this spec may
 		// have minted that escaped the per-test tracking, so no `prw-session-*`
 		// orphan outlives the spec.
@@ -129,68 +154,55 @@ test.describe("PR walkthrough REST API", () => {
 	// host.agents.spawn; that flow is covered by the host-agents API/browser E2Es.
 
 	test("POST resolve returns real local diff cards", async () => {
-		const fixture = makeGitFixture();
-		try {
-			const result = await resolveLocal(fixture);
-			expect(result.changesetId).toBe(`${fixture.baseSha.slice(0, 7)}..${fixture.headSha.slice(0, 7)}`);
-			expect(result.changeset.provider).toBe("local");
-			expect(result.changeset.filesChanged).toBe(2);
-			expect(result.cards.length).toBeGreaterThanOrEqual(2);
-			expect(result.cards.flatMap((card: any) => card.diffBlocks).some((block: any) => block.filePath === "src/feature.ts")).toBe(true);
-		} finally {
-			await fixture.cleanup();
-		}
+		const fixture = localFixture();
+		const result = await resolveLocal(fixture);
+		expect(result.changesetId).toBe(`${fixture.baseSha.slice(0, 7)}..${fixture.headSha.slice(0, 7)}`);
+		expect(result.changeset.provider).toBe("local");
+		expect(result.changeset.filesChanged).toBe(2);
+		expect(result.cards.length).toBeGreaterThanOrEqual(2);
+		expect(result.cards.flatMap((card: any) => card.diffBlocks).some((block: any) => block.filePath === "src/feature.ts")).toBe(true);
 	});
 
 	test("export preview maps line comments and submit rejects without explicit confirmation", async () => {
-		const fixture = makeGitFixture();
-		try {
-			const result = await resolveLocal(fixture);
-			const anchor = firstLineAnchor(result);
-			const draft = {
-				changeset: result.changeset,
-				decisions: {},
-				completedCardIds: [anchor.cardId],
-				updatedAt: new Date().toISOString(),
-				comments: [
-					{ id: "line-1", ...anchor, body: "Please double-check this line.", source: "custom", createdAt: new Date().toISOString() },
-					{ id: "card-1", cardId: anchor.cardId, body: "Card-level concern", source: "custom", createdAt: new Date().toISOString() },
-				],
-			};
+		const result = await resolveFixtureWalkthrough();
+		const anchor = firstLineAnchor(result);
+		const draft = {
+			changeset: result.changeset,
+			decisions: {},
+			completedCardIds: [anchor.cardId],
+			updatedAt: new Date().toISOString(),
+			comments: [
+				{ id: "line-1", ...anchor, body: "Please double-check this line.", source: "custom", createdAt: new Date().toISOString() },
+				{ id: "card-1", cardId: anchor.cardId, body: "Card-level concern", source: "custom", createdAt: new Date().toISOString() },
+			],
+		};
 
-			const previewResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/preview`, {
-				method: "POST",
-				body: JSON.stringify(draft),
-			});
-			expect(previewResp.status).toBe(200);
-			const preview = await previewResp.json();
-			expect(preview.rows.some((row: any) => row.commentId === "line-1" && row.valid && row.path)).toBe(true);
-			expect(preview.body).toContain("Card-level concern");
+		const previewResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/preview`, {
+			method: "POST",
+			body: JSON.stringify(draft),
+		});
+		expect(previewResp.status).toBe(200);
+		const preview = await previewResp.json();
+		expect(preview.rows.some((row: any) => row.commentId === "line-1" && row.valid && row.path)).toBe(true);
+		expect(preview.body).toContain("Card-level concern");
 
-			const submitResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
-				method: "POST",
-				body: JSON.stringify({ draft }),
-			});
-			expect(submitResp.status).toBe(400);
-			const submitBody = await submitResp.json();
-			expect(submitBody.code).toBe("CONFIRMATION_REQUIRED");
-		} finally {
-			await fixture.cleanup();
-		}
+		const submitResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
+			method: "POST",
+			body: JSON.stringify({ draft }),
+		});
+		expect(submitResp.status).toBe(400);
+		const submitBody = await submitResp.json();
+		expect(submitBody.code).toBe("CONFIRMATION_REQUIRED");
 	});
 
 	test("invalid refs return structured errors", async () => {
-		const fixture = makeGitFixture();
-		try {
-			const invalidResp = await apiFetch("/api/pr-walkthrough/resolve", {
-				method: "POST",
-				body: JSON.stringify({ cwd: fixture.cwd, baseSha: "not-a-sha", headSha: fixture.headSha }),
-			});
-			expect(invalidResp.status).toBe(400);
-			expect((await invalidResp.json()).error).toContain("Invalid baseSha");
-		} finally {
-			await fixture.cleanup();
-		}
+		const fixture = localFixture();
+		const invalidResp = await apiFetch("/api/pr-walkthrough/resolve", {
+			method: "POST",
+			body: JSON.stringify({ cwd: fixture.cwd, baseSha: "not-a-sha", headSha: fixture.headSha }),
+		});
+		expect(invalidResp.status).toBe(400);
+		expect((await invalidResp.json()).error).toContain("Invalid baseSha");
 	});
 
 	test("large local diffs return truncation warnings instead of maxBuffer failures", async () => {
@@ -199,6 +211,7 @@ test.describe("PR walkthrough REST API", () => {
 			git(cwd, ["init"]);
 			git(cwd, ["config", "user.name", "Bobbit E2E"]);
 			git(cwd, ["config", "user.email", "bobbit-e2e@example.test"]);
+			git(cwd, ["config", "core.autocrlf", "false"]);
 			writeFileSync(join(cwd, "large.txt"), "base\n", "utf-8");
 			git(cwd, ["add", "."]);
 			git(cwd, ["commit", "-m", "base"]);
@@ -221,20 +234,16 @@ test.describe("PR walkthrough REST API", () => {
 	});
 
 	test("empty local diffs resolve to an orientation-only walkthrough instead of a broken response", async () => {
-		const fixture = makeGitFixture();
-		try {
-			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
-				method: "POST",
-				body: JSON.stringify({ cwd: fixture.cwd, baseSha: fixture.headSha, headSha: fixture.headSha }),
-			});
-			expect(resp.status).toBe(200);
-			const result = await resp.json();
-			expect(result.changeset.filesChanged).toBe(0);
-			expect(result.cards).toHaveLength(1);
-			expect(result.cards[0].phaseId).toBe("orientation");
-		} finally {
-			await fixture.cleanup();
-		}
+		const fixture = localFixture();
+		const resp = await apiFetch("/api/pr-walkthrough/resolve", {
+			method: "POST",
+			body: JSON.stringify({ cwd: fixture.cwd, baseSha: fixture.headSha, headSha: fixture.headSha }),
+		});
+		expect(resp.status).toBe(200);
+		const result = await resp.json();
+		expect(result.changeset.filesChanged).toBe(0);
+		expect(result.cards).toHaveLength(1);
+		expect(result.cards[0].phaseId).toBe("orientation");
 	});
 
 	test("GitHub PR resolve rejects untrusted hosts with typed errors", async () => {
@@ -287,33 +296,24 @@ test.describe("PR walkthrough REST API", () => {
 	// previewOnly GONE. The gh-authenticated (available:true) + gh-posting variants are
 	// unit-pinned in tests2/core/pr-walkthrough-export-mapper.test.ts (fake gh, no fence).
 	test("GitHub PR resolve faked from local SHAs reports gh-auth availability (no previewOnly)", async () => {
-		const fixture = makeGitFixture();
-		try {
-			const prUrl = "https://github.com/acme/widgets/pull/42";
-			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
-				method: "POST",
-				body: JSON.stringify({ cwd: fixture.cwd, prUrl, baseSha: fixture.baseSha, headSha: fixture.headSha }),
-			});
-			expect(resp.status).toBe(200);
-			const result = await resp.json();
-			expect(result.changesetId).toBe(`github:acme/widgets#42:${fixture.headSha.slice(0, 7)}`);
-			expect(result.changeset.provider).toBe("github");
-			expect(result.changeset.prUrl).toBe(prUrl);
-			expect(result.changeset.externalUrl).toBe(prUrl);
-			// No creds (gh fenced) → not available, actionable reason, and previewOnly is GONE.
-			expect(result.export.available).toBe(false);
-			expect(result.export.reason).toMatch(/gh auth login/);
-			expect(result.export.previewOnly).toBeUndefined();
+		const fixture = localFixture();
+		const prUrl = "https://github.com/acme/widgets/pull/42";
+		const result = await resolveLocal(fixture, { prUrl });
+		expect(result.changesetId).toBe(`github:acme/widgets#42:${fixture.headSha.slice(0, 7)}`);
+		expect(result.changeset.provider).toBe("github");
+		expect(result.changeset.prUrl).toBe(prUrl);
+		expect(result.changeset.externalUrl).toBe(prUrl);
+		// No creds (gh fenced) → not available, actionable reason, and previewOnly is GONE.
+		expect(result.export.available).toBe(false);
+		expect(result.export.reason).toMatch(/gh auth login/);
+		expect(result.export.previewOnly).toBeUndefined();
 
-			const submitResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
-				method: "POST",
-				body: JSON.stringify({ draft: { comments: [] }, confirm: true }),
-			});
-			expect(submitResp.status).toBe(400);
-			expect((await submitResp.json()).code).toBe("EXPORT_UNAVAILABLE");
-		} finally {
-			await fixture.cleanup();
-		}
+		const submitResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
+			method: "POST",
+			body: JSON.stringify({ draft: { comments: [] }, confirm: true }),
+		});
+		expect(submitResp.status).toBe(400);
+		expect((await submitResp.json()).code).toBe("EXPORT_UNAVAILABLE");
 	});
 
 	// Bearer-gated public /submit-review route — trust + validation gating (design
@@ -369,19 +369,10 @@ test.describe("PR walkthrough REST API", () => {
 	});
 
 	test("local SHA plus unsafe PR metadata does not persist clickable external URLs", async () => {
-		const fixture = makeGitFixture();
-		try {
-			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
-				method: "POST",
-				body: JSON.stringify({ cwd: fixture.cwd, prUrl: "javascript:alert(1)", prNumber: 42, baseSha: fixture.baseSha, headSha: fixture.headSha }),
-			});
-			expect(resp.status).toBe(200);
-			const result = await resp.json();
-			expect(result.changeset.provider).toBe("github");
-			expect(result.changeset.prUrl).toBeUndefined();
-			expect(result.changeset.externalUrl).toBeUndefined();
-		} finally {
-			await fixture.cleanup();
-		}
+		const fixture = localFixture();
+		const result = await resolveLocal(fixture, { prUrl: "javascript:alert(1)", prNumber: 42 });
+		expect(result.changeset.provider).toBe("github");
+		expect(result.changeset.prUrl).toBeUndefined();
+		expect(result.changeset.externalUrl).toBeUndefined();
 	});
 });
