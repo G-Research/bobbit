@@ -208,10 +208,22 @@ Already mostly wired — confirm and leave intact:
 - Tool accept: verify the tool submit path also prefers `fields.projectId`; if
   it currently only reads session, patch it to prefer the draft field.
 - Project accept: `projectIdForProjectProposal` (~2848) currently reads
-  `session.projectId` only. Patch to prefer `state.activeProposals.project?.fields?.projectId`
-  when present AND registered (editing an existing project); else keep the
-  new-project registration flow (session-scoped provisional id). The
-  authoritative edit-vs-create enforcement lives on the server (see §3).
+  `session.projectId` only. Patch it to be **tri-state** on
+  `state.activeProposals.project?.fields?.projectId`, matching the server
+  contract in §3 exactly (an explicit-but-unknown id must NOT silently fall into
+  the new-project flow):
+  ```ts
+  const explicit = trimmed fields.projectId or undefined;
+  if (explicit) {
+    if (state.projects.some(p => p.id === explicit)) return explicit;   // EDIT existing
+    showConnectionError(...UNKNOWN_PROJECT...); return null;             // REJECT, do NOT create
+  }
+  // absent → unchanged new-project / provisional flow (session-scoped id)
+  ```
+  This keeps the UI and server aligned: explicit+registered = edit,
+  explicit+unknown = reject, absent = create. The authoritative enforcement
+  still lives on the server (see §3); the UI merely preflights for a nicer
+  message and never re-routes an explicit edit into a create.
 
 Server-side acceptance keys off the proposal's `projectId` (goal creation under
 target worktree/branch/workflow; config writes to target config store; project
