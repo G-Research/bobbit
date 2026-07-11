@@ -378,18 +378,21 @@ export default defineConfig({
 					hookTimeout: 90_000,
 				},
 			},
-			// Real-fidelity integration specs, relocated to the e2e tier (run by
-			// `npm run test:e2e` via run-e2e-v2.mjs, NOT by `test:unit`). `include` is
-			// EMPTY unless this project is explicitly selected (--project
-			// v2-integration-e2e), so an unfiltered `test:v2:core` run never picks these
-			// up — they are excluded from v2-integration and dormant here otherwise.
+			// Real-fidelity integration specs, relocated to the e2e tier. This project
+			// OWNS the 12 files (they are excluded from v2-integration), so a direct
+			// `vitest run <one-of-the-12>` still matches HERE and runs — no silent
+			// zero-test pass. The `unit` GATE excludes them not via an empty include but
+			// structurally: the lane runner selects `--project v2-integration
+			// v2-integration-fake` (never this one), and `test:e2e` selects
+			// `--project v2-integration-e2e`. (An unfiltered `test:v2:core` dev full-run
+			// runs them once here, which is correct for a full run.)
 			{
 				test: {
 					...shared,
 					name: "v2-integration-e2e",
 					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 6 },
 					environment: "node",
-					include: cliSelectsProject("v2-integration-e2e") ? [...integrationE2eFiles] : [],
+					include: [...integrationE2eFiles],
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
 				},

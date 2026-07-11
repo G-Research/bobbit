@@ -215,12 +215,17 @@ async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const { A, B, C, excluded } = classifyDaily();
 
+	// Group I is not classified from the daily bucket — it is the fixed
+	// v2-integration-e2e vitest project (heavy integration specs relocated out of
+	// the unit gate; the file list lives in vitest.config.ts::integrationE2eFiles).
+	const I_LABEL = "v2-integration-e2e (relocated integration specs)";
+
 	if (args.list) {
-		console.log(JSON.stringify({ A, B, C, excluded }, null, 2));
+		console.log(JSON.stringify({ A, B, C, I: I_LABEL, excluded }, null, 2));
 		return;
 	}
 
-	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length}`);
+	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length} I(integration)=${I_LABEL}`);
 	console.log(`[e2e-v2] excluded: manual-integration=${excluded.manualIntegration.length}${excluded.missing.length ? `, MISSING=${excluded.missing.length} (${excluded.missing.join(", ")})` : ""}`);
 
 	const docker = dockerAvailable();
@@ -253,7 +258,7 @@ async function main() {
 		peakProcesses: sample.peakProcesses,
 		docker,
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
-		counts: { A: A.length, B: B.length, C: C.length },
+		counts: { A: A.length, B: B.length, C: C.length, I: I_LABEL },
 		excluded,
 		createdAt: new Date().toISOString(),
 	};
