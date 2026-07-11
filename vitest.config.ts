@@ -134,6 +134,29 @@ const fakeCommandStepFiles = [
 	"tests2/integration/optional-steps-api.test.ts",
 ];
 
+// Heavy REAL-FIDELITY integration specs relocated OUT of the fast `unit` gate and
+// into the e2e tier: team/child lifecycle, worktree continue/multi-repo, gateway
+// restart, and real git commit/fork flows. They drive genuine gateway+git+agent
+// work per test (not reducible test-side waits), so they dominate the integration
+// lane's wall (~150s of it). Excluded from `v2-integration` (so `test:unit` skips
+// them) and run by the e2e stage via the `v2-integration-e2e` project below.
+// Files stay physically in tests2/integration/ (guard-v2 only requires a tests-map
+// claim, which is unchanged); only which vitest project runs them moves.
+const integrationE2eFiles = [
+	"tests2/integration/team-lead-child-authz.test.ts",
+	"tests2/integration/orchestrate-restart.test.ts",
+	"tests2/integration/continue-archived.test.ts",
+	"tests2/integration/continue-archived-assistant.test.ts",
+	"tests2/integration/multi-repo-flow-api.test.ts",
+	"tests2/integration/steer-gateway-restart.test.ts",
+	"tests2/integration/team-wait-semantics.test.ts",
+	"tests2/integration/team-delegate.test.ts",
+	"tests2/integration/team-dismiss-structured-regression.test.ts",
+	"tests2/integration/project-isolation.test.ts",
+	"tests2/integration/commit-file-diffs-api.test.ts",
+	"tests2/integration/sidebar-actions-fork-github-link.test.ts",
+];
+
 function listTestFilesUnder(root: string): string[] {
 	const files: string[] = [];
 	function visit(dir: string): void {
@@ -326,8 +349,10 @@ export default defineConfig({
 					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 3 },
 					environment: "node",
 					include: ["tests2/integration/**/*.test.ts"],
-					// The fake-command-step specs run in the dedicated fake project below.
-					exclude: [...fakeCommandStepFiles],
+					// The fake-command-step specs run in the dedicated fake project below;
+					// the heavy real-fidelity specs run in the e2e-tier project (relocated
+					// out of the fast unit gate).
+					exclude: [...fakeCommandStepFiles, ...integrationE2eFiles],
 					// Integration tests each boot a real gateway + verification harness;
 					// under concurrent load they can take >30 s, so override the default.
 					testTimeout: 60_000,
@@ -349,6 +374,22 @@ export default defineConfig({
 					include: [...fakeCommandStepFiles],
 					pool: "forks" as const,
 					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
+					testTimeout: 60_000,
+					hookTimeout: 90_000,
+				},
+			},
+			// Real-fidelity integration specs, relocated to the e2e tier (run by
+			// `npm run test:e2e` via run-e2e-v2.mjs, NOT by `test:unit`). `include` is
+			// EMPTY unless this project is explicitly selected (--project
+			// v2-integration-e2e), so an unfiltered `test:v2:core` run never picks these
+			// up — they are excluded from v2-integration and dormant here otherwise.
+			{
+				test: {
+					...shared,
+					name: "v2-integration-e2e",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 6 },
+					environment: "node",
+					include: cliSelectsProject("v2-integration-e2e") ? [...integrationE2eFiles] : [],
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
 				},

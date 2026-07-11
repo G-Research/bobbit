@@ -201,6 +201,16 @@ async function runGroupC(specs) {
 	});
 }
 
+// Group I — heavy REAL-FIDELITY vitest integration specs relocated out of the
+// fast `unit` gate (see integrationE2eFiles in vitest.config.ts). Run here via
+// the dedicated v2-integration-e2e vitest project. External-free like the rest.
+async function runGroupIntegration() {
+	return run(npmCmd(), ["run", "test:e2e:integration"], {
+		env: { ...EXTERNAL_FREE_ENV },
+		label: "I/integration-e2e",
+	});
+}
+
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const { A, B, C, excluded } = classifyDaily();
@@ -227,6 +237,7 @@ async function main() {
 	if (!only || only === "A") results.push(await runGroupA(A));
 	if (!only || only === "B") results.push(await runGroupB(B));
 	if (!only || only === "C") results.push(await runGroupC(C));
+	if (!only || only === "I") results.push(await runGroupIntegration());
 
 	const sample = sampler.stop();
 	const wallMs = Math.round(performance.now() - startWall);
