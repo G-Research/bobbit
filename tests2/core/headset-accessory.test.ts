@@ -76,8 +76,9 @@ describe("headset accessory", () => {
 		// Seats a quarter sprite-pixel DOWN via the independent translate lever.
 		assert.match(css, /\.bobbit-headset \.bobbit-blob__headset[\s\S]*?translate:\s*0 1px/, "downward seat translate");
 		assert.match(css, /blob-headset-shadow/, "headset hides the far/right ear cup during right-facing busy phases");
-		assert.match(css, /Facing right[\s\S]*?7px 1px 0 #4b5563,[\s\S]*?8px 1px 0 #000,[\s\S]*?2px 4px 0 #000,[\s\S]*?2px 5px 0 #000,[\s\S]*?8px 6px 0 #000,[\s\S]*?9px 6px 0 #000,[\s\S]*?7px 7px 0 #f97316,[\s\S]*?8px 7px 0 #1f2937/, "right-facing headset keeps the selected rim and mic pixels");
-		assert.match(css, /Looking up-right[\s\S]*?60% \{ box-shadow:[\s\S]*?7px 1px 0 #4b5563,[\s\S]*?8px 1px 0 #000,[\s\S]*?2px 4px 0 #000,[\s\S]*?2px 5px 0 #000,[\s\S]*?8px 6px 0 #000,[\s\S]*?9px 6px 0 #000,[\s\S]*?7px 7px 0 #f97316,[\s\S]*?8px 7px 0 #1f2937;\r?\n\t\}/, "headset hides the far/right ear cup during up-right busy phase but keeps selected rim/mic pixels");
+		assert.match(css, /blob-headset-adjust[\s\S]*?34%, 35%, 60%, 61%, 96%, 97% \{ translate: 2px 1px; \}/, "headset nudges right during right-facing transition frames");
+		assert.match(css, /Facing right[\s\S]*?2px 1px 0 #000,[\s\S]*?3px 1px 0 #1f2937,[\s\S]*?1px 2px 0 #000,[\s\S]*?2px 2px 0 #1f2937,[\s\S]*?3px 2px 0 #000,[\s\S]*?8px 6px 0 #1f2937,[\s\S]*?9px 6px 0 #000,[\s\S]*?7px 7px 0 #f97316,[\s\S]*?8px 7px 0 #1f2937/, "right-facing headset uses the narrowed no-third-eye subset");
+		assert.match(css, /Looking up-right[\s\S]*?60% \{ box-shadow:[\s\S]*?2px 1px 0 #000,[\s\S]*?3px 1px 0 #1f2937,[\s\S]*?1px 2px 0 #000,[\s\S]*?2px 2px 0 #1f2937,[\s\S]*?3px 2px 0 #000,[\s\S]*?8px 6px 0 #1f2937,[\s\S]*?9px 6px 0 #000,[\s\S]*?7px 7px 0 #f97316,[\s\S]*?8px 7px 0 #1f2937;\r?\n\t\}/, "up-right headset uses the narrowed no-third-eye subset");
 		assert.doesNotMatch(css, /blob-headset-idle-shadow/, "sleeping idle headset should not hide either ear cup");
 
 		// DOM templates (chat blob + idle blob, streaming container).
