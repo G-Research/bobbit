@@ -3393,8 +3393,13 @@ export class VerificationHarness {
 								console.log(`[verification] goal worktree ahead of ${originRef} — skipping reset (skipped-because-ahead)`);
 							} else if (await isAncestor("HEAD", originRef)) {
 								// local HEAD is an ancestor of origin → origin is strictly ahead, local
-								// has nothing unique. Fast-forward to pick up pushed work.
-								await this.commandRunner.execFile("git", ["merge", "--ff-only", originRef], { cwd, timeout: 15_000 });
+								// has nothing unique. Advance to pick up pushed work. Use `git reset
+								// --hard` (NOT `git merge --ff-only`): a plain fast-forward via merge
+								// runs repo-local hooks (e.g. `.git/hooks/post-merge`), which is a
+								// local code-execution vector inside an agent-controlled worktree.
+								// `reset --hard` does NOT run hooks and is safe here because HEAD is
+								// already proven an ancestor of origin — no local commits are lost.
+								await this.commandRunner.execFile("git", ["reset", "--hard", originRef], { cwd, timeout: 15_000 });
 								console.log(`[verification] fast-forwarded goal worktree to ${originRef} (fast-forwarded)`);
 							} else {
 								// Diverged: each side has unique commits. Never hard-reset — that would
