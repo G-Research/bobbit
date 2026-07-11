@@ -72,6 +72,10 @@
       "reason": "Reproducing test (TDD red) for the 'Cache empty git-widget state' goal (44e3b434): pins the HQ 409 / GOAL_GIT_UNAVAILABLE path where git-status maps to error, retries exhaust with no branch/status data, and the widget renders nothing. Expects a persisted 'hidden' repo hint, cached-hidden reconnect to start quiet with no gitStatusLoading=true skeleton, exactly one quiet showable recheck, and reveal/cache 'yes' when content appears. FAILS on HEAD until the hidden/empty cache state is implemented."
     },
     {
+      "path": "tests2/integration/cross-project-proposals.test.ts",
+      "reason": "Native v2 integration coverage for the 'Cross-project proposals' goal (96fddb01): the proposal seed endpoint resolves the TARGET project uniformly across goal/role/tool/staff — omitted → session project (system → headquarters), explicit valid cross-project accepted and stamped onto proposal.fields.projectId, explicit unknown → 422 UNKNOWN_PROJECT — while propose_project is exempt (a brand-new/unknown projectId is allowed at seed), and goal workflow validation resolves against the target project's workflows rather than the session's."
+    },
+    {
       "path": "tests2/integration/direct-agent-admin-token.test.ts",
       "reason": "Pinning test for the 'Direct-agent admin token' interim rollback: non-sandboxed (direct) agents receive the gateway ADMIN token (readToken()) via scopedGatewayEnvForDirectAgent (createSession/createDelegateSession) and applyScopedGatewayCredentials (restore/revive/respawn), while the sandbox path (mintScopedGatewayToken) still produces a per-project SCOPED token distinct from the admin token. Also pins the loud-throw when no admin token is available (no silent fallback)."
     },

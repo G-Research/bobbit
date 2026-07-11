@@ -48,6 +48,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  */
 const GOAL_FRONTMATTER_KEYS = [
 	"title",
+	"projectId",         // resolved TARGET project id — the shared cross-project contract; acceptance routes the goal here (see docs/design/cross-project-proposals.md §5)
 	"cwd",
 	"workflow",          // string workflow id (looked up against the project workflow store)
 	"options",

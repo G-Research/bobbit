@@ -170,7 +170,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
 			spec: Type.String({ description: "Markdown spec: description, requirements, constraints, approach." }),
-			projectId: Type.Optional(Type.String({ description: "Project id; defaults to this session. cwd never selects project." })),
+			projectId: Type.Optional(Type.String({ description: "Defaults to this session. Set only for an explicit cross-project proposal." })),
 			cwd: Type.Optional(Type.String({ description: "Working directory override inside the selected project." })),
 			workflow: Type.Optional(Type.String({ description: "Registered workflow ID; optional with valid inlineWorkflow." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
@@ -226,7 +226,7 @@ export default function (pi: ExtensionAPI) {
 			name: Type.String({ description: "Role identifier, lowercase with hyphens." }),
 			label: Type.String({ description: "Human-readable display name." }),
 			prompt: Type.String(),
-			projectId: Type.Optional(Type.String({ description: "Project id; defaults to this session. Headquarters is server scope." })),
+			projectId: Type.Optional(Type.String({ description: "Defaults to this session. Set only for an explicit cross-project proposal." })),
 			tools: Type.Optional(Type.String({ description: "Comma-separated allowed tools." })),
 			accessory: Type.Optional(Type.String()),
 		}),
@@ -243,7 +243,7 @@ export default function (pi: ExtensionAPI) {
 			tool: Type.String(),
 			action: Type.String({ description: "e.g. create, update." }),
 			content: Type.String({ description: "Tool definition YAML." }),
-			projectId: Type.Optional(Type.String({ description: "Project id; defaults to this session. Headquarters is server scope." })),
+			projectId: Type.Optional(Type.String({ description: "Defaults to this session. Set only for an explicit cross-project proposal." })),
 		}),
 		async execute(_id, args) { const r = await seedProposal("tool", args); return ack(r.rev); },
 	});
@@ -258,7 +258,7 @@ export default function (pi: ExtensionAPI) {
 			name: Type.String(),
 			description: Type.Optional(Type.String()),
 			prompt: Type.String(),
-			projectId: Type.Optional(Type.String({ description: "Project id; defaults to this session. cwd never selects project." })),
+			projectId: Type.Optional(Type.String({ description: "Defaults to this session. Set only for an explicit cross-project proposal." })),
 			triggers: Type.Optional(Type.String()),
 			cwd: Type.Optional(Type.String({ description: "Working directory override inside the selected project." })),
 			role: Type.Optional(Type.String({ description: "Role name to attach to the staff agent (optional)." })),
@@ -275,6 +275,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			name: Type.String(),
 			root_path: Type.String({ description: "Project root directory." }),
+			projectId: Type.Optional(Type.String({ description: "Defaults to this session. Set only for an explicit cross-project proposal." })),
 			build_command: Type.Optional(Type.String()),
 			test_command: Type.Optional(Type.String()),
 			typecheck_command: Type.Optional(Type.String()),

@@ -5169,6 +5169,13 @@ async function handleApiRoute(
 
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
+		// §3 accept invariant — an EDIT that names an explicit but unregistered
+		// project must fail with a clear UNKNOWN_PROJECT code rather than a
+		// generic 400 from the registry, and must never fall through to a create.
+		if (!projectRegistry.get(projectGetMatch[1])) {
+			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectGetMatch[1]}` }, 422);
+			return;
+		}
 		const body = await readBody(req);
 		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
@@ -5231,6 +5238,12 @@ async function handleApiRoute(
 	const projectPromoteMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/promote$/);
 	if (projectPromoteMatch && req.method === "POST") {
 		const projectId = projectPromoteMatch[1];
+		// §3 accept invariant — promoting an explicit but unregistered project
+		// is a clear UNKNOWN_PROJECT error, not a generic 400.
+		if (!projectRegistry.get(projectId)) {
+			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectId}` }, 422);
+			return;
+		}
 		try {
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
@@ -5317,7 +5330,18 @@ async function handleApiRoute(
 	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
 	if (projectConfigMatch) {
 		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		if (!ctx) {
+			// §3 accept invariant — a config EDIT (PUT) that names an explicit
+			// but unregistered project must fail with a clear UNKNOWN_PROJECT
+			// code, never re-route into a create, and never be a generic 404.
+			// Reads keep the historical 404 shape.
+			if (req.method === "PUT") {
+				json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectConfigMatch[1]}` }, 422);
+			} else {
+				json({ error: "Project not found" }, 404);
+			}
+			return;
+		}
 		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
 
 		if (req.method === "GET" && !suffix) {
@@ -13187,21 +13211,34 @@ async function handleApiRoute(
 			// parentGoalId must remain omitted so accepting the proposal creates a
 			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
-			if (proposalType === "goal" || proposalType === "staff") {
+			// §1 cross-project target resolver — goal / staff / role / tool
+			// (NOT project). Resolve the TARGET project uniformly so that the
+			// tool path and direct API callers behave identically:
+			//   explicit trimmed args.projectId wins;
+			//   otherwise the session's project (system → headquarters).
+			// The resolved target is validated against the registry and stamped
+			// onto the draft, making `proposal.fields.projectId` the single
+			// source of truth for acceptance routing. When projectId is omitted
+			// this reduces to the previous behaviour byte-for-byte. `project`
+			// proposals are excluded — they may name a brand-new, not-yet-
+			// registered project (validated at the accept/mutation boundary).
+			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;
-				if (!sessionProjectId) {
+				const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
+					? enrichedArgs.projectId.trim()
+					: undefined;
+				const defaultProjectId = sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
+				const targetProjectId = explicitProjectId ?? defaultProjectId;
+				if (!targetProjectId) {
 					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
 					return;
 				}
-				const proposalProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined;
-				if (proposalProjectId && proposalProjectId !== sessionProjectId) {
-					json({ ok: false, code: "PROJECT_ID_MISMATCH", message: "proposal projectId must match the session projectId" }, 422);
+				if (!projectRegistry.get(targetProjectId)) {
+					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${targetProjectId}` }, 422);
 					return;
 				}
-				enrichedArgs = { ...enrichedArgs, projectId: sessionProjectId };
+				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
 			}
 			if (proposalType === "goal") {
 				const sess = sessionManager.getSession(sessionId);
@@ -13226,7 +13263,15 @@ async function handleApiRoute(
 			// when the session has no resolvable project or the project has zero
 			// workflows (empty-state behaviour preserved).
 			if (proposalType === "goal") {
-				const projectId = (sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId))?.projectId;
+				// §2 Resolve workflows against the RESOLVED TARGET project
+				// (enrichedArgs.projectId, stamped by §1 above), not the session's
+				// project. A goal targeting project X must validate against X's
+				// registered workflows. Fall back to the session's project only if
+				// the target is somehow absent (defensive; §1 always stamps it).
+				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
+					? enrichedArgs.projectId.trim()
+					: undefined)
+					?? (sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId))?.projectId;
 				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
 				if (projectId) {
 					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);

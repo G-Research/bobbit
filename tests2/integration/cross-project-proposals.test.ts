@@ -1,0 +1,235 @@
+/**
+ * API integration — cross-project proposal seed resolver.
+ *
+ * Design: docs/design/cross-project-proposals.md §1, §2, §3, §6.
+ *
+ * A `propose_*` seed may target a DIFFERENT project than the session's via the
+ * optional `projectId`. The seed endpoint resolves the TARGET uniformly:
+ *   - omitted  → session's project (system → headquarters);
+ *   - explicit → validated against the registry and stamped onto the draft;
+ *   - unknown  → 422 UNKNOWN_PROJECT (goal/role/tool/staff);
+ *   - `project` proposals are exempt — they may name a brand-new project.
+ *
+ * Acceptance covered here:
+ *   (a) omitted projectId → session project (incl. system → headquarters)
+ *   (b) explicit valid cross-project accepted for goal/role/tool/staff/project
+ *   (c) explicit unknown → 422 UNKNOWN_PROJECT for goal/role/tool/staff
+ *   (d) unknown projectId allowed at seed for a brand-new propose_project
+ *   (e) goal workflow validated against the TARGET project's workflows
+ */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { test, expect } from "./_e2e/in-process-harness.js";
+import {
+	apiFetch,
+	rawApiFetch,
+	createSession,
+	deleteSession,
+	defaultProjectId,
+	registerProject,
+} from "./_e2e/e2e-setup.js";
+
+const HEADQUARTERS_PROJECT_ID = "headquarters";
+
+const cleanupRoots: string[] = [];
+
+function gitRepo(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-xproj-${prefix}-`));
+	cleanupRoots.push(dir);
+	fs.writeFileSync(path.join(dir, "README.md"), "# cross-project target\n");
+	execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
+	execFileSync("git", ["-c", "user.email=e2e@bobbit.ai", "-c", "user.name=e2e", "add", "."], { cwd: dir, stdio: "pipe" });
+	execFileSync("git", ["-c", "user.email=e2e@bobbit.ai", "-c", "user.name=e2e", "commit", "-m", "init"], { cwd: dir, stdio: "pipe" });
+	try { return fs.realpathSync(dir); } catch { return dir; }
+}
+
+/** A workflow id that exists ONLY in the target project (never in the default). */
+const TARGET_WORKFLOWS = {
+	"target-only": {
+		id: "target-only",
+		name: "Target Only",
+		description: "Workflow present only in the cross-project target.",
+		gates: [
+			{ id: "implementation", name: "Implementation", verify: [{ name: "Check", type: "command", run: "echo ok" }] },
+			{ id: "ready-to-merge", name: "Ready to Merge", depends_on: ["implementation"], verify: [{ name: "PR raised", type: "command", run: "echo ok" }] },
+		],
+	},
+};
+
+async function seed(sid: string, type: string, args: Record<string, unknown>): Promise<Response> {
+	return apiFetch(`/api/sessions/${sid}/proposal/${type}/seed`, {
+		method: "POST",
+		body: JSON.stringify({ args }),
+	});
+}
+
+async function seededFields(sid: string, type: string): Promise<Record<string, unknown> | undefined> {
+	const resp = await apiFetch(`/api/sessions/${sid}/proposals`);
+	expect(resp.status).toBe(200);
+	const body = await resp.json() as { proposals?: Array<{ proposalType?: string; fields?: Record<string, unknown> }> };
+	return body.proposals?.find(p => p.proposalType === type)?.fields;
+}
+
+const VALID_ARGS: Record<string, Record<string, unknown>> = {
+	goal: { title: "X-Proj Goal", spec: "body\n", workflow: "target-only" },
+	role: { name: "xproj-role", label: "X Role", prompt: "do things" },
+	tool: { tool: "xproj-tool", action: "create", content: "name: xproj-tool\n" },
+	staff: { name: "xproj-staff", prompt: "help out" },
+};
+
+test.describe("cross-project proposal seed @smoke", () => {
+	let sid: string;
+	let targetProjectId: string;
+	let defaultPid: string;
+
+	test.beforeAll(async () => {
+		sid = await createSession();
+		defaultPid = (await defaultProjectId())!;
+		const project = await registerProject({
+			name: `xproj-target-${Date.now()}`,
+			rootPath: gitRepo("target"),
+			seedWorkflows: false,
+		});
+		targetProjectId = project.id;
+		// The default project already carries the harness workflows (feature,
+		// general, …). Give the target a DISTINCT workflow so §2/§e can prove the
+		// goal validation resolves against the target, not the session's project.
+		const cfg = await apiFetch(`/api/projects/${targetProjectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify({
+				components: [{ name: "test", repo: ".", commands: { build: "echo ok" } }],
+				workflows: TARGET_WORKFLOWS,
+			}),
+		});
+		expect(cfg.status, `seed target workflows: ${await cfg.text()}`).toBe(200);
+	});
+
+	test.afterAll(async () => {
+		await deleteSession(sid);
+		for (const dir of cleanupRoots.splice(0)) {
+			try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	});
+
+	// ── (a) omitted projectId → session's project ──────────────────────
+	test("(a) omitted projectId stamps the session project for goal/role/tool/staff", async () => {
+		const s = await createSession();
+		try {
+			for (const type of ["goal", "role", "tool", "staff"] as const) {
+				const args = type === "goal" ? { title: "Def Goal", spec: "body\n", workflow: "feature" } : VALID_ARGS[type];
+				const r = await seed(s, type, args);
+				expect(r.status, `${type} omitted seed: ${await r.clone().text()}`).toBe(200);
+				const fields = await seededFields(s, type);
+				expect(fields?.projectId, `${type} default stamp`).toBe(defaultPid);
+			}
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	// ── (a) system → headquarters default mapping ──────────────────────
+	test("(a) system-scope session default maps to headquarters", async () => {
+		// A role assistant created with a cwd outside any project resolves to the
+		// synthetic `system` project (see role-assistant-session.test.ts). An
+		// omitted-projectId seed must default to the user-facing headquarters
+		// scope, never the hidden `system` id.
+		const bogusCwd = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-xproj-system-"));
+		cleanupRoots.push(bogusCwd);
+		const created = await rawApiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ assistantType: "role", cwd: bogusCwd }),
+		});
+		expect(created.status, `create system-scope role session: ${await created.clone().text()}`).toBe(201);
+		const systemSid = (await created.json()).id as string;
+		try {
+			const r = await seed(systemSid, "role", VALID_ARGS.role);
+			expect(r.status, `system-scope role seed: ${await r.clone().text()}`).toBe(200);
+			const fields = await seededFields(systemSid, "role");
+			expect(fields?.projectId).toBe(HEADQUARTERS_PROJECT_ID);
+		} finally {
+			await rawApiFetch(`/api/sessions/${systemSid}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	// ── (b) explicit valid cross-project ───────────────────────────────
+	test("(b) explicit valid cross-project projectId is accepted and stamped for goal/role/tool/staff", async () => {
+		const s = await createSession();
+		try {
+			for (const type of ["goal", "role", "tool", "staff"] as const) {
+				const r = await seed(s, type, { ...VALID_ARGS[type], projectId: targetProjectId });
+				expect(r.status, `${type} cross-project seed: ${await r.clone().text()}`).toBe(200);
+				const fields = await seededFields(s, type);
+				expect(fields?.projectId, `${type} cross-project stamp`).toBe(targetProjectId);
+			}
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	test("(b) explicit valid cross-project projectId is accepted for propose_project", async () => {
+		const s = await createSession();
+		try {
+			const r = await seed(s, "project", { name: "X-Proj Edit", root_path: "/tmp/xproj", projectId: targetProjectId });
+			expect(r.status, `project cross-project seed: ${await r.clone().text()}`).toBe(200);
+			const fields = await seededFields(s, "project");
+			expect(fields?.projectId).toBe(targetProjectId);
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	// ── (c) explicit unknown → 422 UNKNOWN_PROJECT ─────────────────────
+	test("(c) explicit unknown projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff", async () => {
+		const s = await createSession();
+		try {
+			for (const type of ["goal", "role", "tool", "staff"] as const) {
+				const r = await seed(s, type, { ...VALID_ARGS[type], projectId: "does-not-exist-project" });
+				expect(r.status, `${type} unknown seed`).toBe(422);
+				const body = await r.json();
+				expect(body.ok).toBe(false);
+				expect(body.code).toBe("UNKNOWN_PROJECT");
+			}
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	// ── (d) unknown projectId allowed at seed for propose_project ──────
+	test("(d) unknown projectId is allowed at seed for a brand-new propose_project", async () => {
+		const s = await createSession();
+		try {
+			const r = await seed(s, "project", { name: "Brand New", root_path: "/tmp/brand-new", projectId: "not-yet-registered" });
+			expect(r.status, `project unknown seed: ${await r.clone().text()}`).toBe(200);
+			const fields = await seededFields(s, "project");
+			expect(fields?.projectId).toBe("not-yet-registered");
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	// ── (e) goal workflow validated against the TARGET project ─────────
+	test("(e) goal workflow is validated against the target project's workflows", async () => {
+		const s = await createSession();
+		try {
+			// The target has `target-only` but NOT `feature`; the session's default
+			// project has `feature` but NOT `target-only`.
+			const okResp = await seed(s, "goal", { title: "Target WF", spec: "body\n", workflow: "target-only", projectId: targetProjectId });
+			expect(okResp.status, `target workflow accepted: ${await okResp.clone().text()}`).toBe(200);
+			expect((await seededFields(s, "goal"))?.projectId).toBe(targetProjectId);
+
+			// `feature` is valid in the SESSION's project but unknown to the TARGET —
+			// must be rejected, proving validation resolves against the target.
+			const badResp = await seed(s, "goal", { title: "Session WF", spec: "body\n", workflow: "feature", projectId: targetProjectId });
+			expect(badResp.status).toBe(400);
+			const body = await badResp.json();
+			expect(body.code).toBe("UNKNOWN_WORKFLOW");
+			const ids = (body.availableWorkflows ?? []).map((w: { id?: string }) => w.id);
+			expect(ids).toContain("target-only");
+			expect(ids).not.toContain("feature");
+		} finally {
+			await deleteSession(s);
+		}
+	});
+});
