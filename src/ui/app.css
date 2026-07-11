@@ -2440,18 +2440,11 @@ html {
 }
 
 /* ===== Headset overlay ===== */
-/* Mirrors the crown/nurse-cap rule set (same scale/origin/margin + state
-   follow-animations). Two deliberate differences:
-     1. a half-sprite-pixel DOWNWARD `translate` (0.5 × 4 = 2 CSS px) so the
-        whole headset seats a touch lower (same lever the bandana uses upward),
-     2. its own charcoal + orange box-shadow art.
-   Counter-hue-rotated like the crown so it never shifts color. */
+/* Charcoal headset with front-view top band, two ear cups, and orange boom mic.
+   It uses a small independent downward `translate` to seat over the face without
+   adding top height, and counter-hue-rotates so it stays neutral. */
 .bobbit-blob__headset {
 	display: none;
-}
-/* Push the whole bobbit down when wearing the headset to prevent band-tip clipping */
-.bobbit-headset .bobbit-blob {
-	padding-top: 6px;
 }
 .bobbit-headset .bobbit-blob__headset {
 	display: block;
@@ -2470,14 +2463,11 @@ html {
 	/* Counter hue-rotate so the headset stays neutral charcoal + orange */
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
 	box-shadow:
-		4px -1px 0 #000,
-		5px -1px 0 #000,
-		6px -1px 0 #000,
 		2px 0px 0 #000,
 		3px 0px 0 #000,
-		4px 0px 0 #374151,
-		5px 0px 0 #374151,
-		6px 0px 0 #374151,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
 		7px 0px 0 #000,
 		1px 1px 0 #000,
 		2px 1px 0 #1f2937,
@@ -2487,12 +2477,10 @@ html {
 		6px 1px 0 #000,
 		7px 1px 0 #4b5563,
 		8px 1px 0 #000,
-		0px 2px 0 #000,
 		1px 2px 0 #1f2937,
 		2px 2px 0 #000,
 		7px 2px 0 #000,
 		8px 2px 0 #4b5563,
-		9px 2px 0 #000,
 		0px 3px 0 #000,
 		1px 3px 0 #000,
 		8px 3px 0 #000,
@@ -2530,14 +2518,11 @@ html {
 @keyframes blob-headset-shadow {
 	/* Normal — both ear cups visible. */
 	0% { box-shadow:
-		4px -1px 0 #000,
-		5px -1px 0 #000,
-		6px -1px 0 #000,
 		2px 0px 0 #000,
 		3px 0px 0 #000,
-		4px 0px 0 #374151,
-		5px 0px 0 #374151,
-		6px 0px 0 #374151,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
 		7px 0px 0 #000,
 		1px 1px 0 #000,
 		2px 1px 0 #1f2937,
@@ -2547,12 +2532,10 @@ html {
 		6px 1px 0 #000,
 		7px 1px 0 #4b5563,
 		8px 1px 0 #000,
-		0px 2px 0 #000,
 		1px 2px 0 #1f2937,
 		2px 2px 0 #000,
 		7px 2px 0 #000,
 		8px 2px 0 #4b5563,
-		9px 2px 0 #000,
 		0px 3px 0 #000,
 		1px 3px 0 #000,
 		8px 3px 0 #000,
@@ -2616,14 +2599,11 @@ html {
 	}
 	/* Back to normal after rightward hops. */
 	57% { box-shadow:
-		4px -1px 0 #000,
-		5px -1px 0 #000,
-		6px -1px 0 #000,
 		2px 0px 0 #000,
 		3px 0px 0 #000,
-		4px 0px 0 #374151,
-		5px 0px 0 #374151,
-		6px 0px 0 #374151,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
 		7px 0px 0 #000,
 		1px 1px 0 #000,
 		2px 1px 0 #1f2937,
@@ -2633,12 +2613,10 @@ html {
 		6px 1px 0 #000,
 		7px 1px 0 #4b5563,
 		8px 1px 0 #000,
-		0px 2px 0 #000,
 		1px 2px 0 #1f2937,
 		2px 2px 0 #000,
 		7px 2px 0 #000,
 		8px 2px 0 #4b5563,
-		9px 2px 0 #000,
 		0px 3px 0 #000,
 		1px 3px 0 #000,
 		8px 3px 0 #000,
@@ -2702,14 +2680,11 @@ html {
 	}
 	/* Back to normal after up-right glance. */
 	65% { box-shadow:
-		4px -1px 0 #000,
-		5px -1px 0 #000,
-		6px -1px 0 #000,
 		2px 0px 0 #000,
 		3px 0px 0 #000,
-		4px 0px 0 #374151,
-		5px 0px 0 #374151,
-		6px 0px 0 #374151,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
 		7px 0px 0 #000,
 		1px 1px 0 #000,
 		2px 1px 0 #1f2937,
@@ -2719,12 +2694,10 @@ html {
 		6px 1px 0 #000,
 		7px 1px 0 #4b5563,
 		8px 1px 0 #000,
-		0px 2px 0 #000,
 		1px 2px 0 #1f2937,
 		2px 2px 0 #000,
 		7px 2px 0 #000,
 		8px 2px 0 #4b5563,
-		9px 2px 0 #000,
 		0px 3px 0 #000,
 		1px 3px 0 #000,
 		8px 3px 0 #000,
@@ -2788,14 +2761,11 @@ html {
 	}
 	/* Back to normal. */
 	98% { box-shadow:
-		4px -1px 0 #000,
-		5px -1px 0 #000,
-		6px -1px 0 #000,
 		2px 0px 0 #000,
 		3px 0px 0 #000,
-		4px 0px 0 #374151,
-		5px 0px 0 #374151,
-		6px 0px 0 #374151,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
 		7px 0px 0 #000,
 		1px 1px 0 #000,
 		2px 1px 0 #1f2937,
@@ -2805,12 +2775,10 @@ html {
 		6px 1px 0 #000,
 		7px 1px 0 #4b5563,
 		8px 1px 0 #000,
-		0px 2px 0 #000,
 		1px 2px 0 #1f2937,
 		2px 2px 0 #000,
 		7px 2px 0 #000,
 		8px 2px 0 #4b5563,
-		9px 2px 0 #000,
 		0px 3px 0 #000,
 		1px 3px 0 #000,
 		8px 3px 0 #000,
