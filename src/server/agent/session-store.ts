@@ -2,6 +2,7 @@ import type { Dirent } from "node:fs";
 import type { Clock, FsLike } from "../gateway-deps.js";
 import { realClock, realFs } from "../gateway-deps.js";
 import path from "node:path";
+import { recordDeletionTombstone } from "./deletion-tombstones.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
@@ -581,6 +582,10 @@ export class SessionStore {
 		this.generation++;
 		this.sessions.delete(id);
 		this.saveNow(); // immediate — structural change
+		// Durably tombstone this hard-delete so the boot-time headquarters
+		// migration does not resurrect the record from a stale
+		// `.pre-headquarters-id-migration` backup on the next restart.
+		recordDeletionTombstone(this.storeDir, "sessions.json", id);
 	}
 
 	getAll(): PersistedSession[] {

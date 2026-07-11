@@ -13,6 +13,7 @@ import type { PersistedStaff } from "./staff-store.js";
 import type { PersistedTask } from "./task-store.js";
 import type { PersistedTeamEntry } from "./team-store.js";
 import type { GateState } from "./gate-store.js";
+import { readDeletionTombstones } from "./deletion-tombstones.js";
 
 const MIGRATION_MARKER = ".migrated-to-per-project";
 const PRE_MIGRATION_SUFFIX = ".pre-migration";
@@ -22,6 +23,20 @@ const HEADQUARTERS_DIR_MIGRATION_MARKER = ".headquarters-dir-migrated";
 const HEADQUARTERS_MIGRATION_DIAGNOSTICS = "headquarters-migration-diagnostics.json";
 const PER_PROJECT_MIGRATION_DIAGNOSTICS = "per-project-state-migration-diagnostics.json";
 const HEADQUARTERS_BACKUP_SUFFIX = ".pre-headquarters-id-migration";
+// Suffix a spent per-store `.pre-headquarters-id-migration` backup is renamed to
+// once repair is confirmed complete (marker present) and every backup-only key
+// is either present-in-live or tombstoned. Retiring the backup stops it from
+// resurrecting a tombstoned record on a later boot. Mirrors the
+// `.pre-migration` → `.pre-migration-recovered` retirement precedent in
+// `recoverPreMigrationData`.
+const HEADQUARTERS_BACKUP_RETIRED_SUFFIX = ".pre-headquarters-id-migration-recovered";
+// Array execution stores keyed by `id` that route through
+// `routeLegacyProjectStoreFile`'s backup-only recovery loop and can therefore
+// resurrect a deleted record. Their backups are eligible for retirement and
+// their keys are eligible for deletion tombstones. (gateway-swarms.json is
+// keyed by goalId and remaps onto team-state.json; it is handled via
+// team-state.json and excluded here to avoid the target-remap ambiguity.)
+const HEADQUARTERS_RETIREABLE_STORE_FILES = ["sessions.json", "goals.json", "staff.json", "team-state.json"] as const;
 
 /** Normalize paths for equality checks, including Windows drive-letter casing. */
 function pathKey(p: string): string {
@@ -151,6 +166,8 @@ interface HeadquartersMigrationDiagnostics {
 	restoredNormalProjectIds: string[];
 	restoredNormalRecords: Array<{ file: string; key: string; projectId: string }>;
 	sanitizedHeadquartersRecords: Array<{ file: string; key: string; actions: string[] }>;
+	/** Backup-only keys withheld from recovery because they were tombstoned (deleted after migration). */
+	tombstonedSkipped: Array<{ file: string; key: string }>;
 	previousOverrideHints: string[];
 	failures: string[];
 }
@@ -225,6 +242,7 @@ function newHeadquartersDiagnostics(input: HeadquartersDirectoryMigrationInput):
 		restoredNormalProjectIds: [],
 		restoredNormalRecords: [],
 		sanitizedHeadquartersRecords: [],
+		tombstonedSkipped: [],
 		previousOverrideHints: [],
 		failures: [],
 	};
@@ -674,6 +692,15 @@ function routeLegacyProjectStoreFile(
 	// duplicate under `headquarters`.
 	const inPlace = samePath(legacyFile, targetFile);
 	const routedNormalKeys = new Set<string>();
+	// Durable deletion tombstones: a backup-only key that was intentionally
+	// hard-deleted AFTER the migration must NOT be resurrected by the
+	// backup-only recovery loop below. Read from both the target and legacy
+	// state dirs (identical in the override in-place case, but be robust) and
+	// union them.
+	const tombstonedKeys = new Set<string>();
+	for (const dir of new Set([path.dirname(targetFile), path.dirname(legacyFile)])) {
+		for (const key of readDeletionTombstones(dir, fileName)) tombstonedKeys.add(key);
+	}
 
 	const routeNormal = (projectId: string, record: Record<string, unknown>, key: string): void => {
 		const bucket = normalRecordsByProject.get(projectId) ?? [];
@@ -722,6 +749,14 @@ function routeLegacyProjectStoreFile(
 
 	for (const [key, backup] of backupByKey) {
 		if (seenLegacyKeys.has(key)) continue;
+		// Finding C's deletion counterpart: a backup-only key that carries a
+		// deletion tombstone was removed on purpose after the migration — do NOT
+		// recover it. Un-tombstoned backup-only keys keep their current recovery
+		// behaviour (a legitimately-dropped record remains recoverable).
+		if (tombstonedKeys.has(key)) {
+			diagnostics.tombstonedSkipped.push({ file: fileName, key });
+			continue;
+		}
 		const backupProjectId = typeof backup.projectId === "string" ? backup.projectId : undefined;
 		if (backupProjectId && projectEvidence.sameRootIds.has(backupProjectId)) {
 			routeNormal(backupProjectId, { ...backup, projectId: backupProjectId }, key);
@@ -759,6 +794,80 @@ function routeLegacyProjectStoreFile(
 		if (kept.length !== existing.length) {
 			writeStoreRecords(targetFile, kept, shape);
 			diagnostics.copied.push(`headquarters: removed ${existing.length - kept.length} re-attributed normal record${existing.length - kept.length === 1 ? "" : "s"} from ${fileName}`);
+		}
+	}
+}
+
+/**
+ * Retire spent `.pre-headquarters-id-migration` per-store backups once repair is
+ * confirmed complete (marker present). Only the array execution stores that can
+ * resurrect a record through `routeLegacyProjectStoreFile`'s backup-only
+ * recovery loop are considered (see HEADQUARTERS_RETIREABLE_STORE_FILES).
+ *
+ * Per-store SAFETY GATE: a backup is retired only when EVERY key it holds is
+ * accounted for — either present in a live store the recovery could route into
+ * (the Headquarters store OR a same-root normal project's store) OR tombstoned.
+ * If any backup key is neither (genuinely-unrecovered, never-deleted data), the
+ * backup is PRESERVED so it stays recoverable. This guarantees "un-tombstoned
+ * unrecovered data is never dropped".
+ */
+function retireSpentHeadquartersBackups(
+	headquartersStateDir: string,
+	evidence: { current: Record<string, unknown>[]; sameRootIds: Set<string> },
+	diagnostics: HeadquartersMigrationDiagnostics,
+): void {
+	const projectsById = new Map(evidence.current.map(project => [String(project.id ?? ""), project] as const));
+	const sameRootStateDirs: string[] = [];
+	for (const id of evidence.sameRootIds) {
+		const project = projectsById.get(id);
+		if (project && typeof project.rootPath === "string") {
+			sameRootStateDirs.push(path.join(project.rootPath, ".bobbit", "state"));
+		}
+	}
+
+	for (const fileName of HEADQUARTERS_RETIREABLE_STORE_FILES) {
+		const backupFile = path.join(headquartersStateDir, fileName + HEADQUARTERS_BACKUP_SUFFIX);
+		if (!fs.existsSync(backupFile)) continue;
+
+		const backupKeys = new Set(
+			readStoreRecordsWithShape(backupFile, fileName).records
+				.map(record => recordKeyForFile(fileName, record))
+				.filter(Boolean),
+		);
+
+		// Union of keys present in any live store the recovery could route into.
+		const liveKeys = new Set<string>();
+		const liveFiles = [
+			path.join(headquartersStateDir, fileName),
+			...sameRootStateDirs.map(dir => path.join(dir, fileName)),
+		];
+		for (const file of liveFiles) {
+			for (const record of readStoreRecordsWithShape(file, fileName).records) {
+				const key = recordKeyForFile(fileName, record);
+				if (key) liveKeys.add(key);
+			}
+		}
+
+		const tombstoned = readDeletionTombstones(headquartersStateDir, fileName);
+		let safe = true;
+		for (const key of backupKeys) {
+			if (liveKeys.has(key) || tombstoned.has(key)) continue;
+			safe = false;
+			break;
+		}
+
+		if (!safe) {
+			diagnostics.skipped.push(`retire backup ${fileName}${HEADQUARTERS_BACKUP_SUFFIX}: preserved (holds an un-tombstoned, unrecovered key)`);
+			continue;
+		}
+
+		try {
+			const retiredFile = path.join(headquartersStateDir, fileName + HEADQUARTERS_BACKUP_RETIRED_SUFFIX);
+			fs.rmSync(retiredFile, { force: true });
+			fs.renameSync(backupFile, retiredFile);
+			diagnostics.copied.push(`retired spent backup ${fileName}${HEADQUARTERS_BACKUP_SUFFIX} → ${fileName}${HEADQUARTERS_BACKUP_RETIRED_SUFFIX}`);
+		} catch (err) {
+			diagnostics.failures.push(`retire backup ${fileName}: ${(err as Error).message}`);
 		}
 	}
 }
@@ -933,6 +1042,14 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	const legacyStateDir = path.join(legacyServerBobbitDir, "state");
 	const legacyConfigDir = path.join(legacyServerBobbitDir, "config");
 	const diagnostics = newHeadquartersDiagnostics({ serverRunDir, headquartersDir: headquartersDirPath, headquartersStateDir, headquartersConfigDir, legacyServerBobbitDir });
+	// Whether a prior migration already completed (marker present at boot start).
+	// Read BEFORE we (re-)write the marker at the end of this run. Used to make the
+	// B1 same-root per-store re-routing a no-op on subsequent boots and to gate
+	// spent-backup retirement so it only runs AFTER a completed migration. The
+	// deletion tombstones (layer above) are the primary correctness fix and work
+	// even when the marker is absent; this guard is defence-in-depth + the
+	// "no-op on second boot" invariant.
+	const alreadyMigrated = fs.existsSync(path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER));
 
 	try {
 		fs.mkdirSync(headquartersStateDir, { recursive: true });
@@ -1003,6 +1120,15 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 			}
 			routeLegacyProjectStoreFile(fileName, legacyFile, targetFile, headquartersDirPath, evidence, diagnostics);
 		}
+	} else if (usingOverride && !sourceIsTarget && sameRootEvidence && alreadyMigrated) {
+		// Marker guard (layer B / requirement 2): the B1 same-root re-routing loop
+		// is idempotent apart from the resurrection bug, and any legitimately
+		// droppable backup-only record was already merged into live on the first
+		// completed migration. Once the completion marker is present, re-running the
+		// loop can only re-surface records — so skip it entirely on later boots.
+		// (The ALWAYS-RUN secret relocation / projects repair / store sanitisation
+		// below are NOT gated — they are idempotent and must keep running.)
+		diagnostics.skipped.push("B1 override same-root per-store re-routing: skipped (headquarters-dir migration already complete)");
 	} else if (usingOverride && !sourceIsTarget && sameRootEvidence) {
 		// B1: BOBBIT_DIR/BOBBIT_PI_DIR-override installs promoted per-store records
 		// (sessions/goals/staff/…) under `headquarters` and left their
@@ -1042,6 +1168,15 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	}
 
 	sanitizeExistingHeadquartersStores(headquartersStateDir, headquartersDirPath, diagnostics, { stampMissingProjectId: !sameRootEvidence });
+
+	// Layer C / requirement 3: once repair is confirmed complete (marker present
+	// at boot start) retire spent per-store backups so they can never resurrect a
+	// tombstoned record on a later boot. Gated on `alreadyMigrated` so retirement
+	// only ever runs on a boot AFTER a completed migration (never on the first
+	// migration, before recovery has happened). Per-store safety gate inside.
+	if (alreadyMigrated) {
+		retireSpentHeadquartersBackups(headquartersStateDir, evidence, diagnostics);
+	}
 
 	try {
 		fs.writeFileSync(path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER), new Date().toISOString(), "utf-8");
