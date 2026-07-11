@@ -152,6 +152,12 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-core",
+					// Keep broad unit runs to one Vitest project at a time. Vitest 3.x
+					// has a worker-RPC bug where multiple long-running fork pools can
+					// finish green but report `[vitest-worker]: Timeout calling "onTaskUpdate"`.
+					// Project group sequencing preserves all tests while avoiding the
+					// cross-project worker/reporting pressure that trips the RPC timeout.
+					sequence: { groupOrder: 0 },
 					environment: "node",
 					// Exclude stragglers that require process isolation (singleFork project below)
 					include: ["tests2/core/**/*.test.ts"],
@@ -167,6 +173,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-core-isolated",
+					sequence: { groupOrder: 1 },
 					environment: "node",
 					isolate: true,
 					pool: "forks" as const,
@@ -178,6 +185,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-dom",
+					sequence: { groupOrder: 2 },
 					environment: "happy-dom",
 					include: ["tests2/dom/**/*.test.ts"],
 				},
@@ -186,6 +194,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-integration",
+					sequence: { groupOrder: 3 },
 					environment: "node",
 					include: ["tests2/integration/**/*.test.ts"],
 					// The fake-command-step specs run in the dedicated fake project below.
@@ -205,6 +214,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-integration-fake",
+					sequence: { groupOrder: 4 },
 					environment: "node",
 					setupFiles: ["tests2/integration/_e2e/fake-cmd-setup.ts"],
 					include: [...fakeCommandStepFiles],
