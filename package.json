@@ -37,7 +37,7 @@
     "test:v2:coverage-delta": "node scripts/testing-v2/coverage-delta.mjs",
     "test:v2:browser-chaos": "node scripts/testing-v2/browser-chaos.mjs",
     "test:v2:profile-hooks": "node scripts/testing-v2/profile-hooks.mjs",
-    "test:unit": "npm run test:v2:core",
+    "test:unit": "npm run test:v2:core:lanes",
     "test:browser": "npm run test:v2:browser",
     "test:bundle": "node scripts/testing-v2/run-bundle-check.mjs",
     "test:e2e": "npm run test:e2e:v2",
