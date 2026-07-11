@@ -3,19 +3,21 @@
 ## Problem
 
 When a user clicks **Apply Changes** on a project-assistant proposal in an
-already-registered project (the "registered" branch of `acceptProjectProposal`),
-the proposal is cleared from `state.activeProposals.project` but the assistant
-session keeps running. The preview panel previously fell back to its empty-state
-branch and rendered `"Waiting for project analysis…"`, which read as "nothing
-happened" — users were left wondering whether their changes had taken effect and
-whether they needed to do anything else with the still-running assistant.
+already-registered project (the registered branch of the project proposal accept
+flow), the proposal is cleared from `state.activeProposals.project` but the
+assistant session keeps running. The project proposal panel previously fell back
+to its empty-state branch and rendered `"Waiting for project analysis…"`, which
+read as "nothing happened" — users were left wondering whether their changes had
+taken effect and whether they needed to do anything else with the still-running
+assistant.
 
-The provisional path is unaffected because it always terminates the assistant
-session and navigates to landing on accept.
+The provisional path is different because it promotes the provisional project,
+writes config, terminates the assistant session, and navigates to landing on a
+successful accept.
 
 ## Solution
 
-After a successful `acceptRegisteredProjectProposal()` we set a per-session flag
+After a successful registered project proposal accept, we set a per-session flag
 that swaps the empty-state branch for a confirmation view:
 
 - **Heading**: "Changes Saved"
@@ -42,12 +44,12 @@ each must remember its own accepted/not-accepted state independently.
 
 ### Set
 
-`acceptRegisteredProjectProposal()` in `src/app/session-manager.ts` sets
+The registered accept handler in `src/app/proposal-panels.ts` sets
 `state.projectProposalAcceptedBySessionId[propSessionId] = true` after the
-config + (optional) rename PUTs succeed, then calls `saveProjectDraft(sessionId)`
-so the flag is persisted to the on-disk project draft. Without that explicit
-save, a reload would lose the marker because the panel relies on the draft
-restore path to rehydrate state.
+config + rename PUTs succeed, then calls `saveProjectDraft(sessionId)` so the
+flag is persisted to the on-disk project draft. Without that explicit save, a
+reload would lose the marker because the panel relies on the draft restore path
+to rehydrate state.
 
 ### Cleared
 
@@ -59,7 +61,7 @@ The flag is cleared symmetrically wherever the proposal slot itself is cleared:
 | `selectSession()` (when navigating away from a session that owned the proposal) | Same lifecycle as `activeProposals.project` cleanup |
 | Draft-restore in `connectToSession()` when the active project proposal belongs to a different session | Same lifecycle as `activeProposals.project` cleanup |
 | `terminateSession()` | Session is gone — drop its UI state |
-| `terminateProjectAssistantSession()` | Explicit teardown via the new button |
+| `terminateProjectAssistantSessionFromPanel()` | Explicit teardown via the new button |
 | `backToSessions()` | Same lifecycle as `activeProposals.project` cleanup |
 
 ### Persistence (reload survival)
@@ -82,19 +84,40 @@ restore: (sessionId, draft) => {
 },
 ```
 
-After Apply Changes, `acceptRegisteredProjectProposal()` calls
-`saveProjectDraft(propSessionId)` (instead of the previous
-`deleteProjectDraft(propSessionId)`) so the next reload re-hydrates the flag.
+After Apply Changes, the registered accept handler calls
+`saveProjectDraft(propSessionId)` (instead of deleting the project draft) so the
+next reload re-hydrates the flag.
+
+## Failure and pending contract
+
+The accept handler is panel-owned so the button can reflect request state
+immediately. While Accept Project / Apply Changes is in flight, the primary
+button is disabled and its label changes to `Accepting…` or `Applying…`; this
+prevents duplicate promote, rename, or config writes.
+
+Accept is all-or-stay-open:
+
+- Missing proposal or missing project linkage surfaces a `showConnectionError`
+  message instead of returning silently.
+- Promote, rename, and config-write failures surface `showConnectionError`, leave
+  `state.activeProposals.project` intact, and keep the panel actionable.
+- Success is the only path that clears the proposal, closes the project proposal
+  tab, deletes the proposal file, and refreshes projects.
+
+This matters because a silent no-op is indistinguishable from a slow or failed
+configuration write. The project proposal panel must always give visible
+feedback and preserve the draft on failure so the user can retry or edit.
 
 ## Termination helper
 
-`terminateProjectAssistantSession(sessionId)` in `src/app/session-manager.ts` is
-the single place that tears down a project-assistant session. It is used by:
+`terminateProjectAssistantSessionFromPanel(sessionId)` in
+`src/app/proposal-panels.ts` is the panel path that tears down a project-assistant
+session after a successful provisional accept. It is used by:
 
-1. **Provisional accept path** — `acceptProvisionalProjectProposal()` calls it
-   silently after `POST /api/projects/:id/promote` succeeds.
-2. **Registered Terminate button** — `projectProposalPanel()` calls it after the
-   user confirms the dialog.
+1. **Provisional accept path** — the provisional accept handler calls it silently
+   after project promotion and config write succeed.
+2. **Registered Terminate button** — `projectProposalPanel()` calls the shared
+   session termination path after the user confirms the dialog.
 
 Steps:
 
@@ -108,13 +131,12 @@ Steps:
 6. Drop the saved-state flag for this session
 7. `refreshSessions()` and `setHashRoute("landing")`
 
-The previous inline implementation in `acceptProvisionalProjectProposal()` was
-extracted verbatim to this helper; behavior is unchanged on the provisional
-path.
+The previous inline provisional teardown was extracted to this helper; behavior
+is unchanged on the provisional path.
 
 ## Render path
 
-`projectProposalPanel()` in `src/app/render.ts` checks the flag in its
+`projectProposalPanel()` in `src/app/proposal-panels.ts` checks the flag in its
 no-proposal branch:
 
 ```
@@ -140,3 +162,12 @@ addressable from E2E tests.
 2. Reload preserves the saved state (proves draft persistence works)
 3. A new `<project_proposal>` replaces the saved view with the new proposal
 4. Terminate → confirm → session is gone and the user lands on the dashboard
+
+`tests2/browser/journeys/project-proposal-accept.journey.spec.ts` covers the
+no-op regression directly:
+
+1. Registered Apply Changes shows pending feedback and suppresses duplicate
+   rename requests while in flight
+2. Registered rename failure shows an error and leaves the proposal actionable
+3. Provisional config failure shows an error and keeps the proposal draft
+4. Registered success clears and closes the proposal panel
