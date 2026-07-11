@@ -8,7 +8,6 @@
 // dispatches).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { syncCustomElements } from "./_setup/custom-elements.js";
-import { html, render } from "lit";
 
 // Under vitest pool:forks + isolate:false each test file runs in its OWN
 // happy-dom window while the module graph is cached across files — so a
@@ -102,11 +101,16 @@ async function mountGoalStatusWidget(fixture: {
 	state.goals = [{ id: fixture.goalId, title: "Fixture Goal", state: fixture.goalState || "in-progress", workflow: { gates: [] } }] as any;
 	if (fixture.cache) state.gateStatusCache.set(fixture.goalId, fixture.cache as any);
 
-	const container = document.createElement("div");
-	document.body.appendChild(container);
-	render(html`<goal-status-widget goalId=${fixture.goalId} token="test-token" branch="fixture/branch"></goal-status-widget>`, container);
 	await customElements.whenDefined("goal-status-widget");
-	const el = container.querySelector("goal-status-widget") as any;
+	const container = document.createElement("div");
+	// Create the host imperatively so the fixture uses this file's custom-element registry,
+	// not lit-html's cached template document from another isolate:false DOM file.
+	const el = document.createElement("goal-status-widget") as any;
+	el.goalId = fixture.goalId;
+	el.token = "test-token";
+	el.branch = "fixture/branch";
+	container.appendChild(el);
+	document.body.appendChild(container);
 	await el.updateComplete;
 	await sleep(20);
 	await el.updateComplete;
