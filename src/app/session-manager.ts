@@ -27,7 +27,7 @@ import { showConnectionError, confirmAction, showOAuthExpiryModal } from "./dial
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
-import { showHeaderToast } from "./render.js";
+import { showHeaderToast } from "./header-toast.js";
 import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount, resetProjectProposalPanel } from "./proposal-panels-lazy.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { loadReviewSources } from "./review-sources-lazy.js";

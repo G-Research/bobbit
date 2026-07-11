@@ -20,7 +20,7 @@ import {
 	type Goal,
 	type Project,
 } from "./state.js";
-import { showHeaderToast } from "./render.js";
+import { showHeaderToast } from "./header-toast.js";
 import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";

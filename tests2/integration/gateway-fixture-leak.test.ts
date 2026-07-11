@@ -58,6 +58,7 @@ describe("gateway fixture leak detector", () => {
 				snapshots: 0,
 				sweeps: 0,
 				skippedSweeps: 0,
+				uncertainSweeps: 0,
 			});
 		} finally {
 			if (previousDir === undefined) delete process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
@@ -108,6 +109,14 @@ function activeGoalIds(gateway: GatewayFixture): Set<string> {
 	return ids;
 }
 
+function visibleDefaultContext(gateway: GatewayFixture): any {
+	for (const ctx of Array.from(gateway.projectContextManager.visible?.() ?? []) as any[]) {
+		const project = ctx?.project;
+		if (project?.name === "default" && !project.hidden) return ctx;
+	}
+	throw new Error("default project context not found");
+}
+
 async function defaultProjectRoot(gateway: GatewayFixture): Promise<string> {
 	const list = await gateway.apiJson<any>("/api/projects");
 	const projects: Array<{ id?: string; rootPath?: string; hidden?: boolean }> = Array.isArray(list) ? list : (list?.projects ?? []);
@@ -117,11 +126,18 @@ async function defaultProjectRoot(gateway: GatewayFixture): Promise<string> {
 }
 
 let rawGoalId: string | undefined;
+let restoreDefaultConfigGetAll: (() => void) | undefined;
 
 compatTest.describe.serial("integration harness dirty cleanup", () => {
 	compatTest.beforeAll(() => {
 		resetIntegrationHarnessCleanupStats();
 		rawGoalId = undefined;
+		restoreDefaultConfigGetAll = undefined;
+	});
+
+	compatTest.afterAll(() => {
+		restoreDefaultConfigGetAll?.();
+		restoreDefaultConfigGetAll = undefined;
 	});
 
 	compatTest("records no-op tests as skipped sweeps without resetting the default project", async () => {
@@ -174,5 +190,19 @@ compatTest.describe.serial("integration harness dirty cleanup", () => {
 		const structured = await gateway.apiJson<any>(`/api/projects/${gateway.defaultProjectId}/structured`);
 		compatExpect(structured.components?.[0]?.name).toBe("test");
 		compatExpect(structured.components?.[0]?.commands?.build).toBe("echo ok");
+	});
+
+	compatTest("treats uncertain default-project fingerprints as dirty", async ({ gateway }) => {
+		const cfg = visibleDefaultContext(gateway).projectConfigStore;
+		const original = cfg.getAll;
+		restoreDefaultConfigGetAll = () => { cfg.getAll = original; };
+		cfg.getAll = () => { throw new Error("intentional cleanup fingerprint failure"); };
+	});
+
+	compatTest("falls back to a conservative sweep when cleanliness is uncertain", () => {
+		const stats = integrationHarnessCleanupStats();
+		compatExpect(stats.uncertainSweeps).toBeGreaterThanOrEqual(1);
+		restoreDefaultConfigGetAll?.();
+		restoreDefaultConfigGetAll = undefined;
 	});
 });

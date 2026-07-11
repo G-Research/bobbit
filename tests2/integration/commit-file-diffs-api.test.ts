@@ -1,3 +1,10 @@
+/**
+ * API E2E — representative commit-file metadata and commit-scoped diff routes.
+ *
+ * The suite uses one copied git template so route coverage does not pay repeated
+ * git init/config/initial-commit setup. Session coverage exercises the full
+ * validation matrix; goal coverage is a smoke path for the separate goal route.
+ */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
 import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
@@ -6,8 +13,11 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
+let templateRepo = "";
+const cleanupRoots: string[] = [];
+
 function git(cwd: string, args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+	return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).trim();
 }
 
 function commitTargetChanges(root: string, trackedContent = "base\ncommit scoped marker\n"): string {
@@ -16,26 +26,33 @@ function commitTargetChanges(root: string, trackedContent = "base\ncommit scoped
 	fs.rmSync(path.join(root, "delete-me.txt"));
 	git(root, ["mv", "rename-old.txt", "rename-new.txt"]);
 	git(root, ["add", "."]);
-	git(root, ["commit", "-m", "target commit"]);
+	git(root, ["commit", "--quiet", "-m", "target commit"]);
 	return git(root, ["rev-parse", "HEAD"]);
 }
 
-function initRepo(): { root: string; targetSha: string } {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-commit-diff-api-"));
-	git(root, ["init"]);
-	git(root, ["checkout", "-B", "master"]);
+function createTemplateRepo(): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-commit-diff-template-"));
+	git(root, ["init", "--quiet"]);
+	git(root, ["checkout", "--quiet", "-B", "master"]);
 	git(root, ["config", "user.email", "test@bobbit.local"]);
 	git(root, ["config", "user.name", "Commit Diff Test"]);
 	git(root, ["config", "core.autocrlf", "false"]);
+	git(root, ["config", "commit.gpgsign", "false"]);
 
 	fs.writeFileSync(path.join(root, "tracked.txt"), "base\n");
 	fs.writeFileSync(path.join(root, "delete-me.txt"), "delete me\n");
 	fs.writeFileSync(path.join(root, "rename-old.txt"), "rename me\n");
 	git(root, ["add", "."]);
-	git(root, ["commit", "-m", "initial"]);
+	git(root, ["commit", "--quiet", "-m", "initial"]);
+	return root;
+}
 
-	const targetSha = commitTargetChanges(root);
-	return { root, targetSha };
+function fixtureRepo(prefix: string): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-commit-diff-${prefix}-`));
+	fs.rmSync(root, { recursive: true, force: true });
+	fs.cpSync(templateRepo, root, { recursive: true });
+	cleanupRoots.push(root);
+	return root;
 }
 
 function byPath(files: any[], p: string): any {
@@ -44,6 +61,10 @@ function byPath(files: any[], p: string): any {
 
 async function safeRm(dir: string): Promise<void> {
 	await awaitableRm(dir, { onFinalFailure: () => {} });
+}
+
+function cleanupDir(dir: string): void {
+	try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* ignore */ }
 }
 
 function assertTargetCommitFiles(commit: any): void {
@@ -55,19 +76,26 @@ function assertTargetCommitFiles(commit: any): void {
 	expect(byPath(commit.files, "rename-new.txt")).toMatchObject({ status: "R", statusLabel: "renamed", oldPath: "rename-old.txt" });
 }
 
-async function expectTargetCommit(endpoint: string, targetSha: string): Promise<void> {
+async function expectTargetCommitSummary(endpoint: string, targetSha: string): Promise<void> {
 	const commitsResp = await apiFetch(`${endpoint}/commits`);
 	expect(commitsResp.status).toBe(200);
 	const body = await commitsResp.json();
 	const commit = body.commits.find((c: any) => c.sha === targetSha);
 	expect(commit).toBeTruthy();
 	assertTargetCommitFiles(commit);
+}
 
-	const diffResp = await apiFetch(`${endpoint}/git-diff?commit=${targetSha}&file=${encodeURIComponent("tracked.txt")}`);
+async function expectCommitDiff(endpoint: string, targetSha: string, file: string, marker: string): Promise<void> {
+	const diffResp = await apiFetch(`${endpoint}/git-diff?commit=${targetSha}&file=${encodeURIComponent(file)}`);
 	expect(diffResp.status).toBe(200);
 	const diffBody = await diffResp.json();
-	expect(diffBody.diff).toContain("diff --git a/tracked.txt b/tracked.txt");
-	expect(diffBody.diff).toContain("commit scoped marker");
+	expect(diffBody.diff).toContain(`diff --git a/${file} b/${file}`);
+	expect(diffBody.diff).toContain(marker);
+}
+
+async function expectSessionCommitDiffValidation(endpoint: string, targetSha: string): Promise<void> {
+	await expectTargetCommitSummary(endpoint, targetSha);
+	await expectCommitDiff(endpoint, targetSha, "tracked.txt", "commit scoped marker");
 
 	const renameDiffResp = await apiFetch(`${endpoint}/git-diff?commit=${targetSha}&file=${encodeURIComponent("rename-new.txt")}`);
 	expect(renameDiffResp.status).toBe(200);
@@ -82,13 +110,26 @@ async function expectTargetCommit(endpoint: string, targetSha: string): Promise<
 	expect((await invalidCommitResp.json()).error).toBe("Invalid commit");
 }
 
+test.beforeAll(() => {
+	templateRepo = createTemplateRepo();
+});
+
+test.afterAll(() => {
+	for (const root of cleanupRoots) cleanupDir(root);
+	if (templateRepo) cleanupDir(templateRepo);
+});
+
+// Shared gateway state and copied git fixtures are intentionally kept serial.
+test.describe.configure({ mode: "serial" });
+
 test.describe("commit file diff API", () => {
 	test("session commits include changed files and commit-scoped git-diff", async () => {
-		const { root, targetSha } = initRepo();
-		const project = await registerProject({ name: `commit-diff-session-${Date.now()}`, rootPath: root });
+		const root = fixtureRepo("session");
+		const targetSha = commitTargetChanges(root);
+		const project = await registerProject({ name: `commit-diff-session-${Date.now()}`, rootPath: root, seedWorkflows: false });
 		const sessionId = await createSession({ cwd: root, projectId: project.id });
 		try {
-			await expectTargetCommit(`/api/sessions/${sessionId}`, targetSha);
+			await expectSessionCommitDiffValidation(`/api/sessions/${sessionId}`, targetSha);
 
 			const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
 			expect(sessionResp.status).toBe(200);
@@ -105,8 +146,8 @@ test.describe("commit file diff API", () => {
 	});
 
 	test("goal commits include changed files and commit-scoped git-diff", async () => {
-		const { root } = initRepo();
-		const project = await registerProject({ name: `commit-diff-goal-${Date.now()}`, rootPath: root });
+		const root = fixtureRepo("goal");
+		const project = await registerProject({ name: `commit-diff-goal-${Date.now()}`, rootPath: root, seedWorkflows: false });
 		let goalId: string | undefined;
 		try {
 			const goal = await createGoal({
@@ -130,17 +171,10 @@ test.describe("commit file diff API", () => {
 					: null;
 			}, { timeoutMs: 15_000, label: "goal worktree ready" });
 			const goalCwd = readyGoal.cwd;
-
-			fs.writeFileSync(path.join(goalCwd, "tracked.txt"), "base\n");
-			fs.writeFileSync(path.join(goalCwd, "delete-me.txt"), "delete me\n");
-			fs.writeFileSync(path.join(goalCwd, "rename-old.txt"), "rename me\n");
-			fs.rmSync(path.join(goalCwd, "added.txt"), { force: true });
-			fs.rmSync(path.join(goalCwd, "rename-new.txt"), { force: true });
-			git(goalCwd, ["add", "."]);
-			git(goalCwd, ["commit", "-m", "prepare target commit"]);
 			const goalTargetSha = commitTargetChanges(goalCwd, "base\ngoal commit scoped marker\n");
 
-			await expectTargetCommit(`/api/goals/${goalId}`, goalTargetSha);
+			await expectTargetCommitSummary(`/api/goals/${goalId}`, goalTargetSha);
+			await expectCommitDiff(`/api/goals/${goalId}`, goalTargetSha, "tracked.txt", "goal commit scoped marker");
 		} finally {
 			if (goalId) await deleteGoal(goalId).catch(() => {});
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});

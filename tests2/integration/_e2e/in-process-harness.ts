@@ -173,6 +173,7 @@ export interface CleanupStats {
 	snapshots: number;
 	sweeps: number;
 	skippedSweeps: number;
+	uncertainSweeps: number;
 	defaultResets: number;
 	defaultRestores: number;
 	deletedSessions: number;
@@ -194,6 +195,7 @@ function emptyCleanupStats(): CleanupStats {
 		snapshots: 0,
 		sweeps: 0,
 		skippedSweeps: 0,
+		uncertainSweeps: 0,
 		defaultResets: 0,
 		defaultRestores: 0,
 		deletedSessions: 0,
@@ -400,6 +402,7 @@ async function cleanupTo(gw: GatewayFixture, baseline: CleanupSnapshot, opts: { 
 		return;
 	}
 	incStat("sweeps");
+	if (fingerprintUncertain(now.defaultProjectFingerprint) || fingerprintUncertain(baseline.defaultProjectFingerprint)) incStat("uncertainSweeps");
 	for (const id of now.ids.sessions) if (!baseline.ids.sessions.has(id)) {
 		const resp = await gw.api(`/api/sessions/${id}?purge=true`, { method: "DELETE" }).catch(() => undefined);
 		if (!resp || resp.ok || resp.status === 404) incStat("deletedSessions");

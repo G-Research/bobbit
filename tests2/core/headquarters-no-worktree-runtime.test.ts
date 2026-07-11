@@ -8,7 +8,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { afterEach, describe, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -29,22 +29,36 @@ process.env.BOBBIT_AGENT_DIR = agentDir;
 process.env.BOBBIT_TEST_NO_REMOTE = "1";
 process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 
-const { HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, ProjectRegistry } = await import("../../src/server/agent/project-registry.ts");
-const { ProjectContextManager } = await import("../../src/server/agent/project-context-manager.ts");
-const { GoalManager } = await import("../../src/server/agent/goal-manager.ts");
-const { GoalStore } = await import("../../src/server/agent/goal-store.ts");
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { StaffManager } = await import("../../src/server/agent/staff-manager.ts");
-const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
-const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
-const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
-const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
-loadOrCreateToken(); // seed admin token so direct-agent spawns find it (mirrors server boot)
+let HEADQUARTERS_PROJECT_ID = "headquarters";
+let HEADQUARTERS_PROJECT_NAME = "Headquarters";
+let ProjectRegistry: any;
+let ProjectContextManager: any;
+let GoalManager: any;
+let GoalStore: any;
+let SessionManager: any;
+let StaffManager: any;
+let registerRpcBridgeFactory: (factory: any) => void = () => {};
 
-// Ensure the agent-dir singleton reflects THIS file's BOBBIT_DIR even when a
-// fork-mate initialised it first (isolate:false shared fork).
-resetAgentDirStateForTests?.();
-initPromptDirs(stateDir);
+beforeAll(async () => {
+	const projectRegistry = await import("../../src/server/agent/project-registry.ts");
+	HEADQUARTERS_PROJECT_ID = projectRegistry.HEADQUARTERS_PROJECT_ID;
+	HEADQUARTERS_PROJECT_NAME = projectRegistry.HEADQUARTERS_PROJECT_NAME;
+	ProjectRegistry = projectRegistry.ProjectRegistry;
+	({ ProjectContextManager } = await import("../../src/server/agent/project-context-manager.ts"));
+	({ GoalManager } = await import("../../src/server/agent/goal-manager.ts"));
+	({ GoalStore } = await import("../../src/server/agent/goal-store.ts"));
+	({ SessionManager } = await import("../../src/server/agent/session-manager.ts"));
+	({ StaffManager } = await import("../../src/server/agent/staff-manager.ts"));
+	({ registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts"));
+	const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
+	const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
+	const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+	loadOrCreateToken(); // seed admin token so direct-agent spawns find it (mirrors server boot)
+	// Ensure the agent-dir singleton reflects THIS file's BOBBIT_DIR even when a
+	// fork-mate initialised it first (isolate:false shared fork).
+	resetAgentDirStateForTests?.();
+	initPromptDirs(stateDir);
+});
 
 const managers: any[] = [];
 

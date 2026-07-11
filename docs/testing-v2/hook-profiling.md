@@ -1,8 +1,8 @@
 # Test Suite v2 hook profiling
 
-See the committed before/after summary in [unit-test-optimization-report.html](unit-test-optimization-report.html).
+See the committed before/after summary and measurement caveats in [unit-test-optimization-report.html](unit-test-optimization-report.html).
 
-Run:
+Run from a checkout with dependencies installed:
 
 ```bash
 npm run test:v2:profile-hooks -- [vitest file/project args]
@@ -21,6 +21,10 @@ npm run test:v2:profile-hooks -- tests2/core/team-manager.test.ts
 npm run test:v2:profile-hooks -- --project v2-integration tests2/integration/gateway-fixture-leak.test.ts
 node scripts/testing-v2/profile-hooks.mjs --from-json .profiles/testing-v2/hook-profile/<run>/vitest.json
 ```
+
+## Reading the report
+
+Use `report.md` for review comments and `report.json` for scripted comparisons. Compare wall time, summed file runtime, summed file residual, slowest files, largest residual files, slowest tests, and integration cleanup counters before changing fixtures or cleanup behavior. Commit distilled summaries or HTML reports under `docs/`; do not commit raw `.profiles/` artifacts.
 
 ## Hook attribution limits
 
