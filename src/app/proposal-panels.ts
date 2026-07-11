@@ -2776,19 +2776,33 @@ const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 // Module-level state for the project proposal panel's tab UI.
 let _projectProposalView: ProjectViewMode = "components";
 let _projectProposalAcceptPending = false;
+let _projectProposalAcceptError: { title: string; message: string } | null = null;
 
 /** Reset module-level proposal panel state. Called on session disconnect. */
 export function resetProjectProposalPanel(): void {
 	_projectProposalView = "components";
 	_projectProposalAcceptPending = false;
+	_projectProposalAcceptError = null;
 }
 
 const PROJECT_ACCEPT_FAILED = "Project proposal accept failed";
 const NO_PROJECT_PROPOSAL = "There is no active project proposal to accept. Re-open the proposal and try again.";
 const UNLINKED_PROJECT_PROPOSAL = "This proposal is not linked to a project session. Re-open the project assistant or create the project again.";
 
+function setProjectProposalAcceptError(title: string, message: string): void {
+	_projectProposalAcceptError = { title, message };
+	renderApp();
+}
+
+function clearProjectProposalAcceptError(): void {
+	if (!_projectProposalAcceptError) return;
+	_projectProposalAcceptError = null;
+	renderApp();
+}
+
 function showProjectProposalCaughtError(title: string, err: unknown): void {
 	const { message, code, stack } = errorDetails(err);
+	setProjectProposalAcceptError(title, message);
 	showConnectionError(title, message, { code, stack });
 }
 
@@ -2798,7 +2812,9 @@ async function showProjectProposalResponseError(res: Response, title: string, fa
 	const details = Array.isArray(data?.details) && data.details.length > 0
 		? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
 		: "";
-	showConnectionError(title, details || data?.error || `${fallback}: ${res.status}`, { code: data?.code, stack: data?.stack });
+	const message = details || data?.error || `${fallback}: ${res.status}`;
+	setProjectProposalAcceptError(title, message);
+	showConnectionError(title, message, { code: data?.code, stack: data?.stack });
 }
 
 function activeProjectProposalOrFail(): NonNullable<typeof state.activeProposals.project> | null {
@@ -3039,7 +3055,11 @@ function projectProposalPanel() {
 	const handleAccept = async () => {
 		if (_projectProposalAcceptPending) return;
 		_projectProposalAcceptPending = true;
+		_projectProposalAcceptError = null;
 		renderApp();
+		// Let the pending render commit before the mutation starts. This gives users
+		// immediate feedback and closes the duplicate-click window under load.
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 		try {
 			await acceptProjectProposalFromPanel();
 		} finally {
@@ -3049,6 +3069,7 @@ function projectProposalPanel() {
 	};
 
 	const handleDismiss = () => {
+		clearProjectProposalAcceptError();
 		if (proposal?.sessionId) deleteProjectDraft(proposal.sessionId);
 		dismissTypedProposal("project");
 	};
@@ -3150,6 +3171,12 @@ function projectProposalPanel() {
 				})
 				: html`<div class="px-5 py-2 text-xs text-muted-foreground">Loading project views…</div>`}
 			<div ${ref(projectOuterScrollRef)} class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-5 ${streaming ? STREAMING_BORDER : ""}">
+				${_projectProposalAcceptError ? html`
+					<div class="mb-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm" data-testid="project-proposal-accept-error" role="alert">
+						<div class="font-medium text-destructive">${_projectProposalAcceptError.title}</div>
+						<div class="mt-1 text-foreground/80 whitespace-pre-wrap">${_projectProposalAcceptError.message}</div>
+					</div>
+				` : nothing}
 				${!projectViews || activeView === "settings"
 					? settingsView
 					: activeView === "components"
