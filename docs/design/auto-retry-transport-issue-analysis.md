@@ -98,10 +98,10 @@ No-start clears `nudgePending`, does not increment successful nudge counts, and 
 
 ## Tests that pin the fix
 
-- `tests/auto-retry-policy.test.ts` pins `fetch failed` message-end scheduling, generic 1 s / 5 s / 60 s retries, retry exhaustion, and deterministic exclusions.
-- `tests/session-manager-direct-prompt-lifecycle.test.ts` pins direct and queued dispatch-time `fetch failed` recovery, visible `auto_retry_pending`, recovered-row consumption, fresh prompt supersession, stale tool-call-state clearing, and `auto_retry_cancelled` on exhaustion.
-- `tests/verification-logic.test.ts` and `tests/transient-review-error.test.ts` pin retry classification and verification retry decisions for `fetch failed`, undici codes, and deterministic non-retryable failures.
-- `tests/team-manager-idle-nudge-backoff.test.ts` pins no-start nudge behavior: rejected or parked/queued auto-nudges are not counted or logged as sent before a lead turn starts, and they do not leave `nudgePending` sticky.
+- `tests2/core/auto-retry-policy.test.ts` pins `fetch failed` message-end scheduling, generic 1 s / 5 s / 60 s retries, retry exhaustion, and deterministic exclusions.
+- `tests2/core/session-manager-direct-prompt-lifecycle.test.ts` pins direct and queued dispatch-time `fetch failed` recovery, visible `auto_retry_pending`, recovered-row consumption, fresh prompt supersession, stale tool-call-state clearing, and `auto_retry_cancelled` on exhaustion.
+- `tests2/core/verification-logic.test.ts` and `tests2/core/transient-review-error.test.ts` pin retry classification and verification retry decisions for `fetch failed`, undici codes, and deterministic non-retryable failures.
+- `tests2/core/team-manager-idle-nudge-backoff.test.ts` pins no-start nudge behavior: rejected or parked/queued auto-nudges are not counted or logged as sent before a lead turn starts, and they do not leave `nudgePending` sticky.
 - `tests/e2e/ui/auto-retry-banner.spec.ts` pins banner rendering and clearing for `auto_retry_pending`, `auto_retry_cancelled`, and `agent_start`.
 
 ## Related reference

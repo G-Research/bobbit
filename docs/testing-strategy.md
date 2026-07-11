@@ -823,7 +823,7 @@ suite-layout layers:
   steps, and explicit sequencing should use different `phase` values.
   Component-linked `command: unit` steps also default to 1200s when no explicit
   timeout is set; other command steps keep the generic 300s default. Pinned by
-  `tests/verification-harness-command-scheduling.test.ts`.
+  `tests2/core/verification-harness-command-scheduling.test.ts`.
 - **Activate-skill renderer fixture readiness.** The fixture used to let
   fully-parallel workers rebuild the same esbuild output file in place. A worker
   could load the bundle while another had truncated but not finished writing it,
