@@ -13,12 +13,16 @@
  *     `chunkSizeWarningLimit: 600`).
  *
  * Reads chunks from `dist/ui/assets/` and gzips each via `node:zlib`.
- * **Does not run a build itself** — that would double CI time. The test
- * is auto-discovered by `npm run test:unit` (via the `tests/*.test.ts`
- * pattern); run `npm run test:bundle` to build then assert in one shot.
+ * **Does not run a build itself** — that would double CI time.
  *
- * If `dist/ui/assets/` is missing the test is skipped with a message
- * pointing at the build command.
+ * DETERMINISM GUARD: this test asserts ONLY in the build-first lane, gated on
+ * `BOBBIT_ASSERT_BUNDLE=1` (set by `npm run test:bundle`, which builds `dist/ui`
+ * fresh immediately before). It intentionally does NOT run inside the broad
+ * `test:unit`/lane run, because that run never builds the UI — it would either
+ * skip (no `dist/`) or, worse, assert against a STALE `dist/ui/assets/` left over
+ * from an earlier build and produce a false pass/fail. Gating on the flag makes
+ * the guard reliable without weakening the budgets below. Run `npm run test:bundle`
+ * to build + assert in one shot.
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
@@ -69,7 +73,12 @@ function fmt(bytes: number): string {
 	return `${(bytes / 1024).toFixed(2)} KB`;
 }
 
-test("UI bundle size — main chunk + per-chunk budgets", { skip: !existsSync(ASSETS_DIR) }, () => {
+// Only assert in the build-first lane (npm run test:bundle sets this after a
+// fresh `vite build`). Absent the flag, or with no dist, skip — see the
+// DETERMINISM GUARD note above.
+const ASSERT_ENABLED = process.env.BOBBIT_ASSERT_BUNDLE === "1";
+
+test("UI bundle size — main chunk + per-chunk budgets", { skip: !ASSERT_ENABLED || !existsSync(ASSETS_DIR) }, () => {
 	const entries = readdirSync(ASSETS_DIR)
 		.filter((name) => CHUNK_RE.test(name))
 		.filter((name) => statSync(join(ASSETS_DIR, name)).isFile());
