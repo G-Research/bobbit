@@ -1,5 +1,5 @@
 import { html, LitElement, css } from "lit";
-import { customElement, property, query } from "lit/decorators.js";
+import { property, query } from "lit/decorators.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Copy, Check } from "lucide";
 
@@ -75,7 +75,6 @@ export function closeAnnotationPopover(): void {
   if (_singleton && _singleton.isConnected) _singleton.open = false;
 }
 
-@customElement("annotation-popover")
 export class AnnotationPopover extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   /** DOMRect of the selection range (viewport coordinates). */
@@ -561,6 +560,16 @@ export class AnnotationPopover extends LitElement {
       </div>
     `;
   }
+}
+
+// Guarded registration (not @customElement): keeps this module import-safe when
+// `customElements` is transiently undefined — a lazy import resolving in the
+// happy-dom teardown gap (v2-dom pool:forks/isolate:false window churn) otherwise
+// throws an unhandled "customElements is not defined" that fails the run despite
+// every test passing. In the browser customElements is always present, so this
+// registers identically to @customElement.
+if (typeof customElements !== "undefined" && !customElements.get("annotation-popover")) {
+  customElements.define("annotation-popover", AnnotationPopover);
 }
 
 declare global {
