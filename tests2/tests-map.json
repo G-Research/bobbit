@@ -24,6 +24,10 @@
       "reason": "Native v2 core unit tests for extracted base_ref REST validation grammar and exact error-shape helpers."
     },
     {
+      "path": "tests2/core/deletion-tombstones.test.ts",
+      "reason": "Native v2 unit tests for the deletion-tombstones module (record/read round-trips, idempotency, per-file namespacing, dir creation, missing/corrupt-file tolerance) that guards staff/session/goal resurrection on boot repair."
+    },
+    {
       "path": "tests2/dom/goal-pause-resume-feedback.test.ts",
       "reason": "Failing-first reproducing DOM test for Pause Feedback: no-descendant dashboard Pause, dashboard Resume, and transcript paused-banner Resume controls must immediately disable, show Pausing…/Resuming…, and suppress duplicate POSTs while the gateway request is pending."
     },

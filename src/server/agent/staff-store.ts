@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { recordDeletionTombstone } from "./deletion-tombstones.js";
 
 export type StaffState = "active" | "paused" | "retired";
 export type TriggerType = "schedule" | "git" | "manual" | "goal_created" | "goal_archived";
@@ -160,6 +161,10 @@ export class StaffStore {
 	remove(id: string): void {
 		this.staff.delete(id);
 		this.save();
+		// Durably tombstone this hard-delete so the boot-time headquarters
+		// migration does not resurrect the record from a stale
+		// `.pre-headquarters-id-migration` backup on the next restart.
+		recordDeletionTombstone(this.storeDir, "staff.json", id);
 	}
 
 	getAll(): PersistedStaff[] {

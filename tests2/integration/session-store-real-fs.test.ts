@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
+import { readDeletionTombstones } from "../../src/server/agent/deletion-tombstones.ts";
 
 const roots: string[] = [];
 
@@ -93,6 +94,36 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.ok(
 			warns.some(w => /Failed to parse/.test(w)) && warns.some(w => /Loaded from backup/.test(w)),
 			`expected corrupt-primary and backup-restore warnings, got: ${warns.join("\n")}`,
+		);
+	});
+
+	// purge() is a permanent hard-delete, just like remove(). Without a tombstone
+	// a purged session can be resurrected by the boot-time headquarters migration
+	// from a stale `.pre-headquarters-id-migration` backup. Assert parity: purge
+	// writes the same durable deletion tombstone remove() does.
+	it("purge records a durable deletion tombstone (parity with remove)", () => {
+		const root = freshRoot();
+		const stateDir = path.join(root, "state");
+
+		const store = new SessionStore(stateDir);
+		store.put(makeSession("s-remove"));
+		store.put(makeSession("s-purge"));
+		store.flush();
+
+		store.remove("s-remove");
+		assert.equal(
+			readDeletionTombstones(stateDir, "sessions.json").has("s-remove"),
+			true,
+			"remove must tombstone the id (baseline)",
+		);
+
+		store.archive("s-purge");
+		assert.equal(store.purge("s-purge"), true);
+		assert.equal(store.get("s-purge"), undefined, "purged session must be gone from the store");
+		assert.equal(
+			readDeletionTombstones(stateDir, "sessions.json").has("s-purge"),
+			true,
+			"purge must tombstone the id so the boot migration cannot resurrect it",
 		);
 	});
 
