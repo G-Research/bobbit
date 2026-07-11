@@ -8,7 +8,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import { html } from "lit";
 import { live } from "lit/directives/live.js";
 import { ArrowLeft, Brain, Bug, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
-import { showHeaderToast } from "./render.js";
+import { showHeaderToast } from "./header-toast.js";
 import {
 	getShortcuts,
 	formatBinding,
