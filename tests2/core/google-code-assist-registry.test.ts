@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, isOAuthCapableProvider } from "../../src/server/agent/model-registry.js";
+import { createMemFs } from "../harness/mem-fs.js";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
@@ -40,7 +41,7 @@ beforeEach(() => {
 	// Ensure the API-key `google` provider is NOT authenticated by ambient env.
 	delete process.env.GOOGLE_API_KEY;
 	delete process.env.GEMINI_API_KEY;
-	prefs = new PreferencesStore(path.join(dir, "prefs"));
+	prefs = new PreferencesStore(path.resolve("/memfs/google-code-assist-registry"), createMemFs());
 	invalidateModelCache();
 	clearOAuthCache();
 });

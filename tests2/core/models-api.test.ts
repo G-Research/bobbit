@@ -10,18 +10,17 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
-import fs from "node:fs";
+import { createMemFs } from "../harness/mem-fs.js";
 
-// Create an isolated temp dir for the PreferencesStore (it reads from disk)
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-models-test-"));
+const memfs = createMemFs();
+const stateDir = path.resolve("/memfs/models-test");
 
 // Import after setup
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { getAvailableModels } = await import("../../src/server/agent/model-registry.ts");
 
-const prefs = new PreferencesStore(tmpDir);
+const prefs = new PreferencesStore(stateDir, memfs);
 
 // Fetch models once — all tests validate the same snapshot
 const models = await getAvailableModels(prefs);
@@ -89,6 +88,3 @@ describe("Model registry", () => {
 		assert.equal(model.contextWindow, 272_000);
 	});
 });
-
-// Cleanup
-fs.rmSync(tmpDir, { recursive: true, force: true });
