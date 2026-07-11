@@ -2159,6 +2159,9 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				if ((msg as any).code === "SET_MODEL_FAILED") {
+					this.send({ type: "get_state" });
+				}
 				if ((msg as any).code === "GRANT_ERROR") {
 					// The error frame does not carry a permission request id, so do not
 					// settle/disable all active cards client-side. Refresh from the server
