@@ -2,7 +2,7 @@
 
 Command-based gate verification runs project checks such as type-checks, unit tests, and browser E2E suites from the goal worktree. Those commands can outlive a gateway process, so Bobbit treats them like other durable runtime work: the process identity, logs, and exit status are persisted before the command can continue independently.
 
-This page covers command steps. Reviewer and QA agent resume uses the session restore path; see [llm-review Recovery](llm-review-recovery.md) and [cold restart re-prompting](cold-restart-reprompt.md).
+This page covers command steps. Reviewer and QA agent resume uses the session restore path; see [Verifier Recovery](llm-review-recovery.md) and [cold restart re-prompting](cold-restart-reprompt.md).
 
 ## Why this exists
 
@@ -153,4 +153,4 @@ Two changes fix this:
 | Pure verification semantics | `src/server/agent/verification-logic.ts` |
 | Retained diagnostics | `src/server/agent/gate-diagnostics.ts`, [gate-diagnostics.md](gate-diagnostics.md) |
 
-Primary regression coverage lives in `tests/verification-command-restart-lifecycle.test.ts`, `tests/verification-command-restart-regression.test.ts`, and `tests/verification-harness-restart.test.ts`. The gate-verification UX fixes (slim projection, snapshot liveness/stale, recovery classification, cold-reviewer re-run) are pinned by `tests/gate-verification-ux.test.ts`, with browser regressions in `tests/e2e/ui/gate-list-slim-projection.spec.ts` and `tests/e2e/ui/gate-verification-stale-reconcile.spec.ts`. Real restart-mid-verification behaviour against a live gateway + Docker belongs in `test:manual`.
+Primary regression coverage lives in `tests2/core/verification-command-restart-lifecycle.test.ts`, `tests2/core/verification-command-restart-regression.test.ts`, and `tests2/core/verification-harness-restart.test.ts`. The gate-verification UX fixes (slim projection, snapshot liveness/stale, recovery classification, cold-reviewer re-run) are pinned by `tests2/core/gate-verification-ux.test.ts`, with browser regressions in `tests/e2e/ui/gate-list-slim-projection.spec.ts` and `tests/e2e/ui/gate-verification-stale-reconcile.spec.ts`. Real restart-mid-verification behaviour against a live gateway + Docker belongs in `test:manual`.

@@ -224,7 +224,7 @@ Regression coverage lives in `tests/team-manager-ghost-workers.test.ts`, alongsi
 
 The verification system is split into two modules:
 - **`verification-harness.ts`** - orchestration: session lifecycle, WS event broadcasting, process spawning, retry logic, persistence. Also implements the **blocking-tool** contract used by `verification_result`: a tool extension POSTs a verdict, which resolves the Promise registered when the gate signal started verification. See [docs/blocking-tools.md](blocking-tools.md) for the pattern. The `ask_user_choices` tool uses a different, non-blocking shape - see [docs/non-blocking-ask.md](non-blocking-ask.md).
-- **`verification-logic.ts`** - pure functions extracted for unit testability: `substituteVars` (template variable resolution), `matchExpectFailure` (expect:failure gate evaluation), `groupStepsByPhase`/`getSortedPhases` (phased execution ordering), `partitionOptionalSteps` (optional step filtering), `buildStepCache`/`canSkipAllSteps` (cache reuse for same-commit re-signals), `isTransientReviewError`/`isTransientQaError` (transient failure detection). These are tested in `tests/verification-logic.test.ts` (~65 tests, <1s) without requiring a running server.
+- **`verification-logic.ts`** - pure functions extracted for unit testability: `substituteVars` (template variable resolution), `matchExpectFailure` (expect:failure gate evaluation), `groupStepsByPhase`/`getSortedPhases` (phased execution ordering), `partitionOptionalSteps` (optional step filtering), `buildStepCache`/`canSkipAllSteps` (cache reuse for same-commit re-signals), `isTransientReviewError`/`isTransientQaError` (transient failure detection). These are tested in `tests2/core/verification-logic.test.ts` without requiring a running server.
 
 #### Reviewer `kind` & restart resume
 
@@ -254,9 +254,9 @@ Both are needed because, after a restart, the resumed session is in `status === 
 
 The pattern is now applied at all four reminder sites in `verification-harness.ts`: `_tryResumeFromSession` (the original repro), `runLlmReviewViaSession`, the QA-tester reminder, and the legacy direct-`RpcBridge` reminder. The legacy site has no `SessionManager` injected and so reproduces the shape inline with an `agent_start` listener and the same 10s timeout. A `.catch(() => {})` on every `waitForStreaming` call ensures that an unresponsive agent still falls through to the existing `waitForIdle` race rather than blocking forever - the helper raises the floor without lowering the ceiling.
 
-The live llm-review path is not actually affected by the bug (the kickoff prompt has already pushed the session into `streaming` before any race begins), but it carries the same `waitForStreaming` call for symmetry. Future reminder sites must follow the same pattern. The full reviewer recovery policy is documented in [llm-review Recovery](llm-review-recovery.md).
+The live llm-review path is not actually affected by the bug (the kickoff prompt has already pushed the session into `streaming` before any race begins), but it carries the same `waitForStreaming` call for symmetry. Future reminder sites must follow the same pattern. The full reviewer recovery policy is documented in [Verifier Recovery](llm-review-recovery.md).
 
-Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
+Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests2/core/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
 
 #### Cold-reviewer resume: readiness wait + restart-interrupt routing
 
@@ -272,7 +272,7 @@ The fix has three layers, each a defence the previous one falls through to:
 
 Why `pending` rather than `failed`: a restart is environmental, not a review verdict. Marking the gate `failed` burns the team-lead's trust in the verdict and (pre-fix) forced repeated manual re-signals; leaving it `pending` with a one-line re-signal nudge recovers cleanly with no false negative. Future resume / reminder sites that talk to a possibly-cold revived agent must follow the same shape: `waitForReady` first, a non-default prompt timeout, and route failures through `isRestartInterruptError` / the transient + restart-interrupt step result — never let an RPC timeout escape as a gate failure.
 
-Tests: `tests/verification-resume-restart-prompt.test.ts` (resume-prompt timeout leaves the gate `pending`, never `failed`), `tests/verification-resume-restart-recovery.test.ts` (cold reviewer waits for readiness then passes; rerun-from-scratch fallback reachable when re-attach fails), `tests/verification-logic.test.ts` (`isRestartInterruptError` classification). Key files: `src/server/agent/verification-harness.ts`, `src/server/agent/verification-logic.ts`, `src/server/agent/rpc-bridge.ts` (`prompt` timeout arg), `src/server/agent/session-manager.ts` (`restoreSession` nonInteractive nudge-skip).
+Tests: `tests2/core/verification-resume-restart-prompt.test.ts` (resume-prompt timeout leaves the gate `pending`, never `failed`), `tests2/core/verification-resume-restart-recovery.test.ts` (cold reviewer waits for readiness then passes; rerun-from-scratch fallback reachable when re-attach fails), `tests2/core/verification-logic.test.ts` (`isRestartInterruptError` classification). Key files: `src/server/agent/verification-harness.ts`, `src/server/agent/verification-logic.ts`, `src/server/agent/rpc-bridge.ts` (`prompt` timeout arg), `src/server/agent/session-manager.ts` (`restoreSession` nonInteractive nudge-skip).
 
 #### Atomic step enumeration on `gate_signal`
 
@@ -280,7 +280,7 @@ The `gate_signal` REST handler enumerates the verification step list **synchrono
 
 #### Command-step restart survival
 
-Command-type steps (`npm run test:e2e`, type-check, etc.) survive a gateway restart through durable active-verification metadata, retained stdout/stderr paths, pidfile/nonce identity, heartbeat, process-start-token checks, and atomic exit files. A recovered exit file is a real command verdict; a restart with no durable verdict leaves the gate pending/retryable instead of fabricating a command failure. Timeout/cancel cleanup persists kill intent until Bobbit verifies the command tree is gone. Full design and the symbol-level map are in [docs/verification-restart.md](verification-restart.md); symptom→fix lookup in [debugging.md — Command verification interrupted by gateway restart](debugging.md#command-verification-interrupted-by-gateway-restart). Pinned by `tests/verification-command-restart-lifecycle.test.ts`, `tests/verification-command-restart-regression.test.ts`, `tests/verification-harness-restart.test.ts`, and `tests/e2e/verification-restart-resignal.spec.ts`.
+Command-type steps (`npm run test:e2e`, type-check, etc.) survive a gateway restart through durable active-verification metadata, retained stdout/stderr paths, pidfile/nonce identity, heartbeat, process-start-token checks, and atomic exit files. A recovered exit file is a real command verdict; a restart with no durable verdict leaves the gate pending/retryable instead of fabricating a command failure. Timeout/cancel cleanup persists kill intent until Bobbit verifies the command tree is gone. Full design and the symbol-level map are in [docs/verification-restart.md](verification-restart.md); symptom→fix lookup in [debugging.md — Command verification interrupted by gateway restart](debugging.md#command-verification-interrupted-by-gateway-restart). Pinned by `tests2/core/verification-command-restart-lifecycle.test.ts`, `tests2/core/verification-command-restart-regression.test.ts`, `tests2/core/verification-harness-restart.test.ts`, and `tests/e2e/verification-restart-resignal.spec.ts`.
 
 #### Subprocess tree-kill primitive
 
@@ -294,7 +294,7 @@ Node's `child_process.spawn(..., { timeout })` and direct `process.kill(child.pi
 
 The three `spawn` sites in `VerificationHarness.runCommandStep` (docker-exec, detached restart-survivor, attached-pipe) all route through `spawnTracked`. Cancellation, timeout, recovery cleanup, and shutdown all route through the same primitive, with command-restart recovery adding identity gates before persisted-PID kills. **Never reintroduce `spawn({ timeout })`** — the file header in `spawn-tree.ts` documents why and the same rule applies to any new caller that spawns a shell which may itself spawn descendants (test runners, browser drivers, package managers). Reuse the helper.
 
-Confirm a kill by polling `process.kill(pid, 0)` against the verified step pid — it throws `ESRCH` once the tree is reaped. Live failed-by-timeout steps emit `— killed subprocess tree`; post-restart timeout cleanup records completion only after verified process exit. Pinned by `tests/verification-harness-timeout.test.ts` (unit), `tests/e2e/verification-timeout.spec.ts` (E2E), and restart cleanup coverage in `tests/verification-command-restart-lifecycle.test.ts`. Symptom→fix lookup in [debugging.md — Verification step stuck in `running`](debugging.md#verification-step-stuck-in-running).
+Confirm a kill by polling `process.kill(pid, 0)` against the verified step pid — it throws `ESRCH` once the tree is reaped. Live failed-by-timeout steps emit `— killed subprocess tree`; post-restart timeout cleanup records completion only after verified process exit. Pinned by `tests2/core/verification-harness-timeout.test.ts` (unit), `tests/e2e/verification-timeout.spec.ts` (E2E), and restart cleanup coverage in `tests2/core/verification-command-restart-lifecycle.test.ts`. Symptom→fix lookup in [debugging.md — Verification step stuck in `running`](debugging.md#verification-step-stuck-in-running).
 
 ### Config resolution (3-tier hierarchy)
 
@@ -2723,7 +2723,7 @@ Lit re-renders the modal and live components on property changes; without discip
 
 ### Tests
 
-- `tests/verification-dedup.spec.ts` (+ `tests/fixtures/verification-dedup-*`) - Playwright file:// fixture that dispatches the same `gate-verification-event` 6× and asserts a single rendered occurrence in both `<verification-output-modal>` and `<gate-verification-live>`. This pins the multi-layer guarantee end-to-end on the listener side.
+- `tests2/browser/fixtures/verification-dedup.spec.ts` - Playwright file:// fixture that dispatches the same `gate-verification-event` 6× and asserts a single rendered occurrence in both `<verification-output-modal>` and `<gate-verification-live>`. This pins the multi-layer guarantee end-to-end on the listener side.
 
 ### Key files
 

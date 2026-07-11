@@ -198,6 +198,10 @@
     {
       "path": "tests2/core/chaos-worktree-safety.test.ts",
       "reason": "Reproducing test for the chaos node_modules-wipe goal: pins junction-safe teardown (unlinkReparsePoint / cleanupChaosRoot preserve an external junction target) and the no-inner-node_modules layout (ensureNodeModulesJunction removed). Temp-FS only, external-free core tier. FAILS on HEAD (helpers absent, ensureNodeModulesJunction still defined), passes post-fix."
+    },
+    {
+      "path": "tests2/core/verification-verifier-lifecycle-repro.test.ts",
+      "reason": "Failing-first reproducing tests for Retry Reviewer Resume: verifier llm-review/agent-qa sessions must preserve identity/history, use same-session auto-retry for fetch/connection errors, resurrect dead processes up to 3 times before failing, and give idle agent-qa fair repeated reminder/streaming grace instead of creating blank replacements."
     }
   ],
   "journeys": [
@@ -9830,7 +9834,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "node:test logic suite â€” codemod to vitest; runs in v2-core-isolated because it mutates BOBBIT_AGENT_DIR and asserts agent-dir singleton-sensitive sanitizer path guards.",
       "migrated": true,
       "v2Path": "tests2/core/transcript-sanitizer.test.ts"
     },
