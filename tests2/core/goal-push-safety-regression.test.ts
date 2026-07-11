@@ -20,8 +20,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import type { CommandRunner, ExecFileOptions, ExecFileResult, ExecFileSyncOptions } from "../../src/server/gateway-deps.ts";
 
 import { WorktreePool } from "../../src/server/agent/worktree-pool.ts";
 import {
@@ -37,6 +38,9 @@ import {
 const execFile = promisify(execFileCb);
 const SAFE_BRANCH_REFSPEC = "{{branch}}:refs/heads/{{branch}}";
 const BARE_BRANCH_PUSH = /git push origin \{\{branch\}\}(?!:)/;
+
+let templateRoot: string | undefined;
+let templateOrigin: string | undefined;
 
 async function git(cwd: string, args: string[]): Promise<string> {
 	const { stdout } = await execFile("git", args, { cwd });
@@ -55,21 +59,34 @@ async function gitMaybe(cwd: string, args: string[]): Promise<{ ok: true; stdout
 	}
 }
 
+async function createRemoteTemplate(): Promise<void> {
+	templateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-goal-push-safety-template-"));
+	templateOrigin = path.join(templateRoot, "origin.git");
+	const seed = path.join(templateRoot, "seed");
+
+	await git(templateRoot, ["init", "--bare", "--initial-branch=master", templateOrigin]);
+	await git(templateRoot, ["init", "--initial-branch=master", seed]);
+	await git(seed, ["config", "user.email", "test@test"]);
+	await git(seed, ["config", "user.name", "Test"]);
+	await git(seed, ["config", "core.autocrlf", "false"]);
+	fs.writeFileSync(path.join(seed, "file.txt"), "base\n");
+	await git(seed, ["add", "file.txt"]);
+	await git(seed, ["commit", "-m", "initial"]);
+	await git(seed, ["remote", "add", "origin", templateOrigin]);
+	await git(seed, ["push", "-u", "origin", "master"]);
+}
+
 async function makeRemoteBackedRepo(): Promise<{ root: string; repo: string; origin: string }> {
+	assert.ok(templateOrigin, "remote-backed repo template must be initialized");
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-goal-push-safety-"));
 	const repo = path.join(root, "repo");
 	const origin = path.join(root, "origin.git");
 
-	await git(root, ["init", "--bare", "--initial-branch=master", origin]);
-	await git(root, ["init", "--initial-branch=master", repo]);
+	fs.cpSync(templateOrigin, origin, { recursive: true });
+	await git(root, ["clone", "--local", origin, repo]);
 	await git(repo, ["config", "user.email", "test@test"]);
 	await git(repo, ["config", "user.name", "Test"]);
 	await git(repo, ["config", "core.autocrlf", "false"]);
-	fs.writeFileSync(path.join(repo, "file.txt"), "base\n");
-	await git(repo, ["add", "file.txt"]);
-	await git(repo, ["commit", "-m", "initial"]);
-	await git(repo, ["remote", "add", "origin", origin]);
-	await git(repo, ["push", "-u", "origin", "master"]);
 	await git(repo, ["remote", "set-head", "origin", "master"]);
 
 	return { root, repo, origin };
@@ -86,15 +103,44 @@ async function upstream(cwd: string): Promise<string | null> {
 }
 
 function cleanup(root: string): void {
-	try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
+	try {
+		const repo = path.join(root, "repo");
+		if (fs.existsSync(repo)) {
+			try { execFileSync("git", ["worktree", "prune"], { cwd: repo, stdio: "ignore" }); } catch { /* best-effort */ }
+		}
+		fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+	} catch { /* best-effort */ }
 }
 
-async function cleanupAfterPoolFreshen(root: string): Promise<void> {
-	// claim() starts a fire-and-forget local fetch/reset. Give it a brief chance
-	// to finish before removing the fixture so failure output stays focused on
-	// the upstream regression rather than a deleted temporary origin.
-	await new Promise(resolve => setTimeout(resolve, 500));
-	cleanup(root);
+function createFastPoolRunner(): CommandRunner & { flushBackground: () => Promise<void> } {
+	const pending = new Set<Promise<ExecFileResult>>();
+	const runner: CommandRunner & { flushBackground: () => Promise<void> } = {
+		async execFile(file: string, args: readonly string[], options?: ExecFileOptions): Promise<ExecFileResult> {
+			const promise = (async (): Promise<ExecFileResult> => {
+				if (file === "git" && (args[0] === "fetch" || args[0] === "reset")) {
+					return { stdout: "", stderr: "" };
+				}
+				const { stdout, stderr } = await execFile(file, [...args], options);
+				return { stdout, stderr };
+			})();
+			pending.add(promise);
+			try {
+				return await promise;
+			} finally {
+				pending.delete(promise);
+			}
+		},
+		execFileSync(file: string, args: readonly string[], options?: ExecFileSyncOptions): Buffer | string {
+			return execFileSync(file, [...args], options);
+		},
+		async flushBackground(): Promise<void> {
+			for (let i = 0; i < 3; i += 1) {
+				await new Promise(resolve => setTimeout(resolve, 0));
+				await Promise.allSettled([...pending]);
+			}
+		},
+	};
+	return runner;
 }
 
 function branchPushStep(steps: SeededVerifyStep[] | undefined): string {
@@ -125,9 +171,10 @@ describe("goal/session branch push safety regressions", () => {
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
 
-	beforeAll(() => {
+	beforeAll(async () => {
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
+		await createRemoteTemplate();
 	});
 
 	afterAll(() => {
@@ -135,10 +182,12 @@ describe("goal/session branch push safety regressions", () => {
 		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
 		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
 		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
+		if (templateRoot) cleanup(templateRoot);
 	});
 
 	it("claiming a pool branch must not preserve an inherited origin/master upstream", async () => {
 		const { root, repo } = await makeRemoteBackedRepo();
+		const commandRunner = createFastPoolRunner();
 		try {
 			const poolBranch = "pool/_pool-upstream";
 			const poolWorktree = path.join(root, "repo-wt", "pool-_pool-upstream");
@@ -146,11 +195,12 @@ describe("goal/session branch push safety regressions", () => {
 			await git(poolWorktree, ["branch", "--set-upstream-to=origin/master", poolBranch]);
 			assert.equal(await upstream(poolWorktree), "origin/master", "fixture must start with an inherited origin/master upstream");
 
-			const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 0, commandRunner });
 			pool.registerExternalEntry(poolBranch, poolWorktree);
 
 			const claim = await pool.claim("goal/foo");
 			assert.ok(claim, "pool claim should succeed");
+			await commandRunner.flushBackground();
 
 			const claimedUpstream = await upstream(claim!.worktreePath);
 			assert.ok(
@@ -158,12 +208,14 @@ describe("goal/session branch push safety regressions", () => {
 				`Claimed branch must track origin/goal/foo or have no upstream; actual upstream: ${claimedUpstream ?? "<none>"}`,
 			);
 		} finally {
-			await cleanupAfterPoolFreshen(root);
+			await commandRunner.flushBackground();
+			cleanup(root);
 		}
 	});
 
 	it("claimed pool branch stays local-only even when push is enabled", async () => {
 		const { root, repo, origin } = await makeRemoteBackedRepo();
+		const commandRunner = createFastPoolRunner();
 		const testNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 		try {
 			const poolBranch = "pool/_pool-local-only";
@@ -174,7 +226,7 @@ describe("goal/session branch push safety regressions", () => {
 
 			delete process.env.BOBBIT_TEST_NO_PUSH;
 
-			const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 0, commandRunner });
 			pool.registerExternalEntry(poolBranch, poolWorktree);
 
 			const claim = await pool.claim("goal/foo");
@@ -185,13 +237,14 @@ describe("goal/session branch push safety regressions", () => {
 				"claimed branch must synchronously drop inherited origin/master",
 			);
 
-			await new Promise(resolve => setTimeout(resolve, 500));
+			await commandRunner.flushBackground();
 			assert.equal(await remoteRef(root, origin, "refs/heads/goal/foo"), null, "pool freshen must not publish short-lived branches");
 			assert.notEqual(await upstream(claim!.worktreePath), "origin/goal/foo", "pool freshen must not set upstream to origin/goal/foo");
 		} finally {
 			if (testNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
 			else process.env.BOBBIT_TEST_NO_PUSH = testNoPush;
-			await cleanupAfterPoolFreshen(root);
+			await commandRunner.flushBackground();
+			cleanup(root);
 		}
 	});
 
