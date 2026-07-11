@@ -694,11 +694,22 @@ function routeLegacyProjectStoreFile(
 	const routedNormalKeys = new Set<string>();
 	// Durable deletion tombstones: a backup-only key that was intentionally
 	// hard-deleted AFTER the migration must NOT be resurrected by the
-	// backup-only recovery loop below. Read from both the target and legacy
-	// state dirs (identical in the override in-place case, but be robust) and
-	// union them.
+	// backup-only recovery loop below. Read from the target and legacy state
+	// dirs (identical in the override in-place case, but be robust) AND from
+	// every same-root normal project's own state dir. Under a BOBBIT_DIR/override
+	// install the Headquarters state dir can differ from a same-root normal
+	// project's `<rootPath>/.bobbit/state`; a delete made against that normal
+	// project's store writes its tombstone there, so we must union those dirs in
+	// or the record could resurrect. De-dupe dirs via a Set.
+	const tombstoneDirs = new Set([path.dirname(targetFile), path.dirname(legacyFile)]);
+	for (const project of projectEvidence.current) {
+		const id = String(project.id ?? "");
+		if (id && projectEvidence.sameRootIds.has(id) && typeof project.rootPath === "string") {
+			tombstoneDirs.add(path.join(project.rootPath, ".bobbit", "state"));
+		}
+	}
 	const tombstonedKeys = new Set<string>();
-	for (const dir of new Set([path.dirname(targetFile), path.dirname(legacyFile)])) {
+	for (const dir of tombstoneDirs) {
 		for (const key of readDeletionTombstones(dir, fileName)) tombstonedKeys.add(key);
 	}
 
@@ -811,6 +822,20 @@ function routeLegacyProjectStoreFile(
  * backup is PRESERVED so it stays recoverable. This guarantees "un-tombstoned
  * unrecovered data is never dropped".
  */
+/**
+ * True when any retireable per-store `.pre-headquarters-id-migration` backup is
+ * still present (un-retired) in the Headquarters state dir. Retirement is the
+ * completeness proxy for the B1 marker guard: while an un-retired backup remains
+ * we cannot assume recovery fully accounted for every backup-only key, so the
+ * (now tombstone-safe, idempotent) B1 re-routing must still run.
+ */
+function hasUnretiredHeadquartersBackups(headquartersStateDir: string): boolean {
+	for (const fileName of HEADQUARTERS_RETIREABLE_STORE_FILES) {
+		if (fs.existsSync(path.join(headquartersStateDir, fileName + HEADQUARTERS_BACKUP_SUFFIX))) return true;
+	}
+	return false;
+}
+
 function retireSpentHeadquartersBackups(
 	headquartersStateDir: string,
 	evidence: { current: Record<string, unknown>[]; sameRootIds: Set<string> },
@@ -1120,15 +1145,21 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 			}
 			routeLegacyProjectStoreFile(fileName, legacyFile, targetFile, headquartersDirPath, evidence, diagnostics);
 		}
-	} else if (usingOverride && !sourceIsTarget && sameRootEvidence && alreadyMigrated) {
+	} else if (usingOverride && !sourceIsTarget && sameRootEvidence && alreadyMigrated && !hasUnretiredHeadquartersBackups(headquartersStateDir)) {
 		// Marker guard (layer B / requirement 2): the B1 same-root re-routing loop
-		// is idempotent apart from the resurrection bug, and any legitimately
-		// droppable backup-only record was already merged into live on the first
-		// completed migration. Once the completion marker is present, re-running the
-		// loop can only re-surface records — so skip it entirely on later boots.
+		// is now tombstone-safe and idempotent. Skip it only when recovery is
+		// CONFIRMED COMPLETE — the completion marker is present AND every retireable
+		// per-store backup has already been retired. Retirement is the completeness
+		// proxy: `retireSpentHeadquartersBackups` retires a backup only once every
+		// key it holds is present-in-live or tombstoned, so no un-retired backup ⇒
+		// nothing left to recover ⇒ re-running the loop could only re-surface
+		// records. The marker alone is insufficient (it is written at the END of
+		// every migration regardless of recovery completeness), so gating on the
+		// marker only would hide an unfinished recovery. When an un-retired backup
+		// remains we fall through to the re-routing branch below.
 		// (The ALWAYS-RUN secret relocation / projects repair / store sanitisation
 		// below are NOT gated — they are idempotent and must keep running.)
-		diagnostics.skipped.push("B1 override same-root per-store re-routing: skipped (headquarters-dir migration already complete)");
+		diagnostics.skipped.push("B1 override same-root per-store re-routing: skipped (headquarters-dir migration complete; all spent backups retired)");
 	} else if (usingOverride && !sourceIsTarget && sameRootEvidence) {
 		// B1: BOBBIT_DIR/BOBBIT_PI_DIR-override installs promoted per-store records
 		// (sessions/goals/staff/…) under `headquarters` and left their

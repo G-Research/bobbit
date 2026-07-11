@@ -678,6 +678,39 @@ describe("Headquarters directory migration", () => {
 		);
 	});
 
+	// Gap 2 regression: under a BOBBIT_DIR/override install the Headquarters state
+	// dir (`overrideState`) differs from the same-root normal project's OWN state
+	// dir (`<root>/.bobbit/state`). A delete made against that normal project's
+	// store writes its tombstone to the NORMAL dir — which the recovery loop only
+	// reads once it unions same-root normal project state dirs in. The tombstone
+	// lives ONLY in `<root>/.bobbit/state/.deletion-tombstones.json` (NOT in the HQ
+	// override state dir), so the record resurrects unless that union is honoured.
+	it("honours a tombstone written to a same-root normal project's own state dir (override HQ dir != <root>/.bobbit/state)", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		writeJson(path.join(overrideState, "staff.json"), [staffRecord("survivor", HEADQUARTERS_PROJECT_ID)]);
+		writeJson(path.join(overrideState, "staff.json.pre-headquarters-id-migration"), [staffRecord("survivor", oldId), staffRecord("e2e-guardian", oldId)]);
+		// Tombstone deliberately placed ONLY in the NORMAL project's state dir — the
+		// HQ override state dir has no tombstone file at all.
+		const normalStateDir = path.join(root, ".bobbit", "state");
+		writeJson(path.join(normalStateDir, ".deletion-tombstones.json"), { "staff.json": ["e2e-guardian"] });
+		assert.equal(fs.existsSync(path.join(overrideState, ".deletion-tombstones.json")), false, "precondition: no tombstone in the HQ override state dir");
+
+		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		assert.equal(
+			collectStaffIds(root, overrideState).includes("e2e-guardian"),
+			false,
+			"a tombstone in the same-root normal project's own state dir must suppress resurrection",
+		);
+	});
+
 	// Two-boot byte-stability: a same-root override install where a staff record is
 	// deleted (tombstone written) must stay deleted across TWO boots and the staff
 	// stores must be byte-identical between the boots (proves the repair is a true
@@ -710,9 +743,16 @@ describe("Headquarters directory migration", () => {
 		assert.equal(fs.readFileSync(hqStaffFile, "utf-8"), firstHqBytes, "Headquarters staff.json must be byte-identical across the two boots");
 	});
 
-	// B1 marker guard: once `.headquarters-dir-migrated` is present, the override
-	// same-root per-store re-routing loop must be a no-op on the second boot.
-	it("makes the B1 same-root per-store re-routing a no-op on the second boot once the marker is present", () => {
+	// B1 marker guard: the override same-root per-store re-routing loop must
+	// become a no-op ONCE RECOVERY IS COMPLETE — i.e. the marker is present AND
+	// every spent `.pre-headquarters-id-migration` backup has been retired. The
+	// marker alone is insufficient (it is written at the END of every migration
+	// regardless of recovery completeness). Retirement only runs on a boot AFTER a
+	// completed migration, so the steady no-op state is reached on the THIRD boot:
+	//   boot 1 — first migration (marker absent): reroute, no retire.
+	//   boot 2 — marker present, backup un-retired: reroute (idempotent) + retire.
+	//   boot 3 — marker present, backups retired: true no-op.
+	it("makes the B1 same-root per-store re-routing a no-op once the marker is present AND spent backups are retired", () => {
 		const root = tmpRoot();
 		const override = tmpRoot("bobbit-hq-override-");
 		useIsolatedSecretsDir();
@@ -727,9 +767,45 @@ describe("Headquarters directory migration", () => {
 		const first = migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
 		assert.equal(first.skipped.some(entry => entry.includes("B1 override same-root per-store re-routing: skipped")), false, "first boot must actually run the B1 re-routing loop");
 
+		// Boot 2: marker present but the spent staff backup is not yet retired, so
+		// the (idempotent, tombstone-safe) re-routing must still run and retirement
+		// then retires the now-accounted backup.
 		const second = migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
-		assert.ok(second.skipped.some(entry => entry.includes("B1 override same-root per-store re-routing: skipped")), "second boot must skip the B1 re-routing loop once the marker is present");
-		assert.equal(second.restoredNormalRecords.length, 0, "no records may be re-routed on the second boot");
+		assert.equal(second.skipped.some(entry => entry.includes("B1 override same-root per-store re-routing: skipped")), false, "second boot must still run the loop while an un-retired backup remains");
+		assert.equal(fs.existsSync(path.join(overrideState, "staff.json.pre-headquarters-id-migration")), false, "the fully-accounted staff backup must be retired by the second boot");
+
+		// Boot 3: marker present AND backups retired ⇒ true no-op.
+		const third = migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+		assert.ok(third.skipped.some(entry => entry.includes("B1 override same-root per-store re-routing: skipped")), "third boot must skip the B1 re-routing loop once the marker is present and backups are retired");
+		assert.equal(third.restoredNormalRecords.length, 0, "no records may be re-routed on the no-op boot");
+	});
+
+	// B1 marker guard must NOT hide an unfinished recovery: with the marker
+	// present but an un-retired backup holding an un-tombstoned, never-recovered
+	// key, the re-routing loop must STILL run and recover that key. (Retirement is
+	// the completeness proxy — an un-retired backup means recovery is not proven
+	// complete, so the loop cannot be skipped on the strength of the marker alone.)
+	it("still runs B1 re-routing when the marker is present but an un-retired backup holds an un-recovered key", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		// Simulate a COMPLETED prior migration: marker present at boot start…
+		fs.writeFileSync(path.join(overrideState, ".headquarters-dir-migrated"), "done", "utf-8");
+		// …but a never-recovered, un-tombstoned backup-only key remains. A non-empty
+		// live store is required (an empty store short-circuits the repair).
+		writeJson(path.join(overrideState, "staff.json"), [staffRecord("survivor", HEADQUARTERS_PROJECT_ID)]);
+		writeJson(path.join(overrideState, "staff.json.pre-headquarters-id-migration"), [staffRecord("survivor", oldId), staffRecord("never-recovered", oldId)]);
+		// No tombstone → the backup-only key is legitimately recoverable.
+
+		const result = migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		assert.equal(result.skipped.some(entry => entry.includes("B1 override same-root per-store re-routing: skipped")), false, "the marker alone must not skip re-routing while an un-retired backup with un-recovered data remains");
+		assert.equal(collectStaffIds(root, overrideState).includes("never-recovered"), true, "the un-tombstoned, never-recovered backup-only record must be recovered even though the marker is present");
 	});
 
 	// Sessions & goals get the same tombstone protection as staff (all three route

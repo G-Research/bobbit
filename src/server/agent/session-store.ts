@@ -733,6 +733,10 @@ export class SessionStore {
 		this.generation++;
 		this.sessions.delete(id);
 		this.saveNow();
+		// purge() is a permanent hard-delete, exactly like remove() — durably
+		// tombstone it so the boot-time headquarters migration does not resurrect
+		// the record from a stale `.pre-headquarters-id-migration` backup.
+		recordDeletionTombstone(this.storeDir, "sessions.json", id);
 		return true;
 	}
 
