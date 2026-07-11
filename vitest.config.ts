@@ -20,8 +20,23 @@ import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
  *      grant (BOBBIT_V2_SLOTS_VITEST) with a no-op release; standalone
  *      `test:v2:core` performs its own cross-run reservation. release() is
  *      registered on process exit so the slot isn't leaked.
- *   3. Fallback to 6 only if the ledger call throws.
+ *   3. Ledger grants are capped at 6 by default for the full-suite Vitest
+ *      parent. On Windows/Vitest 3.2, 8 fixed forks can pass every spec and then
+ *      fail the run with `[vitest-worker]: Timeout calling "onTaskUpdate"` while
+ *      the parent drains RPC/reporting updates. This cap preserves coverage and
+ *      retry policy; `VITEST_MAX_FORKS` remains an explicit escape hatch.
+ *   4. Fallback to 6 only if the ledger call throws.
  */
+const STABLE_FULL_SUITE_FORK_CAP = 6;
+
+function capDefaultForks(workerSlots: number): number {
+	const capped = Math.max(1, Math.min(workerSlots, STABLE_FULL_SUITE_FORK_CAP));
+	if (capped < workerSlots) {
+		console.log(`[vitest.config] capping ledger grant from ${workerSlots} to ${capped} forks to avoid Vitest RPC saturation; set VITEST_MAX_FORKS to override.`);
+	}
+	return capped;
+}
+
 function resolveMaxForks(): number {
 	const override = process.env.VITEST_MAX_FORKS;
 	if (override != null && override !== "") {
@@ -31,10 +46,10 @@ function resolveMaxForks(): number {
 	try {
 		const { workerSlots, release } = reserveWorkerSlots("vitest");
 		process.once("exit", release);
-		return Math.max(1, workerSlots);
+		return capDefaultForks(workerSlots);
 	} catch (e) {
-		console.warn(`[vitest.config] ledger reserve failed, falling back to 6 forks: ${(e as Error)?.message ?? e}`);
-		return 6;
+		console.warn(`[vitest.config] ledger reserve failed, falling back to ${STABLE_FULL_SUITE_FORK_CAP} forks: ${(e as Error)?.message ?? e}`);
+		return STABLE_FULL_SUITE_FORK_CAP;
 	}
 }
 
