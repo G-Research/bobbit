@@ -2591,6 +2591,8 @@ html {
 		4px 1px 0 #000,
 		5px 1px 0 #000,
 		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
 		0px 2px 0 #000,
 		1px 2px 0 #1f2937,
 		2px 2px 0 #000,
@@ -2599,11 +2601,17 @@ html {
 		-1px 4px 0 #000,
 		0px 4px 0 #374151,
 		1px 4px 0 #4b5563,
+		2px 4px 0 #000,
 		-1px 5px 0 #000,
 		0px 5px 0 #1f2937,
 		1px 5px 0 #374151,
+		2px 5px 0 #000,
 		0px 6px 0 #000,
-		1px 6px 0 #000;
+		1px 6px 0 #000,
+		8px 6px 0 #000,
+		9px 6px 0 #000,
+		7px 7px 0 #f97316,
+		8px 7px 0 #1f2937;
 	}
 	/* Back to normal after rightward hops. */
 	57% { box-shadow:
@@ -2672,6 +2680,8 @@ html {
 		4px 1px 0 #000,
 		5px 1px 0 #000,
 		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
 		0px 2px 0 #000,
 		1px 2px 0 #1f2937,
 		2px 2px 0 #000,
@@ -2680,11 +2690,17 @@ html {
 		-1px 4px 0 #000,
 		0px 4px 0 #374151,
 		1px 4px 0 #4b5563,
+		2px 4px 0 #000,
 		-1px 5px 0 #000,
 		0px 5px 0 #1f2937,
 		1px 5px 0 #374151,
+		2px 5px 0 #000,
 		0px 6px 0 #000,
-		1px 6px 0 #000;
+		1px 6px 0 #000,
+		8px 6px 0 #000,
+		9px 6px 0 #000,
+		7px 7px 0 #f97316,
+		8px 7px 0 #1f2937;
 	}
 	/* Back to normal after up-right glance. */
 	65% { box-shadow:
@@ -2753,6 +2769,8 @@ html {
 		4px 1px 0 #000,
 		5px 1px 0 #000,
 		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
 		0px 2px 0 #000,
 		1px 2px 0 #1f2937,
 		2px 2px 0 #000,
@@ -2761,11 +2779,17 @@ html {
 		-1px 4px 0 #000,
 		0px 4px 0 #374151,
 		1px 4px 0 #4b5563,
+		2px 4px 0 #000,
 		-1px 5px 0 #000,
 		0px 5px 0 #1f2937,
 		1px 5px 0 #374151,
+		2px 5px 0 #000,
 		0px 6px 0 #000,
-		1px 6px 0 #000;
+		1px 6px 0 #000,
+		8px 6px 0 #000,
+		9px 6px 0 #000,
+		7px 7px 0 #f97316,
+		8px 7px 0 #1f2937;
 	}
 	/* Back to normal. */
 	98% { box-shadow:
