@@ -176,6 +176,10 @@
       "reason": "v2-native gateway-per-worker session lifecycle API coverage."
     },
     {
+      "path": "tests2/integration/session-store-real-fs.test.ts",
+      "reason": "Canonical real-filesystem fidelity for SessionStore atomic rename cleanup, backup rotation/restore after corrupt primary, and recursive orphan transcript traversal."
+    },
+    {
       "path": "tests2/browser/journeys/session-lifecycle.journey.spec.ts",
       "reason": "v2 browser smoke journey — multi-feature integration test, no legacy equivalent."
     },
