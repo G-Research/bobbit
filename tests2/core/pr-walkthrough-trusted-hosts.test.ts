@@ -214,6 +214,10 @@ describe("parseGithubRef enterprise resolve path", () => {
 		assert.equal(gh?.number, "3");
 		assert.equal(parseGithubRefForTesting("https://github.example.com/acme/widgets/pull/3", undefined, "/tmp", []), undefined);
 	});
+
+	it("drops unsafe PR metadata URLs before local-SHA GitHub fallback persists them", () => {
+		assert.equal(parseGithubRefForTesting("javascript:alert(1)", 42, "/tmp", []), undefined);
+	});
 });
 
 describe("resolveGithubPr host routing and token scoping", () => {

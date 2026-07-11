@@ -86,13 +86,14 @@ describe("dev-boot-timing sink", () => {
 	});
 
 	it("trims the log to the most-recent entries once it passes the byte cap", () => {
-		// ~4 KB per line × 400 lines ≈ 1.6 MB > 1 MB cap → trims to last 300.
-		const pad = "y".repeat(4 * 1024);
-		for (let i = 0; i < 400; i++) recordBootTiming(sample({ sessionId: `n${i}`, pad } as Partial<BootTimingSample>), stateDir);
+		const trimOptions = { maxFileBytes: 500, keepLines: 3 };
+		const pad = "y".repeat(80);
+		for (let i = 0; i < 8; i++) {
+			recordBootTiming(sample({ sessionId: `n${i}`, pad } as Partial<BootTimingSample>), stateDir, trimOptions);
+		}
+
 		const kept = readBootTimings(1000, stateDir);
-		assert.ok(kept.length <= 300, `expected ≤300 retained lines, got ${kept.length}`);
-		// The newest sample must survive the trim.
-		assert.equal(kept[kept.length - 1].sessionId, "n399");
+		assert.deepEqual(kept.map((entry) => entry.sessionId), ["n5", "n6", "n7"]);
 	});
 
 	it("skips malformed lines when reading", () => {

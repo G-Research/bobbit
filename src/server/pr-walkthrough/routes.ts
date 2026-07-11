@@ -993,9 +993,19 @@ function typedRouteError(err: unknown): { status: number; extra: Record<string, 
 	};
 }
 
+const optionalPrModuleLoaders: Record<string, () => Promise<any>> = {
+	"card-synthesis": () => import("./card-synthesis.js"),
+	"export-mapper": () => import("./export-mapper.js"),
+	"git-changeset": () => import("./git-changeset.js"),
+	"github-adapter": () => import("./github-adapter.js"),
+	"walkthrough-store": () => import("./walkthrough-store.js"),
+};
+
 async function optionalPrModule(name: string): Promise<any | undefined> {
+	const load = optionalPrModuleLoaders[name];
+	if (!load) return undefined;
 	try {
-		return await import(`./${name}.js`);
+		return await load();
 	} catch (err: any) {
 		if (err?.code === "ERR_MODULE_NOT_FOUND" || /Cannot find module|module not found/i.test(String(err?.message))) return undefined;
 		throw err;

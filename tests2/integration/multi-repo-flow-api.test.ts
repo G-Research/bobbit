@@ -73,10 +73,14 @@ async function registerMultiRepoProject(): Promise<{ id: string; rootPath: strin
 }
 
 test.describe("multi-repo flow API/data paths", () => {
-	test("worktree_root structured endpoint round-trips", async () => {
-		test.setTimeout(60_000);
+	test("multi-repo project exposes structured data and per-repo worktree lifecycle", async () => {
+		test.setTimeout(120_000);
 		const project = await registerMultiRepoProject();
+		let goalId: string | undefined;
+
 		try {
+			// Keep the two structured endpoint assertions in the representative
+			// route-flow test so this suite pays the expensive project cleanup once.
 			const customRoot = path.join(os.tmpdir(), `bobbit-wt-${Date.now()}`);
 			const put = await apiFetch(`/api/projects/${project.id}/config`, {
 				method: "PUT",
@@ -84,21 +88,14 @@ test.describe("multi-repo flow API/data paths", () => {
 			});
 			expect(put.status).toBeLessThan(300);
 
-			const res = await apiFetch(`/api/projects/${project.id}/structured`);
-			const data = await res.json();
-			expect(data.worktree_root).toBe(customRoot);
-		} finally {
-			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
-			project.cleanup();
-		}
-	});
+			const structuredRes = await apiFetch(`/api/projects/${project.id}/structured`);
+			expect(structuredRes.status).toBe(200);
+			const structured = await structuredRes.json();
+			expect(structured.worktree_root).toBe(customRoot);
+			expect(Array.isArray(structured?.components)).toBe(true);
+			const repos = new Set((structured.components as Array<{ repo?: string }>).map(c => c.repo || "."));
+			expect(repos.size).toBeGreaterThan(1);
 
-	test("multi-repo goal: per-repo worktrees on disk, then archive cleanup", async () => {
-		test.setTimeout(120_000);
-		const project = await registerMultiRepoProject();
-		let goalId: string | undefined;
-
-		try {
 			// Drive goal creation entirely via the API so this data-path coverage
 			// stays stable across UI flow changes.
 			//
@@ -161,27 +158,6 @@ test.describe("multi-repo flow API/data paths", () => {
 			}
 		} finally {
 			if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
-			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
-			project.cleanup();
-		}
-	});
-
-	test("structured endpoint surfaces a >1 repo count for the goal-form indicator", async () => {
-		test.setTimeout(60_000);
-		const project = await registerMultiRepoProject();
-
-		try {
-			// The goal-form's multi-repo indicator template is guarded by
-			// `componentSummary?.multiRepo`, which derives from
-			// `/api/projects/:id/structured`. This test asserts that data path:
-			// register the project, GET /structured, and verify a >1 repo count.
-			const res = await apiFetch(`/api/projects/${project.id}/structured`);
-			expect(res.status).toBe(200);
-			const data = await res.json();
-			expect(Array.isArray(data?.components)).toBe(true);
-			const repos = new Set((data.components as Array<{ repo?: string }>).map(c => c.repo || "."));
-			expect(repos.size).toBeGreaterThan(1);
-		} finally {
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 		}

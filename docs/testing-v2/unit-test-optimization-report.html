@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Unit Test Optimization Report</title>
+  <style>
+    :root {
+      --chart-1: oklch(0.52 0.18 250);
+      --chart-3: oklch(0.50 0.16 145);
+      --positive: oklch(0.55 0.15 145);
+      --warning: oklch(0.62 0.15 75);
+      --info: oklch(0.57 0.14 245);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      background: var(--background);
+      color: var(--foreground);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, color-mix(in oklch, var(--chart-1) 14%, transparent), transparent 34rem),
+        radial-gradient(circle at top right, color-mix(in oklch, var(--chart-3) 10%, transparent), transparent 28rem),
+        var(--background);
+      color: var(--foreground);
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 2rem));
+      margin: 0 auto;
+      padding: 3rem 0 4rem;
+    }
+
+    header {
+      display: grid;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      padding: 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: 1.25rem;
+      background: color-mix(in oklch, var(--card) 92%, transparent);
+      box-shadow: 0 1rem 3rem color-mix(in oklch, var(--foreground) 8%, transparent);
+    }
+
+    h1, h2, h3, p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.7rem);
+      line-height: 1;
+      letter-spacing: -0.05em;
+    }
+
+    h2 {
+      font-size: clamp(1.35rem, 2vw, 1.85rem);
+      letter-spacing: -0.03em;
+      margin-bottom: 0.75rem;
+    }
+
+    h3 {
+      font-size: 1rem;
+      letter-spacing: -0.01em;
+    }
+
+    .lede {
+      max-width: 78ch;
+      color: var(--muted-foreground);
+      font-size: 1.05rem;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.38rem 0.7rem;
+      border: 1px solid color-mix(in oklch, var(--primary) 34%, var(--border));
+      border-radius: 999px;
+      background: color-mix(in oklch, var(--primary) 10%, transparent);
+      color: var(--foreground);
+      font-size: 0.85rem;
+      font-weight: 650;
+    }
+
+    section {
+      margin-top: 1rem;
+      padding: 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      background: color-mix(in oklch, var(--card) 90%, transparent);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 1rem;
+    }
+
+    .span-4 { grid-column: span 4; }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
+
+    .metric {
+      min-height: 10rem;
+      display: grid;
+      align-content: space-between;
+      gap: 1rem;
+      padding: 1rem;
+      border: 1px solid var(--border);
+      border-radius: 0.9rem;
+      background: var(--card);
+    }
+
+    .metric strong {
+      display: block;
+      font-size: clamp(1.9rem, 4vw, 3rem);
+      line-height: 1;
+      letter-spacing: -0.05em;
+    }
+
+    .metric span,
+    .note,
+    figcaption,
+    small {
+      color: var(--muted-foreground);
+    }
+
+    .metric.pass {
+      border-color: color-mix(in oklch, var(--positive) 38%, var(--border));
+      background: color-mix(in oklch, var(--positive) 9%, var(--card));
+    }
+
+    .metric.warn {
+      border-color: color-mix(in oklch, var(--warning) 38%, var(--border));
+      background: color-mix(in oklch, var(--warning) 9%, var(--card));
+    }
+
+    .bar-list {
+      display: grid;
+      gap: 0.8rem;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: minmax(12rem, 1.2fr) minmax(14rem, 2fr) auto;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .bar-label {
+      font-weight: 650;
+    }
+
+    .bar-track {
+      height: 0.85rem;
+      overflow: hidden;
+      border-radius: 999px;
+      background: color-mix(in oklch, var(--muted-foreground) 14%, transparent);
+      border: 1px solid var(--border);
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--chart-1), var(--chart-3));
+    }
+
+    .delta {
+      min-width: 4.5rem;
+      color: var(--positive);
+      font-weight: 750;
+      text-align: right;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 0.8rem;
+      background: var(--card);
+    }
+
+    th, td {
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted-foreground);
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    code {
+      padding: 0.1rem 0.28rem;
+      border: 1px solid var(--border);
+      border-radius: 0.35rem;
+      background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
+      color: var(--foreground);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 1.2rem;
+    }
+
+    li + li {
+      margin-top: 0.4rem;
+    }
+
+    .callout {
+      border-color: color-mix(in oklch, var(--info) 42%, var(--border));
+      background: color-mix(in oklch, var(--info) 8%, var(--card));
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.8rem;
+    }
+
+    .status {
+      padding: 0.85rem;
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      background: var(--card);
+    }
+
+    .status b {
+      color: var(--positive);
+    }
+
+    .footer-note {
+      margin-top: 1rem;
+      color: var(--muted-foreground);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 860px) {
+      main {
+        width: min(100vw - 1rem, 1180px);
+        padding-top: 1rem;
+      }
+
+      .span-4,
+      .span-6,
+      .span-8 {
+        grid-column: span 12;
+      }
+
+      .bar-row {
+        grid-template-columns: 1fr;
+      }
+
+      .delta {
+        text-align: left;
+      }
+
+      .status-grid {
+        grid-template-columns: 1fr;
+      }
+
+      table {
+        display: block;
+        overflow-x: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="pill-row">
+        <span class="pill">Bobbit Test Suite v2</span>
+        <span class="pill">Unit-test optimization</span>
+        <span class="pill">Committed performance report</span>
+      </div>
+      <h1>Before/after unit-test performance report</h1>
+      <p class="lede">
+        This report summarizes the latest v2 unit-test runtime cuts. The branch restores the bundle-size guard, trims git-heavy integration fixtures, preserves conservative cleanup, defers heavy imports in focused tests, and documents how to capture the next comparable full-suite profile.
+      </p>
+    </header>
+
+    <section>
+      <h2>Executive summary</h2>
+      <div class="grid">
+        <article class="metric warn span-4">
+          <div>
+            <strong>~606.5 s</strong>
+            <span>Latest full-suite profiled baseline</span>
+          </div>
+          <small>859 files, 7,466 tests, one bundle-size failure</small>
+        </article>
+        <article class="metric pass span-4">
+          <div>
+            <strong>~463.64 KB</strong>
+            <span><code>app-session-runtime</code> raw chunk after the bundle fix</span>
+          </div>
+          <small>Down from 604.43 KB and back under the 600 KB raw budget</small>
+        </article>
+        <article class="metric pass span-4">
+          <div>
+            <strong>42.12 s</strong>
+            <span>Targeted merged validation run</span>
+          </div>
+          <small>17 files / 142 tests covering the optimized hotspot paths</small>
+        </article>
+      </div>
+      <p class="footer-note">
+        The implementation gate passed the full workflow, including build and type-check validation. A fresh full-suite after profile is still owed from a dependency-ready checkout; no full-suite savings are inferred from the targeted run.
+      </p>
+    </section>
+
+    <section>
+      <h2>Baseline profile</h2>
+      <div class="grid">
+        <article class="metric span-4">
+          <div>
+            <strong>~40.9 min</strong>
+            <span>Summed module/file runtime</span>
+          </div>
+        </article>
+        <article class="metric span-4">
+          <div>
+            <strong>~9.6 min</strong>
+            <span>Summed hook time</span>
+          </div>
+          <small>Dominated by repo-heavy integration setup and cleanup</small>
+        </article>
+        <article class="metric span-4">
+          <div>
+            <strong>~4.4 min</strong>
+            <span>Summed collect/import time</span>
+          </div>
+          <small>Server-heavy graphs visible in focused core/dom tests</small>
+        </article>
+      </div>
+      <table style="margin-top: 1rem;">
+        <thead>
+          <tr>
+            <th>Hotspot group</th>
+            <th>Baseline symptom</th>
+            <th>Optimization direction</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Repo/git-heavy integration suites</td>
+            <td>Base-ref, commit-file-diffs, sidebar GitHub link, multi-repo flow, and PR walkthrough were among the slowest files.</td>
+            <td>Reuse cheaper fixture shapes and move pure validation/error-shape checks out of route-level git setup.</td>
+          </tr>
+          <tr>
+            <td>Cleanup residuals</td>
+            <td>Repeated integration cleanup dominated several <code>afterEach</code> totals.</td>
+            <td>Track uncertain cleanup and skip no-op work only when state is known clean.</td>
+          </tr>
+          <tr>
+            <td>Collection/import hotspots</td>
+            <td>Small tests paid for broad server/gateway imports before assertions ran.</td>
+            <td>Defer heavy imports until the assertions that need them.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Optimized hotspot coverage</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Area</th>
+            <th>Runtime cut</th>
+            <th>Coverage retained</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>base-ref-api</code></td>
+            <td>Reduced repeated repository setup and cleanup in route-level cases.</td>
+            <td>Representative API coverage for base-ref behavior stays in integration tests.</td>
+          </tr>
+          <tr>
+            <td><code>commit-file-diffs-api</code></td>
+            <td>Trimmed git fixture setup for commit diff scenarios.</td>
+            <td>Real route behavior remains covered where file diffs depend on repository state.</td>
+          </tr>
+          <tr>
+            <td>Sidebar GitHub link</td>
+            <td>Reworked the fixture path used for fork/GitHub-link assertions.</td>
+            <td>Route-level smoke coverage remains for GitHub-link behavior.</td>
+          </tr>
+          <tr>
+            <td>Multi-repo flow</td>
+            <td>Consolidated the multi-repo integration flow to avoid repeated heavy setup.</td>
+            <td>End-to-end multi-repo routing behavior remains represented.</td>
+          </tr>
+          <tr>
+            <td>PR Walkthrough</td>
+            <td>Optimized suite setup and replaced the Vite-unsafe optional module import template.</td>
+            <td>PR Walkthrough route behavior and optional module loading remain covered.</td>
+          </tr>
+          <tr>
+            <td>Bundle-size guard</td>
+            <td><code>app-session-runtime</code> dropped from 604.43 KB raw to ~463.64 KB raw.</td>
+            <td>The 600 KB raw chunk budget remains unchanged.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>What changed</h2>
+      <div class="grid">
+        <article class="span-6 status">
+          <h3>Bundle boundary</h3>
+          <p class="note"><code>header-toast</code> was split away from the app render graph so session/runtime callers no longer pull <code>render.ts</code> into <code>app-session-runtime</code>.</p>
+        </article>
+        <article class="span-6 status">
+          <h3>Git and worktree fixtures</h3>
+          <p class="note">Hotspot integration suites now use cheaper fixture shapes while keeping representative route-level coverage for behavior that depends on real repository state.</p>
+        </article>
+        <article class="span-6 status">
+          <h3>Cleanup correctness</h3>
+          <p class="note">The in-process harness tracks uncertain cleanup and keeps regression coverage for sweeps that must still run when state is uncertain.</p>
+        </article>
+        <article class="span-6 status">
+          <h3>Import deferral</h3>
+          <p class="note">Core/dom tests that only need narrow assertions defer server-heavy imports until the assertion path needs them.</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>Validation evidence</h2>
+      <div class="status-grid">
+        <div class="status"><b>Passed:</b> implementation gate full workflow after the merged runtime-cut changes.</div>
+        <div class="status"><b>Passed:</b> targeted merged run covering 17 hotspot files / 142 tests in 42.12 s.</div>
+        <div class="status"><b>Passed:</b> <code>npm run build</code> during implementation validation.</div>
+        <div class="status"><b>Passed:</b> <code>npm run check</code> during implementation validation.</div>
+      </div>
+      <p class="footer-note">A documentation-agent attempt to rerun the profiler failed before collection because this worktree could not resolve the <code>vitest</code> package. Treat that as an environment caveat, not a test result.</p>
+    </section>
+
+    <section>
+      <h2>Repeatable profiling workflow</h2>
+      <p class="lede">Run from a checkout with dependencies installed. Keep raw artifacts under <code>.profiles/</code>; commit only distilled docs or reports.</p>
+      <table style="margin-top: 1rem;">
+        <thead>
+          <tr>
+            <th>Goal</th>
+            <th>Command</th>
+            <th>Use</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Full suite timing</td>
+            <td><code>npm run test:v2:profile-hooks -- --top 30</code></td>
+            <td>Primary before/after comparison for wall time, summed file runtime, residuals, and cleanup counters.</td>
+          </tr>
+          <tr>
+            <td>Single integration hotspot</td>
+            <td><code>npm run test:v2:profile-hooks -- --project v2-integration tests2/integration/base-ref-api.test.ts --top 20</code></td>
+            <td>Focused validation while preserving the profiler's report shape.</td>
+          </tr>
+          <tr>
+            <td>Parse an existing JSON artifact</td>
+            <td><code>node scripts/testing-v2/profile-hooks.mjs --from-json .profiles/testing-v2/hook-profile/&lt;run&gt;/vitest.json --top 30</code></td>
+            <td>Regenerate <code>report.md</code> / <code>report.json</code> without rerunning tests.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="footer-note">Vitest JSON does not provide stable per-hook timings. The profiler's file residual is directional and may include hooks, module evaluation, fixtures, and reporter overhead.</p>
+    </section>
+
+    <section class="callout">
+      <h2>Remaining measurement caveats</h2>
+      <ul>
+        <li>The targeted 42.12 s run is not a substitute for a full-suite after profile.</li>
+        <li>Machine load affects wall-clock comparisons; use summed file runtime and residuals alongside wall time.</li>
+        <li>Cleanup counters are available only for integration harness paths that emit stats into <code>BOBBIT_V2_HOOK_PROFILE_DIR</code>.</li>
+        <li>Do not skip uncertain cleanup to improve timings; leak detection and conservative sweeps are part of the invariant.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Conclusion</h2>
+      <p class="lede">
+        The branch restores the bundle guard and addresses the measured git/repo, cleanup, and import hotspots without weakening coverage or leak safety. The next durable deliverable is an apples-to-apples full-suite after profile from a dependency-ready checkout.
+      </p>
+    </section>
+  </main>
+</body>
+</html>

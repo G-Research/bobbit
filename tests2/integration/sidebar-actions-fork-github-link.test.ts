@@ -15,12 +15,10 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-	agentEndPredicate,
 	apiFetch,
-	connectWs,
 	createGoal,
 	defaultProjectId,
 	deleteGoal,
@@ -42,16 +40,22 @@ async function pollUntil<T>(
 	}
 }
 
-// Fork clones the source transcript, so the source needs a non-empty `.jsonl`
-// before forking. Driving one prompt to completion populates `agentSessionFile`.
-async function sendPromptAndWait(id: string, text: string): Promise<void> {
-	const ws = await connectWs(id);
-	try {
-		ws.send({ type: "prompt", text });
-		await ws.waitFor(agentEndPredicate(), 10_000);
-	} finally {
-		ws.close();
-	}
+// Fork clones the source transcript, so seed the already-persisted mock-agent
+// `.jsonl` directly instead of driving a prompt turn. The fork endpoint only
+// needs a non-empty production-shaped transcript, and prompt/WS fidelity is
+// covered in cheaper, dedicated suites.
+async function seedSessionTranscript(gateway: any, sessionId: string, entries: unknown[]): Promise<string> {
+	const jsonlPath = await pollUntil<string>(() => {
+		const file = gateway.sessionManager.getPersistedSession(sessionId)?.agentSessionFile;
+		return file || "";
+	}, { timeoutMs: 10_000, intervalMs: 100, label: `session ${sessionId} jsonl path persisted` });
+	mkdirSync(dirname(jsonlPath), { recursive: true });
+	appendFileSync(jsonlPath, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+	return jsonlPath;
+}
+
+function transcriptMessage(id: string, text: string): unknown {
+	return { type: "message", id, message: { role: "user", content: [{ type: "text", text }] } };
 }
 
 async function getPersisted(id: string): Promise<any> {
@@ -164,19 +168,20 @@ function appendOldCwdMessageContentSentinels(jsonlPath: string, cwd: string, mar
 
 test.describe.serial("sidebar actions server endpoints", () => {
 	test("GET /api/goals/:id/github-link returns PR, branch fallback, and unavailable states", async ({ gateway }) => {
-		const prGoal = await createGoal({ title: `sidebar pr ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
+		const linkGoal = await createGoal({ title: `sidebar link ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
 		const noWorktreeGoal = await createGoal({ title: `sidebar no worktree ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
-		const branchGoal = await createGoal({ title: `sidebar branch ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
 		try {
 			const repo = gitCwd();
-			gateway.sessionManager.getGoalStoreForProject(prGoal.projectId).update(prGoal.id, {
+			try { execFileSync("git", ["remote", "remove", "origin"], { cwd: repo, stdio: "ignore" }); } catch { /* ignore */ }
+			execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widget.git"], { cwd: repo, stdio: "pipe" });
+			gateway.sessionManager.getGoalStoreForProject(linkGoal.projectId).update(linkGoal.id, {
 				branch: "feature/sidebar-pr-cache",
 				repoPath: repo,
 				cwd: repo,
 				worktreePath: repo,
 			});
-			gateway.sessionManager.prStatusStore.set(prGoal.id, { state: "OPEN", url: "https://github.com/acme/widget/pull/123" });
-			const prResp = await apiFetch(`/api/goals/${prGoal.id}/github-link`);
+			gateway.sessionManager.prStatusStore.set(linkGoal.id, { state: "OPEN", url: "https://github.com/acme/widget/pull/123" });
+			const prResp = await apiFetch(`/api/goals/${linkGoal.id}/github-link`);
 			expect(prResp.status).toBe(200);
 			expect(await prResp.json()).toMatchObject({ available: true, kind: "pr", url: "https://github.com/acme/widget/pull/123" });
 
@@ -188,11 +193,10 @@ test.describe.serial("sidebar actions server endpoints", () => {
 			expect(missingResp.status).toBe(200);
 			expect(await missingResp.json()).toMatchObject({ available: false, reason: "goal-not-found" });
 
-			try { execFileSync("git", ["remote", "remove", "origin"], { cwd: repo, stdio: "ignore" }); } catch { /* ignore */ }
-			execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widget.git"], { cwd: repo, stdio: "pipe" });
 			const branch = "feature/sidebar-actions";
-			gateway.sessionManager.getGoalStoreForProject(branchGoal.projectId).update(branchGoal.id, { branch, repoPath: repo, cwd: repo, worktreePath: repo });
-			const branchResp = await apiFetch(`/api/goals/${branchGoal.id}/github-link`);
+			gateway.sessionManager.prStatusStore.remove(linkGoal.id);
+			gateway.sessionManager.getGoalStoreForProject(linkGoal.projectId).update(linkGoal.id, { branch, repoPath: repo, cwd: repo, worktreePath: repo });
+			const branchResp = await apiFetch(`/api/goals/${linkGoal.id}/github-link`);
 			expect(branchResp.status).toBe(200);
 			expect(await branchResp.json()).toMatchObject({
 				available: true,
@@ -200,9 +204,8 @@ test.describe.serial("sidebar actions server endpoints", () => {
 				url: "https://github.com/acme/widget/tree/feature%2Fsidebar-actions",
 			});
 		} finally {
-			await deleteGoal(prGoal.id);
+			await deleteGoal(linkGoal.id);
 			await deleteGoal(noWorktreeGoal.id);
-			await deleteGoal(branchGoal.id);
 		}
 	});
 });
@@ -268,7 +271,9 @@ test.describe.serial("fork worktree choice", () => {
 			expect(srcRec.projectId).toBe(projectId);
 			expect(srcRec.worktreePath).toBeTruthy();
 			expect(srcRec.cwd).toBe(srcRec.worktreePath);
-			await sendPromptAndWait(sourceId, "FORK_WT_MARKER hello from worktree");
+			await seedSessionTranscript(gateway, sourceId, [
+				transcriptMessage(`fork-wt-${sourceId}`, "FORK_WT_MARKER hello from worktree"),
+			]);
 
 			// newWorktree=true → fresh worktree + branch, distinct from the source.
 			const trueResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
@@ -352,12 +357,9 @@ test.describe.serial("fork worktree choice", () => {
 			expect(branchExists(repoPath, srcRec.branch), "source branch should exist before staling it").toBe(true);
 
 			const transcriptMarker = `FORK_STALE_CWD_TRANSCRIPT_${Date.now()}`;
-			await sendPromptAndWait(sourceId!, `${transcriptMarker} hello from stale fork source`);
-
-			const sourceJsonl = await pollUntil<string>(() => {
-				const file = gateway.sessionManager.getPersistedSession(sourceId!)?.agentSessionFile;
-				return file && existsSync(file) ? file : "";
-			}, { timeoutMs: 10_000, intervalMs: 100, label: "source session jsonl exists" });
+			const sourceJsonl = await seedSessionTranscript(gateway, sourceId!, [
+				transcriptMessage(`${transcriptMarker}-user`, `${transcriptMarker} hello from stale fork source`),
+			]);
 			ensureStaleRuntimeCwdMetadata(sourceJsonl, srcRec.worktreePath, sourceId!);
 			const contentMarker = `FORK_STALE_CWD_CONTENT_${Date.now()}`;
 			const { userLine, assistantLine } = appendOldCwdMessageContentSentinels(sourceJsonl, srcRec.worktreePath, contentMarker);

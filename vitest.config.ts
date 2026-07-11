@@ -1,3 +1,5 @@
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { defineConfig } from "vitest/config";
 import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
 
@@ -11,7 +13,9 @@ import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
  *     `shared.retry` note below and docs/testing-strategy.md "Concurrency &
  *     budgets". NB: vitest's key is `retry` (singular); the earlier `retries: 0`
  *     here was a silently-ignored no-op — vitest never applied it.
- *   - three projects: v2-core (node), v2-dom (happy-dom), v2-integration (node).
+ *   - projects: v2-core (node), v2-dom (happy-dom), v2-integration (node).
+ *     On Windows, broad v2-core is split into sequenced shards to keep Vitest's
+ *     worker RPC task-update queue below the post-run timeout threshold.
  *
  * `maxForks` is derived from the concurrency ledger so the 5-way concurrency
  * proof's `sum(workerSlots) <= cores` invariant holds. Resolution precedence:
@@ -20,8 +24,23 @@ import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
  *      grant (BOBBIT_V2_SLOTS_VITEST) with a no-op release; standalone
  *      `test:v2:core` performs its own cross-run reservation. release() is
  *      registered on process exit so the slot isn't leaked.
- *   3. Fallback to 6 only if the ledger call throws.
+ *   3. Ledger grants are capped at 6 by default for the full-suite Vitest
+ *      parent. On Windows/Vitest 3.2, 8 fixed forks can pass every spec and then
+ *      fail the run with `[vitest-worker]: Timeout calling "onTaskUpdate"` while
+ *      the parent drains RPC/reporting updates. This cap preserves coverage and
+ *      retry policy; `VITEST_MAX_FORKS` remains an explicit escape hatch.
+ *   4. Fallback to 6 only if the ledger call throws.
  */
+const STABLE_FULL_SUITE_FORK_CAP = 6;
+
+function capDefaultForks(workerSlots: number): number {
+	const capped = Math.max(1, Math.min(workerSlots, STABLE_FULL_SUITE_FORK_CAP));
+	if (capped < workerSlots) {
+		console.log(`[vitest.config] capping ledger grant from ${workerSlots} to ${capped} forks to avoid Vitest RPC saturation; set VITEST_MAX_FORKS to override.`);
+	}
+	return capped;
+}
+
 function resolveMaxForks(): number {
 	const override = process.env.VITEST_MAX_FORKS;
 	if (override != null && override !== "") {
@@ -31,10 +50,10 @@ function resolveMaxForks(): number {
 	try {
 		const { workerSlots, release } = reserveWorkerSlots("vitest");
 		process.once("exit", release);
-		return Math.max(1, workerSlots);
+		return capDefaultForks(workerSlots);
 	} catch (e) {
-		console.warn(`[vitest.config] ledger reserve failed, falling back to 6 forks: ${(e as Error)?.message ?? e}`);
-		return 6;
+		console.warn(`[vitest.config] ledger reserve failed, falling back to ${STABLE_FULL_SUITE_FORK_CAP} forks: ${(e as Error)?.message ?? e}`);
+		return STABLE_FULL_SUITE_FORK_CAP;
 	}
 }
 
@@ -68,29 +87,115 @@ const singleForkFiles = [
 	"tests2/core/sandbox-wiring-goal-provisioned.test.ts",
 	"tests2/core/session-recovery-agent-dir.test.ts",
 	"tests2/core/transcript-sanitizer-agent-dir.test.ts",
+	"tests2/core/transcript-sanitizer.test.ts",
 ];
 
-// Heavy gateway-integration specs whose command steps are only a "verification
-// that passes / fails with a known code" stand-in (no durable-recovery / real
-// tree-kill assertions). They run in the dedicated `v2-integration-fake` project
+// Long-running core files that legitimately exercise git/worktree flows. Keep
+// them out of the broad v2-core fork pool so normal core files can finish/report
+// without waiting behind a minutes-long straggler and tripping Vitest worker RPC
+// timeouts (`[vitest-worker]: Timeout calling "onTaskUpdate"`). These files do
+// not require module isolation; they only need their own sequenced single fork.
+const heavyCoreFiles = [
+	"tests2/core/team-manager.test.ts",
+];
+
+// DOM fixture that renders a lazy custom element also imported by broader DOM
+// AgentInterface fixtures. Under isolate:false the first importer can pin lit's
+// template/customElements registry to another happy-dom window; the file passes
+// alone but fails in the full project with an inert <goal-status-widget>. Keep
+// the assertions intact and give it a fresh single fork/module graph.
+const isolatedDomFiles = [
+	"tests2/dom/goal-status-widget.test.ts",
+];
+
+// Heavy gateway-integration specs whose command steps are API/status/metadata
+// stand-ins (echo, deterministic exit, or scripted delay) rather than real shell
+// lifecycle coverage. They run in the dedicated `v2-integration-fake` project
 // with the non-spawning fake command-step runner injected, removing the cmd.exe/
-// Git-Bash spawns that oversubscribe the box under concurrent load. Durability/
-// cancel-fidelity + verification-core stay on the real path in v2-integration.
+// Git-Bash spawns that oversubscribe the box under concurrent load.
+//
+// Keep real-runner coverage for tests that assert OS-process fidelity or command
+// side effects: cancel-verification (real cancellation), verification-core
+// (streaming/tree-kill/durable runner), verification-restart-resignal (restart
+// zombie cleanup), gate-inspect-slicing (retained logs/artifacts/filesystem side
+// effects), bg/sandbox command suites, and gate-verification (legacy
+// createTestGateway fixture outside this fake-DI seam).
 // See docs/testing-v2/gateway-cost-feasibility.md.
 const fakeCommandStepFiles = [
+	"tests2/integration/gate-bypass-api.test.ts",
 	"tests2/integration/gate-reset-api.test.ts",
+	"tests2/integration/gate-resign-cancel.test.ts",
+	"tests2/integration/gate-signal-progress.test.ts",
+	"tests2/integration/gate-signal-reminder.test.ts",
+	"tests2/integration/gate-status-summary.test.ts",
 	"tests2/integration/gates-api-heavy.test.ts",
 	"tests2/integration/maintenance-api.test.ts",
-	"tests2/integration/gate-signal-progress.test.ts",
-	"tests2/integration/gate-resign-cancel.test.ts",
+	"tests2/integration/optional-steps-api.test.ts",
 ];
 
-const MAX_FORKS = resolveMaxForks();
+function listTestFilesUnder(root: string): string[] {
+	const files: string[] = [];
+	function visit(dir: string): void {
+		for (const entry of readdirSync(dir)) {
+			const full = join(dir, entry);
+			const stat = statSync(full);
+			if (stat.isDirectory()) {
+				visit(full);
+			} else if (entry.endsWith(".test.ts")) {
+				files.push(full.replace(/\\/g, "/"));
+			}
+		}
+	}
+	visit(root);
+	return files.sort();
+}
+
+function shardFiles(files: string[], requestedShardCount: number): string[][] {
+	const shardCount = Math.max(1, Math.min(requestedShardCount, files.length || 1));
+	const shardSize = Math.ceil(files.length / shardCount);
+	const shards: string[][] = [];
+	for (let i = 0; i < files.length; i += shardSize) {
+		shards.push(files.slice(i, i + shardSize));
+	}
+	return shards.length > 0 ? shards : [[]];
+}
+
+const LEDGER_MAX_FORKS = resolveMaxForks();
+// Windows Vitest worker RPC saturates at ledger grants above two forks and can
+// fail the run *after* all tests pass with `[vitest-worker]: Timeout calling
+// "onTaskUpdate"`. Cap the shared Windows pool deterministically; dedicated
+// heavy/isolated projects keep their explicit single-fork pools, and non-Windows
+// runs keep the normal ledger-derived pool.
+const MAX_FORKS = process.platform === "win32" ? Math.min(LEDGER_MAX_FORKS, 2) : LEDGER_MAX_FORKS;
+const V2_CORE_MAX_FORKS = MAX_FORKS;
 console.log(
-	`[vitest.config] maxForks=${MAX_FORKS} (source: ${
+	`[vitest.config] maxForks=${MAX_FORKS}; ledgerMaxForks=${LEDGER_MAX_FORKS}; v2CoreMaxForks=${V2_CORE_MAX_FORKS} (source: ${
 		process.env.VITEST_MAX_FORKS ? "VITEST_MAX_FORKS override" : process.env.BOBBIT_V2_SLOTS_VITEST ? "ledger parent grant" : "ledger standalone reserve"
 	})`,
 );
+
+function cliSelectsProject(projectName: string): boolean {
+	const args = process.argv;
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] === "--project" && args[i + 1] === projectName) return true;
+		if (args[i] === `--project=${projectName}`) return true;
+	}
+	return false;
+}
+
+const broadCoreFiles = listTestFilesUnder("tests2/core").filter((file) => !heavyCoreFiles.includes(file) && !singleForkFiles.includes(file));
+// The Windows gateway can pass all ~520 broad core files and then fail while
+// workers wait for the parent to acknowledge a large backlog of onTaskUpdate RPCs.
+// Sequential shards preserve coverage and the Windows-safe two-fork throughput,
+// while bounding each worker-pool's reporting queue before the next shard starts.
+// Keep explicit `--project v2-core` invocations on the historical unsplit project
+// for compatibility with coverage/chaos helper scripts that scope by that name.
+const shouldShardBroadCore = process.platform === "win32" && !cliSelectsProject("v2-core");
+const broadCoreShards = shardFiles(broadCoreFiles, shouldShardBroadCore ? 4 : 1);
+const CORE_FOLLOWUP_GROUP_ORDER = broadCoreShards.length;
+if (broadCoreShards.length > 1) {
+	console.log(`[vitest.config] splitting v2-core into ${broadCoreShards.length} sequenced shards (${broadCoreFiles.length} files total) to avoid Vitest RPC saturation`);
+}
 
 // minForks === maxForks pins the pool size for the whole run. Under
 // pool:"forks" + isolate:false, letting tinypool spin DOWN an idle fork (a fast
@@ -148,17 +253,32 @@ export default defineConfig({
 		reporters: ["default"],
 		coverage,
 		projects: [
+			...broadCoreShards.map((include, index) => ({
+				test: {
+					...shared,
+					name: broadCoreShards.length === 1 || index === 0 ? "v2-core" : `v2-core-${index + 1}`,
+					// Keep broad unit shards sequenced. Vitest 3.x can finish green on
+					// Windows and then report `[vitest-worker]: Timeout calling
+					// "onTaskUpdate"` while draining a large task-update backlog. Shards
+					// bound each pool's RPC queue without dropping or isolating coverage.
+					poolOptions: { forks: { minForks: V2_CORE_MAX_FORKS, maxForks: V2_CORE_MAX_FORKS, singleFork: false } },
+					sequence: { groupOrder: index },
+					environment: "node",
+					include,
+				},
+			})),
+			// Heavy core files: single sequenced fork, no module isolation needed. This
+			// prevents a minutes-long git/worktree file from holding a broad v2-core
+			// worker pool open after all other files have reported.
 			{
 				test: {
 					...shared,
-					name: "v2-core",
+					name: "v2-core-heavy",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER },
 					environment: "node",
-					// Exclude stragglers that require process isolation (singleFork project below)
-					include: ["tests2/core/**/*.test.ts"],
-					exclude: [
-						// singleFork stragglers — all listed in singleFork project below
-						...singleForkFiles,
-					],
+					pool: "forks" as const,
+					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
+					include: heavyCoreFiles,
 				},
 			},
 			// singleFork: files that genuinely cannot share a fork even with env-guard.
@@ -167,10 +287,11 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-core-isolated",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 1 },
 					environment: "node",
 					isolate: true,
 					pool: "forks" as const,
-					poolOptions: { forks: { singleFork: true } },
+					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
 					include: singleForkFiles,
 				},
 			},
@@ -178,14 +299,17 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-dom",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 2 },
 					environment: "happy-dom",
 					include: ["tests2/dom/**/*.test.ts"],
+					exclude: [...isolatedDomFiles],
 				},
 			},
 			{
 				test: {
 					...shared,
 					name: "v2-integration",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 3 },
 					environment: "node",
 					include: ["tests2/integration/**/*.test.ts"],
 					// The fake-command-step specs run in the dedicated fake project below.
@@ -205,6 +329,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-integration-fake",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 4 },
 					environment: "node",
 					setupFiles: ["tests2/integration/_e2e/fake-cmd-setup.ts"],
 					include: [...fakeCommandStepFiles],
@@ -212,6 +337,20 @@ export default defineConfig({
 					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
+				},
+			},
+			// Run last so happy-dom/global fetch stubbing in this isolated fixture cannot
+			// poison later Node integration workers when Vitest reuses processes.
+			{
+				test: {
+					...shared,
+					name: "v2-dom-isolated",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 5 },
+					environment: "happy-dom",
+					isolate: true,
+					pool: "forks" as const,
+					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
+					include: [...isolatedDomFiles],
 				},
 			},
 		],

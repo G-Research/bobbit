@@ -6,11 +6,11 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, beforeEach, afterEach, afterAll, vi } from "vitest";
+import { describe, it, beforeAll, afterEach, afterAll, vi } from "vitest";
 // __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
 afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1299,134 +1299,165 @@ describe("TeamManager", () => {
 	// ---------------------------------------------------------------------------
 
 	describe("spawnRole + dismissRole (integration with git)", () => {
-		let repoPath: string;
-		let cleanup: () => void;
-
-		function createTempGitRepo(opts: { publishGoalBranch?: boolean } = {}): { repoPath: string; originPath: string; cleanup: () => void } {
-			const publishGoalBranch = opts.publishGoalBranch ?? true;
-			const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "team-test-"));
-			execSync("git init", { cwd: tmp, stdio: "pipe" });
-			execSync('git config user.email "test@test.com"', { cwd: tmp, stdio: "pipe" });
-			execSync('git config user.name "Test"', { cwd: tmp, stdio: "pipe" });
-			fs.writeFileSync(path.join(tmp, "README.md"), "# test");
-			execSync("git add . && git commit -m init", { cwd: tmp, stdio: "pipe" });
-
-			// Create a bare clone to act as "origin".
-			const bare = `${tmp}-bare`;
-			execSync(`git clone --bare "${tmp}" "${bare}"`, { stdio: "pipe" });
-			execSync(`git remote add origin "${bare}"`, { cwd: tmp, stdio: "pipe" });
-			// Create the feat/test branch locally. Most tests publish it so origin/feat/test
-			// exists; local-only branch tests leave it unpublished on purpose.
-			execSync("git checkout -b feat/test", { cwd: tmp, stdio: "pipe" });
-			if (publishGoalBranch) {
-				execSync("git push origin feat/test", { cwd: tmp, stdio: "pipe" });
-			}
-			// Return to default branch so worktree creation doesn't conflict
-			execSync("git checkout -", { cwd: tmp, stdio: "pipe" });
-
-			return {
-				repoPath: tmp,
-				originPath: bare,
-				cleanup: () => {
-					// Also remove any sibling worktrees and the bare clone
-					const parent = path.dirname(tmp);
-					const basename = path.basename(tmp);
-					try {
-						for (const entry of fs.readdirSync(parent)) {
-							if (entry.startsWith(`${basename}-wt-`) || entry === `${basename}-bare`) {
-								fs.rmSync(path.join(parent, entry), { recursive: true, force: true });
-							}
-						}
-					} catch {
-						// ignore
-					}
-					fs.rmSync(tmp, { recursive: true, force: true });
-				},
-			};
+		interface RealGitTemplate {
+			rootPath: string;
+			publishedOriginPath: string;
+			unpublishedOriginPath: string;
 		}
 
-		beforeEach(() => {
-			const repo = createTempGitRepo();
-			repoPath = repo.repoPath;
-			cleanup = repo.cleanup;
+		interface GitFixture {
+			rootPath: string;
+			repoPath: string;
+			originPath: string;
+		}
+
+		let gitTemplate: RealGitTemplate | undefined;
+		const activeGitFixtures: GitFixture[] = [];
+
+		function runGit(args: string[], cwd?: string): string {
+			return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+		}
+
+		function configureGitUser(repo: string): void {
+			runGit(["config", "user.email", "test@test.com"], repo);
+			runGit(["config", "user.name", "Test"], repo);
+		}
+
+		function createRealGitTemplate(): RealGitTemplate {
+			const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-team-template-"));
+			const seedPath = path.join(rootPath, "seed");
+			const unpublishedOriginPath = path.join(rootPath, "unpublished-origin.git");
+			const publishedOriginPath = path.join(rootPath, "published-origin.git");
+
+			fs.mkdirSync(seedPath);
+			runGit(["init"], seedPath);
+			configureGitUser(seedPath);
+			fs.writeFileSync(path.join(seedPath, "README.md"), "# test\n");
+			runGit(["add", "README.md"], seedPath);
+			runGit(["commit", "-m", "init"], seedPath);
+			runGit(["branch", "-M", "master"], seedPath);
+
+			// The unpublished origin intentionally has only master. Per-test clones create
+			// their goal branch locally so local-ref-first worktree creation is observable.
+			runGit(["clone", "--bare", seedPath, unpublishedOriginPath]);
+
+			runGit(["checkout", "-b", "feat/test"], seedPath);
+			fs.writeFileSync(path.join(seedPath, "GOAL_BRANCH.txt"), "local goal branch\n");
+			runGit(["add", "GOAL_BRANCH.txt"], seedPath);
+			runGit(["commit", "-m", "goal branch"], seedPath);
+			runGit(["clone", "--bare", seedPath, publishedOriginPath]);
+			return { rootPath, publishedOriginPath, unpublishedOriginPath };
+		}
+
+		function cleanupGitFixture(fixture: GitFixture | undefined): void {
+			if (!fixture) return;
+			if (fs.existsSync(fixture.repoPath)) {
+				try {
+					const output = runGit(["worktree", "list", "--porcelain"], fixture.repoPath);
+					const worktreePaths = output
+						.split(/\r?\n/)
+						.filter((line) => line.startsWith("worktree "))
+						.map((line) => line.slice("worktree ".length))
+						.filter((worktreePath) => path.resolve(worktreePath) !== path.resolve(fixture.repoPath));
+					for (const worktreePath of worktreePaths.reverse()) {
+						fs.rmSync(worktreePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+					}
+				} catch {
+					// Best effort; the enclosing fixture root removal is the final cleanup guard.
+				}
+				try { runGit(["worktree", "prune"], fixture.repoPath); } catch { /* ignore */ }
+			}
+			fs.rmSync(fixture.rootPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		}
+
+		function createGitFixture(opts: { publishGoalBranch?: boolean } = {}): GitFixture {
+			if (!gitTemplate) throw new Error("real git template not initialized");
+			const publishGoalBranch = opts.publishGoalBranch ?? true;
+			const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-team-fixture-"));
+			const repoPath = path.join(rootPath, "repo");
+			const originPath = publishGoalBranch ? gitTemplate.publishedOriginPath : gitTemplate.unpublishedOriginPath;
+			const cloneArgs = publishGoalBranch
+				? ["clone", "--local", "--branch", "feat/test", originPath, repoPath]
+				: ["clone", "--local", originPath, repoPath];
+			runGit(cloneArgs);
+			configureGitUser(repoPath);
+
+			if (!publishGoalBranch) {
+				runGit(["checkout", "-b", "feat/test"], repoPath);
+				fs.writeFileSync(path.join(repoPath, "GOAL_BRANCH.txt"), "local goal branch\n");
+				runGit(["add", "GOAL_BRANCH.txt"], repoPath);
+				runGit(["commit", "-m", "local goal branch"], repoPath);
+			}
+
+			const fixture = { rootPath, repoPath, originPath };
+			activeGitFixtures.push(fixture);
+			return fixture;
+		}
+
+		function createRepoTeam(fixture: GitFixture, overrides: Partial<MockGoal> = {}) {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				repoPath: fixture.repoPath,
+				cwd: fixture.repoPath,
+				worktreePath: fixture.repoPath,
+				...overrides,
+			});
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+			return { goal, sm, team };
+		}
+
+		beforeAll(() => {
+			gitTemplate = createRealGitTemplate();
 		});
 
 		afterEach(() => {
-			cleanup();
+			for (const fixture of activeGitFixtures.splice(0).reverse()) {
+				cleanupGitFixture(fixture);
+			}
 		});
 
-		it("should populate baseSha on TeamAgent after spawn", async () => {
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
+		afterAll(() => {
+			if (gitTemplate) {
+				fs.rmSync(gitTemplate.rootPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+				gitTemplate = undefined;
+			}
+		});
+
+		it("should create a worktree and session for a coder role", async () => {
+			const fixture = createGitFixture();
+			const { sm, team } = createRepoTeam(fixture);
 
 			await team.startTeam("goal-1");
-
 			const result = await team.spawnRole("goal-1", "coder", "Implement feature X");
+
 			assert.ok(result.sessionId);
+			assert.ok(result.worktreePath);
+			assert.ok(fs.existsSync(result.worktreePath), `worktree should exist at ${result.worktreePath}`);
+			assert.ok(fs.existsSync(path.join(result.worktreePath, "README.md")), "README.md should exist in worktree");
+			assert.ok(fs.existsSync(path.join(result.worktreePath, "GOAL_BRANCH.txt")), "goal branch content should exist in worktree");
 
-			// The TeamAgent record should have baseSha set (resolved from git rev-parse HEAD)
-			const agent = team.findAgentBySessionId(result.sessionId);
-			assert.ok(agent, "agent record should exist");
-			assert.ok(agent!.baseSha, "baseSha should be populated");
-			assert.match(agent!.baseSha!, /^[0-9a-f]{40}$/, "baseSha should be a 40-char hex SHA");
-		});
+			const agents = team.listAgents("goal-1");
+			assert.equal(agents.length, 1);
+			assert.equal(agents[0].role, "coder");
+			assert.equal(agents[0].task, "Implement feature X");
+			assert.match(agents[0].branch!, /^goal\/goal-1\/coder-[0-9a-f]{4}$/);
 
-		it("should populate branch on TeamAgent after spawn", async () => {
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
-
-			await team.startTeam("goal-1");
-
-			const result = await team.spawnRole("goal-1", "coder", "Implement feature");
-			const agent = team.findAgentBySessionId(result.sessionId);
-			assert.ok(agent, "agent record should exist");
-			assert.ok(agent!.branch, "branch should be populated");
-			assert.equal(typeof agent!.branch, "string");
+			const session = sm.getSession(result.sessionId);
+			assert.ok(session, "session should exist");
+			assert.equal(session.rpcClient.prompt.mock.calls.length, 1);
 		});
 
 		it("spawns from an unpublished local goal branch without publishing the member branch", async () => {
-			cleanup();
-			const unpublishedRepo = createTempGitRepo({ publishGoalBranch: false });
-			repoPath = unpublishedRepo.repoPath;
-			cleanup = unpublishedRepo.cleanup;
-
+			const fixture = createGitFixture({ publishGoalBranch: false });
 			assert.throws(
-				() => execSync("git show-ref --verify --quiet refs/heads/feat/test", { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				() => runGit(["show-ref", "--verify", "--quiet", "refs/heads/feat/test"], fixture.originPath),
 				"origin must not have the goal branch before spawn",
 			);
 
 			const goalId = "12345678-abcd-4000-8000-000000000001";
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				id: goalId,
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
-
-			const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/team-manager.ts"), "utf-8");
-			assert.match(
-				source,
-				/const worktreeOptions = \{ startPoint: memberStartPoint, pushPolicy: "local-only" as const, commandRunner: this\.commandRunner \};\s*worktreeResult = await createWorktree\(goal\.repoPath!, branchName, worktreeOptions\);/,
-				"team member worktree creation must request local-only push policy through the injected command runner",
-			);
+			const { sm, team } = createRepoTeam(fixture, { id: goalId });
 
 			await team.startTeam(goalId);
 			const previousNoPush = process.env.BOBBIT_TEST_NO_PUSH;
@@ -1438,46 +1469,40 @@ describe("TeamManager", () => {
 				if (previousNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
 				else process.env.BOBBIT_TEST_NO_PUSH = previousNoPush;
 			}
+
 			const agent = team.findAgentBySessionId(result.sessionId);
 			assert.ok(agent?.branch, "agent branch should be recorded");
 			assert.match(agent.branch, /^goal\/12345678\/coder-[0-9a-f]{4}$/);
 			assert.ok(fs.existsSync(result.worktreePath!), "member worktree should be created from the local goal branch");
+			assert.ok(
+				fs.existsSync(path.join(result.worktreePath!, "GOAL_BRANCH.txt")),
+				"member worktree should start from the unpublished local goal branch",
+			);
 			assert.equal(sm.getSession(result.sessionId)?.worktreePushPolicy, "local-only");
 			assert.throws(
-				() => execSync(`git show-ref --verify --quiet refs/heads/${agent.branch}`, { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				() => runGit(["show-ref", "--verify", "--quiet", `refs/heads/${agent.branch}`], fixture.originPath),
 				"local-only team member branch must not be published to origin",
 			);
 		});
 
 		it("passes a local sandbox base branch for unpublished sandboxed goal branches", async () => {
-			cleanup();
-			const unpublishedRepo = createTempGitRepo({ publishGoalBranch: false });
-			repoPath = unpublishedRepo.repoPath;
-			cleanup = unpublishedRepo.cleanup;
-
+			const fixture = createGitFixture({ publishGoalBranch: false });
 			assert.throws(
-				() => execSync("git show-ref --verify --quiet refs/heads/feat/test", { cwd: unpublishedRepo.originPath, stdio: "pipe" }),
+				() => runGit(["show-ref", "--verify", "--quiet", "refs/heads/feat/test"], fixture.originPath),
 				"origin must not have the goal branch before sandboxed member spawn",
 			);
 
 			const goalId = "12345678-abcd-4000-8000-000000000001";
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
+			const { sm, team } = createRepoTeam(fixture, {
 				id: goalId,
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
 				projectId: "project-1",
 				sandboxed: true,
 			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
 			sm.getSandboxManager = () => ({
 				get: () => ({
 					exec: vi.fn(async () => "0123456789abcdef0123456789abcdef01234567\n"),
 				}),
 			});
-			const team = createTeamManager(sm);
 
 			await team.startTeam(goalId);
 			const result = await team.spawnRole(goalId, "coder", "Implement in sandbox from local branch");
@@ -1489,64 +1514,9 @@ describe("TeamManager", () => {
 			assert.equal(session.worktreePushPolicy, "local-only");
 		});
 
-
-		it("should create a worktree and session for a coder role", async () => {
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
-
-			await team.startTeam("goal-1");
-
-			const result = await team.spawnRole("goal-1", "coder", "Implement feature X");
-
-			// Session should have been created
-			assert.ok(result.sessionId);
-			assert.ok(result.worktreePath);
-
-			// Worktree directory should exist
-			assert.ok(fs.existsSync(result.worktreePath), `worktree should exist at ${result.worktreePath}`);
-
-			// The file from the repo should be present in the worktree
-			assert.ok(
-				fs.existsSync(path.join(result.worktreePath, "README.md")),
-				"README.md should exist in worktree",
-			);
-
-			// Agent listing should include the coder
-			const agents = team.listAgents("goal-1");
-			assert.equal(agents.length, 1);
-			assert.equal(agents[0].role, "coder");
-			assert.equal(agents[0].task, "Implement feature X");
-
-			// The prompt should have been called with the task
-			const session = sm.getSession(result.sessionId);
-			assert.ok(session, "session should exist");
-			assert.equal(session.rpcClient.prompt.mock.calls.length, 1);
-		});
-
-		it("team recovery scans configured and historical sessions roots instead of the legacy home default", () => {
-			const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/team-manager.ts"), "utf-8");
-			assert.match(source, /trustedAgentSessionsRoots\(\)/, "team recovery must use active, historical, and legacy agent session roots");
-			assert.doesNotMatch(source, /homedir\(\).*\.bobbit.*agent.*sessions/s, "team recovery must not hard-code ~/.bobbit/agent/sessions");
-		});
-
 		it("dispatches the goalProvisioned hook for the member worktree (finding 1)", async () => {
-			// team-manager creates member worktrees directly via createWorktree() and
-			// hands a pre-built cwd to createSession, so session-setup's provisioning
-			// dispatch never fires for them. Without an explicit dispatch here, a
-			// metadata-driven filesystem treatment would be missing on normal member
-			// worktrees. Assert the dispatch runs with the member worktree path/branch.
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({ repoPath, cwd: repoPath, worktreePath: repoPath });
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
+			const fixture = createGitFixture();
+			const { sm, team } = createRepoTeam(fixture);
 
 			await team.startTeam("goal-1");
 			const result = await team.spawnRole("goal-1", "coder", "Implement feature X");
@@ -1563,197 +1533,130 @@ describe("TeamManager", () => {
 			assert.ok(arg.cwd.length > 0, "dispatch must carry the agent cwd");
 		});
 
-		it("should set correct emoji title for each role", async () => {
+		it("should dismiss a role agent and preserve the worktree", async () => {
+			const fixture = createGitFixture();
+			const { sm, team } = createRepoTeam(fixture);
+
+			await team.startTeam("goal-1");
+			const result = await team.spawnRole("goal-1", "tester", "Run test suite");
+			assert.ok(fs.existsSync(result.worktreePath!));
+
+			const dismissed = await team.dismissRole(result.sessionId);
+			assert.deepEqual(
+				{ ok: dismissed.ok, status: dismissed.status, sessionId: dismissed.sessionId, retryable: dismissed.retryable },
+				{ ok: true, status: "dismissed", sessionId: result.sessionId, retryable: false },
+			);
+			assert.ok(fs.existsSync(result.worktreePath!), "worktree should be preserved after dismissal");
+			assert.equal(team.listAgents("goal-1").length, 0);
+			assert.equal(sm._sessions.has(result.sessionId), false);
+		});
+
+		it("should handle completeTeam with real worktrees", async () => {
+			const fixture = createGitFixture();
+			const { goal, team } = createRepoTeam(fixture);
+
+			await team.startTeam("goal-1");
+			const result = await team.spawnRole("goal-1", "coder", "Code stuff");
+			assert.ok(fs.existsSync(result.worktreePath!));
+
+			await team.completeTeam("goal-1");
+			assert.ok(fs.existsSync(result.worktreePath!), "worktree should be preserved after completeTeam");
+			assert.equal(goal.state, "complete");
+			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
+		});
+
+		it("should persist baseSha in TeamAgent across state", async () => {
+			const fixture = createGitFixture();
+			const { team } = createRepoTeam(fixture);
+
+			await team.startTeam("goal-1");
+			const result = await team.spawnRole("goal-1", "coder", "Persist test");
+			const agent = team.findAgentBySessionId(result.sessionId);
+			assert.ok(agent?.baseSha, "baseSha should be set");
+			assert.match(agent.baseSha, /^[0-9a-f]{40}$/, "baseSha should be a 40-char hex SHA");
+
+			const actualSha = runGit(["rev-parse", "HEAD"], result.worktreePath).trim();
+			assert.equal(agent.baseSha, actualSha, "baseSha should match the actual HEAD SHA");
+		});
+
+		it("should create distinct worktrees for coder, reviewer, and tester", async () => {
+			const fixture = createGitFixture();
+			const { team } = createRepoTeam(fixture);
+
+			await team.startTeam("goal-1");
+			const roles = ["coder", "reviewer", "tester"];
+			const results: { sessionId: string; worktreePath?: string }[] = [];
+
+			for (const role of roles) {
+				const result = await team.spawnRole("goal-1", role, `${role} task`);
+				results.push(result);
+				assert.ok(fs.existsSync(result.worktreePath!), `worktree for ${role} should exist`);
+			}
+
+			assert.equal(team.listAgents("goal-1").length, 3);
+			assert.equal(new Set(results.map((result) => result.worktreePath)).size, roles.length);
+
+			for (const result of results) {
+				await team.dismissRole(result.sessionId);
+			}
+		});
+
+		it("should enforce concurrency limit without real git", async () => {
 			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
+			const goal = createMockGoal({ repoPath: undefined, cwd: "/tmp/no-repo" });
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
 			const team = createTeamManager(sm);
 
 			await team.startTeam("goal-1");
+			(team as any).teams.get("goal-1")!.maxConcurrent = 2;
 
+			const r1 = await team.spawnRole("goal-1", "coder", "Task 1");
+			const r2 = await team.spawnRole("goal-1", "tester", "Task 2");
+			assert.equal(team.listAgents("goal-1").length, 2);
+			await assert.rejects(() => team.spawnRole("goal-1", "reviewer", "Task 3"), {
+				message: /already has 2 agents/,
+			});
+
+			await team.dismissRole(r1.sessionId);
+			await team.dismissRole(r2.sessionId);
+		});
+
+		it("should set correct emoji title for each role without real git", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ repoPath: undefined, cwd: "/tmp/no-repo" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			await team.startTeam("goal-1");
 			const result = await team.spawnRole("goal-1", "reviewer", "Review PR #42");
 			const session = sm.getSession(result.sessionId);
 			assert.ok(session);
 			assert.ok(session.title.startsWith("Reviewer:"), `title should start with "Reviewer:", got: ${session.title}`);
 		});
 
-		it("should dismiss a role agent and preserve the worktree", async () => {
+		it("findAgentBySessionId should return the agent record without real git", async () => {
 			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
+			const goal = createMockGoal({ repoPath: undefined, cwd: "/tmp/no-repo" });
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
 			const team = createTeamManager(sm);
 
 			await team.startTeam("goal-1");
-			const result = await team.spawnRole("goal-1", "tester", "Run test suite");
-
-			// Verify worktree exists
-			assert.ok(fs.existsSync(result.worktreePath!));
-
-			// Dismiss
-			const dismissed = await team.dismissRole(result.sessionId);
-			assert.deepEqual(
-				{ ok: dismissed.ok, status: dismissed.status, sessionId: dismissed.sessionId, retryable: dismissed.retryable },
-				{ ok: true, status: "dismissed", sessionId: result.sessionId, retryable: false },
-			);
-
-			// Worktree is preserved for archived session review (cleanup at purge time)
-			assert.ok(
-				fs.existsSync(result.worktreePath!),
-				"worktree should be preserved after dismissal",
-			);
-
-			// Agent list should be empty
-			const agents = team.listAgents("goal-1");
-			assert.equal(agents.length, 0);
-
-			// Session should be terminated
-			assert.equal(sm._sessions.has(result.sessionId), false);
-		});
-
-		it("should spawn multiple role agents respecting concurrency limit", async () => {
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
-
-			await team.startTeam("goal-1");
-
-			// Set low concurrency limit
-			(team as any).teams.get("goal-1")!.maxConcurrent = 2;
-
-			const r1 = await team.spawnRole("goal-1", "coder", "Task 1");
-			const r2 = await team.spawnRole("goal-1", "tester", "Task 2");
-
-			assert.equal(team.listAgents("goal-1").length, 2);
-
-			// Third should fail
-			await assert.rejects(() => team.spawnRole("goal-1", "reviewer", "Task 3"), {
-				message: /already has 2 agents/,
-			});
-
-			// Clean up worktrees
-			await team.dismissRole(r1.sessionId);
-			await team.dismissRole(r2.sessionId);
-		});
-
-		it("should handle completeTeam with real worktrees", async () => {
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
-
-			await team.startTeam("goal-1");
-			const r1 = await team.spawnRole("goal-1", "coder", "Code stuff");
-
-			assert.ok(fs.existsSync(r1.worktreePath!));
-
-			await team.completeTeam("goal-1");
-
-			// Worktree is preserved for archived session review (cleanup at purge time)
-			assert.ok(fs.existsSync(r1.worktreePath!), "worktree should be preserved after completeTeam");
-			assert.equal(goal.state, "complete");
-			// Team state persists (team lead stays alive for reporting)
-			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
-		});
-
-		it("findAgentBySessionId should return the agent record", async () => {
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
-
-			await team.startTeam("goal-1");
-
 			const result = await team.spawnRole("goal-1", "coder", "Test find agent");
 			const agent = team.findAgentBySessionId(result.sessionId);
 			assert.ok(agent, "should find agent by session ID");
 			assert.equal(agent!.sessionId, result.sessionId);
 			assert.equal(agent!.role, "coder");
 			assert.equal(agent!.task, "Test find agent");
-
-			// Non-existent session should return undefined
-			const missing = team.findAgentBySessionId("nonexistent");
-			assert.equal(missing, undefined);
+			assert.equal(team.findAgentBySessionId("nonexistent"), undefined);
 		});
 
-		it("should persist baseSha in TeamAgent across state", async () => {
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
-
-			await team.startTeam("goal-1");
-
-			const result = await team.spawnRole("goal-1", "coder", "Persist test");
-			const agent = team.findAgentBySessionId(result.sessionId);
-			assert.ok(agent?.baseSha, "baseSha should be set");
-
-			// Verify the baseSha matches a real git commit in the worktree
-			const actualSha = execSync("git rev-parse HEAD", { cwd: result.worktreePath, encoding: "utf-8" }).trim();
-			assert.equal(agent!.baseSha, actualSha, "baseSha should match the actual HEAD SHA");
-		});
-
-		it("should handle all valid roles: coder, reviewer, tester", async () => {
-			const goals = new Map<string, MockGoal>();
-			const goal = createMockGoal({
-				repoPath,
-				cwd: repoPath,
-				worktreePath: repoPath,
-			});
-			goals.set(goal.id, goal);
-			const sm = createMockSessionManager(goals);
-			const team = createTeamManager(sm);
-
-			await team.startTeam("goal-1");
-
-			// team-lead is not valid for spawnRole (it's the orchestrator started via startTeam)
-			// coder, reviewer, tester are valid roles for spawning
-			const roles = ["coder", "reviewer", "tester"];
-			const results: { sessionId: string; worktreePath?: string }[] = [];
-
-			for (const role of roles) {
-				const r = await team.spawnRole("goal-1", role, `${role} task`);
-				results.push(r);
-				assert.ok(fs.existsSync(r.worktreePath!), `worktree for ${role} should exist`);
-			}
-
-			const agents = team.listAgents("goal-1");
-			assert.equal(agents.length, 3);
-
-			// Clean up
-			for (const r of results) {
-				await team.dismissRole(r.sessionId);
-			}
+		it("team recovery scans configured and historical sessions roots instead of the legacy home default", () => {
+			const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/team-manager.ts"), "utf-8");
+			assert.match(source, /trustedAgentSessionsRoots\(\)/, "team recovery must use active, historical, and legacy agent session roots");
+			assert.doesNotMatch(source, /homedir\(\).*\.bobbit.*agent.*sessions/s, "team recovery must not hard-code ~/.bobbit/agent/sessions");
 		});
 	});
 });

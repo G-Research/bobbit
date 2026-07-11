@@ -19,7 +19,7 @@ import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
-import { showHeaderToast } from "./render.js";
+import { showHeaderToast } from "./header-toast.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager

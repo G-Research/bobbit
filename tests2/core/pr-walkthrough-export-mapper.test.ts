@@ -322,6 +322,30 @@ describe("PR walkthrough GitHub adapter", () => {
 		);
 	});
 
+	it("preserves GitHub permission errors and bearer auth without the REST gateway", async () => {
+		let authorization: string | undefined;
+		await assert.rejects(
+			resolveGithubPr({
+				prUrl: "https://github.com/acme/widgets/pull/42",
+				apiBaseUrl: "https://api.github.test",
+				token: "mock-token",
+				fetch: async (_url, init) => {
+					authorization = init?.headers?.Authorization;
+					return {
+						ok: false,
+						status: 403,
+						statusText: "Forbidden",
+						headers: { get: (name: string) => name.toLowerCase() === "x-ratelimit-remaining" ? "5" : null },
+						json: async () => ({ message: "Forbidden" }),
+						text: async () => JSON.stringify({ message: "Forbidden" }),
+					};
+				},
+			}),
+			(error: unknown) => error instanceof GithubPrAdapterError && error.status === 403 && error.code === "github_permission_denied" && error.warnings.some(warning => warning.code === "github_permission_denied"),
+		);
+		assert.equal(authorization, "Bearer mock-token");
+	});
+
 	it("parses GitHub PR URLs and origin remotes", () => {
 		assert.deepEqual(parseGithubPrReference({ prUrl: "https://github.com/SuuBro/bobbit/pull/1842" }), {
 			owner: "SuuBro",

@@ -14,10 +14,17 @@
  *   - Return passed=false; do NOT auto-archive, do NOT auto-resolve
  *     (anti-pattern §9). Output references manual recovery.
  */
-import { describe, it, afterAll } from "vitest";
+import { describe, it, afterAll, beforeAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildFixture, buildActive, buildSubgoalStep } from "../../tests/helpers/run-subgoal-step-fixture.ts";
+type RunSubgoalFixtureModule = typeof import("../../tests/helpers/run-subgoal-step-fixture.ts");
+let buildFixture: RunSubgoalFixtureModule["buildFixture"];
+let buildActive: RunSubgoalFixtureModule["buildActive"];
+let buildSubgoalStep: RunSubgoalFixtureModule["buildSubgoalStep"];
+
+beforeAll(async () => {
+	({ buildFixture, buildActive, buildSubgoalStep } = await import("../../tests/helpers/run-subgoal-step-fixture.ts"));
+});
 
 describe("runSubgoalStep — merge + archive flow", () => {
 	it("ready-to-merge passes → mergeChild + teardownTeam + archiveAfterMerge in order", async () => {
