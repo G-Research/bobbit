@@ -1,5 +1,7 @@
 # Test Suite v2 hook profiling
 
+See the committed before/after summary in [unit-test-optimization-report.html](unit-test-optimization-report.html).
+
 Run:
 
 ```bash
