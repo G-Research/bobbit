@@ -54,35 +54,50 @@ if (proposalType === "goal" || proposalType === "staff"
   const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
     ? enrichedArgs.projectId.trim()
     : undefined;
-  const targetProjectId = explicitProjectId ?? sessionProjectId;
+  // The omitted-default path normalises system → headquarters HERE too, so a
+  // DIRECT /seed call (bypassing the tool's argsWithProjectId) from a
+  // server-scope session (session.projectId === "system") still lands in the
+  // user-facing headquarters scope. This mirrors argsWithProjectId exactly so
+  // tool-mediated and direct-seed paths are identical.
+  const defaultProjectId = sessionProjectId === "system" ? "headquarters" : sessionProjectId;
+  const targetProjectId = explicitProjectId ?? defaultProjectId;
   if (!targetProjectId) {
     json({ ok:false, code:"PROJECT_ID_REQUIRED", message:"projectId required for project-scoped proposals" }, 400);
     return;
   }
-  // Fail fast: an EXPLICIT projectId must name a registered project.
-  if (explicitProjectId && !projectRegistry.get(explicitProjectId)) {
+  // Fail fast: validate the RESOLVED target against the registry. This is safe
+  // for the default path because every resolvable default (a real project, or
+  // headquarters) is a registered project — so the check is a no-op there and
+  // only bites a caller-supplied unknown id.
+  if (!projectRegistry.get(targetProjectId)) {
     json({ ok:false, code:"UNKNOWN_PROJECT",
-      message:`Unknown projectId "${explicitProjectId}". It does not name a registered project.` }, 422);
+      message:`Unknown projectId "${targetProjectId}". It does not name a registered project.` }, 422);
     return;
   }
   enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
 }
 ```
 
-Notes:
-- Only an **explicit** `projectId` is validated against the registry. When it
-  falls back to the session's project we trust it (unchanged default path).
+Notes on the explicit-vs-default boundary (source of truth):
+- The server does **not** try to distinguish "user typed it" from "tool injected
+  it". Instead it validates the **resolved target** uniformly against the
+  registry. This is deterministic regardless of call path (tool-mediated or
+  direct `/seed`), which was the ambiguity the review flagged.
+- Uniform validation is safe for the default path because every resolvable
+  default is a registered project: a real session project, or `headquarters`
+  (always registered — `projectRegistry.ensureHeadquartersProject`). The hidden
+  `system` id is never persisted as a target — it is normalised to
+  `headquarters` before validation, matching `argsWithProjectId`.
+- Explicit `projectId: "system"` is treated as any other id and validated
+  against the registry; since `system` is an internal, non-user-facing scope it
+  will not match a user-facing registered project and is rejected — callers must
+  target `headquarters`, not `system`. (Documented contract, not a silent
+  clobber.)
+- **Default path is byte-for-byte unchanged:** when `projectId` is omitted the
+  stamped value equals what `argsWithProjectId` already produced (session scope,
+  or `headquarters` for a `system` session).
 - `role`/`tool` are added to the resolver so an explicit unknown project is
-  rejected for them too (acceptance criterion (c)). Their default path was
-  previously handled entirely by `argsWithProjectId` on the tool side; adding
-  them here does not change the omitted-projectId behaviour because
-  `argsWithProjectId` already stamped the session/headquarters scope before the
-  request arrives — for those types `explicitProjectId` will equal the tool-
-  injected scope. The registry check on that injected value is a no-op for real
-  projects and (for headquarters) headquarters is a registered project.
-- **Default path is byte-for-byte unchanged:** when the tool injected the
-  session's own (or headquarters) scope, `targetProjectId === that scope` and we
-  stamp exactly the same `projectId` as before.
+  rejected for them too (acceptance criterion (c)).
 
 ### 2. Goal workflow validation against the TARGET
 
@@ -131,9 +146,26 @@ it explicitly.
 
 Seed handler: `propose_project` is deliberately **excluded** from the target
 resolver in §1 (it is allowed to name a brand-new, not-yet-registered project).
-When `projectId` is present AND names a registered project the acceptance path
-edits that project's config; otherwise it registers a new project as today.
-No registry rejection for `project` (acceptance criterion (d)).
+No registry rejection for `project` at seed (acceptance criterion (d)).
+
+**`propose_project` acceptance contract (exact):**
+- `fields.projectId` present AND names a **registered** project ⇒ this is an
+  *edit* of that existing project. Acceptance applies the proposed config to
+  that project id (via the existing project-config update path,
+  `projectIdForProjectProposal` returning `fields.projectId`). `name` /
+  `root_path` in the draft describe the existing project and are not used to
+  register a new one.
+- `fields.projectId` **absent** ⇒ brand-new project, registered from
+  `name` + `root_path` exactly as today (unchanged path).
+- `fields.projectId` present but **not registered** ⇒ treated as a brand-new
+  project registration using that value only if the accept path already supports
+  a caller-chosen id; otherwise the unknown id is ignored and registration falls
+  back to `name` + `root_path`. **Decision: reject unknown explicit `projectId`
+  at accept time** with a clear error rather than silently registering, so the
+  edit-vs-create intent is never ambiguous. (New projects must omit `projectId`.)
+- Because `propose_project` is skipped by the tool's `argsWithProjectId`
+  injection, an omitted `projectId` never gets auto-stamped, so the new-project
+  path is preserved byte-for-byte.
 
 ### 4. Tool-wording nudge (advisory, ≤80 chars per budget test)
 
