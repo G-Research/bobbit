@@ -269,6 +269,15 @@ npm run test:unit
 
 The known unrelated `bundle-size.test.ts` failure should not be worsened by this workstream.
 
+### Final validation result
+
+The migration was validated with a targeted vitest run over the touched core and new integration files plus a type-check:
+
+- Targeted run: **42 files / 394 tests passed** (all migrated `tests2/core` store tests and the two new `tests2/integration` real-fs fidelity tests).
+- `npm run check` passed (no type regressions from the seam refactors and test moves).
+
+These are the pass signals for this workstream; the full `npm run test:unit` gate still carries the pre-existing, unrelated `bundle-size.test.ts` failure noted above.
+
 ## Profiling references and evidence
 
 The older `scripts/profiling/vitest.profile.config.ts` reference is absent on this branch. The current hook/file-residual profiler is `scripts/testing-v2/profile-hooks.mjs`, invoked via:
