@@ -47,10 +47,19 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 	// Seed the config scope from the active project once per page lifecycle, so the
 	// listed skills match what that project's sessions actually resolve. An explicit
 	// user scope selection (via handleScopeChange) runs after first load and is respected.
+	//
+	// Do NOT latch the one-shot when there is no active project yet: on a hard refresh /
+	// deep-link to #/skills, main.ts may invoke this before refreshSessions() hydrates
+	// state.activeProjectId. Latching then would freeze the page on Headquarters/system
+	// and never reseed after hydration (the reported hard-refresh symptom). Only mark
+	// initialized once we actually have an active project to seed from.
 	if (!scopeInitialized) {
-		scopeInitialized = true;
 		const active = state.activeProjectId;
-		if (active && getConfigScope() === "system") setConfigScope(active);
+		if (active) {
+			scopeInitialized = true;
+			if (getConfigScope() === "system") setConfigScope(active);
+		}
+		// active still null (pre-hydration): leave scopeInitialized false so a later load seeds.
 	}
 
 	if (showLoading) {
