@@ -50,6 +50,9 @@ const REJECTED_LEGACY_QA_TOP_LEVEL: ReadonlySet<string> = new Set([
  *  fields bag.
  *
  *  - `name` and `root_path` are skipped (handled separately / immutable).
+ *  - `projectId` is skipped — it is cross-project ROUTING metadata (which
+ *    project the proposal targets), never a persisted config value. Writing it
+ *    into `PUT /api/projects/:id/config` would pollute the target's config.
  *  - Legacy top-level `qa_*` keys are dropped (rejected by the server).
  *  - Empty / null / undefined values are dropped.
  *  - Native-YAML fields are kept structured; if the agent supplied them as a
@@ -58,7 +61,7 @@ const REJECTED_LEGACY_QA_TOP_LEVEL: ReadonlySet<string> = new Set([
 export function buildProjectConfigDiff(fields: Record<string, unknown>): Record<string, unknown> {
 	const diff: Record<string, unknown> = {};
 	for (const [k, v] of Object.entries(fields)) {
-		if (k === "name" || k === "root_path") continue;
+		if (k === "name" || k === "root_path" || k === "projectId") continue;
 		if (REJECTED_LEGACY_QA_TOP_LEVEL.has(k)) continue;
 		if (v === undefined || v === null || v === "") continue;
 		if (PROJECT_NATIVE_FIELDS.has(k)) {

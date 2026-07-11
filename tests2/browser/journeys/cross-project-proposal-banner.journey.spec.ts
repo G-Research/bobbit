@@ -157,7 +157,7 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 			.toBe(target.id);
 	});
 
-	test("project proposal editing another registered project banners", async ({ page }) => {
+	test("project proposal editing another registered project banners AND takes the EDIT path", async ({ page }) => {
 		const target = await registerTargetProject();
 		await openApp(page);
 		await createSessionViaUI(page);
@@ -174,5 +174,51 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 		const banner = page.locator('[data-panel="project-proposal"] [data-testid="cross-project-banner"]').first();
 		await expect(banner, "cross-project banner should render when editing another registered project").toBeVisible({ timeout: 10_000 });
 		await expect(banner).toContainText(target.name);
+
+		// Finding 2: an explicit, REGISTERED target must resolve the proposal to
+		// "registered" (EDIT) mode, never provisional/promote. resolveProjectMode
+		// derives mode from the target project, not the proposer session.
+		await expect
+			.poll(async () => page.evaluate(() => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return s?.activeProposals?.project?.mode ?? null;
+			}), { timeout: 10_000 })
+			.toBe("registered");
+		// The `projectId` routing key is never persisted into project config on
+		// accept (buildProjectConfigDiff excludes it) — pinned by the focused unit
+		// test tests2/core/project-proposal-diff.test.ts.
+	});
+
+	test("tool proposal targeting another project routes 'View Tool' to the target scope", async ({ page }) => {
+		const target = await registerTargetProject();
+		await openApp(page);
+		await createSessionViaUI(page);
+		await ensureUnifiedProposalReady(page);
+
+		await driveUnifiedProposal(page, "tool", {
+			tool: "cross-tool",
+			name: "cross-tool",
+			projectId: target.id,
+		});
+		await activatePanel(page, "Tool", '[data-panel="tool-proposal"]');
+
+		const banner = page.locator('[data-panel="tool-proposal"] [data-testid="cross-project-banner"]').first();
+		await expect(banner, "cross-project banner should render for a cross-project tool proposal").toBeVisible({ timeout: 10_000 });
+		await expect(banner).toContainText(target.name);
+
+		// The config-scope test seam attaches once proposal-panels.ts has loaded
+		// (i.e. after the panel mounts above).
+		await page.waitForFunction(
+			() => typeof (window as any).__bobbitGetConfigScope === "function",
+			undefined,
+			{ timeout: 20_000 },
+		);
+
+		// Finding 1: clicking "View Tool" must scope the tool editor to the TARGET
+		// project so the tool is edited/saved in the target's config store.
+		await page.locator('[data-panel="tool-proposal"] [data-testid="proposal-primary-submit"] button').first().click();
+		await expect
+			.poll(async () => page.evaluate(() => (window as any).__bobbitGetConfigScope?.() ?? null), { timeout: 10_000 })
+			.toBe(target.id);
 	});
 });

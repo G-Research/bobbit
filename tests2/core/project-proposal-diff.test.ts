@@ -57,6 +57,18 @@ describe("buildProjectConfigDiff", () => {
 		assert.deepEqual(out.workflows, workflows);
 	});
 
+	it("drops the `projectId` cross-project routing key (never persisted as config)", () => {
+		// projectId is routing metadata identifying the TARGET project of a
+		// cross-project proposal. Persisting it into PUT /api/projects/:id/config
+		// would pollute the target's config with a bogus flat key.
+		const out = buildProjectConfigDiff({
+			projectId: "some-target-project",
+			test_command: "npm test",
+		});
+		assert.deepEqual(out, { test_command: "npm test" });
+		assert.equal("projectId" in out, false);
+	});
+
 	it("drops empty / null / undefined values so we don't clobber persisted state", () => {
 		const out = buildProjectConfigDiff({
 			build_command: "",

@@ -301,6 +301,12 @@ function normalizeWorkflowSelections(): void {
 // and the setter is already an exported cross-module API.
 try {
 	(window as unknown as Record<string, unknown>).__bobbitSetSelectedWorkflowId = setSelectedWorkflowId;
+	// Test seam: expose the shared config-scope getter so browser E2E can assert
+	// that a cross-project tool proposal's "View Tool" routed the editor to the
+	// TARGET project's config scope. Read-only getter; carries no secrets.
+	void import("./config-scope.js").then((m) => {
+		(window as unknown as Record<string, unknown>).__bobbitGetConfigScope = m.getConfigScope;
+	}).catch(() => { /* module unavailable */ });
 } catch { /* non-window environment */ }
 
 function ensureWorkflowsLoaded(projectId?: string): void {
@@ -2351,7 +2357,17 @@ function toolPreviewPanel() {
 	const handleViewTool = async () => {
 		const toolName = state.toolPreviewName.trim();
 		if (!toolName) return;
+		// Cross-project routing: a propose_tool(projectId: target) must open and
+		// save the tool in the TARGET project's config store, not the proposer's
+		// current scope. loadToolPageData keys off the shared config scope
+		// (getConfigApiProjectId → getConfigScope), so set the scope to the
+		// resolved target BEFORE loading/routing.
+		const target = proposalProjectId("tool", state.activeProposals.tool?.sessionId ?? activeSessionId());
 		const { loadToolPageData } = await import("./tool-manager-page.js");
+		if (target) {
+			const { getConfigScope, setConfigScope } = await import("./config-scope.js");
+			if (target !== getConfigScope()) setConfigScope(target);
+		}
 		await loadToolPageData();
 		setHashRoute("tool-edit", toolName);
 		renderApp();

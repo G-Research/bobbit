@@ -232,11 +232,23 @@ export function applyProjectPalette(projectId?: string): void {
 // goal-only call shape used by render.ts:goalProposalPanel.
 // ============================================================================
 
-/** Resolve provisional/registered mode for a project proposal slot from the
- *  current session→project mapping. Extracted for the unified onProposal
- *  callback (Slice E gap-closure). Returns "provisional" if no project is
- *  registered yet (fresh project assistant flow). */
-function resolveProjectMode(sessionId: string): "provisional" | "registered" {
+/** Resolve provisional/registered mode for a project proposal slot.
+ *
+ *  When the proposal carries an explicit `fields.projectId` naming a REGISTERED
+ *  (non-provisional) project, mode derives from THAT target — a cross-project
+ *  edit from a provisional source session must still take the "registered"
+ *  (EDIT) path rather than promote/provision. When `projectId` is absent (the
+ *  common new-project flow) mode derives from the source session's project,
+ *  returning "provisional" if no project is registered yet.
+ *  Extracted for the unified onProposal callback (Slice E gap-closure). */
+function resolveProjectMode(sessionId: string, fields?: Record<string, unknown>): "provisional" | "registered" {
+	const explicit = typeof fields?.projectId === "string" ? (fields.projectId as string).trim() : "";
+	if (explicit) {
+		const target = state.projects.find(p => p.id === explicit);
+		// Explicit target that is registered (non-provisional) → EDIT path.
+		// Unknown/provisional target falls through to the source-session default.
+		if (target && !target.provisional) return "registered";
+	}
 	const session = state.gatewaySessions.find(s => s.id === sessionId);
 	const project = state.projects.find(p => p.id === session?.projectId);
 	return project?.provisional ? "provisional" : "registered";
@@ -1996,7 +2008,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				fields: merged,
 				streaming: false,
 				mode: type === "project"
-					? (prev?.mode ?? resolveProjectMode(sessionId))
+					? (prev?.mode ?? resolveProjectMode(sessionId, merged))
 					: undefined,
 				rev: nextRev,
 				...(preservedWorkflowValidation ? { workflowValidationError: preservedWorkflowValidation } : {}),
