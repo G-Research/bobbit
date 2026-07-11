@@ -890,6 +890,93 @@ describe("Headquarters directory migration", () => {
 		assert.equal(fs.existsSync(path.join(overrideState, "goals.json.pre-headquarters-id-migration-recovered")), false, "the preserved backup must not be retired");
 	});
 
+	// Retirement fix 1: in a BOBBIT_DIR-override install the Headquarters state dir
+	// differs from a same-root normal project's `<rootPath>/.bobbit/state`. A delete
+	// made against that normal project writes its tombstone THERE, not in the HQ dir.
+	// Retirement must union tombstones from the HQ dir AND every same-root normal
+	// project dir — otherwise the tombstoned-but-not-in-live key is misclassified as
+	// unaccounted and the spent backup lingers forever. (Previously PRESERVED.)
+	it("retires a spent backup whose only backup-only key is tombstoned in a same-root normal project's state dir", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		fs.writeFileSync(path.join(overrideState, ".headquarters-dir-migrated"), "done", "utf-8");
+		// survivor already recovered to the normal store; e2e-guardian tombstoned
+		// ONLY in the normal project's state dir (the override HQ dir has NO tombstone).
+		writeJson(path.join(root, ".bobbit", "state", "staff.json"), [staffRecord("survivor", oldId)]);
+		writeJson(path.join(overrideState, "staff.json"), []);
+		writeJson(path.join(overrideState, "staff.json.pre-headquarters-id-migration"), [staffRecord("survivor", oldId), staffRecord("e2e-guardian", oldId)]);
+		writeJson(path.join(root, ".bobbit", "state", ".deletion-tombstones.json"), { "staff.json": ["e2e-guardian"] });
+
+		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		assert.equal(fs.existsSync(path.join(overrideState, "staff.json.pre-headquarters-id-migration")), false, "backup must be retired when the sole backup-only key is tombstoned in the normal project's state dir");
+		assert.equal(fs.existsSync(path.join(overrideState, "staff.json.pre-headquarters-id-migration-recovered")), true, "retired backup must be renamed to the -recovered suffix");
+	});
+
+	// Retirement fix 2: team-state.json has no tombstone namespace of its own (its
+	// records are keyed by goalId and only goals.json gets a goal tombstone). A
+	// team-state backup holding a goalId whose goal was deleted must retire because
+	// the goalId is tombstoned under the "goals.json" namespace; one holding a goalId
+	// that is neither live nor goal-tombstoned must be PRESERVED.
+	function teamRecord(goalId: string): Record<string, unknown> {
+		// No projectId on purpose: real pre-migration team-state records are keyed by
+		// goalId and carry no projectId, so the backup-only recovery loop does not
+		// re-route them — retirement alone (via the goals.json tombstone) governs them.
+		return { goalId, teamLeadSessionId: "s-" + goalId, maxConcurrent: 1, agents: [] };
+	}
+
+	it("retires a team-state backup whose backup-only goalId is goal-tombstoned (goals.json namespace)", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		fs.writeFileSync(path.join(overrideState, ".headquarters-dir-migrated"), "done", "utf-8");
+		// team-state backup-only goalId g-deleted: its goal was deleted, so it is
+		// tombstoned under goals.json → accounted → team-state backup retired.
+		writeJson(path.join(root, ".bobbit", "state", "team-state.json"), []);
+		writeJson(path.join(overrideState, "team-state.json"), []);
+		writeJson(path.join(overrideState, "team-state.json.pre-headquarters-id-migration"), [teamRecord("g-deleted")]);
+		writeJson(path.join(overrideState, ".deletion-tombstones.json"), { "goals.json": ["g-deleted"] });
+
+		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		assert.equal(fs.existsSync(path.join(overrideState, "team-state.json.pre-headquarters-id-migration")), false, "team-state backup with a goal-tombstoned goalId must be retired");
+		assert.equal(fs.existsSync(path.join(overrideState, "team-state.json.pre-headquarters-id-migration-recovered")), true, "retired team-state backup must be renamed to the -recovered suffix");
+	});
+
+	it("preserves a team-state backup whose backup-only goalId is neither live nor goal-tombstoned", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		fs.writeFileSync(path.join(overrideState, ".headquarters-dir-migrated"), "done", "utf-8");
+		// g-live is neither in any live team-state store nor tombstoned under goals.json
+		// → unaccounted key → backup preserved (never dropped).
+		writeJson(path.join(root, ".bobbit", "state", "team-state.json"), []);
+		writeJson(path.join(overrideState, "team-state.json"), []);
+		writeJson(path.join(overrideState, "team-state.json.pre-headquarters-id-migration"), [teamRecord("g-live")]);
+		writeJson(path.join(overrideState, ".deletion-tombstones.json"), { "goals.json": ["g-other"] });
+
+		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		assert.equal(fs.existsSync(path.join(overrideState, "team-state.json.pre-headquarters-id-migration")), true, "team-state backup holding an un-tombstoned, unrecovered goalId must be preserved");
+		assert.equal(fs.existsSync(path.join(overrideState, "team-state.json.pre-headquarters-id-migration-recovered")), false, "the preserved team-state backup must not be retired");
+	});
+
 	// Finding B: relocating a live server secret is FATAL if it cannot be provably
 	// removed from a project-reachable path. If the copy into serverSecretsDir()
 	// succeeds but the reachable source cannot be deleted, leaving it behind would

@@ -873,7 +873,26 @@ function retireSpentHeadquartersBackups(
 			}
 		}
 
-		const tombstoned = readDeletionTombstones(headquartersStateDir, fileName);
+		// Union tombstones from the HQ state dir AND every same-root normal
+		// project's state dir. In a BOBBIT_DIR-override install the HQ state dir
+		// differs from a same-root normal project's `<rootPath>/.bobbit/state`,
+		// and a delete made against that normal project writes its tombstone
+		// there. Reading only the HQ dir would miss it and preserve the backup
+		// forever. De-dupe dirs via a Set, mirroring routeLegacyProjectStoreFile.
+		const tombstoneDirs = new Set([headquartersStateDir, ...sameRootStateDirs]);
+		const tombstoned = new Set<string>();
+		for (const dir of tombstoneDirs) {
+			for (const key of readDeletionTombstones(dir, fileName)) tombstoned.add(key);
+			// team-state.json has no tombstone namespace of its own: its records
+			// are keyed by goalId and are cleaned up when a goal is deleted, but
+			// only goals.json gets a goal tombstone. Gate team-state retirement on
+			// the goal tombstone by treating a backup goalId as tombstoned if it is
+			// tombstoned under the "goals.json" namespace. (We do NOT write
+			// team-state tombstones; goal-tombstone gating is the intended design.)
+			if (fileName === "team-state.json") {
+				for (const key of readDeletionTombstones(dir, "goals.json")) tombstoned.add(key);
+			}
+		}
 		let safe = true;
 		for (const key of backupKeys) {
 			if (liveKeys.has(key) || tombstoned.has(key)) continue;
