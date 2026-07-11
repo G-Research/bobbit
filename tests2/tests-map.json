@@ -238,6 +238,10 @@
       "type": "smoke-journey"
     },
     {
+      "path": "tests2/browser/journeys/cross-project-proposal-banner.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
       "path": "tests2/browser/journeys/goal-editing.journey.spec.ts",
       "type": "smoke-journey"
     },

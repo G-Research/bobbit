@@ -1,0 +1,178 @@
+/**
+ * Journey: Cross-project proposal banner + accept routing (design §5, §7).
+ *
+ * A `propose_*` made from one project may target a DIFFERENT project via its
+ * optional `projectId`. When the resolved target differs from the proposer's
+ * session project the proposal panel must show a prominent "Proposing into
+ * <Target Project>" banner (data-testid="cross-project-banner") tinted with the
+ * target's accent. When the target equals the proposer's project (the common
+ * case) NO banner renders and the panel is unchanged.
+ *
+ * This spec drives the UNIFIED `remote.onProposal` path directly (the same path
+ * a server-pushed `proposal_update {source:"seed"}` frame takes — see
+ * cross-session-proposal-mirror.journey.spec.ts) from a plain session in the
+ * "default" project, seeding proposals whose `projectId` names a second,
+ * separately-registered project ("target").
+ *
+ * Asserts, per design §7:
+ *   (i)  cross-project role/goal/project proposals show the banner with the
+ *        human-readable TARGET name;
+ *   (ii) a same-project role proposal (projectId omitted → session's project)
+ *        shows NO banner;
+ *   (iii) accept routes to the target — for a goal proposal this is fully
+ *        client-side (createGoal uses state.previewProjectId, which resolves to
+ *        the explicit target), so we assert previewProjectId === targetId as a
+ *        reliable proxy. (Seed-endpoint accept routing for role/tool/staff/
+ *        project is owned by the server task; this spec's banner assertions do
+ *        not depend on it.)
+ */
+import { test, expect, openApp, createSessionViaUI, registerProject } from "../_helpers/journey-fixture.js";
+import type { Page } from "@playwright/test";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+// Deterministic UI behaviour — a failure here is a bug, not a flake budget.
+test.describe.configure({ retries: 0 });
+
+async function ensureUnifiedProposalReady(page: Page): Promise<void> {
+	await page.waitForFunction(() => {
+		const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return !!s?.remoteAgent && typeof s.remoteAgent.onProposal === "function";
+	}, undefined, { timeout: 20_000 });
+}
+
+/** Drive the unified onProposal callback directly (server "seed" broadcast path). */
+async function driveUnifiedProposal(
+	page: Page,
+	type: string,
+	fields: Record<string, unknown>,
+	source = "seed",
+): Promise<void> {
+	await page.evaluate(
+		({ type, fields, source }) => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			const ra = s?.remoteAgent;
+			if (!ra || typeof ra.onProposal !== "function") {
+				throw new Error("remoteAgent.onProposal handler missing");
+			}
+			const rev = ((s?.activeProposals?.[type]?.rev ?? 0) as number) + 1;
+			ra.onProposal(type, fields, false, rev, source);
+		},
+		{ type, fields, source },
+	);
+}
+
+/** Focus the proposal workspace tab and wait for its panel container to mount. */
+async function activatePanel(page: Page, tabTitle: string, panelSelector: string): Promise<void> {
+	const pill = page.locator(`.goal-tab-pill[title="${tabTitle}"]`).first();
+	await expect(pill, `${tabTitle} proposal tab pill should appear`).toBeVisible({ timeout: 15_000 });
+	await pill.click();
+	await expect(page.locator(panelSelector).first(), `${panelSelector} should mount`).toBeVisible({ timeout: 15_000 });
+}
+
+/** Register a second project so proposals can cross-target it. */
+async function registerTargetProject(): Promise<{ id: string; name: string }> {
+	const dir = mkdtempSync(join(tmpdir(), `bobbit-v2-xproj-${process.env.E2E_PORT ?? "0"}-`));
+	const name = `v2-xproj-target-${Date.now()}`;
+	const proj = await registerProject({ name, rootPath: dir, seedWorkflows: false });
+	return { id: proj.id, name };
+}
+
+test.describe("Journey: cross-project proposal banner (design §7)", () => {
+	test("role proposal targeting another project shows the cross-project banner", async ({ page }) => {
+		const target = await registerTargetProject();
+		await openApp(page);
+		await createSessionViaUI(page);
+		await ensureUnifiedProposalReady(page);
+
+		// Proposer session is in "default"; proposal targets the "target" project.
+		await driveUnifiedProposal(page, "role", {
+			name: "qa-runner",
+			label: "QA Runner",
+			prompt: "You run QA passes on changed code.",
+			tools: "bash,read,grep",
+			accessory: "flask",
+			projectId: target.id,
+		});
+		await activatePanel(page, "Role", '[data-panel="role-proposal"]');
+
+		const banner = page.locator('[data-panel="role-proposal"] [data-testid="cross-project-banner"]').first();
+		await expect(banner, "cross-project banner should render for a cross-project role proposal").toBeVisible({ timeout: 10_000 });
+		await expect(banner).toContainText("Proposing into");
+		await expect(banner).toContainText(target.name);
+		// The banner must show the human-readable NAME, never the raw id.
+		await expect(banner).not.toContainText(target.id);
+	});
+
+	test("same-project role proposal shows NO banner", async ({ page }) => {
+		// Register a target project too, so the registry has >1 project (proves the
+		// absence of a banner is due to same-project resolution, not a missing registry entry).
+		await registerTargetProject();
+		await openApp(page);
+		await createSessionViaUI(page);
+		await ensureUnifiedProposalReady(page);
+
+		// projectId omitted → defaults to the proposer's session project → same-project.
+		await driveUnifiedProposal(page, "role", {
+			name: "local-role",
+			label: "Local Role",
+			prompt: "A role created in this same project.",
+			tools: "read",
+		});
+		await activatePanel(page, "Role", '[data-panel="role-proposal"]');
+
+		// Panel is mounted; assert the banner is absent (common-case: no extra chrome).
+		await expect(
+			page.locator('[data-panel="role-proposal"] [data-testid="cross-project-banner"]'),
+			"no cross-project banner for a same-project proposal",
+		).toHaveCount(0);
+	});
+
+	test("goal proposal targeting another project banners AND routes accept to the target", async ({ page }) => {
+		const target = await registerTargetProject();
+		await openApp(page);
+		await createSessionViaUI(page);
+		await ensureUnifiedProposalReady(page);
+
+		await driveUnifiedProposal(page, "goal", {
+			title: "Cross-project goal",
+			spec: "A goal proposed from the default project but targeting the registered target project.",
+			projectId: target.id,
+		});
+		await activatePanel(page, "Goal", '[data-panel="goal-proposal"]');
+
+		const banner = page.locator('[data-panel="goal-proposal"] [data-testid="cross-project-banner"]').first();
+		await expect(banner, "cross-project banner should render for a cross-project goal proposal").toBeVisible({ timeout: 10_000 });
+		await expect(banner).toContainText(target.name);
+
+		// (iii) Accept routing proxy: the goal-create path uses state.previewProjectId,
+		// which must resolve to the explicit target — proving the goal would be created
+		// in the target project's worktree/branch on accept.
+		await expect
+			.poll(async () => page.evaluate(() => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return s?.previewProjectId ?? null;
+			}), { timeout: 10_000 })
+			.toBe(target.id);
+	});
+
+	test("project proposal editing another registered project banners", async ({ page }) => {
+		const target = await registerTargetProject();
+		await openApp(page);
+		await createSessionViaUI(page);
+		await ensureUnifiedProposalReady(page);
+
+		// A registered-mode project proposal naming an explicit, registered target.
+		await driveUnifiedProposal(page, "project", {
+			name: target.name,
+			projectId: target.id,
+			test_command: "npm test",
+		});
+		await activatePanel(page, "Project", '[data-panel="project-proposal"]');
+
+		const banner = page.locator('[data-panel="project-proposal"] [data-testid="cross-project-banner"]').first();
+		await expect(banner, "cross-project banner should render when editing another registered project").toBeVisible({ timeout: 10_000 });
+		await expect(banner).toContainText(target.name);
+	});
+});

@@ -71,7 +71,8 @@ import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { ACCESSORY_IDS, getAccessory, statusBobbit } from "./session-colors.js";
-import { defaultCwdForProjectSession, isHeadquartersProject } from "./headquarters.js";
+import { defaultCwdForProjectSession, isHeadquartersProject, projectDisplayName } from "./headquarters.js";
+import { getProjectAccentColor } from "./render-helpers.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 import { reloadStaffList } from "./sidebar.js";
 import {
@@ -123,6 +124,80 @@ function resolveGoalProposalProjectId(sessionId: string | null | undefined, fiel
 	const session = sessionId ? state.gatewaySessions.find(s => s.id === sessionId) : undefined;
 	if (session?.reattemptGoalId) return state.goals.find(g => g.id === session.reattemptGoalId)?.projectId;
 	return undefined;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Cross-project proposal banner (design §7)
+//
+// A proposal made from one project may target a DIFFERENT project via its
+// optional `projectId`. When the resolved target differs from the proposer's
+// session project we surface a prominent "Proposing into <Target>" banner at
+// the top of the panel. Same-project / unknown / undeterminable → no chrome.
+// ──────────────────────────────────────────────────────────────────────
+
+/** Normalise the hidden `system` scope to the user-facing `headquarters` id. */
+function normalizeProposalProjectId(id: string | null | undefined): string | undefined {
+	if (typeof id !== "string") return undefined;
+	const t = id.trim();
+	if (!t) return undefined;
+	return t === "system" ? "headquarters" : t;
+}
+
+/** The (normalised) project of the session that authored the proposal. */
+function proposerSessionProjectId(sessionId: string | null | undefined): string | undefined {
+	if (!sessionId) return undefined;
+	const session = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	return normalizeProposalProjectId(session?.projectId);
+}
+
+/**
+ * Resolve the cross-project banner target for a proposal, or undefined when no
+ * banner should render. Returns the target project record ONLY when it is
+ * registered AND differs from the proposer's session project.
+ */
+function crossProjectTarget(
+	type: ProposalType,
+	sessionId: string | null | undefined,
+): (typeof state.projects)[number] | undefined {
+	let rawTarget: string | undefined;
+	if (type === "goal") {
+		rawTarget = resolveGoalProposalProjectId(sessionId, state.activeProposals.goal?.fields as Record<string, unknown> | undefined);
+	} else if (type === "project") {
+		// Project proposals only banner an EXPLICIT, registered target — a
+		// brand-new / unknown project shows no banner (matches §3 tri-state).
+		const explicit = state.activeProposals.project?.fields?.projectId;
+		rawTarget = typeof explicit === "string" && explicit.trim() ? explicit.trim() : undefined;
+	} else {
+		rawTarget = proposalProjectId(type, sessionId);
+	}
+	const target = normalizeProposalProjectId(rawTarget);
+	if (!target) return undefined;
+	const record = state.projects.find(p => p.id === target);
+	if (!record) return undefined; // unknown target → no banner
+	const proposer = proposerSessionProjectId(sessionId);
+	// Only banner when we can confirm the target differs from the proposer.
+	if (!proposer || proposer === target) return undefined;
+	return record;
+}
+
+/** "Proposing into <Target Project>" banner, tinted with the target's accent. */
+function crossProjectBanner(type: ProposalType, sessionId: string | null | undefined): TemplateResult | typeof nothing {
+	const target = crossProjectTarget(type, sessionId);
+	if (!target) return nothing;
+	const accent = getProjectAccentColor(target);
+	const name = projectDisplayName(target);
+	return html`
+		<div
+			class="shrink-0 flex items-center gap-2 px-5 py-2 text-xs font-medium border-b"
+			data-testid="cross-project-banner"
+			data-target-project-id=${target.id}
+			style=${`border-color: color-mix(in oklch, ${accent} 45%, transparent); background: color-mix(in oklch, ${accent} 12%, transparent); color: var(--foreground);`}
+		>
+			<span class="inline-block w-2 h-2 rounded-full shrink-0" style=${`background: ${accent};`}></span>
+			<span>Proposing into <span class="font-semibold" data-testid="cross-project-target-name">${name}</span></span>
+		</div>
+	`;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -579,6 +654,11 @@ interface GoalFormConfig {
 	specEditMode: boolean;
 	enabledOptionalSteps: string[];
 	linkedProjectId?: string;
+
+	/** Cross-project "Proposing into <Target>" banner (design §7). Rendered at the
+	 *  very top of the form when the goal targets a project other than the
+	 *  proposer's session project; `nothing`/undefined leaves the panel unchanged. */
+	crossProjectBanner?: TemplateResult | typeof nothing;
 
 	/** Workflow availability for the linked project. Drives the empty-workflows
 	 *  banner and Accept-disabled state in the form header. */
@@ -1424,7 +1504,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				: activeTab === "metadata"
 					? renderProposalMetadataTab(config)
 					: renderProposalSubgoalsTab(config);
-	return html`${tabBar}${panel}${footer}`;
+	return html`${config.crossProjectBanner ?? nothing}${tabBar}${panel}${footer}`;
 }
 
 // ============================================================================
@@ -1882,6 +1962,7 @@ function goalPreviewPanel() {
 				sandboxed: _goalSandboxed,
 				specEditMode: state.previewSpecEditMode,
 				enabledOptionalSteps: _assistantEnabledOptionalSteps,
+				crossProjectBanner: crossProjectBanner("goal", state.activeProposals.goal?.sessionId ?? activeSessionId()),
 				linkedProjectId: state.previewProjectId || undefined,
 				workflowState: workflowStateFor(state.previewProjectId || undefined),
 				workflowErrorMessage,
@@ -2084,6 +2165,7 @@ function rolePreviewPanel() {
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="role-proposal">
 			${proposalToast()}
+			${crossProjectBanner("role", state.activeProposals.role?.sessionId ?? activeSessionId())}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -2293,6 +2375,7 @@ function toolPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="tool-proposal">
+			${crossProjectBanner("tool", state.activeProposals.tool?.sessionId ?? activeSessionId())}
 			<div ${ref(toolOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
 				<!-- Tool name header -->
 				<div>
@@ -2558,6 +2641,7 @@ function staffPreviewPanel() {
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="staff-proposal">
 			${proposalToast()}
+			${crossProjectBanner("staff", staffPreviewSessionId())}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -2845,7 +2929,22 @@ function activeProjectProposalOrFail(): NonNullable<typeof state.activeProposals
 	return proposal ?? null;
 }
 
-function projectIdForProjectProposal(sessionId: string): string | null {
+/**
+ * Resolve the project a project-proposal accept should target (design §5,
+ * tri-state — mirrors the server mutation-boundary invariant in §3):
+ *   explicit + registered → that project id (EDIT)
+ *   explicit + unknown    → UNKNOWN_PROJECT error, null (REJECT, no create)
+ *   absent                → session's project (unchanged new-project/provisional flow)
+ * The UI only preflights; the server remains authoritative.
+ */
+function projectIdForProjectProposal(sessionId: string, fields?: Record<string, unknown>): string | null {
+	const explicitRaw = fields?.projectId;
+	const explicit = typeof explicitRaw === "string" && explicitRaw.trim() ? explicitRaw.trim() : undefined;
+	if (explicit) {
+		if (state.projects.some(p => p.id === explicit)) return explicit; // EDIT registered target
+		showConnectionError(PROJECT_ACCEPT_FAILED, `Unknown project "${explicit}". Cross-project proposals must target an already-registered project.`);
+		return null; // explicit + unknown → never fall through to the new-project flow
+	}
 	const projectId = state.gatewaySessions.find(s => s.id === sessionId)?.projectId;
 	if (!projectId) showConnectionError(PROJECT_ACCEPT_FAILED, UNLINKED_PROJECT_PROPOSAL);
 	return projectId || null;
@@ -2935,7 +3034,7 @@ async function terminateProjectAssistantSessionFromPanel(sessionId: string): Pro
 
 async function acceptProvisionalProjectProposalFromPanel(proposal: NonNullable<typeof state.activeProposals.project>): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
-	const projectId = projectIdForProjectProposal(propSessionId);
+	const projectId = projectIdForProjectProposal(propSessionId, fields as Record<string, unknown>);
 	if (!projectId) return false;
 	if (!await promoteProjectProposal(projectId, typeof fields.name === "string" ? fields.name : "")) return false;
 	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
@@ -2953,7 +3052,7 @@ async function acceptProvisionalProjectProposalFromPanel(proposal: NonNullable<t
 
 async function acceptRegisteredProjectProposalFromPanel(proposal: NonNullable<typeof state.activeProposals.project>): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
-	const projectId = projectIdForProjectProposal(propSessionId);
+	const projectId = projectIdForProjectProposal(propSessionId, fields as Record<string, unknown>);
 	if (!projectId) return false;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 	if (fieldNameStr) {
@@ -3181,6 +3280,7 @@ function projectProposalPanel() {
 	const isHistoricalProject = _proposalOverride?.type === "project";
 	return html`
 		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode} data-historical-proposal=${isHistoricalProject ? "true" : "false"}>
+			${crossProjectBanner("project", proposal.sessionId)}
 			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
 				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
 				${proposal.rev > 0 ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${proposal.rev}</span>` : ""}
@@ -3961,6 +4061,7 @@ function goalProposalPanel() {
 		sandboxed: _proposalSandboxed,
 		specEditMode: _proposalSpecEditMode,
 		enabledOptionalSteps: _proposalEnabledOptionalSteps,
+		crossProjectBanner: crossProjectBanner("goal", state.activeProposals.goal?.sessionId ?? activeSessionId()),
 		linkedProjectId: state.previewProjectId || undefined,
 		workflowState: workflowStateFor(state.previewProjectId || undefined),
 		workflowErrorMessage,
