@@ -62,7 +62,7 @@ export type Action =
 	| { type: "optimistic-steer"; message: any }
 	| { type: "permission-needed"; card: any; seq?: number; ts?: number }
 	| { type: "permission-resolved"; messageId: string; status?: string; error?: string }
-	| { type: "permission-status"; messageId?: string; toolName?: string; status: string; error?: string; actionable?: boolean }
+	| { type: "permission-status"; messageId?: string; toolName?: string; status: string; error?: string; actionable?: boolean; fromStatus?: string }
 	| { type: "permission-reconciled"; current: any | null; reason?: string }
 	| { type: "blocked-tool-call-placeholder"; message: any; seq?: number }
 	| { type: "compaction-placeholder"; message: any }
@@ -325,6 +325,14 @@ function containsToolCall(message: any, toolCallId: string): boolean {
 		&& message.content.some((c: any) => c?.type === "toolCall" && c?.id === toolCallId);
 }
 
+function toolCallIds(message: any): string[] {
+	return Array.isArray(message?.content)
+		? message.content
+			.filter((c: any) => c?.type === "toolCall" && typeof c.id === "string")
+			.map((c: any) => c.id as string)
+		: [];
+}
+
 /**
  * Apply a reducer action to the state and return a new state. Pure.
  */
@@ -359,6 +367,19 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			}
 			const role = incoming.role;
 			let messages = state.messages.slice();
+
+			// Permission blocking freezes the in-flight assistant tool-use row as a
+			// synthetic placeholder. If the matching live message_end arrives later,
+			// replace that placeholder instead of rendering the same tool calls twice
+			// until the next snapshot/reload reconciles them.
+			if (role === "assistant") {
+				const ids = toolCallIds(incoming);
+				if (ids.length > 0) {
+					const before = messages.length;
+					messages = messages.filter((m: any) => !(m._permissionBlocked === true && ids.some((id) => containsToolCall(m, id))));
+					if (messages.length !== before) incoming = { ...incoming, _permissionBlocked: true };
+				}
+			}
 
 			// Drop any prior server entry with the same id (replace-by-id).
 			if (typeof incoming.id === "string" && incoming.id.length > 0) {
@@ -873,14 +894,22 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 					: state.highestSeq + 0.25;
 			const existingIdx = state.messages.findIndex((m: any) =>
 				m.role === "tool_permission_needed"
-				&& typeof action.seq === "number"
-				&& m._order === action.seq
-				&& m.toolName === action.card.toolName
-				&& m.group === action.card.group,
+				&& (
+					(action.card.id && m.id === action.card.id)
+					|| (
+						typeof action.seq === "number"
+						&& m._order === action.seq
+						&& m.toolName === action.card.toolName
+						&& m.group === action.card.group
+					)
+				),
 			);
 			let messages = state.messages.map((m) => {
 				if (m.role !== "tool_permission_needed") return m;
 				if (existingIdx !== -1 && m === state.messages[existingIdx]) return m;
+				// Parallel calls for the same tool/group should stack under one pinned
+				// decision instead of superseding each other.
+				if (samePermissionRequest(m, action.card)) return m;
 				return isActionablePermission(m) ? settlePermission(m, "superseded") : m;
 			});
 			const card = {
@@ -889,7 +918,12 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				actionable: action.card.actionable ?? true,
 			};
 			if (existingIdx !== -1) {
-				messages = messages.map((m, idx) => idx === existingIdx ? { ...m, ...card, _order: m._order, _origin: m._origin, _insertionTick: m._insertionTick } : m);
+				messages = messages.map((m, idx) => {
+					if (idx !== existingIdx) return m;
+					const updated = { ...m, ...card, _order: m._order, _origin: m._origin, _insertionTick: m._insertionTick };
+					if (!("error" in card)) delete (updated as any).error;
+					return updated;
+				});
 			} else {
 				messages = [
 					...messages,
@@ -925,8 +959,11 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				const toolMatches = !action.messageId && action.toolName && m.toolName === action.toolName && isActionablePermission(m);
 				const fallbackActiveMatch = !action.messageId && !action.toolName && isActionablePermission(m);
 				if (!idMatches && !toolMatches && !fallbackActiveMatch) return m;
+				if (action.fromStatus && m.status !== action.fromStatus) return m;
 				const actionable = action.actionable ?? ACTIVE_PERMISSION_STATUSES.has(action.status);
-				return { ...m, status: action.status, actionable, ...(action.error ? { error: action.error } : {}) };
+				const updated = { ...m, status: action.status, actionable, ...(action.error ? { error: action.error } : {}) };
+				if (!action.error) delete (updated as any).error;
+				return updated;
 			});
 			return { ...state, messages };
 		}
@@ -943,16 +980,13 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 
 		case "blocked-tool-call-placeholder": {
 			const tick = state.nextTick;
-			const content = Array.isArray(action.message?.content) ? action.message.content : [];
-			const toolCallIds: string[] = content
-				.filter((c: any) => c?.type === "toolCall" && typeof c.id === "string")
-				.map((c: any) => c.id as string);
-			if (toolCallIds.length === 0) return state;
-			if (state.messages.some((m) => toolCallIds.some((id) => containsToolCall(m, id)))) return state;
+			const ids = toolCallIds(action.message);
+			if (ids.length === 0) return state;
+			if (state.messages.some((m) => ids.some((id) => containsToolCall(m, id)))) return state;
 			const order = typeof action.seq === "number" ? action.seq - 0.001 : state.highestSeq + 0.2;
 			const message = {
 				...action.message,
-				id: action.message.id || `blocked_tool_${toolCallIds[0]}`,
+				id: action.message.id || `blocked_tool_${ids[0]}`,
 				_permissionBlocked: true,
 			};
 			return {

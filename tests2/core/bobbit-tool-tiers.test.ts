@@ -38,7 +38,7 @@ const EXPECTED_OPS = {
 		"cancel_verification", "create_staff", "delete_staff", "team_start", "team_teardown",
 	],
 	bobbit_admin: [
-		"update_project_config", "set_provider_key", "delete_provider_key",
+		"create_project", "update_project_config", "set_provider_key", "delete_provider_key",
 		"custom_providers", "aigw_configure", "marketplace_install",
 		"marketplace_update", "marketplace_uninstall", "tool_override",
 		"role_override", "workflow_override", "maintenance_cleanup",

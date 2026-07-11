@@ -35,7 +35,7 @@ import { mintSurfaceToken, resolveSurfaceIdentity } from "../extension-host/surf
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
 import { handleSessionPost } from "../extension-host/session-write.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
-import { applyRuntimeSessionModelSelection } from "./runtime-model-selection.js";
+import { applyRuntimeSessionModelSelection, broadcastRuntimeSessionActualModelState } from "./runtime-model-selection.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
@@ -886,8 +886,10 @@ export function handleWebSocketConnection(
 						// Surface set_model failures to the UI instead of silently swallowing
 						// them — otherwise the client keeps showing the new model while the
 						// agent stays bound to the previous one and subsequent prompts go
-						// to the wrong model.
+						// to the wrong model. First broadcast the authoritative actual model
+						// so optimistic clients reconcile before seeing the failure banner.
 						console.error(`[ws-handler] set_model failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, err?.message || err);
+						await broadcastRuntimeSessionActualModelState(sessionManager, session, broadcast);
 						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code: "SET_MODEL_FAILED" });
 					}
 					break;
@@ -1181,13 +1183,15 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "grant_tool_permission": {
-					sessionManager.grantToolPermission(sessionId, msg.toolName, msg.scope, msg.group, msg.mode).catch((err: any) => {
+					sessionManager.grantToolPermission(sessionId, msg.toolName, msg.scope, msg.group, msg.mode, msg.permissionId).catch((err: any) => {
+						const message = String(err?.message ?? err);
+						if (message.startsWith("Ignored stale permission grant")) return;
 						send(ws, { type: "error", message: `Grant failed: ${err}`, code: "GRANT_ERROR" });
 					});
 					break;
 				}
 				case "deny_tool_permission": {
-					sessionManager.denyToolPermission(sessionId, msg.toolName);
+					sessionManager.denyToolPermission(sessionId, msg.toolName, msg.permissionId);
 					break;
 				}
 				case "restart_agent":

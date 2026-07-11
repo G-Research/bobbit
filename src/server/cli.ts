@@ -12,6 +12,7 @@ import { loadOrCreateToken, readToken } from "./auth/token.js";
 import { ensureTlsCert } from "./auth/tls.js";
 import { loadDesecConfig, updateDesecIp } from "./auth/desec.js";
 import { createGateway } from "./server.js";
+import { bootLog, bootMark } from "./boot-profile.js";
 import { loopbackForBind } from "./cli-loopback.js";
 import { resolveCliGatewayDeps } from "./cli-gateway-deps.js";
 
@@ -126,6 +127,8 @@ function parseArgs(argv: string[]): CliArgs {
 }
 
 async function main() {
+	// Wall-clock anchor for boot instrumentation — process-start (approx) to listen.
+	const bootWallT0 = Date.now();
 	const args = parseArgs(process.argv.slice(2));
 
 	// --show-token: print token and exit
@@ -193,6 +196,9 @@ async function main() {
 		updateDesecIp(desecConfig, args.host); // fire and forget
 	}
 
+	bootMark(`BOOT ${new Date().toISOString()}`);
+	bootLog(`[boot] prologue (binaries/token/tls) in ${Date.now() - bootWallT0}ms`);
+	const ctorT0 = Date.now();
 	const gateway = createGateway({
 		host: args.host,
 		port: args.port,
@@ -205,8 +211,12 @@ async function main() {
 		tls,
 		forceAuth: args.forceAuth,
 	}, resolveCliGatewayDeps());
+	bootLog(`[boot] createGateway construction in ${Date.now() - ctorT0}ms`);
 
+	const startT0 = Date.now();
 	const actualPort = await gateway.start();
+	bootLog(`[boot] gateway.start() (pre-listen critical path) in ${Date.now() - startT0}ms`);
+	bootLog(`[boot] TOTAL process-start \u2192 listening in ${Date.now() - bootWallT0}ms`);
 
 	// Collect reachable addresses for display
 	const interfaces = os.networkInterfaces();

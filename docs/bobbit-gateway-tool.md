@@ -97,13 +97,42 @@ by default (`limit=50`, `offset=0`, max `200`) and return a `pagination` object.
 operations page the already-filtered gateway response in the tool. REST-paged
 responses are annotated, not re-sliced.
 
+**Archived entities are hidden by default.** Every list/search read returns
+live rows only unless the caller explicitly opts in. This keeps stale, archived
+goals and sessions out of agent context, which is almost never what an agent
+wants when it enumerates current state. The filter is applied to the tool
+response after the gateway replies, so it also strips the archive-only
+auxiliary arrays the REST endpoints attach for the UI:
+
+- `list_sessions` — drops `archived: true` session rows and strips the
+  `archivedDelegates` array. Pass `include=archived` to get archived sessions
+  plus the `archivedDelegates` delegate-chain enrichment.
+- `list_goals` — drops `archived: true` goal rows and strips the
+  `archivedSessions` array. Pass `archived=true` to select the archived path,
+  which returns archived goals plus the `archivedSessions` affiliated-session
+  enrichment.
+- `search` — drops archived hits from `results`. Pass `include=archived` (or
+  the REST-style `includeArchived=true`) to include archived rows.
+
+This is the agent-facing tool contract. UI clients can still opt REST
+`/api/search` into archived results with `includeArchived=true` so the full
+search page keeps archived results and badges; `bobbit_read.search` remains
+live-only unless its caller opts in.
+
+Other list operations (`list_projects`, `list_tasks`, `list_gates`, etc.) do
+not expose archived rows on their default REST paths and have no archive
+opt-in.
+
 - `health`, `connection_info` — gateway liveness + network info.
-- `list_goals` (`archived`, `q`), `get_goal` — enumerate / fetch goals.
+- `list_goals` (`archived=true` to include archived goals, `q`), `get_goal` —
+  enumerate / fetch goals.
 - `goal_cost`, `goal_git_status`, `goal_commits`, `goal_pr_status` — per-goal
   cost, git, commit, and PR details.
-- `list_sessions` (`include=archived`, `q`, `projectId`), `get_session`,
-  `session_cost` — enumerate / fetch sessions and their cost.
-- `search` — full-text search across goals/sessions/messages/staff.
+- `list_sessions` (`include=archived` to include archived sessions, `q`,
+  `projectId`), `get_session`, `session_cost` — enumerate / fetch sessions and
+  their cost.
+- `search` (`include=archived` to include archived hits) — full-text search
+  across goals/sessions/messages/staff.
 - `list_projects`, `get_project` — project registry.
 - `list_workflows`, `get_workflow` — workflow templates (`list_workflows`
   requires `projectId`; `get_workflow` accepts it as a scope filter).
@@ -142,7 +171,12 @@ Notes:
 
 ### `bobbit_admin` — config + destructive maintenance
 
-- `update_project_config` — merge project config key/values.
+- `update_project_config` — merge config key/values for an existing project.
+- `create_project` — high-privilege support automation for `POST /api/projects`;
+  requires top-level `name` and `rootPath`. Optional `body` fields include
+  `upsert`, `acceptCanonical`, `color`, `palette`, `colorLight`, `colorDark`,
+  `components`, and `workflows`. This does not replace `propose_project` or the
+  Add Project flow for interactive registration.
 - `set_provider_key`, `delete_provider_key`, `custom_providers`,
   `aigw_configure` — provider credentials and AI-gateway wiring.
 - `marketplace_install`, `marketplace_update`, `marketplace_uninstall` — pack
@@ -157,7 +191,8 @@ Notes:
 - `harness_restart`, `shutdown` — restart or stop the gateway.
 
 These operations mutate config or destroy state, which is why the tier defaults
-to `grantPolicy: never`.
+to `grantPolicy: never`. Use `update_project_config`, not `create_project`, for
+config changes on existing projects.
 
 ## Overlap policy — bobbit does not replace the dedicated tools
 
@@ -208,7 +243,9 @@ grant policy is the authority and the admin token never leaves the server
 
 ## Result and error shape
 
-- **Success** — the tool returns the gateway's JSON verbatim.
+- **Success** — non-list operations return the gateway JSON unchanged. List-style
+  `bobbit_read` operations may add pagination metadata and apply the
+  archive-hidden postprocessor described above.
 - **204 No Content** (e.g. marketplace uninstall) — returns `{ ok: true }`.
 - **Failure** — the gateway's structured `{ error, code }` body is surfaced as a
   single readable error line that includes the human message, the machine

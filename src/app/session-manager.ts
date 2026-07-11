@@ -6,7 +6,6 @@ import { RemoteAgent } from "./remote-agent.js";
 import {
 	state,
 	renderApp,
-	setProjects,
 	activeSessionId,
 	isDesktop,
 	GW_URL_KEY,
@@ -14,43 +13,32 @@ import {
 	GW_SESSION_KEY,
 	type GatewaySession,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision, readProposalSnapshot, type GitStatusData } from "./api.js";
-import { getPiAiModel } from "./pi-ai-lazy.js";
-import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, type GitStatusData } from "./api.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
 import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
-import { errorDetails } from "./error-helpers.js";
 import { runWidgetGitRefresh, abortableSleep, GIT_STATUS_BACKOFF_MS, type GitWidgetLike } from "./git-status-refresh.js";
 import { computeConnectGitState, setCachedRepoState, pruneGitRepoCache } from "./git-repo-cache.js";
 import { startTimeRefresh } from "./render-helpers.js";
-import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
+import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
 import { showConnectionError, confirmAction, showOAuthExpiryModal } from "./dialogs-lazy.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
-import { showHeaderToast } from "./render.js";
+import { showHeaderToast } from "./header-toast.js";
 import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount, resetProjectProposalPanel } from "./proposal-panels-lazy.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
-import { buildProjectConfigDiff } from "./project-proposal-diff.js";
+import { errorDetails } from "./error-helpers.js";
 import { getExpiredAccountOAuthCredentials } from "./account-oauth-providers.js";
 import { HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject } from "./headquarters.js";
-
-// settings-page is dynamic-imported lazily below to keep it out of the main chunk.
-// See docs/design/ui-bundle-size-reduction.md (Task A).
-async function invalidateProjectScopeConfig(projectId: string): Promise<void> {
-	const m = await import("./settings-page.js");
-	m.invalidateProjectScopeConfig(projectId);
-}
 import {
 	isProposalDismissed as isProposalDismissedTyped,
 	markProposalDismissed as markProposalDismissedTyped,
 	hasProposalDismissalRecord,
 	clearProposalDismissed as clearProposalDismissedTyped,
-	deleteProposalFile,
 	metadataObjectToRows,
 } from "./proposal-helpers.js";
 import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
@@ -65,6 +53,11 @@ import {
 	proposalPanelTabId,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+
+async function formatProjectAssistantAutoPromptLazy(input: any): Promise<string> {
+	const m = await import("./project-assistant-autoprompt.js");
+	return m.formatProjectAssistantAutoPrompt(input);
+}
 
 /**
  * Extract the markdown body field from a proposal's fields object.
@@ -1269,6 +1262,13 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // sidebar passes for a fresh switch + hydrate).
 setSessionSwitcher((sessionId: string) => { void connectToSession(sessionId, false); });
 
+export function installConfirmedSessionModelPersistence(remote: RemoteAgent, sessionId: string): () => void {
+	return remote.subscribe((event: any) => {
+		const model = event?.type === "state_update" ? event.data?.model : null;
+		if (model?.provider && model?.id) saveSessionModel(sessionId, model.provider, model.id);
+	});
+}
+
 export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal"; refetchMessagesOnReady?: boolean }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
@@ -1497,19 +1497,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		const remote = new RemoteAgent();
 
-		// Start model restore in parallel with WebSocket connect
-		const modelRestorePromise = (async () => {
-			const savedModel = loadSessionModel(sessionId);
-			if (!savedModel) return null;
-			try {
-				return await getPiAiModel(savedModel.provider, savedModel.modelId) ?? null;
-			} catch {
-				return null; // Model no longer available
-			}
-		})();
-
 		await remote.connect(url, token, sessionId);
 		if (isStale()) { remote.disconnect(); return; }
+		installConfirmedSessionModelPersistence(remote, sessionId);
 		await hydrateSidePanelWorkspace(sessionId);
 		if (isStale()) { remote.disconnect(); return; }
 
@@ -1543,17 +1533,17 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (options?.assistantType && !isExisting) {
 			let autoPrompt: string | undefined;
 			if (options.assistantType === "project" && options.projectEditContext) {
-				autoPrompt = formatProjectAssistantAutoPrompt({
+				autoPrompt = await formatProjectAssistantAutoPromptLazy({
 					dirPath: options.projectDirPath ?? options.projectEditContext.rootPath,
 					editContext: options.projectEditContext,
 				});
 			} else if (options.assistantType === "project" && options.projectDirPath) {
-				autoPrompt = formatProjectAssistantAutoPrompt({
+				autoPrompt = await formatProjectAssistantAutoPromptLazy({
 					dirPath: options.projectDirPath,
 					initialScanContext: options.projectInitialScanContext,
 				});
 			} else if (options.assistantType === "project-scaffolding" && options.projectDirPath) {
-				autoPrompt = formatProjectAssistantAutoPrompt({
+				autoPrompt = await formatProjectAssistantAutoPromptLazy({
 					dirPath: options.projectDirPath,
 					scaffolding: true,
 				});
@@ -1565,20 +1555,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (autoPrompt) remote.prompt(autoPrompt, undefined, { suppressTitleGen: true });
 		}
 
-		// Apply restored model (already resolved or resolving in parallel)
-		const restoredModel = await modelRestorePromise;
-		if (isStale()) { remote.disconnect(); return; }
-		if (restoredModel) {
-			remote.setModel(restoredModel);
-		}
-
-		// Intercept setModel to persist
+		// Keep selection UX optimistic, but only persist server-confirmed model state.
 		const originalSetModel = remote.setModel.bind(remote);
 		remote.setModel = (model: any) => {
 			originalSetModel(model);
-			if (model?.provider && model?.id) {
-				saveSessionModel(sessionId, model.provider, model.id);
-			}
 			renderApp();
 		};
 
@@ -2904,192 +2884,6 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 	await refreshSessions();
 }
 
-// ============================================================================
-// PROJECT PROPOSAL ACCEPTANCE
-// ============================================================================
-
-export async function acceptProjectProposal(): Promise<void> {
-	const proposal = state.activeProposals.project;
-	if (!proposal) return;
-	if (proposal.mode === "registered") {
-		return acceptRegisteredProjectProposal();
-	}
-	return acceptProvisionalProjectProposal();
-}
-
-async function acceptProvisionalProjectProposal(): Promise<void> {
-	const proposal = state.activeProposals.project;
-	if (!proposal) return;
-	const { fields, sessionId: propSessionId } = proposal;
-
-	// Find the provisional project for this session
-	const session = state.gatewaySessions.find(s => s.id === propSessionId);
-	const projectId = session?.projectId;
-	if (!projectId) return;
-
-	// Promote the provisional project
-	const promoted = await promoteProject(projectId, typeof fields.name === "string" ? fields.name : "");
-	if (!promoted) return;
-
-	// Write config fields. Forward every proposed field — including structured
-	// `components` / `workflows` — to the config endpoint via the shared
-	// `buildProjectConfigDiff` helper. Mirrors the registered-mode accept path
-	// so the provisional accept doesn't silently drop the assistant's proposed
-	// workflows and components. Per-component QA config (`config.qa_start_command`
-	// etc.) rides through inside `components[].config`.
-	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
-	if (Object.keys(diff).length > 0) {
-		try {
-			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
-				method: 'PUT',
-				body: JSON.stringify(diff),
-			});
-			if (!res.ok) {
-				const data = await res.json().catch(() => ({}));
-				const details = Array.isArray(data?.details) && data.details.length > 0
-					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
-					: "";
-				showConnectionError(
-					data?.error || `Config write failed (${res.status})`,
-					details || (data?.error ?? ""),
-					{ code: data?.code, stack: data?.stack },
-				);
-				return;
-			}
-		} catch (err) {
-			console.error('[project-proposal] Config write error:', err);
-		}
-	}
-
-	// Refresh
-	setProjects(await fetchProjects());
-	// Settings page caches /api/projects/:id/config{,/resolved} per-project; the
-	// PUT above bypassed it, so invalidate explicitly to keep the Settings tab
-	// coherent without forcing the user to hard-reload.
-	invalidateProjectScopeConfig(projectId);
-	delete state.activeProposals.project;
-	state.assistantHasProposal = false;
-	removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
-	if (proposal.sessionId) {
-		deleteProjectDraft(proposal.sessionId);
-		// Slice E: drop the on-disk proposal file once accepted.
-		void deleteProposalFile(proposal.sessionId, "project");
-	}
-
-	// Terminate the project assistant session silently (no confirmation dialog)
-	await terminateProjectAssistantSession(propSessionId);
-}
-
-/**
- * Tear down a project-assistant session: disconnect, DELETE on the server,
- * remove from local state, clean drafts, navigate to landing. Used by the
- * provisional accept path (silently) and by the registered-mode "Terminate
- * Project Assistant" button after Apply Changes.
- */
-export async function terminateProjectAssistantSession(sessionId: string): Promise<void> {
-	try {
-		uncacheSession(sessionId);
-		if (activeSessionId() === sessionId) {
-			state.remoteAgent?.disconnect();
-			state.remoteAgent = null;
-		}
-		// DELETE /api/sessions/:id terminates (live) or purges (archived).
-		const res = await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-		if (!res.ok && res.status !== 404) {
-			console.warn(`[project-proposal] Terminate returned ${res.status}`);
-		}
-		// Optimistically remove the assistant session from local state.
-		state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== sessionId);
-		renderApp();
-		deleteGoalDraft(sessionId);
-		deleteRoleDraft(sessionId);
-		deleteProjectDraft(sessionId);
-		delete state.projectProposalAcceptedBySessionId[sessionId];
-		await refreshSessions();
-		setHashRoute("landing");
-	} catch (err) {
-		console.error('[project-proposal] Failed to terminate assistant session:', err);
-	}
-	renderApp();
-}
-
-
-
-/** Registered-mode accept: apply the proposal's full config payload to the
- *  live project without terminating or navigating away. The server diffs
- *  against persisted state — we just send everything the proposal carries. */
-async function acceptRegisteredProjectProposal(): Promise<void> {
-	const proposal = state.activeProposals.project;
-	if (!proposal) return;
-	const { fields, sessionId: propSessionId } = proposal;
-	const session = state.gatewaySessions.find(s => s.id === propSessionId);
-	const projectId = session?.projectId;
-	if (!projectId) return;
-
-	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
-
-	// 1. Rename via PUT /api/projects/:id if a name is supplied.
-	if (fieldNameStr) {
-		try {
-			await gatewayFetch(`/api/projects/${projectId}`, {
-				method: "PUT",
-				body: JSON.stringify({ name: fieldNameStr }),
-			});
-		} catch (err) {
-			console.error('[project-proposal] Rename failed:', err);
-		}
-	}
-
-	// 2. Send all proposal fields to the config endpoint. Server diffs against
-	//    persisted state; empty/null values are skipped client-side. Native-YAML
-	//    migrated fields ride through as structured payloads (server rejects
-	//    JSON-encoded strings) — parse if the agent supplied them as a string.
-	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
-	if (Object.keys(diff).length > 0) {
-		try {
-			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
-				method: 'PUT',
-				body: JSON.stringify(diff),
-			});
-			if (!res.ok) {
-				const data = await res.json().catch(() => ({}));
-				const details = Array.isArray(data?.details) && data.details.length > 0
-					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
-					: "";
-				showConnectionError(
-					data?.error || `Config write failed (${res.status})`,
-					details || (data?.error ?? ""),
-					{ code: data?.code, stack: data?.stack },
-				);
-				return;
-			}
-		} catch (err) {
-			console.error('[project-proposal] Config write error:', err);
-		}
-	}
-
-	// 3. Refresh projects list; clear proposal; stay connected.
-	try { setProjects(await fetchProjects()); } catch { /* ignore */ }
-	// Invalidate the Settings page's per-project config cache so its tab picks
-	// up the just-applied changes the next time it renders (no hard reload).
-	invalidateProjectScopeConfig(projectId);
-	state.projectProposalAcceptedBySessionId[propSessionId] = true;
-	delete state.activeProposals.project;
-	state.assistantHasProposal = false;
-	// Apply/Accept is a proposal-specific close path: the server workspace's
-	// absence is authoritative, so accepted saved-state must not reopen the tab.
-	removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
-	// Persist the accepted flag in the on-disk draft so it survives reload.
-	saveProjectDraft(propSessionId);
-	// Slice E: drop the on-disk proposal file once accepted.
-	void deleteProposalFile(propSessionId, "project");
-	// Notify the proposing agent that the change is now live so it can
-	// continue its task without polling. Mid-session only — provisional
-	// (project-assistant) flow terminates the session, so notifying there
-	// is a no-op.
-	void notifyProposalDecision(propSessionId, "project", "accepted", fieldNameStr || "(unnamed)");
-	renderApp();
-}
 
 // ============================================================================
 // DISCONNECT
@@ -3127,33 +2921,6 @@ export function backToSessions(): void {
 	setHashRoute("landing");
 	renderApp();
 	refreshSessions();
-}
-
-// ============================================================================
-// MUTATION-APPROVAL CHAT CARDS — Phase 5b
-//
-// Server emits `mutation_pending {goalId, requestId, kind, summary}` when a
-// post-freeze plan-mutation lands in the approval queue. Client renders an
-// inline card in the chat with Approve / Reject buttons. On the WS reply
-// `mutation_decided`, we flip the card to a decided state.
-// ============================================================================
-
-export function handleMutationPendingEvent(msg: { goalId: string; requestId: string; kind: "fix-up" | "expansion" | "restructure" | "criteria-drop"; summary: string }): void {
-	if (!state.remoteAgent) return;
-	state.remoteAgent.appendMutationPendingCard({
-		goalId: msg.goalId,
-		requestId: msg.requestId,
-		kind: msg.kind,
-		summary: msg.summary,
-	});
-}
-
-export function handleMutationDecidedEvent(msg: { goalId: string; requestId: string; decision: "approve" | "reject" }): void {
-	if (!state.remoteAgent) return;
-	state.remoteAgent.markMutationDecided(msg.requestId, msg.decision);
-	// Best-effort: refresh the dashboard so the Plan tab reflects the
-	// applied/rejected mutation immediately.
-	import("./goal-dashboard.js").then(m => m.notifyGoalEventForDashboard?.()).catch(() => {});
 }
 
 export function disconnectGateway(): void {

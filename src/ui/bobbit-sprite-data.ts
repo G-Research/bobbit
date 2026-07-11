@@ -514,47 +514,39 @@ export const ACCESSORY_NURSE_CAP: AccessorySpriteData = {
 };
 
 /**
- * Headset accessory — charcoal gaming headset: outlined headband arc, two
+ * Headset accessory — compact charcoal gaming headset: front-view top band, two
  * charcoal ear cups over the eye row, and a boom mic ending in an orange foam
  * windscreen in front of the mouth. Sidebar coordinates (yOffset=2,
- * addsHeight=true, blobYAdjust=-1).
+ * addsHeight=false, blobYAdjust=2).
  *
- * The band carries BOTH a top outline (rows -2..1) and its own bottom outline
- * (drawn over the head) so it reads as a whole-pixel band that tracks the
- * accessory's fractional seat rather than borrowing the head's top outline.
- *
- * Seated half a sprite-pixel DOWN (like the bandana/nurse-cap seat trick):
- * blob CSS uses `translate: 0 2px`, the sidebar canvas uses
- * `translateY(0.5 * S)`. Neutral greys only (NOT in the flask exception set) so
- * it is counter-hue-rotated and stays neutral across every session palette.
+ * Seated a quarter sprite-pixel DOWN in chat (`translate: 0 1px`) and a half
+ * sprite-pixel DOWN in sidebar canvas (`translateY(0.5 * S)`). Neutral greys
+ * only (NOT in the flask exception set) so it is counter-hue-rotated and stays
+ * neutral across every session palette.
  */
 export const ACCESSORY_HEADSET: AccessorySpriteData = {
   id: 'headset',
   label: 'Headset',
   yOffset: 2,
-  addsHeight: true,
-  blobYAdjust: -1,
+  addsHeight: false,
+  blobYAdjust: 2,
   pixels: [
-    // Row -2: headband top outline (over the crown)
-    [3, -2, '#000'], [4, -2, '#000'], [5, -2, '#000'], [6, -2, '#000'],
-    // Row -1: headband crown (charcoal + highlight on the sunlit left) w/ side outline
-    [2, -1, '#000'], [3, -1, '#4b5563'], [4, -1, '#4b5563'], [5, -1, '#1f2937'], [6, -1, '#1f2937'], [7, -1, '#000'],
-    // Row 0: band shoulders + band bottom outline under the crown
-    [1, 0, '#000'], [2, 0, '#1f2937'], [3, 0, '#000'], [4, 0, '#000'], [5, 0, '#000'], [6, 0, '#000'], [7, 0, '#1f2937'], [8, 0, '#000'],
-    // Row 1: band shoulders + outline
-    [0, 1, '#000'], [1, 1, '#1f2937'], [2, 1, '#000'], [7, 1, '#000'], [8, 1, '#1f2937'], [9, 1, '#000'],
-    // Row 2: band reaches the cups + outline
-    [-1, 2, '#000'], [0, 2, '#1f2937'], [1, 2, '#000'], [8, 2, '#000'], [9, 2, '#1f2937'], [10, 2, '#000'],
-    // Row 3: ear cup top rims
-    [-1, 3, '#000'], [0, 3, '#000'], [1, 3, '#000'], [8, 3, '#000'], [9, 3, '#000'], [10, 3, '#000'],
-    // Row 4: ear cup cushions (highlight upper-left)
-    [-1, 4, '#000'], [0, 4, '#4b5563'], [1, 4, '#374151'], [8, 4, '#374151'], [9, 4, '#4b5563'], [10, 4, '#000'],
-    // Row 5: ear cup cushions (shade lower)
-    [-1, 5, '#000'], [0, 5, '#374151'], [1, 5, '#1f2937'], [8, 5, '#1f2937'], [9, 5, '#374151'], [10, 5, '#000'],
-    // Row 6: ear cup bottom rims + boom foam windscreen in front of the mouth
-    [-1, 6, '#000'], [0, 6, '#000'], [1, 6, '#000'], [4, 6, '#f97316'], [5, 6, '#6b7280'], [6, 6, '#374151'], [8, 6, '#000'], [9, 6, '#000'], [10, 6, '#000'],
-    // Row 7: boom arm from the right cup
-    [7, 7, '#374151'], [8, 7, '#374151'],
+    // Row 0
+    [2, 0, '#000'], [3, 0, '#000'], [4, 0, '#000'], [5, 0, '#000'], [6, 0, '#000'], [7, 0, '#000'],
+    // Row 1
+    [1, 1, '#000'], [2, 1, '#1f2937'], [3, 1, '#1f2937'], [4, 1, '#000'], [5, 1, '#000'], [6, 1, '#000'], [7, 1, '#4b5563'], [8, 1, '#000'],
+    // Row 2
+    [1, 2, '#1f2937'], [2, 2, '#000'], [7, 2, '#000'], [8, 2, '#4b5563'],
+    // Row 3
+    [0, 3, '#000'], [1, 3, '#000'], [8, 3, '#000'], [9, 3, '#000'],
+    // Row 4
+    [-1, 4, '#000'], [0, 4, '#374151'], [1, 4, '#4b5563'], [8, 4, '#374151'], [9, 4, '#4b5563'], [10, 4, '#000'],
+    // Row 5
+    [-1, 5, '#000'], [0, 5, '#1f2937'], [1, 5, '#374151'], [8, 5, '#1f2937'], [9, 5, '#374151'], [10, 5, '#000'],
+    // Row 6
+    [0, 6, '#000'], [1, 6, '#000'], [7, 6, '#1f2937'], [8, 6, '#000'], [9, 6, '#000'],
+    // Row 7
+    [4, 7, '#f97316'], [5, 7, '#1f2937'], [6, 7, '#1f2937'],
   ],
 };
 

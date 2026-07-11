@@ -415,7 +415,8 @@ export default defineConfig(({ mode }) => ({
 					// its raw size under the 600 KB budget (see tests/bundle-size.test.ts).
 					// These stay in the eager import graph (entry chunk imports them);
 					// modulePreload covers the extra requests. Packaging change only.
-					if (normalizedId.endsWith("/src/app/session-manager.ts") || normalizedId.endsWith("/src/app/remote-agent.ts")) return "app-session-runtime";
+					if (normalizedId.endsWith("/src/app/session-manager.ts")) return "app-session-manager";
+					if (normalizedId.endsWith("/src/app/remote-agent.ts")) return "app-remote-agent";
 					if (normalizedId.endsWith("/src/app/preview-panel.ts")) return "app-preview-panel";
 					if (
 						normalizedId.endsWith("/src/ui/components/review/ReviewPane.ts") ||
@@ -438,6 +439,7 @@ export default defineConfig(({ mode }) => ({
 					) return "app-bobbit-render";
 					if (normalizedId.endsWith("/src/ui/utils/i18n.ts")) return "app-i18n";
 					if (
+						normalizedId.endsWith("/src/ui/tools/renderer-registry.ts") ||
 						normalizedId.endsWith("/src/ui/components/StreamingMessageContainer.ts") ||
 						normalizedId.endsWith("/src/ui/components/LiveTimer.ts") ||
 						normalizedId.endsWith("/src/ui/components/ToolPermissionCard.ts") ||

@@ -594,7 +594,7 @@ Inventory reconciliation: `tests2/tests-map.json` defines **31 journeys**, maps 
 - `tests/ui-fixtures/dynamic-panel-workspace-fixture.spec.ts`
 - `tests/ui-fixtures/preview-panel.spec.ts`
 - `tests/ui-fixtures/sidebar-actions-menu-fixture.spec.ts`
-- `tests/verification-dedup.spec.ts`
+- `tests2/browser/fixtures/verification-dedup.spec.ts`
 
 ## 6. Budget arithmetic, full-run CPU enforcement, and atomic ledger
 

@@ -1,10 +1,11 @@
 /**
- * API E2E — PUT /api/projects/:id/config validation for `base_ref`.
+ * API E2E — representative PUT /api/projects/:id/config validation for `base_ref`.
  *
- * Covers:
- *  - Round-trip persistence (set / get / clear).
- *  - Every error-inventory row from docs/design/base-ref.md.
- *  - Multi-repo `details[]` payload when the ref is missing in some components.
+ * Pure grammar/error-shape inventory lives in tests2/core/base-ref-validation.test.ts.
+ * This file keeps route-level coverage for persistence plus git-backed tag,
+ * sandbox, local-branch, multi-repo, and warning paths. Keep related route
+ * checks batched: the in-process integration cleanup runs after every test, so
+ * splitting pure scenario permutations here materially increases suite time.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base, registerProject as registerProjectShared } from "./_e2e/e2e-setup.js";
@@ -14,34 +15,57 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 let token: string;
+let templateRepo = "";
+let nameCounter = 0;
+const cleanupRoots: string[] = [];
 
 const headers = () => ({
 	Authorization: `Bearer ${token}`,
 	"Content-Type": "application/json",
 });
 
-function gitInit(dir: string, opts?: { extraBranches?: string[] }): void {
-	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir });
-	execFileSync("git", ["checkout", "--quiet", "-b", "master"], { cwd: dir });
-	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: dir });
-	for (const b of opts?.extraBranches ?? []) {
-		execFileSync("git", ["branch", b], { cwd: dir });
-	}
+function git(cwd: string, ...args: string[]): string {
+	return execFileSync("git", args, { cwd, encoding: "utf-8", windowsHide: true }).trim();
 }
 
-/** Create a "fake" `origin/<branch>` remote tracking ref by writing a packed ref.
+function createTemplateRepo(): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-template-"));
+	git(dir, "init", "--quiet");
+	git(dir, "config", "user.email", "test@bobbit.local");
+	git(dir, "config", "user.name", "test");
+	git(dir, "config", "commit.gpgsign", "false");
+	git(dir, "checkout", "--quiet", "-B", "master");
+	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
+	git(dir, "add", ".");
+	git(dir, "commit", "--quiet", "-m", "init");
+	git(dir, "branch", "develop");
+	git(dir, "tag", "v1.2.3");
+	return dir;
+}
+
+function cleanupDir(dir: string): void {
+	try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* ignore */ }
+}
+
+function copyTemplateRepo(root: string): void {
+	fs.cpSync(templateRepo, root, { recursive: true });
+}
+
+function fixtureRepo(prefix: string, opts?: { originDevelop?: boolean }): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-baseref-${prefix}-`));
+	fs.rmSync(root, { recursive: true, force: true });
+	copyTemplateRepo(root);
+	cleanupRoots.push(root);
+	if (opts?.originDevelop) fakeOriginRef(root, "develop");
+	return root;
+}
+
+/** Create a "fake" `origin/<branch>` remote tracking ref by writing a loose ref.
  *  Cheaper than scaffolding a real remote — `git rev-parse --verify origin/<branch>`
  *  resolves to whatever commit we point it at. */
 function fakeOriginRef(repo: string, branch: string, sha?: string): void {
-	const headSha = sha ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf-8" }).trim();
-	const refsDir = path.join(repo, ".git", "refs", "remotes", "origin");
-	const refPath = path.join(refsDir, branch);
+	const headSha = sha ?? git(repo, "rev-parse", "HEAD");
+	const refPath = path.join(repo, ".git", "refs", "remotes", "origin", branch);
 	fs.mkdirSync(path.dirname(refPath), { recursive: true });
 	fs.writeFileSync(refPath, headSha + "\n");
 }
@@ -49,7 +73,7 @@ function fakeOriginRef(repo: string, branch: string, sha?: string): void {
 async function registerProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<string> {
 	// Delegate to the shared helper which canonicalizes rootPath (handles the
 	// macOS /var → /private/var tmpdir symlink) and sets acceptCanonical:true.
-	const proj = await registerProjectShared({ name, rootPath, components });
+	const proj = await registerProjectShared({ name: `${name}-${++nameCounter}`, rootPath, components });
 	return proj.id;
 }
 
@@ -70,121 +94,79 @@ async function get(id: string): Promise<any> {
 	return res.json();
 }
 
-test.beforeAll(() => { token = readE2EToken(); });
+function expectBaseRefUnset(config: any): void {
+	expect(config.base_ref === undefined || config.base_ref === "").toBe(true);
+}
 
-// These tests create temporary git repositories and mutate project config through
-// one in-process gateway. Running them fully parallel fans out extra gateway
-// workers/retries on Windows and has hit broad-suite timeouts without improving
-// coverage, so keep this file serial while the API project remains parallel.
+test.beforeAll(() => {
+	token = readE2EToken();
+	templateRepo = createTemplateRepo();
+});
+
+test.afterAll(() => {
+	for (const root of cleanupRoots) cleanupDir(root);
+	if (templateRepo) cleanupDir(templateRepo);
+});
+
+// These tests register projects and mutate project config through one in-process
+// gateway. Keep this file serial to avoid extra gateway workers/retries on Windows.
 test.describe.configure({ mode: "serial" });
 
 test.describe("base_ref API validation", () => {
-	test("PUT round-trip — set origin/<branch>, GET returns it, empty clears it", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-rt-"));
-		gitInit(root);
-		fakeOriginRef(root, "develop");
-		const id = await registerProject(`baseref-rt-${Date.now()}`, root);
+	test("persists remote refs, clears empty values, and accepts local/whitespace refs", async () => {
+		const root = fixtureRepo("rt", { originDevelop: true });
+		const id = await registerProject("baseref-rt", root);
 
-		const r1 = await put(id, { base_ref: "origin/develop" });
-		expect(r1.status, JSON.stringify(r1.json)).toBe(200);
+		const remoteSet = await put(id, { base_ref: "origin/develop" });
+		expect(remoteSet.status, JSON.stringify(remoteSet.json)).toBe(200);
+		expect((await get(id)).base_ref).toBe("origin/develop");
 
-		const cfg1 = await get(id);
-		expect(cfg1.base_ref).toBe("origin/develop");
+		const emptyClear = await put(id, { base_ref: "" });
+		expect(emptyClear.status, JSON.stringify(emptyClear.json)).toBe(200);
+		expectBaseRefUnset(await get(id));
 
-		// Empty value clears.
-		const r2 = await put(id, { base_ref: "" });
-		expect(r2.status).toBe(200);
-		const cfg2 = await get(id);
-		// Empty after clear can either be "" or the key removed; either is OK
-		// for the unset sentinel. We accept both.
-		expect(cfg2.base_ref === undefined || cfg2.base_ref === "").toBe(true);
+		const localSet = await put(id, { base_ref: "develop" });
+		expect(localSet.status, JSON.stringify(localSet.json)).toBe(200);
+		expect((await get(id)).base_ref).toBe("develop");
+
+		const whitespaceUnset = await put(id, { base_ref: "   " });
+		expect(whitespaceUnset.status, JSON.stringify(whitespaceUnset.json)).toBe(200);
 	});
 
-	test("rejects commit SHA shape with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-sha-"));
-		gitInit(root);
-		const id = await registerProject(`baseref-sha-${Date.now()}`, root);
-		const sha = "abc123def";
-		const r = await put(id, { base_ref: sha });
-		expect(r.status).toBe(400);
-		expect(r.json.field).toBe("base_ref");
-		expect(r.json.error).toBe(`base_ref must be a branch ref, not a commit SHA. Got: ${sha}`);
-	});
+	test("rejects git-backed tag refs and sandboxed local refs with route error strings", async () => {
+		const root = fixtureRepo("reject");
+		const id = await registerProject("baseref-reject", root);
 
-	test("rejects tag with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-tag-"));
-		gitInit(root);
-		// Create a real tag in the repo so the server's tag-detection path fires.
-		execFileSync("git", ["tag", "v1.2.3"], { cwd: root });
-		const id = await registerProject(`baseref-tag-${Date.now()}`, root);
-		const r = await put(id, { base_ref: "v1.2.3" });
-		expect(r.status).toBe(400);
-		expect(r.json.field).toBe("base_ref");
-		expect(r.json.error).toBe("base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: v1.2.3");
-	});
+		const tag = await put(id, { base_ref: "v1.2.3" });
+		expect(tag.status).toBe(400);
+		expect(tag.json).toEqual({
+			field: "base_ref",
+			error: "base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: v1.2.3",
+		});
 
-	test("rejects invalid branch grammar with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-grammar-"));
-		gitInit(root);
-		const id = await registerProject(`baseref-grammar-${Date.now()}`, root);
-		const bad = "feature foo"; // space disallowed
-		const r = await put(id, { base_ref: bad });
-		expect(r.status).toBe(400);
-		expect(r.json.field).toBe("base_ref");
-		expect(r.json.error).toBe(`base_ref must be a valid branch name. Got: ${bad}`);
-	});
-
-	test("rejects non-origin remote prefix with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-nonorigin-"));
-		gitInit(root);
-		const id = await registerProject(`baseref-nonorigin-${Date.now()}`, root);
-		const bad = "upstream/main";
-		const r = await put(id, { base_ref: bad });
-		expect(r.status).toBe(400);
-		expect(r.json.field).toBe("base_ref");
-		expect(r.json.error).toBe(
-			`base_ref only supports the 'origin' remote today. Got: ${bad}. If you need a different primary remote, configure it as 'origin' in your local clone.`,
-		);
-	});
-
-	test("rejects local ref when sandbox = docker with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-sandbox-"));
-		gitInit(root);
-		const id = await registerProject(`baseref-sandbox-${Date.now()}`, root);
-		// First flip sandbox to docker.
-		const r1 = await put(id, { sandbox: "docker" });
-		expect(r1.status).toBe(200);
-		const r2 = await put(id, { base_ref: "master" });
-		expect(r2.status).toBe(400);
-		expect(r2.json.field).toBe("base_ref");
-		expect(r2.json.error).toBe(
-			"base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: master",
-		);
-	});
-
-	test("accepts local branch ref in a non-sandbox project", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-local-"));
-		gitInit(root, { extraBranches: ["develop"] });
-		const id = await registerProject(`baseref-local-${Date.now()}`, root);
-		const r = await put(id, { base_ref: "develop" });
-		expect(r.status, JSON.stringify(r.json)).toBe(200);
-		const cfg = await get(id);
-		expect(cfg.base_ref).toBe("develop");
+		const sandbox = await put(id, { sandbox: "docker" });
+		expect(sandbox.status, JSON.stringify(sandbox.json)).toBe(200);
+		const local = await put(id, { base_ref: "master" });
+		expect(local.status).toBe(400);
+		expect(local.json).toEqual({
+			field: "base_ref",
+			error: "base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: master",
+		});
 	});
 
 	test("multi-repo: missing ref in subset of components returns 400 with structured details[]", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-"));
+		cleanupRoots.push(root);
 		const repoA = path.join(root, "api");
 		const repoB = path.join(root, "web");
 		const repoC = path.join(root, "shared");
-		gitInit(repoA);
-		gitInit(repoB);
-		gitInit(repoC);
-		// Only `api` has origin/develop. `web` and `shared` lack it.
+		copyTemplateRepo(repoA);
+		copyTemplateRepo(repoB);
+		copyTemplateRepo(repoC);
 		fakeOriginRef(repoA, "develop");
 
 		const id = await registerProject(
-			`baseref-multi-${Date.now()}`,
+			"baseref-multi",
 			root,
 			[
 				{ name: "api", repo: "api" },
@@ -206,20 +188,19 @@ test.describe("base_ref API validation", () => {
 		}
 	});
 
-	test("validation only fires when base_ref is in the PUT body", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-skip-"));
-		gitInit(root);
-		const id = await registerProject(`baseref-skip-${Date.now()}`, root);
-		// Save an unrelated key — should succeed without consulting git.
-		const r = await put(id, { build_command: "echo build" });
-		expect(r.status).toBe(200);
-	});
+	test("non-git component paths skip validation unless base_ref is present, then return warnings", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-warning-"));
+		cleanupRoots.push(root);
+		fs.mkdirSync(path.join(root, "docs"), { recursive: true });
+		const id = await registerProject("baseref-warning", root, [{ name: "docs", repo: "docs" }]);
 
-	test("whitespace-only value is treated as unset (200)", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-ws-"));
-		gitInit(root);
-		const id = await registerProject(`baseref-ws-${Date.now()}`, root);
-		const r = await put(id, { base_ref: "   " });
-		expect(r.status, JSON.stringify(r.json)).toBe(200);
+		const skip = await put(id, { build_command: "echo build" });
+		expect(skip.status, JSON.stringify(skip.json)).toBe(200);
+
+		const warn = await put(id, { base_ref: "origin/develop" });
+		expect(warn.status, JSON.stringify(warn.json)).toBe(200);
+		expect(warn.json.warnings).toEqual([
+			`base_ref validation skipped for component 'docs': not a git repo at ${path.join(root, "docs")}`,
+		]);
 	});
 });

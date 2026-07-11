@@ -20,13 +20,13 @@ import {
 	type Goal,
 	type Project,
 } from "./state.js";
-import { showHeaderToast } from "./render.js";
+import { showHeaderToast } from "./header-toast.js";
 import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
 import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
-import { refreshSessions, retryLoadSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder } from "./api.js";
+import { refreshSessions, retryLoadSessions, fetchRoles, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder, refreshStaffStateFromApi } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderTreeSessionNode, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
@@ -905,19 +905,7 @@ function ensureStaffLoaded(): void {
 
 /** Reload staff list (e.g. after creating one). Also pulls the orphan list. */
 export function reloadStaffList(): Promise<void> {
-	const staffP = fetchStaff().then((list) => {
-		state.staffList = list.map((s) => ({
-			id: s.id, name: s.name, description: s.description, state: s.state,
-			lastWakeAt: s.lastWakeAt, currentSessionId: s.currentSessionId, triggers: s.triggers,
-			projectId: s.projectId,
-		}));
-	});
-	const orphanP = fetchOrphanedStaff().then((list) => {
-		state.orphanedStaff = list.map((s) => ({
-			id: s.id, name: s.name, description: s.description, state: s.state, projectId: s.projectId,
-		}));
-	}).catch(() => { /* endpoint may not exist on older server */ });
-	return Promise.all([staffP, orphanP]).then(() => { renderApp(); });
+	return refreshStaffStateFromApi();
 }
 
 /**

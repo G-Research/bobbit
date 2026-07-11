@@ -2,6 +2,7 @@ import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
+import { recordDeletionTombstone } from "./deletion-tombstones.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
@@ -289,6 +290,11 @@ export class GoalStore {
 		this.generation++;
 		this.goals.delete(id);
 		this.save();
+		// Durably tombstone this hard-delete so the boot-time headquarters
+		// migration does not resurrect the record from a stale
+		// `.pre-headquarters-id-migration` backup on the next restart.
+		// NOTE: archive() intentionally does NOT tombstone — it keeps the record.
+		recordDeletionTombstone(this.storeDir, "goals.json", id);
 	}
 
 	getAll(): PersistedGoal[] {

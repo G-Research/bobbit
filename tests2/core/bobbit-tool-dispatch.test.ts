@@ -186,6 +186,71 @@ describe("bobbit_orchestrate — method, query & body building", () => {
 });
 
 describe("bobbit_admin — path & body building", () => {
+	it("create_project POSTs required top-level fields to /api/projects", async () => {
+		const c = await run("bobbit_admin", {
+			operation: "create_project",
+			name: "Demo Project",
+			rootPath: "/workspace/demo",
+		});
+		expect(c.method).toBe("POST");
+		expect(c.url).toBe("https://gw.test/api/projects");
+		expect(c.body).toEqual({ name: "Demo Project", rootPath: "/workspace/demo" });
+	});
+
+	it("create_project passes optional endpoint fields through from body", async () => {
+		const components = [{ name: "app", repo: ".", relativePath: "src" }];
+		const workflows = { general: { id: "general", name: "General", gates: [] } };
+		const c = await run("bobbit_admin", {
+			operation: "create_project",
+			name: "Demo Project",
+			rootPath: "/workspace/demo",
+			body: {
+				upsert: true,
+				acceptCanonical: true,
+				color: "blue",
+				palette: "slate",
+				colorLight: "#dbeafe",
+				colorDark: "#1e3a8a",
+				components,
+				workflows,
+			},
+		});
+		expect(c.method).toBe("POST");
+		expect(c.url).toBe("https://gw.test/api/projects");
+		expect(c.body).toEqual({
+			upsert: true,
+			acceptCanonical: true,
+			color: "blue",
+			palette: "slate",
+			colorLight: "#dbeafe",
+			colorDark: "#1e3a8a",
+			components,
+			workflows,
+			name: "Demo Project",
+			rootPath: "/workspace/demo",
+		});
+	});
+
+	it("create_project keeps top-level name and rootPath authoritative over body fields", async () => {
+		const c = await run("bobbit_admin", {
+			operation: "create_project",
+			name: "Top Level Name",
+			rootPath: "/workspace/top-level",
+			body: {
+				name: "Stale Body Name",
+				rootPath: "/stale/body/path",
+				upsert: true,
+			},
+		});
+		expect(c.method).toBe("POST");
+		expect(c.url).toBe("https://gw.test/api/projects");
+		expect(c.body).toEqual({
+			name: "Top Level Name",
+			rootPath: "/workspace/top-level",
+			upsert: true,
+		});
+	});
+
 	it("maintenance_cleanup maps action to its POST path", async () => {
 		const c = await run("bobbit_admin", { operation: "maintenance_cleanup", action: "sessions" });
 		expect(c.method).toBe("POST");

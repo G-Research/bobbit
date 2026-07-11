@@ -1275,12 +1275,14 @@ Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/search` | Query. Params: `q`, `projectId?`, `type?`, `limit?`, `offset?`. Omit `projectId` to search across all projects. |
+| `GET` | `/api/search` | Query. Params: `q`, `projectId?`, `type?`, `limit?`, `offset?`, `includeArchived?` / `include=archived`. Omit `projectId` to search across all projects. Archived rows are excluded unless explicitly requested. |
 | `POST` | `/api/search/rebuild` | Kick off a full rebuild in the background (`{ projectId }`) |
 | `GET` | `/api/search/stats` | Stats for the project's search index (`?projectId=`) |
 | `POST` | `/api/search/compact` | No-op under FlexSearch; retained for API compatibility (`{ projectId }`) |
 | `GET` | `/api/maintenance/orphaned-index-rows` | List index rows whose parent entity no longer exists (`?projectId=`) |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned index rows (`{ projectId }`) |
+
+`GET /api/search` defaults to live-only results. Pass `includeArchived=true` or `include=archived` to include archived goals, sessions, messages, and staff matches. The full search UI uses `includeArchived=true` intentionally so archived badges/results remain visible; agent-facing `bobbit_read.search` stays live-only unless its caller opts in.
 
 **Disabled-service responses:** All Search endpoints return **503** with `{ error: "search-unavailable", reason, state }` when the service is disabled. `state` mirrors `SearchService.getState()` (one of `"initializing"`, `"ready"`, `"disabled"`, `"closed"`); `reason` mirrors `state` for diagnostic symmetry. The disabled path is catastrophic store-open failure — rare, and the Settings → Maintenance → Search Index panel exposes **Rebuild Index** as the recovery action.
 

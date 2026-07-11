@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
-import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
+import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
@@ -746,6 +746,19 @@ Call \`verification_result\` now with whatever opinion you ALREADY FORMED — do
 ${originalKickoff}`;
 }
 
+/** Restart-aware continuation prompt for a resurrected agent-qa process. */
+export function buildQaRestartContinuationPrompt(originalKickoff: string): string {
+	return `## QA verification process restarted
+
+The Bobbit server/infrastructure or QA agent process restarted while your QA verification turn was in progress. Your transcript and verification context were preserved.
+
+Continue the QA verification from where you left off. Use the preserved transcript together with the original QA test plan/context below, complete any remaining QA work, and call \`verification_result\` only when QA is complete.
+
+---
+
+${originalKickoff}`;
+}
+
 /**
  * The `verification_result` tool is now a standard goal tool registered in
  * `.bobbit/config/tools/tasks/extension.ts` — no generated extension needed.
@@ -1168,6 +1181,7 @@ const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
 const MAX_REVIEWER_REMINDERS = 2;
 const REVIEWER_REMINDER_STREAM_SETTLE_MS = 15_000;
 const REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS = 20_000;
+const MAX_VERIFIER_SAME_SESSION_RESURRECTIONS = 3;
 
 function isRetryableLlmReviewRecovery(output: string): boolean {
 	return isTransientReviewError(output) || isRetryableGenericAgentError(output);
@@ -1192,6 +1206,35 @@ function classifyLlmReviewRecoveryError(output: string): string {
 function reviewerIgnoredReminder(output: string): boolean {
 	return output.includes("Agent did not call verification_result after reminder")
 		|| output.includes("Agent did not call verification_result after server restart and reminder");
+}
+
+function isVerifierProcessDeathMessage(message: string | undefined): boolean {
+	if (!message) return false;
+	return /\b(?:agent )?process (?:exited|not running|died|terminated)\b/i.test(message)
+		|| /\bsession .*terminated\b/i.test(message);
+}
+
+async function raceResultWithLateVerdictGrace(
+	clock: Clock,
+	resultPromise: Promise<VerificationResult>,
+	graceMs: number,
+): Promise<({ type: "result" } & VerificationResult) | { type: "timeout" }> {
+	let timer: ReturnType<Clock["setTimeout"]> | undefined;
+	try {
+		const timeoutPromise = new Promise<{ type: "timeout" }>(resolve => {
+			timer = clock.setTimeout(() => {
+				timer = undefined;
+				resolve({ type: "timeout" });
+			}, graceMs);
+			(timer as any)?.unref?.();
+		});
+		return await Promise.race([
+			resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+			timeoutPromise,
+		]);
+	} finally {
+		if (timer) clock.clearTimeout(timer);
+	}
 }
 
 function appendLlmReviewRecoveryDiagnostics(
@@ -3326,8 +3369,43 @@ export class VerificationHarness {
 					if (hasRemoteGoalBranch) {
 						try {
 							await this.commandRunner.execFile("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-							await this.commandRunner.execFile("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
-							console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+
+							// Ancestry-aware, NON-DESTRUCTIVE sync. `git reset --hard` here would
+							// silently discard un-pushed local commits when the worktree is ahead
+							// of origin — the normal state under the team-lead local-merge model.
+							// `git merge-base --is-ancestor <a> <b>` exits 0 when <a> is an ancestor
+							// of <b>, exit 1 when it is not; any other exit is a real git error.
+							const originRef = `origin/${goalBranch}`;
+							const isAncestor = async (ancestor: string, descendant: string): Promise<boolean> => {
+								try {
+									await this.commandRunner.execFile("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd, timeout: 15_000 });
+									return true;
+								} catch (err) {
+									const code = execErrorCode(err);
+									if (code === 1 || code === "1") return false;
+									throw err; // real error (e.g. bad revision) → outer catch keeps local state
+								}
+							};
+
+							if (await isAncestor(originRef, "HEAD")) {
+								// origin is an ancestor of local HEAD → local is ahead of (or equal to)
+								// origin. It already contains every origin commit plus local merges.
+								console.log(`[verification] goal worktree ahead of ${originRef} — skipping reset (skipped-because-ahead)`);
+							} else if (await isAncestor("HEAD", originRef)) {
+								// local HEAD is an ancestor of origin → origin is strictly ahead, local
+								// has nothing unique. Advance to pick up pushed work. Use `git reset
+								// --hard` (NOT `git merge --ff-only`): a plain fast-forward via merge
+								// runs repo-local hooks (e.g. `.git/hooks/post-merge`), which is a
+								// local code-execution vector inside an agent-controlled worktree.
+								// `reset --hard` does NOT run hooks and is safe here because HEAD is
+								// already proven an ancestor of origin — no local commits are lost.
+								await this.commandRunner.execFile("git", ["reset", "--hard", originRef], { cwd, timeout: 15_000 });
+								console.log(`[verification] fast-forwarded goal worktree to ${originRef} (fast-forwarded)`);
+							} else {
+								// Diverged: each side has unique commits. Never hard-reset — that would
+								// discard local commits. Keep local state and verify it, loudly.
+								console.warn(`[verification] goal worktree diverged from ${originRef} — keeping local state, NOT resetting (diverged-kept-local)`);
+							}
 						} catch (err) {
 							console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
 						}
@@ -4046,6 +4124,117 @@ export class VerificationHarness {
 		}
 	}
 
+	private async recoverVerifierAfterProcessDeath(args: {
+		sessionId: string;
+		stepName: string;
+		label: string;
+		prompt: string;
+		resultPromise: Promise<VerificationResult>;
+		timeoutMs: number;
+	}): Promise<
+		| ({ type: "result" } & VerificationResult)
+		| { type: "failed"; output: string }
+	> {
+		let lastError = "process not running";
+		const sessionManager = this.sessionManager!;
+		const deadline = this.clock.now() + Math.max(1, args.timeoutMs);
+		const remainingMs = () => Math.max(0, deadline - this.clock.now());
+		let attempts = 0;
+
+		for (let attempt = 1; attempt <= MAX_VERIFIER_SAME_SESSION_RESURRECTIONS; attempt++) {
+			attempts = attempt;
+			const remainingBeforeAttempt = remainingMs();
+			if (remainingBeforeAttempt <= 0) {
+				lastError = `verification timeout budget exhausted before same-session resurrection attempt ${attempt}`;
+				break;
+			}
+
+			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history; remainingBudgetMs=${remainingBeforeAttempt}.`);
+			try {
+				const existing = sessionManager.getSession(args.sessionId);
+				if (existing && existing.status !== "terminated" && typeof sessionManager.restartAgent === "function") {
+					await sessionManager.restartAgent(args.sessionId);
+				} else if (typeof sessionManager.ensureSessionAlive === "function") {
+					await sessionManager.ensureSessionAlive(args.sessionId);
+				} else if (typeof sessionManager.restartAgent === "function") {
+					await sessionManager.restartAgent(args.sessionId);
+				} else {
+					throw new Error("Session manager does not expose same-session resurrection");
+				}
+
+				const session = sessionManager.getSession(args.sessionId);
+				if (!session?.rpcClient) throw new Error("Session missing after same-session resurrection");
+
+				if (typeof session.rpcClient.promptWhenReady === "function") {
+					await session.rpcClient.promptWhenReady(args.prompt, undefined);
+				} else {
+					await session.rpcClient.prompt(args.prompt);
+				}
+
+				const streamingBudget = Math.min(REVIEWER_REMINDER_STREAM_SETTLE_MS, remainingMs());
+				if (streamingBudget <= 0) {
+					lastError = "verification timeout budget exhausted after same-session resurrection prompt dispatch";
+					break;
+				}
+				const started = await sessionManager.waitForStreaming(args.sessionId, streamingBudget)
+					.then(() => true)
+					.catch((err: any) => {
+						lastError = (err as Error)?.message || String(err);
+						return false;
+					});
+
+				const idleBudget = remainingMs();
+				if (idleBudget <= 0) {
+					lastError = "verification timeout budget exhausted waiting for resurrected verifier";
+					break;
+				}
+				try {
+					const finished = await Promise.race([
+						args.resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+						sessionManager.waitForIdle(args.sessionId, idleBudget).then(() => ({ type: "idle" as const })),
+					]);
+					if (finished.type === "result") return finished;
+				} catch (err: any) {
+					lastError = (err as Error)?.message || String(err);
+					if (isVerifierProcessDeathMessage(lastError)) continue;
+					break;
+				}
+
+				const recoveryBudget = remainingMs();
+				if (recoveryBudget <= 0) {
+					lastError = "verification timeout budget exhausted after resurrected verifier went idle";
+					break;
+				}
+				const recoveryResult = await this.waitForReviewerErroredTurnRecovery(args.sessionId, args.resultPromise, recoveryBudget, args.stepName);
+				if (recoveryResult.type === "result") return recoveryResult;
+				if (recoveryResult.type === "errored") {
+					lastError = recoveryResult.output;
+					if (isVerifierProcessDeathMessage(lastError)) continue;
+					break;
+				}
+
+				if (started) {
+					const lateBudget = Math.min(REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS, remainingMs());
+					if (lateBudget > 0) {
+						const late = await raceResultWithLateVerdictGrace(this.clock, args.resultPromise, lateBudget);
+						if (late.type === "result") return late;
+					}
+				}
+
+				lastError = "verifier went idle without verification_result after same-session resurrection; not issuing duplicate resurrection prompts to an alive idle session";
+				break;
+			} catch (err: any) {
+				lastError = (err as Error)?.message || String(err);
+				if (!isVerifierProcessDeathMessage(lastError) && !isRetryableLlmReviewRecovery(lastError)) break;
+			}
+		}
+
+		return {
+			type: "failed",
+			output: `${args.label} verifier process could not be recovered after ${attempts} same-session resurrection attempt(s): ${lastError}`,
+		};
+	}
+
 	/**
 	 * Run an LLM review step via SessionManager (visible in UI as a proper session).
 	 */
@@ -4309,10 +4498,7 @@ export class VerificationHarness {
 				// flight — give a short settle grace and re-check the channel once
 				// before deciding to nudge again / give up.
 				if (started) {
-					const late = await Promise.race([
-						resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-						new Promise<{ type: "timeout" }>(r => this.clock.setTimeout(() => r({ type: "timeout" }), REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS)),
-					]);
+					const late = await raceResultWithLateVerdictGrace(this.clock, resultPromise, REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS);
 					if (late.type === "result") {
 						reminderOutcome = { type: "result", verdict: late.verdict, summary: late.summary };
 						break;
@@ -4335,8 +4521,9 @@ export class VerificationHarness {
 			console.log(`[verification][reviewer-lifecycle] termination reason=reminder-exhausted for ${sessionId} ("${step.name}") after ${MAX_REVIEWER_REMINDERS} fair reminder(s) — no verification_result.`);
 			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId };
 		} catch (err: any) {
-			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
-			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
+			const msg = err?.message || String(err);
+			const isTimeout = msg.includes("timed out") || msg.includes("Timeout");
+			const isProcessDeath = isVerifierProcessDeathMessage(msg);
 			// If the underlying agent was stuck behind a provider rate-limit /
 			// overload (corp-subscription quotas, Anthropic 429/529, etc.) the
 			// generic "timed out after 600s" message buries the actual cause.
@@ -4344,12 +4531,24 @@ export class VerificationHarness {
 			// reviewer output (and the team-lead notification that quotes it)
 			// names the rate limit explicitly.
 			const backoffSuffix = describeProviderBackoff(this.sessionManager?.getSession(sessionId));
+			if (isProcessDeath) {
+				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${sessionId}): ${msg}`);
+				const recovered = await this.recoverVerifierAfterProcessDeath({
+					sessionId,
+					stepName: step.name,
+					label: "LLM review",
+					prompt: VERIFICATION_RESTART_RESUME_PROMPT,
+					resultPromise,
+					timeoutMs,
+				});
+				if (recovered.type === "result") {
+					return { passed: recovered.verdict, output: recovered.summary, sessionId };
+				}
+				return { passed: false, output: recovered.output, sessionId };
+			}
 			const errOutput = isTimeout
 				? `LLM review timed out after ${(timeoutMs / 1000)}s.${backoffSuffix}`
-				: `LLM review failed: ${err.message}${backoffSuffix}`;
-			if (isProcessDeath) {
-				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${sessionId}): ${err.message}`);
-			}
+				: `LLM review failed: ${msg}${backoffSuffix}`;
 			if (backoffSuffix) {
 				console.warn(`[verification] Reviewer for "${step.name}" (session ${sessionId}) was stuck on provider backoff at timeout:${backoffSuffix}`);
 			}
@@ -4500,19 +4699,23 @@ export class VerificationHarness {
 			commit: builtinVars.commit,
 			componentName,
 		});
-		let qaSessionId: string | undefined;
+		// Pre-generate sessionId and register the verification_result resolver
+		// before session creation so same-session recovery can keep using the
+		// original identity even when startup/prompt delivery fails.
+		let qaSessionId: string | undefined = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
+		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
+		let qaCapturedVerdict: VerificationResult | null = null;
+		let qaHardFailureNoResult = false;
+		const qaCapturingResolver = (r: VerificationResult) => {
+			if (!qaCapturedVerdict) qaCapturedVerdict = r;
+			resultResolver(r);
+		};
+		this.pendingResults.set(qaSessionId, qaCapturingResolver);
 		let qaLastErroredToolOutput: string | null = null;
 		let qaErrListenerUnsub: (() => void) | undefined;
 		try {
 			// Create session via SessionManager
 			const qaRoleName = role.name || step.role || "qa-tester";
-
-			// Pre-generate sessionId so we can register the verification_result resolver before session creation
-			qaSessionId = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
-
-			// Set up verification_result promise
-			const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
-			this.pendingResults.set(qaSessionId, resultResolver);
 
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
 			const qaIsSandboxed = (goalId
@@ -4667,47 +4870,108 @@ export class VerificationHarness {
 				return { passed: result.verdict, output: result.summary, sessionId: qaSessionId, artifact };
 			}
 
-			// Agent went idle without calling the tool — if the last turn hit a
-			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the context-rich reminder for live reviewers. Re-attaching
-			// the kickoff in the reminder restores the QA test plan to context
-			// so the agent has the spec back when it tries again.
-			const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
-			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : buildContextRichReminder(kickoff);
-			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "context-rich"} reminder`);
-			await session.rpcClient.prompt(qaReminderPrompt);
-			// Wait for the agent to actually pick up the reminder before racing
-			// against waitForIdle — see _tryResumeFromSession for rationale.
-			await this.sessionManager!.waitForStreaming(qaSessionId, 10_000).catch(() => {});
-			const result2 = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-			]);
-
-			if (result2.type === "result") {
-				const artifact = result2.reportHtml
-					? { content: result2.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+			const initialRecovery = await this.waitForReviewerErroredTurnRecovery(qaSessionId, resultPromise, timeoutMs, step.name);
+			if (initialRecovery.type === "result") {
+				await this.sessionManager!.waitForIdle(qaSessionId, 30_000).catch(() => {});
+				const artifact = initialRecovery.reportHtml
+					? { content: initialRecovery.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
 					: undefined;
-				return { passed: result2.verdict, output: result2.summary, sessionId: qaSessionId, artifact };
+				return { passed: initialRecovery.verdict, output: initialRecovery.summary, sessionId: qaSessionId, artifact };
+			}
+			if (initialRecovery.type === "errored") {
+				return { passed: false, output: initialRecovery.output, sessionId: qaSessionId };
 			}
 
-			// Hard failure
+			// Agent went idle without calling the tool. Match llm-review fairness:
+			// re-nudge the SAME session up to MAX_REVIEWER_REMINDERS times, wait for
+			// streaming to actually start, then give the turn/late verdict a grace
+			// window before terminating or step-level retry can happen.
+			let qaReminderOutcome:
+				| { type: "result"; verdict: boolean; summary: string; reportHtml?: string }
+				| { type: "errored"; output: string }
+				| { type: "idle" } = { type: "idle" };
+			for (let reminderNum = 1; reminderNum <= MAX_REVIEWER_REMINDERS; reminderNum++) {
+				const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
+				const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : buildContextRichReminder(kickoff);
+				console.log(`[verification][verifier-lifecycle] QA reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${qaSessionId} for "${step.name}" (${qaJsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
+				await session.rpcClient.prompt(qaReminderPrompt);
+				const started = await this.sessionManager!.waitForStreaming(qaSessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
+				const result2 = await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+				]);
+
+				if (result2.type === "result") {
+					qaReminderOutcome = { type: "result", verdict: result2.verdict, summary: result2.summary, reportHtml: result2.reportHtml };
+					break;
+				}
+
+				const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(qaSessionId, resultPromise, timeoutMs, step.name);
+				if (postReminderRecovery.type === "result") {
+					await this.sessionManager!.waitForIdle(qaSessionId, 30_000).catch(() => {});
+					qaReminderOutcome = { type: "result", verdict: postReminderRecovery.verdict, summary: postReminderRecovery.summary, reportHtml: postReminderRecovery.reportHtml };
+					break;
+				}
+				if (postReminderRecovery.type === "errored") {
+					qaReminderOutcome = { type: "errored", output: postReminderRecovery.output };
+					break;
+				}
+
+				if (started) {
+					const late = await raceResultWithLateVerdictGrace(this.clock, resultPromise, REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS);
+					if (late.type === "result") {
+						qaReminderOutcome = { type: "result", verdict: late.verdict, summary: late.summary, reportHtml: late.reportHtml };
+						break;
+					}
+				}
+			}
+
+			if (qaReminderOutcome.type === "result") {
+				const artifact = qaReminderOutcome.reportHtml
+					? { content: qaReminderOutcome.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+					: undefined;
+				return { passed: qaReminderOutcome.verdict, output: qaReminderOutcome.summary, sessionId: qaSessionId, artifact };
+			}
+			if (qaReminderOutcome.type === "errored") {
+				return { passed: false, output: qaReminderOutcome.output, sessionId: qaSessionId };
+			}
+
+			// Hard failure — keep the resolver alive through teardown so a verdict
+			// racing terminateSession is captured and honored in finally.
+			qaHardFailureNoResult = true;
+			console.log(`[verification][verifier-lifecycle] termination reason=reminder-exhausted for QA ${qaSessionId} ("${step.name}") after ${MAX_REVIEWER_REMINDERS} fair reminder(s) — no verification_result.`);
 			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId: qaSessionId };
 		} catch (err: any) {
-			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
-			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
+			const msg = err?.message || String(err);
+			const isTimeout = msg.includes("timed out") || msg.includes("Timeout");
+			const isProcessDeath = isVerifierProcessDeathMessage(msg);
 			// See runLlmReviewViaSession for rationale: surface provider
 			// rate-limit / overload state so a "timed out" failure doesn't
 			// hide a quota wall behind a generic timeout message.
 			const backoffSuffix = qaSessionId
 				? describeProviderBackoff(this.sessionManager?.getSession(qaSessionId))
 				: "";
+			if (isProcessDeath && qaSessionId) {
+				console.error(`[verification] QA agent process died during "${step.name}" (session ${qaSessionId}): ${msg}`);
+				const recovered = await this.recoverVerifierAfterProcessDeath({
+					sessionId: qaSessionId,
+					stepName: step.name,
+					label: "Agent QA",
+					prompt: buildQaRestartContinuationPrompt(kickoff),
+					resultPromise,
+					timeoutMs,
+				});
+				if (recovered.type === "result") {
+					const artifact = recovered.reportHtml
+						? { content: recovered.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+						: undefined;
+					return { passed: recovered.verdict, output: recovered.summary, sessionId: qaSessionId, artifact };
+				}
+				return { passed: false, output: recovered.output, sessionId: qaSessionId };
+			}
 			const errOutput = isTimeout
 				? `Agent QA timed out after ${(timeoutMs / 1000)}s.${backoffSuffix}`
-				: `Agent QA failed: ${err.message}${backoffSuffix}`;
-			if (isProcessDeath) {
-				console.error(`[verification] QA agent process died during "${step.name}" (session ${qaSessionId}): ${err.message}`);
-			}
+				: `Agent QA failed: ${msg}${backoffSuffix}`;
 			if (backoffSuffix) {
 				console.warn(`[verification] QA agent for "${step.name}" (session ${qaSessionId}) was stuck on provider backoff at timeout:${backoffSuffix}`);
 			}
@@ -4722,6 +4986,15 @@ export class VerificationHarness {
 				this.pendingResults.delete(qaSessionId);
 				if (this.teamManager) {
 					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
+				}
+				if (qaHardFailureNoResult && qaCapturedVerdict) {
+					const v: VerificationResult = qaCapturedVerdict;
+					const artifact = v.reportHtml
+						? { content: v.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+						: undefined;
+					console.log(`[verification][verifier-lifecycle] late verification_result for QA ${qaSessionId} ("${step.name}") arrived during teardown — honoring verdict=${v.verdict ? "pass" : "fail"} instead of the 'did not call' hard failure.`);
+					// eslint-disable-next-line no-unsafe-finally
+					return { passed: v.verdict, output: v.summary, sessionId: qaSessionId, artifact };
 				}
 			}
 		}
@@ -5173,8 +5446,11 @@ export class VerificationHarness {
 				// Run command in a subshell so its `exit` does not short-circuit our
 				// exit-file write; capture $?, write atomically, then propagate. The
 				// wrapper appends stdout/stderr to restart-surviving files and keeps
-				// those files tail-bounded while the gateway is down.
-				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( while kill -0 "$__bobbit_pid" 2>/dev/null; do ${trimLogs}; sleep 5; done ) & __bobbit_trim=$!; ( ${command}\n) >> ${qOut} 2>> ${qErr}; __ec=$?; kill "$__bobbit_hb" "$__bobbit_trim" 2>/dev/null; wait "$__bobbit_hb" 2>/dev/null; wait "$__bobbit_trim" 2>/dev/null; ${trimLogs}; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
+				// those files tail-bounded while the gateway is down. Helper loops are
+				// signalled but not waited on: on Windows/Git-Bash, waiting for a helper
+				// that is itself sleeping can deadlock the wrapper after command output is
+				// complete, leaving the gate "running" until an outer timeout/cancel.
+				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( while kill -0 "$__bobbit_pid" 2>/dev/null; do ${trimLogs}; sleep 5; done ) & __bobbit_trim=$!; ( ${command}\n) >> ${qOut} 2>> ${qErr}; __ec=$?; kill "$__bobbit_hb" "$__bobbit_trim" 2>/dev/null; ${trimLogs}; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
 			}
 
 			// Resolve a synchronously-thrown spawn error the same way we'd
@@ -5413,12 +5689,19 @@ export class VerificationHarness {
 			let settled = false;
 			let exitCode: number | null = null;
 			let exitSignal: NodeJS.Signals | null = null;
-			let closeGraceTimer: NodeJS.Timeout | undefined;
+			let closeGraceTimer: TimerHandle | undefined;
+			let exitFilePollTimer: TimerHandle | undefined;
+			// These timers are coupled to a real OS child process. Do not schedule them
+			// on the injected/manual gateway clock used by tests; if the child emits
+			// "exit" without a matching "close", virtual time would never advance and
+			// verification would remain running until the outer test times out.
+			const processClock = realClock;
 
 			const settleFromProcess = (code: number | null, signal: NodeJS.Signals | null) => {
 				if (settled) return;
 				settled = true;
-				if (closeGraceTimer) this.clock.clearTimeout(closeGraceTimer);
+				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
+				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
@@ -5457,10 +5740,34 @@ export class VerificationHarness {
 				resolve(withDiagnostics({ passed: code === 0, output: tail || (signal ? `exit signal ${signal}` : `exit code ${code}`) }));
 			};
 
+			if (useDetached && exitFile) {
+				// The durable wrapper writes the exit file after the command finishes.
+				// In some Windows/Git-Bash runs the wrapper has already written stdout +
+				// exit status, but Node never receives a prompt child close/exit event,
+				// leaving the gate running until the outer test timeout. Treat the exit
+				// file as the authoritative detached-command verdict on the live path too
+				// (the restart path already does this).
+				exitFilePollTimer = processClock.setInterval(() => {
+					if (settled || !exitFile) return;
+					let code: number | null = null;
+					try {
+						const raw = fs.readFileSync(exitFile, "utf8").trim();
+						const parsed = parseInt(raw, 10);
+						if (!Number.isFinite(parsed)) return;
+						code = parsed;
+					} catch {
+						return;
+					}
+					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
+					settleFromProcess(code, null);
+				}, 100);
+				exitFilePollTimer.unref?.();
+			}
+
 			child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
 				exitCode = code;
 				exitSignal = signal;
-				closeGraceTimer = this.clock.setTimeout(() => {
+				closeGraceTimer = processClock.setTimeout(() => {
 					if (settled) return;
 					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; treating the process exit as authoritative and attempting to kill any remaining subprocess group.`;
 					stderr += `${stderr ? "\n" : ""}${warning}`;
@@ -5478,7 +5785,8 @@ export class VerificationHarness {
 			child.on("error", (err: Error) => {
 				if (settled) return;
 				settled = true;
-				if (closeGraceTimer) this.clock.clearTimeout(closeGraceTimer);
+				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
+				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 				resolve(handleSpawnError(err));
@@ -5543,7 +5851,10 @@ export class VerificationHarness {
 			}
 		};
 
-		const interval = this.clock.setInterval(() => {
+		// File tailing follows bytes written by an OS process, not logical gateway
+		// time. Use wall-clock timers so live output still flows when tests inject
+		// a manual clock for deterministic gateway timers.
+		const interval = realClock.setInterval(() => {
 			if (stopped) return;
 			outPos = readNew(outFile, outPos, "stdout");
 			errPos = readNew(errFile, errPos, "stderr");
@@ -5552,7 +5863,7 @@ export class VerificationHarness {
 		return () => {
 			if (stopped) return;
 			stopped = true;
-			this.clock.clearInterval(interval);
+			realClock.clearInterval(interval);
 			// Final flush to catch the tail end of output written between the
 			// last poll and child exit.
 			outPos = readNew(outFile, outPos, "stdout");

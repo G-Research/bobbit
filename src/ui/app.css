@@ -2440,18 +2440,11 @@ html {
 }
 
 /* ===== Headset overlay ===== */
-/* Mirrors the crown/nurse-cap rule set (same scale/origin/margin + state
-   follow-animations). Two deliberate differences:
-     1. a half-sprite-pixel DOWNWARD `translate` (0.5 × 4 = 2 CSS px) so the
-        whole headset seats a touch lower (same lever the bandana uses upward),
-     2. its own charcoal + orange box-shadow art.
-   Counter-hue-rotated like the crown so it never shifts color. */
+/* Charcoal headset with front-view top band, two ear cups, and orange boom mic.
+   It uses a small independent downward `translate` to seat over the face without
+   adding top height, and counter-hue-rotates so it stays neutral. */
 .bobbit-blob__headset {
 	display: none;
-}
-/* Push the whole bobbit down when wearing the headset to prevent band-tip clipping */
-.bobbit-headset .bobbit-blob {
-	padding-top: 6px;
 }
 .bobbit-headset .bobbit-blob__headset {
 	display: block;
@@ -2461,33 +2454,366 @@ html {
 	overflow: visible;
 	transform-origin: 5px 8px; /* same as sprite */
 	transform: scale(4);
-	/* Seat half a sprite pixel (0.5 × 4 = 2 CSS px) lower. Independent `translate`
+	/* Seat a quarter sprite pixel (0.25 × 4 = 1 CSS px) lower. Independent `translate`
 	   composes with the bob / idle `transform` animations instead of being
 	   overwritten (same trick the bandana / nurse-cap use). */
-	translate: 0 2px;
+	translate: 0 1px;
 	margin: 8px 18px 28px 17px;
 	image-rendering: pixelated;
 	/* Counter hue-rotate so the headset stays neutral charcoal + orange */
 	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
 	box-shadow:
-		3px -2px 0 #000, 4px -2px 0 #000, 5px -2px 0 #000, 6px -2px 0 #000,
-		2px -1px 0 #000, 3px -1px 0 #4b5563, 4px -1px 0 #4b5563, 5px -1px 0 #1f2937, 6px -1px 0 #1f2937, 7px -1px 0 #000,
-		1px 0px 0 #000, 2px 0px 0 #1f2937, 3px 0px 0 #000, 4px 0px 0 #000, 5px 0px 0 #000, 6px 0px 0 #000, 7px 0px 0 #1f2937, 8px 0px 0 #000,
-		0px 1px 0 #000, 1px 1px 0 #1f2937, 2px 1px 0 #000, 7px 1px 0 #000, 8px 1px 0 #1f2937, 9px 1px 0 #000,
-		-1px 2px 0 #000, 0px 2px 0 #1f2937, 1px 2px 0 #000, 8px 2px 0 #000, 9px 2px 0 #1f2937, 10px 2px 0 #000,
-		-1px 3px 0 #000, 0px 3px 0 #000, 1px 3px 0 #000, 8px 3px 0 #000, 9px 3px 0 #000, 10px 3px 0 #000,
-		-1px 4px 0 #000, 0px 4px 0 #4b5563, 1px 4px 0 #374151, 8px 4px 0 #374151, 9px 4px 0 #4b5563, 10px 4px 0 #000,
-		-1px 5px 0 #000, 0px 5px 0 #374151, 1px 5px 0 #1f2937, 8px 5px 0 #1f2937, 9px 5px 0 #374151, 10px 5px 0 #000,
-		-1px 6px 0 #000, 0px 6px 0 #000, 1px 6px 0 #000, 4px 6px 0 #f97316, 5px 6px 0 #6b7280, 6px 6px 0 #374151, 8px 6px 0 #000, 9px 6px 0 #000, 10px 6px 0 #000,
-		7px 7px 0 #374151, 8px 7px 0 #374151;
-	/* Match sprite's busy animation so the headset moves in sync */
-	animation: blob-busy-move 10s cubic-bezier(0.34, 1, 0.64, 1) infinite;
+		2px 0px 0 #000,
+		3px 0px 0 #000,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
+		7px 0px 0 #000,
+		1px 1px 0 #000,
+		2px 1px 0 #1f2937,
+		3px 1px 0 #1f2937,
+		4px 1px 0 #000,
+		5px 1px 0 #000,
+		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
+		1px 2px 0 #1f2937,
+		2px 2px 0 #000,
+		7px 2px 0 #000,
+		8px 2px 0 #4b5563,
+		0px 3px 0 #000,
+		1px 3px 0 #000,
+		8px 3px 0 #000,
+		9px 3px 0 #000,
+		-1px 4px 0 #000,
+		0px 4px 0 #374151,
+		1px 4px 0 #4b5563,
+		8px 4px 0 #374151,
+		9px 4px 0 #4b5563,
+		10px 4px 0 #000,
+		-1px 5px 0 #000,
+		0px 5px 0 #1f2937,
+		1px 5px 0 #374151,
+		8px 5px 0 #1f2937,
+		9px 5px 0 #374151,
+		10px 5px 0 #000,
+		0px 6px 0 #000,
+		1px 6px 0 #000,
+		7px 6px 0 #1f2937,
+		8px 6px 0 #000,
+		9px 6px 0 #000,
+		4px 7px 0 #f97316,
+		5px 7px 0 #1f2937,
+		6px 7px 0 #1f2937;
+	/* Match sprite motion, nudge through right-facing transitions, and hide the far/right ear cup when the bobbit looks right. */
+	animation-name: blob-busy-move, blob-headset-adjust, blob-headset-shadow;
+	animation-duration: 10s, 10s, 10s;
+	animation-timing-function: cubic-bezier(0.34, 1, 0.64, 1), ease-in-out, step-end;
+	animation-iteration-count: infinite, infinite, infinite;
 }
-/* Headset follows all sprite state animations (reuses the crown keyframes) */
+@keyframes blob-headset-adjust {
+	0%, 33%, 36%, 57%, 59%, 62%, 65%, 95%, 98%, 100% { translate: 0 1px; }
+	34%, 35%, 60%, 61%, 96%, 97% { translate: 2px 1px; }
+}
+@keyframes blob-headset-shadow {
+	/* Normal — both ear cups visible. */
+	0% { box-shadow:
+		2px 0px 0 #000,
+		3px 0px 0 #000,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
+		7px 0px 0 #000,
+		1px 1px 0 #000,
+		2px 1px 0 #1f2937,
+		3px 1px 0 #1f2937,
+		4px 1px 0 #000,
+		5px 1px 0 #000,
+		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
+		1px 2px 0 #1f2937,
+		2px 2px 0 #000,
+		7px 2px 0 #000,
+		8px 2px 0 #4b5563,
+		0px 3px 0 #000,
+		1px 3px 0 #000,
+		8px 3px 0 #000,
+		9px 3px 0 #000,
+		-1px 4px 0 #000,
+		0px 4px 0 #374151,
+		1px 4px 0 #4b5563,
+		8px 4px 0 #374151,
+		9px 4px 0 #4b5563,
+		10px 4px 0 #000,
+		-1px 5px 0 #000,
+		0px 5px 0 #1f2937,
+		1px 5px 0 #374151,
+		8px 5px 0 #1f2937,
+		9px 5px 0 #374151,
+		10px 5px 0 #000,
+		0px 6px 0 #000,
+		1px 6px 0 #000,
+		7px 6px 0 #1f2937,
+		8px 6px 0 #000,
+		9px 6px 0 #000,
+		4px 7px 0 #f97316,
+		5px 7px 0 #1f2937,
+		6px 7px 0 #1f2937;
+	}
+	/* Facing right — show only the near/left-side headset pixels. */
+	34% { box-shadow:
+		4px -1px 0 #000,
+		5px -1px 0 #000,
+		6px -1px 0 #000,
+		3px 0px 0 #000,
+		4px 0px 0 #374151,
+		5px 0px 0 #374151,
+		6px 0px 0 #374151,
+		7px 0px 0 #000,
+		2px 1px 0 #000,
+		3px 1px 0 #1f2937,
+		4px 1px 0 #000,
+		5px 1px 0 #000,
+		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
+		1px 2px 0 #000,
+		2px 2px 0 #1f2937,
+		3px 2px 0 #000,
+		0px 3px 0 #000,
+		1px 3px 0 #000,
+		2px 3px 0 #000,
+		0px 4px 0 #000,
+		1px 4px 0 #4b5563,
+		2px 4px 0 #000,
+		0px 5px 0 #000,
+		1px 5px 0 #374151,
+		2px 5px 0 #000,
+		1px 6px 0 #000,
+		2px 6px 0 #000,
+		8px 6px 0 #1f2937,
+		9px 6px 0 #000,
+		7px 7px 0 #f97316,
+		8px 7px 0 #1f2937;
+	}
+	/* Back to normal after rightward hops. */
+	57% { box-shadow:
+		2px 0px 0 #000,
+		3px 0px 0 #000,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
+		7px 0px 0 #000,
+		1px 1px 0 #000,
+		2px 1px 0 #1f2937,
+		3px 1px 0 #1f2937,
+		4px 1px 0 #000,
+		5px 1px 0 #000,
+		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
+		1px 2px 0 #1f2937,
+		2px 2px 0 #000,
+		7px 2px 0 #000,
+		8px 2px 0 #4b5563,
+		0px 3px 0 #000,
+		1px 3px 0 #000,
+		8px 3px 0 #000,
+		9px 3px 0 #000,
+		-1px 4px 0 #000,
+		0px 4px 0 #374151,
+		1px 4px 0 #4b5563,
+		8px 4px 0 #374151,
+		9px 4px 0 #4b5563,
+		10px 4px 0 #000,
+		-1px 5px 0 #000,
+		0px 5px 0 #1f2937,
+		1px 5px 0 #374151,
+		8px 5px 0 #1f2937,
+		9px 5px 0 #374151,
+		10px 5px 0 #000,
+		0px 6px 0 #000,
+		1px 6px 0 #000,
+		7px 6px 0 #1f2937,
+		8px 6px 0 #000,
+		9px 6px 0 #000,
+		4px 7px 0 #f97316,
+		5px 7px 0 #1f2937,
+		6px 7px 0 #1f2937;
+	}
+	/* Looking up-right — hide the far/right ear cup behind the body. */
+	60% { box-shadow:
+		4px -1px 0 #000,
+		5px -1px 0 #000,
+		6px -1px 0 #000,
+		3px 0px 0 #000,
+		4px 0px 0 #374151,
+		5px 0px 0 #374151,
+		6px 0px 0 #374151,
+		7px 0px 0 #000,
+		2px 1px 0 #000,
+		3px 1px 0 #1f2937,
+		4px 1px 0 #000,
+		5px 1px 0 #000,
+		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
+		1px 2px 0 #000,
+		2px 2px 0 #1f2937,
+		3px 2px 0 #000,
+		0px 3px 0 #000,
+		1px 3px 0 #000,
+		2px 3px 0 #000,
+		0px 4px 0 #000,
+		1px 4px 0 #4b5563,
+		2px 4px 0 #000,
+		0px 5px 0 #000,
+		1px 5px 0 #374151,
+		2px 5px 0 #000,
+		1px 6px 0 #000,
+		2px 6px 0 #000,
+		8px 6px 0 #1f2937,
+		9px 6px 0 #000,
+		7px 7px 0 #f97316,
+		8px 7px 0 #1f2937;
+	}
+	/* Back to normal after up-right glance. */
+	65% { box-shadow:
+		2px 0px 0 #000,
+		3px 0px 0 #000,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
+		7px 0px 0 #000,
+		1px 1px 0 #000,
+		2px 1px 0 #1f2937,
+		3px 1px 0 #1f2937,
+		4px 1px 0 #000,
+		5px 1px 0 #000,
+		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
+		1px 2px 0 #1f2937,
+		2px 2px 0 #000,
+		7px 2px 0 #000,
+		8px 2px 0 #4b5563,
+		0px 3px 0 #000,
+		1px 3px 0 #000,
+		8px 3px 0 #000,
+		9px 3px 0 #000,
+		-1px 4px 0 #000,
+		0px 4px 0 #374151,
+		1px 4px 0 #4b5563,
+		8px 4px 0 #374151,
+		9px 4px 0 #4b5563,
+		10px 4px 0 #000,
+		-1px 5px 0 #000,
+		0px 5px 0 #1f2937,
+		1px 5px 0 #374151,
+		8px 5px 0 #1f2937,
+		9px 5px 0 #374151,
+		10px 5px 0 #000,
+		0px 6px 0 #000,
+		1px 6px 0 #000,
+		7px 6px 0 #1f2937,
+		8px 6px 0 #000,
+		9px 6px 0 #000,
+		4px 7px 0 #f97316,
+		5px 7px 0 #1f2937,
+		6px 7px 0 #1f2937;
+	}
+	/* Micro-glance right — show only the near/left-side headset pixels. */
+	96% { box-shadow:
+		4px -1px 0 #000,
+		5px -1px 0 #000,
+		6px -1px 0 #000,
+		3px 0px 0 #000,
+		4px 0px 0 #374151,
+		5px 0px 0 #374151,
+		6px 0px 0 #374151,
+		7px 0px 0 #000,
+		2px 1px 0 #000,
+		3px 1px 0 #1f2937,
+		4px 1px 0 #000,
+		5px 1px 0 #000,
+		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
+		1px 2px 0 #000,
+		2px 2px 0 #1f2937,
+		3px 2px 0 #000,
+		0px 3px 0 #000,
+		1px 3px 0 #000,
+		2px 3px 0 #000,
+		0px 4px 0 #000,
+		1px 4px 0 #4b5563,
+		2px 4px 0 #000,
+		0px 5px 0 #000,
+		1px 5px 0 #374151,
+		2px 5px 0 #000,
+		1px 6px 0 #000,
+		2px 6px 0 #000,
+		8px 6px 0 #1f2937,
+		9px 6px 0 #000,
+		7px 7px 0 #f97316,
+		8px 7px 0 #1f2937;
+	}
+	/* Back to normal. */
+	98% { box-shadow:
+		2px 0px 0 #000,
+		3px 0px 0 #000,
+		4px 0px 0 #000,
+		5px 0px 0 #000,
+		6px 0px 0 #000,
+		7px 0px 0 #000,
+		1px 1px 0 #000,
+		2px 1px 0 #1f2937,
+		3px 1px 0 #1f2937,
+		4px 1px 0 #000,
+		5px 1px 0 #000,
+		6px 1px 0 #000,
+		7px 1px 0 #4b5563,
+		8px 1px 0 #000,
+		1px 2px 0 #1f2937,
+		2px 2px 0 #000,
+		7px 2px 0 #000,
+		8px 2px 0 #4b5563,
+		0px 3px 0 #000,
+		1px 3px 0 #000,
+		8px 3px 0 #000,
+		9px 3px 0 #000,
+		-1px 4px 0 #000,
+		0px 4px 0 #374151,
+		1px 4px 0 #4b5563,
+		8px 4px 0 #374151,
+		9px 4px 0 #4b5563,
+		10px 4px 0 #000,
+		-1px 5px 0 #000,
+		0px 5px 0 #1f2937,
+		1px 5px 0 #374151,
+		8px 5px 0 #1f2937,
+		9px 5px 0 #374151,
+		10px 5px 0 #000,
+		0px 6px 0 #000,
+		1px 6px 0 #000,
+		7px 6px 0 #1f2937,
+		8px 6px 0 #000,
+		9px 6px 0 #000,
+		4px 7px 0 #f97316,
+		5px 7px 0 #1f2937,
+		6px 7px 0 #1f2937;
+	}
+}
+/* Headset follows the sleeping idle blob without hiding either ear cup. */
 .bobbit-blob--idle .bobbit-blob__headset {
-	animation: blob-crown-idle-sleep-breathe 3.6s ease-in-out infinite;
+	animation: blob-headset-idle-sleep-breathe 3.6s ease-in-out infinite;
 	animation-delay: var(--bobbit-idle-phase, 0s);
-	transform: scale(4) translateX(-7px) translateY(0.75px);
+	transform: scale(4) translateX(-7px) translateY(0);
+}
+@keyframes blob-headset-idle-sleep-breathe {
+	0%, 100% { transform: scale(4) translateX(-7px) translateY(0); }
+	50%      { transform: scale(4) translateX(-7px) translateY(0.375px) scaleX(1.04) scaleY(0.94); }
 }
 .bobbit-blob--exit .bobbit-blob__headset {
 	animation: blob-exit 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;

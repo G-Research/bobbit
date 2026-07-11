@@ -7,6 +7,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import "../../src/app/session-manager.js";
 import { setRenderApp } from "../../src/app/state.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
+import { ensureBgProcessPill, ensureContinueSessionChooser, ensureCostPopover, ensureGitStatusWidget, ensureGoalStatusWidget } from "../../src/app/lazy-widgets.js";
 import "../../src/ui/components/AgentInterface.js";
 import "../../src/ui/components/MessageList.js";
 import "../../src/ui/components/Messages.js";
@@ -14,7 +15,14 @@ import "../../src/ui/components/ToolPermissionCard.js";
 
 setRenderApp(() => {});
 
-beforeAll(() => {
+beforeAll(async () => {
+	await Promise.all([
+		ensureGitStatusWidget(),
+		ensureGoalStatusWidget(),
+		ensureBgProcessPill(),
+		ensureCostPopover(),
+		ensureContinueSessionChooser(),
+	]);
 	if (!(globalThis as any).ResizeObserver) {
 		(globalThis as any).ResizeObserver = class ResizeObserver {
 			observe() {}
@@ -177,6 +185,19 @@ describe("Permission Card UX reproductions", () => {
 		expect(toolCard.textContent || "", "permission-blocked tool should communicate pending/blocked state").toMatch(/permission|blocked|pending|waiting/i);
 	});
 
+	it("clears the stale streaming preview when the blocked tool placeholder is committed", async () => {
+		const streaming = assistantToolMessage("streaming-assistant", "stream-call", "diagnostic_tool");
+		const { el, session } = await mountAgentInterface([permissionRow("perm-stream", "diagnostic_tool")]);
+		session.state.streamingMessage = streaming;
+		(session as any).streamingMessageId = streaming.id;
+
+		(el as any)._clearStreamingIfPermissionBlocked();
+		await settle(el);
+
+		assert.equal(session.state.streamingMessage, null, "permission-blocked streaming preview should be cleared so tool cards do not duplicate");
+		assert.equal((session as any).streamingMessageId, undefined);
+	});
+
 	it("preserves the streaming tool-call context when tool_permission_needed arrives", async () => {
 		const agent: any = new RemoteAgent();
 		agent.send = () => {};
@@ -204,8 +225,9 @@ describe("Permission Card UX reproductions", () => {
 
 	it("clears grant spinner and marks the row stale/error after a grant failure", async () => {
 		const { el, session } = await mountAgentInterface([permissionRow("perm-error")]);
-		const card = inlineCards(el)[0];
-		assert.ok(card, "inline permission card should render");
+		const card = pinnedCards(el)[0];
+		assert.ok(card, "pinned permission card should render");
+		assert.equal(inlineCards(el).length, 0, "active permission card should not duplicate inline while pinned");
 		clickButton(card, /Allow just/i);
 		await settle(el);
 		expect(el.textContent || "").toContain("Granting permission");
@@ -220,26 +242,47 @@ describe("Permission Card UX reproductions", () => {
 		expect(el.textContent || "", "stale grant error should be visible").toMatch(/stale|error|failed/i);
 	});
 
-	it("shares duration and disabled/granting feedback between inline and pinned copies", async () => {
+	it("uses pinned controls only for active permission requests", async () => {
 		const { el, session } = await mountAgentInterface([permissionRow("perm-shared")]);
 		const pinned = pinnedCards(el)[0];
 		if (!pinned) assert.fail("pinned permission controls not visible");
-		const inline = inlineCards(el)[0];
-		assert.ok(inline, "inline permission history card should still render");
+		assert.equal(inlineCards(el).length, 0, "active permission history card should be hidden while pinned");
 
-		const inlineSelect = inline.querySelector("select") as HTMLSelectElement | null;
-		assert.ok(inlineSelect, "inline duration select should be visible");
-		inlineSelect.value = "persistent";
-		inlineSelect.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+		const pinnedSelect = pinned.querySelector("select") as HTMLSelectElement | null;
+		assert.ok(pinnedSelect, "pinned duration select should be visible");
+		pinnedSelect.value = "persistent";
+		pinnedSelect.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 		await settle(el);
 
 		clickButton(pinned, /Allow just/i);
 		await settle(el);
 
 		assert.equal(session.grantCalls.length, 1, "duplicate grant clicks should be suppressed");
-		assert.equal(session.grantCalls[0].mode, "persistent", "pinned grant should use duration selected in inline copy");
-		const copiesText = [inline, pinned].map((c) => c.textContent || "");
-		assert.ok(copiesText.every((text) => /Granting|Permission granted/i.test(text)), "inline and pinned copies should show the same grant feedback");
+		assert.equal(session.grantCalls[0].mode, "persistent", "pinned grant should use selected duration");
+		expect(pinned.textContent || "").toMatch(/Granting|Permission granted/i);
+		assert.equal(inlineCards(el).length, 0, "granting permission card should not duplicate inline while pinned");
+	});
+
+	it("groups parallel same-tool permission requests into one pinned batch", async () => {
+		const { el, session } = await mountAgentInterface([
+			permissionRow("perm-a", "diagnostic_tool", { requestCount: 2 }),
+			permissionRow("perm-b", "diagnostic_tool", { requestCount: 2 }),
+		]);
+		const pinned = pinnedCards(el);
+		assert.equal(pinned.length, 1, "same-tool requests should render as one pinned permission card");
+		expect(pinned[0].textContent || "").toMatch(/2 calls|Just for now/i);
+
+		const select = pinned[0].querySelector("select") as HTMLSelectElement | null;
+		assert.ok(select, "duration selector should render");
+		select.value = "one-time";
+		select.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+		await settle(el);
+		clickButton(pinned[0], /Allow just/i);
+		await settle(el);
+
+		assert.equal(session.grantCalls.length, 1);
+		assert.equal(session.grantCalls[0].mode, "one-time");
+		assert.equal(inlineCards(el).length, 0, "batched active rows should not duplicate inline while granting");
 	});
 
 	it("grant and deny from pinned controls use the same session payloads, settle pinned rows, and keep inline history", async () => {

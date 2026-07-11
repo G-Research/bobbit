@@ -20,10 +20,17 @@
  *   - When all of a step's deps are already merged, it spawns immediately
  *     (never blocked).
  */
-import { describe, it, afterAll } from "vitest";
+import { describe, it, afterAll, beforeAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildFixture, buildActive, buildSubgoalStep } from "../../tests/helpers/run-subgoal-step-fixture.ts";
+type RunSubgoalFixtureModule = typeof import("../../tests/helpers/run-subgoal-step-fixture.ts");
+let buildFixture: RunSubgoalFixtureModule["buildFixture"];
+let buildActive: RunSubgoalFixtureModule["buildActive"];
+let buildSubgoalStep: RunSubgoalFixtureModule["buildSubgoalStep"];
+
+beforeAll(async () => {
+	({ buildFixture, buildActive, buildSubgoalStep } = await import("../../tests/helpers/run-subgoal-step-fixture.ts"));
+});
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 

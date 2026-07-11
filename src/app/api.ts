@@ -19,7 +19,7 @@ import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
-import { showHeaderToast } from "./render.js";
+import { showHeaderToast } from "./header-toast.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager
@@ -285,6 +285,7 @@ const SESSION_LIST_PUSH_RECONNECT_MS = 3_000;
 let sessionListPushRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionListPushRefreshInFlight = false;
 let sessionListPushRefreshQueued = false;
+let sessionListPushStaffRefreshNeeded = false;
 let sessionListPushWs: WebSocket | null = null;
 let sessionListPushReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionListPushIntentionalClose = false;
@@ -302,8 +303,16 @@ function canConnectSessionListPush(): boolean {
 	return !!localStorage.getItem(GW_TOKEN_KEY);
 }
 
-export function scheduleSessionListRefreshFromPush(): void {
+async function refreshClientListsFromPush(includeStaff: boolean): Promise<void> {
+	if (includeStaff) {
+		await refreshStaffStateFromApi();
+	}
+	await refreshSessions();
+}
+
+function scheduleClientListRefreshFromPush(includeStaff: boolean): void {
 	if (!canRefreshSessionListFromPush()) return;
+	if (includeStaff) sessionListPushStaffRefreshNeeded = true;
 	if (sessionListPushRefreshTimer) return;
 	if (sessionListPushRefreshInFlight) {
 		sessionListPushRefreshQueued = true;
@@ -313,17 +322,27 @@ export function scheduleSessionListRefreshFromPush(): void {
 	sessionListPushRefreshTimer = setTimeout(() => {
 		sessionListPushRefreshTimer = null;
 		if (!canRefreshSessionListFromPush()) return;
+		const refreshStaff = sessionListPushStaffRefreshNeeded;
+		sessionListPushStaffRefreshNeeded = false;
 		sessionListPushRefreshInFlight = true;
-		void refreshSessions()
+		void refreshClientListsFromPush(refreshStaff)
 			.catch((err) => console.warn("[session-list-push] refresh failed:", err))
 			.finally(() => {
 				sessionListPushRefreshInFlight = false;
-				if (sessionListPushRefreshQueued) {
+				if (sessionListPushRefreshQueued || sessionListPushStaffRefreshNeeded) {
 					sessionListPushRefreshQueued = false;
-					scheduleSessionListRefreshFromPush();
+					scheduleClientListRefreshFromPush(false);
 				}
 			});
 	}, SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS);
+}
+
+export function scheduleSessionListRefreshFromPush(): void {
+	scheduleClientListRefreshFromPush(false);
+}
+
+export function scheduleStaffListRefreshFromPush(): void {
+	scheduleClientListRefreshFromPush(true);
 }
 
 function sessionListPushWsUrl(): string {
@@ -368,6 +387,8 @@ export function startSessionListPushSync(): void {
 			const msg = JSON.parse(event.data as string);
 			if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
 				scheduleSessionListRefreshFromPush();
+			} else if (msg?.type === "staff_changed") {
+				scheduleStaffListRefreshFromPush();
 			}
 		} catch {
 			// ignore malformed frames
@@ -392,6 +413,7 @@ export function stopSessionListPushSync(): void {
 		sessionListPushRefreshTimer = null;
 	}
 	sessionListPushRefreshQueued = false;
+	sessionListPushStaffRefreshNeeded = false;
 	if (sessionListPushWs && (sessionListPushWs.readyState === WebSocket.OPEN || sessionListPushWs.readyState === WebSocket.CONNECTING)) {
 		sessionListPushWs.close();
 	}
@@ -843,7 +865,7 @@ async function fetchArchivedSearchSessionsPage(limit: number, afterCursor: numbe
 
 export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<{ results: any[]; total: number }> {
 	try {
-		const params = new URLSearchParams({ q: query });
+		const params = new URLSearchParams({ q: query, includeArchived: "true" });
 		if (type && type !== "all") params.set("type", type);
 		if (limit !== undefined) params.set("limit", String(limit));
 		if (offset !== undefined) params.set("offset", String(offset));
@@ -1811,25 +1833,75 @@ function eagerMarkArchived(ids: string[]): void {
 	}
 }
 
+export type GoalPauseResumeAction = "pause" | "resume";
+
+const goalPauseResumePending = new Map<string, { fetchRef: unknown }>();
+
+function goalPauseResumePendingKey(goalId: string, action: GoalPauseResumeAction): string {
+	return `${goalId}:${action}`;
+}
+
+function currentFetchRef(): unknown {
+	return typeof globalThis !== "undefined" ? globalThis.fetch : undefined;
+}
+
+export function isGoalPauseResumeActionPending(goalId: string | undefined | null, action: GoalPauseResumeAction): boolean {
+	if (!goalId) return false;
+	const key = goalPauseResumePendingKey(goalId, action);
+	const entry = goalPauseResumePending.get(key);
+	if (!entry) return false;
+	if (entry.fetchRef !== currentFetchRef()) {
+		goalPauseResumePending.delete(key);
+		return false;
+	}
+	return true;
+}
+
+export function getGoalPauseResumePendingAction(goalId: string | undefined | null): GoalPauseResumeAction | null {
+	if (!goalId) return null;
+	if (isGoalPauseResumeActionPending(goalId, "pause")) return "pause";
+	if (isGoalPauseResumeActionPending(goalId, "resume")) return "resume";
+	return null;
+}
+
+function setGoalPauseResumeActionPending(goalId: string, action: GoalPauseResumeAction, pending: boolean): void {
+	const key = goalPauseResumePendingKey(goalId, action);
+	if (pending) goalPauseResumePending.set(key, { fetchRef: currentFetchRef() });
+	else goalPauseResumePending.delete(key);
+	renderApp();
+}
+
 /** Pause a goal with cascade-confirm UX. */
 export async function pauseGoalWithDialog(id: string): Promise<void> {
-	const goal = state.goals.find((g) => g.id === id);
-	if (!goal) return;
-	const descendants = countDescendants(id);
-	const result = await showPauseGoalDialog(goal, descendants);
-	if (result.paused > 0) {
-		await refreshSessions();
+	if (isGoalPauseResumeActionPending(id, "pause")) return;
+	setGoalPauseResumeActionPending(id, "pause", true);
+	try {
+		const goal = state.goals.find((g) => g.id === id);
+		if (!goal) return;
+		const descendants = countDescendants(id);
+		const result = await showPauseGoalDialog(goal, descendants);
+		if (result.paused > 0) {
+			await refreshSessions();
+		}
+	} finally {
+		setGoalPauseResumeActionPending(id, "pause", false);
 	}
 }
 
 /** Resume a goal with cascade-confirm UX. */
 export async function resumeGoalWithDialog(id: string): Promise<void> {
-	const goal = state.goals.find((g) => g.id === id);
-	if (!goal) return;
-	const descendants = countDescendants(id);
-	const result = await showResumeGoalDialog(goal, descendants);
-	if (result.resumed > 0) {
-		await refreshSessions();
+	if (isGoalPauseResumeActionPending(id, "resume")) return;
+	setGoalPauseResumeActionPending(id, "resume", true);
+	try {
+		const goal = state.goals.find((g) => g.id === id);
+		if (!goal) return;
+		const descendants = countDescendants(id);
+		const result = await showResumeGoalDialog(goal, descendants);
+		if (result.resumed > 0) {
+			await refreshSessions();
+		}
+	} finally {
+		setGoalPauseResumeActionPending(id, "resume", false);
 	}
 }
 
@@ -2285,6 +2357,31 @@ export async function fetchOrphanedStaff(): Promise<StaffAgent[]> {
 	} catch {
 		return [];
 	}
+}
+
+export async function refreshStaffStateFromApi(): Promise<void> {
+	const [staffList, orphanedStaff] = await Promise.all([
+		fetchStaff(),
+		fetchOrphanedStaff(),
+	]);
+	state.staffList = staffList.map((s) => ({
+		id: s.id,
+		name: s.name,
+		description: s.description,
+		state: s.state,
+		lastWakeAt: s.lastWakeAt,
+		currentSessionId: s.currentSessionId,
+		triggers: s.triggers,
+		projectId: s.projectId,
+	}));
+	state.orphanedStaff = orphanedStaff.map((s) => ({
+		id: s.id,
+		name: s.name,
+		description: s.description,
+		state: s.state,
+		projectId: s.projectId,
+	}));
+	renderApp();
 }
 
 export async function reassignStaffProject(id: string, projectId: string): Promise<boolean> {

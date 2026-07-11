@@ -1119,6 +1119,7 @@ export class AgentInterface extends LitElement {
 			}
 			if ((ev as any).type === "render") {
 				// Generic re-render request (e.g. tool permission card added)
+				this._clearStreamingIfPermissionBlocked();
 				this._updateAndPin();
 				return;
 			}
@@ -1692,10 +1693,37 @@ export class AgentInterface extends LitElement {
 		});
 	}
 
+	private _activePermissionToolNames(): Set<string> {
+		return new Set(this._activePermissionRows().map((m) => m.toolName).filter((name): name is string => typeof name === "string" && name.length > 0));
+	}
+
+	private _clearStreamingIfPermissionBlocked() {
+		const blockedTools = this._activePermissionToolNames();
+		if (blockedTools.size === 0) return;
+		const streaming = this.session?.state?.streamingMessage as any;
+		const hasBlockedStreamingTool = streaming?.content?.some?.((c: any) => c?.type === "toolCall" && blockedTools.has(c.name));
+		if (hasBlockedStreamingTool && this.session?.state) {
+			(this.session.state as any).streamingMessage = null;
+			(this.session as any).streamingMessageId = undefined;
+		}
+		// RemoteAgent clears state.streamingMessage before emitting render on the
+		// permission path; clear the imperative container too so stale previews
+		// cannot remain beside the frozen blocked placeholder.
+		this._streamingContainer?.setMessage(null, true);
+	}
+
 	private _patchPermissionRow(id: string | undefined, patch: Record<string, unknown>) {
 		if (!id || !this.session?.state) return;
 		const current = ((this.session.state as any).messages || []) as any[];
 		(this.session.state as any).messages = current.map((m) => m?.role === "tool_permission_needed" && m.id === id ? { ...m, ...patch } : m);
+		this.requestUpdate();
+	}
+
+	private _patchPermissionRows(ids: string[], patch: Record<string, unknown>) {
+		if (!this.session?.state || ids.length === 0) return;
+		const idSet = new Set(ids);
+		const current = ((this.session.state as any).messages || []) as any[];
+		(this.session.state as any).messages = current.map((m) => m?.role === "tool_permission_needed" && idSet.has(m.id) ? { ...m, ...patch } : m);
 		this.requestUpdate();
 	}
 
@@ -1709,16 +1737,25 @@ export class AgentInterface extends LitElement {
 	private _renderPinnedPermissions() {
 		const rows = this._activePermissionRows();
 		if (rows.length === 0) return nothing;
+		const groups = new Map<string, any[]>();
+		for (const row of rows) {
+			const key = `${row.toolName || ""}\u0000${row.group || ""}`;
+			groups.set(key, [...(groups.get(key) ?? []), row]);
+		}
+		const groupedRows = [...groups.values()].map((items) => {
+			const first = items[0];
+			const count = Math.max(items.length, ...items.map((m) => typeof m.requestCount === "number" ? m.requestCount : 1));
+			return { first, ids: items.map((m) => m.id).filter(Boolean), count };
+		});
 		return html`
 			<div
 				data-permission-pinned
 				data-pinned-permission-controls
-				class="pinned-permission-controls sticky bottom-0 z-20 mt-3 pt-2 pb-2 px-2 sm:px-4 pointer-events-auto"
-				style="position: sticky; bottom: 0;"
+				class="pinned-permission-controls mb-2 pointer-events-auto"
 			>
-				<div class="max-w-5xl mx-auto rounded-lg border border-amber-500/30 bg-background shadow-sm p-2 space-y-2 overflow-y-auto" style="max-height: min(45vh, 22rem); background: color-mix(in oklch, var(--background) 95%, transparent); backdrop-filter: blur(8px);">
+				<div class="rounded-lg border border-amber-500/30 bg-background shadow-sm p-2 space-y-2 overflow-y-auto" style="max-height: min(45vh, 22rem); background: color-mix(in oklch, var(--background) 95%, transparent); backdrop-filter: blur(8px);">
 					<div class="text-xs font-medium text-amber-600 dark:text-amber-400 px-1">Permission required</div>
-					${rows.map((perm) => html`<tool-permission-card
+					${groupedRows.map(({ first: perm, ids, count }) => html`<tool-permission-card
 						.permissionId=${perm.id}
 						.toolName=${perm.toolName}
 						.group=${perm.group}
@@ -1727,16 +1764,17 @@ export class AgentInterface extends LitElement {
 						.status=${perm.status ?? "active"}
 						.mode=${perm.mode ?? "session-only"}
 						.error=${perm.error ?? ""}
+						.requestCount=${count}
 						.actionable=${perm.actionable !== false}
-						.onModeChange=${(mode: string) => this._patchPermissionRow(perm.id, { mode })}
+						.onModeChange=${(mode: string) => this._patchPermissionRows(ids, { mode })}
 						.onGrant=${(scope: "tool" | "group", mode?: string) => {
 							if (!this._beginPermissionGrant()) return false;
-							this._patchPermissionRow(perm.id, { status: "granting", actionable: true, mode: mode ?? perm.mode ?? "session-only" });
-							(this.session as any)?.grantToolPermission?.(perm.toolName, scope, perm.group, perm.lastPromptText, mode ?? perm.mode ?? "session-only");
+							this._patchPermissionRows(ids, { status: "granting", actionable: true, mode: mode ?? perm.mode ?? "session-only" });
+							(this.session as any)?.grantToolPermission?.(perm.toolName, scope, perm.group, perm.lastPromptText, mode ?? perm.mode ?? "session-only", perm.id);
 							return true;
 						}}
 						.onDeny=${() => {
-							this._patchPermissionRow(perm.id, { status: "denied", actionable: false });
+							this._patchPermissionRows(ids, { status: "denied", actionable: false });
 							(this.session as any)?.denyToolPermission?.(perm.id, perm.toolName);
 						}}
 					></tool-permission-card>`)}
@@ -1782,6 +1820,7 @@ export class AgentInterface extends LitElement {
 					.isStreaming=${state.isStreaming}
 					.hasStreamMessage=${!!state.streamingMessage}
 					.toolPartialResults=${(state as any).toolPartialResults}
+					.hideActionablePermissionRows=${true}
 					.onCostClick=${this.onCostClick}
 					.onDismissError=${(id: string) => {
 						if (!this.session) return;
@@ -1804,7 +1843,7 @@ export class AgentInterface extends LitElement {
 						if (!this.session || !this._beginPermissionGrant()) return;
 						const { id, toolName, scope, group, lastPromptText, mode } = e.detail;
 						this._patchPermissionRow(id, { status: "granting", actionable: true, mode });
-						(this.session as any).grantToolPermission?.(toolName, scope, group, lastPromptText, mode);
+						(this.session as any).grantToolPermission?.(toolName, scope, group, lastPromptText, mode, id);
 					}}
 					@deny-tool-permission=${(e: CustomEvent) => {
 						if (!this.session) return;
@@ -1820,6 +1859,7 @@ export class AgentInterface extends LitElement {
 					.isStreaming=${state.isStreaming}
 					.archived=${this.readOnly && !this.nonInteractive}
 					.pendingToolCalls=${state.pendingToolCalls}
+					.permissionBlockedTools=${this._activePermissionToolNames()}
 					.toolResultsById=${toolResultsById}
 					.toolPartialResults=${(state as any).toolPartialResults}
 					.onCostClick=${this.onCostClick}
@@ -2208,7 +2248,6 @@ export class AgentInterface extends LitElement {
 				<div class="flex-1 min-h-0 relative">
 					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden" style="overflow-anchor: none;">
 						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
-						${this._renderPinnedPermissions()}
 					</div>
 					${this._renderJumpToLastPrompt()}
 					${this._renderJumpToBottom()}
@@ -2217,6 +2256,7 @@ export class AgentInterface extends LitElement {
 				<!-- Input Area -->
 				<div class="shrink-0 pt-0 pb-1 agent-input-area">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
+						${this._renderPinnedPermissions()}
 						${this.bgProcesses.length > 0 || this._showGitStatusWidget || this.goalId || this.teamGoalId ? html`
 						<div data-pill-strip class="absolute right-2 bottom-full mb-3 z-10 pointer-events-auto" style="max-width:${this._isNarrow ? '75%' : 'calc(100% - 8rem)'}; --pill-h: 22px">
 							<!-- Real pills with a CSS drop-shadow filter for the glow. Drop-shadow

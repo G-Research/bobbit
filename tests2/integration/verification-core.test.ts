@@ -24,7 +24,14 @@ import {
 	deleteSession,
 	signalAndWaitForGate,
 	type WsConnection,
+	type WsMsg,
 } from "./_e2e/e2e-setup.js";
+
+const VERIFICATION_WS_TIMEOUT_MS = 60_000;
+const VERIFICATION_LLM_WS_TIMEOUT_MS = 90_000;
+const VERIFICATION_TEST_TIMEOUT_MS = 180_000;
+
+test.setTimeout(VERIFICATION_TEST_TIMEOUT_MS);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,9 +68,64 @@ async function prepBugFixGoalWithAnalysis(
 		"issue-analysis",
 		{ content: `# Bug Analysis\n\nSteps: 1. run failing test\nRoot cause: ${rootCause}` },
 		"passed",
-		30_000,
+		VERIFICATION_WS_TIMEOUT_MS,
 	);
 	return { goalId, sessionId, ws };
+}
+
+async function flushWs(conn: WsConnection): Promise<void> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "ping" });
+	await conn.waitForFrom(cursor, (m) => m.type === "pong", 5_000);
+}
+
+async function signalGateFromCursor(
+	conn: WsConnection,
+	goalId: string,
+	gateId: string,
+	body: Record<string, unknown>,
+): Promise<{ cursor: number; signalId: string; signal: any }> {
+	const cursor = conn.messageCount();
+	const resp = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
+		method: "POST",
+		body: JSON.stringify(body),
+	});
+	expect(resp.status).toBe(201);
+	const data = await resp.json();
+	const signalId = data?.signal?.id;
+	expect(signalId).toBeTruthy();
+	return { cursor, signalId, signal: data.signal };
+}
+
+async function waitForGateStatusByRest(
+	goalId: string,
+	gateId: string,
+	status: string,
+	signalId?: string,
+	timeoutMs = 30_000,
+): Promise<any> {
+	const start = Date.now();
+	let last: any;
+	while (Date.now() - start < timeoutMs) {
+		const resp = await apiFetch(`/api/goals/${goalId}/gates/${gateId}?view=summary`);
+		expect(resp.status).toBe(200);
+		last = await resp.json();
+		const signalMatches = signalId == null || last.latestSignal?.id === signalId;
+		if (last.status === status && signalMatches) return last;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	throw new Error(
+		`Timed out waiting for ${gateId} to become ${status}; last=${JSON.stringify(last)}`,
+	);
+}
+
+function gateEvent(
+	goalId: string,
+	gateId: string,
+	signalId: string,
+	type: string,
+): (m: WsMsg) => boolean {
+	return (m) => m.type === type && m.goalId === goalId && m.gateId === gateId && m.signalId === signalId;
 }
 
 const HIGH_VOLUME_WS_BURST_CMD = `node -e "process.stdout.write('OUT_BURST_START\\n'+'x'.repeat(160*1024)+'\\nOUT_BURST_END\\n'); process.stderr.write('ERR_BURST_START\\n'+'y'.repeat(128*1024)+'\\nERR_BURST_END\\n')"`;
@@ -153,7 +215,9 @@ function assertVerificationOrdering(messages: WsConnection["messages"], goalId: 
 	}
 }
 
-// Gate status waiting uses WS events via ws.waitFor() — no polling needed.
+// Gate waiting uses cursor-scoped WS events for live delivery checks and REST
+// status for prerequisite readiness where the test does not assert WS delivery.
+
 
 // ===========================================================================
 // 1. Command verification WS event lifecycle
@@ -163,7 +227,7 @@ function assertVerificationOrdering(messages: WsConnection["messages"], goalId: 
 // ===========================================================================
 
 test.describe("Command verification WS event lifecycle", () => {
-	test.describe.configure({ mode: "parallel" });
+	test.describe.configure({ mode: "parallel", timeout: VERIFICATION_TEST_TIMEOUT_MS });
 
 	test("WS events have correct shape, timestamps, and ordering for design-doc signal @smoke", async () => {
 		const goalId = await createTestFastGoal();
@@ -181,31 +245,31 @@ test.describe("Command verification WS event lifecycle", () => {
 			// Collect all key events
 			await ws.waitFor(
 				(m) => m.type === "gate_signal_received" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const started = await ws.waitFor(
 				(m) => m.type === "gate_verification_started" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const stepStarted = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const stepOutput = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_output" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const stepComplete = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_complete" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			const complete = await ws.waitFor(
 				(m) => m.type === "gate_verification_complete" && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			await ws.waitFor(
 				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 
 			const after = Date.now();
@@ -312,7 +376,7 @@ test.describe("Command verification WS event lifecycle", () => {
 
 			await ws.waitFor(
 				(m) => m.type === "gate_verification_complete" && m.gateId === firstGate.gateId,
-				15_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 
 			const verificationEvents = ws.messages.filter(
@@ -337,36 +401,30 @@ test.describe("Command verification WS event lifecycle", () => {
 
 test.describe("Multi-step verification", () => {
 	test.describe.configure({ mode: "parallel" });
-	test.setTimeout(120_000);
+	test.setTimeout(VERIFICATION_TEST_TIMEOUT_MS);
 
 	test("multi-step verification emits correct events and step_output fields", async () => {
 		const goalId = await createTestFastGoal();
 		const sessionId = await createSession({ goalId });
 		const ws = await connectWs(sessionId);
 		try {
-			// Pass design-doc first (dependency). Use the cursor-based helper so a
-			// fast status event cannot be missed and a slow Windows command spawn gets
-			// the same pressure budget as the rest of this verification-core file.
-			await signalAndWaitForGate(
-				ws,
-				goalId,
-				"design-doc",
-				{ content: "# Design" },
-				"passed",
-				45_000,
-			);
+			await flushWs(ws);
 
-			// Signal implementation gate (depends on design-doc)
-			const implementationCursor = ws.messageCount();
-			await apiFetch(`/api/goals/${goalId}/gates/implementation/signal`, {
-				method: "POST",
-				body: JSON.stringify({}),
-			});
+			// Pass design-doc first (dependency). This test asserts implementation
+			// WS payloads, so wait for the prerequisite through REST to avoid
+			// racing unrelated/stale design-doc WS events under full-suite load.
+			const designSignal = await signalGateFromCursor(ws, goalId, "design-doc", { content: "# Design" });
+			await waitForGateStatusByRest(goalId, "design-doc", "passed", designSignal.signalId, 45_000);
+
+			// Signal implementation gate (depends on design-doc) and only consume
+			// events emitted after this signal for this exact goal/gate/signal.
+			const implementationSignal = await signalGateFromCursor(ws, goalId, "implementation", {});
+			const { cursor, signalId } = implementationSignal;
 
 			const started = await ws.waitForFrom(
-				implementationCursor,
-				(m) => m.type === "gate_verification_started" && m.gateId === "implementation",
-				30_000,
+				cursor,
+				gateEvent(goalId, "implementation", signalId, "gate_verification_started"),
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(started.steps).toBeDefined();
 			expect(started.steps.length).toBe(1);
@@ -374,9 +432,9 @@ test.describe("Multi-step verification", () => {
 
 			// Check step_output event fields
 			const output = await ws.waitForFrom(
-				implementationCursor,
-				(m) => m.type === "gate_verification_step_output" && m.gateId === "implementation",
-				30_000,
+				cursor,
+				gateEvent(goalId, "implementation", signalId, "gate_verification_step_output"),
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(output.goalId).toBe(goalId);
 			expect(output.gateId).toBe("implementation");
@@ -388,17 +446,17 @@ test.describe("Multi-step verification", () => {
 			expect(output.ts).toBeGreaterThan(0);
 
 			const stepComplete = await ws.waitForFrom(
-				implementationCursor,
-				(m) => m.type === "gate_verification_step_complete" && m.gateId === "implementation",
-				30_000,
+				cursor,
+				gateEvent(goalId, "implementation", signalId, "gate_verification_step_complete"),
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(stepComplete.stepName).toBe("Quick check");
 			expect(stepComplete.status).toBe("passed");
 
 			const complete = await ws.waitForFrom(
-				implementationCursor,
-				(m) => m.type === "gate_verification_complete" && m.gateId === "implementation",
-				30_000,
+				cursor,
+				gateEvent(goalId, "implementation", signalId, "gate_verification_complete"),
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(complete.status).toBe("passed");
 		} finally {
@@ -422,7 +480,7 @@ test.describe("Multi-step verification", () => {
 
 			const stepStarted = await ws.waitFor(
 				(m) => m.type === "gate_verification_step_started" && m.gateId === "design-doc",
-				15_000,
+				VERIFICATION_LLM_WS_TIMEOUT_MS,
 			);
 			expect(stepStarted.goalId).toBe(goalId);
 			expect(stepStarted.signalId).toBeTruthy();
@@ -436,13 +494,13 @@ test.describe("Multi-step verification", () => {
 					m.type === "gate_verification_step_complete" &&
 					m.gateId === "design-doc" &&
 					m.sessionId != null,
-				15_000,
+				VERIFICATION_LLM_WS_TIMEOUT_MS,
 			);
 			expect(stepComplete.sessionId).toBeTruthy();
 			expect(stepComplete.sessionId).toMatch(/^llm-review-/);
 			expect(stepComplete.status).toMatch(/^(passed|failed)$/);
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", VERIFICATION_LLM_WS_TIMEOUT_MS);
 		} finally {
 			ws.close();
 			await deleteSession(sessionId);
@@ -484,6 +542,22 @@ test.describe("Verification WebSocket burst backpressure", () => {
 				body: JSON.stringify({ content: "# Burst gate\n\nRun the high-volume command fixture." }),
 			});
 			expect(signalResp.status).toBe(201);
+			const signalData = await signalResp.json();
+			const signalId = signalData?.signal?.id;
+			expect(signalId).toBeTruthy();
+
+			const completeA = await wsA.waitForFrom(
+				cursorA,
+				(m) => m.type === "gate_verification_complete" && m.goalId === goalId && m.gateId === "burst-gate" && m.signalId === signalId,
+				45_000,
+			);
+			const completeB = await wsB.waitForFrom(
+				cursorB,
+				(m) => m.type === "gate_verification_complete" && m.goalId === goalId && m.gateId === "burst-gate" && m.signalId === signalId,
+				45_000,
+			);
+			expect(completeA.status).toBe("passed");
+			expect(completeB.status).toBe("passed");
 
 			await wsA.waitForFrom(
 				cursorA,
@@ -535,7 +609,7 @@ test.describe("Verification WebSocket burst backpressure", () => {
 // ===========================================================================
 
 test.describe("Verification REST API", () => {
-	test.describe.configure({ mode: "parallel" });
+	test.describe.configure({ mode: "parallel", timeout: VERIFICATION_TEST_TIMEOUT_MS });
 
 	test("active verifications API and step output after completion", async () => {
 		const goal = await createGoal({
@@ -622,7 +696,7 @@ test.describe("Verification REST API", () => {
 // ===========================================================================
 
 test.describe("Expect failure pipeline", () => {
-	test.describe.configure({ mode: "parallel" });
+	test.describe.configure({ mode: "parallel", timeout: VERIFICATION_TEST_TIMEOUT_MS });
 
 	test("expect:failure gate with matching error_pattern passes", async () => {
 		const { goalId, ws } = await prepBugFixGoalWithAnalysis(
@@ -642,7 +716,7 @@ test.describe("Expect failure pipeline", () => {
 					},
 				},
 				"passed",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 		} finally {
 			ws.close();
@@ -668,7 +742,7 @@ test.describe("Expect failure pipeline", () => {
 					},
 				},
 				"failed",
-				30_000,
+				VERIFICATION_WS_TIMEOUT_MS,
 			);
 
 			const signalsResp = await apiFetch(
@@ -693,6 +767,7 @@ test.describe("Expect failure pipeline", () => {
 // ===========================================================================
 
 test.describe("LLM Review verification", () => {
+	test.describe.configure({ timeout: VERIFICATION_TEST_TIMEOUT_MS });
 
 	test("llm-review step uses skip path when BOBBIT_LLM_REVIEW_SKIP is set", async () => {
 		const goalId = await createGeneralGoal();
@@ -709,7 +784,7 @@ test.describe("LLM Review verification", () => {
 			const signalData = await signalResp.json();
 			expect(signalData.signal.status).toBe("running");
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && (m.status === "passed" || m.status === "failed"), 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && (m.status === "passed" || m.status === "failed"), VERIFICATION_LLM_WS_TIMEOUT_MS);
 
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);
 			expect(signalsResp.status).toBe(200);

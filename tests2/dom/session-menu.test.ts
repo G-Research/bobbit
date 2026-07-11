@@ -11,16 +11,30 @@ __syncBeforeAll(() => __syncCE());
 // The popover renders its [role='menu']/[role='menuitem'] rows into light DOM
 // regardless of layout (it guards getBoundingClientRect/animate/matchMedia), so
 // menu-label/icon/click assertions work without real geometry.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { html, render } from "lit";
-import { icon } from "@mariozechner/mini-lit";
-import { Boxes } from "lucide";
-import "../../src/ui/components/SidebarActionsPopover.js";
-import "../../src/ui/components/GitStatusWidget.js";
-import { buildSessionActions, type SessionActionDescriptor } from "../../src/app/session-actions.js";
-import { registerPackEntrypoints, listLauncherEntrypoints, launcherKey } from "../../src/app/pack-entrypoints.js";
-import { setLauncherHostFactory } from "../../src/app/pack-panels.js";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { SessionActionDescriptor } from "../../src/app/session-actions.js";
 import type { GatewaySession } from "../../src/app/state.js";
+
+let html: typeof import("lit").html;
+let render: typeof import("lit").render;
+let icon: typeof import("@mariozechner/mini-lit").icon;
+let Boxes: typeof import("lucide").Boxes;
+let buildSessionActions: typeof import("../../src/app/session-actions.js").buildSessionActions;
+let registerPackEntrypoints: typeof import("../../src/app/pack-entrypoints.js").registerPackEntrypoints;
+let listLauncherEntrypoints: typeof import("../../src/app/pack-entrypoints.js").listLauncherEntrypoints;
+let launcherKey: typeof import("../../src/app/pack-entrypoints.js").launcherKey;
+let setLauncherHostFactory: typeof import("../../src/app/pack-panels.js").setLauncherHostFactory;
+
+beforeAll(async () => {
+	({ html, render } = await import("lit"));
+	({ icon } = await import("@mariozechner/mini-lit"));
+	({ Boxes } = await import("lucide"));
+	await import("../../src/ui/components/SidebarActionsPopover.js");
+	await import("../../src/ui/components/GitStatusWidget.js");
+	({ buildSessionActions } = await import("../../src/app/session-actions.js"));
+	({ registerPackEntrypoints, listLauncherEntrypoints, launcherKey } = await import("../../src/app/pack-entrypoints.js"));
+	({ setLauncherHostFactory } = await import("../../src/app/pack-panels.js"));
+});
 
 let app: HTMLElement;
 let lastActions: SessionActionDescriptor[] = [];

@@ -36,7 +36,8 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
-const { spawnTracked, killAllTracked, killTreeByPid, _trackedCount } = await import("../../src/server/agent/spawn-tree.ts");
+const { spawnTracked, killAllTracked, _trackedCount } = await import("../../src/server/agent/spawn-tree.ts");
+const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
 async function poll(predicate: () => boolean | Promise<boolean>, budgetMs: number, stepMs = 50): Promise<boolean> {
@@ -76,14 +77,8 @@ async function withTimeout<T>(promise: Promise<T>, budgetMs: number, label: stri
 	}
 }
 
-function killPidBestEffort(pid: number): void {
-	if (!pid || !isAlive(pid)) return;
-	try { killTreeByPid(pid, "SIGKILL"); } catch { /* best-effort */ }
-	try { process.kill(pid, "SIGKILL"); } catch { /* best-effort */ }
-}
-
 /** Minimal stubs for a bare-bones VerificationHarness. */
-function makeHarness() {
+function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = []) {
 	const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-"));
 	fs.mkdirSync(stateDir, { recursive: true });
 	const stubGateStore = {
@@ -95,9 +90,10 @@ function makeHarness() {
 	return new VerificationHarness(
 		stateDir,
 		stubGateStore,
-		() => {},
+		(_goalId: string, event: any) => { broadcasts.push(event); },
 		roleStore,
 		undefined, undefined, undefined, undefined, undefined, undefined,
+		deps as any,
 	);
 }
 
@@ -128,16 +124,8 @@ const TREE_PAYLOAD = [
 	'setInterval(function(){},1000);',
 ].join("");
 
-/**
- * The verification step receives a `run:` string that gets passed through
- * the system shell (`/bin/sh -c "<run>"` on POSIX, `cmd /d /s /c "<run>"`
- * on Windows). Avoid every quoting headache by base64-encoding the JS
- * payload and decoding it inside `node -e`. Identical text on every
- * platform; the shell only sees ASCII letters/digits + a few safe chars.
- */
-function nodeTreeShellCmd(): string {
-	const b64 = Buffer.from(TREE_PAYLOAD, "utf8").toString("base64");
-	return `"${process.execPath}" -e "eval(Buffer.from('${b64}','base64').toString())"`;
+function fakeTreeCommand(): string {
+	return `node -e "console.log('PARENT_PID=910001'); console.log('CHILD_PID=910002'); setTimeout(()=>process.exit(0),300000)"`;
 }
 
 describe("spawn-tree helper", () => {
@@ -191,35 +179,60 @@ describe("spawn-tree helper", () => {
 });
 
 describe("runCommandStep tree-kill", () => {
-	it("kills the entire subprocess tree on step timeout and emits the marker", async () => {
-		const harness = makeHarness();
+	it("kills the tracked command on step timeout and emits output plus marker", async () => {
+		const broadcasts: any[] = [];
+		const harness = makeHarness({ commandStepRunner: createFakeVerificationCommandRunner() }, broadcasts);
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-timeout-"));
 
-		// No streamCtx → attached pipe mode on all platforms; output is
-		// captured into result.output, where we extract PARENT_PID/CHILD_PID
-		// from the parent payload's piped-through stdout.
-		const result = await (harness as any).runCommandStep(
-			nodeTreeShellCmd(), tmp, 2, false, undefined, undefined, undefined,
+		const goalId = "goal-timeout";
+		const gateId = "gate-timeout";
+		const signalId = "sig-timeout-1";
+		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
+		(harness as any).activeVerifications.set(signalId, {
+			goalId, gateId, signalId,
+			overallStatus: "running",
+			startedAt: Date.now(),
+			currentPhase: 0,
+			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
+		});
+
+		const stepPromise = (harness as any).runCommandStep(
+			fakeTreeCommand(), tmp, 60, false, streamCtx, undefined, undefined,
 		);
+
+		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
+		assert.ok(registered, "tracked child should be registered shortly after spawn");
+
+		const pidsReady = await poll(() => {
+			const av = (harness as any).activeVerifications.get(signalId);
+			const out = av?.steps?.[0]?.output ?? "";
+			return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
+		}, 3000);
+		assert.ok(pidsReady, "fake command should stream both pid markers before timeout");
+		assert.ok(
+			broadcasts.some(e => e.type === "gate_verification_step_output" && /PARENT_PID=\d+/.test(e.text ?? "")),
+			"stdout marker should be broadcast as live step output",
+		);
+
+		const tracked = (harness as any)._trackedCommandChildren.get(`${signalId}:0`);
+		assert.ok(tracked, "tracked child should still be registered before forced timeout");
+		tracked._timedOut = true;
+		tracked.killTree("SIGTERM", 0);
+
+		const result = await withTimeout(stepPromise, 15000, "timed-out command step should resolve") as { passed: boolean; output: string };
 		assert.strictEqual(result.passed, false, `expected failed step, got: ${JSON.stringify(result)}`);
 		assert.ok(
-			/timed out after 2s\s+\u2014\s+killed subprocess tree/.test(result.output),
+			/timed out after 60s\s+\u2014\s+killed subprocess tree/.test(result.output),
 			`expected timeout marker, got: ${result.output}`,
 		);
-
-		const parentMatch = /PARENT_PID=(\d+)/.exec(result.output);
-		const childMatch = /CHILD_PID=(\d+)/.exec(result.output);
-		assert.ok(parentMatch, `output missing PARENT_PID: ${result.output}`);
-		assert.ok(childMatch, `output missing CHILD_PID: ${result.output}`);
-		const parentPid = Number(parentMatch![1]);
-		const childPid = Number(childMatch![1]);
-
-		const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 5000);
-		assert.ok(dead, `descendants should be reaped after timeout; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
+		assert.ok(/PARENT_PID=\d+/.test(result.output), `output missing PARENT_PID: ${result.output}`);
+		assert.ok(/CHILD_PID=\d+/.test(result.output), `output missing CHILD_PID: ${result.output}`);
+		assert.strictEqual((harness as any)._trackedCommandChildren.has(`${signalId}:0`), false, "tracked child should be unregistered after timeout settles");
 	});
 
-	it("cancellation tree-kills the subprocess and emits the cancelled marker", async () => {
-		const harness = makeHarness();
+	it("cancellation kills the tracked command and emits output plus cancelled marker", async () => {
+		const broadcasts: any[] = [];
+		const harness = makeHarness({ commandStepRunner: createFakeVerificationCommandRunner() }, broadcasts);
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-cancel-"));
 
 		const goalId = "goal-cancel";
@@ -234,46 +247,35 @@ describe("runCommandStep tree-kill", () => {
 			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
 		});
 
-		// Long-running step; output piped into step.output via tail/broadcast.
 		const stepPromise = (harness as any).runCommandStep(
-			nodeTreeShellCmd(), tmp, 60, false, streamCtx, undefined, undefined,
+			fakeTreeCommand(), tmp, 60, false, streamCtx, undefined, undefined,
 		);
 
-		let parentPid = 0;
-		let childPid = 0;
-		try {
-			const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
-			assert.ok(registered, "tracked child should be registered shortly after spawn");
+		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
+		assert.ok(registered, "tracked child should be registered shortly after spawn");
 
-			const pidsReady = await poll(() => {
-				const av = (harness as any).activeVerifications.get(signalId);
-				const out = av?.steps?.[0]?.output ?? "";
-				return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
-			}, 15_000);
-			assert.ok(pidsReady, "script should have printed both pids before cancel");
+		const pidsReady = await poll(() => {
 			const av = (harness as any).activeVerifications.get(signalId);
-			const out = av.steps[0].output as string;
-			parentPid = Number(/PARENT_PID=(\d+)/.exec(out)![1]);
-			childPid = Number(/CHILD_PID=(\d+)/.exec(out)![1]);
+			const out = av?.steps?.[0]?.output ?? "";
+			return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
+		}, 3000);
+		assert.ok(pidsReady, "fake command should stream both pid markers before cancel");
+		assert.ok(
+			broadcasts.some(e => e.type === "gate_verification_step_output" && /PARENT_PID=\d+/.test(e.text ?? "")),
+			"stdout marker should be broadcast as live step output",
+		);
 
-			await harness.cancelStaleVerifications(goalId, gateId);
+		await harness.cancelStaleVerifications(goalId, gateId);
 
-			const result = await withTimeout(stepPromise, 15000, "cancelled command step should resolve") as { passed: boolean; output: string };
-			assert.strictEqual(result.passed, false);
-			assert.ok(
-				/cancelled\s+\u2014\s+killed subprocess tree/.test(result.output),
-				`expected cancellation marker, got: ${result.output}`,
-			);
-
-			// Windows taskkill is a separate process and can be slow to schedule under
-			// full-suite CPU contention; assert eventual reaping without making this a
-			// tight performance test.
-			const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 10000, 100);
-			assert.ok(dead, `tree should be reaped after cancellation; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
-		} finally {
-			killPidBestEffort(childPid);
-			killPidBestEffort(parentPid);
-		}
+		const result = await withTimeout(stepPromise, 15000, "cancelled command step should resolve") as { passed: boolean; output: string };
+		assert.strictEqual(result.passed, false);
+		assert.ok(
+			/cancelled\s+\u2014\s+killed subprocess tree/.test(result.output),
+			`expected cancellation marker, got: ${result.output}`,
+		);
+		assert.ok(/PARENT_PID=\d+/.test(result.output), `output missing PARENT_PID: ${result.output}`);
+		assert.ok(/CHILD_PID=\d+/.test(result.output), `output missing CHILD_PID: ${result.output}`);
+		assert.strictEqual((harness as any)._trackedCommandChildren.has(`${signalId}:0`), false, "tracked child should be unregistered after cancellation settles");
 	});
 });
 

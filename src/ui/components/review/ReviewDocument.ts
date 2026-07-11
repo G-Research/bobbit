@@ -1,5 +1,5 @@
 import { html, LitElement } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { property, state } from "lit/decorators.js";
 import { marked } from "marked";
 import { createTextAnnotator, type TextAnnotator } from "@recogito/text-annotator";
 import "@recogito/text-annotator/text-annotator.css";
@@ -145,7 +145,6 @@ export function renderReviewMarkdownToHtml(markdown: string): string {
  * text selection and highlighting. Does NOT use Shadow DOM so the annotator
  * can access the rendered DOM directly.
  */
-@customElement("review-document")
 export class ReviewDocument extends LitElement {
   @property({ type: String }) markdown = "";
   @property({ type: String }) sessionId = "";
@@ -1012,6 +1011,16 @@ export class ReviewDocument extends LitElement {
       <!-- Annotation popover is mounted as a singleton in <body>; see _syncPopover. -->
     `;
   }
+}
+
+// Guarded registration (not @customElement): keeps this module import-safe when
+// `customElements` is transiently undefined — a lazy import resolving in the
+// happy-dom teardown gap (v2-dom pool:forks/isolate:false window churn) otherwise
+// throws an unhandled "customElements is not defined" that fails the run despite
+// every test passing. In the browser customElements is always present, so this
+// registers identically to @customElement.
+if (typeof customElements !== "undefined" && !customElements.get("review-document")) {
+  customElements.define("review-document", ReviewDocument);
 }
 
 declare global {

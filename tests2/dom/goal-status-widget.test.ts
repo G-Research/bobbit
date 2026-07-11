@@ -101,12 +101,11 @@ async function mountGoalStatusWidget(fixture: {
 	state.goals = [{ id: fixture.goalId, title: "Fixture Goal", state: fixture.goalState || "in-progress", workflow: { gates: [] } }] as any;
 	if (fixture.cache) state.gateStatusCache.set(fixture.goalId, fixture.cache as any);
 
+	await customElements.whenDefined("goal-status-widget");
 	const container = document.createElement("div");
 	document.body.appendChild(container);
-	await customElements.whenDefined("goal-status-widget");
-	// Create the host element with the current happy-dom document. Rendering the
-	// host tag through lit can use another file's cached template document under
-	// isolate:false and leave the widget unupgraded in full-suite runs.
+	// Create the host imperatively so the fixture uses this file's custom-element registry,
+	// not lit-html's cached template document from another isolate:false DOM file.
 	const el = document.createElement("goal-status-widget") as any;
 	el.goalId = fixture.goalId;
 	el.token = "test-token";

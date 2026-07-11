@@ -1,5 +1,5 @@
 import { html, LitElement } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { property, state } from "lit/decorators.js";
 import {
   buildReviewDecisionPayloadForDocument,
   getAnnotationBucketForDocument,
@@ -20,7 +20,6 @@ import "./review-pane.css";
  * Renders a horizontal tab bar, the active `<review-document>`, and a bottom
  * action bar. Uses light DOM for consistent styling with the app theme.
  */
-@customElement("review-pane")
 export class ReviewPane extends LitElement {
   @property({ attribute: false })
   documents: Map<string, ReviewDocumentModel> = new Map();
@@ -384,6 +383,16 @@ export class ReviewPane extends LitElement {
       </div>
     `;
   }
+}
+
+// Guarded registration (not @customElement): keeps this module import-safe when
+// `customElements` is transiently undefined — a lazy import resolving in the
+// happy-dom teardown gap (v2-dom pool:forks/isolate:false window churn) otherwise
+// throws an unhandled "customElements is not defined" that fails the run despite
+// every test passing. In the browser customElements is always present, so this
+// registers identically to @customElement.
+if (typeof customElements !== "undefined" && !customElements.get("review-pane")) {
+  customElements.define("review-pane", ReviewPane);
 }
 
 declare global {

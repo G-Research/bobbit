@@ -31,6 +31,7 @@ import {
 	normalizeAgentDirInput,
 } from "./bobbit-dir.js";
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
+import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
@@ -43,6 +44,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
+import type { ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
@@ -122,6 +124,14 @@ import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-f
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
+import {
+	baseRefMissingInReposError,
+	baseRefSkippedRepoWarning,
+	baseRefTagError,
+	isValidBaseRefBranchGrammar,
+	normalizeBaseRefValue,
+	validateBaseRefShape,
+} from "./base-ref-validation.js";
 
 /**
  * Render the `team_wait` result text (orchestration-core design §9). Returns on
@@ -157,18 +167,6 @@ function formatWaitText(result: WaitResult): string {
 		lines.push(`➜ Process this result now, then call team_wait again to await the remaining children — pass child_session_ids: [${remainingIds.join(", ")}].`);
 	}
 	return lines.join("\n");
-}
-
-// Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
-// Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
-// without an exec round-trip. See docs/design/base-ref.md.
-function isValidBaseRefBranchGrammar(name: string): boolean {
-	if (!name) return false;
-	if (/\s/.test(name)) return false;
-	if (name.startsWith("-") || name.endsWith(".")) return false;
-	if (name.includes("..") || name.includes("@{")) return false;
-	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
-	return /^[A-Za-z0-9_./-]+$/.test(name);
 }
 
 function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
@@ -1824,6 +1822,18 @@ export interface GatewayConfig {
 }
 
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
+	// Construction checkpoint timer — createGateway runs fully synchronously
+	// before start(), and earlier profiling showed ~19s of unattributed time
+	// here. Log cumulative elapsed at each major subsystem so the heavy step is
+	// visible. Cheap; best-effort file tee via bootLog.
+	const __ckT0 = Date.now();
+	let __ckLast = __ckT0;
+	const ck = (label: string): void => {
+		const now = Date.now();
+		const delta = now - __ckLast;
+		__ckLast = now;
+		if (delta >= SLOW_PHASE_MS) bootLog(`[boot] ctor ${label} +${delta}ms (@${now - __ckT0}ms)`);
+	};
 	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
 	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
 	if (deps?.agentBridgeFactory) {
@@ -1931,11 +1941,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	// Run one-time migration from centralized to per-project state
+	ck("pre-migration-setup");
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot(), { centralConfigDir: configDir });
+	ck("migrateToPerProjectState");
 
 	// Recover data lost by the original migration bug (unconditional rename
 	// when central dir == default project dir). Must run before stores load.
 	recoverPreMigrationData(stateDir);
+	ck("recoverPreMigrationData");
 
 	// One-shot project.yaml migration: synthesize components[] for legacy
 	// single-repo projects. Idempotent. Must run BEFORE ProjectContext
@@ -1944,6 +1957,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	migrateAllProjectYaml(
 		projectRegistry.list().map(p => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
 	);
+	ck("migrateAllProjectYaml");
 
 	const projectConfigStore = new ProjectConfigStore(configDir, gatewayDeps.fsImpl);
 
@@ -1958,6 +1972,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		worktreeSetupRuntime,
 	});
 	projectContextManager.initAll();
+	ck("initAll");
 
 	// Migrate inline token values from project.yaml → secrets.json (one-time)
 	for (const p of projectRegistry.list()) {
@@ -1998,6 +2013,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		} catch { /* ignore parse errors */ }
 	}
 
+	ck("token-migration-loop");
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir, gatewayDeps.fsImpl);
 	const preferencesStore = new PreferencesStore(stateDir, gatewayDeps.fsImpl);
@@ -2009,7 +2025,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const roleStore = new RoleStore(configDir);
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager(configDir);
+	ck("stores-pre-tooldocs");
 	toolManager.generateDetailDocs(stateDir);
+	ck("generateDetailDocs");
 	// Extension host (design docs/design/extension-host.md §4b): the action
 	// dispatcher lives for the gateway process lifetime; its module cache is
 	// dropped synchronously by invalidateResolverCaches() on pack mutations.
@@ -2034,6 +2052,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
 	// persistence behind `host.store.*` + the /api/ext/store/:op endpoint).
 	getPackStore();
+	ck("getPackStore");
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
@@ -2070,6 +2089,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	const builtinConfigProvider = new BuiltinConfigProvider(config.builtinsDir);
+	ck("stores+SessionManager");
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
 	// Direct store lookups (roleStore.get()) transparently fall back to
 	// builtins, so no seeding to disk is needed. Workflows are project-
@@ -2563,6 +2583,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
 
+	ck("pre-TeamManager");
 	const teamManager = new TeamManager(sessionManager, {
 		colorStore,
 		taskManager: new TaskManager(taskStore),
@@ -2958,6 +2979,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			sendMs: performance.now() - sendStart,
 		});
 	}
+
 	/**
 	 * Broadcast to all authenticated WebSocket clients whose active session
 	 * belongs to the given project. Clients with no session association (e.g.
@@ -3123,7 +3145,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	}
 
+	ck("pre-VerificationHarness");
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	ck("new VerificationHarness");
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -3173,6 +3197,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	});
 
+	ck("post-VerificationHarness-to-return");
+	bootLog(`[boot] ctor total (createGateway body) ${Date.now() - __ckT0}ms`);
 	return {
 		server,
 		deps: gatewayDeps,
@@ -3185,18 +3211,23 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		get extensionChannels() { return extensionChannelServices; },
 		async start(): Promise<number> {
+			// Phase timer for the pre-listen critical path: everything awaited here
+			// blocks `server.listen()`, i.e. delays the UI becoming reachable.
+			// Log each phase (>=50ms) so a slow cold-start is diagnosable from logs.
+			const bootStart = Date.now();
+			const bootPhase = makePhaseTimer("[boot] pre-listen");
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
-			await startupAigwCheck(preferencesStore);
+			await bootPhase("aigw-check", () => startupAigwCheck(preferencesStore));
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
-			await initExtensionChannelsOnce();
+			await bootPhase("extension-channels", () => initExtensionChannelsOnce());
 
 			// Initialize MCP servers (skip when disabled by gateway runtime config)
 			if (!gatewayRuntimeFlags.skipMcp) {
 				try {
-					await sessionManager.initMcp(headquartersDir());
+					await bootPhase("mcp-init", () => sessionManager.initMcp(headquartersDir()));
 				} catch (err) {
 					console.error('[mcp] MCP init failed:', (err as Error).message);
 				}
@@ -3373,13 +3404,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			sessionManager.subscribeSandboxRecovery();
 
 			// Restore persisted sessions before accepting connections
-			await sessionManager.restoreSessions();
+			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
 			// once per project context after sessions are restored so the
 			// resolver can see live PersistedSession records. Idempotent.
 			const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
+			const costBackfillStart = Date.now();
 			try {
 				for (const ctx of projectContextManager.all()) {
 					backfillLegacyCostGoalIds({
@@ -3391,12 +3423,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			} catch (err) {
 				console.warn("[cost-backfill] boot backfill failed (non-fatal):", err);
 			}
+			{
+				const dt = Date.now() - costBackfillStart;
+				if (dt >= SLOW_PHASE_MS) bootLog(`[boot] pre-listen cost-backfill in ${dt}ms`);
+			}
+			bootLog(`[boot] pre-listen phases complete in ${Date.now() - bootStart}ms`);
 
 			// NOTE: Orphaned worktree cleanup and non-interactive session cleanup
 			// are no longer automatic on startup. Use the Settings → Maintenance UI
 			// or the /api/maintenance/* endpoints to preview and clean up manually.
 
-			sessionManager.startPurgeSchedule();
+			await bootPhase("startPurgeSchedule", () => sessionManager.startPurgeSchedule());
 
 			// Initialize worktree pools for all git-repo projects
 			// (pre-creates worktrees in the background so new sessions start instantly).
@@ -3512,7 +3549,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								});
 							}
 						}
-						console.log(`[boot] sweeper start (${sweepProjects.length} projects)`);
+						bootLog(`[boot] sweeper start (${sweepProjects.length} projects)`);
 						const result = await sweepOrphanedWorktrees({
 							projects: sweepProjects,
 							goals: sweepGoals,
@@ -3520,7 +3557,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							teams: sweepTeams,
 							staff: sweepStaff,
 						});
-						console.log(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
+						bootLog(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
 					} catch (err) {
 						console.warn(`[boot] sweeper failed in ${Date.now() - tStart}ms (non-fatal):`, err);
 					}
@@ -3566,9 +3603,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
 								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
-								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
+								bootLog(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
-								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
+								bootLog(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							}
 						} catch (err) {
 							console.warn(`[boot] pool init failed: project=${ctx.project.id} in ${Date.now() - tStart}ms (non-fatal):`, err);
@@ -3576,24 +3613,29 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					}));
 				})();
 				await Promise.all([transcriptBackfillTask, sweeperTask, poolInitTask]);
-				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
+				bootLog(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
 
 			// Wire goal-manager resolvers so goals claim through the pool first and
 			// resolve components / project root for multi-repo goal creation.
 			// Hidden contexts (synthetic system project) have no goals to wire.
-			for (const ctx of projectContextManager.visible()) {
-				wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
-			}
+			await bootPhase("wireGoalManagerResolvers", () => {
+				for (const ctx of projectContextManager.visible()) {
+					wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
+				}
+			});
 
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
-			teamManager.resubscribeTeamEvents();
+			await bootPhase("resubscribeTeamEvents", () => teamManager.resubscribeTeamEvents());
 
 			// Resume any verifications that were interrupted by a server restart (fire-and-forget)
-			verificationHarness.resumeInterruptedVerifications().catch(err => {
-				console.error("[verification] Error resuming interrupted verifications:", err);
+			await bootPhase("resumeInterruptedVerifications-sync", () => {
+				verificationHarness.resumeInterruptedVerifications().catch(err => {
+					console.error("[verification] Error resuming interrupted verifications:", err);
+				});
 			});
+			bootLog(`[boot] start() reached listen() at ${Date.now() - bootStart}ms`);
 
 			// Port 0 = let OS assign a free port; skip the auto-increment loop
 			if (config.port === 0) {
@@ -3638,6 +3680,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			throw new Error(`All ports ${config.port}-${maxPort} in use`);
 		},
 		async shutdown() {
+			const shutdownStart = Date.now();
+			bootMark(`SHUTDOWN ${new Date().toISOString()}`);
+			// Phase timer: log each teardown phase so a slow shutdown is diagnosable
+			// from the logs without a profiler. Cheap (Date.now + one appended line).
+			const phase = makePhaseTimer("[shutdown]");
 			try {
 				// Stop accepting NEW connections AND forcibly terminate existing
 				// keep-alive connections BEFORE we tear down the state stores.
@@ -3656,18 +3703,36 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				triggerEngine.stop();
 				inboxNudger.stop();
 				wss.close();
-				await disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown");
+				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-				for (const pool of sessionManager.getAllWorktreePools().values()) {
-					await pool.drain();
-				}
-				await sessionManager.shutdown();
-				await projectContextManager.closeAll();
+				// Worktree pools are intentionally NOT drained on shutdown.
+				//
+				// Pool entries are pre-built worktrees on `pool/_pool-*` branches
+				// created `pushPolicy: "local-only"` — they never exist on the remote.
+				// The old `drain()` here ran, serially across every project's pool,
+				// `git worktree remove --force` + `git branch -D` + a pointless
+				// `git push origin --delete` (a network round-trip, up to a 15s
+				// timeout each, to delete a branch that was never pushed). That both
+				// slowed shutdown AND destroyed exactly the worktrees the next boot
+				// then had to rebuild from scratch (`git worktree add` + `npm ci`),
+				// leaving new sessions on the cold path for minutes after start.
+				//
+				// Leaving them on disk lets `WorktreePool.reclaimOrphaned` re-adopt
+				// them instantly at the next boot (the sweeper skips pool branches,
+				// and reclaim is capped at the pool's target size, so they don't
+				// accumulate). Explicit teardown still drains: project removal
+				// (`removeWorktreePool`) and the Settings → Maintenance cleanup.
+				await phase("session-manager", () => sessionManager.shutdown());
+				await phase("project-contexts", () => projectContextManager.closeAll());
 				if (sandboxManager) {
-					await sandboxManager.shutdownAll();
+					await phase("sandbox-manager", () => sandboxManager!.shutdownAll());
 				}
-				await sessionManager.cleanupSandboxNetwork();
+				await phase("sandbox-network", () => sessionManager.cleanupSandboxNetwork());
+				bootLog(`[shutdown] complete in ${Date.now() - shutdownStart}ms`);
+			} catch (err) {
+				bootLog(`[shutdown] aborted after ${Date.now() - shutdownStart}ms: ${err instanceof Error ? err.message : String(err)}`);
+				throw err;
 			} finally {
 				restoreExplicitRpcBridgeFactory();
 			}
@@ -3890,6 +3955,13 @@ async function handleApiRoute(
 	const resolveRoleForProject = (roleId: string, projectId?: string): Role | undefined => {
 		const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleId)?.item;
 		return cascadeRole ?? roleManager.getRole(roleId);
+	};
+	const broadcastStaffChanged = (event: Extract<ServerMessage, { type: "staff_changed" }>): void => {
+		try {
+			broadcastToAll(event);
+		} catch (err) {
+			console.error(`[broadcast] staff_changed failed for ${event.staffId}:`, err);
+		}
 	};
 	type RoleCreateOptions = { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
 	const roleCreateOptions = (role: Role): RoleCreateOptions => {
@@ -5401,59 +5473,15 @@ async function handleApiRoute(
 			const baseRefWarnings: string[] = [];
 			if ("base_ref" in (body as Record<string, unknown>)) {
 				const rawBaseRef = (body as Record<string, unknown>).base_ref;
-				const baseRefValue = typeof rawBaseRef === "string" ? rawBaseRef.trim() : "";
+				const baseRefValue = normalizeBaseRefValue(rawBaseRef);
 				if (baseRefValue) {
-					// 1. SHA shape (7-40 hex chars). Reject before grammar — a 40-char hex
-					//    string is grammatically valid but is rejected for clarity.
-					if (/^[0-9a-f]{7,40}$/i.test(baseRefValue)) {
-						json({ field: "base_ref", error: `base_ref must be a branch ref, not a commit SHA. Got: ${baseRefValue}` }, 400);
-						return;
-					}
-					// 2. Invalid branch grammar.
-					if (!isValidBaseRefBranchGrammar(baseRefValue)) {
-						json({ field: "base_ref", error: `base_ref must be a valid branch name. Got: ${baseRefValue}` }, 400);
-						return;
-					}
-					// 3. Non-origin remote prefix. Anything matching `<prefix>/<rest>` where
-					//    `<prefix>` is not `origin` is rejected. Local refs (no slash, or
-					//    `feature/foo`) are still accepted — the prefix gate only fires when
-					//    the first segment looks like a remote name and isn't `origin`.
-					//    We treat the first slash-segment as a remote prefix only when the
-					//    full value is exactly `<prefix>/<rest>` AND `<rest>` looks like a
-					//    branch (rather than e.g. `feature/foo` which has no remote prefix at all).
-					//    Practically: if the value starts with anything other than `origin/`
-					//    AND the first segment is a known-remote-shaped token, reject.
-					//    We use a simple heuristic: if it doesn't start with `origin/` and
-					//    its first segment contains no special chars and a slash exists,
-					//    treat it as a remote prefix. The error message names the value
-					//    so users can correct it.
-					//
-					// To avoid false positives on local refs like `feature/foo`, we only
-					// reject values whose first segment matches the set of typical
-					// remote names (upstream/fork/etc.). Today's design says: anything
-					// with a remote-style prefix other than `origin/` is rejected, but
-					// distinguishing local `feature/foo` from remote `upstream/foo`
-					// requires git knowledge we don't have at validate time. The design
-					// doc's error inventory specifically calls out `upstream/main` as the
-					// example to reject — so we use a conservative allowlist: anything
-					// matching a known remote-name pattern that isn't `origin` is rejected.
-					// Known remote-shaped tokens: upstream, fork, mirror, github, gitlab,
-					// bitbucket. Everything else flows through (local branches with slashes).
-					const firstSegment = baseRefValue.split("/")[0];
-					const KNOWN_NON_ORIGIN_REMOTES = new Set(["upstream", "fork", "mirror", "github", "gitlab", "bitbucket", "remote"]);
-					if (baseRefValue.includes("/") && firstSegment !== "origin" && KNOWN_NON_ORIGIN_REMOTES.has(firstSegment)) {
-						json({ field: "base_ref", error: `base_ref only supports the 'origin' remote today. Got: ${baseRefValue}. If you need a different primary remote, configure it as 'origin' in your local clone.` }, 400);
-						return;
-					}
-					// 4. Sandbox + local — when the project runs in a docker sandbox, only
-					//    remote refs work because the container has separate ref visibility
-					//    from the host.
 					const sandboxResolved = ctx.projectConfigStore.getWithDefaults().sandbox || "none";
-					if (sandboxResolved === "docker" && !baseRefValue.startsWith("origin/")) {
-						json({ field: "base_ref", error: `base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: ${baseRefValue}` }, 400);
+					const shapeError = validateBaseRefShape({ value: rawBaseRef, sandbox: sandboxResolved });
+					if (shapeError) {
+						json(shapeError, 400);
 						return;
 					}
-					// 5. Multi-repo ref existence — `git rev-parse --verify` against every
+					// Multi-repo ref existence — `git rev-parse --verify` against every
 					//    component repo. Also detect tags up-front: a value that resolves
 					//    via `refs/tags/<value>` in ANY component is rejected as a tag.
 					const componentsForCheck = ctx.projectConfigStore.getComponents();
@@ -5467,7 +5495,7 @@ async function handleApiRoute(
 						const repoPath = path.join(ctx.project.rootPath, c.repo);
 						const gitRepoCheck = await isGitRepo(repoPath).catch(() => false);
 						if (!gitRepoCheck) {
-							baseRefWarnings.push(`base_ref validation skipped for component '${c.name}': not a git repo at ${repoPath}`);
+							baseRefWarnings.push(baseRefSkippedRepoWarning(c.name, repoPath));
 							continue;
 						}
 						checkedRepoCount++;
@@ -5491,15 +5519,11 @@ async function handleApiRoute(
 						}
 					}
 					if (tagDetected) {
-						json({ field: "base_ref", error: `base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: ${baseRefValue}` }, 400);
+						json(baseRefTagError(baseRefValue), 400);
 						return;
 					}
 					if (failures.length > 0) {
-						json({
-							field: "base_ref",
-							error: `base_ref '${baseRefValue}' is not present in ${failures.length} of ${checkedRepoCount} component repos`,
-							details: failures,
-						}, 400);
+						json(baseRefMissingInReposError(baseRefValue, failures, checkedRepoCount), 400);
 						return;
 					}
 				}
@@ -5717,10 +5741,12 @@ async function handleApiRoute(
 		const typeParam = url.searchParams.get("type") || "all";
 		const validTypes = new Set(["all", "goals", "sessions", "messages", "staff"]);
 		const type = validTypes.has(typeParam) ? typeParam as "all" | "goals" | "sessions" | "messages" | "staff" : "all";
+		const includeArchived = url.searchParams.get("includeArchived") === "true"
+			|| (url.searchParams.get("include") || "").split(",").some(part => part.trim() === "archived");
 		try {
 			const projectId = url.searchParams.get("projectId") || undefined;
 			const projectNames = new Map(projectRegistry.list().map(p => [p.id, p.name]));
-			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames });
+			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames, includeArchived });
 			json(results);
 		} catch (err) {
 			json({ error: `Search failed: ${err}` }, 500);
@@ -12003,6 +12029,9 @@ async function handleApiRoute(
 					getSession: (id) => sessionManager.getSession(id),
 					enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
 					deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
+					getErroredPromptRecoveryDecision: (id) => sessionManager.getErroredPromptRecoveryDecision(id),
+					enqueuePromptForRetryRecovery: (id, text, opts) => sessionManager.enqueuePromptForRetryRecovery(id, text, opts),
+					retryLastPrompt: (id, opts) => sessionManager.retryLastPrompt(id, opts),
 				}, body.sessionId, message, { mode, defaultMode: "steer" });
 			json(result);
 		} catch (err) {
@@ -12416,6 +12445,9 @@ async function handleApiRoute(
 				getSession: (id) => sessionManager.getSession(id),
 				enqueuePrompt: (id, text, opts) => sessionManager.enqueuePrompt(id, text, opts),
 				deliverLiveSteer: (id, text, opts) => sessionManager.deliverLiveSteer(id, text, opts),
+				getErroredPromptRecoveryDecision: (id) => sessionManager.getErroredPromptRecoveryDecision(id),
+				enqueuePromptForRetryRecovery: (id, text, opts) => sessionManager.enqueuePromptForRetryRecovery(id, text, opts),
+				retryLastPrompt: (id, opts) => sessionManager.retryLastPrompt(id, opts),
 			}, targetSessionId, body.message, { mode: body.mode, defaultMode: "prompt" });
 			json(result);
 		} catch (err) {
@@ -15448,6 +15480,13 @@ async function handleApiRoute(
 					...(typeof body.worktree === "boolean" ? { worktree: body.worktree } : {}),
 				},
 			);
+			broadcastStaffChanged({
+				type: "staff_changed",
+				reason: "created",
+				staffId: staff.id,
+				projectId,
+				sessionId: staff.currentSessionId,
+			});
 			json(staff, 201);
 		} catch (err: any) {
 			console.error("[server] Failed to create staff agent:", err);
@@ -15481,9 +15520,18 @@ async function handleApiRoute(
 				json({ error: "projectId must reference a registered project" }, 400);
 				return;
 			}
+			const previousStaff = staffManager.getStaff(id);
 			try {
 				const staff = await staffManager.reassignProject(id, targetProjectId, sessionManager);
 				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+				broadcastStaffChanged({
+					type: "staff_changed",
+					reason: "reassigned",
+					staffId: staff.id,
+					projectId: targetProjectId,
+					previousProjectId: previousStaff?.projectId,
+					sessionId: previousStaff?.currentSessionId,
+				});
 				json(staff);
 			} catch (err: any) {
 				jsonError(400, err);
@@ -15573,13 +15621,32 @@ async function handleApiRoute(
 			if (hasAccessoryUpdate && staff?.currentSessionId) {
 				sessionManager.updateSessionMeta(staff.currentSessionId, { accessory: staff.accessory });
 			}
+			if (staff) {
+				broadcastStaffChanged({
+					type: "staff_changed",
+					reason: "updated",
+					staffId: staff.id,
+					projectId: staff.projectId ?? existingStaff.projectId ?? SYSTEM_PROJECT_ID,
+					sessionId: staff.currentSessionId,
+				});
+			}
 			json(staff);
 			return;
 		}
 
 		if (req.method === "DELETE") {
+			const previousStaff = staffManager.getStaff(id);
 			const ok = await staffManager.deleteStaff(id, sessionManager);
 			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
+			if (previousStaff) {
+				broadcastStaffChanged({
+					type: "staff_changed",
+					reason: "deleted",
+					staffId: previousStaff.id,
+					projectId: previousStaff.projectId ?? SYSTEM_PROJECT_ID,
+					sessionId: previousStaff.currentSessionId,
+				});
+			}
 			json({ ok: true });
 			return;
 		}

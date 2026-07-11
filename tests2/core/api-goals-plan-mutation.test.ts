@@ -25,14 +25,12 @@
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { classifyMutation, type ClassifierPlanStep, type MutationKind } from "../../src/server/agent/plan-mutation.ts";
 import { PlanMutationStore, DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "../../src/server/agent/plan-mutation-store.ts";
 import { tryHandleNestedGoalRoute } from "../../src/server/agent/nested-goal-routes.ts";
-import { CookieStore } from "../../src/server/auth/cookie.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -46,13 +44,17 @@ const identitySecretStore = {
 		typeof s === "string" && s.trim() ? s.trim() : undefined,
 };
 
-let tmpRoot: string;
-let stateDir: string;
+let memfs: MemFs;
+const stateDir = path.resolve("/memfs/plan-mutation-api/state");
+const unauthenticatedCookieStore = { verify: () => false };
+
+function makePlanMutationStore(): PlanMutationStore {
+	return new PlanMutationStore(stateDir, { startSweep: false }, memfs);
+}
 
 beforeEach(() => {
-	tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "plan-mutation-api-"));
-	stateDir = path.join(tmpRoot, "state");
-	fs.mkdirSync(stateDir);
+	memfs = createMemFs();
+	memfs.mkdirSync(stateDir);
 });
 
 type Verdict =
@@ -105,7 +107,7 @@ function step(planId: string, phase: number, spec = `spec-${planId}`, title = `t
 
 describe("plan-mutation decision matrix", () => {
 	it("noop applied", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const r = planMutationVerdict(cur, cur, "", [], {}, store, "g1");
 		assert.equal(r.kind, "noop");
@@ -113,7 +115,7 @@ describe("plan-mutation decision matrix", () => {
 	});
 
 	it("fix-up under balanced → applied", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 1)];
 		const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: "balanced" }, store, "g1");
@@ -122,7 +124,7 @@ describe("plan-mutation decision matrix", () => {
 	});
 
 	it("fix-up under autonomous → applied", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 1)];
 		const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: "autonomous" }, store, "g1");
@@ -130,7 +132,7 @@ describe("plan-mutation decision matrix", () => {
 	});
 
 	it("fix-up under strict → requires approval (request stored)", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 1)];
 		const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: "strict" }, store, "g1");
@@ -141,7 +143,7 @@ describe("plan-mutation decision matrix", () => {
 	});
 
 	it("expansion always requires approval (any policy)", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 2)]; // phase 2 > max(current.phase) = 1.
 		for (const policy of ["strict", "balanced", "autonomous"] as const) {
@@ -152,7 +154,7 @@ describe("plan-mutation decision matrix", () => {
 	});
 
 	it("restructure on non-paused goal → 409", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1), step("b", 2)];
 		const next = [step("a", 1)]; // b removed.
 		const r = planMutationVerdict(cur, next, "", [], { paused: false }, store, "g1");
@@ -161,7 +163,7 @@ describe("plan-mutation decision matrix", () => {
 	});
 
 	it("restructure on paused goal → requires approval", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1), step("b", 2)];
 		const next = [step("a", 1)];
 		const r = planMutationVerdict(cur, next, "", [], { paused: true }, store, "g1");
@@ -170,7 +172,7 @@ describe("plan-mutation decision matrix", () => {
 	});
 
 	it("criteria-drop always 409 (no policy override)", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1, "")];
 		const next = [step("a", 1, ""), step("b", 1, "unrelated")];
 		for (const policy of ["strict", "balanced", "autonomous"] as const) {
@@ -199,7 +201,7 @@ describe("plan-mutation decision matrix", () => {
 	});
 
 	it("approve flow: requestId resolves and request is removed on apply", () => {
-		const store = new PlanMutationStore(stateDir);
+		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 2)];
 		const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: "balanced" }, store, "g1");
@@ -266,7 +268,7 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 		};
 		const ctx: any = {
 			goalStore: { get: () => goal, getAll: () => [goal] },
-			planMutationStore: new PlanMutationStore(stateDir),
+			planMutationStore: makePlanMutationStore(),
 			goalManager,
 			gateStore: { getGate: () => ({ status: "pending" }) },
 			workflowStore: {},
@@ -281,7 +283,7 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 			},
 			teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
 			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {}, sessionSecretStore: identitySecretStore },
-			cookieStore: new CookieStore(stateDir),
+			cookieStore: unauthenticatedCookieStore,
 			requireSubgoalsEnabled: () => true,
 			getGoalAcrossProjects: () => goal,
 			getGoalManagerForGoal: () => goalManager,
@@ -391,7 +393,7 @@ describe("Pre/post-freeze: PATCH /plan classifies only after goal-plan freeze", 
 		};
 		const ctx: any = {
 			goalStore: { get: () => goal, getAll: () => [goal] },
-			planMutationStore: new PlanMutationStore(stateDir),
+			planMutationStore: makePlanMutationStore(),
 			goalManager,
 			gateStore: { getGate: () => ({ status: "pending" }) },
 			workflowStore: {},
@@ -406,7 +408,7 @@ describe("Pre/post-freeze: PATCH /plan classifies only after goal-plan freeze", 
 			},
 			teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
 			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {}, sessionSecretStore: identitySecretStore },
-			cookieStore: new CookieStore(stateDir),
+			cookieStore: unauthenticatedCookieStore,
 			requireSubgoalsEnabled: () => true,
 			getGoalAcrossProjects: () => goal,
 			getGoalManagerForGoal: () => goalManager,

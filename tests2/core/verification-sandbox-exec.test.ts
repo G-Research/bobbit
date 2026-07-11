@@ -31,6 +31,7 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
+const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -148,6 +149,8 @@ function createHarness(opts: {
 		}) as any,
 		undefined, // projectConfigStore
 		pcm as any,
+		undefined, // configCascade
+		{ commandStepRunner: createFakeVerificationCommandRunner() },
 	);
 
 	return { harness, broadcastCalls, pcm };
@@ -194,7 +197,7 @@ describe("runCommandStep spawn behavior", () => {
 		assert.ok(result.output.length > 0, "Should have some error output");
 	});
 
-	it("streams output via broadcastFn for docker exec path", async () => {
+	it("streams output via broadcastFn for host path", async () => {
 		const { harness, broadcastCalls } = createHarness();
 		const streamCtx = {
 			goalId: "goal-1",
@@ -202,7 +205,7 @@ describe("runCommandStep spawn behavior", () => {
 			signalId: "sig-1",
 			stepIndex: 0,
 		};
-		await (harness as any).runCommandStep(
+		const result = await (harness as any).runCommandStep(
 			"echo streamed-marker",
 			os.tmpdir(),
 			10,
@@ -211,6 +214,7 @@ describe("runCommandStep spawn behavior", () => {
 			undefined,
 			undefined, // host path — more reliable for streaming test
 		);
+		assert.ok(result.output.includes("streamed-marker"), `Expected output to contain marker, got: ${result.output}`);
 		// Should have broadcast stdout data
 		const outputEvents = broadcastCalls.filter(
 			c => c.event.type === "gate_verification_step_output" && c.event.stream === "stdout",

@@ -5,10 +5,10 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { SessionStore } from "../../src/server/agent/session-store.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const SRC_ROOT = path.resolve(process.cwd(), "src", "server", "agent");
 
@@ -132,87 +132,87 @@ describe("reviewer archive metadata persistence", () => {
 	});
 
 	it("normalizes legacy verifier archive rows with goalId-only while leaving standalone archived sessions unchanged", () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-reviewer-archive-"));
-		try {
-			fs.writeFileSync(path.join(tempDir, "sessions.json"), JSON.stringify({
-				version: 2,
-				epoch: 1,
-				sessions: [
-					{
-						id: "team-lead-goal-one",
-						title: "Team lead",
-						cwd: tempDir,
-						agentSessionFile: "lead.jsonl",
-						createdAt: 1,
-						lastActivity: 1,
-						archived: true,
-						role: "team-lead",
-						teamGoalId: "goal-one",
-					},
-					{
-						id: "llm-review-goal-only",
-						title: "New session",
-						cwd: tempDir,
-						agentSessionFile: "",
-						createdAt: 2,
-						lastActivity: 2,
-						archived: true,
-						goalId: "goal-one",
-						role: "bug-hunter",
-						accessory: "magnifier",
-					},
-					{
-						id: "agent-qa-goal-only",
-						title: "New session",
-						cwd: tempDir,
-						agentSessionFile: "",
-						createdAt: 3,
-						lastActivity: 3,
-						archived: true,
-						goalId: "goal-one",
-						role: "qa-tester",
-					},
-					{
-						id: "standalone-archived-user-session",
-						title: "User archived session",
-						cwd: tempDir,
-						agentSessionFile: "user.jsonl",
-						createdAt: 4,
-						lastActivity: 4,
-						archived: true,
-						goalId: "goal-two",
-					},
-				],
-			}, null, 2));
+		// memfs-backed: the normalization under test is pure store load logic, so
+		// the backing filesystem is swapped from real disk to an injected FsLike.
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/state/reviewer-archive");
+		const cwd = path.resolve("/cwd/reviewer-archive");
+		memfs.writeFileSync(path.join(stateDir, "sessions.json"), JSON.stringify({
+			version: 2,
+			epoch: 1,
+			sessions: [
+				{
+					id: "team-lead-goal-one",
+					title: "Team lead",
+					cwd,
+					agentSessionFile: "lead.jsonl",
+					createdAt: 1,
+					lastActivity: 1,
+					archived: true,
+					role: "team-lead",
+					teamGoalId: "goal-one",
+				},
+				{
+					id: "llm-review-goal-only",
+					title: "New session",
+					cwd,
+					agentSessionFile: "",
+					createdAt: 2,
+					lastActivity: 2,
+					archived: true,
+					goalId: "goal-one",
+					role: "bug-hunter",
+					accessory: "magnifier",
+				},
+				{
+					id: "agent-qa-goal-only",
+					title: "New session",
+					cwd,
+					agentSessionFile: "",
+					createdAt: 3,
+					lastActivity: 3,
+					archived: true,
+					goalId: "goal-one",
+					role: "qa-tester",
+				},
+				{
+					id: "standalone-archived-user-session",
+					title: "User archived session",
+					cwd,
+					agentSessionFile: "user.jsonl",
+					createdAt: 4,
+					lastActivity: 4,
+					archived: true,
+					goalId: "goal-two",
+				},
+			],
+		}, null, 2), "utf-8");
 
-			const store = new SessionStore(tempDir);
-			const byId = new Map(store.getArchived().map((session) => [session.id, session]));
+		const store = new SessionStore(stateDir, memfs);
+		const byId = new Map(store.getArchived().map((session) => [session.id, session]));
 
-			for (const id of ["llm-review-goal-only", "agent-qa-goal-only"]) {
-				assert.equal(
-					byId.get(id)?.teamGoalId,
-					"goal-one",
-					`REVIEWER_ARCHIVE_METADATA ${id} must be backfilled from goalId to teamGoalId`,
-				);
-				assert.equal(
-					byId.get(id)?.teamLeadSessionId,
-					"team-lead-goal-one",
-					`REVIEWER_ARCHIVE_METADATA ${id} must infer the unique team lead for its goal`,
-				);
-			}
-
+		for (const id of ["llm-review-goal-only", "agent-qa-goal-only"]) {
 			assert.equal(
-				byId.get("standalone-archived-user-session")?.teamGoalId,
-				undefined,
-				"REVIEWER_ARCHIVE_METADATA normal standalone archived sessions must not be converted into team sessions",
+				byId.get(id)?.teamGoalId,
+				"goal-one",
+				`REVIEWER_ARCHIVE_METADATA ${id} must be backfilled from goalId to teamGoalId`,
 			);
 			assert.equal(
-				byId.get("standalone-archived-user-session")?.teamLeadSessionId,
-				undefined,
-				"REVIEWER_ARCHIVE_METADATA normal standalone archived sessions must not receive a team lead",
+				byId.get(id)?.teamLeadSessionId,
+				"team-lead-goal-one",
+				`REVIEWER_ARCHIVE_METADATA ${id} must infer the unique team lead for its goal`,
 			);
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
+
+		assert.equal(
+			byId.get("standalone-archived-user-session")?.teamGoalId,
+			undefined,
+			"REVIEWER_ARCHIVE_METADATA normal standalone archived sessions must not be converted into team sessions",
+		);
+		assert.equal(
+			byId.get("standalone-archived-user-session")?.teamLeadSessionId,
+			undefined,
+			"REVIEWER_ARCHIVE_METADATA normal standalone archived sessions must not receive a team lead",
+		);
 	});
 });

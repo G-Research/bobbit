@@ -20,6 +20,26 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+      "reason": "Reproducing + decision-matrix tests for the destructive pre-verification goal-worktree sync: local-ahead un-pushed commit B must survive (not be discarded by `git reset --hard origin/<goalBranch>`), local-behind fast-forwards to origin, diverged keeps local + warns, up-to-date is a no-op. Drives the real VerificationHarness against real temp git repos."
+    },
+    {
+      "path": "tests2/core/base-ref-validation.test.ts",
+      "reason": "Native v2 core unit tests for extracted base_ref REST validation grammar and exact error-shape helpers."
+    },
+    {
+      "path": "tests2/core/deletion-tombstones.test.ts",
+      "reason": "Native v2 unit tests for the deletion-tombstones module (record/read round-trips, idempotency, per-file namespacing, dir creation, missing/corrupt-file tolerance) that guards staff/session/goal resurrection on boot repair."
+    },
+    {
+      "path": "tests2/dom/goal-pause-resume-feedback.test.ts",
+      "reason": "Failing-first reproducing DOM test for Pause Feedback: no-descendant dashboard Pause, dashboard Resume, and transcript paused-banner Resume controls must immediately disable, show Pausing…/Resuming…, and suppress duplicate POSTs while the gateway request is pending."
+    },
+    {
+      "path": "tests2/dom/goal-create-feedback.test.ts",
+      "reason": "Pinning DOM coverage for Create Goal proposal feedback: assistant preview and regular proposal panels must immediately show Creating…, disable/mark busy, suppress duplicate POST /api/goals calls while pending, and clear pending state after a failed create."
+    },
+    {
       "path": "tests2/core/permission-reducer.test.ts",
       "reason": "Failing-first reproducing tests for Permission Card UX reducer lifecycle: denied rows must remain as compact history, timed-out rows settle stale/expired, and superseded rows stop being actionable."
     },
@@ -34,6 +54,14 @@
     {
       "path": "tests2/browser/journeys/cross-session-proposal-mirror.journey.spec.ts",
       "reason": "Reproducing test for the 'Fix cross-session proposal panels' goal: from a NON-matching session (assistantType === null) a role/tool/staff proposal that reaches the panel through the UNIFIED remote.onProposal path alone (source 'seed'/'rehydrate'/'edit'/'restore'/switch-back — not the live tool-use scan that also fires the legacy per-type callback) leaves the legacy form-mirror (rolePreviewName…, toolPreviewName…, staffPreviewName…) empty, so the panel renders blank and its primary submit stays disabled/absent. Drives onProposal directly (same technique as tests2/browser/e2e/proposal-inline-comments.spec.ts) and asserts the mirror is populated + submit enabled. FAILS on HEAD (no role/tool/staff bridge in the unified callback, only goal is bridged), passes once the bridge is added."
+    },
+    {
+      "path": "tests2/browser/journeys/project-proposal-accept.journey.spec.ts",
+      "reason": "Failing-first browser journey for Project Proposal Accept no-op: registered Apply shows pending/disabled duplicate-click guard, registered rename failures surface a connection error without clearing the proposal, provisional config failures surface an error without cleanup, and registered success closes the proposal. Deterministic repro opts out of the retry bridge with retries:0. FAILS on HEAD until project proposal accept pending/error handling is fixed."
+    },
+    {
+      "path": "tests2/browser/journeys/staff-lifecycle-no-refresh.journey.spec.ts",
+      "reason": "Browser regression coverage for Refresh Staff UI: while the app is open, staff create/delete calls made through API/tool-equivalent endpoints must update desktop and mobile sidebars without reload, show the staff row under Staff, and keep the permanent staff-agent session out of regular Sessions."
     },
     {
       "path": "tests2/core/git-repo-cache.test.ts",
@@ -68,6 +96,10 @@
       "reason": "Part 1+2 of 'Hide/Disable PR & Hindsight': fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; plus hindsight is absent from the built-in group and from /api/marketplace/installed. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts."
     },
     {
+      "path": "tests2/core/pr-walkthrough-local-resolver.test.ts",
+      "reason": "Native v2 core tests for PR walkthrough local diff resolver error/truncation/empty-diff behavior moved out of the route-level integration suite."
+    },
+    {
       "path": "tests2/core/bobbit-tool-credentials.test.ts",
       "reason": "bobbit gateway tool suite: credential/URL resolution — env creds, state-file fallback, absent-creds (logs + no registration, no throw), baseUrl trailing-slash trimming."
     },
@@ -90,6 +122,10 @@
     {
       "path": "tests2/core/bobbit-tool-pagination.test.ts",
       "reason": "bobbit gateway tool suite: pagination contract — bounded list-style bobbit_read responses, fallback/post-response slicing, preserved ancillary fields, and normalized pagination metadata."
+    },
+    {
+      "path": "tests2/core/bobbit-tool-archive-filtering.test.ts",
+      "reason": "Reproducing tests for the Hide Archived Lists goal: bobbit_read list_sessions/list_goals/search must hide archived primary rows and archive-only enrichment by default while preserving explicit archive opt-ins; pins SearchService default includeArchived=false."
     },
     {
       "path": "tests2/core/role-bobbit-tools-policy.test.ts",
@@ -164,6 +200,14 @@
       "reason": "v2-native gateway-per-worker session lifecycle API coverage."
     },
     {
+      "path": "tests2/integration/session-store-real-fs.test.ts",
+      "reason": "Canonical real-filesystem fidelity for SessionStore atomic rename cleanup, backup rotation/restore after corrupt primary, and recursive orphan transcript traversal."
+    },
+    {
+      "path": "tests2/integration/cost-tracker-real-fs.test.ts",
+      "reason": "Canonical real-filesystem fidelity for CostTracker: default realFs persists session-costs.json (without the derived cacheHitRate) and a fresh tracker reloads the counters/goalId from real disk. Backs the memfs migration of the cost-tracker unit cluster."
+    },
+    {
       "path": "tests2/browser/journeys/session-lifecycle.journey.spec.ts",
       "reason": "v2 browser smoke journey — multi-feature integration test, no legacy equivalent."
     },
@@ -194,6 +238,10 @@
     {
       "path": "tests2/core/pi-rpc-agent-end-retry.test.ts",
       "reason": "Pi 0.80.5 RPC compatibility: retryable agent_end events carry willRetry=true before Pi internal auto-retry settles. Bobbit must not mark the session idle, drain queued prompts, revoke one-time grants, or resolve waitForIdle until the final non-retry agent_end."
+    },
+    {
+      "path": "tests2/core/verification-verifier-lifecycle-repro.test.ts",
+      "reason": "Failing-first reproducing tests for Retry Reviewer Resume: verifier llm-review/agent-qa sessions must preserve identity/history, use same-session auto-retry for fetch/connection errors, resurrect dead processes up to 3 times before failing, and give idle agent-qa fair repeated reminder/streaming grace instead of creating blank replacements."
     }
   ],
   "journeys": [
@@ -243,6 +291,10 @@
     },
     {
       "path": "tests2/browser/journeys/proposals.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-proposal-accept.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -9826,7 +9878,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "node:test logic suite â€” codemod to vitest; runs in v2-core-isolated because it mutates BOBBIT_AGENT_DIR and asserts agent-dir singleton-sensitive sanitizer path guards.",
       "migrated": true,
       "v2Path": "tests2/core/transcript-sanitizer.test.ts"
     },
