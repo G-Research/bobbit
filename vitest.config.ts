@@ -96,6 +96,7 @@ const singleForkFiles = [
 // timeouts (`[vitest-worker]: Timeout calling "onTaskUpdate"`). These files do
 // not require module isolation; they only need their own sequenced single fork.
 const heavyCoreFiles = [
+	"tests2/core/git-status-native.test.ts",
 	"tests2/core/team-manager.test.ts",
 ];
 
@@ -183,7 +184,20 @@ function cliSelectsProject(projectName: string): boolean {
 	return false;
 }
 
-const broadCoreFiles = listTestFilesUnder("tests2/core").filter((file) => !heavyCoreFiles.includes(file) && !singleForkFiles.includes(file));
+function cliSelectsFile(file: string): boolean {
+	const normalizedFile = file.replace(/\\/g, "/");
+	return process.argv.some((arg) => {
+		const normalizedArg = arg.replace(/\\/g, "/");
+		return normalizedArg === normalizedFile || normalizedArg.endsWith(`/${normalizedFile}`);
+	});
+}
+
+// Keep targeted legacy invocations such as `--project v2-core tests2/core/foo.test.ts`
+// working while unfiltered broad runs still hand heavy files to v2-core-heavy.
+const explicitV2CoreHeavyFiles = cliSelectsProject("v2-core") ? heavyCoreFiles.filter(cliSelectsFile) : [];
+const broadCoreFiles = listTestFilesUnder("tests2/core").filter(
+	(file) => (!heavyCoreFiles.includes(file) || explicitV2CoreHeavyFiles.includes(file)) && !singleForkFiles.includes(file),
+);
 // The Windows gateway can pass all ~520 broad core files and then fail while
 // workers wait for the parent to acknowledge a large backlog of onTaskUpdate RPCs.
 // Sequential shards preserve coverage and the Windows-safe two-fork throughput,

@@ -4,16 +4,11 @@
 // Pack code receives only the HostApi object built by host-api.ts; it cannot import
 // this module or access the RemoteAgent WebSocket that services these requests.
 
-import type { SurfaceRef } from "./host-api.js";
 import { GW_TOKEN_KEY, GW_URL_KEY } from "./gateway-fetch.js";
+import { waitForSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-minter-registry.js";
+export { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter } from "./surface-token-minter-registry.js";
+export type { PackSurfaceRef, WsSurfaceTokenMinter } from "./surface-token-minter-registry.js";
 
-export type PackSurfaceRef = Extract<SurfaceRef, { kind: "pack" }>;
-
-export type WsSurfaceTokenMinter = (surface: PackSurfaceRef) => Promise<string>;
-
-const minters = new Map<string, WsSurfaceTokenMinter>();
-const minterWaiters = new Map<string, Array<(minter: WsSurfaceTokenMinter | undefined) => void>>();
-const MINTER_WAIT_MS = 150;
 const BACKGROUND_TRANSPORT_IDLE_MS = 250;
 const BACKGROUND_READY_TIMEOUT_MS = 15_000;
 const BACKGROUND_MINT_TIMEOUT_MS = 30_000;
@@ -27,41 +22,6 @@ interface BackgroundSurfaceTokenTransport {
 }
 
 const backgroundTransports = new Map<string, BackgroundSurfaceTokenTransport>();
-
-export function registerSurfaceTokenMinter(sessionId: string, minter: WsSurfaceTokenMinter): void {
-	if (!sessionId) return;
-	minters.set(sessionId, minter);
-	const waiters = minterWaiters.get(sessionId);
-	if (waiters) {
-		minterWaiters.delete(sessionId);
-		for (const resolve of waiters) resolve(minter);
-	}
-}
-
-export function unregisterSurfaceTokenMinter(sessionId: string, minter?: WsSurfaceTokenMinter): void {
-	if (!sessionId) return;
-	if (minter && minters.get(sessionId) !== minter) return;
-	minters.delete(sessionId);
-}
-
-async function waitForSurfaceTokenMinter(sessionId: string): Promise<WsSurfaceTokenMinter | undefined> {
-	const existing = minters.get(sessionId);
-	if (existing) return existing;
-	return new Promise((resolve) => {
-		const waiters = minterWaiters.get(sessionId) ?? [];
-		waiters.push(resolve);
-		minterWaiters.set(sessionId, waiters);
-		setTimeout(() => {
-			const current = minterWaiters.get(sessionId);
-			if (current) {
-				const idx = current.indexOf(resolve);
-				if (idx >= 0) current.splice(idx, 1);
-				if (current.length === 0) minterWaiters.delete(sessionId);
-			}
-			resolve(undefined);
-		}, MINTER_WAIT_MS);
-	});
-}
 
 function closeBackgroundTransport(sessionId: string, transport: BackgroundSurfaceTokenTransport, reason: string): void {
 	if (backgroundTransports.get(sessionId) === transport) backgroundTransports.delete(sessionId);

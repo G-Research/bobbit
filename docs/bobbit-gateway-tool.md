@@ -171,7 +171,12 @@ Notes:
 
 ### `bobbit_admin` — config + destructive maintenance
 
-- `update_project_config` — merge project config key/values.
+- `update_project_config` — merge config key/values for an existing project.
+- `create_project` — high-privilege support automation for `POST /api/projects`;
+  requires top-level `name` and `rootPath`. Optional `body` fields include
+  `upsert`, `acceptCanonical`, `color`, `palette`, `colorLight`, `colorDark`,
+  `components`, and `workflows`. This does not replace `propose_project` or the
+  Add Project flow for interactive registration.
 - `set_provider_key`, `delete_provider_key`, `custom_providers`,
   `aigw_configure` — provider credentials and AI-gateway wiring.
 - `marketplace_install`, `marketplace_update`, `marketplace_uninstall` — pack
@@ -186,7 +191,8 @@ Notes:
 - `harness_restart`, `shutdown` — restart or stop the gateway.
 
 These operations mutate config or destroy state, which is why the tier defaults
-to `grantPolicy: never`.
+to `grantPolicy: never`. Use `update_project_config`, not `create_project`, for
+config changes on existing projects.
 
 ## Overlap policy — bobbit does not replace the dedicated tools
 

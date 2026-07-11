@@ -1,7 +1,7 @@
 name: bobbit_admin
 description: "Config + destructive maintenance: project config, provider keys, marketplace, overrides, cleanup, restart."
 summary: "Gateway config + destructive maintenance"
-params: [operation, projectId?, workflowId?, name?, provider?, scope?, action?, config?, body?]
+params: [operation, projectId?, workflowId?, name?, rootPath?, provider?, scope?, action?, config?, body?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -28,12 +28,15 @@ detail_docs: >-
 
   - `operation` — which admin action to run (catalogue below).
 
-  - `projectId`, `workflowId`, `name` (tool/role), `provider`, `key`, `scope`
-  (`server`|`project`), `action` (sub-selector), `id` (custom-provider delete),
+  - `projectId`, `workflowId`, `name` (tool/role/project), `rootPath`
+  (`create_project`), `provider`, `key`, `scope` (`server`|`project`),
+  `action` (sub-selector), `id` (custom-provider delete),
   `sourceId`/`dirName`/`packName` (marketplace), `url` (aigw).
 
   - `config` — key/values for `update_project_config` and `custom_providers`
-  upsert; `body` — any other operation body fields.
+  upsert; `body` — any other operation body fields. For `create_project`,
+  supported `body` fields include `upsert`, `acceptCanonical`, `color`,
+  `palette`, `colorLight`, `colorDark`, `components`, and `workflows`.
 
 
   ## Operation catalogue
@@ -43,6 +46,8 @@ detail_docs: >-
   |---|---|---|---|
 
   | `update_project_config` | PUT | `/api/projects/:projectId/config` | `projectId`, `config` |
+
+  | `create_project` | POST | `/api/projects` | `name`, `rootPath` |
 
   | `set_provider_key` | POST | `/api/provider-keys/:provider` | `provider`, `key` |
 
@@ -93,6 +98,11 @@ detail_docs: >-
   - **Destructive** — `maintenance_cleanup` deletes worktrees, purges archives,
   and rebuilds the search index. `shutdown`/`harness_restart` stop or restart the
   gateway. Confirm intent before calling.
+
+  - `create_project` is a high-privilege support/automation path for registering
+  projects via `POST /api/projects`. It does not replace interactive
+  `propose_project` / Add Project flows. Use `update_project_config` for config
+  changes on existing projects.
 
   - `*_override` ops create an override by copying into scope (the `/customize`
   endpoints); removing an override (`DELETE …/override`) is not exposed here.
