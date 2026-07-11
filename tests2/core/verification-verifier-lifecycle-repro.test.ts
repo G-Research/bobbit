@@ -427,4 +427,165 @@ describe("verifier lifecycle reproductions", () => {
 		);
 		assert.equal(result.passed, false, `${MARKER}: no-result idle QA may fail only after fair reminder/grace exhaustion`);
 	});
+
+	it("resurrected agent-qa gets restart-aware QA continuation context, not alive-idle reminder wording", async () => {
+		const goalId = "goal-agent-qa-process-death-prompt";
+		const stateDir = makeStateDir("verifier-agent-qa-process-death-");
+		const sessionId = "agent-qa-dead-continuation-same-session";
+		const prompts: string[] = [];
+		const calls: string[] = [];
+		let harness: any;
+		let initialWait = true;
+
+		const fakeSession = {
+			id: sessionId,
+			status: "terminated",
+			lastTurnErrored: false,
+			transcriptMarker: "preserved QA history",
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async (text: string) => {
+					prompts.push(text);
+					return { success: true };
+				},
+				promptWhenReady: async (text: string) => {
+					prompts.push(text);
+					const resolver = harness.pendingResults.get(sessionId);
+					resolver?.({ verdict: true, summary: "Recovered QA continued from preserved context." });
+				},
+			},
+		};
+		const { roleStore, projectContextManager } = makeProjectContext(goalId, qaRoleStore());
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async (_cwd: string, _args: unknown, _goalId: string, _assistantType: unknown, opts: any) => {
+				assert.equal(opts.sessionId, sessionId, `${MARKER}: QA process-death recovery must preserve session id`);
+				return fakeSession;
+			},
+			setTitle: () => {},
+			updateSessionMeta: () => {},
+			getSession: (sid: string) => {
+				assert.equal(sid, sessionId, `${MARKER}: QA resurrection must target the original session`);
+				return fakeSession;
+			},
+			waitForIdle: async (sid: string) => {
+				calls.push(`waitForIdle:${sid}`);
+				if (initialWait) {
+					initialWait = false;
+					throw new Error("Agent process not running");
+				}
+			},
+			waitForStreaming: async (sid: string) => { calls.push(`waitForStreaming:${sid}`); },
+			ensureSessionAlive: async (sid: string) => {
+				calls.push(`ensureSessionAlive:${sid}`);
+				assert.equal(fakeSession.transcriptMarker, "preserved QA history", `${MARKER}: QA same-session resurrection must preserve transcript/history metadata`);
+				fakeSession.status = "idle";
+			},
+			restartAgent: async (sid: string) => { calls.push(`restartAgent:${sid}`); },
+			terminateSession: async (sid: string) => { calls.push(`terminate:${sid}`); },
+		} as any;
+
+		harness = new VerificationHarness(
+			stateDir,
+			undefined,
+			() => {},
+			roleStore,
+			undefined,
+			sessionManager,
+			verifierTeamManager() as any,
+			undefined,
+			projectContextManager as any,
+			undefined,
+			{ clock: makeFakeClock() as any },
+		) as any;
+
+		const result = await harness.runAgentQaStep(
+			{ name: "QA process death", prompt: "Run the browser smoke plan", timeout: 60, role: "qa-tester", component: "web" },
+			stateDir,
+			goalId,
+			{ branch: "goal/retry-reviewer", commit: "abc123" },
+			"signal content",
+			{},
+			"goal spec",
+			new Map(),
+			sessionId,
+		);
+
+		const recoveryPrompt = prompts[1] || "";
+		assert.equal(result.passed, true, `${MARKER}: QA should complete from same-session process-death recovery. result=${JSON.stringify(result)} calls=${JSON.stringify(calls)}`);
+		assert.match(recoveryPrompt, /server\/infrastructure|process restarted/i, `${MARKER}: resurrected QA prompt must explain restart/process recovery. prompt=${recoveryPrompt}`);
+		assert.match(recoveryPrompt, /continue.*QA|QA.*continue/i, `${MARKER}: resurrected QA prompt must ask the agent to continue QA, not submit an already-formed idle verdict. prompt=${recoveryPrompt}`);
+		assert.match(recoveryPrompt, /\[QA-TEST CONTEXT\]\ncomponent: web/, `${MARKER}: resurrected QA prompt must preserve full QA kickoff context. prompt=${recoveryPrompt}`);
+		assert.match(recoveryPrompt, /Run the browser smoke plan/, `${MARKER}: resurrected QA prompt must include the original QA test plan. prompt=${recoveryPrompt}`);
+		assert.doesNotMatch(recoveryPrompt, /ALREADY FORMED|do not re-investigate|STOP — verification_result not called/i, `${MARKER}: resurrected QA prompt must not use alive-idle reminder wording. prompt=${recoveryPrompt}`);
+	});
+
+	it("agent-qa honors a late verification_result posted during teardown", async () => {
+		const goalId = "goal-agent-qa-late-verdict";
+		const stateDir = makeStateDir("verifier-agent-qa-late-verdict-");
+		const sessionId = "agent-qa-late-verdict-same-session";
+		const prompts: string[] = [];
+		let harness: any;
+
+		const fakeSession = {
+			id: sessionId,
+			status: "idle",
+			lastTurnErrored: false,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async (text: string) => {
+					prompts.push(text);
+					return { success: true };
+				},
+			},
+		};
+		const { roleStore, projectContextManager } = makeProjectContext(goalId, qaRoleStore());
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async (_cwd: string, _args: unknown, _goalId: string, _assistantType: unknown, opts: any) => {
+				assert.equal(opts.sessionId, sessionId, `${MARKER}: late QA verdict path must preserve session id`);
+				return fakeSession;
+			},
+			setTitle: () => {},
+			updateSessionMeta: () => {},
+			getSession: () => fakeSession,
+			waitForIdle: async () => {},
+			waitForStreaming: async () => {},
+			terminateSession: async (sid: string) => {
+				const resolver = harness.pendingResults.get(sid);
+				resolver?.({ verdict: true, summary: "Late QA verdict captured during teardown.", reportHtml: "<p>late</p>" });
+			},
+		} as any;
+
+		harness = new VerificationHarness(
+			stateDir,
+			undefined,
+			() => {},
+			roleStore,
+			undefined,
+			sessionManager,
+			verifierTeamManager() as any,
+			undefined,
+			projectContextManager as any,
+			undefined,
+			{ clock: makeFakeClock() as any },
+		) as any;
+
+		const result = await harness.runAgentQaStep(
+			{ name: "QA late verdict", prompt: "Run checks", timeout: 1, role: "qa-tester" },
+			stateDir,
+			goalId,
+			{ branch: "goal/retry-reviewer", commit: "abc123" },
+			"signal content",
+			{},
+			"goal spec",
+			new Map(),
+			sessionId,
+		);
+
+		assert.ok(prompts.length >= 2, `${MARKER}: QA must exhaust reminder path before teardown late-verdict capture is exercised. prompts=${prompts.length}`);
+		assert.equal(result.passed, true, `${MARKER}: late QA verification_result during teardown must be honored, not replaced by did-not-call failure. result=${JSON.stringify(result)}`);
+		assert.equal(result.output, "Late QA verdict captured during teardown.");
+		assert.deepEqual(result.artifact, { content: "<p>late</p>", contentType: "text/html" });
+	});
 });

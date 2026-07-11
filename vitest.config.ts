@@ -247,7 +247,7 @@ export default defineConfig({
 					environment: "node",
 					isolate: true,
 					pool: "forks" as const,
-					poolOptions: { forks: { singleFork: true } },
+					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
 					include: singleForkFiles,
 				},
 			},

@@ -746,6 +746,19 @@ Call \`verification_result\` now with whatever opinion you ALREADY FORMED — do
 ${originalKickoff}`;
 }
 
+/** Restart-aware continuation prompt for a resurrected agent-qa process. */
+export function buildQaRestartContinuationPrompt(originalKickoff: string): string {
+	return `## QA verification process restarted
+
+The Bobbit server/infrastructure or QA agent process restarted while your QA verification turn was in progress. Your transcript and verification context were preserved.
+
+Continue the QA verification from where you left off. Use the preserved transcript together with the original QA test plan/context below, complete any remaining QA work, and call \`verification_result\` only when QA is complete.
+
+---
+
+${originalKickoff}`;
+}
+
 /**
  * The `verification_result` tool is now a standard goal tool registered in
  * `.bobbit/config/tools/tasks/extension.ts` — no generated extension needed.
@@ -4656,7 +4669,13 @@ export class VerificationHarness {
 		// original identity even when startup/prompt delivery fails.
 		let qaSessionId: string | undefined = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
-		this.pendingResults.set(qaSessionId, resultResolver);
+		let qaCapturedVerdict: VerificationResult | null = null;
+		let qaHardFailureNoResult = false;
+		const qaCapturingResolver = (r: VerificationResult) => {
+			if (!qaCapturedVerdict) qaCapturedVerdict = r;
+			resultResolver(r);
+		};
+		this.pendingResults.set(qaSessionId, qaCapturingResolver);
 		let qaLastErroredToolOutput: string | null = null;
 		let qaErrListenerUnsub: (() => void) | undefined;
 		try {
@@ -4882,7 +4901,9 @@ export class VerificationHarness {
 				return { passed: false, output: qaReminderOutcome.output, sessionId: qaSessionId };
 			}
 
-			// Hard failure
+			// Hard failure — keep the resolver alive through teardown so a verdict
+			// racing terminateSession is captured and honored in finally.
+			qaHardFailureNoResult = true;
 			console.log(`[verification][verifier-lifecycle] termination reason=reminder-exhausted for QA ${qaSessionId} ("${step.name}") after ${MAX_REVIEWER_REMINDERS} fair reminder(s) — no verification_result.`);
 			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId: qaSessionId };
 		} catch (err: any) {
@@ -4901,7 +4922,7 @@ export class VerificationHarness {
 					sessionId: qaSessionId,
 					stepName: step.name,
 					label: "Agent QA",
-					prompt: buildContextRichReminder(kickoff),
+					prompt: buildQaRestartContinuationPrompt(kickoff),
 					resultPromise,
 					timeoutMs,
 				});
@@ -4930,6 +4951,15 @@ export class VerificationHarness {
 				this.pendingResults.delete(qaSessionId);
 				if (this.teamManager) {
 					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
+				}
+				if (qaHardFailureNoResult && qaCapturedVerdict) {
+					const v: VerificationResult = qaCapturedVerdict;
+					const artifact = v.reportHtml
+						? { content: v.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+						: undefined;
+					console.log(`[verification][verifier-lifecycle] late verification_result for QA ${qaSessionId} ("${step.name}") arrived during teardown — honoring verdict=${v.verdict ? "pass" : "fail"} instead of the 'did not call' hard failure.`);
+					// eslint-disable-next-line no-unsafe-finally
+					return { passed: v.verdict, output: v.summary, sessionId: qaSessionId, artifact };
 				}
 			}
 		}
