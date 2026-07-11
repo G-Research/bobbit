@@ -70,6 +70,15 @@ const singleForkFiles = [
 	"tests2/core/transcript-sanitizer-agent-dir.test.ts",
 ];
 
+// Long-running core files that legitimately exercise git/worktree flows. Keep
+// them out of the broad v2-core fork pool so normal core files can finish/report
+// without waiting behind a minutes-long straggler and tripping Vitest worker RPC
+// timeouts (`[vitest-worker]: Timeout calling "onTaskUpdate"`). These files do
+// not require module isolation; they only need their own sequenced single fork.
+const heavyCoreFiles = [
+	"tests2/core/team-manager.test.ts",
+];
+
 // Heavy gateway-integration specs whose command steps are only a "verification
 // that passes / fails with a known code" stand-in (no durable-recovery / real
 // tree-kill assertions). They run in the dedicated `v2-integration-fake` project
@@ -159,12 +168,28 @@ export default defineConfig({
 					// cross-project worker/reporting pressure that trips the RPC timeout.
 					sequence: { groupOrder: 0 },
 					environment: "node",
-					// Exclude stragglers that require process isolation (singleFork project below)
+					// Exclude stragglers handled by dedicated core projects below.
 					include: ["tests2/core/**/*.test.ts"],
 					exclude: [
+						// heavy stragglers — sequenced in v2-core-heavy below
+						...heavyCoreFiles,
 						// singleFork stragglers — all listed in singleFork project below
 						...singleForkFiles,
 					],
+				},
+			},
+			// Heavy core files: single sequenced fork, no module isolation needed. This
+			// prevents a minutes-long git/worktree file from holding a broad v2-core
+			// worker pool open after all other files have reported.
+			{
+				test: {
+					...shared,
+					name: "v2-core-heavy",
+					sequence: { groupOrder: 1 },
+					environment: "node",
+					pool: "forks" as const,
+					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
+					include: heavyCoreFiles,
 				},
 			},
 			// singleFork: files that genuinely cannot share a fork even with env-guard.
@@ -173,7 +198,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-core-isolated",
-					sequence: { groupOrder: 1 },
+					sequence: { groupOrder: 2 },
 					environment: "node",
 					isolate: true,
 					pool: "forks" as const,
@@ -185,7 +210,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-dom",
-					sequence: { groupOrder: 2 },
+					sequence: { groupOrder: 3 },
 					environment: "happy-dom",
 					include: ["tests2/dom/**/*.test.ts"],
 				},
@@ -194,7 +219,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-integration",
-					sequence: { groupOrder: 3 },
+					sequence: { groupOrder: 4 },
 					environment: "node",
 					include: ["tests2/integration/**/*.test.ts"],
 					// The fake-command-step specs run in the dedicated fake project below.
@@ -214,7 +239,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-integration-fake",
-					sequence: { groupOrder: 4 },
+					sequence: { groupOrder: 5 },
 					environment: "node",
 					setupFiles: ["tests2/integration/_e2e/fake-cmd-setup.ts"],
 					include: [...fakeCommandStepFiles],
