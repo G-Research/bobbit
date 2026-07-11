@@ -136,14 +136,14 @@ function wrapTest(fn?: TestFn): () => Promise<void> {
 		// When invoked inside a wrapDescribe block, that block owns the scope +
 		// sweep. A bare top-level test() (no describe) owns its own sweep here.
 		const ownScope = !currentScope();
-		const baseline = ownScope ? snapshotIds(gw) : undefined;
+		const baseline = ownScope ? snapshotCleanupState(gw) : undefined;
 		if (ownScope) setScope(createScope(gw));
 		try {
 			if (fn) await fn(fixtures());
 		} finally {
 			if (ownScope) {
 				setScope(undefined);
-				if (baseline) await sweepTo(gw, baseline);
+				if (baseline) await cleanupTo(gw, baseline);
 			}
 		}
 	};
@@ -159,6 +159,80 @@ function wrapHook(fn?: HookFn): () => Promise<void> {
 interface DescribeBody { (): void }
 
 interface IdSnapshot { sessions: Set<string>; goals: Set<string>; projects: Set<string> }
+
+interface CleanupSnapshot {
+	ids: IdSnapshot;
+	counts: EntityCounts;
+	defaultProjectFingerprint: string;
+	generation: number;
+}
+
+export interface CleanupStats {
+	snapshots: number;
+	sweeps: number;
+	skippedSweeps: number;
+	defaultResets: number;
+	defaultRestores: number;
+	deletedSessions: number;
+	deletedGoals: number;
+	deletedProjects: number;
+}
+
+interface IntegrationHarnessState {
+	generation: number;
+	stats: CleanupStats;
+}
+
+const HARNESS_STATE_KEY = Symbol.for("bobbit.tests2.integrationHarnessState");
+
+type HarnessGlobal = typeof globalThis & { [key: symbol]: IntegrationHarnessState | undefined };
+
+function emptyCleanupStats(): CleanupStats {
+	return {
+		snapshots: 0,
+		sweeps: 0,
+		skippedSweeps: 0,
+		defaultResets: 0,
+		defaultRestores: 0,
+		deletedSessions: 0,
+		deletedGoals: 0,
+		deletedProjects: 0,
+	};
+}
+
+function harnessState(): IntegrationHarnessState {
+	const global = globalThis as HarnessGlobal;
+	let state = global[HARNESS_STATE_KEY];
+	if (!state) {
+		state = { generation: 0, stats: emptyCleanupStats() };
+		global[HARNESS_STATE_KEY] = state;
+	}
+	return state;
+}
+
+function incStat(key: keyof CleanupStats, by = 1): void {
+	harnessState().stats[key] += by;
+}
+
+function bumpGeneration(): void {
+	harnessState().generation++;
+}
+
+export function integrationHarnessCleanupStats(): CleanupStats {
+	return { ...harnessState().stats };
+}
+
+export function resetIntegrationHarnessCleanupStats(): void {
+	harnessState().stats = emptyCleanupStats();
+}
+
+function stableStringify(value: unknown): string {
+	if (value === undefined) return "undefined";
+	if (value === null || typeof value !== "object") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map(v => stableStringify(v)).join(",")}]`;
+	const record = value as Record<string, unknown>;
+	return `{${Object.keys(record).sort().map(k => `${JSON.stringify(k)}:${stableStringify(record[k])}`).join(",")}}`;
+}
 
 /**
  * Live entity IDs, sourced from the SAME managers countEntities()/the leak
@@ -179,53 +253,144 @@ function snapshotIds(gw: GatewayFixture): IdSnapshot {
 	return ids;
 }
 
-function hasVisibleDefaultProject(gw: GatewayFixture): boolean {
-	try {
-		for (const ctx of Array.from(gw.projectContextManager.visible?.() ?? []) as any[]) {
-			const proj = ctx?.project;
-			if (proj && !proj.hidden && proj.name === "default") return true;
-		}
-	} catch { /* */ }
-	return false;
+function sameSet(a: Set<string>, b: Set<string>): boolean {
+	if (a.size !== b.size) return false;
+	for (const value of a) if (!b.has(value)) return false;
+	return true;
 }
 
-async function sweepTo(gw: GatewayFixture, baseline: IdSnapshot): Promise<void> {
-	const now = snapshotIds(gw);
-	for (const id of now.sessions) if (!baseline.sessions.has(id)) {
-		await gw.api(`/api/sessions/${id}?purge=true`, { method: "DELETE" }).catch(() => {});
+function findVisibleDefaultContext(gw: GatewayFixture): any | undefined {
+	for (const ctx of Array.from(gw.projectContextManager.visible?.() ?? []) as any[]) {
+		const proj = ctx?.project;
+		if (proj && !proj.hidden && proj.name === "default") return ctx;
 	}
-	for (const id of now.goals) if (!baseline.goals.has(id)) {
-		await gw.api(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => {});
+	return undefined;
+}
+
+function hasVisibleDefaultProject(gw: GatewayFixture): boolean {
+	try { return !!findVisibleDefaultContext(gw); }
+	catch { return false; }
+}
+
+function defaultProjectFingerprint(gw: GatewayFixture): string {
+	try {
+		const ctx = findVisibleDefaultContext(gw);
+		if (!ctx) return "missing";
+		const project = ctx.project ?? {};
+		const cfg = ctx.projectConfigStore ?? gw.projectContextManager.getOrCreate?.(project.id)?.projectConfigStore;
+		try { cfg?.reload?.(); } catch { /* pick up out-of-band project.yaml writes when cheap */ }
+		return `ok:${stableStringify({
+			project: {
+				id: project.id,
+				name: project.name,
+				hidden: !!project.hidden,
+				rootPath: project.rootPath,
+			},
+			config: cfg?.getWithDefaults?.() ?? cfg?.getAll?.() ?? null,
+			components: cfg?.getComponents?.() ?? null,
+			workflows: cfg?.getWorkflows?.() ?? null,
+		})}`;
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return `unknown:${message}`;
 	}
-	for (const id of now.projects) if (!baseline.projects.has(id) && id !== gw.defaultProjectId) {
-		await gw.api(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+}
+
+function snapshotCleanupState(gw: GatewayFixture): CleanupSnapshot {
+	incStat("snapshots");
+	const ids = snapshotIds(gw);
+	let counts: EntityCounts;
+	try { counts = gw.countEntities(); }
+	catch { counts = { sessions: ids.sessions.size, goals: ids.goals.size, projects: ids.projects.size }; }
+	return {
+		ids,
+		counts,
+		defaultProjectFingerprint: defaultProjectFingerprint(gw),
+		generation: harnessState().generation,
+	};
+}
+
+function fingerprintUncertain(value: string): boolean {
+	return value.startsWith("unknown:");
+}
+
+function isClean(now: CleanupSnapshot, baseline: CleanupSnapshot): boolean {
+	return now.generation === baseline.generation
+		&& now.counts.sessions === baseline.counts.sessions
+		&& now.counts.goals === baseline.counts.goals
+		&& now.counts.projects === baseline.counts.projects
+		&& !fingerprintUncertain(now.defaultProjectFingerprint)
+		&& !fingerprintUncertain(baseline.defaultProjectFingerprint)
+		&& now.defaultProjectFingerprint === baseline.defaultProjectFingerprint
+		&& sameSet(now.ids.sessions, baseline.ids.sessions)
+		&& sameSet(now.ids.goals, baseline.ids.goals)
+		&& sameSet(now.ids.projects, baseline.ids.projects);
+}
+
+function cleanupNeeded(gw: GatewayFixture, before: CleanupSnapshot, now = snapshotCleanupState(gw)): boolean {
+	return !isClean(now, before);
+}
+
+function defaultProjectNeedsHealing(now: CleanupSnapshot, baseline: CleanupSnapshot): boolean {
+	return fingerprintUncertain(now.defaultProjectFingerprint)
+		|| fingerprintUncertain(baseline.defaultProjectFingerprint)
+		|| now.defaultProjectFingerprint !== baseline.defaultProjectFingerprint;
+}
+
+async function cleanupTo(gw: GatewayFixture, baseline: CleanupSnapshot, opts: { final?: boolean } = {}): Promise<void> {
+	const now = snapshotCleanupState(gw);
+	const needed = cleanupNeeded(gw, baseline, now);
+	if (!opts.final && !needed) {
+		incStat("skippedSweeps");
+		return;
 	}
-	// Heal the default project on cleanup:
+	incStat("sweeps");
+	for (const id of now.ids.sessions) if (!baseline.ids.sessions.has(id)) {
+		const resp = await gw.api(`/api/sessions/${id}?purge=true`, { method: "DELETE" }).catch(() => undefined);
+		if (!resp || resp.ok || resp.status === 404) incStat("deletedSessions");
+		bumpGeneration();
+	}
+	for (const id of now.ids.goals) if (!baseline.ids.goals.has(id)) {
+		const resp = await gw.api(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => undefined);
+		if (!resp || resp.ok || resp.status === 404) incStat("deletedGoals");
+		bumpGeneration();
+	}
+	for (const id of now.ids.projects) if (!baseline.ids.projects.has(id) && id !== gw.defaultProjectId) {
+		const resp = await gw.api(`/api/projects/${id}`, { method: "DELETE" }).catch(() => undefined);
+		if (!resp || resp.ok || resp.status === 404) incStat("deletedProjects");
+		bumpGeneration();
+	}
+	// Heal the default project only when the cleanup snapshot proves it changed:
 	//   - MISSING (a test deleted it) → re-register + reseed via restoreDefaultProject().
 	//   - PRESENT but its seeded workflows/component config were mutated in place by a
 	//     fork-mate (e.g. inline-workflow-goal-flow.test.ts REPLACES the default
 	//     project.yaml workflows) → resetDefaultProjectBaseline() restores the seeded
-	//     baseline (no-op when intact). Without the reset branch, a corrupted-but-
-	//     present default leaks across the shared fork and flakes later tests that
-	//     read the seeded workflows/components (e.g. the QA tooltip metadata test).
+	//     baseline. Proven no-op tests skip this expensive branch entirely.
 	// Neither path touches ctx.workflowStore, so workflows a test registered via
 	// POST /api/workflows (a separate store) are preserved.
-	if (!hasVisibleDefaultProject(gw)) await gw.restoreDefaultProject();
-	else await gw.resetDefaultProjectBaseline();
+	if (!hasVisibleDefaultProject(gw)) {
+		await gw.restoreDefaultProject();
+		incStat("defaultRestores");
+		bumpGeneration();
+	} else if (defaultProjectNeedsHealing(now, baseline)) {
+		await gw.resetDefaultProjectBaseline();
+		incStat("defaultResets");
+		bumpGeneration();
+	}
 }
 
 function wrapDescribe(name: string, body: DescribeBody): void {
 	vDescribe(name, () => {
 		let before: EntityCounts;
-		let fileBaseline: IdSnapshot;
-		let testBaseline: IdSnapshot;
+		let fileBaseline: CleanupSnapshot;
+		let testBaseline: CleanupSnapshot;
 		// Registered BEFORE the spec's own hooks → beforeAll/beforeEach run first,
 		// afterEach/afterAll run last (vitest reverses teardown order), so the
 		// sweep + leak assert happen AFTER the spec's own cleanup hooks.
-		vBeforeAll(async () => { const gw = await ensureGw(); before = snapshotEntities(gw); fileBaseline = snapshotIds(gw); });
-		vBeforeEach(async () => { const gw = await ensureGw(); testBaseline = snapshotIds(gw); setScope(createScope(gw)); });
-		vAfterEach(async () => { setScope(undefined); await sweepTo(await ensureGw(), testBaseline); });
-		vAfterAll(async () => { const gw = await ensureGw(); await sweepTo(gw, fileBaseline); assertNoLeaks(before, snapshotEntities(gw)); });
+		vBeforeAll(async () => { const gw = await ensureGw(); before = snapshotEntities(gw); fileBaseline = snapshotCleanupState(gw); });
+		vBeforeEach(async () => { const gw = await ensureGw(); testBaseline = snapshotCleanupState(gw); setScope(createScope(gw)); });
+		vAfterEach(async () => { setScope(undefined); await cleanupTo(await ensureGw(), testBaseline); });
+		vAfterAll(async () => { const gw = await ensureGw(); await cleanupTo(gw, fileBaseline, { final: true }); assertNoLeaks(before, snapshotEntities(gw)); });
 		body();
 	});
 }

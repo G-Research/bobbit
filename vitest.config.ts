@@ -70,19 +70,29 @@ const singleForkFiles = [
 	"tests2/core/transcript-sanitizer-agent-dir.test.ts",
 ];
 
-// Heavy gateway-integration specs whose command steps are only a "verification
-// that passes / fails with a known code" stand-in (no durable-recovery / real
-// tree-kill assertions). They run in the dedicated `v2-integration-fake` project
+// Heavy gateway-integration specs whose command steps are API/status/metadata
+// stand-ins (echo, deterministic exit, or scripted delay) rather than real shell
+// lifecycle coverage. They run in the dedicated `v2-integration-fake` project
 // with the non-spawning fake command-step runner injected, removing the cmd.exe/
-// Git-Bash spawns that oversubscribe the box under concurrent load. Durability/
-// cancel-fidelity + verification-core stay on the real path in v2-integration.
+// Git-Bash spawns that oversubscribe the box under concurrent load.
+//
+// Keep real-runner coverage for tests that assert OS-process fidelity or command
+// side effects: cancel-verification (real cancellation), verification-core
+// (streaming/tree-kill/durable runner), verification-restart-resignal (restart
+// zombie cleanup), gate-inspect-slicing (retained logs/artifacts/filesystem side
+// effects), bg/sandbox command suites, and gate-verification (legacy
+// createTestGateway fixture outside this fake-DI seam).
 // See docs/testing-v2/gateway-cost-feasibility.md.
 const fakeCommandStepFiles = [
+	"tests2/integration/gate-bypass-api.test.ts",
 	"tests2/integration/gate-reset-api.test.ts",
+	"tests2/integration/gate-resign-cancel.test.ts",
+	"tests2/integration/gate-signal-progress.test.ts",
+	"tests2/integration/gate-signal-reminder.test.ts",
+	"tests2/integration/gate-status-summary.test.ts",
 	"tests2/integration/gates-api-heavy.test.ts",
 	"tests2/integration/maintenance-api.test.ts",
-	"tests2/integration/gate-signal-progress.test.ts",
-	"tests2/integration/gate-resign-cancel.test.ts",
+	"tests2/integration/optional-steps-api.test.ts",
 ];
 
 const MAX_FORKS = resolveMaxForks();
