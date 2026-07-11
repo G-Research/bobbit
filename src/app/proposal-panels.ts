@@ -4053,7 +4053,9 @@ function goalProposalPanel() {
 		renderApp();
 	};
 
-	return renderGoalForm({
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full" data-panel="goal-proposal">
+			${renderGoalForm({
 		title: _proposalTitle,
 		spec: _proposalSpec,
 		cwd: _proposalCwd,
@@ -4127,7 +4129,9 @@ function goalProposalPanel() {
 
 		// ---- Goal proposal tabs wiring ----
 		...goalProposalTabsConfig(_proposalWorkflowId, (id) => { _proposalWorkflowId = id; }),
-	});
+	})}
+		</div>
+	`;
 }
 
 
