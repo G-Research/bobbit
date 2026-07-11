@@ -283,6 +283,13 @@ const goalPlugin: ProposalTypePlugin = {
 function makeYamlPlugin(opts: {
 	type: ProposalType;
 	requiredFields: readonly string[];
+	/**
+	 * Optionally compute the effective required fields from the parsed draft.
+	 * Used by `project` to make `root_path` conditional: required only when
+	 * creating a brand-new project (no `projectId`), optional when editing an
+	 * existing registered project (explicit `projectId`).
+	 */
+	resolveRequiredFields?: (fields: Record<string, unknown>) => readonly string[];
 }): ProposalTypePlugin {
 	return {
 		type: opts.type,
@@ -327,7 +334,10 @@ function makeYamlPlugin(opts: {
 					message: `${opts.type} proposal must parse to a YAML mapping (got ${Array.isArray(parsed) ? "array" : typeof parsed})`,
 				};
 			}
-			for (const f of opts.requiredFields) {
+			const effectiveRequired = opts.resolveRequiredFields
+				? opts.resolveRequiredFields(parsed as Record<string, unknown>)
+				: opts.requiredFields;
+			for (const f of effectiveRequired) {
 				const v = (parsed as Record<string, unknown>)[f];
 				if (v === undefined || v === null || v === "") {
 					return {
@@ -344,9 +354,19 @@ function makeYamlPlugin(opts: {
 	};
 }
 
+function projectIdPresent(fields: Record<string, unknown>): boolean {
+	const v = fields.projectId;
+	return typeof v === "string" && v.trim() !== "";
+}
+
 const projectPlugin = makeYamlPlugin({
 	type: "project",
+	// `name` is always required. `root_path` is required only for CREATE
+	// (no explicit projectId). When editing an existing registered project via
+	// an explicit projectId, the server already knows the root path.
 	requiredFields: ["name", "root_path"],
+	resolveRequiredFields: (fields) =>
+		projectIdPresent(fields) ? ["name"] : ["name", "root_path"],
 });
 
 const rolePlugin = makeYamlPlugin({

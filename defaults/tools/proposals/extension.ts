@@ -274,7 +274,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Propose a project with name, root_path, and optional command fields.",
 		parameters: Type.Object({
 			name: Type.String(),
-			root_path: Type.String({ description: "Project root directory." }),
+			root_path: Type.Optional(Type.String({ description: "Project root dir. Required to create; omit when editing via projectId." })),
 			projectId: Type.Optional(Type.String({ description: "Defaults to this session. Set only for an explicit cross-project proposal." })),
 			build_command: Type.Optional(Type.String()),
 			test_command: Type.Optional(Type.String()),

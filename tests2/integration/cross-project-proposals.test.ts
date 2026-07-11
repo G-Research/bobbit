@@ -180,6 +180,54 @@ test.describe("cross-project proposal seed @smoke", () => {
 		}
 	});
 
+	// ── propose_project root_path is conditional (edit vs create) ──────
+	// Requirement 4 / design §3: editing an existing registered project via an
+	// explicit projectId does not require root_path (the server already knows
+	// it); a brand-new CREATE (no projectId) still requires root_path.
+	test("propose_project with explicit registered projectId seeds WITHOUT root_path (edit)", async () => {
+		const s = await createSession();
+		try {
+			const r = await seed(s, "project", { name: "Edit Existing", projectId: targetProjectId });
+			expect(r.status, `project edit seed (no root_path): ${await r.clone().text()}`).toBe(200);
+			const fields = await seededFields(s, "project");
+			expect(fields?.projectId).toBe(targetProjectId);
+			expect(fields?.root_path).toBeUndefined();
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	test("propose_project with NO projectId and NO root_path is rejected (create requires root_path)", async () => {
+		const s = await createSession();
+		try {
+			const r = await seed(s, "project", { name: "New No Root" });
+			// A missing required field is caught by writeProposalFile's serialize
+			// validation and surfaced as a 500 (same as any other missing required
+			// field at seed); the important invariant is that CREATE without
+			// root_path never produces a valid draft.
+			const text = await r.text();
+			expect(r.status, `project create seed (no root_path) must fail: ${text}`).not.toBe(200);
+			expect(text).toMatch(/root_path/);
+			// And no valid draft was persisted.
+			const fields = await seededFields(s, "project");
+			expect(fields).toBeUndefined();
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	test("propose_project brand-new with name + root_path still seeds (create)", async () => {
+		const s = await createSession();
+		try {
+			const r = await seed(s, "project", { name: "Brand New Create", root_path: "/tmp/brand-new-create" });
+			expect(r.status, `project create seed: ${await r.clone().text()}`).toBe(200);
+			const fields = await seededFields(s, "project");
+			expect(fields?.root_path).toBe("/tmp/brand-new-create");
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
 	// ── (c) explicit unknown → 422 UNKNOWN_PROJECT ─────────────────────
 	test("(c) explicit unknown projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff", async () => {
 		const s = await createSession();
