@@ -26,12 +26,12 @@ process.env.BOBBIT_TEST_NO_PUSH = "1";
 process.env.BOBBIT_SKIP_NPM_CI = "1";
 
 const execFile = promisify(execFileCb);
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { SessionStore } = await import("../../src/server/agent/session-store.ts");
-const { GoalManager } = await import("../../src/server/agent/goal-manager.ts");
-const { GoalStore } = await import("../../src/server/agent/goal-store.ts");
-const { handleSetupFailure } = await import("../../src/server/agent/session-setup.ts");
-const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
+let SessionManager: any;
+let SessionStore: any;
+let GoalManager: any;
+let GoalStore: any;
+let handleSetupFailure: any;
+let initPromptDirs: (stateDir: string) => void;
 
 type TestRepo = { repo: string; tmp: string };
 
@@ -149,6 +149,12 @@ function cleanupManager(manager: any): void {
 
 describe("shared worktree guard reproductions", () => {
 	beforeAll(async () => {
+		({ SessionManager } = await import("../../src/server/agent/session-manager.ts"));
+		({ SessionStore } = await import("../../src/server/agent/session-store.ts"));
+		({ GoalManager } = await import("../../src/server/agent/goal-manager.ts"));
+		({ GoalStore } = await import("../../src/server/agent/goal-store.ts"));
+		({ handleSetupFailure } = await import("../../src/server/agent/session-setup.ts"));
+		({ initPromptDirs } = await import("../../src/server/agent/system-prompt.ts"));
 		realRepoTemplate = await createRepoTemplate();
 	});
 
