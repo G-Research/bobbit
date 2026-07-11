@@ -17,22 +17,24 @@
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { PlanMutationStore, DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "../../src/server/agent/plan-mutation-store.ts";
 import { tryHandleNestedGoalRoute } from "../../src/server/agent/nested-goal-routes.ts";
-import { CookieStore } from "../../src/server/auth/cookie.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 import type { ClassifierPlanStep } from "../../src/server/agent/plan-mutation.ts";
 
-let tmpRoot: string;
-let stateDir: string;
+let memfs: MemFs;
+const stateDir = path.resolve("/memfs/mutations-pending/state");
+const unauthenticatedCookieStore = { verify: () => false };
+
+function makePlanMutationStore(): PlanMutationStore {
+	return new PlanMutationStore(stateDir, { startSweep: false }, memfs);
+}
 
 beforeEach(() => {
-	tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mutations-pending-"));
-	stateDir = path.join(tmpRoot, "state");
-	fs.mkdirSync(stateDir);
+	memfs = createMemFs();
+	memfs.mkdirSync(stateDir);
 });
 
 function step(planId: string, phase = 1): ClassifierPlanStep {
@@ -72,7 +74,7 @@ async function getPending(goalId: string, store: PlanMutationStore, opts?: { sub
 		verificationHarness: {},
 		teamManager: { getTeamState: () => undefined },
 		sessionManager: {},
-		cookieStore: new CookieStore(stateDir),
+		cookieStore: unauthenticatedCookieStore,
 		requireSubgoalsEnabled: () => opts?.subgoalsEnabled ?? true,
 		getGoalAcrossProjects: () => (goalExists ? goal : undefined),
 		getGoalManagerForGoal: () => ({}),
@@ -90,7 +92,7 @@ async function getPending(goalId: string, store: PlanMutationStore, opts?: { sub
 
 describe("GET /api/goals/:id/mutations/pending", () => {
 	it("returns persisted pending requests with mapped fields", async () => {
-		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const store = makePlanMutationStore();
 		const now = Date.now();
 		store.put(pending("g1", "r1", now + DEFAULT_MUTATION_TTL_MS));
 		store.put(pending("g1", "r2", now + DEFAULT_MUTATION_TTL_MS));
@@ -113,7 +115,7 @@ describe("GET /api/goals/:id/mutations/pending", () => {
 	});
 
 	it("filters out entries past their TTL", async () => {
-		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const store = makePlanMutationStore();
 		const now = Date.now();
 		store.put(pending("g1", "fresh", now + DEFAULT_MUTATION_TTL_MS));
 		store.put(pending("g1", "stale", now - 1)); // already expired
@@ -125,21 +127,21 @@ describe("GET /api/goals/:id/mutations/pending", () => {
 	});
 
 	it("returns empty list when the goal has no pending requests", async () => {
-		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const store = makePlanMutationStore();
 		const { responses } = await getPending("g-empty", store);
 		assert.equal(responses[0].status, 200);
 		assert.deepEqual(responses[0].body.pending, []);
 	});
 
 	it("404s for an unknown goal", async () => {
-		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const store = makePlanMutationStore();
 		const { handled, responses } = await getPending("g-missing", store, { goalExists: false });
 		assert.equal(handled, true);
 		assert.equal(responses.at(-1)!.status, 404);
 	});
 
 	it("no-ops (handled, no body) when subgoals are disabled", async () => {
-		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const store = makePlanMutationStore();
 		store.put(pending("g1", "r1", Date.now() + DEFAULT_MUTATION_TTL_MS));
 		const { handled, responses } = await getPending("g1", store, { subgoalsEnabled: false });
 		assert.equal(handled, true);

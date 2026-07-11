@@ -20,11 +20,8 @@
  */
 import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import yaml from "yaml";
 
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
 import { GoalManager } from "../../src/server/agent/goal-manager.ts";
@@ -34,7 +31,8 @@ import { ProjectConfigStore } from "../../src/server/agent/project-config-store.
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
 import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
-import { CookieStore } from "../../src/server/auth/cookie.ts";
+import type { CookieStore } from "../../src/server/auth/cookie.ts";
+import { createMemFs } from "../harness/mem-fs.js";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
 
 const TL = "tl-session";
@@ -55,16 +53,16 @@ interface Harness {
 
 async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } = {}): Promise<Harness> {
 	const stampChildPreparing = opts.stampChildPreparing ?? true;
-	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nested-conc-"));
-	const stateDir = path.join(tmpRoot, "state");
-	const configDir = path.join(tmpRoot, "config");
-	fs.mkdirSync(stateDir);
-	fs.mkdirSync(configDir);
-	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
+	const memfs = createMemFs();
+	const tmpRoot = path.resolve("/memfs/nested-conc/work");
+	const stateDir = path.resolve("/memfs/nested-conc/state");
+	const configDir = path.resolve("/memfs/nested-conc/config");
+	memfs.mkdirSync(stateDir);
+	memfs.mkdirSync(configDir);
 
-	const goalStore = new GoalStore(stateDir);
-	const cookieStore = new CookieStore(stateDir);
-	const cfg = new ProjectConfigStore(configDir);
+	const goalStore = new GoalStore(stateDir, memfs);
+	const cookieStore = { verify: () => false } as unknown as CookieStore;
+	const cfg = new ProjectConfigStore(configDir, memfs);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
 		{
@@ -77,8 +75,8 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 		},
 	]);
 	const goalManager = new GoalManager(goalStore, wf);
-	const gateStore = new GateStore(stateDir);
-	const planMutationStore = new PlanMutationStore(stateDir, { startSweep: false });
+	const gateStore = new GateStore(stateDir, memfs);
+	const planMutationStore = new PlanMutationStore(stateDir, { startSweep: false }, memfs);
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "feature" });
 	goalStore.update(parent.id, {
@@ -185,7 +183,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 			"x-bobbit-spawning-session": sessionId,
 			"x-bobbit-session-secret": sessionSecretStore.getOrCreateSecret(sessionId),
 		}),
-		cleanup() { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {} },
+		cleanup() {},
 		call,
 	};
 }
