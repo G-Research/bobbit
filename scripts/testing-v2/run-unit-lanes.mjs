@@ -50,10 +50,16 @@ const LOG_DIR = join(REPO_ROOT, ".profiles", "unit-lanes");
 // Per-lane fork cap. Default 2 (Windows-RPC-safe under v3). Overridable via
 // UNIT_LANES_FORK_CAP for experiments (e.g. testing whether a single lane's
 // smaller onTaskUpdate backlog tolerates more forks than the full suite).
-const PER_LANE_FORK_CAP = Math.max(1, Number(process.env.UNIT_LANES_FORK_CAP || "2"));
+// A non-numeric override must NOT poison the scheduler: NaN would make
+// maxConcurrent NaN and stall the run (no lane ever starts), so fall back to 2.
+const _forkCap = Number(process.env.UNIT_LANES_FORK_CAP || "2");
+const PER_LANE_FORK_CAP = Number.isFinite(_forkCap) ? Math.max(1, Math.floor(_forkCap)) : 2;
 
-// Heartbeat cadence for the live progress line.
-const HEARTBEAT_MS = Number(process.env.UNIT_LANES_HEARTBEAT_MS || "12000");
+// Heartbeat cadence for the live progress line. Clamp to >=1s and reject
+// non-numeric/zero/negative values so a bad override can't flood the console
+// (setInterval(fn, 0|NaN) fires continuously).
+const _heartbeatMs = Number(process.env.UNIT_LANES_HEARTBEAT_MS || "12000");
+const HEARTBEAT_MS = Number.isFinite(_heartbeatMs) ? Math.max(1000, Math.floor(_heartbeatMs)) : 12000;
 
 // Per-file completion line emitted by the vitest default reporter, e.g.
 //   " ✓ |v2-core| tests2/core/foo.test.ts (12 tests) 340ms"
