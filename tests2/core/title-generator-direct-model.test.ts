@@ -17,6 +17,7 @@ import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { invalidateModelCache, type ApiModel } from "../../src/server/agent/model-registry.js";
 import { generateSessionTitle } from "../../src/server/agent/title-generator.js";
 import { completeModelText, testModelPreference } from "../../src/server/agent/model-completion.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const previousSkipTitleGen = process.env.BOBBIT_SKIP_TITLE_GEN;
 const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
@@ -46,9 +47,8 @@ afterEach(() => {
 	resetAgentDirStateForTests();
 });
 
-function prefsWithManualProvider(): { prefs: PreferencesStore; dir: string } {
-	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-title-direct-"));
-	const prefs = new PreferencesStore(dir);
+function prefsWithManualProvider(): PreferencesStore {
+	const prefs = new PreferencesStore(path.resolve("/memfs/title-direct"), createMemFs());
 	prefs.set("customProviders", [{
 		id: "direct",
 		name: "direct",
@@ -57,7 +57,7 @@ function prefsWithManualProvider(): { prefs: PreferencesStore; dir: string } {
 		apiKey: "sk-test",
 		models: [{ id: "direct-title-model", name: "Direct Title Model" }],
 	}]);
-	return { prefs, dir };
+	return prefs;
 }
 
 describe("title generation with non-AI-Gateway naming models", () => {
@@ -126,21 +126,17 @@ describe("title generation with non-AI-Gateway naming models", () => {
 	});
 
 	it("model test helper works for non-AI-Gateway models", async () => {
-		const { prefs, dir } = prefsWithManualProvider();
+		const prefs = prefsWithManualProvider();
 		const calls: any[] = [];
-		try {
-			const result = await testModelPreference(prefs, "direct/direct-title-model", async (model, _prefs, args) => {
-				calls.push({ model, args });
-				return "OK";
-			});
-			assert.equal(result.ok, true);
-			assert.equal(result.modelResolved, "direct-title-model");
-			assert.equal(calls.length, 1);
-			assert.equal(calls[0].model.provider, "direct");
-			assert.equal(calls[0].model.id, "direct-title-model");
-			assert.equal(calls[0].args.thinkingLevel, "off");
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
+		const result = await testModelPreference(prefs, "direct/direct-title-model", async (model, _prefs, args) => {
+			calls.push({ model, args });
+			return "OK";
+		});
+		assert.equal(result.ok, true);
+		assert.equal(result.modelResolved, "direct-title-model");
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0].model.provider, "direct");
+		assert.equal(calls[0].model.id, "direct-title-model");
+		assert.equal(calls[0].args.thinkingLevel, "off");
 	});
 });

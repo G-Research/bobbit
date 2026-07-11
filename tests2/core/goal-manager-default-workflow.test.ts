@@ -16,13 +16,13 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 import { GoalManager } from "../../src/server/agent/goal-manager.js";
 import { GoalStore } from "../../src/server/agent/goal-store.js";
 import type { Workflow, WorkflowStore } from "../../src/server/agent/workflow-store.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const NO_WORKFLOWS_MSG =
 	"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
@@ -47,58 +47,50 @@ function makeStore(items: Workflow[]): WorkflowStore {
 }
 
 function makeManager() {
-	const dir = mkdtempSync(join(tmpdir(), "bobbit-gm-default-wf-"));
-	const store = new GoalStore(dir);
+	const memfs = createMemFs();
+	const id = randomUUID();
+	const stateDir = join("/memfs/bobbit-gm-default-wf", id, "state");
+	const cwd = join("/memfs/bobbit-gm-default-wf", id, "work");
+	memfs.mkdirSync(stateDir);
+	const store = new GoalStore(stateDir, memfs);
 	const mgr = new GoalManager(store);
-	return { mgr, dir };
+	return { mgr, dir: cwd };
 }
 
 describe("GoalManager workflow defaulting", () => {
 	it("falls back to the first workflow in store order when no id is supplied", async () => {
 		const { mgr, dir } = makeManager();
-		try {
-			const wfFoo = makeWorkflow("foo");
-			const wfBar = makeWorkflow("bar");
-			const goal = await mgr.createGoal("test goal", dir, {
-				workflowStore: makeStore([wfFoo, wfBar]),
-			});
-			assert.equal(goal.workflowId, "foo", "expected first workflow id");
-			assert.equal(goal.workflow?.id, "foo", "expected workflow snapshot to be foo");
-			// Order is preserved if we swap.
-			const goal2 = await mgr.createGoal("test goal 2", dir, {
-				workflowStore: makeStore([wfBar, wfFoo]),
-			});
-			assert.equal(goal2.workflowId, "bar");
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
+		const wfFoo = makeWorkflow("foo");
+		const wfBar = makeWorkflow("bar");
+		const goal = await mgr.createGoal("test goal", dir, {
+			workflowStore: makeStore([wfFoo, wfBar]),
+		});
+		assert.equal(goal.workflowId, "foo", "expected first workflow id");
+		assert.equal(goal.workflow?.id, "foo", "expected workflow snapshot to be foo");
+		// Order is preserved if we swap.
+		const goal2 = await mgr.createGoal("test goal 2", dir, {
+			workflowStore: makeStore([wfBar, wfFoo]),
+		});
+		assert.equal(goal2.workflowId, "bar");
 	});
 
 	it("throws NO_WORKFLOWS_MSG when no id supplied and the store is empty", async () => {
 		const { mgr, dir } = makeManager();
-		try {
-			await assert.rejects(
-				() => mgr.createGoal("empty goal", dir, { workflowStore: makeStore([]) }),
-				(err: Error) => err.message === NO_WORKFLOWS_MSG,
-			);
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
+		await assert.rejects(
+			() => mgr.createGoal("empty goal", dir, { workflowStore: makeStore([]) }),
+			(err: Error) => err.message === NO_WORKFLOWS_MSG,
+		);
 	});
 
 	it("throws 'Workflow not found' when an explicit unknown id is supplied to a non-empty store", async () => {
 		const { mgr, dir } = makeManager();
-		try {
-			const wfFoo = makeWorkflow("foo");
-			await assert.rejects(
-				() => mgr.createGoal("missing-id goal", dir, {
-					workflowId: "missing",
-					workflowStore: makeStore([wfFoo]),
-				}),
-				(err: Error) => /Workflow not found: missing/.test(err.message),
-			);
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
+		const wfFoo = makeWorkflow("foo");
+		await assert.rejects(
+			() => mgr.createGoal("missing-id goal", dir, {
+				workflowId: "missing",
+				workflowStore: makeStore([wfFoo]),
+			}),
+			(err: Error) => /Workflow not found: missing/.test(err.message),
+		);
 	});
 });

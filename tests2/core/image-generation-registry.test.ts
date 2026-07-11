@@ -15,22 +15,12 @@ import { test } from "vitest";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, getImageModelByPref, parseImageModelPref } from "../../src/server/agent/image-generation.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 function withPrefs<T>(fn: (prefs: PreferencesStore) => T): T {
-	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-image-models-"));
-	try {
-		const result = fn(new PreferencesStore(dir));
-		if (result && typeof (result as any).finally === "function") {
-			return (result as unknown as Promise<unknown>).finally(() => {
-				rmSync(dir, { recursive: true, force: true });
-			}) as T;
-		}
-		rmSync(dir, { recursive: true, force: true });
-		return result;
-	} catch (err) {
-		rmSync(dir, { recursive: true, force: true });
-		throw err;
-	}
+	const memfs = createMemFs();
+	const dir = path.resolve("/memfs/image-models");
+	return fn(new PreferencesStore(dir, memfs));
 }
 
 test("image model registry includes GPT Image 2 and Google image models", () => {

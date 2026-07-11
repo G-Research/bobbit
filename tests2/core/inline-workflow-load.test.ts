@@ -14,8 +14,6 @@
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 
@@ -24,25 +22,25 @@ import { InlineWorkflowStore, type Workflow } from "../../src/server/agent/workf
 import { WorkflowManager } from "../../src/server/agent/workflow-manager.ts";
 import { GoalManager } from "../../src/server/agent/goal-manager.ts";
 import { GoalStore } from "../../src/server/agent/goal-store.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
-let tmpRoot: string;
-let configDir: string;
-let stateDir: string;
+let memfs: MemFs;
+const tmpRoot = path.resolve("/memfs/inline-workflow-test/work");
+const configDir = path.resolve("/memfs/inline-workflow-test/config");
+const stateDir = path.resolve("/memfs/inline-workflow-test/state");
 
 beforeEach(() => {
-	tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "inline-workflow-test-"));
-	configDir = path.join(tmpRoot, "config");
-	stateDir = path.join(tmpRoot, "state");
-	fs.mkdirSync(configDir, { recursive: true });
-	fs.mkdirSync(stateDir, { recursive: true });
+	memfs = createMemFs();
+	memfs.mkdirSync(configDir);
+	memfs.mkdirSync(stateDir);
 });
 
 function writeProjectYaml(obj: Record<string, unknown>): void {
-	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify(obj));
+	memfs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify(obj));
 }
 
 function makeStores(): { cfg: ProjectConfigStore; store: InlineWorkflowStore } {
-	const cfg = new ProjectConfigStore(configDir);
+	const cfg = new ProjectConfigStore(configDir, memfs);
 	const store = new InlineWorkflowStore(cfg);
 	return { cfg, store };
 }
@@ -115,7 +113,7 @@ describe("InlineWorkflowStore — mutations round-trip via ProjectConfigStore", 
 			createdAt: 1, updatedAt: 1,
 		});
 		// Re-load fresh to confirm disk write.
-		const cfg2 = new ProjectConfigStore(configDir);
+		const cfg2 = new ProjectConfigStore(configDir, memfs);
 		const block = cfg2.getWorkflows();
 		assert.ok(block && "myflow" in block);
 		assert.equal((block!.myflow as any).name, "My Flow");
@@ -130,7 +128,7 @@ describe("InlineWorkflowStore — mutations round-trip via ProjectConfigStore", 
 		const { store } = makeStores();
 		assert.ok(store.get("a"));
 		store.remove("a");
-		const cfg2 = new ProjectConfigStore(configDir);
+		const cfg2 = new ProjectConfigStore(configDir, memfs);
 		const block = cfg2.getWorkflows();
 		assert.ok(!block || !("a" in block));
 	});
@@ -141,7 +139,7 @@ describe("Goal creation — empty workflows rejected", () => {
 		writeProjectYaml({});
 		const { store } = makeStores();
 		// No builtins set.
-		const goalStore = new GoalStore(stateDir);
+		const goalStore = new GoalStore(stateDir, memfs);
 		const gm = new GoalManager(goalStore, store);
 		await assert.rejects(
 			() => gm.createGoal("test", tmpRoot, { workflowId: "general", workflowStore: store }),
@@ -157,7 +155,7 @@ describe("Goal creation — empty workflows rejected", () => {
 			gates: [{ id: "g", name: "G", dependsOn: [] }],
 			createdAt: 0, updatedAt: 0,
 		}]);
-		const goalStore = new GoalStore(stateDir);
+		const goalStore = new GoalStore(stateDir, memfs);
 		const gm = new GoalManager(goalStore, store);
 		// Use a non-git tmp dir to avoid worktree creation in tests.
 		const goal = await gm.createGoal("test", tmpRoot, { workflowId: "general", workflowStore: store });

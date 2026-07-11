@@ -13,8 +13,7 @@ guardProcessEnv();
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "vitest";
 import { fileURLToPath } from "node:url";
@@ -27,6 +26,7 @@ import { applyRuntimeSessionModelSelection, broadcastRuntimeSessionActualModelSt
 import { generateImage } from "../../src/server/agent/image-generation.js";
 import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
@@ -270,10 +270,11 @@ function makeRuntimeHarness(options: {
 }
 
 function tempPrefs(): { prefs: PreferencesStore; cleanup: () => void } {
-	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-controlled-fallback-"));
+	const memfs = createMemFs();
+	const dir = path.resolve("/memfs/controlled-fallback");
 	return {
-		prefs: new PreferencesStore(dir),
-		cleanup: () => rmSync(dir, { recursive: true, force: true }),
+		prefs: new PreferencesStore(dir, memfs),
+		cleanup: () => memfs.rmSync(dir, { recursive: true, force: true }),
 	};
 }
 

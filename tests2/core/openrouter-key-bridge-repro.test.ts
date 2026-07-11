@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const tmpRoot = makeTmpDir("openrouter-key-bridge-repro-");
 const stateDir = path.join(tmpRoot, "state");
@@ -105,7 +106,7 @@ function makeBridge(overrides: Record<string, any> = {}): any {
 const FAKE_OPENAI_KEY = "sk-openai-unrelated-never-inject";
 
 function preferencesWithOpenRouterKey(): any {
-	const prefs = new PreferencesStore(stateDir);
+	const prefs = new PreferencesStore(path.resolve("/memfs/openrouter-key-bridge"), createMemFs());
 	prefs.set("providerKey.openrouter", FAKE_OPENROUTER_KEY);
 	prefs.set("providerKey.openai", FAKE_OPENAI_KEY);
 	return prefs;

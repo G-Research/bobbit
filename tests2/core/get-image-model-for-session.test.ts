@@ -25,9 +25,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
@@ -93,10 +92,36 @@ function loadProductionFn(): (
 	) as any;
 }
 
+function createSessionStoreMemFs() {
+	const memfs = createMemFs() as ReturnType<typeof createMemFs> & {
+		openSync(p: fs.PathLike): number;
+		fsyncSync(fd: number): void;
+		closeSync(fd: number): void;
+		writeFileSync(p: fs.PathLike | number, data: string | NodeJS.ArrayBufferView, options?: unknown): void;
+	};
+	const writeFileSync = memfs.writeFileSync.bind(memfs) as typeof memfs.writeFileSync;
+	const fdPaths = new Map<number, fs.PathLike>();
+	let nextFd = 100;
+	memfs.openSync = (p: fs.PathLike) => {
+		const fd = nextFd++;
+		fdPaths.set(fd, p);
+		return fd;
+	};
+	memfs.fsyncSync = () => {};
+	memfs.closeSync = (fd: number) => { fdPaths.delete(fd); };
+	memfs.writeFileSync = ((p: fs.PathLike | number, data: string | NodeJS.ArrayBufferView, options?: unknown) => {
+		const target = typeof p === "number" ? fdPaths.get(p) : p;
+		if (!target) throw Object.assign(new Error(`EBADF: bad file descriptor, write '${p}'`), { code: "EBADF" });
+		return writeFileSync(target, data, options as any);
+	}) as typeof memfs.writeFileSync;
+	return memfs;
+}
+
 function makeFixture() {
-	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-getim-"));
-	const prefs = new PreferencesStore(dir);
-	const store = new SessionStore(dir);
+	const memfs = createSessionStoreMemFs();
+	const dir = path.resolve("/memfs", `getim-${randomUUID()}`);
+	const prefs = new PreferencesStore(dir, memfs);
+	const store = new SessionStore(dir, memfs);
 	const id = randomUUID();
 	store.put({
 		id,
@@ -106,7 +131,7 @@ function makeFixture() {
 		createdAt: Date.now(),
 		lastActivity: Date.now(),
 	});
-	const cleanup = () => rmSync(dir, { recursive: true, force: true });
+	const cleanup = () => memfs.rmSync(dir, { recursive: true, force: true });
 	return { store, prefs, id, cleanup };
 }
 

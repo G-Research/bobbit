@@ -17,10 +17,7 @@
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import yaml from "yaml";
 
 import { GoalStore } from "../../src/server/agent/goal-store.ts";
 import { GoalManager } from "../../src/server/agent/goal-manager.ts";
@@ -28,23 +25,22 @@ import { ProjectConfigStore } from "../../src/server/agent/project-config-store.
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { computePlanFreezeUpdate } from "../../src/server/agent/parent-workflow-freeze.ts";
 import type { PersistedGoal } from "../../src/server/agent/goal-store.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
-let tmpRoot: string;
-let stateDir: string;
-let configDir: string;
+let memfs: MemFs;
+const tmpRoot = path.resolve("/memfs/freeze-signal/work");
+const stateDir = path.resolve("/memfs/freeze-signal/state");
+const configDir = path.resolve("/memfs/freeze-signal/config");
 
 beforeEach(() => {
-	tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "freeze-signal-"));
-	stateDir = path.join(tmpRoot, "state");
-	configDir = path.join(tmpRoot, "config");
-	fs.mkdirSync(stateDir);
-	fs.mkdirSync(configDir);
-	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
+	memfs = createMemFs();
+	memfs.mkdirSync(stateDir);
+	memfs.mkdirSync(configDir);
 });
 
 function makeManager(): { gm: GoalManager; store: GoalStore } {
-	const goalStore = new GoalStore(stateDir);
-	const cfg = new ProjectConfigStore(configDir);
+	const goalStore = new GoalStore(stateDir, memfs);
+	const cfg = new ProjectConfigStore(configDir, memfs);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
 		{
@@ -127,7 +123,7 @@ describe("Gov-2: goal-plan signal freezes execution.verify[] durably", () => {
 		assert.equal(readFrozen(store.get(goal.id)), true, "execution must be frozen after goal-plan signal");
 
 		// Durable: a fresh GoalStore over the same state dir still sees it.
-		const reloaded = new GoalStore(stateDir);
+		const reloaded = new GoalStore(stateDir, memfs);
 		assert.equal(readFrozen(reloaded.get(goal.id)), true, "freeze must survive a store reload (persisted)");
 	});
 

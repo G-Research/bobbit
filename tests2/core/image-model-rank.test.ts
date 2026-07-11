@@ -19,8 +19,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = path.resolve(__dirname, "..", "..", "src/ui/dialogs/ImageModelSelector.ts");
@@ -49,13 +48,9 @@ function loadProductionRank(): (model: any, registry: readonly any[]) => number 
 }
 
 function withRegistry<T>(fn: (reg: ReturnType<typeof getAvailableImageModels>) => T): T {
-	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-imr-"));
-	try {
-		const prefs = new PreferencesStore(dir);
-		return fn(getAvailableImageModels(prefs));
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
-	}
+	const memfs = createMemFs();
+	const prefs = new PreferencesStore(path.resolve("/memfs/image-model-rank"), memfs);
+	return fn(getAvailableImageModels(prefs));
 }
 
 describe("imageModelRank (production source) parity with registry order", () => {

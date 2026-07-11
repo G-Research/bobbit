@@ -25,16 +25,16 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
-import fs from "node:fs";
+import { createMemFs } from "../harness/mem-fs.js";
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-model-meta-resolver-"));
+const memfs = createMemFs();
+const stateDir = path.resolve("/memfs/model-meta-resolver");
 
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache, resolveModelStateMeta } = await import("../../src/server/agent/model-registry.ts");
 
-const prefs = new PreferencesStore(tmpDir);
+const prefs = new PreferencesStore(stateDir, memfs);
 
 describe("resolveModelStateMeta", () => {
 	it("tier 1 (registry cache): returns Fable's merged pi-ai metadata after getAvailableModels", async () => {
