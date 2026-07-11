@@ -306,6 +306,42 @@ test("diverged goal worktree: sync keeps local commit B and surfaces a warning (
 	}
 });
 
+test("local-behind fast-forward does NOT execute repo-local git hooks (reset --hard, not merge --ff-only)", async () => {
+	const { root, repoDir, remoteDir, goalBranch, shaA } = makePublishedGoalBranchRepo();
+	const { harness, signal } = makeHarnessFixture("origin/master");
+	try {
+		// Install an executable post-merge hook that writes a sentinel. `git merge
+		// --ff-only` would run this hook (local code-execution vector); `git reset
+		// --hard` must NOT. On Windows the hook runs under Git Bash via the shebang.
+		const hooksDir = path.join(repoDir, ".git", "hooks");
+		fs.mkdirSync(hooksDir, { recursive: true });
+		const hookPath = path.join(hooksDir, "post-merge");
+		const sentinelPath = path.join(root, "post-merge-hook-sentinel.txt");
+		const sentinelForShell = sentinelPath.replace(/\\/g, "/");
+		fs.writeFileSync(hookPath, `#!/bin/sh\necho ran > "${sentinelForShell}"\n`);
+		fs.chmodSync(hookPath, 0o755);
+
+		// Advance origin ahead with commit C; local stays at A (behind → fast-forward).
+		const shaC = pushExtraOriginCommit(root, remoteDir, goalBranch, "feature.txt", "commit A\ncommit C (origin)\n", "commit C on origin");
+		assert.equal(git(repoDir, ["rev-parse", "HEAD"]), shaA, "fixture precondition: local still at A before sync");
+
+		const { head } = await runVerificationCapturingWarnings(harness, signal, repoDir, goalBranch);
+
+		assert.equal(
+			head,
+			shaC,
+			`fast-forward must advance HEAD to origin tip C (HEAD=${head} expected ${shaC})`,
+		);
+		assert.equal(
+			fs.existsSync(sentinelPath),
+			false,
+			`SYNC_RAN_GIT_HOOK: pre-verification fast-forward executed a repo-local post-merge hook (sentinel written at ${sentinelPath}) — sync must use "git reset --hard", which does not run hooks`,
+		);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("up-to-date goal worktree: sync leaves HEAD unchanged when local == origin", async () => {
 	const { root, repoDir, goalBranch, shaA } = makePublishedGoalBranchRepo();
 	const { harness, signal } = makeHarnessFixture("origin/master");
