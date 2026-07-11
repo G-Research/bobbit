@@ -8,8 +8,8 @@
 // over any eager built-in of the same name) that:
 //   1. fetches the pre-built ESM renderer bytes from GET /api/tools/:tool/renderer
 //      (authed via gatewayFetch — the bare module URL would not carry the bearer);
-//   2. imports it through a Blob URL with /* @vite-ignore */ so Vite does not try
-//      to pre-bundle a runtime URL (works identically in dev + static dist);
+//   2. imports it as an ESM module (Blob URL in the browser; data URL under
+//      Node-backed Vitest, where blob:nodedata:* is not importable);
 //   3. invokes the module's default factory, handing it the host's own lit
 //      toolkit (`html`/`nothing` + `renderHeader`) so the pack renderer shares the
 //      app's single lit instance and standard header shape.
@@ -23,29 +23,11 @@ import { html, nothing } from "lit";
 import { registerLazyToolRenderer, unregisterPackRenderer, renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { fetchTools } from "./api.js";
+import { importJavaScriptModuleBlob } from "./javascript-module-import.js";
 
 /** Host toolkit handed to a pack renderer's factory. Keeps the pack on the
  *  app's single `lit` instance and standard `renderHeader()` shape. */
 const HOST_TOOLKIT = { html, nothing, renderHeader };
-
-/**
- * Dynamic-import a pack renderer module from a Blob object URL, guarding the ONE
- * environment where it cannot work. In a real browser the module loader resolves
- * and executes a `blob:<origin>/<uuid>` URL natively — production behaviour is
- * unchanged. Under Vitest / happy-dom (and any Node vite-node context)
- * `URL.createObjectURL` instead yields a `blob:nodedata:*` URL whose ESM the Node
- * loader cannot resolve; a bare `import()` there throws `ERR_MODULE_NOT_FOUND` as
- * a vitest-worker-fatal unhandled error. We reject with a controlled error in that
- * case (the registry's load-failure fallback handles the rejection) so the
- * fetch/register path still runs headlessly — DOM tests assert on the fetch, not
- * on a loaded renderer — without crashing the worker.
- */
-export function importPackModuleFromObjectUrl(objUrl: string): Promise<unknown> {
-	if (objUrl.startsWith("blob:nodedata:")) {
-		return Promise.reject(new Error(`blob ESM import unsupported in this (non-browser) environment: ${objUrl}`));
-	}
-	return import(/* @vite-ignore */ objUrl);
-}
 
 /** Tool metadata subset needed to decide pack-renderer registration. */
 export interface PackRendererToolInfo {
@@ -107,15 +89,10 @@ export function registerPackRenderers(
 				const resp = await gatewayFetch(url); // authed (admin bearer); no session binding needed
 				if (!resp.ok) throw new Error(`renderer ${t.name} HTTP ${resp.status}`);
 				const blob = await resp.blob();
-				const objUrl = URL.createObjectURL(blob.slice(0, blob.size, "text/javascript"));
-				try {
-					const mod = await importPackModuleFromObjectUrl(objUrl);
-					const factory = (mod as any).default ?? (mod as any).createRenderer;
-					if (typeof factory !== "function") throw new Error("renderer module has no factory export");
-					return factory(HOST_TOOLKIT); // → ToolRenderer
-				} finally {
-					URL.revokeObjectURL(objUrl);
-				}
+				const mod = await importJavaScriptModuleBlob(blob);
+				const factory = (mod as any).default ?? (mod as any).createRenderer;
+				if (typeof factory !== "function") throw new Error("renderer module has no factory export");
+				return factory(HOST_TOOLKIT); // → ToolRenderer
 			},
 			{ override: true },
 		);

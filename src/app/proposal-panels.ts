@@ -14,12 +14,13 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { Check, Copy, Eye, FolderOpen, Goal as GoalIcon, Minus, Pencil, Plus, UserCheck, Users, Wrench } from "lucide";
 
-import { state, renderApp, activeSessionId, isProposalStreaming } from "./state.js";
+import { state, renderApp, setProjects, activeSessionId, isProposalStreaming } from "./state.js";
 import {
 	createGoal,
 	createRole,
 	gatewayFetch,
 	refreshSessions,
+	fetchProjects,
 	fetchSandboxStatus,
 	fetchWorkflows,
 	fetchGroupPolicies,
@@ -55,6 +56,7 @@ import {
 	deleteProjectDraft,
 	markProposalDismissed,
 	backToSessions,
+	uncacheSession,
 } from "./session-manager.js";
 import { deleteProposalFile, metadataObjectToRows, metadataRowsToObject } from "./proposal-helpers.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
@@ -70,6 +72,7 @@ import { errorDetails } from "./error-helpers.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { ACCESSORY_IDS, getAccessory, statusBobbit } from "./session-colors.js";
 import { defaultCwdForProjectSession, isHeadquartersProject } from "./headquarters.js";
+import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 import { reloadStaffList } from "./sidebar.js";
 import {
 	isHistoricalProposalTab,
@@ -2772,10 +2775,177 @@ const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 
 // Module-level state for the project proposal panel's tab UI.
 let _projectProposalView: ProjectViewMode = "components";
+let _projectProposalAcceptPending = false;
 
 /** Reset module-level proposal panel state. Called on session disconnect. */
 export function resetProjectProposalPanel(): void {
 	_projectProposalView = "components";
+	_projectProposalAcceptPending = false;
+}
+
+const PROJECT_ACCEPT_FAILED = "Project proposal accept failed";
+const NO_PROJECT_PROPOSAL = "There is no active project proposal to accept. Re-open the proposal and try again.";
+const UNLINKED_PROJECT_PROPOSAL = "This proposal is not linked to a project session. Re-open the project assistant or create the project again.";
+
+function showProjectProposalCaughtError(title: string, err: unknown): void {
+	const { message, code, stack } = errorDetails(err);
+	showConnectionError(title, message, { code, stack });
+}
+
+async function showProjectProposalResponseError(res: Response, title: string, fallback: string): Promise<void> {
+	let data: any = {};
+	try { data = await res.json(); } catch { data = {}; }
+	const details = Array.isArray(data?.details) && data.details.length > 0
+		? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
+		: "";
+	showConnectionError(title, details || data?.error || `${fallback}: ${res.status}`, { code: data?.code, stack: data?.stack });
+}
+
+function activeProjectProposalOrFail(): NonNullable<typeof state.activeProposals.project> | null {
+	const proposal = state.activeProposals.project;
+	if (!proposal) showConnectionError(PROJECT_ACCEPT_FAILED, NO_PROJECT_PROPOSAL);
+	return proposal ?? null;
+}
+
+function projectIdForProjectProposal(sessionId: string): string | null {
+	const projectId = state.gatewaySessions.find(s => s.id === sessionId)?.projectId;
+	if (!projectId) showConnectionError(PROJECT_ACCEPT_FAILED, UNLINKED_PROJECT_PROPOSAL);
+	return projectId || null;
+}
+
+async function invalidateProjectProposalConfig(projectId: string): Promise<void> {
+	const m = await import("./settings-page.js");
+	m.invalidateProjectScopeConfig(projectId);
+}
+
+async function promoteProjectProposal(projectId: string, name: string): Promise<boolean> {
+	try {
+		const body: Record<string, unknown> = {};
+		if (name) body.name = name;
+		const res = await gatewayFetch(`/api/projects/${projectId}/promote`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) {
+			await showProjectProposalResponseError(res, "Failed to promote project", "Project promotion failed");
+			return false;
+		}
+		return true;
+	} catch (err) {
+		showProjectProposalCaughtError("Failed to promote project", err);
+		return false;
+	}
+}
+
+async function writeProjectProposalConfig(projectId: string, fields: Record<string, unknown>): Promise<boolean> {
+	const diff = buildProjectConfigDiff(fields);
+	if (Object.keys(diff).length === 0) return true;
+	try {
+		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify(diff),
+		});
+		if (!res.ok) {
+			await showProjectProposalResponseError(res, "Failed to save project config", "Config write failed");
+			return false;
+		}
+		return true;
+	} catch (err) {
+		showProjectProposalCaughtError("Failed to save project config", err);
+		return false;
+	}
+}
+
+function notifyProjectProposalAccepted(sessionId: string, summary: string): void {
+	const message = `[SYSTEM: The user accepted your project proposal${summary ? ` "${summary}"` : ""}. The change is now live in the project — continue with your task.]`;
+	void gatewayFetch(`/api/sessions/${sessionId}/notify`, {
+		method: "POST",
+		body: JSON.stringify({ message }),
+	}).catch((err) => console.warn("[proposal-notify] Failed to notify proposing session:", err));
+}
+
+export async function acceptProjectProposalFromPanel(): Promise<boolean> {
+	const proposal = activeProjectProposalOrFail();
+	if (!proposal) return false;
+	return proposal.mode === "registered"
+		? acceptRegisteredProjectProposalFromPanel(proposal)
+		: acceptProvisionalProjectProposalFromPanel(proposal);
+}
+
+async function terminateProjectAssistantSessionFromPanel(sessionId: string): Promise<void> {
+	try {
+		uncacheSession(sessionId);
+		if (activeSessionId() === sessionId) {
+			state.remoteAgent?.disconnect();
+			state.remoteAgent = null;
+		}
+		const res = await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+		if (!res.ok && res.status !== 404) console.warn(`[project-proposal] Terminate returned ${res.status}`);
+		state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== sessionId);
+		renderApp();
+		deleteGoalDraft(sessionId);
+		deleteRoleDraft(sessionId);
+		deleteProjectDraft(sessionId);
+		delete state.projectProposalAcceptedBySessionId[sessionId];
+		await refreshSessions();
+		setHashRoute("landing");
+	} catch (err) {
+		console.error("[project-proposal] Failed to terminate assistant session:", err);
+	}
+	renderApp();
+}
+
+async function acceptProvisionalProjectProposalFromPanel(proposal: NonNullable<typeof state.activeProposals.project>): Promise<boolean> {
+	const { fields, sessionId: propSessionId } = proposal;
+	const projectId = projectIdForProjectProposal(propSessionId);
+	if (!projectId) return false;
+	if (!await promoteProjectProposal(projectId, typeof fields.name === "string" ? fields.name : "")) return false;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
+
+	setProjects(await fetchProjects());
+	void invalidateProjectProposalConfig(projectId);
+	delete state.activeProposals.project;
+	state.assistantHasProposal = false;
+	void closeSidePanelTab(proposalPanelTabId("project"), { sessionId: propSessionId });
+	deleteProjectDraft(propSessionId);
+	void deleteProposalFile(propSessionId, "project");
+	await terminateProjectAssistantSessionFromPanel(propSessionId);
+	return true;
+}
+
+async function acceptRegisteredProjectProposalFromPanel(proposal: NonNullable<typeof state.activeProposals.project>): Promise<boolean> {
+	const { fields, sessionId: propSessionId } = proposal;
+	const projectId = projectIdForProjectProposal(propSessionId);
+	if (!projectId) return false;
+	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
+	if (fieldNameStr) {
+		try {
+			const res = await gatewayFetch(`/api/projects/${projectId}`, {
+				method: "PUT",
+				body: JSON.stringify({ name: fieldNameStr }),
+			});
+			if (!res.ok) {
+				await showProjectProposalResponseError(res, "Failed to rename project", "Project rename failed");
+				return false;
+			}
+		} catch (err) {
+			showProjectProposalCaughtError("Failed to rename project", err);
+			return false;
+		}
+	}
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
+
+	setProjects(await fetchProjects());
+	void invalidateProjectProposalConfig(projectId);
+	state.projectProposalAcceptedBySessionId[propSessionId] = true;
+	delete state.activeProposals.project;
+	state.assistantHasProposal = false;
+	void closeSidePanelTab(proposalPanelTabId("project"), { sessionId: propSessionId });
+	saveProjectDraft(propSessionId);
+	void deleteProposalFile(propSessionId, "project");
+	notifyProjectProposalAccepted(propSessionId, fieldNameStr || "(unnamed)");
+	renderApp();
+	return true;
 }
 
 function projectProposalPanel() {
@@ -2806,8 +2976,7 @@ function projectProposalPanel() {
 					true,
 				);
 				if (!ok) return;
-				const { terminateProjectAssistantSession } = await import("./session-manager.js");
-				await terminateProjectAssistantSession(sessId);
+				await terminateProjectAssistantSessionFromPanel(sessId);
 			};
 			return html`
 				<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal" data-state="accepted">
@@ -2868,8 +3037,15 @@ function projectProposalPanel() {
 	}
 
 	const handleAccept = async () => {
-		const { acceptProjectProposal } = await import("./session-manager.js");
-		await acceptProjectProposal();
+		if (_projectProposalAcceptPending) return;
+		_projectProposalAcceptPending = true;
+		renderApp();
+		try {
+			await acceptProjectProposalFromPanel();
+		} finally {
+			_projectProposalAcceptPending = false;
+			renderApp();
+		}
 	};
 
 	const handleDismiss = () => {
@@ -2923,7 +3099,9 @@ function projectProposalPanel() {
 		return known?.label ?? key;
 	};
 
-	const acceptLabel = isRegistered ? "Apply Changes" : "Accept Project";
+	const acceptLabel = _projectProposalAcceptPending
+		? isRegistered ? "Applying…" : "Accepting…"
+		: isRegistered ? "Apply Changes" : "Accept Project";
 	const acceptDisabled = !fields.name?.trim();
 
 	const activeView = _projectProposalView;
@@ -2986,8 +3164,8 @@ function projectProposalPanel() {
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleAccept,
-					disabled: acceptDisabled || streaming,
-					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
+					disabled: acceptDisabled || streaming || _projectProposalAcceptPending,
+					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${_projectProposalAcceptPending ? html`<span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden="true"></span>` : icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
 				})}</span>
 			</div>
 		</div>

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
-import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
+import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
@@ -5411,8 +5411,11 @@ export class VerificationHarness {
 				// Run command in a subshell so its `exit` does not short-circuit our
 				// exit-file write; capture $?, write atomically, then propagate. The
 				// wrapper appends stdout/stderr to restart-surviving files and keeps
-				// those files tail-bounded while the gateway is down.
-				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( while kill -0 "$__bobbit_pid" 2>/dev/null; do ${trimLogs}; sleep 5; done ) & __bobbit_trim=$!; ( ${command}\n) >> ${qOut} 2>> ${qErr}; __ec=$?; kill "$__bobbit_hb" "$__bobbit_trim" 2>/dev/null; wait "$__bobbit_hb" 2>/dev/null; wait "$__bobbit_trim" 2>/dev/null; ${trimLogs}; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
+				// those files tail-bounded while the gateway is down. Helper loops are
+				// signalled but not waited on: on Windows/Git-Bash, waiting for a helper
+				// that is itself sleeping can deadlock the wrapper after command output is
+				// complete, leaving the gate "running" until an outer timeout/cancel.
+				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( while kill -0 "$__bobbit_pid" 2>/dev/null; do ${trimLogs}; sleep 5; done ) & __bobbit_trim=$!; ( ${command}\n) >> ${qOut} 2>> ${qErr}; __ec=$?; kill "$__bobbit_hb" "$__bobbit_trim" 2>/dev/null; ${trimLogs}; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
 			}
 
 			// Resolve a synchronously-thrown spawn error the same way we'd
@@ -5651,12 +5654,19 @@ export class VerificationHarness {
 			let settled = false;
 			let exitCode: number | null = null;
 			let exitSignal: NodeJS.Signals | null = null;
-			let closeGraceTimer: NodeJS.Timeout | undefined;
+			let closeGraceTimer: TimerHandle | undefined;
+			let exitFilePollTimer: TimerHandle | undefined;
+			// These timers are coupled to a real OS child process. Do not schedule them
+			// on the injected/manual gateway clock used by tests; if the child emits
+			// "exit" without a matching "close", virtual time would never advance and
+			// verification would remain running until the outer test times out.
+			const processClock = realClock;
 
 			const settleFromProcess = (code: number | null, signal: NodeJS.Signals | null) => {
 				if (settled) return;
 				settled = true;
-				if (closeGraceTimer) this.clock.clearTimeout(closeGraceTimer);
+				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
+				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
@@ -5695,10 +5705,34 @@ export class VerificationHarness {
 				resolve(withDiagnostics({ passed: code === 0, output: tail || (signal ? `exit signal ${signal}` : `exit code ${code}`) }));
 			};
 
+			if (useDetached && exitFile) {
+				// The durable wrapper writes the exit file after the command finishes.
+				// In some Windows/Git-Bash runs the wrapper has already written stdout +
+				// exit status, but Node never receives a prompt child close/exit event,
+				// leaving the gate running until the outer test timeout. Treat the exit
+				// file as the authoritative detached-command verdict on the live path too
+				// (the restart path already does this).
+				exitFilePollTimer = processClock.setInterval(() => {
+					if (settled || !exitFile) return;
+					let code: number | null = null;
+					try {
+						const raw = fs.readFileSync(exitFile, "utf8").trim();
+						const parsed = parseInt(raw, 10);
+						if (!Number.isFinite(parsed)) return;
+						code = parsed;
+					} catch {
+						return;
+					}
+					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
+					settleFromProcess(code, null);
+				}, 100);
+				exitFilePollTimer.unref?.();
+			}
+
 			child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
 				exitCode = code;
 				exitSignal = signal;
-				closeGraceTimer = this.clock.setTimeout(() => {
+				closeGraceTimer = processClock.setTimeout(() => {
 					if (settled) return;
 					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; treating the process exit as authoritative and attempting to kill any remaining subprocess group.`;
 					stderr += `${stderr ? "\n" : ""}${warning}`;
@@ -5716,7 +5750,8 @@ export class VerificationHarness {
 			child.on("error", (err: Error) => {
 				if (settled) return;
 				settled = true;
-				if (closeGraceTimer) this.clock.clearTimeout(closeGraceTimer);
+				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
+				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 				resolve(handleSpawnError(err));
@@ -5781,7 +5816,10 @@ export class VerificationHarness {
 			}
 		};
 
-		const interval = this.clock.setInterval(() => {
+		// File tailing follows bytes written by an OS process, not logical gateway
+		// time. Use wall-clock timers so live output still flows when tests inject
+		// a manual clock for deterministic gateway timers.
+		const interval = realClock.setInterval(() => {
 			if (stopped) return;
 			outPos = readNew(outFile, outPos, "stdout");
 			errPos = readNew(errFile, errPos, "stderr");
@@ -5790,7 +5828,7 @@ export class VerificationHarness {
 		return () => {
 			if (stopped) return;
 			stopped = true;
-			this.clock.clearInterval(interval);
+			realClock.clearInterval(interval);
 			// Final flush to catch the tail end of output written between the
 			// last poll and child exit.
 			outPos = readNew(outFile, outPos, "stdout");
