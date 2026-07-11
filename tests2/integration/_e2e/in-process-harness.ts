@@ -23,6 +23,8 @@
 process.env.BOBBIT_LLM_REVIEW_SKIP ??= "1";
 process.env.BOBBIT_HUMAN_SIGNOFF_SKIP ??= "1";
 
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import {
 	afterAll as vAfterAll,
 	afterEach as vAfterEach,
@@ -272,13 +274,32 @@ function hasVisibleDefaultProject(gw: GatewayFixture): boolean {
 	catch { return false; }
 }
 
+function projectConfigFileFingerprint(rootPath: unknown): string {
+	if (typeof rootPath !== "string" || rootPath.length === 0) return "no-root";
+	try {
+		const stat = statSync(join(rootPath, ".bobbit", "config", "project.yaml"));
+		return `${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+	} catch (err) {
+		const code = (err as { code?: unknown })?.code;
+		if (code === "ENOENT") return "missing";
+		const message = err instanceof Error ? err.message : String(err);
+		return `unknown:${message}`;
+	}
+}
+
 function defaultProjectFingerprint(gw: GatewayFixture): string {
 	try {
 		const ctx = findVisibleDefaultContext(gw);
 		if (!ctx) return "missing";
 		const project = ctx.project ?? {};
-		const cfg = ctx.projectConfigStore ?? gw.projectContextManager.getOrCreate?.(project.id)?.projectConfigStore;
-		try { cfg?.reload?.(); } catch { /* pick up out-of-band project.yaml writes when cheap */ }
+		const cfg = ctx.projectConfigStore;
+		// Keep this path mostly in-memory. The harness calls it from every
+		// beforeAll/beforeEach/afterEach; forcing project.yaml reload+YAML parse here
+		// adds enough synchronous filesystem work under full-suite concurrency to
+		// starve freshly booting gateway forks and trip hook timeouts. A cheap file
+		// stat still detects out-of-band project.yaml rewrites so cleanup can take the
+		// conservative healing path, while API-driven mutations are caught by the
+		// in-memory store fields below.
 		return `ok:${stableStringify({
 			project: {
 				id: project.id,
@@ -286,7 +307,8 @@ function defaultProjectFingerprint(gw: GatewayFixture): string {
 				hidden: !!project.hidden,
 				rootPath: project.rootPath,
 			},
-			config: cfg?.getWithDefaults?.() ?? cfg?.getAll?.() ?? null,
+			configFile: projectConfigFileFingerprint(project.rootPath),
+			config: cfg?.getAll?.() ?? null,
 			components: cfg?.getComponents?.() ?? null,
 			workflows: cfg?.getWorkflows?.() ?? null,
 		})}`;
