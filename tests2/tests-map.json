@@ -80,6 +80,10 @@
       "reason": "Part 1+2 of 'Hide/Disable PR & Hindsight': fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; plus hindsight is absent from the built-in group and from /api/marketplace/installed. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts."
     },
     {
+      "path": "tests2/core/pr-walkthrough-local-resolver.test.ts",
+      "reason": "Native v2 core tests for PR walkthrough local diff resolver error/truncation/empty-diff behavior moved out of the route-level integration suite."
+    },
+    {
       "path": "tests2/core/bobbit-tool-credentials.test.ts",
       "reason": "bobbit gateway tool suite: credential/URL resolution — env creds, state-file fallback, absent-creds (logs + no registration, no throw), baseUrl trailing-slash trimming."
     },
