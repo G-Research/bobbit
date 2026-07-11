@@ -165,6 +165,8 @@ let _cachedWorkflows: Workflow[] = [];
 let _selectedWorkflowId = "";
 let _goalSandboxed = false;
 let _goalAutoStartTeam = true;
+/** In-flight flag for assistant goal-preview submission. Mirrors _proposalSaving for the regular proposal panel. */
+let _goalPreviewSaving = false;
 let _staffSandboxed = false;
 let _assistantEnabledOptionalSteps: string[] = [];
 
@@ -445,6 +447,7 @@ const STREAMING_BORDER = "border-l-2 border-l-primary/70 animate-pulse";
 // not virtualised).
 const goalSpecPreviewRef = createRef<HTMLDivElement>();
 const goalSpecTextareaRef = createRef<HTMLTextAreaElement>();
+const goalCreateButtonContainerRef = createRef<HTMLSpanElement>();
 const rolePromptPreviewRef = createRef<HTMLDivElement>();
 const rolePromptTextareaRef = createRef<HTMLTextAreaElement>();
 // Inline-comments wrapper refs (one per commentable proposal panel).
@@ -1081,9 +1084,16 @@ function renderGoalForm(config: GoalFormConfig) {
 	const sandboxAvailable = !!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists);
 	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
 
+	const createBusy = !!config.saving;
+	const createDisabled = (config.createDisabled ?? !config.title.trim()) || createBusy || !!config.streaming || noWorkflows || workflowProblem;
+
 	queueMicrotask(() => {
 		reconcileFollowTail(goalSpecPreviewRef.value);
 		reconcileFollowTail(goalSpecTextareaRef.value);
+		// mini-lit's Button helper does not expose aria-busy; stamp it onto the
+		// generated button so the shared goal form stays accessible while saving.
+		const createButton = goalCreateButtonContainerRef.value?.querySelector("button");
+		if (createButton) createButton.setAttribute("aria-busy", createBusy ? "true" : "false");
 	});
 
 	// When viewing a historical Goal (vN) tab, show that revision's number
@@ -1317,13 +1327,15 @@ function renderGoalForm(config: GoalFormConfig) {
 				}) : ""}
 				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
 				<span
+					${ref(goalCreateButtonContainerRef)}
 					data-testid="proposal-primary-submit"
+					aria-busy=${createBusy ? "true" : "false"}
 					title=${noWorkflows ? "This project has no workflows yet — run the project assistant first." : workflowErrorMessage ? workflowErrorMessage : ""}
 				>${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows || workflowProblem,
-					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
+					disabled: createDisabled,
+					children: createBusy ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
 				})}</span>
 				</div>
 			</div>
@@ -1699,7 +1711,7 @@ function goalPreviewPanel() {
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
-		if (!trimmedTitle) return;
+		if (!trimmedTitle || _goalPreviewSaving) return;
 		if (!state.previewProjectId) {
 			showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
 			return;
@@ -1753,6 +1765,9 @@ function goalPreviewPanel() {
 			? _proposalMaxConcurrentChildren
 			: undefined;
 
+		_goalPreviewSaving = true;
+		renderApp();
+
 		// Await the server FIRST. If it rejects, leave the assistant session,
 		// draft, gateway.sessionId, and form state intact so the user can edit
 		// (e.g. change workflow) and try again. See goal spec §1.
@@ -1779,13 +1794,18 @@ function goalPreviewPanel() {
 		} catch (err) {
 			const { message, code, stack } = errorDetails(err);
 			showConnectionError("Failed to create goal", message, { code, stack });
+			_goalPreviewSaving = false;
+			renderApp();
 			return;
 		}
 		if (!goal) {
 			// createGoal() returns falsy on certain server errors (the helper
 			// already surfaces a toast). Preserve the assistant either way.
+			_goalPreviewSaving = false;
+			renderApp();
 			return;
 		}
+		_goalPreviewSaving = false;
 
 		const closeProposalTab = closeCurrentProposalPanel("goal", sessionId);
 
@@ -1804,6 +1824,7 @@ function goalPreviewPanel() {
 		_selectedWorkflowId = "";
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
+		_goalPreviewSaving = false;
 		_assistantEnabledOptionalSteps = [];
 		_proposalParentGoalId = "";
 		_proposalSubgoalsAllowed = null;
@@ -1934,10 +1955,11 @@ function goalPreviewPanel() {
 				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
 				onCwdHighlight: (i) => { state.cwdHighlightIndex = i; },
 				onCreate: handleCreateGoal,
+				saving: _goalPreviewSaving,
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
 				createDisabled: (() => {
-					if (assistantWorkflowBlocked) return true;
+					if (_goalPreviewSaving || assistantWorkflowBlocked) return true;
 					if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
 						const pDepth = nestingDepthOf(_proposalParentGoalId, state.goals);
 						if (pDepth + 1 > maxNestingDepth) return true;
