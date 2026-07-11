@@ -35,6 +35,7 @@
     "test:e2e:v2": "npm run build --silent && node scripts/testing-v2/run-e2e-v2.mjs",
     "test:v2:coverage-delta": "node scripts/testing-v2/coverage-delta.mjs",
     "test:v2:browser-chaos": "node scripts/testing-v2/browser-chaos.mjs",
+    "test:v2:profile-hooks": "node scripts/testing-v2/profile-hooks.mjs",
     "test:unit": "npm run test:v2:core",
     "test:browser": "npm run test:v2:browser",
     "test:bundle": "npm run build:ui && vitest run --config vitest.config.ts --silent=passed-only tests2/core/bundle-size.test.ts",

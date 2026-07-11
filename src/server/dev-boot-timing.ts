@@ -25,6 +25,15 @@ const KEEP_LINES = 300;
 /** Reject samples whose serialized form exceeds this (defends the disk). */
 const MAX_SAMPLE_BYTES = 64 * 1024; // 64 KB
 
+export interface BootTimingSinkOptions {
+	/** Test seam: production default is MAX_FILE_BYTES. */
+	maxFileBytes?: number;
+	/** Test seam: production default is KEEP_LINES. */
+	keepLines?: number;
+	/** Test seam: production default is MAX_SAMPLE_BYTES. */
+	maxSampleBytes?: number;
+}
+
 export interface BootTimingMark { name: string; t: number; }
 
 /** One client-reported reload sample. Shape is advisory — extra keys are kept. */
@@ -61,7 +70,11 @@ function filePath(stateDir: string): string {
  * Best-effort: filesystem errors are swallowed — diagnostics must never break
  * a reload. Throws only on a programmer error (missing stateDir).
  */
-export function recordBootTiming(sample: unknown, stateDir: string = bobbitStateDir()): string | null {
+export function recordBootTiming(
+	sample: unknown,
+	stateDir: string = bobbitStateDir(),
+	options: BootTimingSinkOptions = {},
+): string | null {
 	if (!stateDir) throw new Error("recordBootTiming: stateDir is required");
 	if (!sample || typeof sample !== "object" || Array.isArray(sample)) return null;
 
@@ -72,13 +85,13 @@ export function recordBootTiming(sample: unknown, stateDir: string = bobbitState
 	} catch {
 		return null;
 	}
-	if (line.length > MAX_SAMPLE_BYTES) return null;
+	if (line.length > (options.maxSampleBytes ?? MAX_SAMPLE_BYTES)) return null;
 
 	const target = filePath(stateDir);
 	try {
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.appendFileSync(target, line + "\n", "utf-8");
-		trimIfNeeded(target);
+		trimIfNeeded(target, options);
 		return target;
 	} catch {
 		return null;
@@ -86,17 +99,17 @@ export function recordBootTiming(sample: unknown, stateDir: string = bobbitState
 }
 
 /** Keep only the last KEEP_LINES entries once the file passes MAX_FILE_BYTES. */
-function trimIfNeeded(target: string): void {
+function trimIfNeeded(target: string, options: BootTimingSinkOptions = {}): void {
 	let size: number;
 	try {
 		size = fs.statSync(target).size;
 	} catch {
 		return;
 	}
-	if (size <= MAX_FILE_BYTES) return;
+	if (size <= (options.maxFileBytes ?? MAX_FILE_BYTES)) return;
 	try {
 		const lines = fs.readFileSync(target, "utf-8").split("\n").filter((l) => l.trim().length > 0);
-		const kept = lines.slice(-KEEP_LINES);
+		const kept = lines.slice(-(options.keepLines ?? KEEP_LINES));
 		fs.writeFileSync(target, kept.join("\n") + "\n", "utf-8");
 	} catch {
 		/* best-effort */
