@@ -33,29 +33,29 @@ describe("headset accessory", () => {
 	it("is an addsHeight hat seated like the crown (yOffset 2)", () => {
 		assert.equal(ACCESSORY_HEADSET.addsHeight, true, "band rises above the head");
 		assert.equal(ACCESSORY_HEADSET.yOffset, 2);
-		assert.equal(ACCESSORY_HEADSET.blobYAdjust, -1);
+		assert.equal(ACCESSORY_HEADSET.blobYAdjust, 2);
 	});
 
 	it("has a headband with BOTH a top and its own bottom outline", () => {
-		// Top outline over the crown at row -2.
-		assert.ok(has(4, -2, "#000") && has(5, -2, "#000"), "band top outline at row -2");
-		// Dedicated bottom outline under the crown at row 0 (drawn over the head
+		// Top outline over the crown at row -1.
+		assert.ok(has(4, -1, "#000") && has(5, -1, "#000"), "band top outline at row -1");
+		// Dedicated bottom outline under the crown at row 1 (drawn over the head
 		// so it tracks the fractional seat rather than borrowing the head edge).
 		assert.ok(
-			has(3, 0, "#000") && has(4, 0, "#000") && has(5, 0, "#000") && has(6, 0, "#000"),
-			"band bottom outline at row 0",
+			has(4, 1, "#000") && has(5, 1, "#000") && has(6, 1, "#000"),
+			"band bottom outline at row 1",
 		);
 	});
 
 	it("has two charcoal ear cups over the eye row", () => {
 		// Left cushion highlight + right cushion highlight on row 4.
-		assert.ok(has(0, 4, "#4b5563") && has(9, 4, "#4b5563"), "cushion highlights at row 4");
-		assert.ok(has(1, 4, "#374151") && has(8, 4, "#374151"), "cushion bodies at row 4");
+		assert.ok(has(1, 4, "#4b5563") && has(9, 4, "#4b5563"), "cushion highlights at row 4");
+		assert.ok(has(0, 4, "#374151") && has(8, 4, "#374151"), "cushion bodies at row 4");
 	});
 
 	it("has a boom mic ending in an orange foam windscreen", () => {
-		assert.ok(has(4, 6, "#f97316"), "orange foam at the mouth");
-		assert.ok(has(7, 7, "#374151") && has(8, 7, "#374151"), "boom arm from the right cup");
+		assert.ok(has(4, 7, "#f97316"), "orange foam at the mouth");
+		assert.ok(has(5, 7, "#1f2937") && has(6, 7, "#1f2937"), "boom arm from the right cup");
 	});
 
 	it("uses only neutral greys + the foam pop (stays neutral across hues)", () => {
@@ -73,8 +73,11 @@ describe("headset accessory", () => {
 		const css = read("src/ui/app.css");
 		assert.match(css, /\.bobbit-headset \.bobbit-blob__headset \{/, "app.css overlay rule");
 		assert.match(css, /\.bobbit-blob--archived \.bobbit-blob__headset/, "archived animation-kill list");
-		// Seats half a sprite-pixel DOWN via the independent translate lever.
-		assert.match(css, /\.bobbit-headset \.bobbit-blob__headset[\s\S]*?translate:\s*0 2px/, "downward seat translate");
+		// Seats a quarter sprite-pixel DOWN via the independent translate lever.
+		assert.match(css, /\.bobbit-headset \.bobbit-blob__headset[\s\S]*?translate:\s*0 1px/, "downward seat translate");
+		assert.match(css, /blob-headset-shadow/, "headset hides the far/right ear cup during right-facing busy phases");
+		assert.match(css, /Looking up-right[\s\S]*?60% \{ box-shadow:[\s\S]*?0px 6px 0 #000,[\s\S]*?1px 6px 0 #000;\r?\n\t\}/, "headset hides the far/right ear cup during up-right busy phase");
+		assert.doesNotMatch(css, /blob-headset-idle-shadow/, "sleeping idle headset should not hide either ear cup");
 
 		// DOM templates (chat blob + idle blob, streaming container).
 		const render = read("src/ui/bobbit-render.ts");
