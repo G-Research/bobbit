@@ -4088,11 +4088,25 @@ export class VerificationHarness {
 		| { type: "failed"; output: string }
 	> {
 		let lastError = "process not running";
-		const sessionManager = this.sessionManager as any;
+		const sessionManager = this.sessionManager!;
+		const deadline = this.clock.now() + Math.max(1, args.timeoutMs);
+		const remainingMs = () => Math.max(0, deadline - this.clock.now());
+		let attempts = 0;
+
 		for (let attempt = 1; attempt <= MAX_VERIFIER_SAME_SESSION_RESURRECTIONS; attempt++) {
-			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history.`);
+			attempts = attempt;
+			const remainingBeforeAttempt = remainingMs();
+			if (remainingBeforeAttempt <= 0) {
+				lastError = `verification timeout budget exhausted before same-session resurrection attempt ${attempt}`;
+				break;
+			}
+
+			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history; remainingBudgetMs=${remainingBeforeAttempt}.`);
 			try {
-				if (typeof sessionManager.ensureSessionAlive === "function") {
+				const existing = sessionManager.getSession(args.sessionId);
+				if (existing && existing.status !== "terminated" && typeof sessionManager.restartAgent === "function") {
+					await sessionManager.restartAgent(args.sessionId);
+				} else if (typeof sessionManager.ensureSessionAlive === "function") {
 					await sessionManager.ensureSessionAlive(args.sessionId);
 				} else if (typeof sessionManager.restartAgent === "function") {
 					await sessionManager.restartAgent(args.sessionId);
@@ -4100,7 +4114,7 @@ export class VerificationHarness {
 					throw new Error("Session manager does not expose same-session resurrection");
 				}
 
-				const session = sessionManager.getSession?.(args.sessionId);
+				const session = sessionManager.getSession(args.sessionId);
 				if (!session?.rpcClient) throw new Error("Session missing after same-session resurrection");
 
 				if (typeof session.rpcClient.promptWhenReady === "function") {
@@ -4109,45 +4123,67 @@ export class VerificationHarness {
 					await session.rpcClient.prompt(args.prompt);
 				}
 
-				const started = await this.sessionManager!.waitForStreaming(args.sessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS)
+				const streamingBudget = Math.min(REVIEWER_REMINDER_STREAM_SETTLE_MS, remainingMs());
+				if (streamingBudget <= 0) {
+					lastError = "verification timeout budget exhausted after same-session resurrection prompt dispatch";
+					break;
+				}
+				const started = await sessionManager.waitForStreaming(args.sessionId, streamingBudget)
 					.then(() => true)
 					.catch((err: any) => {
 						lastError = (err as Error)?.message || String(err);
 						return false;
 					});
 
+				const idleBudget = remainingMs();
+				if (idleBudget <= 0) {
+					lastError = "verification timeout budget exhausted waiting for resurrected verifier";
+					break;
+				}
 				try {
 					const finished = await Promise.race([
 						args.resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-						this.sessionManager!.waitForIdle(args.sessionId, args.timeoutMs).then(() => ({ type: "idle" as const })),
+						sessionManager.waitForIdle(args.sessionId, idleBudget).then(() => ({ type: "idle" as const })),
 					]);
 					if (finished.type === "result") return finished;
 				} catch (err: any) {
 					lastError = (err as Error)?.message || String(err);
-					continue;
+					if (isVerifierProcessDeathMessage(lastError)) continue;
+					break;
 				}
 
-				const recoveryResult = await this.waitForReviewerErroredTurnRecovery(args.sessionId, args.resultPromise, args.timeoutMs, args.stepName);
+				const recoveryBudget = remainingMs();
+				if (recoveryBudget <= 0) {
+					lastError = "verification timeout budget exhausted after resurrected verifier went idle";
+					break;
+				}
+				const recoveryResult = await this.waitForReviewerErroredTurnRecovery(args.sessionId, args.resultPromise, recoveryBudget, args.stepName);
 				if (recoveryResult.type === "result") return recoveryResult;
 				if (recoveryResult.type === "errored") {
 					lastError = recoveryResult.output;
-					continue;
+					if (isVerifierProcessDeathMessage(lastError)) continue;
+					break;
 				}
 
 				if (started) {
-					const late = await raceResultWithLateVerdictGrace(this.clock, args.resultPromise, REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS);
-					if (late.type === "result") return late;
+					const lateBudget = Math.min(REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS, remainingMs());
+					if (lateBudget > 0) {
+						const late = await raceResultWithLateVerdictGrace(this.clock, args.resultPromise, lateBudget);
+						if (late.type === "result") return late;
+					}
 				}
 
-				lastError = "verifier went idle without verification_result after same-session resurrection";
+				lastError = "verifier went idle without verification_result after same-session resurrection; not issuing duplicate resurrection prompts to an alive idle session";
+				break;
 			} catch (err: any) {
 				lastError = (err as Error)?.message || String(err);
+				if (!isVerifierProcessDeathMessage(lastError) && !isRetryableLlmReviewRecovery(lastError)) break;
 			}
 		}
 
 		return {
 			type: "failed",
-			output: `${args.label} verifier process could not be recovered after ${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} same-session resurrection attempts: ${lastError}`,
+			output: `${args.label} verifier process could not be recovered after ${attempts} same-session resurrection attempt(s): ${lastError}`,
 		};
 	}
 
