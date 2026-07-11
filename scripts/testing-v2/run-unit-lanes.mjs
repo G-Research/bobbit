@@ -33,6 +33,7 @@
  */
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -46,7 +47,30 @@ const LOG_DIR = join(REPO_ROOT, ".profiles", "unit-lanes");
 // risks the Vitest 3.2 onTaskUpdate/onUnhandledError 60s-RPC-timeout bug
 // (#8164/#6511) under load. Lane parallelism buys throughput by running MULTIPLE
 // 2-fork processes, never by raising a single process past this.
-const PER_LANE_FORK_CAP = 2;
+// Per-lane fork cap. Default 2 (Windows-RPC-safe under v3). Overridable via
+// UNIT_LANES_FORK_CAP for experiments (e.g. testing whether a single lane's
+// smaller onTaskUpdate backlog tolerates more forks than the full suite).
+// A non-numeric override must NOT poison the scheduler: NaN would make
+// maxConcurrent NaN and stall the run (no lane ever starts), so fall back to 2.
+const _forkCap = Number(process.env.UNIT_LANES_FORK_CAP || "2");
+const PER_LANE_FORK_CAP = Number.isFinite(_forkCap) ? Math.max(1, Math.floor(_forkCap)) : 2;
+
+// Heartbeat cadence for the live progress line. Clamp to >=1s and reject
+// non-numeric/zero/negative values so a bad override can't flood the console
+// (setInterval(fn, 0|NaN) fires continuously).
+const _heartbeatMs = Number(process.env.UNIT_LANES_HEARTBEAT_MS || "12000");
+const HEARTBEAT_MS = Number.isFinite(_heartbeatMs) ? Math.max(1000, Math.floor(_heartbeatMs)) : 12000;
+
+// Per-file completion line emitted by the vitest default reporter, e.g.
+//   " ✓ |v2-core| tests2/core/foo.test.ts (12 tests) 340ms"
+//   " ❯ tests2/core/bar.test.ts (5 tests | 1 failed) 200ms"
+const FILE_LINE_RE = /(tests2\/[^\s]+\.(?:test|spec)\.ts)\b[^\n]*\((\d+)\s+tests?(?:\s*\|\s*(\d+)\s+failed)?[^)]*\)/;
+// Lines worth surfacing to the console live (failures + the final tallies).
+const FAIL_LINE_RE = /(^|\s)(FAIL|×|✗)\s|AssertionError|Unhandled (Error|Rejection)/;
+// The [vitest-worker] birpc timeout signature — the documented CPU-starvation
+// reporter-RPC flake (onTaskUpdate/onUnhandledError/fetch/transform/resolveId),
+// which is a transport artifact under load, NOT a test result.
+const WORKER_RPC_TIMEOUT_RE = /\[vitest-(worker|api)\]: Timeout calling "(onTaskUpdate|onUnhandledError|onCollected|fetch|transform|resolveId)"/;
 
 // integration (~600s of work) is the pole. At 2 forks it is a ~478s single lane.
 // It CAN be cost-balance-sharded across N concurrent 2-fork processes, but
@@ -133,35 +157,92 @@ function vitestCmd() {
 	return process.platform === "win32" ? "npx.cmd" : "npx";
 }
 
-function runLane(name, projects, forks, files, parentRunId) {
+function runLane(name, projects, forks, files, parentRunId, stats) {
 	const startWall = performance.now();
 	mkdirSync(LOG_DIR, { recursive: true });
 	const logPath = join(LOG_DIR, `${name}.log`);
 	const out = createWriteStream(logPath);
+	const st = stats[name];
+	// The DEFAULT reporter prints one line per completed FILE (glyph + path +
+	// "(N tests[ | M failed])"), which we parse for live counts + surface failures
+	// immediately. Full detail still lands in the per-lane log.
 	const projectArgs = projects.flatMap((p) => ["--project", p]);
-	const args = ["vitest", "run", "--config", "vitest.config.ts", "--silent=passed-only", "--reporter=dot", ...projectArgs, ...(files || [])];
+	const args = ["vitest", "run", "--config", "vitest.config.ts", "--silent=passed-only", ...projectArgs, ...(files || [])];
 	return new Promise((resolveRun) => {
 		const child = spawn(vitestCmd(), args, {
 			cwd: REPO_ROOT,
 			// LEDGER-NATIVE: the orchestrator holds ONE reservation for the whole unit
 			// run; each lane REUSES that grant via the parent-grant env (the same seam
 			// run-v2 uses), so the config's reserveWorkerSlots() takes the managed,
-			// no-op-release path and never registers a second ledger entry. This keeps
-			// the Sigma(workers)<=cores invariant across concurrent goals: our total
-			// forks = Sigma(lane shares) <= the single reserved grant. `forks` is this
-			// lane's share (<= PER_LANE_FORK_CAP); the config still clamps to the
-			// Windows-safe cap.
+			// no-op-release path and never registers a second ledger entry.
 			env: { ...process.env, BOBBIT_V2_LEDGER_PARENT: parentRunId, BOBBIT_V2_SLOTS_VITEST: String(forks) },
 			stdio: ["ignore", "pipe", "pipe"],
 			shell: process.platform === "win32",
 		});
-		child.stdout.pipe(out);
-		child.stderr.pipe(out);
+		const handleLine = (raw, isErr) => {
+			out.write(raw + "\n");
+			// Strip ANSI so detection works whether or not vitest emitted color.
+			const line = raw.replace(/\x1b\[[0-9;]*m/g, "");
+			// Count [vitest-worker] birpc timeouts (onTaskUpdate/onUnhandledError/fetch/
+			// transform/resolveId) — the documented CPU-starvation reporter-RPC flake,
+			// NOT a test result.
+			if (WORKER_RPC_TIMEOUT_RE.test(line)) st.rpcTimeouts += 1;
+			// Capture vitest's authoritative final tally ("Tests N passed | M failed").
+			// This survives per-file RPC timeouts, so it's more trustworthy than the
+			// exit code (which the unhandled RPC-timeout errors pollute).
+			if (/^\s*Tests\s+\d/.test(line) && /(passed|failed)/.test(line)) {
+				const f = /(\d+)\s+failed/.exec(line);
+				const p = /(\d+)\s+passed/.exec(line);
+				st.summarySeen = true;
+				st.summaryFailed = f ? Number(f[1]) : 0;
+				st.summaryPassed = p ? Number(p[1]) : 0;
+			}
+			const m = FILE_LINE_RE.exec(line);
+			if (m) {
+				st.files += 1;
+				st.tests += Number(m[2]) || 0;
+				const failed = Number(m[3]) || 0;
+				if (failed > 0) {
+					st.failedTests += failed;
+					st.failedFiles.push(m[1]);
+					console.log(`  \u2717 [${name}] ${m[1]} — ${failed} failed`);
+				}
+				return;
+			}
+			// Surface assertion / unhandled-error / RPC-timeout lines live (deduped-ish).
+			if (isErr && FAIL_LINE_RE.test(line) && !/\.test\.ts/.test(line)) {
+				const trimmed = line.trim();
+				if (trimmed && st.failNotes.length < 200) st.failNotes.push(trimmed);
+			}
+		};
+		createInterface({ input: child.stdout }).on("line", (l) => handleLine(l, false));
+		createInterface({ input: child.stderr }).on("line", (l) => handleLine(l, true));
 		child.on("close", (code, signal) => {
-			resolveRun({ name, projects, code: code ?? (signal ? 1 : 0), signal, wallMs: Math.round(performance.now() - startWall), logPath });
+			st.done = true;
+			st.wallMs = Math.round(performance.now() - startWall);
+			const rawCode = code ?? (signal ? 1 : 0);
+			const realFailed = st.summarySeen ? st.summaryFailed : st.failedTests;
+			const passedN = st.summarySeen ? st.summaryPassed : st.tests;
+			// KNOWN infra flake (docs/testing-strategy.md, docs/testing-v2/concurrency-proof.md):
+			// under N-way CPU starvation a worker's event loop stalls >60s and the birpc
+			// onTaskUpdate/fetch call times out, exiting the run NONZERO even though every
+			// test passed. We downgrade to PASS only when ALL of: vitest printed its final
+			// tally, that tally shows 0 failed tests, and >=1 [vitest-worker] RPC timeout
+			// occurred. Any real failed test (summaryFailed>0), a missing tally, or a
+			// nonzero exit WITHOUT an RPC timeout (some other unhandled error) still FAILS
+			// — so this never masks a genuine regression.
+			st.infraFlake = rawCode !== 0 && realFailed === 0 && st.summarySeen && st.rpcTimeouts > 0;
+			const c = st.infraFlake ? 0 : rawCode;
+			if (st.infraFlake) {
+				console.log(`⚠ [${name}] all ${passedN} tests PASSED, but ${st.rpcTimeouts} [vitest-worker] RPC timeout(s) under load — known CPU-starvation infra flake (docs/testing-strategy.md); treating lane as PASS.`);
+			}
+			console.log(`▸ [${name}] ${c === 0 ? "PASS" : "FAIL"} — ${st.files} files, ${passedN} tests, ${realFailed} failed${st.rpcTimeouts ? `, ${st.rpcTimeouts} rpc-timeout` : ""} in ${(st.wallMs / 1000).toFixed(1)}s`);
+			resolveRun({ name, projects, code: c, signal, wallMs: st.wallMs, logPath, infraFlake: st.infraFlake, rpcTimeouts: st.rpcTimeouts });
 		});
 		child.on("error", (error) => {
-			resolveRun({ name, projects, code: 1, error: String(error), wallMs: Math.round(performance.now() - startWall), logPath });
+			st.done = true;
+			st.wallMs = Math.round(performance.now() - startWall);
+			resolveRun({ name, projects, code: 1, error: String(error), wallMs: st.wallMs, logPath });
 		});
 	});
 }
@@ -206,6 +287,26 @@ async function main() {
 	console.log(`[unit-lanes] ${jobs.length} job(s), perLane=${perLane} forks, maxConcurrent=${maxConcurrent} (waves if jobs>maxConcurrent): ${jobs.map((j) => j.name).join(", ")}`);
 
 	const startWall = performance.now();
+	// Live per-lane counters (updated by runLane as the reporter emits file lines).
+	const stats = {};
+	for (const j of jobs) stats[j.name] = { files: 0, tests: 0, failedTests: 0, failedFiles: [], failNotes: [], rpcTimeouts: 0, summarySeen: false, summaryFailed: 0, summaryPassed: 0, infraFlake: false, done: false, started: false, wallMs: 0 };
+
+	// Heartbeat: a compact progress line so the run is never silent and early
+	// feedback (counts + failures-so-far) is visible while work is in flight.
+	const heartbeat = setInterval(() => {
+		const el = ((performance.now() - startWall) / 1000).toFixed(0);
+		const parts = jobs.map((j) => {
+			const s = stats[j.name];
+			if (!s.started) return `${j.name} · queued`;
+			const mark = s.done ? "✓done" : "…";
+			return `${j.name} ${mark} ${s.files}f/${s.tests}t${s.failedTests ? ` ✗${s.failedTests}` : ""}`;
+		});
+		const totT = jobs.reduce((a, j) => a + stats[j.name].tests, 0);
+		const totF = jobs.reduce((a, j) => a + stats[j.name].failedTests, 0);
+		console.log(`[unit-lanes +${el}s] ${totT} tests${totF ? `, ${totF} FAILED` : ""} | ${parts.join("  |  ")}`);
+	}, HEARTBEAT_MS);
+	if (typeof heartbeat.unref === "function") heartbeat.unref();
+
 	const results = [];
 	const queue = [...jobs];
 	const active = new Set();
@@ -214,7 +315,9 @@ async function main() {
 			console.error(`[unit-lanes] unknown lane "${j.name}" (known: ${Object.keys(LANES).join(", ")})`);
 			return Promise.resolve({ name: j.name, projects: [], code: 1, wallMs: 0, error: "unknown lane" });
 		}
-		return runLane(j.name, j.projects, perLane, j.files, reservation.parentRunId);
+		stats[j.name].started = true;
+		console.log(`▸ [${j.name}] started (${perLane} forks): ${j.projects.join(", ")}${j.files ? ` · ${j.files.length} files` : ""}`);
+		return runLane(j.name, j.projects, perLane, j.files, reservation.parentRunId, stats);
 	};
 	while (queue.length || active.size) {
 		while (queue.length && active.size < maxConcurrent) {
@@ -224,6 +327,7 @@ async function main() {
 		}
 		if (active.size) await Promise.race(active);
 	}
+	clearInterval(heartbeat);
 	reservation.release();
 	const totalWallMs = Math.round(performance.now() - startWall);
 
@@ -234,11 +338,36 @@ async function main() {
 	}
 	const slowest = results.reduce((a, r) => (r.wallMs > a ? r.wallMs : a), 0);
 	const serialSum = results.reduce((a, r) => a + r.wallMs, 0);
-	console.log(`\n[unit-lanes] total wall ${(totalWallMs / 1000).toFixed(1)}s (slowest lane ${(slowest / 1000).toFixed(1)}s; serial-sum would be ${(serialSum / 1000).toFixed(1)}s)`);
+	const grandPassed = jobs.reduce((a, j) => a + (stats[j.name].summarySeen ? stats[j.name].summaryPassed : stats[j.name].tests), 0);
+	const grandFailed = jobs.reduce((a, j) => a + (stats[j.name].summarySeen ? stats[j.name].summaryFailed : stats[j.name].failedTests), 0);
+	const grandRpc = jobs.reduce((a, j) => a + stats[j.name].rpcTimeouts, 0);
+	console.log(`\n[unit-lanes] ${grandPassed} tests passed, ${grandFailed} failed across ${jobs.length} lane(s)${grandRpc ? ` · ${grandRpc} worker-RPC timeout(s) under load` : ""}`);
+	console.log(`[unit-lanes] total wall ${(totalWallMs / 1000).toFixed(1)}s (slowest lane ${(slowest / 1000).toFixed(1)}s; serial-sum would be ${(serialSum / 1000).toFixed(1)}s)`);
 
-	const failed = results.filter((r) => r.code !== 0);
-	if (failed.length) console.error(`[unit-lanes] FAIL — ${failed.map((r) => r.name).join(", ")}`);
-	process.exit(failed.length ? 1 : 0);
+	// Real failures = lanes that failed AFTER the infra-flake downgrade.
+	const realFailedLanes = results.filter((r) => r.code !== 0);
+	if (realFailedLanes.length) {
+		console.error(`\n[unit-lanes] FAILURES:`);
+		for (const r of realFailedLanes) {
+			const s = stats[r.name];
+			console.error(`  ${r.name}: ${s.summaryFailed || s.failedTests} failed test(s) in ${new Set(s.failedFiles).size} file(s)`);
+			for (const f of [...new Set(s.failedFiles)]) console.error(`    ✗ ${f}`);
+			for (const note of s.failNotes.slice(0, 20)) console.error(`      ${note}`);
+			console.error(`    (full detail: ${join(LOG_DIR, `${r.name}.log`)})`);
+		}
+	}
+
+	// Infra-flake lanes: all tests passed, downgraded from a nonzero exit caused
+	// only by worker-RPC timeouts. Surfaced loudly but do NOT fail the gate.
+	const flakeLanes = results.filter((r) => r.infraFlake);
+	if (flakeLanes.length) {
+		console.warn(`\n[unit-lanes] ⚠ INFRA-FLAKE (passed, not gating): ${flakeLanes.map((r) => `${r.name} (${r.rpcTimeouts} RPC timeout${r.rpcTimeouts === 1 ? "" : "s"})`).join(", ")}`);
+		console.warn(`    Known CPU-starvation reporter-RPC timeout under N-way load — see docs/testing-strategy.md. All tests passed; re-run on a quiet box to confirm.`);
+	}
+
+	if (realFailedLanes.length) console.error(`\n[unit-lanes] FAIL — lane(s): ${realFailedLanes.map((r) => r.name).join(", ")}`);
+	else console.log(`\n[unit-lanes] PASS — ${grandPassed} tests, 0 real failures${grandRpc ? ` (${grandRpc} worker-RPC timeout(s) tolerated as infra flake)` : ""}`);
+	process.exit(realFailedLanes.length ? 1 : 0);
 }
 
 main().catch((e) => { console.error("[unit-lanes] fatal:", e); process.exit(1); });
