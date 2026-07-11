@@ -31,6 +31,7 @@ import {
 	normalizeAgentDirInput,
 } from "./bobbit-dir.js";
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
+import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
@@ -1821,6 +1822,18 @@ export interface GatewayConfig {
 }
 
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
+	// Construction checkpoint timer — createGateway runs fully synchronously
+	// before start(), and earlier profiling showed ~19s of unattributed time
+	// here. Log cumulative elapsed at each major subsystem so the heavy step is
+	// visible. Cheap; best-effort file tee via bootLog.
+	const __ckT0 = Date.now();
+	let __ckLast = __ckT0;
+	const ck = (label: string): void => {
+		const now = Date.now();
+		const delta = now - __ckLast;
+		__ckLast = now;
+		if (delta >= SLOW_PHASE_MS) bootLog(`[boot] ctor ${label} +${delta}ms (@${now - __ckT0}ms)`);
+	};
 	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
 	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
 	if (deps?.agentBridgeFactory) {
@@ -1928,11 +1941,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	// Run one-time migration from centralized to per-project state
+	ck("pre-migration-setup");
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot(), { centralConfigDir: configDir });
+	ck("migrateToPerProjectState");
 
 	// Recover data lost by the original migration bug (unconditional rename
 	// when central dir == default project dir). Must run before stores load.
 	recoverPreMigrationData(stateDir);
+	ck("recoverPreMigrationData");
 
 	// One-shot project.yaml migration: synthesize components[] for legacy
 	// single-repo projects. Idempotent. Must run BEFORE ProjectContext
@@ -1941,6 +1957,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	migrateAllProjectYaml(
 		projectRegistry.list().map(p => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
 	);
+	ck("migrateAllProjectYaml");
 
 	const projectConfigStore = new ProjectConfigStore(configDir, gatewayDeps.fsImpl);
 
@@ -1955,6 +1972,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		worktreeSetupRuntime,
 	});
 	projectContextManager.initAll();
+	ck("initAll");
 
 	// Migrate inline token values from project.yaml → secrets.json (one-time)
 	for (const p of projectRegistry.list()) {
@@ -1995,6 +2013,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		} catch { /* ignore parse errors */ }
 	}
 
+	ck("token-migration-loop");
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir, gatewayDeps.fsImpl);
 	const preferencesStore = new PreferencesStore(stateDir, gatewayDeps.fsImpl);
@@ -2006,7 +2025,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const roleStore = new RoleStore(configDir);
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager(configDir);
+	ck("stores-pre-tooldocs");
 	toolManager.generateDetailDocs(stateDir);
+	ck("generateDetailDocs");
 	// Extension host (design docs/design/extension-host.md §4b): the action
 	// dispatcher lives for the gateway process lifetime; its module cache is
 	// dropped synchronously by invalidateResolverCaches() on pack mutations.
@@ -2031,6 +2052,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
 	// persistence behind `host.store.*` + the /api/ext/store/:op endpoint).
 	getPackStore();
+	ck("getPackStore");
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
@@ -2067,6 +2089,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	const builtinConfigProvider = new BuiltinConfigProvider(config.builtinsDir);
+	ck("stores+SessionManager");
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
 	// Direct store lookups (roleStore.get()) transparently fall back to
 	// builtins, so no seeding to disk is needed. Workflows are project-
@@ -2560,6 +2583,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
 
+	ck("pre-TeamManager");
 	const teamManager = new TeamManager(sessionManager, {
 		colorStore,
 		taskManager: new TaskManager(taskStore),
@@ -3121,7 +3145,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	}
 
+	ck("pre-VerificationHarness");
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	ck("new VerificationHarness");
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -3171,6 +3197,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	});
 
+	ck("post-VerificationHarness-to-return");
+	bootLog(`[boot] ctor total (createGateway body) ${Date.now() - __ckT0}ms`);
 	return {
 		server,
 		deps: gatewayDeps,
@@ -3183,18 +3211,23 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		get extensionChannels() { return extensionChannelServices; },
 		async start(): Promise<number> {
+			// Phase timer for the pre-listen critical path: everything awaited here
+			// blocks `server.listen()`, i.e. delays the UI becoming reachable.
+			// Log each phase (>=50ms) so a slow cold-start is diagnosable from logs.
+			const bootStart = Date.now();
+			const bootPhase = makePhaseTimer("[boot] pre-listen");
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
-			await startupAigwCheck(preferencesStore);
+			await bootPhase("aigw-check", () => startupAigwCheck(preferencesStore));
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
-			await initExtensionChannelsOnce();
+			await bootPhase("extension-channels", () => initExtensionChannelsOnce());
 
 			// Initialize MCP servers (skip when disabled by gateway runtime config)
 			if (!gatewayRuntimeFlags.skipMcp) {
 				try {
-					await sessionManager.initMcp(headquartersDir());
+					await bootPhase("mcp-init", () => sessionManager.initMcp(headquartersDir()));
 				} catch (err) {
 					console.error('[mcp] MCP init failed:', (err as Error).message);
 				}
@@ -3371,13 +3404,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			sessionManager.subscribeSandboxRecovery();
 
 			// Restore persisted sessions before accepting connections
-			await sessionManager.restoreSessions();
+			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
 			// once per project context after sessions are restored so the
 			// resolver can see live PersistedSession records. Idempotent.
 			const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
+			const costBackfillStart = Date.now();
 			try {
 				for (const ctx of projectContextManager.all()) {
 					backfillLegacyCostGoalIds({
@@ -3389,12 +3423,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			} catch (err) {
 				console.warn("[cost-backfill] boot backfill failed (non-fatal):", err);
 			}
+			{
+				const dt = Date.now() - costBackfillStart;
+				if (dt >= SLOW_PHASE_MS) bootLog(`[boot] pre-listen cost-backfill in ${dt}ms`);
+			}
+			bootLog(`[boot] pre-listen phases complete in ${Date.now() - bootStart}ms`);
 
 			// NOTE: Orphaned worktree cleanup and non-interactive session cleanup
 			// are no longer automatic on startup. Use the Settings → Maintenance UI
 			// or the /api/maintenance/* endpoints to preview and clean up manually.
 
-			sessionManager.startPurgeSchedule();
+			await bootPhase("startPurgeSchedule", () => sessionManager.startPurgeSchedule());
 
 			// Initialize worktree pools for all git-repo projects
 			// (pre-creates worktrees in the background so new sessions start instantly).
@@ -3510,7 +3549,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								});
 							}
 						}
-						console.log(`[boot] sweeper start (${sweepProjects.length} projects)`);
+						bootLog(`[boot] sweeper start (${sweepProjects.length} projects)`);
 						const result = await sweepOrphanedWorktrees({
 							projects: sweepProjects,
 							goals: sweepGoals,
@@ -3518,7 +3557,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							teams: sweepTeams,
 							staff: sweepStaff,
 						});
-						console.log(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
+						bootLog(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
 					} catch (err) {
 						console.warn(`[boot] sweeper failed in ${Date.now() - tStart}ms (non-fatal):`, err);
 					}
@@ -3564,9 +3603,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
 								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
-								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
+								bootLog(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
-								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
+								bootLog(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							}
 						} catch (err) {
 							console.warn(`[boot] pool init failed: project=${ctx.project.id} in ${Date.now() - tStart}ms (non-fatal):`, err);
@@ -3574,24 +3613,29 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					}));
 				})();
 				await Promise.all([transcriptBackfillTask, sweeperTask, poolInitTask]);
-				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
+				bootLog(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
 
 			// Wire goal-manager resolvers so goals claim through the pool first and
 			// resolve components / project root for multi-repo goal creation.
 			// Hidden contexts (synthetic system project) have no goals to wire.
-			for (const ctx of projectContextManager.visible()) {
-				wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
-			}
+			await bootPhase("wireGoalManagerResolvers", () => {
+				for (const ctx of projectContextManager.visible()) {
+					wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
+				}
+			});
 
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
-			teamManager.resubscribeTeamEvents();
+			await bootPhase("resubscribeTeamEvents", () => teamManager.resubscribeTeamEvents());
 
 			// Resume any verifications that were interrupted by a server restart (fire-and-forget)
-			verificationHarness.resumeInterruptedVerifications().catch(err => {
-				console.error("[verification] Error resuming interrupted verifications:", err);
+			await bootPhase("resumeInterruptedVerifications-sync", () => {
+				verificationHarness.resumeInterruptedVerifications().catch(err => {
+					console.error("[verification] Error resuming interrupted verifications:", err);
+				});
 			});
+			bootLog(`[boot] start() reached listen() at ${Date.now() - bootStart}ms`);
 
 			// Port 0 = let OS assign a free port; skip the auto-increment loop
 			if (config.port === 0) {
@@ -3636,6 +3680,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			throw new Error(`All ports ${config.port}-${maxPort} in use`);
 		},
 		async shutdown() {
+			const shutdownStart = Date.now();
+			bootMark(`SHUTDOWN ${new Date().toISOString()}`);
+			// Phase timer: log each teardown phase so a slow shutdown is diagnosable
+			// from the logs without a profiler. Cheap (Date.now + one appended line).
+			const phase = makePhaseTimer("[shutdown]");
 			try {
 				// Stop accepting NEW connections AND forcibly terminate existing
 				// keep-alive connections BEFORE we tear down the state stores.
@@ -3654,18 +3703,36 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				triggerEngine.stop();
 				inboxNudger.stop();
 				wss.close();
-				await disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown");
+				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-				for (const pool of sessionManager.getAllWorktreePools().values()) {
-					await pool.drain();
-				}
-				await sessionManager.shutdown();
-				await projectContextManager.closeAll();
+				// Worktree pools are intentionally NOT drained on shutdown.
+				//
+				// Pool entries are pre-built worktrees on `pool/_pool-*` branches
+				// created `pushPolicy: "local-only"` — they never exist on the remote.
+				// The old `drain()` here ran, serially across every project's pool,
+				// `git worktree remove --force` + `git branch -D` + a pointless
+				// `git push origin --delete` (a network round-trip, up to a 15s
+				// timeout each, to delete a branch that was never pushed). That both
+				// slowed shutdown AND destroyed exactly the worktrees the next boot
+				// then had to rebuild from scratch (`git worktree add` + `npm ci`),
+				// leaving new sessions on the cold path for minutes after start.
+				//
+				// Leaving them on disk lets `WorktreePool.reclaimOrphaned` re-adopt
+				// them instantly at the next boot (the sweeper skips pool branches,
+				// and reclaim is capped at the pool's target size, so they don't
+				// accumulate). Explicit teardown still drains: project removal
+				// (`removeWorktreePool`) and the Settings → Maintenance cleanup.
+				await phase("session-manager", () => sessionManager.shutdown());
+				await phase("project-contexts", () => projectContextManager.closeAll());
 				if (sandboxManager) {
-					await sandboxManager.shutdownAll();
+					await phase("sandbox-manager", () => sandboxManager!.shutdownAll());
 				}
-				await sessionManager.cleanupSandboxNetwork();
+				await phase("sandbox-network", () => sessionManager.cleanupSandboxNetwork());
+				bootLog(`[shutdown] complete in ${Date.now() - shutdownStart}ms`);
+			} catch (err) {
+				bootLog(`[shutdown] aborted after ${Date.now() - shutdownStart}ms: ${err instanceof Error ? err.message : String(err)}`);
+				throw err;
 			} finally {
 				restoreExplicitRpcBridgeFactory();
 			}
