@@ -123,6 +123,14 @@ import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-f
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
+import {
+	baseRefMissingInReposError,
+	baseRefSkippedRepoWarning,
+	baseRefTagError,
+	isValidBaseRefBranchGrammar,
+	normalizeBaseRefValue,
+	validateBaseRefShape,
+} from "./base-ref-validation.js";
 
 /**
  * Render the `team_wait` result text (orchestration-core design §9). Returns on
@@ -158,18 +166,6 @@ function formatWaitText(result: WaitResult): string {
 		lines.push(`➜ Process this result now, then call team_wait again to await the remaining children — pass child_session_ids: [${remainingIds.join(", ")}].`);
 	}
 	return lines.join("\n");
-}
-
-// Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
-// Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
-// without an exec round-trip. See docs/design/base-ref.md.
-function isValidBaseRefBranchGrammar(name: string): boolean {
-	if (!name) return false;
-	if (/\s/.test(name)) return false;
-	if (name.startsWith("-") || name.endsWith(".")) return false;
-	if (name.includes("..") || name.includes("@{")) return false;
-	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
-	return /^[A-Za-z0-9_./-]+$/.test(name);
 }
 
 function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
@@ -5410,59 +5406,15 @@ async function handleApiRoute(
 			const baseRefWarnings: string[] = [];
 			if ("base_ref" in (body as Record<string, unknown>)) {
 				const rawBaseRef = (body as Record<string, unknown>).base_ref;
-				const baseRefValue = typeof rawBaseRef === "string" ? rawBaseRef.trim() : "";
+				const baseRefValue = normalizeBaseRefValue(rawBaseRef);
 				if (baseRefValue) {
-					// 1. SHA shape (7-40 hex chars). Reject before grammar — a 40-char hex
-					//    string is grammatically valid but is rejected for clarity.
-					if (/^[0-9a-f]{7,40}$/i.test(baseRefValue)) {
-						json({ field: "base_ref", error: `base_ref must be a branch ref, not a commit SHA. Got: ${baseRefValue}` }, 400);
-						return;
-					}
-					// 2. Invalid branch grammar.
-					if (!isValidBaseRefBranchGrammar(baseRefValue)) {
-						json({ field: "base_ref", error: `base_ref must be a valid branch name. Got: ${baseRefValue}` }, 400);
-						return;
-					}
-					// 3. Non-origin remote prefix. Anything matching `<prefix>/<rest>` where
-					//    `<prefix>` is not `origin` is rejected. Local refs (no slash, or
-					//    `feature/foo`) are still accepted — the prefix gate only fires when
-					//    the first segment looks like a remote name and isn't `origin`.
-					//    We treat the first slash-segment as a remote prefix only when the
-					//    full value is exactly `<prefix>/<rest>` AND `<rest>` looks like a
-					//    branch (rather than e.g. `feature/foo` which has no remote prefix at all).
-					//    Practically: if the value starts with anything other than `origin/`
-					//    AND the first segment is a known-remote-shaped token, reject.
-					//    We use a simple heuristic: if it doesn't start with `origin/` and
-					//    its first segment contains no special chars and a slash exists,
-					//    treat it as a remote prefix. The error message names the value
-					//    so users can correct it.
-					//
-					// To avoid false positives on local refs like `feature/foo`, we only
-					// reject values whose first segment matches the set of typical
-					// remote names (upstream/fork/etc.). Today's design says: anything
-					// with a remote-style prefix other than `origin/` is rejected, but
-					// distinguishing local `feature/foo` from remote `upstream/foo`
-					// requires git knowledge we don't have at validate time. The design
-					// doc's error inventory specifically calls out `upstream/main` as the
-					// example to reject — so we use a conservative allowlist: anything
-					// matching a known remote-name pattern that isn't `origin` is rejected.
-					// Known remote-shaped tokens: upstream, fork, mirror, github, gitlab,
-					// bitbucket. Everything else flows through (local branches with slashes).
-					const firstSegment = baseRefValue.split("/")[0];
-					const KNOWN_NON_ORIGIN_REMOTES = new Set(["upstream", "fork", "mirror", "github", "gitlab", "bitbucket", "remote"]);
-					if (baseRefValue.includes("/") && firstSegment !== "origin" && KNOWN_NON_ORIGIN_REMOTES.has(firstSegment)) {
-						json({ field: "base_ref", error: `base_ref only supports the 'origin' remote today. Got: ${baseRefValue}. If you need a different primary remote, configure it as 'origin' in your local clone.` }, 400);
-						return;
-					}
-					// 4. Sandbox + local — when the project runs in a docker sandbox, only
-					//    remote refs work because the container has separate ref visibility
-					//    from the host.
 					const sandboxResolved = ctx.projectConfigStore.getWithDefaults().sandbox || "none";
-					if (sandboxResolved === "docker" && !baseRefValue.startsWith("origin/")) {
-						json({ field: "base_ref", error: `base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: ${baseRefValue}` }, 400);
+					const shapeError = validateBaseRefShape({ value: rawBaseRef, sandbox: sandboxResolved });
+					if (shapeError) {
+						json(shapeError, 400);
 						return;
 					}
-					// 5. Multi-repo ref existence — `git rev-parse --verify` against every
+					// Multi-repo ref existence — `git rev-parse --verify` against every
 					//    component repo. Also detect tags up-front: a value that resolves
 					//    via `refs/tags/<value>` in ANY component is rejected as a tag.
 					const componentsForCheck = ctx.projectConfigStore.getComponents();
@@ -5476,7 +5428,7 @@ async function handleApiRoute(
 						const repoPath = path.join(ctx.project.rootPath, c.repo);
 						const gitRepoCheck = await isGitRepo(repoPath).catch(() => false);
 						if (!gitRepoCheck) {
-							baseRefWarnings.push(`base_ref validation skipped for component '${c.name}': not a git repo at ${repoPath}`);
+							baseRefWarnings.push(baseRefSkippedRepoWarning(c.name, repoPath));
 							continue;
 						}
 						checkedRepoCount++;
@@ -5500,15 +5452,11 @@ async function handleApiRoute(
 						}
 					}
 					if (tagDetected) {
-						json({ field: "base_ref", error: `base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: ${baseRefValue}` }, 400);
+						json(baseRefTagError(baseRefValue), 400);
 						return;
 					}
 					if (failures.length > 0) {
-						json({
-							field: "base_ref",
-							error: `base_ref '${baseRefValue}' is not present in ${failures.length} of ${checkedRepoCount} component repos`,
-							details: failures,
-						}, 400);
+						json(baseRefMissingInReposError(baseRefValue, failures, checkedRepoCount), 400);
 						return;
 					}
 				}
