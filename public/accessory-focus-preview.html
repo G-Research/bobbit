@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Accessory Focus Preview</title>
+<link rel="stylesheet" href="/src/ui/app.css">
+<link rel="stylesheet" href="/src/app/app.css">
+<link rel="stylesheet" href="/src/app/role-manager.css">
+<style>
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 24px;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--background);
+  color: var(--foreground);
+}
+h1 { margin: 0 0 6px; font-size: 22px; line-height: 1.15; }
+h2 { margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); font-size: 16px; }
+h3 { margin: 16px 0 8px; color: var(--muted-foreground); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+p { margin: 0 0 12px; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+.controls {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  margin: 18px 0 20px;
+  padding: 10px 0;
+  background: var(--background);
+  border-block: 1px solid var(--border);
+}
+.controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted-foreground); font-size: 12px; }
+.controls select, .controls button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--foreground);
+  padding: 4px 8px;
+  font: inherit;
+}
+.controls button { cursor: pointer; }
+.controls button:hover { border-color: var(--primary); }
+.layout-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; align-items: stretch; }
+.wide-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; align-items: stretch; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  overflow: hidden;
+}
+.card-title { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; margin-bottom: 10px; font-size: 13px; font-weight: 650; }
+.subtle { color: var(--muted-foreground); font-size: 11px; font-weight: 500; }
+.row { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }
+.cell { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; min-width: 54px; }
+.cell-label { max-width: 110px; color: var(--muted-foreground); font-size: 10px; line-height: 1.2; text-align: center; word-break: break-word; }
+.sprite-pad { display: grid; place-items: center; min-height: 54px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in oklch, var(--card) 86%, var(--foreground)); }
+.paused * { animation-play-state: paused !important; }
+.mock-sidebar {
+  width: min(100%, 280px);
+  padding: 4px 0;
+  border: 1px solid var(--sidebar-border, var(--border));
+  border-radius: 10px;
+  background: var(--sidebar, var(--card));
+}
+.mock-sidebar-section { padding: 8px 12px 3px; color: var(--muted-foreground); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.mock-sidebar-row { display: flex; align-items: center; gap: 7px; margin: 0 5px; padding: 4px 8px; border-radius: 6px; color: var(--sidebar-foreground, var(--foreground)); }
+.mock-sidebar-row.active { background: var(--secondary); }
+.mock-sidebar-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.mock-sidebar-time { color: var(--muted-foreground); font-size: 10px; opacity: .7; }
+.mock-chat { max-width: 520px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); }
+.mock-msg { margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); font-size: 13px; line-height: 1.45; }
+.mock-msg.user { border-left: 3px solid var(--primary); background: color-mix(in oklch, var(--primary) 10%, var(--card)); }
+.role-card {
+  width: 154px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+.role-name { font-size: 13px; font-weight: 650; }
+.role-desc { color: var(--muted-foreground); font-size: 11px; text-align: center; }
+.meta-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 10px; margin: 0; font-size: 12px; }
+.meta-list dt { color: var(--muted-foreground); }
+.meta-list dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.pixel-grid { display: inline-grid; gap: 1px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); }
+.pixel { width: 14px; height: 14px; border: 1px solid color-mix(in oklch, var(--border) 70%, transparent); background: color-mix(in oklch, var(--muted-foreground) 8%, transparent); }
+.pixel.filled { border-color: color-mix(in oklch, var(--foreground) 22%, transparent); }
+.editor-card { grid-column: 1 / -1; }
+.editor-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.editor-tools button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--foreground);
+  padding: 4px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+.editor-tools button:hover { border-color: var(--primary); }
+.editor-help { color: var(--muted-foreground); font-size: 11px; line-height: 1.45; }
+#spriteEditor {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 10px;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  tab-size: 2;
+}
+#editorStatus { color: var(--muted-foreground); }
+#editorStatus.error { color: var(--negative); }
+.visual-editor-layout { display: grid; grid-template-columns: 158px minmax(220px, max-content) minmax(260px, 1fr); gap: 14px; align-items: start; }
+.visual-editor-panel { min-width: 0; }
+.editor-preview-rail { display: grid; gap: 10px; align-content: start; }
+.editor-preview-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--background); }
+.editor-preview-title { margin-bottom: 6px; color: var(--muted-foreground); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.editor-preview-stage { min-height: 84px; display: grid; place-items: center; overflow: hidden; border-radius: 8px; background: color-mix(in oklch, var(--card) 86%, var(--foreground)); }
+.editor-preview-stage.compact { min-height: 44px; }
+.editor-preview-scale { transform: scale(.72); transform-origin: center; }
+.editor-grid-wrap { overflow: auto; max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); }
+.editor-grid-stack { position: relative; display: inline-block; }
+.editor-grid { position: relative; z-index: 2; display: inline-grid; gap: 1px; user-select: none; touch-action: none; }
+.body-ghost-grid { position: absolute; z-index: 1; display: grid; gap: 1px; pointer-events: none; opacity: .26; }
+.body-ghost-cell { width: 18px; height: 18px; }
+.editor-pixel {
+  width: 18px;
+  height: 18px;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  background-color: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+  background-image: linear-gradient(45deg, color-mix(in oklch, var(--muted-foreground) 12%, transparent) 25%, transparent 25%), linear-gradient(-45deg, color-mix(in oklch, var(--muted-foreground) 12%, transparent) 25%, transparent 25%);
+  background-size: 8px 8px;
+  cursor: crosshair;
+}
+.editor-pixel.filled { background-image: none; border-color: color-mix(in oklch, var(--foreground) 28%, transparent); }
+.editor-pixel.origin { outline: 1px solid var(--primary); outline-offset: -2px; }
+.palette { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
+.swatch { width: 28px; height: 28px; border: 2px solid var(--border); border-radius: 7px; cursor: pointer; }
+.swatch.selected { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 25%, transparent); }
+.editor-meta { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 8px 0; color: var(--muted-foreground); font-size: 12px; }
+.editor-meta input[type=number] { width: 64px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); padding: 3px 6px; }
+.editor-meta input[type=color] { width: 36px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: transparent; }
+.export-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 10px 0; }
+.export-control { border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: color-mix(in oklch, var(--card) 92%, var(--foreground)); }
+.export-control label { display: flex; justify-content: space-between; gap: 10px; align-items: center; color: var(--foreground); font-size: 12px; font-weight: 650; }
+.export-control input[type=number] { width: 72px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); padding: 3px 6px; }
+.control-help { margin-top: 5px; color: var(--muted-foreground); font-size: 11px; line-height: 1.35; }
+@media (max-width: 760px) { .visual-editor-layout { grid-template-columns: 1fr; } }
+</style>
+<style id="customAccessoryStyle"></style>
+</head>
+<body>
+<h1>Accessory Focus Preview</h1>
+<p>Single-accessory lab using the same real Bobbit renderers as <code>bobbit-preview.html</code>. Pick an accessory, then inspect raw pixels, sidebar states, role-manager sizes, chat animations, palette sweeps, and app-like contexts.</p>
+<div class="controls">
+  <label>Accessory <select id="accessorySelect"></select></label>
+  <label>Palette <select id="hueSelect"></select></label>
+  <label>Theme <select id="themeSelect"><option value="light">Light</option><option value="dark">Dark</option></select></label>
+  <label><input id="pauseToggle" type="checkbox"> Pause animations</label>
+  <button id="replayBtn" type="button">Replay one-shots</button>
+</div>
+<main id="app"></main>
+<script type="module">
+import { render, html, nothing } from "/node_modules/lit/index.js";
+import {
+  renderSidebarBobbitCanvas,
+  renderChatBlobCanvas,
+  renderIdleBlobCanvas,
+  NO_ACCESSORY,
+  BOBBIT_HUE_ROTATIONS,
+  SPRITE_ACCESSORIES,
+  BODY_GRID,
+  EYE_POSITIONS,
+} from "/src/ui/bobbit-render.ts";
+import { ACCESSORIES, ACCESSORY_IDS } from "/src/app/session-colors.ts";
+
+const app = document.getElementById("app");
+const accessorySelect = document.getElementById("accessorySelect");
+const hueSelect = document.getElementById("hueSelect");
+const themeSelect = document.getElementById("themeSelect");
+const pauseToggle = document.getElementById("pauseToggle");
+const replayBtn = document.getElementById("replayBtn");
+const params = new URLSearchParams(window.location.search);
+const accessoryIds = ACCESSORY_IDS.filter((id) => id !== "none");
+const originalSprites = Object.fromEntries(Object.entries(SPRITE_ACCESSORIES).map(([id, sprite]) => [
+  id,
+  { ...sprite, pixels: sprite.pixels.map(([x, y, color]) => [x, y, color]) },
+]));
+const customStyle = document.getElementById("customAccessoryStyle");
+let replayNonce = 0;
+let editorText = "";
+let editorMessage = "";
+let editorError = false;
+let liveTimer = 0;
+let spriteVersion = 0;
+let selectedColor = "#000";
+let editorTool = "paint";
+let isPainting = false;
+let overlayMode = "chat-active";
+// Sprite-pixel units. Busy is the total active-chat Y seating. Idle is the
+// total idle-chat Y seating; the CSS transform delta is derived from both.
+let fineYOffsetBusy = 0.25;
+let fineYOffsetIdle = 0.25;
+
+for (const id of accessoryIds) {
+  const opt = document.createElement("option");
+  opt.value = id;
+  opt.textContent = ACCESSORIES[id]?.label ? `${ACCESSORIES[id].label} (${id})` : id;
+  accessorySelect.append(opt);
+}
+for (const [i, hue] of BOBBIT_HUE_ROTATIONS.entries()) {
+  const opt = document.createElement("option");
+  opt.value = String(i);
+  opt.textContent = `${i}: ${hue}°`;
+  hueSelect.append(opt);
+}
+
+const requestedAccessory = params.get("accessory");
+accessorySelect.value = accessoryIds.includes(requestedAccessory) ? requestedAccessory : (accessoryIds.includes("headset") ? "headset" : accessoryIds[0]);
+hueSelect.value = String(Math.max(0, Math.min(BOBBIT_HUE_ROTATIONS.length - 1, Number(params.get("hue") ?? 5))));
+themeSelect.value = params.get("theme") === "dark" ? "dark" : "light";
+document.documentElement.classList.toggle("dark", themeSelect.value === "dark");
+window.addEventListener("pointerup", () => { isPainting = false; });
+
+function accessoryClass(id) {
+  if (!id || id === "none") return "";
+  return `bobbit-${id === "crown" ? "crowned" : id}`;
+}
+function accessoryDef(id) { return ACCESSORIES[id] || NO_ACCESSORY; }
+function spriteDef(id) { return SPRITE_ACCESSORIES[id]; }
+function sidebarAccessoryFor(id) {
+  const sprite = spriteDef(id);
+  const base = accessoryDef(id);
+  const previewId = `${id}--preview-${spriteVersion}`;
+  SPRITE_ACCESSORIES[previewId] = { ...sprite, id: previewId, pixels: sprite.pixels.map(([x, y, color]) => [x, y, color]) };
+  // Sidebar canvas caches accessory images by id. A preview id busts that cache
+  // so editor changes show live; preserve headset's extra 0.5px seating via yOffset.
+  return { ...base, id: previewId, yOffset: sprite.yOffset + (id === "headset" ? 0.5 : 0), addsHeight: sprite.addsHeight };
+}
+function selectedHue() { return BOBBIT_HUE_ROTATIONS[Number(hueSelect.value)] ?? 0; }
+function pixelsToBoxShadow(pixels) {
+  return pixels.map(([x, y, color]) => `${x}px ${y}px 0 ${color}`).join(",\n\t\t");
+}
+function cloneSprite(sprite) {
+  return { ...sprite, pixels: sprite.pixels.map(([x, y, color]) => [x, y, color]) };
+}
+function formatSprite(id, source = spriteDef(id)) {
+  const sprite = source || originalSprites[id];
+  if (!sprite) return "";
+  const constName = `ACCESSORY_${id.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+  const lines = sprite.pixels.map(([x, y, color]) => `\t[${x}, ${y}, "${color}"],`).join("\n");
+  return `// Paste this back to the agent, or edit live here.\n// fineYOffsetBusy: ${fineYOffsetBusy}  // active-chat total extra Y seating, in sprite pixels; render/CSS glue, not AccessorySpriteData
+// fineYOffsetIdle: ${fineYOffsetIdle}  // idle-chat total extra Y seating, in sprite pixels; render/CSS glue, not AccessorySpriteData\nexport const ${constName}: AccessorySpriteData = {\n\tid: "${sprite.id}",\n\tlabel: "${sprite.label}",\n\tyOffset: ${sprite.yOffset},\n\taddsHeight: ${sprite.addsHeight},\n\tblobYAdjust: ${sprite.blobYAdjust ?? 0},\n\tpixels: [\n${lines}\n\t],\n};\n`;
+}
+function parseEditorText(text, id) {
+  const base = originalSprites[id] || spriteDef(id);
+  const bracketPixels = [...text.matchAll(/\[\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*["']([^"']+)["']\s*\]/g)]
+    .map((m) => [Number(m[1]), Number(m[2]), m[3]]);
+  const linePixels = [];
+  if (bracketPixels.length === 0) {
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(/^\s*(-?\d+)\s*[,\s]\s*(-?\d+)\s*[,\s]\s*(#[0-9a-fA-F]{3,8}|[a-zA-Z][\w-]*)/);
+      if (m) linePixels.push([Number(m[1]), Number(m[2]), m[3]]);
+    }
+  }
+  const pixels = bracketPixels.length ? bracketPixels : linePixels;
+  if (!pixels.length) throw new Error("No pixels found. Use [x, y, \"#hex\"] lines or x y #hex rows.");
+  const yOffset = Number(text.match(/yOffset\s*:\s*(-?\d+)/)?.[1] ?? base?.yOffset ?? 0);
+  const addsHeight = (text.match(/addsHeight\s*:\s*(true|false)/)?.[1] ?? String(base?.addsHeight ?? false)) === "true";
+  const blobYAdjust = Number(text.match(/blobYAdjust\s*:\s*(-?\d+)/)?.[1] ?? base?.blobYAdjust ?? 0);
+  const busyFineMatch = text.match(/(?:fineYOffsetBusy|fineYOffset|previewFineYOffset)\s*:?\s*(-?\d+(?:\.\d+)?)/);
+  const idleFineMatch = text.match(/fineYOffsetIdle\s*:?\s*(-?\d+(?:\.\d+)?)/);
+  if (busyFineMatch) fineYOffsetBusy = Number(busyFineMatch[1]);
+  if (idleFineMatch) fineYOffsetIdle = Number(idleFineMatch[1]);
+  return { ...base, id, label: ACCESSORIES[id]?.label || base?.label || id, yOffset, addsHeight, blobYAdjust, pixels };
+}
+function updateCustomStyle(id, sprite) {
+  const cls = accessoryClass(id);
+  const divClass = `bobbit-blob__${id}`;
+  if (!cls) {
+    customStyle.textContent = "";
+    return;
+  }
+  const shadow = pixelsToBoxShadow(sprite.pixels);
+  const rules = [`.${cls} .${divClass} { box-shadow:\n\t\t${shadow}; }`];
+  if (id === "headset") {
+    const busyTranslatePx = fineYOffsetBusy * 4;
+    const idleTransformYPx = (fineYOffsetIdle - fineYOffsetBusy) * 4;
+    const hiddenShadow = pixelsToBoxShadow(sprite.pixels.filter(([x, y]) => x <= 6 || (x === 7 && y === 0)));
+    rules.push(`.${cls} .${divClass} { translate: 0 ${busyTranslatePx}px !important; }`);
+    rules.push(`@keyframes blob-headset-shadow {
+\t0% { box-shadow:\n\t\t${shadow};\n\t}
+\t34% { box-shadow:\n\t\t${hiddenShadow};\n\t}
+\t57% { box-shadow:\n\t\t${shadow};\n\t}
+\t60% { box-shadow:\n\t\t${hiddenShadow};\n\t}
+\t65% { box-shadow:\n\t\t${shadow};\n\t}
+\t96% { box-shadow:\n\t\t${hiddenShadow};\n\t}
+\t98% { box-shadow:\n\t\t${shadow};\n\t}
+}`);
+    rules.push(`.${cls} .bobbit-blob--idle .${divClass} { transform: scale(4) translateX(-7px) translateY(${idleTransformYPx}px) !important; }`);
+  }
+  customStyle.textContent = rules.join("\n");
+}
+function applyEditorText(silent = false) {
+  const id = accessorySelect.value;
+  try {
+    const sprite = parseEditorText(editorText, id);
+    SPRITE_ACCESSORIES[id] = sprite;
+    ACCESSORIES[id] = {
+      ...(ACCESSORIES[id] || NO_ACCESSORY),
+      id,
+      label: sprite.label,
+      shadow: pixelsToBoxShadow(sprite.pixels),
+      yOffset: sprite.yOffset,
+      addsHeight: sprite.addsHeight,
+    };
+    updateCustomStyle(id, sprite);
+    spriteVersion += 1;
+    editorError = false;
+    editorMessage = `${sprite.pixels.length} pixels applied live`;
+    return true;
+  } catch (err) {
+    editorError = true;
+    editorMessage = err instanceof Error ? err.message : String(err);
+    if (!silent) renderAllPreservingEditor();
+    return false;
+  }
+}
+function applySpriteObject(sprite, message = `${sprite.pixels.length} pixels applied live`) {
+  const id = accessorySelect.value;
+  SPRITE_ACCESSORIES[id] = cloneSprite(sprite);
+  ACCESSORIES[id] = {
+    ...(ACCESSORIES[id] || NO_ACCESSORY),
+    id,
+    label: sprite.label,
+    shadow: pixelsToBoxShadow(sprite.pixels),
+    yOffset: sprite.yOffset,
+    addsHeight: sprite.addsHeight,
+  };
+  updateCustomStyle(id, sprite);
+  spriteVersion += 1;
+  editorText = formatSprite(id, sprite);
+  editorError = false;
+  editorMessage = message;
+}
+function setPixelAt(x, y, event) {
+  event?.preventDefault?.();
+  const id = accessorySelect.value;
+  const sprite = cloneSprite(spriteDef(id));
+  const erase = editorTool === "erase" || event?.button === 2 || event?.altKey || event?.shiftKey;
+  sprite.pixels = sprite.pixels.filter(([px, py]) => px !== x || py !== y);
+  if (!erase) sprite.pixels.push([x, y, selectedColor]);
+  sprite.pixels.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  applySpriteObject(sprite, erase ? `Erased ${x},${y}` : `Painted ${x},${y} ${selectedColor}`);
+  renderAllPreservingEditor();
+}
+function updateMeta(field, value) {
+  const id = accessorySelect.value;
+  const sprite = cloneSprite(spriteDef(id));
+  sprite[field] = value;
+  applySpriteObject(sprite, `Updated ${field}`);
+  renderAllPreservingEditor();
+}
+function updateFineYOffset(which, value) {
+  if (which === "idle") fineYOffsetIdle = Number(value);
+  else fineYOffsetBusy = Number(value);
+  const id = accessorySelect.value;
+  updateCustomStyle(id, spriteDef(id));
+  editorText = formatSprite(id, spriteDef(id));
+  editorMessage = `Updated fineYOffset${which === "idle" ? "Idle" : "Busy"}`;
+  renderAllPreservingEditor();
+}
+function paletteColorsFor(sprite) {
+  const defaults = ["#000", "#1f2937", "#374151", "#4b5563", "#6b7280", "#f97316", "#8ec63f", "#b5d98a", "#ef4444", "#87ceeb", "#fde047", "#f3f4f6"];
+  return [...new Set([...sprite.pixels.map(([, , color]) => color), ...defaults])];
+}
+const BODY_GHOST_PALETTE = {
+  K: "#000",
+  M: "#8ec63f",
+  L: "#b5d98a",
+  D: "#6b9930",
+  E: "#1a3010",
+};
+function bodyGhostAt(x, y) {
+  const eyes = EYE_POSITIONS.center;
+  if ((x === eyes.lx && (y === eyes.ly || y === eyes.ly + 1)) || (x === eyes.rx && (y === eyes.ry || y === eyes.ry + 1))) return BODY_GHOST_PALETTE.E;
+  const key = BODY_GRID[y]?.[x];
+  if (key && key !== "_") return BODY_GHOST_PALETTE[key];
+  return "";
+}
+function bodyOverlayY(sprite, id = accessorySelect.value) {
+  if (overlayMode === "chat-active") return id === "headset" ? -fineYOffsetBusy : 0;
+  if (overlayMode === "chat-idle") return id === "headset" ? -fineYOffsetIdle : 0;
+
+  // Sidebar canvas composition in accessory pixel coordinates. Accessory bitmaps
+  // are cropped upward by minY (`yShift`), body top is 4 CSS px for addsHeight,
+  // and accessory top is yOffset CSS px. Convert CSS delta back to sprite pixels.
+  const minSpriteY = Math.min(0, ...sprite.pixels.map(([, y]) => y));
+  const bodyTopCss = sprite.addsHeight ? 4 : 0;
+  const accessoryTopCss = sprite.addsHeight ? sprite.yOffset : 0;
+  const sidebarFine = id === "headset" ? 0.5 : 0;
+  return minSpriteY + ((bodyTopCss - accessoryTopCss) / 1.6) - sidebarFine;
+}
+function editorBounds(sprite) {
+  let minX = -2, minY = -4, maxX = 12, maxY = 12;
+  if (overlayMode !== "none") {
+    const bodyY = bodyOverlayY(sprite);
+    minX = Math.min(minX, 0);
+    minY = Math.min(minY, Math.floor(bodyY));
+    maxX = Math.max(maxX, BODY_GRID[0].length - 1);
+    maxY = Math.max(maxY, Math.ceil(bodyY + BODY_GRID.length - 1));
+  }
+  for (const [x, y] of sprite.pixels) {
+    minX = Math.min(minX, x - 1); minY = Math.min(minY, y - 1);
+    maxX = Math.max(maxX, x + 1); maxY = Math.max(maxY, y + 1);
+  }
+  return { minX, minY, maxX, maxY };
+}
+function bodyGhostOverlay(sprite, minX, minY, id) {
+  if (overlayMode === "none") return nothing;
+  const bodyY = bodyOverlayY(sprite, id);
+  const left = (0 - minX) * 19;
+  const top = (bodyY - minY) * 19;
+  const cells = [];
+  for (let y = 0; y < BODY_GRID.length; y++) {
+    for (let x = 0; x < BODY_GRID[y].length; x++) {
+      const color = bodyGhostAt(x, y);
+      cells.push(html`<span class="body-ghost-cell" style="${color ? `background:${color}` : ""}"></span>`);
+    }
+  }
+  return html`<div class="body-ghost-grid" style="left:${left}px;top:${top}px;grid-template-columns:repeat(${BODY_GRID[0].length}, 18px);">${cells}</div>`;
+}
+function editorPreviewRail(id, hue, sidebarAcc) {
+  return html`<div class="editor-preview-rail">
+    <div class="editor-preview-card">
+      <div class="editor-preview-title">busy chat</div>
+      <div class="editor-preview-stage"><div class="editor-preview-scale">${renderChatBlobCanvas({ blobClass: "bobbit-blob", accClass: accessoryClass(id), hueRotate: hue })}</div></div>
+    </div>
+    <div class="editor-preview-card">
+      <div class="editor-preview-title">idle chat</div>
+      <div class="editor-preview-stage"><div class="editor-preview-scale">${renderChatBlobCanvas({ blobClass: "bobbit-blob bobbit-blob--idle", accClass: accessoryClass(id), hueRotate: hue })}</div></div>
+    </div>
+    <div class="editor-preview-card">
+      <div class="editor-preview-title">sidebar idle</div>
+      <div class="editor-preview-stage compact"><div style="transform:scale(3);transform-origin:center;">${renderSidebarBobbitCanvas({ status: "idle", accessory: sidebarAcc, hueRotate: hue })}</div></div>
+    </div>
+  </div>`;
+}
+function visualEditor(id, hue, sidebarAcc) {
+  const sprite = spriteDef(id);
+  const pixels = new Map(sprite.pixels.map(([x, y, color]) => [`${x},${y}`, color]));
+  const { minX, minY, maxX, maxY } = editorBounds(sprite);
+  const colors = paletteColorsFor(sprite);
+  const cells = [];
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const color = pixels.get(`${x},${y}`);
+      cells.push(html`<button
+        type="button"
+        class="editor-pixel ${color ? "filled" : ""} ${x === 0 && y === 0 ? "origin" : ""}"
+        title="${x},${y}${color ? ` ${color}` : " empty"}"
+        style="${color ? `background-color:${color}` : ""}"
+        @contextmenu=${(event) => event.preventDefault()}
+        @pointerdown=${(event) => { isPainting = true; setPixelAt(x, y, event); }}
+        @pointerenter=${(event) => { if (isPainting && event.buttons) setPixelAt(x, y, event); }}
+      ></button>`);
+    }
+  }
+  return html`<div class="visual-editor-layout">
+    ${editorPreviewRail(id, hue, sidebarAcc)}
+    <div class="visual-editor-panel">
+      <div class="editor-grid-wrap">
+        <div class="editor-grid-stack">
+          ${bodyGhostOverlay(sprite, minX, minY, id)}
+          <div class="editor-grid" style="grid-template-columns:repeat(${maxX - minX + 1}, 18px);">${cells}</div>
+        </div>
+      </div>
+      <div class="editor-help">Click/drag to paint. Right-click, Shift, Alt, or Erase mode removes pixels. The washed-out Bobbit is offset by <code>yOffset</code>; the outlined cell is accessory origin <code>0,0</code>.</div>
+    </div>
+    <div class="visual-editor-panel">
+      <h3>Paint palette</h3>
+      <div class="palette">
+        ${colors.map((color) => html`<button type="button" class="swatch ${editorTool === "paint" && selectedColor === color ? "selected" : ""}" title=${color} style="background:${color}" @click=${() => { selectedColor = color; editorTool = "paint"; renderAllPreservingEditor(); }}></button>`)}
+      </div>
+      <div class="editor-meta">
+        <label>Custom <input type="color" .value=${/^#[0-9a-fA-F]{6}$/.test(selectedColor) ? selectedColor : "#000000"} @input=${(event) => { selectedColor = event.target.value; editorTool = "paint"; renderAllPreservingEditor(); }}></label>
+        <button type="button" class="swatch ${editorTool === "erase" ? "selected" : ""}" style="background:repeating-linear-gradient(45deg, transparent 0 5px, var(--border) 5px 10px);" title="Erase" @click=${() => { editorTool = "erase"; renderAllPreservingEditor(); }}></button>
+        <span>${editorTool === "erase" ? "Erase mode" : `Paint ${selectedColor}`}</span>
+        <label>overlay target <select .value=${overlayMode} @change=${(event) => { overlayMode = event.target.value; renderAllPreservingEditor(); }}><option value="chat-active">chat active</option><option value="chat-idle">chat idle</option><option value="sidebar-idle">sidebar idle</option><option value="none">none</option></select></label>
+      </div>
+      <div class="control-help"><b>Custom</b> chooses a paint colour. <b>Erase</b> removes pixels. <b>overlay target</b> loads the washed-out body alignment for a real app context: chat active, chat idle, or sidebar idle.</div>
+      <h3>Seating metadata</h3>
+      <div class="editor-meta">
+        <label>yOffset <input type="number" .value=${String(sprite.yOffset)} @change=${(event) => updateMeta("yOffset", Number(event.target.value))}></label>
+        <label>blobYAdjust <input type="number" .value=${String(sprite.blobYAdjust ?? 0)} @change=${(event) => updateMeta("blobYAdjust", Number(event.target.value))}></label>
+        <label><input type="checkbox" .checked=${Boolean(sprite.addsHeight)} @change=${(event) => updateMeta("addsHeight", event.target.checked)}> addsHeight</label>
+      </div>
+      <div class="control-help"><b>yOffset</b> is the sidebar/top seating integer. <b>blobYAdjust</b> is the large chat blob delta. <b>addsHeight</b> reserves extra top space for head-worn accessories.</div>
+    </div>
+  </div>`;
+}
+function resetEditorFromRegistry() {
+  const id = accessorySelect.value;
+  const sprite = cloneSprite(originalSprites[id]);
+  SPRITE_ACCESSORIES[id] = cloneSprite(sprite);
+  editorText = formatSprite(id, sprite);
+  applyEditorText(true);
+  renderAllPreservingEditor();
+}
+function normalizeEditorText() {
+  if (applyEditorText(true)) editorText = formatSprite(accessorySelect.value, spriteDef(accessorySelect.value));
+  renderAllPreservingEditor();
+}
+async function copyEditorText() {
+  try {
+    await navigator.clipboard.writeText(editorText);
+    editorError = false;
+    editorMessage = "Copied editor text";
+  } catch {
+    editorError = true;
+    editorMessage = "Clipboard copy failed; select the text manually.";
+  }
+  renderAllPreservingEditor();
+}
+function onEditorInput(event) {
+  editorText = event.target.value;
+  editorMessage = "Editing; live apply pending...";
+  editorError = false;
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => {
+    applyEditorText(true);
+    renderAllPreservingEditor();
+  }, 250);
+}
+function renderAllPreservingEditor() {
+  const el = document.activeElement;
+  const preserve = el?.id === "spriteEditor" ? { start: el.selectionStart, end: el.selectionEnd } : null;
+  renderAll();
+  if (preserve) requestAnimationFrame(() => {
+    const next = document.getElementById("spriteEditor");
+    if (next) {
+      next.focus();
+      next.setSelectionRange(preserve.start, preserve.end);
+    }
+  });
+}
+editorText = formatSprite(accessorySelect.value);
+applyEditorText(true);
+
+function updateUrl() {
+  const next = new URLSearchParams();
+  next.set("accessory", accessorySelect.value);
+  next.set("hue", hueSelect.value);
+  next.set("theme", themeSelect.value);
+  history.replaceState(null, "", `${location.pathname}?${next.toString()}`);
+}
+
+function sidebarCell(label, opts, zoom = 1) {
+  const margin = Math.max(0, (zoom - 1) * 11);
+  return html`<div class="cell">
+    <div class="sprite-pad" style="min-width:${Math.ceil(44 * zoom)}px;min-height:${Math.ceil(34 * zoom)}px;">
+      <div style="transform:scale(${zoom});transform-origin:center;margin:${margin}px;">${renderSidebarBobbitCanvas(opts)}</div>
+    </div>
+    <span class="cell-label">${label}</span>
+  </div>`;
+}
+function chatCell(label, blobClass, id, hue) {
+  return html`<div class="cell" style="min-width:132px;">
+    <div class="sprite-pad" style="min-width:118px;min-height:112px;">${renderChatBlobCanvas({ blobClass, accClass: accessoryClass(id), hueRotate: hue })}</div>
+    <span class="cell-label">${label}</span>
+  </div>`;
+}
+function inlineCell(size, id, hueIndex, phaseIndex) {
+  return html`<div class="cell">
+    <div class="sprite-pad" style="min-width:${Math.max(56, size + 18)}px;min-height:${Math.max(56, size + 18)}px;">
+      ${renderIdleBlobCanvas({ accId: id, accClass: accessoryClass(id), size, hueIndex, phaseIndex })}
+    </div>
+    <span class="cell-label">${size}px inline</span>
+  </div>`;
+}
+function pixelGrid(id) {
+  const sprite = spriteDef(id);
+  if (!sprite?.pixels?.length) return html`<p>No sprite pixels registered for <code>${id}</code>.</p>`;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const byCoord = new Map();
+  for (const [x, y, color] of sprite.pixels) {
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+    byCoord.set(`${x},${y}`, color);
+  }
+  const cells = [];
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const color = byCoord.get(`${x},${y}`);
+      cells.push(html`<span class="pixel ${color ? "filled" : ""}" title="${x},${y}${color ? ` ${color}` : ""}" style="${color ? `background:${color}` : ""}"></span>`);
+    }
+  }
+  return html`<div class="pixel-grid" style="grid-template-columns:repeat(${maxX - minX + 1}, 14px);">${cells}</div>
+    <dl class="meta-list" style="margin-top:12px;">
+      <dt>bounds</dt><dd>x ${minX}…${maxX}, y ${minY}…${maxY}</dd>
+      <dt>pixels</dt><dd>${sprite.pixels.length}</dd>
+      <dt>yOffset</dt><dd>${sprite.yOffset}</dd>
+      <dt>addsHeight</dt><dd>${String(sprite.addsHeight)}</dd>
+      <dt>blobYAdjust</dt><dd>${String(sprite.blobYAdjust ?? 0)}</dd>
+    </dl>`;
+}
+function renderAll() {
+  updateUrl();
+  const id = accessorySelect.value;
+  const acc = accessoryDef(id);
+  const hueIndex = Number(hueSelect.value);
+  const hue = selectedHue();
+  const pausedClass = pauseToggle.checked ? "paused" : "";
+  const sidebarAcc = sidebarAccessoryFor(id);
+  const sidebarBase = { accessory: sidebarAcc, hueRotate: hue };
+  const oneShotStates = [
+    ["busy loop", "bobbit-blob"],
+    ["idle loop", "bobbit-blob bobbit-blob--idle"],
+    ["enter hop", "bobbit-blob bobbit-blob--enter"],
+    ["enter roll", "bobbit-blob bobbit-blob--enter-roll"],
+    ["exit hop", "bobbit-blob bobbit-blob--exit"],
+    ["exit roll", "bobbit-blob bobbit-blob--exit-roll"],
+    ["compact shake", "bobbit-blob bobbit-blob--compact-shake"],
+    ["compacting", "bobbit-blob bobbit-blob--compacting"],
+    ["compact pop", "bobbit-blob bobbit-blob--compact-pop"],
+    ["archived", "bobbit-blob bobbit-blob--archived"],
+  ];
+
+  render(html`<div class=${pausedClass} data-replay=${replayNonce}>
+    <section class="wide-grid">
+      <div class="card editor-card">
+        <div class="card-title"><span>Visual sprite editor</span><span id="editorStatus" class=${editorError ? "error" : ""}>${editorMessage}</span></div>
+        ${visualEditor(id, hue, sidebarAcc)}
+        <h3>Copyable text representation</h3>
+        <textarea id="spriteEditor" spellcheck="false" .value=${editorText} @input=${onEditorInput}></textarea>
+        <div class="export-controls">
+          <div class="export-control">
+            <label>yOffset <input type="number" .value=${String(spriteDef(id).yOffset)} @change=${(event) => updateMeta("yOffset", Number(event.target.value))}></label>
+            <div class="control-help">Integer sidebar/accessory seating. This is part of <code>AccessorySpriteData</code> and is included in copied text.</div>
+          </div>
+          <div class="export-control">
+            <label>blobYAdjust <input type="number" .value=${String(spriteDef(id).blobYAdjust ?? 0)} @change=${(event) => updateMeta("blobYAdjust", Number(event.target.value))}></label>
+            <div class="control-help">Integer vertical delta for the large/chat blob context. Included in copied text.</div>
+          </div>
+          <div class="export-control">
+            <label><span>addsHeight</span><input type="checkbox" .checked=${Boolean(spriteDef(id).addsHeight)} @change=${(event) => updateMeta("addsHeight", event.target.checked)}></label>
+            <div class="control-help">Reserves extra top room for hats/headsets so they do not clip. Included in copied text.</div>
+          </div>
+          <div class="export-control">
+            <label>fineYOffsetBusy <input type="number" step="0.25" .value=${String(fineYOffsetBusy)} @change=${(event) => updateFineYOffset("busy", event.target.value)}></label>
+            <div class="control-help">Fractional extra seating for busy/streaming chat blob glue. Exported as a comment.</div>
+          </div>
+          <div class="export-control">
+            <label>fineYOffsetIdle <input type="number" step="0.25" .value=${String(fineYOffsetIdle)} @change=${(event) => updateFineYOffset("idle", event.target.value)}></label>
+            <div class="control-help">Fractional extra seating for idle chat blob glue. Separate because idle CSS has its own transform.</div>
+          </div>
+        </div>
+        <div class="editor-tools">
+          <button type="button" @click=${copyEditorText}>Copy text</button>
+          <button type="button" @click=${normalizeEditorText}>Regenerate text from pixels</button>
+          <button type="button" @click=${() => { applyEditorText(true); renderAllPreservingEditor(); }}>Apply pasted text</button>
+          <button type="button" @click=${resetEditorFromRegistry}>Reset from registry</button>
+        </div>
+        <div class="editor-help">Use the visual grid for pixel edits, then Copy text and send it back to me. The textarea is also editable for paste/import; previews below update live.</div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>${acc.label}</span><span class="subtle"><code>${id}</code></span></div>
+        ${pixelGrid(id)}
+      </div>
+      <div class="card">
+        <div class="card-title"><span>Current controls</span><span class="subtle">real renderer input</span></div>
+        <dl class="meta-list">
+          <dt>accessory class</dt><dd>${accessoryClass(id) || "none"}</dd>
+          <dt>hue rotate</dt><dd>${hue}deg</dd>
+          <dt>palette index</dt><dd>${hueIndex}</dd>
+          <dt>sidebar accessory</dt><dd>${acc.id}</dd>
+          <dt>chat class</dt><dd>${accessoryClass(id)}</dd>
+        </dl>
+        <h3>Quick baseline</h3>
+        <div class="row">
+          ${sidebarCell("sidebar", { status: "streaming", ...sidebarBase }, 2)}
+          ${inlineCell(56, id, hueIndex, 0)}
+          ${chatCell("chat", "bobbit-blob", id, hue)}
+        </div>
+      </div>
+    </section>
+
+    <h2>Sidebar context: all operational states</h2>
+    <div class="card">
+      <div class="row">
+        ${sidebarCell("streaming", { status: "streaming", ...sidebarBase })}
+        ${sidebarCell("idle sleeping", { status: "idle", ...sidebarBase })}
+        ${sidebarCell("idle awake", { status: "idle", noDesaturate: true, ...sidebarBase })}
+        ${sidebarCell("selected", { status: "idle", isSelected: true, ...sidebarBase })}
+        ${sidebarCell("unread", { status: "idle", unread: true, ...sidebarBase })}
+        ${sidebarCell("compacting", { status: "streaming", isCompacting: true, ...sidebarBase })}
+        ${sidebarCell("aborting", { status: "streaming", isAborting: true, ...sidebarBase })}
+        ${sidebarCell("starting", { status: "starting", ...sidebarBase })}
+        ${sidebarCell("terminated", { status: "terminated", ...sidebarBase })}
+      </div>
+      <h3>Zoomed sidebar pixels</h3>
+      <div class="row">${[1, 2, 3, 4].map((zoom) => sidebarCell(`${zoom}×`, { status: "streaming", noDesaturate: true, ...sidebarBase }, zoom))}</div>
+    </div>
+
+    <h2>Role manager / picker inline sizes</h2>
+    <div class="card"><div class="row">${[24, 32, 42, 56, 76, 96].map((size, i) => inlineCell(size, id, hueIndex, i))}</div></div>
+
+    <h2>Chat blob animations</h2>
+    <div class="card">
+      <p>One-shot states replay when the DOM is remounted. Use <b>Replay one-shots</b> after changing pixels or seating.</p>
+      <div class="row">${oneShotStates.map(([label, cls]) => chatCell(label, cls, id, hue))}</div>
+    </div>
+
+    <h2>Palette sweep</h2>
+    <div class="layout-grid">
+      <div class="card">
+        <div class="card-title"><span>Sidebar</span><span class="subtle">all session hues</span></div>
+        <div class="row">${BOBBIT_HUE_ROTATIONS.map((h) => sidebarCell(`${h}°`, { status: "streaming", accessory: sidebarAcc, hueRotate: h }))}</div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>Inline</span><span class="subtle">all palette indexes</span></div>
+        <div class="row">${BOBBIT_HUE_ROTATIONS.map((_h, i) => inlineCell(38, id, i, i))}</div>
+      </div>
+    </div>
+
+    <h2>App-like contexts</h2>
+    <div class="layout-grid">
+      <div class="card">
+        <div class="card-title"><span>Sidebar rows</span><span class="subtle">natural size</span></div>
+        <div class="mock-sidebar">
+          <div class="mock-sidebar-section">Sessions</div>
+          <div class="mock-sidebar-row active">${renderSidebarBobbitCanvas({ status: "streaming", isSelected: true, ...sidebarBase })}<span class="mock-sidebar-title">Support assistant</span><span class="mock-sidebar-time">now</span></div>
+          <div class="mock-sidebar-row">${renderSidebarBobbitCanvas({ status: "idle", ...sidebarBase })}<span class="mock-sidebar-title">Idle with ${acc.label}</span><span class="mock-sidebar-time">8m</span></div>
+          <div class="mock-sidebar-row">${renderSidebarBobbitCanvas({ status: "streaming", isCompacting: true, ...sidebarBase })}<span class="mock-sidebar-title">Compacting context</span><span class="mock-sidebar-time">32s</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>Role card</span><span class="subtle">picker/card size</span></div>
+        <div class="role-card">
+          ${renderIdleBlobCanvas({ accId: id, accClass: accessoryClass(id), size: 52, hueIndex, phaseIndex: 2 })}
+          <div class="role-name">${acc.label} role</div>
+          <div class="role-desc">Inline idle bobbit using <code>${accessoryClass(id)}</code>.</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>Chat response</span><span class="subtle">streaming container scale</span></div>
+        <div class="mock-chat">
+          <div class="mock-msg user">Can you help me debug this?</div>
+          <div class="mock-msg">Sure — I’ll inspect the state and suggest the safest next step.</div>
+          ${renderChatBlobCanvas({ blobClass: "bobbit-blob", accClass: accessoryClass(id), hueRotate: hue })}
+        </div>
+      </div>
+    </div>
+  </div>`, app);
+}
+
+function remountAndRender() {
+  replayNonce += 1;
+  render(nothing, app);
+  requestAnimationFrame(renderAll);
+}
+
+accessorySelect.addEventListener("change", () => {
+  editorText = formatSprite(accessorySelect.value);
+  applyEditorText(true);
+  remountAndRender();
+});
+hueSelect.addEventListener("change", renderAll);
+themeSelect.addEventListener("change", () => {
+  document.documentElement.classList.toggle("dark", themeSelect.value === "dark");
+  renderAll();
+});
+pauseToggle.addEventListener("change", renderAll);
+replayBtn.addEventListener("click", remountAndRender);
+renderAll();
+</script>
+</body>
+</html>
