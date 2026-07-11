@@ -3369,8 +3369,38 @@ export class VerificationHarness {
 					if (hasRemoteGoalBranch) {
 						try {
 							await this.commandRunner.execFile("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-							await this.commandRunner.execFile("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
-							console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
+
+							// Ancestry-aware, NON-DESTRUCTIVE sync. `git reset --hard` here would
+							// silently discard un-pushed local commits when the worktree is ahead
+							// of origin — the normal state under the team-lead local-merge model.
+							// `git merge-base --is-ancestor <a> <b>` exits 0 when <a> is an ancestor
+							// of <b>, exit 1 when it is not; any other exit is a real git error.
+							const originRef = `origin/${goalBranch}`;
+							const isAncestor = async (ancestor: string, descendant: string): Promise<boolean> => {
+								try {
+									await this.commandRunner.execFile("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd, timeout: 15_000 });
+									return true;
+								} catch (err) {
+									const code = execErrorCode(err);
+									if (code === 1 || code === "1") return false;
+									throw err; // real error (e.g. bad revision) → outer catch keeps local state
+								}
+							};
+
+							if (await isAncestor(originRef, "HEAD")) {
+								// origin is an ancestor of local HEAD → local is ahead of (or equal to)
+								// origin. It already contains every origin commit plus local merges.
+								console.log(`[verification] goal worktree ahead of ${originRef} — skipping reset (skipped-because-ahead)`);
+							} else if (await isAncestor("HEAD", originRef)) {
+								// local HEAD is an ancestor of origin → origin is strictly ahead, local
+								// has nothing unique. Fast-forward to pick up pushed work.
+								await this.commandRunner.execFile("git", ["merge", "--ff-only", originRef], { cwd, timeout: 15_000 });
+								console.log(`[verification] fast-forwarded goal worktree to ${originRef} (fast-forwarded)`);
+							} else {
+								// Diverged: each side has unique commits. Never hard-reset — that would
+								// discard local commits. Keep local state and verify it, loudly.
+								console.warn(`[verification] goal worktree diverged from ${originRef} — keeping local state, NOT resetting (diverged-kept-local)`);
+							}
 						} catch (err) {
 							console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
 						}
