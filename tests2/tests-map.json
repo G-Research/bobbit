@@ -28,6 +28,10 @@
       "reason": "Reproducing test (TDD red) for the 'Fix skill autocomplete gap' goal (9e081770), Facet 1: the Skills page's default slash-skills/details fetch must resolve against the currently-active session's project (state.activeProjectId), not Headquarters/system. Drives loadSkillsPageData with active project P and asserts the captured details URL carries projectId=proj-P and getConfigApiProjectId()==='proj-P'. FAILS on HEAD (scope defaults to system => Headquarters), passes once the page seeds scope from the active project. Failure token SKILL_AUTOCOMPLETE_GAP."
     },
     {
+      "path": "tests2/core/skill-surface-consistency.test.ts",
+      "reason": "Regression test (spec requirement 2) for the 'Fix skill autocomplete gap' goal (9e081770): the Skills page (/api/slash-skills/details) and composer autocomplete (/api/slash-skills) must resolve the IDENTICAL skill set for a given project. Both server handlers call the shared discoverSlashSkills(cwd, resolveProjectConfigStore(projectId), skillMarketContext(projectId)) with inputs derived from the SAME projectId; this pins set-equality and proves a project-only skill plus a custom-directory (nested Claude-plugin) skill surface in both. Hermetic (temp dirs + store stub)."
+    },
+    {
       "path": "tests2/core/verification-goal-sync-nondestructive.test.ts",
       "reason": "Reproducing + decision-matrix tests for the destructive pre-verification goal-worktree sync: local-ahead un-pushed commit B must survive (not be discarded by `git reset --hard origin/<goalBranch>`), local-behind fast-forwards to origin, diverged keeps local + warns, up-to-date is a no-op. Drives the real VerificationHarness against real temp git repos."
     },

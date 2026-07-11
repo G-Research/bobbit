@@ -2,10 +2,11 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, TemplateResult } from "lit";
 import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, FolderOpen, Plus, X, Zap } from "lucide";
-import { renderApp } from "./state.js";
+import { renderApp, state } from "./state.js";
 import { gatewayFetch } from "./api.js";
 import { setHashRoute } from "./routing.js";
 import { getConfigScope, setConfigScope, getConfigApiProjectId, renderConfigScopeRow } from "./config-scope.js";
+import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 
 // Module-level state
 let slashSkills: Array<{ name: string; description: string; source: string; filePath: string; content: string; originPackName?: string | null }> = [];
@@ -16,6 +17,7 @@ let directories: Array<{ path: string; source: string; isCustom: boolean }> = []
 let customDirs: Array<{ path: string }> = [];
 let newDirPath = "";
 let directoriesExpanded = false;
+let scopeInitialized = false;
 
 export function clearSkillsPageState(): void {
 	slashSkills = [];
@@ -26,13 +28,31 @@ export function clearSkillsPageState(): void {
 	customDirs = [];
 	newDirPath = "";
 	directoriesExpanded = false;
+	scopeInitialized = false;
 }
 
 function slashSkillsDetailsUrl(): string {
 	return `/api/slash-skills/details?projectId=${encodeURIComponent(getConfigApiProjectId())}`;
 }
 
+/** Config endpoint for the currently-selected scope's store — mirrors settings-page.ts::saveConfigDirs.
+ *  Headquarters resolves against the server-scope store (/api/project-config); a real project uses its
+ *  own project-scope store, matching where skill resolution reads `skill_directories`. */
+function configEndpoint(): string {
+	const pid = getConfigApiProjectId();
+	return pid === HEADQUARTERS_PROJECT_ID ? "/api/project-config" : `/api/projects/${encodeURIComponent(pid)}/config`;
+}
+
 export async function loadSkillsPageData(showLoading = true): Promise<void> {
+	// Seed the config scope from the active project once per page lifecycle, so the
+	// listed skills match what that project's sessions actually resolve. An explicit
+	// user scope selection (via handleScopeChange) runs after first load and is respected.
+	if (!scopeInitialized) {
+		scopeInitialized = true;
+		const active = state.activeProjectId;
+		if (active && getConfigScope() === "system") setConfigScope(active);
+	}
+
 	if (showLoading) {
 		loading = true;
 		error = "";
@@ -51,9 +71,9 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 			directories = [];
 		}
 
-		// Load custom directories from project config
+		// Load custom directories from the scope-appropriate config store
 		try {
-			const configRes = await gatewayFetch("/api/project-config");
+			const configRes = await gatewayFetch(configEndpoint());
 			if (configRes.ok) {
 				const config = await configRes.json();
 				if (config.skill_directories) {
@@ -150,7 +170,7 @@ function renderSkillCard(skill: typeof slashSkills[0]): TemplateResult {
 async function saveCustomDirs(): Promise<void> {
 	renderApp();
 	try {
-		await gatewayFetch("/api/project-config", {
+		await gatewayFetch(configEndpoint(), {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ skill_directories: JSON.stringify(customDirs) }),

@@ -155,53 +155,97 @@ export function applySubstitutions(content: string, args: string): string {
 	return result;
 }
 
+/** Parse a single SKILL.md into a {@link SlashSkill}, or null on read/parse failure. */
+function parseSkillFile(skillFile: string, fallbackName: string, source: SlashSkill["source"]): SlashSkill | null {
+	try {
+		const raw = fs.readFileSync(skillFile, "utf-8");
+		const { frontmatter, content: rawContent } = parseFrontmatter(raw);
+		// Do NOT auto-inline @path/foo.md references. Claude Code uses Level-3
+		// progressive disclosure — the agent reads referenced files on demand,
+		// and the activation-header manifest tells it what's available.
+		const content = rawContent;
+
+		const name = frontmatter.name || fallbackName;
+		const description = frontmatter.description ||
+			content.split("\n").find((l) => l.trim().length > 0)?.trim() || "";
+
+		return {
+			name,
+			description,
+			argumentHint: frontmatter["argument-hint"],
+			disableModelInvocation: frontmatter["disable-model-invocation"],
+			userInvocable: frontmatter["user-invocable"],
+			content,
+			source,
+			filePath: skillFile,
+			allowedTools: normalizeAllowedTools(frontmatter),
+			context: frontmatter.context,
+			agent: frontmatter.agent,
+		};
+	} catch (err) {
+		console.warn(`[slash-skills] Failed to parse ${skillFile}:`, err);
+		return null;
+	}
+}
+
 /**
- * Scan a directory for SKILL.md files (each in a subdirectory).
- * Exported so the pack resolver's SkillLoader reuses identical parse logic.
+ * Scan a directory for SKILL.md files.
+ *
+ * Discovers three bounded layouts, de-duplicated by absolute `filePath`:
+ *   1. One-level (normal `.claude/skills` / `.bobbit/skills`): `<dir>/<name>/SKILL.md`
+ *   2. Plugins-parent root (Claude plugin container): `<dir>/<plugin>/skills/<name>/SKILL.md`
+ *   3. Plugin root (the scan dir IS a plugin): `<dir>/skills/<name>/SKILL.md`
+ *
+ * The `skills/` convention is followed exactly one extra level — no arbitrary
+ * deep recursion. A normal skill dir literally named `skills` (i.e.
+ * `<dir>/skills/SKILL.md` exists) is treated as a normal one-level skill, not a
+ * plugin container. Exported so the pack resolver's SkillLoader reuses identical
+ * parse logic.
  */
 export function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
 	const skills: SlashSkill[] = [];
 	if (!fs.existsSync(dir)) return skills;
 
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return skills;
+	const seen = new Set<string>();
+	const readDir = (d: string): fs.Dirent[] => {
+		try {
+			return fs.readdirSync(d, { withFileTypes: true });
+		} catch {
+			return [];
+		}
+	};
+	const push = (skillFile: string, fallbackName: string): void => {
+		const abs = path.resolve(skillFile);
+		if (seen.has(abs)) return;
+		if (!fs.existsSync(skillFile)) return;
+		const skill = parseSkillFile(skillFile, fallbackName, source);
+		if (skill) {
+			seen.add(abs);
+			skills.push(skill);
+		}
+	};
+
+	for (const entry of readDir(dir)) {
+		if (!entry.isDirectory()) continue;
+		// (1) One-level normal layout: <dir>/<name>/SKILL.md
+		push(path.join(dir, entry.name, "SKILL.md"), entry.name);
+		// (2) Plugins-parent root: <dir>/<plugin>/skills/<name>/SKILL.md
+		const nestedSkillsDir = path.join(dir, entry.name, "skills");
+		if (fs.existsSync(nestedSkillsDir)) {
+			for (const sub of readDir(nestedSkillsDir)) {
+				if (!sub.isDirectory()) continue;
+				push(path.join(nestedSkillsDir, sub.name, "SKILL.md"), sub.name);
+			}
+		}
 	}
 
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		const skillFile = path.join(dir, entry.name, "SKILL.md");
-		if (!fs.existsSync(skillFile)) continue;
-
-		try {
-			const raw = fs.readFileSync(skillFile, "utf-8");
-			const { frontmatter, content: rawContent } = parseFrontmatter(raw);
-			// Do NOT auto-inline @path/foo.md references. Claude Code uses Level-3
-			// progressive disclosure — the agent reads referenced files on demand,
-			// and the activation-header manifest tells it what's available.
-			const content = rawContent;
-
-			const name = frontmatter.name || entry.name;
-			const description = frontmatter.description ||
-				content.split("\n").find((l) => l.trim().length > 0)?.trim() || "";
-
-			skills.push({
-				name,
-				description,
-				argumentHint: frontmatter["argument-hint"],
-				disableModelInvocation: frontmatter["disable-model-invocation"],
-				userInvocable: frontmatter["user-invocable"],
-				content,
-				source,
-				filePath: skillFile,
-				allowedTools: normalizeAllowedTools(frontmatter),
-				context: frontmatter.context,
-				agent: frontmatter.agent,
-			});
-		} catch (err) {
-			console.warn(`[slash-skills] Failed to parse ${skillFile}:`, err);
+	// (3) Plugin root: <dir>/skills/<name>/SKILL.md — only when <dir>/skills is a
+	// plugin skills container, not itself a normal one-level skill dir.
+	const directSkillsDir = path.join(dir, "skills");
+	if (fs.existsSync(directSkillsDir) && !fs.existsSync(path.join(directSkillsDir, "SKILL.md"))) {
+		for (const sub of readDir(directSkillsDir)) {
+			if (!sub.isDirectory()) continue;
+			push(path.join(directSkillsDir, sub.name, "SKILL.md"), sub.name);
 		}
 	}
 
