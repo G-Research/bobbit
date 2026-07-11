@@ -9,12 +9,16 @@
  * It also asserts the happy path: a scope that creates and cleans up a session
  * returns entity counts to baseline and assertNoLeaks() does NOT throw.
  */
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { getGateway, type GatewayFixture } from "../harness/gateway.js";
 import { assertNoLeaks, snapshotEntities } from "../harness/leak-detector.js";
 import { createScope } from "../harness/scope.js";
 import {
 	expect as compatExpect,
+	exportIntegrationHarnessCleanupStatsForProfile,
 	integrationHarnessCleanupStats,
 	resetIntegrationHarnessCleanupStats,
 	test as compatTest,
@@ -36,6 +40,32 @@ afterEach(async () => {
 });
 
 describe("gateway fixture leak detector", () => {
+	it("exports integration cleanup stats to the profiler directory", () => {
+		const previousDir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-hook-profile-"));
+		try {
+			process.env.BOBBIT_V2_HOOK_PROFILE_DIR = dir;
+			resetIntegrationHarnessCleanupStats();
+
+			const outPath = exportIntegrationHarnessCleanupStatsForProfile();
+
+			expect(outPath).toBeTruthy();
+			expect(outPath!.startsWith(dir)).toBe(true);
+			const payload = JSON.parse(readFileSync(outPath!, "utf8"));
+			expect(payload.kind).toBe("integration-harness-cleanup-stats");
+			expect(payload.pid).toBe(process.pid);
+			expect(payload.cleanupStats).toMatchObject({
+				snapshots: 0,
+				sweeps: 0,
+				skippedSweeps: 0,
+			});
+		} finally {
+			if (previousDir === undefined) delete process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
+			else process.env.BOBBIT_V2_HOOK_PROFILE_DIR = previousDir;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("throws when a test leaks a session", async () => {
 		const before = snapshotEntities(gw);
 

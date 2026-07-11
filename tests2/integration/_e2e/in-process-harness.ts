@@ -23,7 +23,7 @@
 process.env.BOBBIT_LLM_REVIEW_SKIP ??= "1";
 process.env.BOBBIT_HUMAN_SIGNOFF_SKIP ??= "1";
 
-import { statSync } from "node:fs";
+import { mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	afterAll as vAfterAll,
@@ -228,6 +228,39 @@ export function resetIntegrationHarnessCleanupStats(): void {
 	harnessState().stats = emptyCleanupStats();
 }
 
+function profileCleanupStatsPath(): string | undefined {
+	const dir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
+	if (!dir) return undefined;
+	const worker = process.env.VITEST_WORKER_ID || process.env.VITEST_POOL_ID || "worker";
+	return join(dir, `integration-harness-cleanup-${process.pid}-${worker}.json`);
+}
+
+export function exportIntegrationHarnessCleanupStatsForProfile(): string | undefined {
+	const outPath = profileCleanupStatsPath();
+	if (!outPath) return undefined;
+	const payload = {
+		kind: "integration-harness-cleanup-stats",
+		createdAt: new Date().toISOString(),
+		pid: process.pid,
+		vitestWorkerId: process.env.VITEST_WORKER_ID ?? null,
+		vitestPoolId: process.env.VITEST_POOL_ID ?? null,
+		cleanupStats: integrationHarnessCleanupStats(),
+	};
+	mkdirSync(process.env.BOBBIT_V2_HOOK_PROFILE_DIR!, { recursive: true });
+	const tmpPath = `${outPath}.tmp-${process.pid}`;
+	writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`);
+	renameSync(tmpPath, outPath);
+	return outPath;
+}
+
+function exportIntegrationHarnessCleanupStatsBestEffort(): void {
+	try { exportIntegrationHarnessCleanupStatsForProfile(); }
+	catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		console.warn(`[integration-harness] failed to export cleanup stats: ${message}`);
+	}
+}
+
 function stableStringify(value: unknown): string {
 	if (value === undefined) return "undefined";
 	if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -412,7 +445,15 @@ function wrapDescribe(name: string, body: DescribeBody): void {
 		vBeforeAll(async () => { const gw = await ensureGw(); before = snapshotEntities(gw); fileBaseline = snapshotCleanupState(gw); });
 		vBeforeEach(async () => { const gw = await ensureGw(); testBaseline = snapshotCleanupState(gw); setScope(createScope(gw)); });
 		vAfterEach(async () => { setScope(undefined); await cleanupTo(await ensureGw(), testBaseline); });
-		vAfterAll(async () => { const gw = await ensureGw(); await cleanupTo(gw, fileBaseline, { final: true }); assertNoLeaks(before, snapshotEntities(gw)); });
+		vAfterAll(async () => {
+			try {
+				const gw = await ensureGw();
+				await cleanupTo(gw, fileBaseline, { final: true });
+				assertNoLeaks(before, snapshotEntities(gw));
+			} finally {
+				exportIntegrationHarnessCleanupStatsBestEffort();
+			}
+		});
 		body();
 	});
 }
