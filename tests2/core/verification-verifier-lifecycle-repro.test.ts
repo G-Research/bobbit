@@ -247,6 +247,114 @@ describe("verifier lifecycle reproductions", () => {
 		assert.equal(result.passed, false, `${MARKER}: exhausted same-session resurrection should fail the step only after the 3 recovery attempts`);
 	});
 
+	it("resurrected llm-review that goes idle without a verdict does not multiply timeout or fake more resurrection attempts", async () => {
+		const goalId = "goal-reviewer-resurrection-idle-budget";
+		const stateDir = makeStateDir("verifier-reviewer-idle-budget-");
+		const sessionId = "llm-review-resurrected-idle-same-session";
+		const createdIds: string[] = [];
+		const calls: string[] = [];
+		const idleWaitTimeouts: number[] = [];
+		const streamingWaitTimeouts: number[] = [];
+		let idleWaitCount = 0;
+		let now = 0;
+
+		const fakeClock = {
+			now: () => now,
+			setTimeout: (handler: () => void, ms: number) => {
+				now += Math.max(0, ms);
+				return globalThis.setTimeout(handler, 0);
+			},
+			setInterval: (handler: () => void, ms: number) => globalThis.setInterval(handler, ms),
+			clearTimeout: (handle: any) => globalThis.clearTimeout(handle),
+		};
+		const fakeSession = {
+			id: sessionId,
+			status: "terminated",
+			lastTurnErrored: false,
+			transcriptMarker: "preserved reviewer history",
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async () => { calls.push("prompt:resume"); },
+				promptWhenReady: async () => { calls.push("promptWhenReady:resume"); },
+			},
+		};
+		const roleStore = { get: () => undefined, getAll: () => [] };
+		const { projectContextManager } = makeProjectContext(goalId, roleStore);
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async (_cwd: string, _args: unknown, _goalId: string, _assistantType: unknown, opts: any) => {
+				createdIds.push(opts.sessionId);
+				return fakeSession;
+			},
+			setTitle: () => {},
+			updateSessionMeta: () => {},
+			getSession: (sid: string) => {
+				assert.equal(sid, sessionId, `${MARKER}: idle-after-resurrection checks must target the original reviewer id`);
+				return fakeSession;
+			},
+			waitForIdle: async (_sid: string, timeoutMs: number) => {
+				idleWaitCount += 1;
+				idleWaitTimeouts.push(timeoutMs);
+				calls.push(`waitForIdle:${timeoutMs}`);
+				if (idleWaitCount === 1) throw new Error("Agent process not running");
+				return;
+			},
+			waitForStreaming: async (_sid: string, timeoutMs: number) => {
+				streamingWaitTimeouts.push(timeoutMs);
+				calls.push(`waitForStreaming:${timeoutMs}`);
+				now += Math.max(0, timeoutMs);
+			},
+			ensureSessionAlive: async (sid: string) => {
+				calls.push(`ensureSessionAlive:${sid}`);
+				assert.equal(fakeSession.transcriptMarker, "preserved reviewer history", `${MARKER}: same-session resurrection must preserve transcript/history metadata`);
+				fakeSession.status = "idle";
+			},
+			restartAgent: async (sid: string) => { calls.push(`restartAgent:${sid}`); },
+			terminateSession: async (sid: string) => { calls.push(`terminate:${sid}`); },
+		} as any;
+
+		const harness = new VerificationHarness(
+			stateDir,
+			undefined,
+			() => {},
+			roleStore as any,
+			undefined,
+			sessionManager,
+			verifierTeamManager() as any,
+			undefined,
+			projectContextManager as any,
+			undefined,
+			{ clock: fakeClock as any },
+		) as any;
+
+		const result = await harness.runLlmReviewViaSession(
+			{ name: "Dead then idle reviewer", prompt: "Review the diff", timeout: 60, role: "reviewer" },
+			stateDir,
+			goalId,
+			{ name: "reviewer", promptTemplate: "You are a code reviewer.", accessory: "magnifier" },
+			"combined prompt",
+			"kickoff prompt",
+			60_000,
+			sessionId,
+		);
+
+		const resurrectionCalls = calls.filter(c => c === `ensureSessionAlive:${sessionId}` || c === `restartAgent:${sessionId}`);
+		assert.equal(
+			resurrectionCalls.length,
+			1,
+			`${MARKER}: once same-session resurrection succeeds and the verifier is alive-but-idle without verification_result, recovery must not issue fake resurrection attempts 2/3. calls=${JSON.stringify(calls)} result=${JSON.stringify(result)}`,
+		);
+		assert.deepEqual(createdIds, [sessionId], `${MARKER}: idle-after-resurrection recovery must not create a blank replacement session with the same id`);
+		assert.deepEqual(streamingWaitTimeouts, [15_000], `${MARKER}: resurrection streaming grace should be bounded and counted against the shared verifier timeout budget`);
+		assert.deepEqual(
+			idleWaitTimeouts,
+			[60_000, 45_000],
+			`${MARKER}: recovery must wait only for the remaining shared timeout budget after streaming grace, not the full step timeout on every resurrection attempt. calls=${JSON.stringify(calls)}`,
+		);
+		assert.equal(result.passed, false, `${MARKER}: idle-without-result after successful same-session resurrection should fail clearly instead of looping as process death`);
+		assert.match(result.output, /idle without verification_result|not issuing duplicate resurrection/i, `${MARKER}: failure diagnostics should explain idle-without-result after resurrection. output=${result.output}`);
+	});
+
 	it("alive idle agent-qa gets repeated fair reminders with streaming grace before termination", async () => {
 		const goalId = "goal-agent-qa-idle-grace";
 		const stateDir = makeStateDir("verifier-agent-qa-idle-");
