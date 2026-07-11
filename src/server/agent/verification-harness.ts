@@ -1201,6 +1201,29 @@ function isVerifierProcessDeathMessage(message: string | undefined): boolean {
 		|| /\bsession .*terminated\b/i.test(message);
 }
 
+async function raceResultWithLateVerdictGrace(
+	clock: Clock,
+	resultPromise: Promise<VerificationResult>,
+	graceMs: number,
+): Promise<({ type: "result" } & VerificationResult) | { type: "timeout" }> {
+	let timer: ReturnType<Clock["setTimeout"]> | undefined;
+	try {
+		const timeoutPromise = new Promise<{ type: "timeout" }>(resolve => {
+			timer = clock.setTimeout(() => {
+				timer = undefined;
+				resolve({ type: "timeout" });
+			}, graceMs);
+			(timer as any)?.unref?.();
+		});
+		return await Promise.race([
+			resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+			timeoutPromise,
+		]);
+	} finally {
+		if (timer) clock.clearTimeout(timer);
+	}
+}
+
 function appendLlmReviewRecoveryDiagnostics(
 	output: string,
 	args: { attempts: number; maxBoundedAttempts: number },
@@ -4112,10 +4135,7 @@ export class VerificationHarness {
 				}
 
 				if (started) {
-					const late = await Promise.race([
-						args.resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-						new Promise<{ type: "timeout" }>(r => this.clock.setTimeout(() => r({ type: "timeout" }), REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS)),
-					]);
+					const late = await raceResultWithLateVerdictGrace(this.clock, args.resultPromise, REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS);
 					if (late.type === "result") return late;
 				}
 
@@ -4394,10 +4414,7 @@ export class VerificationHarness {
 				// flight — give a short settle grace and re-check the channel once
 				// before deciding to nudge again / give up.
 				if (started) {
-					const late = await Promise.race([
-						resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-						new Promise<{ type: "timeout" }>(r => this.clock.setTimeout(() => r({ type: "timeout" }), REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS)),
-					]);
+					const late = await raceResultWithLateVerdictGrace(this.clock, resultPromise, REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS);
 					if (late.type === "result") {
 						reminderOutcome = { type: "result", verdict: late.verdict, summary: late.summary };
 						break;
@@ -4811,10 +4828,7 @@ export class VerificationHarness {
 				}
 
 				if (started) {
-					const late = await Promise.race([
-						resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-						new Promise<{ type: "timeout" }>(r => this.clock.setTimeout(() => r({ type: "timeout" }), REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS)),
-					]);
+					const late = await raceResultWithLateVerdictGrace(this.clock, resultPromise, REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS);
 					if (late.type === "result") {
 						qaReminderOutcome = { type: "result", verdict: late.verdict, summary: late.summary, reportHtml: late.reportHtml };
 						break;
