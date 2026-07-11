@@ -22,11 +22,24 @@ type GateStoreCall =
 	| { kind: "updateSignalVerification"; signalId: string; update: any }
 	| { kind: "updateGateStatus"; goalId: string; gateId: string; status: string };
 
+function removeTreeBestEffort(root: string): void {
+	try {
+		fs.rmSync(root, { recursive: true, force: true, maxRetries: process.platform === "win32" ? 10 : 3, retryDelay: 100 });
+	} catch {
+		// Some Windows process handles can outlive test assertions briefly. The
+		// lifecycle tests explicitly kill their children; defer one final cleanup
+		// attempt so teardown does not fail while the OS is releasing handles.
+		setTimeout(() => {
+			try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch { /* best-effort */ }
+		}, 250).unref?.();
+	}
+}
+
 function makeHarness(_t: TestContext) {
 	const root = makeTmpDir("verif-command-lifecycle-");
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
-	onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
+	onTestFinished(() => removeTreeBestEffort(root));
 	return makeHarnessForStateDir(stateDir);
 }
 
@@ -273,15 +286,15 @@ test("command step settles from process exit when inherited stdio delays close",
 	const workDir = path.join(stateDir, "stdio-close-delay-work");
 	fs.mkdirSync(workDir, { recursive: true });
 	const holderPidFile = path.join(workDir, "stdio-holder.pid");
-	const holderScript = [
+	const holderScriptFile = path.join(workDir, "stdio-holder.js");
+	fs.writeFileSync(holderScriptFile, [
 		"const fs = require('node:fs');",
 		`fs.writeFileSync(${JSON.stringify(holderPidFile)}, String(process.pid));`,
-		"setTimeout(() => {}, 30000);",
-	].join("\n");
-	const holderB64 = Buffer.from(holderScript, "utf8").toString("base64");
+		"setInterval(() => {}, 1000);",
+	].join("\n"));
 	const nodeExe = process.execPath.replace(/\\/g, "/");
-	const safeHolderCwd = process.cwd().replace(/\\/g, "/").replace(/'/g, `'"'"'`);
-	const command = `cd '${safeHolderCwd}' && "${nodeExe}" -e "eval(Buffer.from('${holderB64}','base64').toString())" & echo stdio-close-delay-parent-exiting; exit 0`;
+	const shellQuote = (value: string) => `'${value.replace(/\\/g, "/").replace(/'/g, `'\"'\"'`)}'`;
+	const command = `"${nodeExe}" ${shellQuote(holderScriptFile)} & __bobbit_i=0; while [ ! -s ${shellQuote(holderPidFile)} ] && [ "$__bobbit_i" -lt 500 ]; do __bobbit_i=$((__bobbit_i + 1)); sleep 0.02; done; echo stdio-close-delay-parent-exiting; exit 0`;
 
 	let holderPid = 0;
 	const stepPromise = (harness as any).runCommandStep(command, workDir, 30, false, undefined, undefined, undefined);
@@ -289,7 +302,7 @@ test("command step settles from process exit when inherited stdio delays close",
 		holderPid = await waitForCondition("stdio holder pid", () => {
 			if (!fs.existsSync(holderPidFile)) return false;
 			const pid = Number(fs.readFileSync(holderPidFile, "utf8"));
-			return Number.isFinite(pid) && pid > 0 ? pid : false;
+			return Number.isFinite(pid) && pid > 0 && isPidAliveForTest(pid) ? pid : false;
 		}, 10_000, 25);
 
 		const result = await withTimeout(stepPromise, 6_000, "command step to settle after process exit despite inherited stdio") as { passed: boolean; output: string };

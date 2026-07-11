@@ -14,7 +14,7 @@ guardProcessEnv();
  * SHARED_WORKTREE_GUARD_* because cleanup removes a worktree still referenced
  * by a non-archived persisted session.
  */
-import { afterEach, beforeEach, describe, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { execFile as execFileCb } from "node:child_process";
 import fs from "node:fs";
@@ -38,14 +38,15 @@ type TestRepo = { repo: string; tmp: string };
 const managers: any[] = [];
 let prevBobbitDir: string | undefined;
 let stateRoot = "";
+let realRepoTemplate: TestRepo | undefined;
 
 async function git(args: string[], cwd: string): Promise<string> {
 	const { stdout } = await execFile("git", args, { cwd });
 	return stdout.trim();
 }
 
-async function makeRepo(prefix: string): Promise<TestRepo> {
-	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+async function createRepoTemplate(): Promise<TestRepo> {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-template-"));
 	const repo = path.join(tmp, "repo");
 	fs.mkdirSync(repo, { recursive: true });
 	await git(["-c", "init.defaultBranch=master", "init", repo], tmp);
@@ -54,6 +55,21 @@ async function makeRepo(prefix: string): Promise<TestRepo> {
 	fs.writeFileSync(path.join(repo, "README.md"), "# repro\n", "utf8");
 	await git(["add", "README.md"], repo);
 	await git(["commit", "-m", "initial"], repo);
+	return { repo, tmp };
+}
+
+async function cloneTemplateRepo(repo: string): Promise<void> {
+	if (!realRepoTemplate) throw new Error("real repo template was not initialized");
+	fs.mkdirSync(path.dirname(repo), { recursive: true });
+	await git(["clone", "--local", realRepoTemplate.repo, repo], path.dirname(repo));
+	await git(["config", "user.name", "Bobbit Test"], repo);
+	await git(["config", "user.email", "bobbit-test@example.invalid"], repo);
+}
+
+async function makeRepo(prefix: string): Promise<TestRepo> {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const repo = path.join(tmp, "repo");
+	await cloneTemplateRepo(repo);
 	return { repo, tmp };
 }
 
@@ -75,11 +91,21 @@ function makeSession(id: string, extra: Record<string, any>): any {
 	};
 }
 
-function makeManager(store: any): any {
-	const manager: any = new SessionManager();
+function makeManager(store: any, commandRunner?: any): any {
+	const manager: any = new SessionManager(commandRunner ? { commandRunner } : undefined);
 	manager._testStore = store;
 	managers.push(manager);
 	return manager;
+}
+
+function fakeGitWorktreeListRunner(porcelain: string): any {
+	return {
+		execFile: async (command: string, args: readonly string[]) => {
+			assert.equal(command, "git");
+			assert.deepEqual(args, ["worktree", "list", "--porcelain"]);
+			return { stdout: porcelain, stderr: "" };
+		},
+	};
 }
 
 async function waitForWorktreeRemoval(worktreePath: string, timeoutMs = 3_000): Promise<void> {
@@ -87,6 +113,15 @@ async function waitForWorktreeRemoval(worktreePath: string, timeoutMs = 3_000): 
 	while (Date.now() < deadline && fs.existsSync(worktreePath)) {
 		await new Promise(resolve => setTimeout(resolve, 50));
 	}
+}
+
+async function assertWorktreeStillExistsAfterCleanupSettles(worktreePath: string, settleMs = 750): Promise<void> {
+	const deadline = Date.now() + settleMs;
+	while (Date.now() < deadline) {
+		assert.ok(fs.existsSync(worktreePath), `worktree was removed unexpectedly: ${worktreePath}`);
+		await new Promise(resolve => setTimeout(resolve, 50));
+	}
+	assert.ok(fs.existsSync(worktreePath), `worktree was removed unexpectedly: ${worktreePath}`);
 }
 
 async function removeTempDirWithRetries(dir: string): Promise<void> {
@@ -113,6 +148,10 @@ function cleanupManager(manager: any): void {
 }
 
 describe("shared worktree guard reproductions", () => {
+	beforeAll(async () => {
+		realRepoTemplate = await createRepoTemplate();
+	});
+
 	beforeEach(() => {
 		stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-state-"));
 		prevBobbitDir = process.env.BOBBIT_DIR;
@@ -125,6 +164,13 @@ describe("shared worktree guard reproductions", () => {
 		if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 		else process.env.BOBBIT_DIR = prevBobbitDir;
 		await removeTempDirWithRetries(stateRoot);
+	});
+
+	afterAll(async () => {
+		if (realRepoTemplate) {
+			await removeTempDirWithRetries(realRepoTemplate.tmp);
+			realRepoTemplate = undefined;
+		}
 	});
 
 	it("purging an archived session must not remove a worktree referenced by a live session cwd", async () => {
@@ -214,10 +260,11 @@ describe("shared worktree guard reproductions", () => {
 	});
 
 	it("manual orphan listing must not report a worktree path referenced by live repoWorktrees", async () => {
-		const { repo, tmp } = await makeRepo("shared-wt-guard-list-");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-list-"));
 		try {
+			const repo = path.join(tmp, "repo");
 			const sharedWorktree = path.join(tmp, "repo-wt", "session-shared-api");
-			await makeWorktree(repo, sharedWorktree, "session/stale-branch");
+			fs.mkdirSync(sharedWorktree, { recursive: true });
 
 			const store = new SessionStore(stateRoot);
 			store.put(makeSession("live-repo-owner", {
@@ -226,7 +273,8 @@ describe("shared worktree guard reproductions", () => {
 				repoWorktrees: { api: sharedWorktree.replace(/\\/g, "/").toUpperCase() },
 			}));
 
-			const manager = makeManager(store);
+			const porcelain = `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${sharedWorktree}\nbranch refs/heads/session/stale-branch\n`;
+			const manager = makeManager(store, fakeGitWorktreeListRunner(porcelain));
 			const orphans = await manager.listOrphanedSessionWorktrees(repo);
 
 			assert.equal(
@@ -333,7 +381,7 @@ describe("shared worktree guard reproductions", () => {
 				makePipelineContext(store, sessions),
 			);
 
-			await waitForWorktreeRemoval(sharedWorktree);
+			await assertWorktreeStillExistsAfterCleanupSettles(sharedWorktree);
 			assert.ok(
 				fs.existsSync(sharedWorktree),
 				"SHARED_WORKTREE_GUARD_SETUP_FAILURE_REGRESSION: setup-failure cleanup removed a worktree path already referenced by another non-archived persisted session",
@@ -345,13 +393,7 @@ describe("shared worktree guard reproductions", () => {
 });
 
 async function makeRepoIn(repo: string): Promise<void> {
-	fs.mkdirSync(repo, { recursive: true });
-	await git(["-c", "init.defaultBranch=master", "init", repo], path.dirname(repo));
-	await git(["config", "user.name", "Bobbit Test"], repo);
-	await git(["config", "user.email", "bobbit-test@example.invalid"], repo);
-	fs.writeFileSync(path.join(repo, "README.md"), "# repro\n", "utf8");
-	await git(["add", "README.md"], repo);
-	await git(["commit", "-m", "initial"], repo);
+	await cloneTemplateRepo(repo);
 }
 
 function makePipelineContext(store: any, sessions: Map<string, any>): any {

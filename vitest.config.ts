@@ -20,8 +20,23 @@ import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
  *      grant (BOBBIT_V2_SLOTS_VITEST) with a no-op release; standalone
  *      `test:v2:core` performs its own cross-run reservation. release() is
  *      registered on process exit so the slot isn't leaked.
- *   3. Fallback to 6 only if the ledger call throws.
+ *   3. Ledger grants are capped at 6 by default for the full-suite Vitest
+ *      parent. On Windows/Vitest 3.2, 8 fixed forks can pass every spec and then
+ *      fail the run with `[vitest-worker]: Timeout calling "onTaskUpdate"` while
+ *      the parent drains RPC/reporting updates. This cap preserves coverage and
+ *      retry policy; `VITEST_MAX_FORKS` remains an explicit escape hatch.
+ *   4. Fallback to 6 only if the ledger call throws.
  */
+const STABLE_FULL_SUITE_FORK_CAP = 6;
+
+function capDefaultForks(workerSlots: number): number {
+	const capped = Math.max(1, Math.min(workerSlots, STABLE_FULL_SUITE_FORK_CAP));
+	if (capped < workerSlots) {
+		console.log(`[vitest.config] capping ledger grant from ${workerSlots} to ${capped} forks to avoid Vitest RPC saturation; set VITEST_MAX_FORKS to override.`);
+	}
+	return capped;
+}
+
 function resolveMaxForks(): number {
 	const override = process.env.VITEST_MAX_FORKS;
 	if (override != null && override !== "") {
@@ -31,10 +46,10 @@ function resolveMaxForks(): number {
 	try {
 		const { workerSlots, release } = reserveWorkerSlots("vitest");
 		process.once("exit", release);
-		return Math.max(1, workerSlots);
+		return capDefaultForks(workerSlots);
 	} catch (e) {
-		console.warn(`[vitest.config] ledger reserve failed, falling back to 6 forks: ${(e as Error)?.message ?? e}`);
-		return 6;
+		console.warn(`[vitest.config] ledger reserve failed, falling back to ${STABLE_FULL_SUITE_FORK_CAP} forks: ${(e as Error)?.message ?? e}`);
+		return STABLE_FULL_SUITE_FORK_CAP;
 	}
 }
 
@@ -70,19 +85,29 @@ const singleForkFiles = [
 	"tests2/core/transcript-sanitizer-agent-dir.test.ts",
 ];
 
-// Heavy gateway-integration specs whose command steps are only a "verification
-// that passes / fails with a known code" stand-in (no durable-recovery / real
-// tree-kill assertions). They run in the dedicated `v2-integration-fake` project
+// Heavy gateway-integration specs whose command steps are API/status/metadata
+// stand-ins (echo, deterministic exit, or scripted delay) rather than real shell
+// lifecycle coverage. They run in the dedicated `v2-integration-fake` project
 // with the non-spawning fake command-step runner injected, removing the cmd.exe/
-// Git-Bash spawns that oversubscribe the box under concurrent load. Durability/
-// cancel-fidelity + verification-core stay on the real path in v2-integration.
+// Git-Bash spawns that oversubscribe the box under concurrent load.
+//
+// Keep real-runner coverage for tests that assert OS-process fidelity or command
+// side effects: cancel-verification (real cancellation), verification-core
+// (streaming/tree-kill/durable runner), verification-restart-resignal (restart
+// zombie cleanup), gate-inspect-slicing (retained logs/artifacts/filesystem side
+// effects), bg/sandbox command suites, and gate-verification (legacy
+// createTestGateway fixture outside this fake-DI seam).
 // See docs/testing-v2/gateway-cost-feasibility.md.
 const fakeCommandStepFiles = [
+	"tests2/integration/gate-bypass-api.test.ts",
 	"tests2/integration/gate-reset-api.test.ts",
+	"tests2/integration/gate-resign-cancel.test.ts",
+	"tests2/integration/gate-signal-progress.test.ts",
+	"tests2/integration/gate-signal-reminder.test.ts",
+	"tests2/integration/gate-status-summary.test.ts",
 	"tests2/integration/gates-api-heavy.test.ts",
 	"tests2/integration/maintenance-api.test.ts",
-	"tests2/integration/gate-signal-progress.test.ts",
-	"tests2/integration/gate-resign-cancel.test.ts",
+	"tests2/integration/optional-steps-api.test.ts",
 ];
 
 const MAX_FORKS = resolveMaxForks();
