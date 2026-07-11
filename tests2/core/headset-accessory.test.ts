@@ -30,15 +30,15 @@ describe("headset accessory", () => {
 		assert.equal(ACCESSORY_HEADSET.label, "Headset");
 	});
 
-	it("is an addsHeight hat seated like the crown (yOffset 2)", () => {
-		assert.equal(ACCESSORY_HEADSET.addsHeight, true, "band rises above the head");
+	it("is seated without adding top height", () => {
+		assert.equal(ACCESSORY_HEADSET.addsHeight, false, "front-view band starts at row 0");
 		assert.equal(ACCESSORY_HEADSET.yOffset, 2);
 		assert.equal(ACCESSORY_HEADSET.blobYAdjust, 2);
 	});
 
-	it("has a headband with BOTH a top and its own bottom outline", () => {
-		// Top outline over the crown at row -1.
-		assert.ok(has(4, -1, "#000") && has(5, -1, "#000"), "band top outline at row -1");
+	it("has a front-view headband with its own bottom outline", () => {
+		// Top outline starts at row 0, so the headset no longer needs addsHeight spacing.
+		assert.ok(has(2, 0, "#000") && has(7, 0, "#000"), "band top outline at row 0");
 		// Dedicated bottom outline under the crown at row 1 (drawn over the head
 		// so it tracks the fractional seat rather than borrowing the head edge).
 		assert.ok(
@@ -76,6 +76,7 @@ describe("headset accessory", () => {
 		// Seats a quarter sprite-pixel DOWN via the independent translate lever.
 		assert.match(css, /\.bobbit-headset \.bobbit-blob__headset[\s\S]*?translate:\s*0 1px/, "downward seat translate");
 		assert.match(css, /blob-headset-shadow/, "headset hides the far/right ear cup during right-facing busy phases");
+		assert.doesNotMatch(css, /\.bobbit-headset \.bobbit-blob \{[\s\S]*?padding-top/, "headset front view should not add top padding");
 		assert.match(css, /blob-headset-adjust[\s\S]*?34%, 35%, 60%, 61%, 96%, 97% \{ translate: 2px 1px; \}/, "headset nudges right during right-facing transition frames");
 		assert.match(css, /Facing right[\s\S]*?2px 1px 0 #000,[\s\S]*?3px 1px 0 #1f2937,[\s\S]*?1px 2px 0 #000,[\s\S]*?2px 2px 0 #1f2937,[\s\S]*?3px 2px 0 #000,[\s\S]*?8px 6px 0 #1f2937,[\s\S]*?9px 6px 0 #000,[\s\S]*?7px 7px 0 #f97316,[\s\S]*?8px 7px 0 #1f2937/, "right-facing headset uses the narrowed no-third-eye subset");
 		assert.match(css, /Looking up-right[\s\S]*?60% \{ box-shadow:[\s\S]*?2px 1px 0 #000,[\s\S]*?3px 1px 0 #1f2937,[\s\S]*?1px 2px 0 #000,[\s\S]*?2px 2px 0 #1f2937,[\s\S]*?3px 2px 0 #000,[\s\S]*?8px 6px 0 #1f2937,[\s\S]*?9px 6px 0 #000,[\s\S]*?7px 7px 0 #f97316,[\s\S]*?8px 7px 0 #1f2937;\r?\n\t\}/, "up-right headset uses the narrowed no-third-eye subset");

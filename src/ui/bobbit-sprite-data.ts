@@ -514,10 +514,10 @@ export const ACCESSORY_NURSE_CAP: AccessorySpriteData = {
 };
 
 /**
- * Headset accessory — compact charcoal gaming headset: arched band, two
+ * Headset accessory — compact charcoal gaming headset: front-view top band, two
  * charcoal ear cups over the eye row, and a boom mic ending in an orange foam
  * windscreen in front of the mouth. Sidebar coordinates (yOffset=2,
- * addsHeight=true, blobYAdjust=2).
+ * addsHeight=false, blobYAdjust=2).
  *
  * Seated a quarter sprite-pixel DOWN in chat (`translate: 0 1px`) and a half
  * sprite-pixel DOWN in sidebar canvas (`translateY(0.5 * S)`). Neutral greys
@@ -528,17 +528,15 @@ export const ACCESSORY_HEADSET: AccessorySpriteData = {
   id: 'headset',
   label: 'Headset',
   yOffset: 2,
-  addsHeight: true,
+  addsHeight: false,
   blobYAdjust: 2,
   pixels: [
-    // Row -1
-    [4, -1, '#000'], [5, -1, '#000'], [6, -1, '#000'],
     // Row 0
-    [2, 0, '#000'], [3, 0, '#000'], [4, 0, '#374151'], [5, 0, '#374151'], [6, 0, '#374151'], [7, 0, '#000'],
+    [2, 0, '#000'], [3, 0, '#000'], [4, 0, '#000'], [5, 0, '#000'], [6, 0, '#000'], [7, 0, '#000'],
     // Row 1
     [1, 1, '#000'], [2, 1, '#1f2937'], [3, 1, '#1f2937'], [4, 1, '#000'], [5, 1, '#000'], [6, 1, '#000'], [7, 1, '#4b5563'], [8, 1, '#000'],
     // Row 2
-    [0, 2, '#000'], [1, 2, '#1f2937'], [2, 2, '#000'], [7, 2, '#000'], [8, 2, '#4b5563'], [9, 2, '#000'],
+    [1, 2, '#1f2937'], [2, 2, '#000'], [7, 2, '#000'], [8, 2, '#4b5563'],
     // Row 3
     [0, 3, '#000'], [1, 3, '#000'], [8, 3, '#000'], [9, 3, '#000'],
     // Row 4
