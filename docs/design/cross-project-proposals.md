@@ -157,15 +157,30 @@ No registry rejection for `project` at seed (acceptance criterion (d)).
   register a new one.
 - `fields.projectId` **absent** ⇒ brand-new project, registered from
   `name` + `root_path` exactly as today (unchanged path).
-- `fields.projectId` present but **not registered** ⇒ treated as a brand-new
-  project registration using that value only if the accept path already supports
-  a caller-chosen id; otherwise the unknown id is ignored and registration falls
-  back to `name` + `root_path`. **Decision: reject unknown explicit `projectId`
-  at accept time** with a clear error rather than silently registering, so the
-  edit-vs-create intent is never ambiguous. (New projects must omit `projectId`.)
+- `fields.projectId` present but **not registered** ⇒ **rejected with a clear
+  error** (edit-vs-create intent must be unambiguous; new projects omit
+  `projectId`).
 - Because `propose_project` is skipped by the tool's `argsWithProjectId`
   injection, an omitted `projectId` never gets auto-stamped, so the new-project
   path is preserved byte-for-byte.
+
+**Enforcement point is the server mutation boundary, not the UI.** The edit-vs-
+create invariant for project proposals is owned by the API, so direct/non-UI
+callers get identical semantics:
+- The relevant mutation endpoints are `PUT /api/projects/:id/config`,
+  `PUT /api/projects/:id` (rename), and `POST /api/projects/:id/promote`
+  (`src/server/server.ts`, project routes ~4517-5250). These already resolve the
+  target via `projectRegistry.get(:id)` and return an error for an unknown id —
+  so an unknown `fields.projectId` naturally fails there.
+- Make that explicit and clean: when a project proposal is accepted against an
+  **explicit** `fields.projectId`, the accept path targets *that* id. If the id
+  is not registered the server returns a clear `UNKNOWN_PROJECT` error (not a
+  generic 404), so the caller sees "you asked to edit an unregistered project".
+  New-project creation must go through the provisional/promote path with **no**
+  `projectId`.
+- The UI (`acceptRegisteredProjectProposalFromPanel` /
+  `acceptProvisionalProjectProposalFromPanel`) may preflight for a nicer message,
+  but correctness does not depend on it — the server is authoritative.
 
 ### 4. Tool-wording nudge (advisory, ≤80 chars per budget test)
 
@@ -194,13 +209,16 @@ Already mostly wired — confirm and leave intact:
   it currently only reads session, patch it to prefer the draft field.
 - Project accept: `projectIdForProjectProposal` (~2848) currently reads
   `session.projectId` only. Patch to prefer `state.activeProposals.project?.fields?.projectId`
-  when present (editing an existing registered project); else keep the
-  new-project registration flow.
+  when present AND registered (editing an existing project); else keep the
+  new-project registration flow (session-scoped provisional id). The
+  authoritative edit-vs-create enforcement lives on the server (see §3).
 
-Server-side acceptance already keys off the proposal's `projectId` (goal creation
-under target worktree/branch/workflow, config writes to target config store), so
-no server acceptance changes beyond §1–§3 are expected. Implementer must verify
-each accept endpoint honours the body `projectId`.
+Server-side acceptance keys off the proposal's `projectId` (goal creation under
+target worktree/branch/workflow; config writes to target config store; project
+config edit vs create). The goal/role/tool/staff accept endpoints already honour
+the body/proposal `projectId`; the project accept path adds the explicit
+`UNKNOWN_PROJECT` guard described in §3. Implementer must verify each accept
+endpoint honours the resolved `projectId`.
 
 ### 6. Headquarters scope
 
@@ -220,9 +238,20 @@ Add a shared helper:
 // own session project (normalising system→headquarters). Otherwise undefined.
 function crossProjectTarget(type: ProposalType, sid: string | null | undefined):
   { id: string; name: string; color?: string } | undefined {
-  const target = type === "goal"
-    ? resolveGoalProposalProjectId(sid, state.activeProposals.goal?.fields)
-    : proposalProjectId(type, sid);
+  let target: string | undefined;
+  if (type === "goal") {
+    target = resolveGoalProposalProjectId(sid, state.activeProposals.goal?.fields);
+  } else if (type === "project") {
+    // Project proposals: banner ONLY for an explicit edit of an existing
+    // (registered) project. Brand-new project proposals (no fields.projectId,
+    // or an id that is not yet registered) get NO banner — they are not
+    // "cross-project" in the target-registry sense.
+    const explicit = state.activeProposals.project?.fields?.projectId;
+    const id = typeof explicit === "string" && explicit.trim() ? explicit.trim() : undefined;
+    target = id && state.projects.some(p => p.id === id) ? id : undefined;
+  } else {
+    target = proposalProjectId(type, sid);   // role / tool / staff
+  }
   if (!target) return undefined;
   const session = sid ? (state.gatewaySessions.find(s => s.id === sid)
     || state.archivedSessions.find(s => s.id === sid)) : undefined;
