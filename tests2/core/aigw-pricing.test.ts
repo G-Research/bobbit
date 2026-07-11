@@ -20,6 +20,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { createMemFs } from "../harness/mem-fs.js";
+
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const { discoverAigwModels, writeAigwModelsJson } = await import("../../src/server/agent/aigw-manager.ts");
@@ -145,10 +147,11 @@ describe("AI Gateway pricing metadata", () => {
 	});
 
 	it("converts /v1/models pricing to per-million costs in getAvailableModels output", async () => {
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-aigw-pricing-"));
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/aigw-pricing");
 		const mock = await startMockAigw();
 		try {
-			const prefs = new PreferencesStore(tmpDir);
+			const prefs = new PreferencesStore(stateDir, memfs);
 			prefs.set("aigw.url", mock.url);
 			invalidateModelCache();
 
@@ -169,7 +172,6 @@ describe("AI Gateway pricing metadata", () => {
 		} finally {
 			invalidateModelCache();
 			await mock.close();
-			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
 	});
 

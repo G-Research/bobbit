@@ -23,6 +23,7 @@ import path from "node:path";
 
 import { generateImage } from "../../src/server/agent/image-generation.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 let tmp: string;
 let prefs: PreferencesStore;
@@ -37,8 +38,9 @@ beforeAll(() => {
 	process.env.BOBBIT_AGENT_DIR = tmp;
 	mkdirSync(tmp, { recursive: true });
 	// No OAuth credential — we set the OpenAI key via prefs below so the
-	// non-GPT-Image path is used.
-	prefs = new PreferencesStore(tmp);
+	// non-GPT-Image path is used. BOBBIT_AGENT_DIR still points at a real
+	// empty dir because auth probing is outside the PreferencesStore fs seam.
+	prefs = new PreferencesStore(path.resolve("/memfs/image-from-url-cap"), createMemFs());
 	prefs.set("providerKey.openai", "test-key");
 	origFetch = globalThis.fetch;
 });
