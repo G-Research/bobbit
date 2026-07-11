@@ -6,7 +6,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 
 import { WorktreePool } from "../../src/server/agent/worktree-pool.ts";
 import { createWorktree, createWorktreeSet } from "../../src/server/skills/git.ts";
+import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 
 const execFile = promisify(execFileCb);
 
@@ -74,22 +75,32 @@ async function withGitCommandLog<T>(fn: () => Promise<T>): Promise<{ result: T; 
 	}
 }
 
+let templateRoot: string | null = null;
+let templateOrigin: string | null = null;
+
+async function createRemoteTemplate(): Promise<void> {
+	templateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-local-push-policy-template-"));
+	const seed = path.join(templateRoot, "seed");
+	templateOrigin = path.join(templateRoot, "origin.git");
+
+	await git(templateRoot, ["init", "--bare", "--initial-branch=master", templateOrigin]);
+	await git(templateRoot, ["init", "--initial-branch=master", seed]);
+	await git(seed, ["config", "user.email", "test@test"]);
+	await git(seed, ["config", "user.name", "Test"]);
+	fs.writeFileSync(path.join(seed, "README.md"), "base\n");
+	await git(seed, ["add", "README.md"]);
+	await git(seed, ["commit", "-m", "initial"]);
+	await git(seed, ["remote", "add", "origin", templateOrigin]);
+	await git(seed, ["push", "-u", "origin", "master"]);
+	await git(seed, ["remote", "set-head", "origin", "master"]);
+}
+
 async function makeRemoteBackedRepo(): Promise<{ root: string; repo: string; origin: string }> {
+	assert.ok(templateOrigin, "remote-backed repo template must be initialised");
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-local-push-policy-"));
 	const repo = path.join(root, "repo");
-	const origin = path.join(root, "origin.git");
-
-	await git(root, ["init", "--bare", "--initial-branch=master", origin]);
-	await git(root, ["init", "--initial-branch=master", repo]);
-	await git(repo, ["config", "user.email", "test@test"]);
-	await git(repo, ["config", "user.name", "Test"]);
-	fs.writeFileSync(path.join(repo, "README.md"), "base\n");
-	await git(repo, ["add", "README.md"]);
-	await git(repo, ["commit", "-m", "initial"]);
-	await git(repo, ["remote", "add", "origin", origin]);
-	await git(repo, ["push", "-u", "origin", "master"]);
-	await git(repo, ["remote", "set-head", "origin", "master"]);
-	return { root, repo, origin };
+	await git(root, ["clone", "--local", templateOrigin, repo]);
+	return { root, repo, origin: templateOrigin };
 }
 
 async function remoteRef(root: string, origin: string, ref: string): Promise<string | null> {
@@ -123,31 +134,64 @@ function cleanup(root: string): void {
 	}
 }
 
+function makeFakeRepo(): { root: string; repo: string } {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-local-push-policy-fake-"));
+	const repo = path.join(root, "repo");
+	fs.mkdirSync(repo, { recursive: true });
+	return { root, repo };
+}
+
+function recordingGitRunner(): { commands: string[]; runner: CommandRunner } {
+	const commands: string[] = [];
+	return {
+		commands,
+		runner: {
+			async execFile(file, args) {
+				assert.equal(file, "git");
+				commands.push(args.join(" "));
+				if (args[0] === "rev-parse" && args[1] === "--verify") {
+					throw new Error(`missing ref: ${args[2] ?? ""}`);
+				}
+				return { stdout: "", stderr: "" };
+			},
+		},
+	};
+}
+
 describe("host worktree push policy", () => {
+	beforeAll(async () => {
+		await createRemoteTemplate();
+	});
+
+	afterAll(() => {
+		if (templateRoot) cleanup(templateRoot);
+		templateRoot = null;
+		templateOrigin = null;
+	});
+
 	it("createWorktree local-only skips push, origin branch fetch, and origin branch upstream", async () => {
-		const { root, repo, origin } = await makeRemoteBackedRepo();
+		const { root, repo } = makeFakeRepo();
 		const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 		delete process.env.BOBBIT_TEST_NO_PUSH;
 		try {
 			const branch = "session/local-only";
-			const { result, commands } = await withGitCommandLog(() => createWorktree(repo, branch, {
+			const { commands, runner } = recordingGitRunner();
+			const result = await createWorktree(repo, branch, {
 				startPoint: "origin/master",
 				pushPolicy: "local-only",
-			}));
+				commandRunner: runner,
+			});
 
-			assert.equal(await remoteRef(root, origin, `refs/heads/${branch}`), null, "local-only branch must not be published");
-			if (commands.length > 0) {
-				assert.ok(!commands.some((command) => command.startsWith("push ")), `local-only must not run git push; commands:\n${commands.join("\n")}`);
-				assert.ok(
-					!commands.includes(`fetch origin refs/heads/${branch}:refs/remotes/origin/${branch}`),
-					`local-only must not fetch origin tracking ref for its own branch; commands:\n${commands.join("\n")}`,
-				);
-				assert.ok(
-					!commands.includes(`branch --set-upstream-to=origin/${branch} ${branch}`),
-					`local-only must not set upstream to origin/${branch}; commands:\n${commands.join("\n")}`,
-				);
-			}
-			assert.notEqual(await upstream(result.worktreePath), `origin/${branch}`);
+			assert.equal(result.branchName, branch);
+			assert.ok(!commands.some((command) => command.startsWith("push ")), `local-only must not run git push; commands:\n${commands.join("\n")}`);
+			assert.ok(
+				!commands.includes(`fetch origin refs/heads/${branch}:refs/remotes/origin/${branch}`),
+				`local-only must not fetch origin tracking ref for its own branch; commands:\n${commands.join("\n")}`,
+			);
+			assert.ok(
+				!commands.includes(`branch --set-upstream-to=origin/${branch} ${branch}`),
+				`local-only must not set upstream to origin/${branch}; commands:\n${commands.join("\n")}`,
+			);
 		} finally {
 			restoreEnv("BOBBIT_TEST_NO_PUSH", originalNoPush);
 			cleanup(root);
@@ -180,21 +224,20 @@ describe("host worktree push policy", () => {
 	});
 
 	it("BOBBIT_TEST_NO_PUSH suppresses publish even when pushPolicy is publish", async () => {
-		const { root, repo, origin } = await makeRemoteBackedRepo();
+		const { root, repo } = makeFakeRepo();
 		const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
 		try {
 			const branch = "session/no-push-env";
-			const { commands } = await withGitCommandLog(() => createWorktree(repo, branch, {
+			const { commands, runner } = recordingGitRunner();
+			await createWorktree(repo, branch, {
 				startPoint: "origin/master",
 				pushPolicy: "publish",
 				remotePolicy: { skipRemotePush: true },
-			}));
+				commandRunner: runner,
+			});
 
-			assert.equal(await remoteRef(root, origin, `refs/heads/${branch}`), null, "test no-push mode must not publish");
-			if (commands.length > 0) {
-				assert.ok(!commands.some((command) => command.startsWith("push ")), `test no-push mode must not run git push; commands:\n${commands.join("\n")}`);
-			}
+			assert.ok(!commands.some((command) => command.startsWith("push ")), `test no-push mode must not run git push; commands:\n${commands.join("\n")}`);
 		} finally {
 			restoreEnv("BOBBIT_TEST_NO_PUSH", originalNoPush);
 			cleanup(root);
@@ -216,7 +259,7 @@ describe("host worktree push policy", () => {
 
 			const { result: claim, commands } = await withGitCommandLog(async () => {
 				const claimed = await pool.claim(targetBranch);
-				await new Promise(resolve => setTimeout(resolve, 700));
+				await new Promise(resolve => setTimeout(resolve, 300));
 				return claimed;
 			});
 
@@ -236,7 +279,7 @@ describe("host worktree push policy", () => {
 	});
 
 	it("createWorktreeSet passes through publish policy and skipPush remains local-only", async () => {
-		const { root, repo, origin } = await makeRemoteBackedRepo();
+		const { root, repo } = makeFakeRepo();
 		const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 		delete process.env.BOBBIT_TEST_NO_PUSH;
 		try {
@@ -244,25 +287,23 @@ describe("host worktree push policy", () => {
 			const publishBranch = "set/publish";
 			const skipBranch = "set/skip-push";
 
-			const published = await withGitCommandLog(() => createWorktreeSet(repo, components, publishBranch, "origin/master", {
+			const published = recordingGitRunner();
+			await createWorktreeSet(repo, components, publishBranch, "origin/master", {
 				pushPolicy: "publish",
-			}));
-			if (published.commands.length > 0) {
-				assert.ok(
-					published.commands.includes(`push origin ${publishBranch}:refs/heads/${publishBranch}`),
-					`createWorktreeSet publish policy must reach createWorktree; commands:\n${published.commands.join("\n")}`,
-				);
-			}
-			assert.ok(await remoteRef(root, origin, `refs/heads/${publishBranch}`), "publish policy must publish createWorktreeSet branch");
+				commandRunner: published.runner,
+			});
+			assert.ok(
+				published.commands.includes(`push origin ${publishBranch}:refs/heads/${publishBranch}`),
+				`createWorktreeSet publish policy must reach createWorktree; commands:\n${published.commands.join("\n")}`,
+			);
 
-			const skipped = await withGitCommandLog(() => createWorktreeSet(repo, components, skipBranch, "origin/master", {
+			const skipped = recordingGitRunner();
+			await createWorktreeSet(repo, components, skipBranch, "origin/master", {
 				pushPolicy: "publish",
 				skipPush: true,
-			}));
-			assert.equal(await remoteRef(root, origin, `refs/heads/${skipBranch}`), null, "skipPush must map to local-only");
-			if (skipped.commands.length > 0) {
-				assert.ok(!skipped.commands.some((command) => command.startsWith("push ")), `skipPush must suppress git push; commands:\n${skipped.commands.join("\n")}`);
-			}
+				commandRunner: skipped.runner,
+			});
+			assert.ok(!skipped.commands.some((command) => command.startsWith("push ")), `skipPush must suppress git push; commands:\n${skipped.commands.join("\n")}`);
 		} finally {
 			restoreEnv("BOBBIT_TEST_NO_PUSH", originalNoPush);
 			cleanup(root);
