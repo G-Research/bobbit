@@ -80,6 +80,15 @@ const heavyCoreFiles = [
 	"tests2/core/team-manager.test.ts",
 ];
 
+// DOM fixture that renders a lazy custom element also imported by broader DOM
+// AgentInterface fixtures. Under isolate:false the first importer can pin lit's
+// template/customElements registry to another happy-dom window; the file passes
+// alone but fails in the full project with an inert <goal-status-widget>. Keep
+// the assertions intact and give it a fresh single fork/module graph.
+const isolatedDomFiles = [
+	"tests2/dom/goal-status-widget.test.ts",
+];
+
 // Heavy gateway-integration specs whose command steps are only a "verification
 // that passes / fails with a known code" stand-in (no durable-recovery / real
 // tree-kill assertions). They run in the dedicated `v2-integration-fake` project
@@ -95,9 +104,16 @@ const fakeCommandStepFiles = [
 	"tests2/integration/gate-resign-cancel.test.ts",
 ];
 
-const MAX_FORKS = resolveMaxForks();
+const LEDGER_MAX_FORKS = resolveMaxForks();
+// Windows Vitest worker RPC saturates at ledger grants above two forks and can
+// fail the run *after* all tests pass with `[vitest-worker]: Timeout calling
+// "onTaskUpdate"`. Cap the shared Windows pool deterministically; dedicated
+// heavy/isolated projects keep their explicit single-fork pools, and non-Windows
+// runs keep the normal ledger-derived pool.
+const MAX_FORKS = process.platform === "win32" ? Math.min(LEDGER_MAX_FORKS, 2) : LEDGER_MAX_FORKS;
+const V2_CORE_MAX_FORKS = MAX_FORKS;
 console.log(
-	`[vitest.config] maxForks=${MAX_FORKS} (source: ${
+	`[vitest.config] maxForks=${MAX_FORKS}; ledgerMaxForks=${LEDGER_MAX_FORKS}; v2CoreMaxForks=${V2_CORE_MAX_FORKS} (source: ${
 		process.env.VITEST_MAX_FORKS ? "VITEST_MAX_FORKS override" : process.env.BOBBIT_V2_SLOTS_VITEST ? "ledger parent grant" : "ledger standalone reserve"
 	})`,
 );
@@ -167,6 +183,9 @@ export default defineConfig({
 					// finish green but report `[vitest-worker]: Timeout calling "onTaskUpdate"`.
 					// Project group sequencing preserves all tests while avoiding the
 					// cross-project worker/reporting pressure that trips the RPC timeout.
+					// Keep the broad core pool tied to the Windows-safe shared cap; explicit
+					// single-fork projects below remain independently pinned at one fork.
+					poolOptions: { forks: { minForks: V2_CORE_MAX_FORKS, maxForks: V2_CORE_MAX_FORKS, singleFork: false } },
 					sequence: { groupOrder: 0 },
 					environment: "node",
 					// Exclude stragglers handled by dedicated core projects below.
@@ -214,6 +233,7 @@ export default defineConfig({
 					sequence: { groupOrder: 3 },
 					environment: "happy-dom",
 					include: ["tests2/dom/**/*.test.ts"],
+					exclude: [...isolatedDomFiles],
 				},
 			},
 			{
@@ -248,6 +268,20 @@ export default defineConfig({
 					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
+				},
+			},
+			// Run last so happy-dom/global fetch stubbing in this isolated fixture cannot
+			// poison later Node integration workers when Vitest reuses processes.
+			{
+				test: {
+					...shared,
+					name: "v2-dom-isolated",
+					sequence: { groupOrder: 6 },
+					environment: "happy-dom",
+					isolate: true,
+					pool: "forks" as const,
+					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
+					include: [...isolatedDomFiles],
 				},
 			},
 		],
