@@ -20,6 +20,18 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/scan-skill-dir-nested.test.ts",
+      "reason": "Reproducing test (TDD red) for the 'Fix skill autocomplete gap' goal (9e081770), Facet 2: scanSkillDir must discover nested Claude-plugin skills under BOTH a plugins-parent root (<dir>/<plugin>/skills/<name>/SKILL.md) and a plugin root (<dir>/skills/<name>/SKILL.md), keeping source=custom, while preserving the existing one-level <dir>/<name>/SKILL.md behaviour (no duplication). FAILS on HEAD (single-depth scan resolves zero nested skills), passes post-fix. Failure token SKILL_AUTOCOMPLETE_GAP."
+    },
+    {
+      "path": "tests2/dom/skills-page-scope.test.ts",
+      "reason": "Reproducing test (TDD red) for the 'Fix skill autocomplete gap' goal (9e081770), Facet 1: the Skills page's default slash-skills/details fetch must resolve against the currently-active session's project (state.activeProjectId), not Headquarters/system. Drives loadSkillsPageData with active project P and asserts the captured details URL carries projectId=proj-P and getConfigApiProjectId()==='proj-P'. FAILS on HEAD (scope defaults to system => Headquarters), passes once the page seeds scope from the active project. Failure token SKILL_AUTOCOMPLETE_GAP."
+    },
+    {
+      "path": "tests2/integration/skill-surface-consistency.test.ts",
+      "reason": "Regression test (spec requirement 2) for the 'Fix skill autocomplete gap' goal (9e081770): a REAL two-endpoint gateway test proving the Skills page (/api/slash-skills/details) and composer autocomplete (/api/slash-skills) resolve the IDENTICAL skill-name set for a given project. Registers project P (rootPath owns .claude/skills/only-in-p) and asserts both endpoints for P are set-equal AND include only-in-p; a second project Q proves scope isolation (Q's autocomplete must NOT surface P's skill). Replaces the tautological core test that called discoverSlashSkills twice with identical args and thus could not catch endpoint/parameter/projectId/config-store/market-context divergence."
+    },
+    {
       "path": "tests2/core/verification-goal-sync-nondestructive.test.ts",
       "reason": "Reproducing + decision-matrix tests for the destructive pre-verification goal-worktree sync: local-ahead un-pushed commit B must survive (not be discarded by `git reset --hard origin/<goalBranch>`), local-behind fast-forwards to origin, diverged keeps local + warns, up-to-date is a no-op. Drives the real VerificationHarness against real temp git repos."
     },
