@@ -62,6 +62,7 @@ function clearDashboardState(): void {
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 import { loadPersistedPanelWorkspace } from "./panel-workspace.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
+import { restoreActiveProjectFromLastSession } from "./skills-active-project.js";
 import { bootMark } from "./boot-timing.js";
 
 // Boot-timing: this fires only after the entire eager module graph has been
@@ -539,10 +540,14 @@ async function handleHashChange(): Promise<void> {
 			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
-			const { loadSkillsPageData } = await import("./skills-page.js");
-			loadSkillsPageData();
+			// Render the page shell first, hydrate sessions (populates state.activeProjectId),
+			// THEN load skills so the Skills page seeds its config scope from the active
+			// project rather than latching on Headquarters pre-hydration. See skills-page.ts.
 			renderApp();
 			await refreshSessions();
+			restoreActiveProjectFromLastSession();
+			const { loadSkillsPageData } = await import("./skills-page.js");
+			loadSkillsPageData();
 		} else if (route.view === "market") {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -790,6 +795,12 @@ async function initApp() {
 				await loadWorkflowPageData();
 				navigateToWorkflowEdit(route.workflowId);
 			} else if (route.view === "skills") {
+				// Hydrate sessions first (populates state.activeProjectId) so the Skills
+				// page seeds its config scope from the active project instead of latching
+				// on Headquarters/system pre-hydration. Mirrors the goal-dashboard/ext
+				// branches above. See skills-page.ts::loadSkillsPageData.
+				await refreshSessions();
+				restoreActiveProjectFromLastSession();
 				const { loadSkillsPageData } = await import("./skills-page.js");
 				loadSkillsPageData();
 			} else if (route.view === "market") {
