@@ -1957,6 +1957,10 @@ Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additi
 
 **Agents type:** entries point at individual files, not directories. Concatenated into system prompt in order. `@ref` resolved relative to file's parent dir.
 
+**Nested Claude-plugin skill layout:** Claude plugins nest skills one level deeper than a normal skills dir. Besides the one-level `<dir>/<name>/SKILL.md`, `scanSkillDir` (`src/server/skills/slash-skills.ts`) also discovers, per scanned directory, a plugins-parent root (`<dir>/<plugin>/skills/<name>/SKILL.md`, e.g. a directory pointed at `~/.claude/plugins`) and a single plugin root (`<dir>/skills/<name>/SKILL.md`). Discovery follows the `skills/` convention exactly one extra level — no arbitrary deep recursion — de-duplicating by absolute `filePath`. A directory literally named `skills` that holds its own top-level `SKILL.md` is still treated as a normal one-level skill, not a plugin container. This is why pointing a custom scan directory at a plugin root previously resolved zero skills.
+
+**Skills page ↔ composer scope parity:** The Skills page (`/api/slash-skills/details`) and the composer autocomplete (`/api/slash-skills`) share the `discoverSlashSkills` → `PackResolver` pipeline but resolve against whatever project config store their scope parameters select. If the two surfaces pass different `projectId`/`cwd`, they resolve against different `config_directories` / `pack_order` / `.claude/skills` and diverge — a skill can show on the page yet be absent from a session's `/` menu. The Skills page therefore follows the active project's scope (see [Features → Skills](features.md#skills)) so that, for a given project, the page and that project's sessions resolve the identical set. The TTL cache key in `discoverSlashSkills` incorporates `cwd` plus both server- and project-scope `pack_order` so differently-wired scopes never reuse a stale list.
+
 **Key file:** `src/server/agent/config-directories.ts`
 
 ### Skill chip rendering & autonomous activation
