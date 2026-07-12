@@ -11,7 +11,7 @@ guardProcessEnv();
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-rpc-agent-end-retry-"));
 process.env.BOBBIT_DIR = tmpRoot;
 
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager, isRetryableAgentEnd } = await import("../../src/server/agent/session-manager.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { createManualClock } = await import("../harness/clock.js");
@@ -111,6 +111,35 @@ describe("Pi RPC agent_end retry contract", () => {
 		assert.deepEqual(session.oneTimeGrantedTools, []);
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(prompt.mock.calls[0][0]).toBe("queued until Pi settles");
+	});
+
+	it("isRetryableAgentEnd only matches agent_end with willRetry:true", () => {
+		expect(isRetryableAgentEnd({ type: "agent_end", willRetry: true })).toBe(true);
+		expect(isRetryableAgentEnd({ type: "agent_end", willRetry: false })).toBe(false);
+		expect(isRetryableAgentEnd({ type: "agent_end", messages: [] })).toBe(false);
+		expect(isRetryableAgentEnd({ type: "message_end", willRetry: true })).toBe(false);
+		expect(isRetryableAgentEnd(undefined)).toBe(false);
+		expect(isRetryableAgentEnd(null)).toBe(false);
+		expect(isRetryableAgentEnd("agent_end")).toBe(false);
+	});
+
+	it("emitAgentEvent suppresses retryable agent_end but emits the terminal one to clients", () => {
+		const manager = makeManager();
+		const session = putSession(manager);
+
+		// Retryable agent_end must NOT reach the event buffer (clients treat any
+		// agent_end as terminal and would clear the streaming message/tool calls).
+		manager.emitAgentEvent(session, { type: "agent_end", willRetry: true, messages: [] });
+		expect(session.eventBuffer.size).toBe(0);
+
+		// Non-terminal streaming events still flow through.
+		manager.emitAgentEvent(session, { type: "message_update", message: { id: "m1", role: "assistant" } });
+		expect(session.eventBuffer.size).toBe(1);
+
+		// The real terminal agent_end is emitted so clients end the turn.
+		manager.emitAgentEvent(session, { type: "agent_end", willRetry: false, messages: [] });
+		const events = session.eventBuffer.getAll().map((e: any) => e.event.type);
+		expect(events).toEqual(["message_update", "agent_end"]);
 	});
 
 	it("waitForIdle ignores retryable Pi agent_end and resolves on the final agent_end", async () => {
