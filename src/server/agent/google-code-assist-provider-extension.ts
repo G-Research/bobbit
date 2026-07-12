@@ -594,7 +594,14 @@ export default function (pi) {
 }
 
 // ── File handling (mirrors writeProviderBridgeExtension) ────────────────────
-const extCodeCache = new Map<string, string>();
+// Keyed by session id, but the cached value carries the gateway-credential
+// marker the source was generated with. The marker is MUTABLE across the gateway
+// process lifetime (a user can authenticate Google after a pre-auth spawn), and
+// it is baked into the generated source as `GATEWAY_CREDENTIAL_AT_SPAWN`. Caching
+// on session id alone would hand back stale pre-auth source (marker=false) after
+// the credential became available, so a same-session respawn would start without
+// synchronous models/apiKey. We therefore invalidate on marker change.
+const extCodeCache = new Map<string, { marker: boolean; code: string }>();
 const extFileCache = new Map<string, string>();
 
 /**
@@ -631,17 +638,22 @@ const extFileCache = new Map<string, string>();
  * for dedup, mirroring `writeProviderBridgeExtension`.
  */
 export function writeGoogleCodeAssistProviderExtension(sessionId: string): string | undefined {
-	let code = extCodeCache.get(sessionId);
-	if (!code) {
+	// The gateway knows synchronously, before spawn, whether it holds a usable
+	// Google credential (the same condition its token endpoint enforces). This is
+	// MUTABLE for the life of the gateway process: a user can authenticate Google
+	// after a pre-auth spawn and then respawn/restart the SAME session. Bake it in
+	// so a gateway-authenticated session exposes Code Assist models at load instead
+	// of racing the async auth watcher.
+	const gatewayCredentialAtSpawn = hasGoogleCodeAssistCredential();
+	const cached = extCodeCache.get(sessionId);
+	let code: string;
+	if (cached && cached.marker === gatewayCredentialAtSpawn) {
+		code = cached.code;
+	} else {
 		const models = codeAssistModelDescriptors();
 		if (models.length === 0) return undefined;
-		// The gateway knows synchronously, before spawn, whether it holds a usable
-		// Google credential (the same condition its token endpoint enforces). Bake
-		// that in so a gateway-authenticated session exposes Code Assist models at
-		// load instead of racing the async auth watcher.
-		const gatewayCredentialAtSpawn = hasGoogleCodeAssistCredential();
 		code = generateGoogleCodeAssistProviderExtension(sessionId, models, gatewayCredentialAtSpawn);
-		extCodeCache.set(sessionId, code);
+		extCodeCache.set(sessionId, { marker: gatewayCredentialAtSpawn, code });
 	}
 
 	// Revalidate a cached path before reuse: the file lives under a shared,

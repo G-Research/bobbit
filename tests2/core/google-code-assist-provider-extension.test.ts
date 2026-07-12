@@ -40,6 +40,7 @@ import {
 	resetGoogleCodeAssistExtensionCache,
 	type CodeAssistModelDescriptor,
 } from "../../src/server/agent/google-code-assist-provider-extension.ts";
+import { resetAgentDirStateForTests } from "../../src/server/agent-dir-config.ts";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gca-ext-"));
 
@@ -519,6 +520,46 @@ describe("writeGoogleCodeAssistProviderExtension unconditional registration", ()
 		assert.ok(srcAfter.includes("pi.registerProvider("), "provider still registered post-auth");
 		assert.ok(srcAfter.includes("/google-code-assist/token"), "still gateway-driven for the token post-auth");
 		assert.ok(!srcAfter.includes("ya29."), "still bakes no access token into the source post-auth");
+	});
+
+	it("same-session pre-auth then later credential: rewrite reflects marker WITHOUT a cache reset", () => {
+		// Regression (high severity): extCodeCache was keyed only by sessionId while
+		// the generated source embeds the MUTABLE GATEWAY_CREDENTIAL_AT_SPAWN marker.
+		// A session written pre-auth (marker=false), whose user then authenticates
+		// Google later in the SAME gateway process and respawns the SAME session with
+		// an explicit google-gemini-cli/* selection, must NOT reuse the stale
+		// marker=false source — otherwise sandbox startup lacks synchronous
+		// models/apiKey and can fail before the async auth watcher runs. The fix must
+		// hold WITHOUT calling resetGoogleCodeAssistExtensionCache().
+		resetAgentDirStateForTests(); // re-resolve globalAgentDir against this test's dir
+		// Pre-auth: no auth.json in `dir` → hasGoogleCodeAssistCredential() === false.
+		const before = writeGoogleCodeAssistProviderExtension("sess-marker-flip");
+		if (!before) return; // pi-ai google catalog unavailable in this env — skip
+		const srcBefore = fs.readFileSync(before, "utf-8");
+		assert.ok(
+			srcBefore.includes("const GATEWAY_CREDENTIAL_AT_SPAWN = false"),
+			"pre-auth write must bake the gateway-credential marker false",
+		);
+
+		// The gateway learns a usable Google credential later in the SAME process.
+		writeAuth();
+		resetAgentDirStateForTests(); // re-resolve so the new auth.json is observed
+
+		// Rewrite for the SAME session WITHOUT resetting the codegen caches.
+		const after = writeGoogleCodeAssistProviderExtension("sess-marker-flip");
+		assert.ok(after, "expected an extension after the credential became available");
+		const srcAfter = fs.readFileSync(after!, "utf-8");
+		assert.ok(
+			srcAfter.includes("const GATEWAY_CREDENTIAL_AT_SPAWN = true"),
+			"post-auth rewrite must bake the marker true even without resetGoogleCodeAssistExtensionCache()",
+		);
+		// Synchronous model registration hinges on the marker being observed at load.
+		assert.ok(
+			srcAfter.includes("GATEWAY_CREDENTIAL_AT_SPAWN") && srcAfter.includes("authenticatedAtLoad"),
+			"post-auth source must gate synchronous registration on the (now true) marker",
+		);
+		assert.notEqual(after, before, "a marker flip must yield a fresh content-addressed path");
+		assert.ok(!srcAfter.includes("ya29."), "must never bake token material into the generated source");
 	});
 
 	it("repairs a tampered cached extension before reuse", () => {
