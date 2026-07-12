@@ -82,12 +82,21 @@ export function isSessionSelectableModelString(modelString: string): boolean {
  * back to an available model; once a credential is observed the model becomes
  * pinnable again. All other providers and malformed/unknown strings are
  * unaffected (they defer to `isSessionSelectableModelString`).
+ *
+ * "A credential is observed" here spans BOTH supported Code Assist auth paths:
+ * a stored OAuth credential in `auth.json` (`hasGoogleCodeAssistCredential()`)
+ * AND a pre-acquired Bearer token in `GOOGLE_CLOUD_ACCESS_TOKEN`
+ * (`hasGoogleCodeAssistSpawnCredential()`). The generated provider extension
+ * registers Code Assist models synchronously at load when either is present
+ * (see `authenticatedAtLoad` in google-code-assist-provider-extension.ts), so
+ * env-token deployments / manual live-config runs with `MANUAL_TEST_MODEL=
+ * google-gemini-cli/...` must remain spawn-pinnable, not silently stripped.
  */
 export function isSpawnPinnableModelString(modelString: string): boolean {
 	if (!isSessionSelectableModelString(modelString)) return false;
 	const slash = modelString.indexOf("/");
 	const provider = slash > 0 ? modelString.slice(0, slash) : modelString;
-	if (provider === GOOGLE_GEMINI_CLI_PROVIDER) return hasGoogleCodeAssistCredential();
+	if (provider === GOOGLE_GEMINI_CLI_PROVIDER) return hasGoogleCodeAssistSpawnCredential();
 	return true;
 }
 
@@ -153,6 +162,25 @@ function readGoogleCredential(): StoredGoogleCredential | null {
 export function hasGoogleCodeAssistCredential(): boolean {
 	const cred = readGoogleCredential();
 	return !!(cred && (cred.access || cred.refresh));
+}
+
+/** True when a pre-acquired Bearer token is supplied via `GOOGLE_CLOUD_ACCESS_TOKEN`. */
+function hasGoogleCodeAssistEnvToken(): boolean {
+	const tok = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+	return typeof tok === "string" && tok.trim().length > 0;
+}
+
+/**
+ * True when a Code Assist credential exists via EITHER supported path — a stored
+ * `auth.json` OAuth credential or a `GOOGLE_CLOUD_ACCESS_TOKEN` env Bearer token.
+ * This is the credential picture that decides whether `google-gemini-cli/*` is
+ * safe to hand Pi as `--model` at spawn time. It mirrors the generated provider
+ * extension's `authenticatedAtLoad` gate (`hasLocalCredential() ||
+ * GOOGLE_CLOUD_ACCESS_TOKEN`), so the two never disagree about whether Pi can
+ * resolve an explicit Code Assist selection.
+ */
+export function hasGoogleCodeAssistSpawnCredential(): boolean {
+	return hasGoogleCodeAssistCredential() || hasGoogleCodeAssistEnvToken();
 }
 
 /**
