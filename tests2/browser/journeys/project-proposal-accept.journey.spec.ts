@@ -112,6 +112,12 @@ async function injectProjectProposal(page: Page, opts: {
 
 			state.activeProposals.project = {
 				sessionId,
+				// Project proposals pin their target project id at creation time so
+				// accept promotes/writes the intended project even after a background
+				// refreshSessions() poll mutates the session→project link. Mirror that
+				// real data model here instead of relying solely on the mutable
+				// session list (which the 5s poll would revert to the base project id).
+				projectId,
 				fields: {
 					name: projectName,
 					root_path: rootPath,

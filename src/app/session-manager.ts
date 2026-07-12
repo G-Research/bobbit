@@ -782,6 +782,7 @@ const projectDraft = createDraftManager({
 					sessionId: p.sessionId,
 					fields,
 					mode: p.mode,
+					...(typeof p.projectId === "string" && p.projectId.trim() ? { projectId: p.projectId.trim() } : {}),
 					streaming: typeof p.streaming === "boolean" ? p.streaming : false,
 					rev: typeof p.rev === "number" ? p.rev : 1,
 				};
@@ -1998,6 +1999,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				mode: type === "project"
 					? (prev?.mode ?? resolveProjectMode(sessionId))
 					: undefined,
+				// Pin the target project id on project proposals so accept promotes
+				// the intended project even if a background session refresh mutates
+				// the session→project link afterwards. Preserve an already-pinned id.
+				...(type === "project"
+					? { projectId: prev?.projectId ?? projectIdForSession(sessionId) }
+					: {}),
 				rev: nextRev,
 				...(preservedWorkflowValidation ? { workflowValidationError: preservedWorkflowValidation } : {}),
 			};
