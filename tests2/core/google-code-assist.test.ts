@@ -28,6 +28,7 @@ import {
 	hasGoogleCodeAssistCredential,
 	isSessionSelectableProvider,
 	isSessionSelectableModelString,
+	isSpawnPinnableModelString,
 	convertContextToCodeAssist,
 	parseCodeAssistStreamChunk,
 	mapFinishReason,
@@ -287,6 +288,34 @@ describe("session-selectability guard (Code Assist runtime now registered)", () 
 			assert.notEqual(m.sessionSelectable, false, `${m.id} must be selectable for sessions`);
 			assert.equal(m.sessionUnavailableReason, undefined, `${m.id} must not carry an unavailable reason`);
 		}
+	});
+});
+
+describe("isSpawnPinnableModelString (auth-aware spawn pin guard)", () => {
+	it("skips google-gemini-cli when no Google credential is present", () => {
+		// No auth.json written → hasGoogleCodeAssistCredential() is false.
+		assert.equal(hasGoogleCodeAssistCredential(), false);
+		assert.equal(isSpawnPinnableModelString("google-gemini-cli/gemini-2.5-pro"), false);
+		// It remains session-*selectable* (the model selector must still allow it).
+		assert.equal(isSessionSelectableModelString("google-gemini-cli/gemini-2.5-pro"), true);
+	});
+
+	it("pins google-gemini-cli once a Google credential exists", () => {
+		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
+		assert.equal(hasGoogleCodeAssistCredential(), true);
+		assert.equal(isSpawnPinnableModelString("google-gemini-cli/gemini-2.5-pro"), true);
+	});
+
+	it("treats an expired-but-present credential as pinnable (re-auth is late/lazy)", () => {
+		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok-stale", expires: Date.now() - 1000 } });
+		assert.equal(isSpawnPinnableModelString("google-gemini-cli/gemini-2.5-pro"), true);
+	});
+
+	it("leaves other providers and malformed strings unchanged regardless of Google auth", () => {
+		// No Google credential present.
+		assert.equal(isSpawnPinnableModelString("anthropic/claude-sonnet-4-5"), true);
+		assert.equal(isSpawnPinnableModelString("google/gemini-2.5-pro"), true);
+		assert.equal(isSpawnPinnableModelString("no-slash"), true);
 	});
 });
 
