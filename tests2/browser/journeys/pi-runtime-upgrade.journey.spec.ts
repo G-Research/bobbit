@@ -42,18 +42,22 @@ async function loadModelsFromApi(): Promise<ApiModel[]> {
 	return models;
 }
 
-function pickUiModel(models: ApiModel[]): ApiModel {
-	const preferred = [
-		(m: ApiModel) => m.provider === "openai-codex" && m.id === "gpt-5.5",
-		(m: ApiModel) => m.provider === "anthropic" && /claude/i.test(m.id),
-		(m: ApiModel) => m.provider === "openai" && /gpt/i.test(m.id),
-		(m: ApiModel) => m.provider === "google" && /gemini/i.test(m.id),
-	];
-	for (const matcher of preferred) {
-		const model = models.find(matcher);
-		if (model) return model;
+/**
+ * Pi 0.80.6's central user-facing contract: the GPT 5.6 catalog entries must be
+ * exposed through /api/models under the openai provider. Pinning these exact IDs
+ * (instead of accepting any generic model) is the point of this journey — it
+ * fails loudly if the Pi upgrade or the Bobbit model registry stops surfacing them.
+ */
+const GPT_5_6_IDS = ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] as const;
+
+function requireGpt56Models(models: ApiModel[]): ApiModel[] {
+	const selected: ApiModel[] = [];
+	for (const id of GPT_5_6_IDS) {
+		const model = models.find((m) => m.provider === "openai" && m.id === id);
+		expect(model, `expected openai/${id} GPT 5.6 model in /api/models`).toBeTruthy();
+		selected.push(model as ApiModel);
 	}
-	return models[0];
+	return selected;
 }
 
 async function openModelsSettings(page: Page): Promise<void> {
@@ -63,12 +67,17 @@ async function openModelsSettings(page: Page): Promise<void> {
 }
 
 test.describe("Journey: Pi Runtime Upgrade", () => {
-	test("model settings selector renders and selects built-in metadata from /api/models", async ({ page }) => {
+	test("settings selector exposes Pi 0.80.6 GPT 5.6 models from /api/models and selects one", async ({ page }) => {
 		const models = await loadModelsFromApi();
-		const model = pickUiModel(models);
-		expect(new Set(models.map((m) => m.provider)).size).toBeGreaterThan(0);
-		expect(model.contextWindow).toBeGreaterThan(0);
-		expect(model.maxTokens).toBeGreaterThan(0);
+		// Hard pin: all three GPT 5.6 catalog entries must be present, not just any model.
+		const gpt56 = requireGpt56Models(models);
+		for (const model of gpt56) {
+			expect(model.contextWindow, `${model.id} contextWindow`).toBeGreaterThan(0);
+			expect(model.maxTokens, `${model.id} maxTokens`).toBeGreaterThan(0);
+			expect(model.reasoning, `${model.id} should be reasoning-capable`).toBe(true);
+		}
+		// Select the first GPT 5.6 entry through the settings picker.
+		const model = gpt56[0];
 
 		const modelResponses: string[] = [];
 		page.on("response", (response) => {
@@ -77,28 +86,31 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 			}
 		});
 
-		await apiFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ "default.sessionModel": null }),
-		});
+		try {
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": null }),
+			});
 
-		await openModelsSettings(page);
-		const sessionRow = page.locator('[data-testid="model-row"][data-row-label="Session"]').first();
-		await sessionRow.locator('button[title="Choose model"]').click();
+			await openModelsSettings(page);
+			const sessionRow = page.locator('[data-testid="model-row"][data-row-label="Session"]').first();
+			await sessionRow.locator('button[title="Choose model"]').click();
 
-		await expect(page.getByText("Select Model").first()).toBeVisible({ timeout: 15_000 });
-		await page.getByPlaceholder("Search models...").fill(model.id);
-		const item = page.locator("[data-model-item]").filter({ hasText: model.id }).filter({ hasText: model.provider }).first();
-		await expect(item, `expected ${model.provider}/${model.id} in the model selector`).toBeVisible({ timeout: 15_000 });
-		await item.click();
+			await expect(page.getByText("Select Model").first()).toBeVisible({ timeout: 15_000 });
+			await page.getByPlaceholder("Search models...").fill(model.id);
+			const item = page.locator("[data-model-item]").filter({ hasText: model.id }).filter({ hasText: model.provider }).first();
+			await expect(item, `expected ${model.provider}/${model.id} in the model selector`).toBeVisible({ timeout: 15_000 });
+			await item.click();
 
-		await expect(page.getByText("Select Model")).toHaveCount(0, { timeout: 15_000 });
-		await expect(sessionRow.locator('button[title="Choose model"]')).toContainText(model.id, { timeout: 15_000 });
-		expect(modelResponses.length, "settings/model selector should fetch server model metadata").toBeGreaterThan(0);
-		await apiFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ "default.sessionModel": null }),
-		});
+			await expect(page.getByText("Select Model")).toHaveCount(0, { timeout: 15_000 });
+			await expect(sessionRow.locator('button[title="Choose model"]')).toContainText(model.id, { timeout: 15_000 });
+			expect(modelResponses.length, "settings/model selector should fetch server model metadata").toBeGreaterThan(0);
+		} finally {
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": null }),
+			});
+		}
 	});
 
 	test("provider key settings use browser-safe pi-ai server routes", async ({ page }) => {
