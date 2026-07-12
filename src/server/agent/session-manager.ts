@@ -4020,9 +4020,11 @@ export class SessionManager {
 		} else if (event.type === "agent_end") {
 			// Pi 0.80+ emits agent_end for retryable failed attempts before its
 			// internal auto-retry loop settles. Do not mark Bobbit idle, revoke
-			// one-time grants, or drain queued prompts until the final agent_end.
+			// one-time grants, drain queued prompts, or count the turn until the
+			// final (willRetry:false) agent_end. Incrementing completedTurnCount on
+			// a retryable attempt double-counts a single user-visible turn (the
+			// final agent_end increments again) and shifts lifecycle turn indexes.
 			if (event.willRetry === true) {
-				session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
 				return;
 			}
 

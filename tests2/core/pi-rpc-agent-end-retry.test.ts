@@ -92,7 +92,10 @@ describe("Pi RPC agent_end retry contract", () => {
 
 		assert.equal(session.status, "streaming");
 		assert.equal(session.streamingStartedAt, 123);
-		assert.equal(session.completedTurnCount, 1);
+		// A retryable agent_end must NOT count the turn: one user-visible turn with
+		// an internal Pi retry would otherwise be counted twice (retry + final),
+		// shifting lifecycle turn indexes. Unchanged from its pre-event value.
+		assert.equal(session.completedTurnCount ?? 0, 0);
 		assert.deepEqual(session.allowedTools, ["read", "write"]);
 		assert.deepEqual(session.oneTimeGrantedTools, ["read"]);
 		expect(prompt).not.toHaveBeenCalled();
@@ -102,6 +105,8 @@ describe("Pi RPC agent_end retry contract", () => {
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
 		await flush();
 
+		// Only the final (willRetry:false) agent_end increments the counter — exactly once.
+		assert.equal(session.completedTurnCount, 1);
 		assert.deepEqual(session.allowedTools, ["write"]);
 		assert.deepEqual(session.oneTimeGrantedTools, []);
 		expect(prompt).toHaveBeenCalledTimes(1);
