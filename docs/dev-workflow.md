@@ -341,7 +341,7 @@ Team leads merge or cherry-pick from local refs/worktrees when available. Publis
 - a workflow, cross-machine handoff, or container handoff requires a remote branch;
 - the final Ready-to-Merge / PR flow publishes the goal integration branch.
 
-Cleanup and status treat missing remote branches for scoped sub-agent branches as expected. The git-status widget may show `Local-only by policy` to distinguish an intentional local-only branch from a failed push. Gate verification uses the same distinction for goal worktrees: an unpublished goal branch skips remote goal-branch sync quietly and verifies the local worktree, while published goal branches still fetch/reset from `origin/<branch>`; see [Gate verification baselines](goals-workflows-tasks.md#gate-verification-baselines).
+Cleanup and status treat missing remote branches for scoped sub-agent branches as expected. The git-status widget may show `Local-only by policy` to distinguish an intentional local-only branch from a failed push. Gate verification uses the same distinction for goal worktrees: an unpublished goal branch skips remote goal-branch sync quietly and verifies the local worktree. A published goal branch is fetched and then synced **non-destructively** — because the team-lead worktree is normally ahead of origin (un-pushed local merges), the harness never blindly `reset --hard`s. It compares local HEAD against `origin/<branch>` and keeps the local tree when ahead, fast-forwards when behind, and warns while keeping local when diverged, so un-pushed local commits are never discarded; see [Gate verification baselines](goals-workflows-tasks.md#gate-verification-baselines).
 
 ### Worktree-stash hazard — never `git stash` inside a session worktree
 

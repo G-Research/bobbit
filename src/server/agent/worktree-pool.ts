@@ -899,7 +899,13 @@ export class WorktreePool {
 		}
 	}
 
-	/** Clean up all pool entries. Call on shutdown. */
+	/**
+	 * Clean up all pool entries (worktree remove + branch delete). NOT called on
+	 * gateway shutdown anymore — shutdown intentionally leaves pool worktrees on
+	 * disk for `reclaimOrphaned` to re-adopt on the next boot. Only explicit
+	 * teardown drains: project removal (`removeWorktreePool`) and Settings →
+	 * Maintenance cleanup.
+	 */
 	async drain(): Promise<void> {
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;

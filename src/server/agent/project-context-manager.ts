@@ -7,6 +7,7 @@ import type { SearchResults, SearchResult } from "../search/types.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
 import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
 import type { RemoteGitPolicy } from "../skills/git.js";
+import { bootLog, SLOW_PHASE_MS } from "../boot-profile.js";
 
 /**
  * Minimal session-resolver surface needed by the search orphan filter.
@@ -72,9 +73,18 @@ export class ProjectContextManager {
 
   /** Initialize contexts for all registered projects. */
   initAll(): void {
-    for (const project of this.registry.list()) {
+    const t0 = Date.now();
+    const projects = this.registry.list();
+    for (const project of projects) {
+      const pt0 = Date.now();
       this.getOrCreate(project.id);
+      const dt = Date.now() - pt0;
+      // Per-project context open (loads goals/sessions/costs/workflows/tools
+      // from disk) is synchronous and blocks gateway construction. Log slow
+      // ones so a single heavy project is visible in boot logs.
+      if (dt >= SLOW_PHASE_MS) bootLog(`[boot] context open: project=${project.id} in ${dt}ms`);
     }
+    bootLog(`[boot] initAll opened ${projects.length} project context(s) in ${Date.now() - t0}ms`);
   }
 
   /** Get or lazily create a ProjectContext. */

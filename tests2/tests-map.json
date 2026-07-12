@@ -20,6 +20,10 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+      "reason": "Reproducing + decision-matrix tests for the destructive pre-verification goal-worktree sync: local-ahead un-pushed commit B must survive (not be discarded by `git reset --hard origin/<goalBranch>`), local-behind fast-forwards to origin, diverged keeps local + warns, up-to-date is a no-op. Drives the real VerificationHarness against real temp git repos."
+    },
+    {
       "path": "tests2/core/base-ref-validation.test.ts",
       "reason": "Native v2 core unit tests for extracted base_ref REST validation grammar and exact error-shape helpers."
     },
