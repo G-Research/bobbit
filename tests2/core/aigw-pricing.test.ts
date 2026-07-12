@@ -86,6 +86,16 @@ function pricedOpenAiModel(): AigwModelPayload {
 	};
 }
 
+function pricedGpt56Model(): AigwModelPayload {
+	return {
+		id: "openai/gpt-5.6-luna",
+		pricing: {
+			prompt: 0.00000125,
+			completion: 0.00001,
+		},
+	};
+}
+
 function pricedClaudeModel(): AigwModelPayload {
 	return {
 		id: "aws/us.anthropic.claude-sonnet-4-5-v1:0",
@@ -200,6 +210,51 @@ describe("AI Gateway pricing metadata", () => {
 				assert.equal(claudeEntry.api, "bedrock-converse-stream");
 				assert.deepEqual(openAiEntry.cost, GPT_52_COST, "non-Claude generated model entry should preserve discovered cost");
 				assert.deepEqual(claudeEntry.cost, CLAUDE_COST, "Claude Bedrock-routed generated model entry should preserve discovered cost");
+				assert.deepEqual(mock.requests(), ["/v1/models"]);
+			} finally {
+				await mock.close();
+			}
+		} finally {
+			if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
+			fs.rmSync(tmpAgentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("persists thinkingLevelMap on generated AIGW model entries so spawned Pi agents honor `max`", async () => {
+		const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
+		const tmpAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-aigw-thinkmap-models-"));
+		try {
+			process.env.BOBBIT_AGENT_DIR = tmpAgentDir;
+			resetAgentDirStateForTests();
+			const mock = await startMockAigw([pricedGpt56Model(), pricedOpenAiModel()]);
+			try {
+				const discoveredModels = await discoverAigwModels(mock.url);
+				const luna = discoveredModels.find((m: any) => m.id === "openai/gpt-5.6-luna") as any;
+				assert.ok(luna, "expected discovery to return the routed GPT 5.6 model");
+				assert.deepEqual(
+					luna.thinkingLevelMap,
+					{ xhigh: "xhigh", max: "max" },
+					"discovery should attach the GPT 5.6 thinkingLevelMap that advertises `max`",
+				);
+
+				writeAigwModelsJson(`${mock.url}/v1`, discoveredModels);
+
+				const data = readModelsJson(tmpAgentDir);
+				const persistedModels = data.providers.aigw.models;
+				const lunaEntry = persistedModels.find((m: any) => m.id === "openai/gpt-5.6-luna");
+				const plainEntry = persistedModels.find((m: any) => m.id === "openai/gpt-5.2");
+
+				assert.ok(lunaEntry, "expected routed GPT 5.6 entry in models.json");
+				assert.deepEqual(
+					lunaEntry.thinkingLevelMap,
+					{ xhigh: "xhigh", max: "max" },
+					"writeAigwModelsJson must persist thinkingLevelMap so Pi honors selected `max` thinking",
+				);
+				assert.ok(
+					!("thinkingLevelMap" in plainEntry),
+					"models without an input thinkingLevelMap must not get a fabricated one",
+				);
 				assert.deepEqual(mock.requests(), ["/v1/models"]);
 			} finally {
 				await mock.close();

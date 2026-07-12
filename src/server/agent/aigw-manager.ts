@@ -569,6 +569,9 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 					// Per-model Bedrock endpoint override — provider baseUrl is the
 					// OpenAI-compatible /v1 root; Bedrock Converse lives under /aws.
 					baseUrl: bedrockBaseUrl,
+					// Only forward a thinkingLevelMap when the input model carries one —
+					// never fabricate one for Claude/Bedrock entries.
+					...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
 					...(m.compat ? { compat: m.compat } : {}),
 				};
 			}
@@ -580,6 +583,11 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 				reasoning: m.reasoning,
 				input: m.input,
 				cost,
+				// Persist per-model effort metadata (e.g. AIGW-routed GPT 5.6
+				// Luna/Sol/Terra `{ xhigh, max }`) so spawned Pi agents honor the
+				// selected `max` thinking level instead of collapsing to the generic
+				// family fallback. Omitted when the input model carries no map.
+				...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
 				compat: { ...openaiCompat, ...(m.compat || {}) },
 			};
 		}),
