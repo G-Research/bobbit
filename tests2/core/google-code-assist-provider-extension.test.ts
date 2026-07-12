@@ -213,6 +213,109 @@ describe("generateGoogleCodeAssistProviderExtension", () => {
 			else process.env.PI_CODING_AGENT_DIR = prevPiDir;
 		}
 	});
+
+	it("bakes the gateway-credential-at-spawn marker into the source", () => {
+		// The marker is what lets a gateway-authenticated sandbox (no local auth
+		// mounted) expose Code Assist models synchronously at load.
+		assert.ok(
+			source.includes("GATEWAY_CREDENTIAL_AT_SPAWN"),
+			"expected a baked gateway-credential-at-spawn marker",
+		);
+		// Default codegen (no gateway credential) must bake it false so the pre-auth
+		// guard holds.
+		assert.ok(
+			source.includes("const GATEWAY_CREDENTIAL_AT_SPAWN = false"),
+			"expected the marker to default to false without a gateway credential",
+		);
+	});
+
+	it("gateway-authenticated spawn exposes models synchronously with no local/env credential", async () => {
+		// Regression: Bug Hunt finding — in a gateway-authenticated sandbox (only
+		// BOBBIT_GATEWAY_URL/BOBBIT_TOKEN, no locally-mounted Google OAuth) the
+		// provider must register Code Assist models at load, BEFORE Pi resolves an
+		// explicit google-gemini-cli/* selection during startup. Otherwise the async
+		// auth watcher (delayed first check) upgraded too late and the session
+		// failed/fell back.
+		const gwSource = generateGoogleCodeAssistProviderExtension("sess-gw", sampleModels, true);
+		assert.ok(
+			gwSource.includes("const GATEWAY_CREDENTIAL_AT_SPAWN = true"),
+			"expected the gateway marker baked true",
+		);
+		const transpiled = ts.transpileModule(gwSource, {
+			compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+		});
+		// No auth.json in this dir and no env token — the ONLY signal is the baked
+		// gateway marker.
+		const noAuthDir = fs.mkdtempSync(path.join(tmpDir, "gw-no-local-"));
+		const file = path.join(tmpDir, `gca-provider-gw-${Date.now()}.cjs`);
+		fs.writeFileSync(file, transpiled.outputText, "utf-8");
+		const prevPiDir = process.env.PI_CODING_AGENT_DIR;
+		const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
+		const prevEnvTok = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+		process.env.PI_CODING_AGENT_DIR = noAuthDir;
+		delete process.env.BOBBIT_AGENT_DIR;
+		delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+		try {
+			const mod = await import(pathToFileURL(file).href);
+			let registered: { name?: string; config?: any } = {};
+			mod.default({ registerProvider: (name: string, config: any) => { registered = { name, config }; } });
+			assert.equal(registered.name, "google-gemini-cli");
+			assert.equal(
+				registered.config.apiKey,
+				"code-assist-runtime",
+				"gateway-authenticated load must mark the provider configured so Pi can resolve the selection",
+			);
+			assert.ok(
+				Array.isArray(registered.config.models) && registered.config.models.length === 1,
+				"gateway-authenticated load must expose models synchronously",
+			);
+		} finally {
+			if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prevPiDir;
+			if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
+			if (prevEnvTok === undefined) delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+			else process.env.GOOGLE_CLOUD_ACCESS_TOKEN = prevEnvTok;
+		}
+	});
+
+	it("gateway-unauthenticated spawn keeps the pre-auth guard and retries via the watcher", async () => {
+		// With GATEWAY_CREDENTIAL_AT_SPAWN=false and no local/env credential, the
+		// provider must NOT expose models/apiKey (so Code Assist can't become Pi's
+		// implicit/default), but must still arm the auth watcher for late auth.
+		const preAuthSource = generateGoogleCodeAssistProviderExtension("sess-preauth", sampleModels, false);
+		assert.ok(preAuthSource.includes("startAuthWatcher"), "expected the late-auth watcher to remain");
+		const transpiled = ts.transpileModule(preAuthSource, {
+			compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+		});
+		const noAuthDir = fs.mkdtempSync(path.join(tmpDir, "preauth-no-local-"));
+		const file = path.join(tmpDir, `gca-provider-preauth-${Date.now()}.cjs`);
+		fs.writeFileSync(file, transpiled.outputText, "utf-8");
+		const prevPiDir = process.env.PI_CODING_AGENT_DIR;
+		const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
+		const prevEnvTok = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+		const prevGwUrl = process.env.BOBBIT_GATEWAY_URL;
+		process.env.PI_CODING_AGENT_DIR = noAuthDir;
+		delete process.env.BOBBIT_AGENT_DIR;
+		delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+		delete process.env.BOBBIT_GATEWAY_URL;
+		try {
+			const mod = await import(pathToFileURL(file).href);
+			let registered: { name?: string; config?: any } = {};
+			mod.default({ registerProvider: (name: string, config: any) => { registered = { name, config }; } });
+			assert.equal(registered.config.apiKey, undefined, "pre-auth must not mark Code Assist authenticated");
+			assert.equal(registered.config.models, undefined, "pre-auth must not expose models to Pi defaults");
+		} finally {
+			if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prevPiDir;
+			if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
+			if (prevEnvTok === undefined) delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+			else process.env.GOOGLE_CLOUD_ACCESS_TOKEN = prevEnvTok;
+			if (prevGwUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+			else process.env.BOBBIT_GATEWAY_URL = prevGwUrl;
+		}
+	});
 });
 
 describe("convertContext request mapping (maxTokens / toolChoice)", () => {

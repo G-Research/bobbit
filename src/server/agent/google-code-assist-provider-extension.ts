@@ -35,6 +35,7 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import {
 	GOOGLE_CODE_ASSIST_API,
 	GOOGLE_GEMINI_CLI_PROVIDER,
+	hasGoogleCodeAssistCredential,
 } from "./google-code-assist.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 
@@ -86,10 +87,21 @@ export function codeAssistModelDescriptors(): CodeAssistModelDescriptor[] {
  *
  * @param sessionId - session id (used to fetch the per-request token from the gateway)
  * @param models - the model descriptors to register for the provider
+ * @param gatewayCredentialAtSpawn - whether the GATEWAY already holds a usable
+ *   Google account credential at spawn time (i.e. its
+ *   `/api/sessions/:id/google-code-assist/token` endpoint will serve a Bearer).
+ *   When true the extension registers Code Assist models SYNCHRONOUSLY at load,
+ *   so an explicit `google-gemini-cli/*` selection resolves during Pi session
+ *   startup even in a gateway-authenticated sandbox that has no local auth mount
+ *   (fixes the async-first-check race where the auth watcher upgraded too late).
+ *   When false the pre-auth guard holds: no models/apiKey are exposed until a
+ *   real local/env/gateway credential is observed, so Code Assist can never
+ *   become Pi's implicit/default model before Google sign-in.
  */
 export function generateGoogleCodeAssistProviderExtension(
 	sessionId: string,
 	models: CodeAssistModelDescriptor[],
+	gatewayCredentialAtSpawn = false,
 ): string {
 	return `import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
@@ -101,6 +113,12 @@ const API = ${JSON.stringify(GOOGLE_CODE_ASSIST_API)};
 const BASE_URL = ${JSON.stringify(CODE_ASSIST_PROVIDER_BASE_URL)};
 const SESSION_ID = ${JSON.stringify(sessionId)};
 const MODELS = ${JSON.stringify(models)};
+// Baked by the gateway at codegen time: true when the gateway already holds a
+// usable Google account credential, so its per-request token endpoint will serve
+// a Bearer for this session. Lets the provider register models SYNCHRONOUSLY at
+// load (before Pi resolves an explicit google-gemini-cli/* selection) without
+// depending on a locally-mounted credential or the async auth watcher.
+const GATEWAY_CREDENTIAL_AT_SPAWN = ${JSON.stringify(!!gatewayCredentialAtSpawn)};
 
 // pi thinking level → Gemini thinkingBudget (mirrors THINKING_BUDGET in
 // google-code-assist.ts). Kept inline so the extension is self-contained.
@@ -532,9 +550,14 @@ function startAuthWatcher(pi) {
   if (!gwUrl && !process.env.GOOGLE_CLOUD_ACCESS_TOKEN) return;
   let stopped = false;
   let timer;
+  let firstCheck = true;
   const arm = () => {
     if (!stopped) {
-      timer = setTimeout(check, 10_000);
+      // Probe immediately on the first arm so a session spawned moments before
+      // the gateway learns of a Google credential upgrades without waiting a full
+      // retry interval; back off to periodic polling for genuinely-late auth.
+      timer = setTimeout(check, firstCheck ? 0 : 10_000);
+      firstCheck = false;
       if (timer && typeof timer.unref === "function") timer.unref();
     }
   };
@@ -557,7 +580,13 @@ function startAuthWatcher(pi) {
 }
 
 export default function (pi) {
-  const authenticatedAtLoad = hasLocalCredential() || !!process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+  // A gateway that already holds a Google credential (GATEWAY_CREDENTIAL_AT_SPAWN)
+  // is authenticated for this session even when no credential is mounted locally:
+  // the runtime Bearer is fetched per request from the gateway token endpoint. We
+  // therefore expose models synchronously here so Pi can resolve an explicit
+  // google-gemini-cli/* selection during startup rather than racing the watcher.
+  const authenticatedAtLoad =
+    hasLocalCredential() || !!process.env.GOOGLE_CLOUD_ACCESS_TOKEN || GATEWAY_CREDENTIAL_AT_SPAWN;
   pi.registerProvider(PROVIDER, providerConfig(authenticatedAtLoad));
   if (!authenticatedAtLoad) startAuthWatcher(pi);
 }
@@ -575,16 +604,28 @@ const extFileCache = new Map<string, string>();
  *
  * The extension is written UNCONDITIONALLY — even with no Google account
  * credential present — so the `google-code-assist` API provider is registered
- * inside every spawned agent. Until a real credential is observed, it deliberately
- * registers no `models[]` and no provider `apiKey`; otherwise Pi 0.80 treats the
- * extension's placeholder auth as configured and may choose Code Assist as the
- * implicit/default model before Google login. A lightweight auth watcher upgrades
- * the registration with the model list after local auth/env/gateway auth becomes
- * visible, preserving late-auth availability without making pre-auth Code Assist
- * a default candidate. The runtime Bearer token is still fetched per request from
- * the gateway, nothing account-scoped is baked in at spawn time, the gateway-side
- * model selector still only surfaces these models once authenticated, and the
- * generated source contains no secrets.
+ * inside every spawned agent. Whether it exposes `models[]`/`apiKey` at load is
+ * decided by the credential picture the GATEWAY can see at spawn time:
+ *
+ *   - Gateway already holds a usable Google credential (`hasGoogleCodeAssistCredential()`):
+ *     bake `GATEWAY_CREDENTIAL_AT_SPAWN=true` so the extension registers the model
+ *     list SYNCHRONOUSLY at load. This is what makes an explicit `google-gemini-cli/*`
+ *     selection resolvable during Pi startup in a gateway-authenticated sandbox
+ *     that has no locally-mounted auth (the per-request Bearer is still fetched
+ *     from the gateway token endpoint). Fixes the async-first-check race where the
+ *     auth watcher upgraded the provider only ~10s after Pi had already resolved
+ *     (and failed/fell back on) the selected model.
+ *   - No credential visible anywhere: register no `models[]` and no provider
+ *     `apiKey`; otherwise Pi 0.80 treats the extension's placeholder auth as
+ *     configured and may choose Code Assist as the implicit/default model before
+ *     Google login. A lightweight auth watcher then upgrades the registration once
+ *     local/env/gateway auth becomes visible, preserving late-auth availability
+ *     without making pre-auth Code Assist a default candidate.
+ *
+ * The runtime Bearer token is always fetched per request from the gateway,
+ * nothing account-scoped is baked in at spawn time, the gateway-side model
+ * selector still only surfaces these models once authenticated, and the generated
+ * source contains no secrets (the baked marker is a boolean, not a credential).
  *
  * Content-addressed under `.bobbit/state/google-code-assist/<hash>/provider.ts`
  * for dedup, mirroring `writeProviderBridgeExtension`.
@@ -594,7 +635,12 @@ export function writeGoogleCodeAssistProviderExtension(sessionId: string): strin
 	if (!code) {
 		const models = codeAssistModelDescriptors();
 		if (models.length === 0) return undefined;
-		code = generateGoogleCodeAssistProviderExtension(sessionId, models);
+		// The gateway knows synchronously, before spawn, whether it holds a usable
+		// Google credential (the same condition its token endpoint enforces). Bake
+		// that in so a gateway-authenticated session exposes Code Assist models at
+		// load instead of racing the async auth watcher.
+		const gatewayCredentialAtSpawn = hasGoogleCodeAssistCredential();
+		code = generateGoogleCodeAssistProviderExtension(sessionId, models, gatewayCredentialAtSpawn);
 		extCodeCache.set(sessionId, code);
 	}
 
