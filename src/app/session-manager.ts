@@ -234,20 +234,25 @@ export function applyProjectPalette(projectId?: string): void {
 
 /** Resolve provisional/registered mode for a project proposal slot.
  *
- *  When the proposal carries an explicit `fields.projectId` naming a REGISTERED
- *  (non-provisional) project, mode derives from THAT target — a cross-project
- *  edit from a provisional source session must still take the "registered"
- *  (EDIT) path rather than promote/provision. When `projectId` is absent (the
- *  common new-project flow) mode derives from the source session's project,
- *  returning "provisional" if no project is registered yet.
+ *  When the proposal carries an explicit `fields.projectId` naming an EXISTING
+ *  project, mode derives from THAT target: a provisional target takes the
+ *  "provisional" (promote/provision) path and a registered target takes the
+ *  "registered" (EDIT) path — regardless of the source session's own mode. This
+ *  ensures a cross-project proposal targeting a provisional project still
+ *  promotes it rather than skipping straight to a config EDIT. An explicit
+ *  target that is unknown/not-found falls through to the source-session default.
+ *  When `projectId` is absent (the common new-project flow) mode derives from
+ *  the source session's project, returning "provisional" if no project is
+ *  registered yet.
  *  Extracted for the unified onProposal callback (Slice E gap-closure). */
-function resolveProjectMode(sessionId: string, fields?: Record<string, unknown>): "provisional" | "registered" {
+export function resolveProjectMode(sessionId: string, fields?: Record<string, unknown>): "provisional" | "registered" {
 	const explicit = typeof fields?.projectId === "string" ? (fields.projectId as string).trim() : "";
 	if (explicit) {
 		const target = state.projects.find(p => p.id === explicit);
-		// Explicit target that is registered (non-provisional) → EDIT path.
-		// Unknown/provisional target falls through to the source-session default.
-		if (target && !target.provisional) return "registered";
+		// Explicit KNOWN target → mode from that target (provisional target →
+		// promote/provision; registered target → EDIT). Unknown target falls
+		// through to the source-session default below.
+		if (target) return target.provisional ? "provisional" : "registered";
 	}
 	const session = state.gatewaySessions.find(s => s.id === sessionId);
 	const project = state.projects.find(p => p.id === session?.projectId);

@@ -80,6 +80,10 @@
       "reason": "Native v2 integration coverage for the 'Cross-project proposals' goal (96fddb01): the proposal seed endpoint resolves the TARGET project uniformly across goal/role/tool/staff — omitted → session project (system → headquarters), explicit valid cross-project accepted and stamped onto proposal.fields.projectId, explicit unknown → 422 UNKNOWN_PROJECT — while propose_project is exempt (a brand-new/unknown projectId is allowed at seed), and goal workflow validation resolves against the target project's workflows rather than the session's."
     },
     {
+      "path": "tests2/dom/resolve-project-mode.test.ts",
+      "reason": "PR #1005 review (Greptile P1) coverage for the 'Cross-project proposals' goal (96fddb01): src/app/session-manager.ts::resolveProjectMode must derive a project proposal's provisional/registered mode from an EXPLICIT fields.projectId target when that target EXISTS (provisional target → 'provisional'/promote path; registered target → 'registered'/EDIT path), regardless of the source session's own mode. Only an unknown explicit target falls through to the source session, and an absent projectId keeps the source-session new-project flow. Pins the fix so a registered source targeting a provisional project no longer skips the required promote."
+    },
+    {
       "path": "tests2/integration/direct-agent-admin-token.test.ts",
       "reason": "Pinning test for the 'Direct-agent admin token' interim rollback: non-sandboxed (direct) agents receive the gateway ADMIN token (readToken()) via scopedGatewayEnvForDirectAgent (createSession/createDelegateSession) and applyScopedGatewayCredentials (restore/revive/respawn), while the sandbox path (mintScopedGatewayToken) still produces a per-project SCOPED token distinct from the admin token. Also pins the loud-throw when no admin token is available (no silent fallback)."
     },
