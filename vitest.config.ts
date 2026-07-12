@@ -98,6 +98,11 @@ const singleForkFiles = [
 const heavyCoreFiles = [
 	"tests2/core/git-status-native.test.ts",
 	"tests2/core/team-manager.test.ts",
+	// Real git/worktree-sync flows (init repos + remotes + worktrees + fetch);
+	// each test runs ~4-25s even in isolation, so in the broad v2-core pool they
+	// blow the 30s testTimeout under concurrent lane CPU-starvation. Sequenced in
+	// the dedicated single-fork heavy lane (with extra timeout headroom below).
+	"tests2/core/verification-goal-sync-nondestructive.test.ts",
 ];
 
 // DOM fixture that renders a lazy custom element also imported by broader DOM
@@ -292,6 +297,12 @@ export default defineConfig({
 					environment: "node",
 					pool: "forks" as const,
 					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
+					// These files run real git/worktree flows that are individually slow
+					// (tens of seconds) and get slower under the parallel integration lane's
+					// CPU load. Give them headroom over the shared 30s default so a busy box
+					// doesn't turn a legitimately-long git test into a spurious timeout.
+					testTimeout: 120_000,
+					hookTimeout: 120_000,
 					include: heavyCoreFiles,
 				},
 			},
