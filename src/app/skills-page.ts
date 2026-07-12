@@ -276,7 +276,11 @@ async function saveCustomDirs(): Promise<void> {
 // Exported for tests (Fix A): accepts an optional explicit path; defaults to the
 // pending `newDirPath` bound to the Add-row input.
 export async function addCustomDir(path?: string): Promise<void> {
-	const trimmed = (path ?? newDirPath).trim();
+	// `path` is optional and only supplied by tests. The Add button binds this
+	// handler directly, so Lit passes a MouseEvent as the first argument — ignore
+	// any non-string value and fall back to the pending input.
+	const explicit = typeof path === "string" ? path : undefined;
+	const trimmed = (explicit ?? newDirPath).trim();
 	if (!trimmed) return;
 	customDirs = [...customDirs, { path: trimmed }];
 	newDirPath = "";

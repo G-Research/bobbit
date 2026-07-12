@@ -194,6 +194,17 @@ describe("Skills page — saveCustomDirs preserves multi-type config_directories
 		expect(dirs.some((d) => d.path === "/newdir" && d.types.length === 1 && d.types[0] === "skills")).toBe(true);
 	});
 
+	it("does not crash when the Add button passes a MouseEvent (ignores non-string arg)", async () => {
+		stubConfig();
+		await loadSkillsPageData();
+		putBodies = [];
+		// The Add button binds `@click=${addCustomDir}`, so Lit hands the handler a
+		// MouseEvent as its first argument. The optional `path` must be ignored when
+		// it is not a string; with the input empty this is a no-op (no throw, no PUT).
+		await expect(addCustomDir(new Event("click") as any)).resolves.toBeUndefined();
+		expect(putBodies.length, "empty input + Event arg must not save").toBe(0);
+	});
+
 	it("guards against a user re-adding a multi-type path as a skills-only custom dir", async () => {
 		stubConfig();
 		await loadSkillsPageData();
