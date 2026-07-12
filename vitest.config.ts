@@ -2,6 +2,7 @@ import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { defineConfig } from "vitest/config";
 import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
+import { integrationE2eFiles } from "./scripts/testing-v2/integration-e2e-files.mjs";
 
 /**
  * Tier-1 vitest configuration for Test Suite v2.
@@ -98,6 +99,11 @@ const singleForkFiles = [
 const heavyCoreFiles = [
 	"tests2/core/git-status-native.test.ts",
 	"tests2/core/team-manager.test.ts",
+	// Real git/worktree-sync flows (init repos + remotes + worktrees + fetch);
+	// each test runs ~4-25s even in isolation, so in the broad v2-core pool they
+	// blow the 30s testTimeout under concurrent lane CPU-starvation. Sequenced in
+	// the dedicated single-fork heavy lane (with extra timeout headroom below).
+	"tests2/core/verification-goal-sync-nondestructive.test.ts",
 ];
 
 // DOM fixture that renders a lazy custom element also imported by broader DOM
@@ -133,6 +139,17 @@ const fakeCommandStepFiles = [
 	"tests2/integration/maintenance-api.test.ts",
 	"tests2/integration/optional-steps-api.test.ts",
 ];
+
+// Heavy REAL-FIDELITY integration specs relocated OUT of the fast `unit` gate and
+// into the e2e tier: team/child lifecycle, worktree continue/multi-repo, gateway
+// restart, and real git commit/fork flows. They drive genuine gateway+git+agent
+// work per test (not reducible test-side waits), so they dominate the integration
+// lane's wall (~150s of it). Excluded from `v2-integration` (so `test:unit` skips
+// them) and run by the e2e stage via the `v2-integration-e2e` project below.
+// Files stay physically in tests2/integration/ (guard-v2 only requires a tests-map
+// claim, which is unchanged); only which vitest project runs them moves.
+// The list lives in ./scripts/testing-v2/integration-e2e-files.mjs (imported at
+// top) so run-e2e-v2.mjs's reported count can't drift from what actually runs.
 
 function listTestFilesUnder(root: string): string[] {
 	const files: string[] = [];
@@ -292,6 +309,12 @@ export default defineConfig({
 					environment: "node",
 					pool: "forks" as const,
 					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
+					// These files run real git/worktree flows that are individually slow
+					// (tens of seconds) and get slower under the parallel integration lane's
+					// CPU load. Give them headroom over the shared 30s default so a busy box
+					// doesn't turn a legitimately-long git test into a spurious timeout.
+					testTimeout: 120_000,
+					hookTimeout: 120_000,
 					include: heavyCoreFiles,
 				},
 			},
@@ -326,8 +349,10 @@ export default defineConfig({
 					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 3 },
 					environment: "node",
 					include: ["tests2/integration/**/*.test.ts"],
-					// The fake-command-step specs run in the dedicated fake project below.
-					exclude: [...fakeCommandStepFiles],
+					// The fake-command-step specs run in the dedicated fake project below;
+					// the heavy real-fidelity specs run in the e2e-tier project (relocated
+					// out of the fast unit gate).
+					exclude: [...fakeCommandStepFiles, ...integrationE2eFiles],
 					// Integration tests each boot a real gateway + verification harness;
 					// under concurrent load they can take >30 s, so override the default.
 					testTimeout: 60_000,
@@ -349,6 +374,25 @@ export default defineConfig({
 					include: [...fakeCommandStepFiles],
 					pool: "forks" as const,
 					poolOptions: { forks: { minForks: 1, maxForks: 1, singleFork: true } },
+					testTimeout: 60_000,
+					hookTimeout: 90_000,
+				},
+			},
+			// Real-fidelity integration specs, relocated to the e2e tier. This project
+			// OWNS the 12 files (they are excluded from v2-integration), so a direct
+			// `vitest run <one-of-the-12>` still matches HERE and runs — no silent
+			// zero-test pass. The `unit` GATE excludes them not via an empty include but
+			// structurally: the lane runner selects `--project v2-integration
+			// v2-integration-fake` (never this one), and `test:e2e` selects
+			// `--project v2-integration-e2e`. (An unfiltered `test:v2:core` dev full-run
+			// runs them once here, which is correct for a full run.)
+			{
+				test: {
+					...shared,
+					name: "v2-integration-e2e",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 6 },
+					environment: "node",
+					include: [...integrationE2eFiles],
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
 				},
