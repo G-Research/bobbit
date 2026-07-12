@@ -2012,8 +2012,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				sessionId,
 				fields: merged,
 				streaming: false,
+				// Always recompute for project proposals: resolveProjectMode is a pure
+				// function of the CURRENT merged fields + registry/session state, so a
+				// later revision that adds/changes fields.projectId (e.g. a cross-project
+				// target) must re-evaluate the mode. Preferring a sticky prev.mode here
+				// left accept on a stale promote/edit branch (Greptile P1, PR #1005).
 				mode: type === "project"
-					? (prev?.mode ?? resolveProjectMode(sessionId, merged))
+					? resolveProjectMode(sessionId, merged)
 					: undefined,
 				rev: nextRev,
 				...(preservedWorkflowValidation ? { workflowValidationError: preservedWorkflowValidation } : {}),

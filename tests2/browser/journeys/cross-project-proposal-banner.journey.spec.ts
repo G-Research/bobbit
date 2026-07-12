@@ -250,6 +250,55 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 		// test tests2/core/project-proposal-diff.test.ts.
 	});
 
+	test("STALE MODE (PR #1005 P1): a project slot re-evaluates mode when a LATER revision adds a cross-project target", async ({ page }) => {
+		// Regression pin for the slot-update recompute fix in
+		// src/app/session-manager.ts (~line 2015). A project proposal slot that is
+		// FIRST created without an explicit fields.projectId derives its mode from
+		// the source session (default project → "registered"). If a LATER revision
+		// adds a cross-project target, the slot must RE-EVALUATE the mode from the
+		// new fields — the buggy code kept the sticky `prev.mode`, so an accept took
+		// the stale branch (a provisional target was left unpromoted).
+		await openApp(page);
+		await createSessionViaUI(page);
+		await ensureUnifiedProposalReady(page);
+
+		// Inject a PROVISIONAL target into the client-side project registry. A real
+		// registered project (via the REST API) is never provisional, so we seed the
+		// provisional target directly — resolveProjectMode reads state.projects.
+		const provisionalTargetId = `v2-provisional-target-${Date.now()}`;
+		await page.evaluate((id) => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			s.projects.push({ id, name: "Provisional Target", provisional: true });
+		}, provisionalTargetId);
+
+		// Rev 1: NO projectId → mode derives from the source (default) session.
+		await driveUnifiedProposal(page, "project", {
+			name: "same-project-first",
+			test_command: "npm test",
+		});
+		await expect
+			.poll(async () => page.evaluate(() => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return s?.activeProposals?.project?.mode ?? null;
+			}), { timeout: 10_000 })
+			.toBe("registered");
+
+		// Rev 2 (later revision): ADD an explicit provisional cross-project target.
+		// The recompute must flip the mode registered → provisional. With the stale
+		// `prev.mode` code this stayed "registered".
+		await driveUnifiedProposal(page, "project", {
+			name: "same-project-first",
+			test_command: "npm test",
+			projectId: provisionalTargetId,
+		});
+		await expect
+			.poll(async () => page.evaluate(() => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return s?.activeProposals?.project?.mode ?? null;
+			}), { timeout: 10_000 })
+			.toBe("provisional");
+	});
+
 	test("tool proposal targeting another project routes 'View Tool' to the target scope", async ({ page }) => {
 		const target = await registerTargetProject();
 		await openApp(page);
