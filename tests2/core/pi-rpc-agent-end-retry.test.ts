@@ -12,6 +12,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-rpc-agent-end-retry-")
 process.env.BOBBIT_DIR = tmpRoot;
 
 const { SessionManager, isRetryableAgentEnd } = await import("../../src/server/agent/session-manager.ts");
+const { subscribeToEvents } = await import("../../src/server/agent/session-setup.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { createManualClock } = await import("../harness/clock.js");
@@ -140,6 +141,46 @@ describe("Pi RPC agent_end retry contract", () => {
 		manager.emitAgentEvent(session, { type: "agent_end", willRetry: false, messages: [] });
 		const events = session.eventBuffer.getAll().map((e: any) => e.event.type);
 		expect(events).toEqual(["message_update", "agent_end"]);
+	});
+
+	it("subscribeToEvents (session-setup pipeline) suppresses retryable agent_end before client/EventBuffer broadcast", () => {
+		const manager = makeManager();
+		let listener: ((event: any) => void) | undefined;
+		const session = putSession(manager, {
+			rpcClient: { onEvent: (fn: (event: any) => void) => { listener = fn; return () => { listener = undefined; }; } },
+		});
+
+		const handleAgentLifecycle = vi.fn();
+		const trackCostFromEvent = vi.fn();
+		const ctx: any = {
+			store: { update: vi.fn() },
+			handleAgentLifecycle,
+			trackCostFromEvent,
+		};
+
+		const unsub = subscribeToEvents(session, ctx);
+		expect(typeof unsub).toBe("function");
+
+		// Retryable Pi agent_end must NOT reach the EventBuffer/clients even on the
+		// normal spawn setup pipeline path (not only SessionManager direct paths).
+		listener?.({ type: "agent_end", willRetry: true, messages: [] });
+		expect(session.eventBuffer.size).toBe(0);
+
+		// Other events still broadcast normally.
+		listener?.({ type: "message_update", message: { id: "m1", role: "assistant" } });
+		expect(session.eventBuffer.size).toBe(1);
+
+		// The real terminal agent_end (willRetry:false) still broadcasts.
+		listener?.({ type: "agent_end", willRetry: false, messages: [] });
+
+		const events = session.eventBuffer.getAll().map((e: any) => e.event.type);
+		expect(events).toEqual(["message_update", "agent_end"]);
+
+		// Lifecycle + cost tracking still see every event, including the retryable one.
+		expect(handleAgentLifecycle).toHaveBeenCalledTimes(3);
+		expect(trackCostFromEvent).toHaveBeenCalledTimes(3);
+
+		unsub();
 	});
 
 	it("waitForIdle ignores retryable Pi agent_end and resolves on the final agent_end", async () => {
