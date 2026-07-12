@@ -119,6 +119,22 @@ models under provider `google-gemini-cli` with `api: "google-code-assist"` (see
 `… (Google account)` and are **session-selectable**: you can bind one to any agent session
 exactly like an Anthropic, OpenAI, or API-key Gemini model.
 
+"A Google account credential is present" spans **both** supported Code Assist auth paths
+(`hasGoogleCodeAssistSpawnCredential()` in `src/server/agent/google-code-assist.ts`):
+
+- a stored `auth.json` OAuth credential (Settings → Account → Google login), or
+- a pre-acquired Bearer token in the gateway env var `GOOGLE_CLOUD_ACCESS_TOKEN`.
+
+Either path counts as a genuine Code Assist credential for the whole surface — `/api/models`
+and Settings model exposure, the Settings auth-status row, and spawn-time model pinning
+(default, per-role, and persisted `google-gemini-cli/*` selection). One shared credential
+helper drives all three so they never disagree. This makes an env-token deployment (no
+interactive OAuth login) a first-class way to run account-backed Gemini sessions. The
+isolation from the API-key `google` provider is exact and bidirectional: a generic
+`GOOGLE_API_KEY`/`GEMINI_API_KEY` never authenticates Code Assist, and
+`GOOGLE_CLOUD_ACCESS_TOKEN` never authenticates the API-key `google` (Gemini Developer API)
+provider.
+
 The emitted set is a **curated allowlist** (`CODE_ASSIST_ALLOWLIST` in that file), not every
 `gemini-*` in pi-ai's `google` catalog. The catalog carries Developer API (AI Studio) ids
 that the Code Assist endpoint 404s on with `HTTP 404 Requested entity not found` —
