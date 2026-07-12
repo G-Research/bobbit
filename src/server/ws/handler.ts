@@ -86,18 +86,50 @@ function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[
 	return mergeSidecarEntriesIntoMessages(entries, messages);
 }
 
-function buildResolvedModelStateModel(provider: string, id: string, base?: Record<string, unknown>): Record<string, unknown> {
+const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+/**
+ * Build the `state.model` payload for a live/rehydrated frame.
+ *
+ * Authoritative metadata (registry cache / pi-ai catalog) always wins so stale
+ * or incorrect live frames get corrected — e.g. Claude Fable 5's 1M context,
+ * `reasoning:true`, and `thinkingLevelMap {..., max:"max"}`.
+ *
+ * When the resolver only produced INFERRED defaults (custom / aigw / unknown
+ * providers that legitimately fall through to `inferMeta`), those defaults must
+ * NOT clobber more-accurate live fields already present on `base` (the agent's
+ * live `state.model`). Inferred values are used only as a fallback for fields
+ * the live frame does not already carry.
+ */
+export function buildResolvedModelStateModel(provider: string, id: string, base?: Record<string, unknown>): Record<string, unknown> {
 	const meta = resolveModelStateMeta(provider, id);
 	const model: Record<string, unknown> = {
 		...(base ?? {}),
 		provider,
 		id,
-		contextWindow: meta.contextWindow,
-		maxTokens: meta.maxTokens,
-		reasoning: meta.reasoning,
 	};
+	const inferredFallback = meta.source === "inferred";
+
+	// contextWindow / maxTokens: authoritative overwrites; inferred only fills gaps.
+	model.contextWindow = inferredFallback && isPositiveNumber(base?.contextWindow)
+		? base!.contextWindow
+		: meta.contextWindow;
+	model.maxTokens = inferredFallback && isPositiveNumber(base?.maxTokens)
+		? base!.maxTokens
+		: meta.maxTokens;
+
+	// reasoning: authoritative overwrites; inferred keeps a live boolean when present.
+	model.reasoning = inferredFallback && typeof base?.reasoning === "boolean"
+		? base!.reasoning
+		: meta.reasoning;
+
+	// thinkingLevelMap: authoritative source is the sole owner. On inferred
+	// fallback keep a live map when present (else drop it so the client applies
+	// its family heuristic).
 	if (meta.thinkingLevelMap) {
 		model.thinkingLevelMap = meta.thinkingLevelMap;
+	} else if (inferredFallback && base?.thinkingLevelMap && typeof base.thinkingLevelMap === "object") {
+		model.thinkingLevelMap = base.thinkingLevelMap;
 	} else {
 		delete model.thinkingLevelMap;
 	}

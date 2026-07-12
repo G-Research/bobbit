@@ -20,6 +20,10 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/model-state-frame-preservation.test.ts",
+      "reason": "Pinning tests for buildResolvedModelStateModel (ws/handler.ts): custom/unknown provider (resolver source=inferred) preserves live contextWindow/maxTokens/reasoning/thinkingLevelMap, while known Fable model still gets authoritative catalog metadata incl. thinkingLevelMap.max over stale live base."
+    },
+    {
       "path": "tests2/core/verification-goal-sync-nondestructive.test.ts",
       "reason": "Reproducing + decision-matrix tests for the destructive pre-verification goal-worktree sync: local-ahead un-pushed commit B must survive (not be discarded by `git reset --hard origin/<goalBranch>`), local-behind fast-forwards to origin, diverged keeps local + warns, up-to-date is a no-op. Drives the real VerificationHarness against real temp git repos."
     },
