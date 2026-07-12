@@ -251,10 +251,30 @@ describe("AI Gateway pricing metadata", () => {
 					{ xhigh: "xhigh", max: "max" },
 					"writeAigwModelsJson must persist thinkingLevelMap so Pi honors selected `max` thinking",
 				);
+				// Pi's openai-completions only sends reasoning_effort when resolved compat
+				// has supportsReasoningEffort:true. A GPT 5.6 entry that advertises `max`
+				// but leaves this false would silently drop the selected effort.
+				assert.equal(
+					lunaEntry.compat?.supportsReasoningEffort,
+					true,
+					"routed GPT 5.6 entry must opt into reasoning effort so Pi sends the selected `max` effort",
+				);
 				assert.ok(
 					!("thinkingLevelMap" in plainEntry),
 					"models without an input thinkingLevelMap must not get a fabricated one",
 				);
+				// Conservative default preserved for non-reasoning-effort models.
+				assert.equal(
+					plainEntry.compat?.supportsReasoningEffort,
+					false,
+					"plain non-GPT-5.6 model must keep supportsReasoningEffort:false (no fabricated opt-in)",
+				);
+				// Other conservative gateway compat defaults must survive the GPT 5.6 opt-in.
+				assert.equal(lunaEntry.compat?.supportsStore, false, "GPT 5.6 must keep supportsStore:false");
+				assert.equal(lunaEntry.compat?.supportsDeveloperRole, false, "GPT 5.6 must keep supportsDeveloperRole:false");
+				assert.equal(lunaEntry.compat?.supportsUsageInStreaming, false, "GPT 5.6 must keep supportsUsageInStreaming:false");
+				assert.equal(lunaEntry.compat?.supportsStrictMode, false, "GPT 5.6 must keep supportsStrictMode:false");
+				assert.equal(lunaEntry.compat?.maxTokensField, "max_tokens", "GPT 5.6 must keep maxTokensField:max_tokens");
 				assert.deepEqual(mock.requests(), ["/v1/models"]);
 			} finally {
 				await mock.close();

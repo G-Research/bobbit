@@ -137,7 +137,12 @@ const GATEWAY_COMPAT: Record<string, unknown> = {
  */
 type InferRule = {
 	test: RegExp | ((id: string) => boolean);
-	meta: Omit<ModelMeta, "compat">;
+	// `meta.compat`, when present, is a *partial* override that `inferMeta` merges
+	// on top of GATEWAY_COMPAT (so a rule only names the flags it flips and keeps
+	// the conservative gateway defaults for the rest). Used by GPT 5.6 to opt into
+	// `supportsReasoningEffort` so Pi's openai-completions actually sends the
+	// selected reasoning_effort for the advertised `max` tier.
+	meta: Omit<ModelMeta, "compat"> & { compat?: Record<string, unknown> };
 };
 
 const INFER_RULES: InferRule[] = [
@@ -154,7 +159,10 @@ const INFER_RULES: InferRule[] = [
 	// this substring rule keep extended thinking instead of collapsing to the
 	// generic `/gpt-5/` non-reasoning fallback. Placed before the 5.5 rules so
 	// the digit is unambiguous (substring `gpt-5.6` never matches 5.5 rules).
-	{ test: /gpt-5\.6/, meta: { contextWindow: 272_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], thinkingLevelMap: { xhigh: "xhigh", max: "max" } } },
+	// The compat override opts into supportsReasoningEffort: without it the merged
+	// gateway compat leaves it false and Pi's openai-completions silently drops the
+	// selected effort even though the model advertises `xhigh`/`max`.
+	{ test: /gpt-5\.6/, meta: { contextWindow: 272_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], thinkingLevelMap: { xhigh: "xhigh", max: "max" }, compat: { supportsReasoningEffort: true } } },
 	{ test: /gpt-5\.5-pro/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.5/, meta: { contextWindow: 272_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.4-pro/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
@@ -189,7 +197,10 @@ export function inferMeta(modelId: string): ModelMeta {
 	for (const rule of INFER_RULES) {
 		const matched = typeof rule.test === "function" ? rule.test(id) : rule.test.test(id);
 		if (matched) {
-			return { ...rule.meta, compat: GATEWAY_COMPAT };
+			const { compat: override, ...rest } = rule.meta;
+			// Merge any per-rule compat override on top of the conservative gateway
+			// defaults so unnamed flags keep GATEWAY_COMPAT's values.
+			return { ...rest, compat: override ? { ...GATEWAY_COMPAT, ...override } : GATEWAY_COMPAT };
 		}
 	}
 	return { ...DEFAULT_META, compat: GATEWAY_COMPAT };
@@ -588,6 +599,11 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 				// selected `max` thinking level instead of collapsing to the generic
 				// family fallback. Omitted when the input model carries no map.
 				...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
+				// Merge the discovered per-model compat over the conservative gateway
+				// defaults. This is what carries `supportsReasoningEffort: true` for the
+				// GPT 5.6 family (inferMeta's compat override) so Pi's openai-completions
+				// sends the selected reasoning_effort for the advertised `max` tier;
+				// other non-Claude models keep the conservative `false` default.
 				compat: { ...openaiCompat, ...(m.compat || {}) },
 			};
 		}),
