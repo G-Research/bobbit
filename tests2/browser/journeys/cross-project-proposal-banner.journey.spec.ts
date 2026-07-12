@@ -19,14 +19,17 @@
  *        human-readable TARGET name;
  *   (ii) a same-project role proposal (projectId omitted → session's project)
  *        shows NO banner;
- *   (iii) accept routes to the target — for a goal proposal this is fully
- *        client-side (createGoal uses state.previewProjectId, which resolves to
- *        the explicit target), so we assert previewProjectId === targetId as a
- *        reliable proxy. (Seed-endpoint accept routing for role/tool/staff/
- *        project is owned by the server task; this spec's banner assertions do
- *        not depend on it.)
+ *   (iii) accept routes to the target — for the goal proposal we now DRIVE THE
+ *        REAL ACCEPT: click "Create Goal" and assert, via the goals REST API,
+ *        that the newly-created goal's `projectId` equals the TARGET project
+ *        (not the proposer's session project). The previous
+ *        `previewProjectId === targetId` proxy is retained as a pre-accept
+ *        sanity check, but the load-bearing assertion is now on the real
+ *        created entity. (Seed-endpoint accept routing for role/tool/staff/
+ *        project is owned by the server task; those banner assertions do not
+ *        depend on it.)
  */
-import { test, expect, openApp, createSessionViaUI, registerProject } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, createSessionViaUI, registerProject, apiFetch, deleteGoal, defaultProjectId } from "../_helpers/journey-fixture.js";
 import type { Page } from "@playwright/test";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -71,11 +74,18 @@ async function activatePanel(page: Page, tabTitle: string, panelSelector: string
 	await expect(page.locator(panelSelector).first(), `${panelSelector} should mount`).toBeVisible({ timeout: 15_000 });
 }
 
-/** Register a second project so proposals can cross-target it. */
-async function registerTargetProject(): Promise<{ id: string; name: string }> {
+/**
+ * Register a second project so proposals can cross-target it.
+ *
+ * Banner-only tests keep `seedWorkflows: false` (a bare registry entry is all
+ * the banner resolver needs). The goal-accept test passes `withWorkflows: true`
+ * so the target has a resolvable workflow set — otherwise the goal panel's
+ * "no workflows" guard blocks Create and the accept never fires.
+ */
+async function registerTargetProject(opts?: { withWorkflows?: boolean }): Promise<{ id: string; name: string }> {
 	const dir = mkdtempSync(join(tmpdir(), `bobbit-v2-xproj-${process.env.E2E_PORT ?? "0"}-`));
 	const name = `v2-xproj-target-${Date.now()}`;
-	const proj = await registerProject({ name, rootPath: dir, seedWorkflows: false });
+	const proj = await registerProject({ name, rootPath: dir, seedWorkflows: opts?.withWorkflows ? undefined : false });
 	return { id: proj.id, name };
 }
 
@@ -130,31 +140,82 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 	});
 
 	test("goal proposal targeting another project banners AND routes accept to the target", async ({ page }) => {
-		const target = await registerTargetProject();
-		await openApp(page);
-		await createSessionViaUI(page);
-		await ensureUnifiedProposalReady(page);
+		test.setTimeout(90_000);
+		const target = await registerTargetProject({ withWorkflows: true });
+		const proposerProjectId = await defaultProjectId();
+		expect(proposerProjectId, "proposer session must resolve to the default project").toBeTruthy();
+		expect(target.id, "target must be a DIFFERENT project than the proposer").not.toBe(proposerProjectId);
 
-		await driveUnifiedProposal(page, "goal", {
-			title: "Cross-project goal",
-			spec: "A goal proposed from the default project but targeting the registered target project.",
-			projectId: target.id,
-		});
-		await activatePanel(page, "Goal", '[data-panel="goal-proposal"]');
+		// Unique title so we can pinpoint the created goal in the API list.
+		const goalTitle = `Cross-project goal ${Date.now()}`;
+		let createdGoalId: string | undefined;
 
-		const banner = page.locator('[data-panel="goal-proposal"] [data-testid="cross-project-banner"]').first();
-		await expect(banner, "cross-project banner should render for a cross-project goal proposal").toBeVisible({ timeout: 10_000 });
-		await expect(banner).toContainText(target.name);
+		try {
+			await openApp(page);
+			await createSessionViaUI(page);
+			await ensureUnifiedProposalReady(page);
 
-		// (iii) Accept routing proxy: the goal-create path uses state.previewProjectId,
-		// which must resolve to the explicit target — proving the goal would be created
-		// in the target project's worktree/branch on accept.
-		await expect
-			.poll(async () => page.evaluate(() => {
-				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
-				return s?.previewProjectId ?? null;
-			}), { timeout: 10_000 })
-			.toBe(target.id);
+			await driveUnifiedProposal(page, "goal", {
+				title: goalTitle,
+				spec: "A goal proposed from the default project but targeting the registered target project.",
+				projectId: target.id,
+			});
+			await activatePanel(page, "Goal", '[data-panel="goal-proposal"]');
+
+			const banner = page.locator('[data-panel="goal-proposal"] [data-testid="cross-project-banner"]').first();
+			await expect(banner, "cross-project banner should render for a cross-project goal proposal").toBeVisible({ timeout: 10_000 });
+			await expect(banner).toContainText(target.name);
+
+			// Pre-accept sanity: the goal-create path uses state.previewProjectId,
+			// which must resolve to the explicit target before we click Create.
+			await expect
+				.poll(async () => page.evaluate(() => {
+					const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+					return s?.previewProjectId ?? null;
+				}), { timeout: 10_000 })
+				.toBe(target.id);
+
+			// Keep the accept lightweight: don't auto-start a team (avoids spawning a
+			// team-lead session for a goal the test tears down immediately).
+			const autoStart = page.locator('[data-panel="goal-proposal"] label:has-text("Auto-start team") input.toggle-switch').first();
+			if (await autoStart.isChecked().catch(() => false)) {
+				await autoStart.uncheck();
+			}
+
+			// (iii) REAL ACCEPT: click "Create Goal" once the workflow-backed target
+			// has enabled the primary submit, then verify the created entity lands in
+			// the TARGET project via the goals REST API.
+			const createBtn = page.locator('[data-panel="goal-proposal"] [data-testid="proposal-primary-submit"] button').first();
+			await expect(createBtn, "Create Goal must become enabled once the target's workflows load").toBeEnabled({ timeout: 20_000 });
+			await createBtn.click();
+
+			// The goal proposal panel closes on a successful create.
+			await expect(
+				page.locator('[data-panel="goal-proposal"]'),
+				"goal proposal panel should close after a successful accept",
+			).toHaveCount(0, { timeout: 20_000 });
+
+			// Authoritative assertion: the newly-created goal exists and its projectId
+			// is the TARGET, not the proposer's session project.
+			let createdGoal: { id: string; title?: string; projectId?: string } | undefined;
+			await expect.poll(async () => {
+				const resp = await apiFetch("/api/goals");
+				if (!resp.ok) return false;
+				const data = await resp.json();
+				const goals = (Array.isArray(data) ? data : data.goals ?? []) as Array<{ id: string; title?: string; projectId?: string }>;
+				createdGoal = goals.find(g => g.title === goalTitle);
+				return !!createdGoal;
+			}, {
+				timeout: 20_000,
+				message: "the accepted goal should appear in the goals API list",
+			}).toBe(true);
+
+			createdGoalId = createdGoal!.id;
+			expect(createdGoal!.projectId, "accepted cross-project goal must be created in the TARGET project").toBe(target.id);
+			expect(createdGoal!.projectId, "accepted cross-project goal must NOT land in the proposer's project").not.toBe(proposerProjectId);
+		} finally {
+			if (createdGoalId) await deleteGoal(createdGoalId).catch(() => {});
+		}
 	});
 
 	test("project proposal editing another registered project banners AND takes the EDIT path", async ({ page }) => {
