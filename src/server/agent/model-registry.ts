@@ -18,6 +18,7 @@ import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
+import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -364,7 +365,13 @@ const ENV_MAP: Record<string, string> = {
 	"anthropic": "ANTHROPIC_API_KEY",
 	"openai": "OPENAI_API_KEY",
 	"google": "GOOGLE_API_KEY",
-	"google-gemini-cli": "GOOGLE_API_KEY",
+	// Google account (Code Assist) authenticates via the Bearer access token, NOT a
+	// Gemini Developer API key. Mapping this to GOOGLE_API_KEY would let a generic
+	// GOOGLE_API_KEY/GEMINI_API_KEY masquerade as an authenticated account provider
+	// and cross-contaminate isolation. Auth is ultimately resolved through the shared
+	// spawn-credential helper (see detectProviderAuth) so whitespace-only tokens and
+	// stored OAuth are handled consistently; this entry documents the association.
+	"google-gemini-cli": "GOOGLE_CLOUD_ACCESS_TOKEN",
 	"google-vertex": "GOOGLE_APPLICATION_CREDENTIALS",
 	"xai": "XAI_API_KEY",
 	"amazon-bedrock": "AWS_ACCESS_KEY_ID",
@@ -390,6 +397,15 @@ function detectProviderAuth(provider: string, prefs: PreferencesStore): boolean 
 	// Check provider key in preferences (migrated from IndexedDB)
 	const storedKey = prefs.get(`providerKey.${provider}`) as string | undefined;
 	if (storedKey) return true;
+
+	// Code Assist (Google account) is authenticated ONLY by a stored auth.json OAuth
+	// credential OR a pre-acquired GOOGLE_CLOUD_ACCESS_TOKEN Bearer env token. Route
+	// through the shared spawn-credential helper so settings/model-API auth metadata,
+	// spawn-pinning, and the generated provider extension's authenticatedAtLoad gate
+	// all agree on the credential picture (including trimming whitespace-only tokens).
+	// A generic GOOGLE_API_KEY/GEMINI_API_KEY must never authenticate the account
+	// provider, and the Bearer token must never authenticate the API-key `google`.
+	if (provider === GOOGLE_GEMINI_CLI_PROVIDER) return hasGoogleCodeAssistSpawnCredential();
 
 	// Check env vars
 	const envVar = ENV_MAP[provider];

@@ -13,9 +13,15 @@ guardProcessEnv();
  *  1. An OAuth credential only authenticates OAuth-capable providers — a generic
  *     auth.json token must NOT make the API-key-only `google` provider look usable.
  *  2. google-gemini-cli Gemini models are emitted (with api "google-code-assist")
- *     only when a Google account credential is present.
+ *     only when a Google account credential is present — via EITHER a stored
+ *     auth.json OAuth credential OR a pre-acquired GOOGLE_CLOUD_ACCESS_TOKEN
+ *     Bearer env token — matching provider-extension authenticatedAtLoad and
+ *     spawn-pinnable behavior.
  *  3. Once agent-side Code Assist runtime support exists, account models are
  *     session-selectable (no sessionSelectable:false gate).
+ *  4. Credential isolation is strict in both directions: a GOOGLE_CLOUD_ACCESS_TOKEN
+ *     authenticates ONLY the account provider (never generic API-key `google`), and
+ *     a GOOGLE_API_KEY/GEMINI_API_KEY never authenticates account models.
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -31,6 +37,7 @@ import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/ag
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevGoogleKey = process.env.GOOGLE_API_KEY;
 const prevGeminiKey = process.env.GEMINI_API_KEY;
+const prevCloudToken = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
 let dir: string;
 let prefs: PreferencesStore;
 
@@ -38,9 +45,11 @@ beforeEach(() => {
 	dir = mkdtempSync(path.join(tmpdir(), "bobbit-gca-reg-"));
 	process.env.BOBBIT_AGENT_DIR = dir;
 	pinAgentDirForTest(dir);
-	// Ensure the API-key `google` provider is NOT authenticated by ambient env.
+	// Ensure neither the API-key `google` provider nor the Code Assist account
+	// provider is authenticated by ambient env before each case sets it explicitly.
 	delete process.env.GOOGLE_API_KEY;
 	delete process.env.GEMINI_API_KEY;
+	delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
 	prefs = new PreferencesStore(path.resolve("/memfs/google-code-assist-registry"), createMemFs());
 	invalidateModelCache();
 	clearOAuthCache();
@@ -50,6 +59,7 @@ afterEach(() => {
 	if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR; else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
 	if (prevGoogleKey === undefined) delete process.env.GOOGLE_API_KEY; else process.env.GOOGLE_API_KEY = prevGoogleKey;
 	if (prevGeminiKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = prevGeminiKey;
+	if (prevCloudToken === undefined) delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN; else process.env.GOOGLE_CLOUD_ACCESS_TOKEN = prevCloudToken;
 	resetAgentDirForTest();
 	rmSync(dir, { recursive: true, force: true });
 	invalidateModelCache();
@@ -157,5 +167,65 @@ describe("Google account model emission + auth isolation", () => {
 		for (const m of googleModels) {
 			assert.equal(m.authenticated, false, `${m.id} must not be authenticated by an OAuth token`);
 		}
+	});
+});
+
+describe("GOOGLE_CLOUD_ACCESS_TOKEN env-token Code Assist exposure + isolation", () => {
+	it("emits authenticated google-gemini-cli Code Assist models from an env token alone (no auth.json)", async () => {
+		// Env-token-only deployments (manual/live config, sandbox) must surface
+		// authenticated account models even without a stored OAuth credential, matching
+		// the provider extension's authenticatedAtLoad gate and spawn-pinnable behavior.
+		process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "ya29.env-bearer-token";
+		invalidateModelCache();
+		clearOAuthCache();
+		const models = await getAvailableModels(prefs);
+		const account = models.filter((m) => m.provider === "google-gemini-cli");
+		assert.ok(account.length > 0, "expected google-gemini-cli models from env token");
+		for (const m of account) {
+			assert.equal(m.api, "google-code-assist");
+			assert.equal(m.authenticated, true, `${m.id} must be authenticated by GOOGLE_CLOUD_ACCESS_TOKEN`);
+			assert.notEqual(m.sessionSelectable, false, `${m.id} must stay selectable for sessions`);
+		}
+	});
+
+	it("an env token does not authenticate or expose the generic API-key `google` provider", async () => {
+		// Isolation: the Code Assist Bearer token is a different wire protocol and must
+		// never make the API-key Gemini Developer API provider look usable.
+		process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "ya29.env-bearer-token";
+		invalidateModelCache();
+		clearOAuthCache();
+		const models = await getAvailableModels(prefs);
+		const googleModels = models.filter((m) => m.provider === "google");
+		assert.ok(googleModels.length > 0, "expected built-in google models");
+		for (const m of googleModels) {
+			assert.equal(m.authenticated, false, `${m.id} must not be authenticated by GOOGLE_CLOUD_ACCESS_TOKEN`);
+		}
+	});
+
+	it("a GOOGLE_API_KEY does not emit or authenticate google-gemini-cli account models", async () => {
+		// Reverse isolation: the always-working API-key path must never masquerade as
+		// the account (Code Assist) provider. With only GOOGLE_API_KEY set and no
+		// account credential, no google-gemini-cli models should be emitted.
+		process.env.GOOGLE_API_KEY = "test-key";
+		invalidateModelCache();
+		clearOAuthCache();
+		const models = await getAvailableModels(prefs);
+		assert.equal(
+			models.some((m) => m.provider === "google-gemini-cli"),
+			false,
+			"GOOGLE_API_KEY must not surface Code Assist account models",
+		);
+	});
+
+	it("a whitespace-only env token does not count as a Code Assist credential", async () => {
+		process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "   ";
+		invalidateModelCache();
+		clearOAuthCache();
+		const models = await getAvailableModels(prefs);
+		assert.equal(
+			models.some((m) => m.provider === "google-gemini-cli"),
+			false,
+			"whitespace-only GOOGLE_CLOUD_ACCESS_TOKEN must not emit account models",
+		);
 	});
 });
