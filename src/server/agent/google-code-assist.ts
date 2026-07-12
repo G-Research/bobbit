@@ -66,6 +66,31 @@ export function isSessionSelectableModelString(modelString: string): boolean {
 	return isSessionSelectableProvider(provider);
 }
 
+/**
+ * True when a `"<provider>/<modelId>"` string may be *pinned as a session's
+ * initial `--model` at spawn time*, given the current auth state.
+ *
+ * This is intentionally stricter than `isSessionSelectableModelString()`. Code
+ * Assist (`google-gemini-cli/*`) is always session-*selectable* — the model
+ * selector and authenticated sessions must keep allowing it — but it is only
+ * *runnable* once a real Google credential is present. When no credential
+ * exists, the generated pi-coding-agent provider extension registers no
+ * `models[]`/`apiKey`, so handing Pi `--model google-gemini-cli/...` (from a
+ * stale `default.sessionModel`, a role override, or a persisted
+ * `modelProvider/modelId`) fails to resolve and the session cannot start. In
+ * that pre-auth state we decline to pin it so normal/assistant sessions fall
+ * back to an available model; once a credential is observed the model becomes
+ * pinnable again. All other providers and malformed/unknown strings are
+ * unaffected (they defer to `isSessionSelectableModelString`).
+ */
+export function isSpawnPinnableModelString(modelString: string): boolean {
+	if (!isSessionSelectableModelString(modelString)) return false;
+	const slash = modelString.indexOf("/");
+	const provider = slash > 0 ? modelString.slice(0, slash) : modelString;
+	if (provider === GOOGLE_GEMINI_CLI_PROVIDER) return hasGoogleCodeAssistCredential();
+	return true;
+}
+
 const CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION = "v1internal";
 const CLIENT_METADATA = { ideType: "IDE_UNSPECIFIED", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" } as const;

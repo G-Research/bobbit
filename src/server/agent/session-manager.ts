@@ -74,7 +74,7 @@ import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./
 import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
-import { isSessionSelectableModelString } from "./google-code-assist.js";
+import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
@@ -5791,8 +5791,13 @@ export class SessionManager {
 		// redundant initial `model_change` event with its hardcoded default.
 		// Prefer the persisted model if known (avoids surprising changes after
 		// restart); fall back to role/preference resolution.
-		if (ps.modelProvider && ps.modelId) {
-			bridgeOptions.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		const psPersistedModel = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined;
+		// Keep an explicit, still-runnable persisted pin (incl. authenticated Code
+		// Assist), but fall back to role/pref resolution when the persisted model is
+		// no longer spawn-pinnable — e.g. a Code Assist model whose Google credential
+		// was removed/expired, which Pi could not resolve as `--model`.
+		if (psPersistedModel && isSpawnPinnableModelString(psPersistedModel)) {
+			bridgeOptions.initialModel = psPersistedModel;
 		} else {
 			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
@@ -6831,11 +6836,14 @@ export class SessionManager {
 			const m = this.resolveRoleModelValue(role, projectId);
 			// Skip models that can't run in an agent session (e.g. google-gemini-cli
 			// Code Assist) so a role override doesn't pin an unrunnable provider.
-			if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
+			// `isSpawnPinnableModelString` additionally screens out Code Assist when
+			// no Google credential is present (unauthenticated `google-gemini-cli/*`
+			// would fail to resolve as Pi's `--model`).
+			if (m && /^[^/]+\/.+$/.test(m) && isSpawnPinnableModelString(m)) return m;
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSpawnPinnableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -6881,10 +6889,10 @@ export class SessionManager {
 	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
 		if (role) {
 			const m = this.resolveRoleModelValue(role, projectId);
-			if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
+			if (m && /^[^/]+\/.+$/.test(m) && isSpawnPinnableModelString(m)) return m;
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSpawnPinnableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -7737,8 +7745,14 @@ export class SessionManager {
 
 		// Pin model/thinking-level at spawn for the respawn (after role assignment).
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
-		if (respawnPersisted?.modelProvider && respawnPersisted?.modelId) {
-			bridgeOptions.initialModel = `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`;
+		const respawnPersistedModel =
+			respawnPersisted?.modelProvider && respawnPersisted?.modelId
+				? `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`
+				: undefined;
+		// See spawn path: skip a persisted pin that is no longer spawn-pinnable
+		// (e.g. unauthenticated Code Assist) so the respawn falls back cleanly.
+		if (respawnPersistedModel && isSpawnPinnableModelString(respawnPersistedModel)) {
+			bridgeOptions.initialModel = respawnPersistedModel;
 		} else {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
@@ -9847,8 +9861,14 @@ export class SessionManager {
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
-			if (forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId) {
-				bridgeOptions.initialModel = `${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`;
+			const forceRespawnPersistedModel =
+				forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId
+					? `${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`
+					: undefined;
+			// See spawn path: skip a persisted pin that is no longer spawn-pinnable
+			// (e.g. unauthenticated Code Assist) so the force-respawn falls back cleanly.
+			if (forceRespawnPersistedModel && isSpawnPinnableModelString(forceRespawnPersistedModel)) {
+				bridgeOptions.initialModel = forceRespawnPersistedModel;
 			} else {
 				const initModel = this.resolveInitialModel(session.role, session.projectId);
 				if (initModel) bridgeOptions.initialModel = initModel;

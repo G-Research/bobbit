@@ -12,6 +12,7 @@ import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { resolveMarketplacePiExtensionActivation, type ResolvedPiExtensionContribution } from "../../src/server/agent/session-setup.ts";
 import type { ScopedToolContext } from "../../src/server/agent/tool-manager.ts";
+import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 
 function contribution(listName: string, entryPath: string | undefined, status: ResolvedPiExtensionContribution["diagnostic"]["status"] = "ok"): ResolvedPiExtensionContribution {
 	return {
@@ -112,6 +113,61 @@ describe("marketplace pi extension activation args", () => {
 			assert.equal(rows[0].diagnostic.code, "runtime_load_failed");
 			assert.equal(session.eventBuffer.size, 1);
 		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("resolveInitialModel is auth-aware for Code Assist spawn pins", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-init-model-auth-"));
+		const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
+		try {
+			process.env.BOBBIT_AGENT_DIR = tmp;
+			pinAgentDirForTest(tmp);
+			const writeGoogleAuth = () =>
+				fs.writeFileSync(
+					path.join(tmp, "auth.json"),
+					JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } }),
+					"utf-8",
+				);
+			const clearGoogleAuth = () => fs.writeFileSync(path.join(tmp, "auth.json"), JSON.stringify({}), "utf-8");
+
+			// Fake preferences store returning a stale Code Assist default.sessionModel.
+			let sessionModelPref: string | undefined = "google-gemini-cli/gemini-2.5-pro";
+			const manager: any = new SessionManager({
+				preferencesStore: { get: (k: string) => (k === "default.sessionModel" ? sessionModelPref : undefined) } as any,
+			});
+			// Stub role model resolution so we can drive the role-override branch.
+			let roleModel: string | undefined;
+			manager.resolveRoleModelValue = () => roleModel;
+
+			// (1) pre-auth: stale Code Assist default.sessionModel is skipped.
+			clearGoogleAuth();
+			assert.equal(manager.resolveInitialModel(undefined, undefined), undefined);
+
+			// (2) post-auth: same default is returned once a credential exists.
+			writeGoogleAuth();
+			assert.equal(manager.resolveInitialModel(undefined, undefined), "google-gemini-cli/gemini-2.5-pro");
+
+			// (3) stale role override is skipped pre-auth (falls through to no pref).
+			clearGoogleAuth();
+			roleModel = "google-gemini-cli/gemini-2.5-flash";
+			sessionModelPref = undefined;
+			assert.equal(manager.resolveInitialModel("reviewer", undefined), undefined);
+			// …and is pinned once authenticated.
+			writeGoogleAuth();
+			assert.equal(manager.resolveInitialModel("reviewer", undefined), "google-gemini-cli/gemini-2.5-flash");
+
+			// (4) other providers resolve unchanged, with or without Google auth.
+			clearGoogleAuth();
+			roleModel = undefined;
+			sessionModelPref = "anthropic/claude-sonnet-4-5";
+			assert.equal(manager.resolveInitialModel(undefined, undefined), "anthropic/claude-sonnet-4-5");
+			roleModel = "google/gemini-2.5-pro";
+			assert.equal(manager.resolveInitialModel("coder", undefined), "google/gemini-2.5-pro");
+		} finally {
+			resetAgentDirForTest();
+			if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});
