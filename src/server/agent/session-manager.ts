@@ -969,11 +969,30 @@ function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
 	return next;
 }
 
+/** True for a Pi retryable `agent_end` (`{ type:"agent_end", willRetry:true }`).
+ *  Pi 0.80+ emits agent_end for every retryable failed attempt BEFORE its
+ *  internal auto-retry loop settles; only the final `willRetry:false` agent_end
+ *  is a real turn boundary. Clients treat every agent_end as terminal
+ *  (`src/app/remote-agent.ts` clears the streaming message/tool calls and
+ *  notifies; `src/ui/components/AgentInterface.ts` clears the streaming
+ *  container), so a retryable agent_end must never reach clients via
+ *  `emitSessionEvent` or settle a wait/abort listener as final. Shared by every
+ *  `rpcClient.onEvent` emit path so the suppression contract stays consistent.
+ *  Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts. */
+export function isRetryableAgentEnd(event: unknown): boolean {
+	return !!event
+		&& typeof event === "object"
+		&& (event as { type?: unknown }).type === "agent_end"
+		&& (event as { willRetry?: unknown }).willRetry === true;
+}
+
 /** Push a raw event into the session's EventBuffer (assigning seq/ts) and
  *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
  *  This is the single emit path for live agent events — every call site that
  *  used to do `eventBuffer.push(ev); broadcast(clients, {type:"event", data:ev})`
  *  must route through here so envelope fields stay consistent.
+ *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
+ *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
 	const normalized = normalizeToolResultErrorEvent(truncated);
@@ -5103,6 +5122,21 @@ export class SessionManager {
 	}
 
 	/**
+	 * Emit a live agent event to clients, suppressing retryable Pi agent_end
+	 * (see `isRetryableAgentEnd`). Pi 0.80+ emits a non-terminal `agent_end`
+	 * ({ willRetry:true }) before each internal auto-retry; clients treat every
+	 * agent_end as terminal and would clear the streaming message/tool calls, so
+	 * these must never reach clients. Shared by every `rpcClient.onEvent` path so
+	 * the suppression contract is applied uniformly; only real terminal
+	 * (willRetry:false) agent_end events are emitted/replayed.
+	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
+	 */
+	private emitAgentEvent(session: SessionInfo, event: unknown): void {
+		if (isRetryableAgentEnd(event)) return;
+		emitSessionEvent(session, truncateLargeToolContent(event));
+	}
+
+	/**
 	 * Check an event for usage data and record it via the cost tracker.
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
@@ -5862,8 +5896,7 @@ export class SessionManager {
 
 			this.handleAgentLifecycle(session, event);
 
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			this.emitAgentEvent(session, event);
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
@@ -7271,8 +7304,7 @@ export class SessionManager {
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = this.clock.now();
 			this.handleAgentLifecycle(session, event);
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			this.emitAgentEvent(session, event);
 			this.trackCostFromEvent(session, event);
 		});
 		session.unsubscribe = unsub;
@@ -7727,8 +7759,7 @@ export class SessionManager {
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
 			this.handleAgentLifecycle(session, event);
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			this.emitAgentEvent(session, event);
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
@@ -9682,7 +9713,11 @@ export class SessionManager {
 			resolveSettled(false);
 		}, gracePeriodMs);
 		const unsubSettle = session.rpcClient.onEvent((event: any) => {
-			if (event.type === "agent_end") {
+			// A retryable agent_end (willRetry:true) means Pi is about to retry the
+			// attempt, not that the run stopped — treating it as settled would end
+			// the grace race early and skip force-kill while the agent is still
+			// live. Only a final (willRetry:false) agent_end settles the abort.
+			if (event.type === "agent_end" && event.willRetry !== true) {
 				this.clock.clearTimeout(settleTimer);
 				unsubSettle();
 				resolveSettled(true);
@@ -9835,8 +9870,7 @@ export class SessionManager {
 
 				this.handleAgentLifecycle(session, event);
 
-				const truncated = truncateLargeToolContent(event);
-				emitSessionEvent(session, truncated);
+				this.emitAgentEvent(session, event);
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 
