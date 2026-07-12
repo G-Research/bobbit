@@ -75,7 +75,7 @@ The final contract is split deliberately:
 - The generated extension is written and loaded for spawned agents so the `google-code-assist` API can become available without respawning.
 - Before a real Google credential is visible, it registers only the API and `streamSimple` handler. It does **not** register `models[]` or a placeholder `apiKey`, so Code Assist cannot become Pi's unauthenticated default model.
 - When local OAuth, `GOOGLE_CLOUD_ACCESS_TOKEN`, or gateway token access becomes available, an auth watcher upgrades the provider registration with `models[]` and the runtime marker `apiKey`.
-- The gateway model registry still emits `google-gemini-cli/*` models only after account credentials are present; API-key Gemini remains the separate `google` provider.
+- The gateway model registry emits `google-gemini-cli/*` models only after a real Code Assist credential is present. That credential picture is shared (`hasGoogleCodeAssistSpawnCredential`) across `/api/models`/Settings exposure, the Settings auth-status row, and spawn-time model pinning, and it counts **both** a stored `auth.json` OAuth entry **and** a gateway `GOOGLE_CLOUD_ACCESS_TOKEN` Bearer env token. Isolation stays exact: a generic `GOOGLE_API_KEY`/`GEMINI_API_KEY` never authenticates Code Assist, and `GOOGLE_CLOUD_ACCESS_TOKEN` never authenticates the API-key-only `google` provider. See [Google OAuth models](google-oauth-models.md#account-backed-gemini-as-agent-session-models).
 
 Pinned coverage:
 
