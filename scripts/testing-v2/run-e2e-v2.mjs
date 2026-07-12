@@ -43,6 +43,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { execFileSync } from "node:child_process";
 import { createCpuSampler } from "./assert-budget.mjs";
+import { integrationE2eFiles } from "./integration-e2e-files.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -217,15 +218,13 @@ async function main() {
 
 	// Group I is not classified from the daily bucket — it is the fixed
 	// v2-integration-e2e vitest project (heavy integration specs relocated out of
-	// the unit gate; the file list lives in vitest.config.ts::integrationE2eFiles).
-	const I_LABEL = "v2-integration-e2e (relocated integration specs)";
-
+	// the unit gate; the file list is the shared integrationE2eFiles module).
 	if (args.list) {
-		console.log(JSON.stringify({ A, B, C, I: I_LABEL, excluded }, null, 2));
+		console.log(JSON.stringify({ A, B, C, I: integrationE2eFiles, excluded }, null, 2));
 		return;
 	}
 
-	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length} I(integration)=${I_LABEL}`);
+	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length} I(integration)=${integrationE2eFiles.length}`);
 	console.log(`[e2e-v2] excluded: manual-integration=${excluded.manualIntegration.length}${excluded.missing.length ? `, MISSING=${excluded.missing.length} (${excluded.missing.join(", ")})` : ""}`);
 
 	const docker = dockerAvailable();
@@ -258,7 +257,7 @@ async function main() {
 		peakProcesses: sample.peakProcesses,
 		docker,
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
-		counts: { A: A.length, B: B.length, C: C.length, I: I_LABEL },
+		counts: { A: A.length, B: B.length, C: C.length, I: integrationE2eFiles.length },
 		excluded,
 		createdAt: new Date().toISOString(),
 	};

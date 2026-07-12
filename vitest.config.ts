@@ -2,6 +2,7 @@ import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { defineConfig } from "vitest/config";
 import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
+import { integrationE2eFiles } from "./scripts/testing-v2/integration-e2e-files.mjs";
 
 /**
  * Tier-1 vitest configuration for Test Suite v2.
@@ -142,20 +143,8 @@ const fakeCommandStepFiles = [
 // them) and run by the e2e stage via the `v2-integration-e2e` project below.
 // Files stay physically in tests2/integration/ (guard-v2 only requires a tests-map
 // claim, which is unchanged); only which vitest project runs them moves.
-const integrationE2eFiles = [
-	"tests2/integration/team-lead-child-authz.test.ts",
-	"tests2/integration/orchestrate-restart.test.ts",
-	"tests2/integration/continue-archived.test.ts",
-	"tests2/integration/continue-archived-assistant.test.ts",
-	"tests2/integration/multi-repo-flow-api.test.ts",
-	"tests2/integration/steer-gateway-restart.test.ts",
-	"tests2/integration/team-wait-semantics.test.ts",
-	"tests2/integration/team-delegate.test.ts",
-	"tests2/integration/team-dismiss-structured-regression.test.ts",
-	"tests2/integration/project-isolation.test.ts",
-	"tests2/integration/commit-file-diffs-api.test.ts",
-	"tests2/integration/sidebar-actions-fork-github-link.test.ts",
-];
+// The list lives in ./scripts/testing-v2/integration-e2e-files.mjs (imported at
+// top) so run-e2e-v2.mjs's reported count can't drift from what actually runs.
 
 function listTestFilesUnder(root: string): string[] {
 	const files: string[] = [];
