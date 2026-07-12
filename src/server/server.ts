@@ -13234,8 +13234,19 @@ async function handleApiRoute(
 					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
 					return;
 				}
-				if (!projectRegistry.get(targetProjectId)) {
+				const targetRecord = projectRegistry.get(targetProjectId);
+				if (!targetRecord) {
 					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${targetProjectId}` }, 422);
+					return;
+				}
+				// A hidden/synthetic project (e.g. the `system` anchor) is never a
+				// valid user-facing cross-project target. The system→headquarters
+				// mapping above applies to the OMITTED default only; an EXPLICIT
+				// projectId naming a hidden project must be rejected. Guarded on
+				// `explicitProjectId` so a hidden target arriving via the session
+				// default is unaffected (byte-for-byte default path preserved).
+				if (explicitProjectId && targetRecord.hidden) {
+					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Project "${explicitProjectId}" is not a valid cross-project target.` }, 422);
 					return;
 				}
 				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };

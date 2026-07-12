@@ -32,6 +32,7 @@ import {
 } from "./_e2e/e2e-setup.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
+const SYSTEM_PROJECT_ID = "system";
 
 const cleanupRoots: string[] = [];
 
@@ -238,6 +239,27 @@ test.describe("cross-project proposal seed @smoke", () => {
 				const body = await r.json();
 				expect(body.ok).toBe(false);
 				expect(body.code).toBe("UNKNOWN_PROJECT");
+			}
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	// ── (c') explicit hidden/system target → 422 UNKNOWN_PROJECT ───────
+	// The synthetic `system` project IS registered (hidden: true), but it is not
+	// a user-facing cross-project target. The system→headquarters mapping is for
+	// the OMITTED default only; an EXPLICIT `system` must be rejected.
+	test("(c') explicit hidden `system` projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff", async () => {
+		const s = await createSession();
+		try {
+			for (const type of ["goal", "role", "tool", "staff"] as const) {
+				const r = await seed(s, type, { ...VALID_ARGS[type], projectId: SYSTEM_PROJECT_ID });
+				expect(r.status, `${type} explicit system seed`).toBe(422);
+				const body = await r.json();
+				expect(body.ok).toBe(false);
+				expect(body.code).toBe("UNKNOWN_PROJECT");
+				// No valid draft was persisted for the hidden target.
+				expect(await seededFields(s, type)).toBeUndefined();
 			}
 		} finally {
 			await deleteSession(s);
