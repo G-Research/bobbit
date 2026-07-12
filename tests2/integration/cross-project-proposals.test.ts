@@ -27,6 +27,8 @@ import {
 	rawApiFetch,
 	createSession,
 	deleteSession,
+	createGoal,
+	deleteGoal,
 	defaultProjectId,
 	registerProject,
 } from "./_e2e/e2e-setup.js";
@@ -301,5 +303,79 @@ test.describe("cross-project proposal seed @smoke", () => {
 		} finally {
 			await deleteSession(s);
 		}
+	});
+});
+
+/**
+ * PR #1005 (Bug hunt, high) — team-lead parent auto-injection must NOT fire for a
+ * CROSS-PROJECT goal proposal.
+ *
+ * For a team-lead session whose current goal can spawn children, the seed handler
+ * auto-injects `parentGoalId = teamGoalId` when the proposal omits one. That inject
+ * runs AFTER §1 stamps the resolved TARGET project. If the target names a DIFFERENT
+ * project, the injected parent belongs to the SOURCE project, so on accept
+ * POST /api/goals rejects it with PARENT_CROSS_PROJECT. The fix guards the inject on
+ * a same-project check (parent.projectId === enrichedArgs.projectId); cross-project
+ * goals stay top-level. The same-project / no-explicit-target path is unchanged.
+ */
+test.describe("team-lead parent inject vs cross-project target (PR #1005) @smoke", () => {
+	let gw: any;
+	let leadSid: string;
+	let parentGoalId: string;
+	let injectTargetProjectId: string;
+
+	test.beforeAll(async ({ gateway }) => {
+		gw = gateway;
+		// A spawn-capable parent goal in the SESSION's (default) project.
+		const defaultPid = (await defaultProjectId())!;
+		const parent = await createGoal({
+			title: `xproj-inject-parent ${Date.now()}`,
+			workflowId: "feature",
+			subgoalsAllowed: true,
+			projectId: defaultPid,
+		});
+		parentGoalId = parent.id as string;
+
+		// A DIFFERENT registered project with NO workflows, so goal-workflow
+		// validation is skipped for the cross-project draft and this test isolates
+		// the parent-inject guard alone.
+		const project = await registerProject({
+			name: `xproj-inject-target-${Date.now()}`,
+			rootPath: gitRepo("inject-target"),
+			seedWorkflows: false,
+		});
+		injectTargetProjectId = project.id;
+
+		// Promote the session to a team-lead whose team goal is the spawn-capable
+		// parent. getSession returns the live SessionInfo; mutate role/teamGoalId in
+		// place (mirrors a real team-lead session as seen by the seed handler).
+		leadSid = await createSession();
+		const sess = gw.sessionManager.getSession(leadSid);
+		expect(sess, "team-lead session must be live in the manager").toBeTruthy();
+		sess.role = "team-lead";
+		sess.teamGoalId = parentGoalId;
+	});
+
+	test.afterAll(async () => {
+		await deleteSession(leadSid);
+		await deleteGoal(parentGoalId);
+	});
+
+	test("(same-project) team-lead goal proposal STILL auto-injects the parent", async () => {
+		const r = await seed(leadSid, "goal", { title: "Same-Proj Child", spec: "body\n", workflow: "feature" });
+		expect(r.status, `same-project team-lead seed: ${await r.clone().text()}`).toBe(200);
+		const fields = await seededFields(leadSid, "goal");
+		expect(fields?.parentGoalId, "same-project proposal must auto-inject the team-lead parent").toBe(parentGoalId);
+	});
+
+	test("(cross-project) team-lead goal proposal stays TOP-LEVEL (no parent inject)", async () => {
+		const r = await seed(leadSid, "goal", { title: "Cross-Proj Child", spec: "body\n", projectId: injectTargetProjectId });
+		expect(r.status, `cross-project team-lead seed: ${await r.clone().text()}`).toBe(200);
+		const fields = await seededFields(leadSid, "goal");
+		expect(fields?.projectId, "cross-project stamp").toBe(injectTargetProjectId);
+		expect(
+			fields?.parentGoalId,
+			"cross-project proposal must NOT inject a source-project parent (would fail accept with PARENT_CROSS_PROJECT)",
+		).toBeUndefined();
 	});
 });

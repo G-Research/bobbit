@@ -13324,8 +13324,20 @@ async function handleApiRoute(
 					const existingParent = enrichedArgs.parentGoalId;
 					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
 						const parent = getGoalAcrossProjects(sess.teamGoalId);
+						// Only auto-inject the team-lead's goal as parent when the
+						// proposal targets the SAME project as that parent. §1 above
+						// stamps the resolved TARGET project onto enrichedArgs.projectId;
+						// for a cross-project goal proposal the parent belongs to the
+						// SOURCE project, so injecting it would make accept fail with
+						// PARENT_CROSS_PROJECT. Cross-project goals must stay top-level
+						// in the target project. Same-project / no-explicit-target path
+						// is preserved byte-for-byte.
+						const targetProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
+							? enrichedArgs.projectId.trim()
+							: undefined;
+						const sameProjectParent = !!parent && (!targetProjectId || parent.projectId === targetProjectId);
 						const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
-						const canSpawnImplicitChild = !!parent && checkCanSpawnChild(
+						const canSpawnImplicitChild = !!parent && sameProjectParent && checkCanSpawnChild(
 							parent,
 							prefs,
 							(id) => getGoalAcrossProjects(id),
