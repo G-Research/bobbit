@@ -57,6 +57,7 @@ import {
 	markProposalDismissed,
 	backToSessions,
 	uncacheSession,
+	resolveProjectMode,
 } from "./session-manager.js";
 import { deleteProposalFile, metadataObjectToRows, metadataRowsToObject } from "./proposal-helpers.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
@@ -2882,6 +2883,9 @@ const PROJECT_LEGACY_QA_KEYS = new Set([
  *  proposal panel). Hidden from the panel even if the agent or current config
  *  carries them. */
 const PROJECT_PANEL_HIDDEN_KEYS = new Set([
+	// projectId is the cross-project target selector, not editable config; keep it
+	// out of the "Other settings" custom-field list so it can't be casually edited.
+	"projectId",
 	"sandbox",
 	"sandbox_image",
 	"sandbox_mounts",
@@ -3020,7 +3024,14 @@ function notifyProjectProposalAccepted(sessionId: string, summary: string): void
 export async function acceptProjectProposalFromPanel(): Promise<boolean> {
 	const proposal = activeProjectProposalOrFail();
 	if (!proposal) return false;
-	return proposal.mode === "registered"
+	// Recompute the mode from the CURRENT fields at dispatch time. The stored
+	// proposal.mode can go stale because the accept sub-functions re-resolve the
+	// target from fields.projectId, which the user can edit in the panel after
+	// the slot was created. Dispatching on the stale mode could skip the required
+	// promote step (e.g. a registered-mode slot re-targeted to a provisional
+	// project). resolveProjectMode is the single source of truth.
+	const mode = resolveProjectMode(proposal.sessionId, proposal.fields as Record<string, unknown>);
+	return mode === "registered"
 		? acceptRegisteredProjectProposalFromPanel(proposal)
 		: acceptProvisionalProjectProposalFromPanel(proposal);
 }
@@ -3174,7 +3185,10 @@ function projectProposalPanel() {
 			try { fields[k] = JSON.stringify(v); } catch { fields[k] = String(v); }
 		}
 	}
-	const mode = proposal.mode ?? "provisional";
+	// Derive the mode from the CURRENT fields so the Accept button label
+	// ("Apply Changes" vs "Accept Project") matches the branch acceptProjectProposalFromPanel
+	// will actually run after any projectId edit. Mirrors the dispatch-time recompute.
+	const mode = resolveProjectMode(proposal.sessionId, rawFields);
 	const isRegistered = mode === "registered";
 
 	/** Build union of keys to render: known editable + proposal fields. */
