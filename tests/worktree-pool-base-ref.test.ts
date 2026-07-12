@@ -94,14 +94,15 @@ describe("WorktreePool — base_ref plumbing", () => {
 
 	it("initial fill uses the current baseRefResolver() value as the start-point", async () => {
 		const { repo, developSha } = await makeRepoWithTwoBranches();
+		let pool: WorktreePool | undefined;
 		try {
-			const pool = new WorktreePool({
+			pool = new WorktreePool({
 				repoPath: repo,
 				targetSize: 1,
 				baseRefResolver: () => "develop",
 			});
 			pool.startFilling();
-			for (let i = 0; i < 50 && pool.size === 0; i++) {
+			for (let i = 0; i < 200 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1, "pool should have one entry after fill");
@@ -119,23 +120,28 @@ describe("WorktreePool — base_ref plumbing", () => {
 				`pool entry should have been branched from develop (${developSha}), got ${headOut.trim()}`,
 			);
 		} finally {
+			// Quiesce all background fill/freshen work before removing the repo so
+			// leaked `git` children can't race teardown (and, under the shared Group
+			// A process, can't starve later tests' fills).
+			if (pool) await pool.drain().catch(() => { /* best-effort */ });
 			await rmRepo(repo);
 		}
 	});
 
 	it("freshen re-resolves baseRefResolver() on every call — claimed entries adopt the current base", async () => {
 		const { repo, masterSha, developSha } = await makeRepoWithTwoBranches();
+		let pool: WorktreePool | undefined;
 		try {
 			// Start with develop as the base, fill, then flip to master and
 			// freshen — the entry's HEAD must follow.
 			let configured: string = "develop";
-			const pool = new WorktreePool({
+			pool = new WorktreePool({
 				repoPath: repo,
 				targetSize: 1,
 				baseRefResolver: () => configured,
 			});
 			pool.startFilling();
-			for (let i = 0; i < 50 && pool.size === 0; i++) {
+			for (let i = 0; i < 200 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1);
@@ -161,40 +167,45 @@ describe("WorktreePool — base_ref plumbing", () => {
 				`after flipping baseRefResolver to "master", freshen should reset HEAD to ${masterSha}, got ${headOut}`,
 			);
 		} finally {
+			if (pool) await pool.drain().catch(() => { /* best-effort */ });
 			await rmRepo(repo);
 		}
 	});
 
 	it("empty/undefined resolver preserves today's resolveRemotePrimary fallback (back-compat)", async () => {
 		const { repo } = await makeRepoWithTwoBranches();
+		let pool: WorktreePool | undefined;
+		let pool2: WorktreePool | undefined;
 		try {
 			// No baseRefResolver at all — must behave exactly like a project
 			// that hasn't configured base_ref (today's behaviour: pool builds
 			// from resolveRemotePrimary, which for a no-remote local-only repo
 			// falls back to "HEAD" and the worktree is still created).
-			const pool = new WorktreePool({
+			pool = new WorktreePool({
 				repoPath: repo,
 				targetSize: 1,
 			});
 			pool.startFilling();
-			for (let i = 0; i < 50 && pool.size === 0; i++) {
+			for (let i = 0; i < 200 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1, "pool should fill even without a baseRefResolver");
 
 			// Same when resolver returns an empty string — must also collapse
 			// to the fallback rather than treating "" as a literal ref.
-			const pool2 = new WorktreePool({
+			pool2 = new WorktreePool({
 				repoPath: repo,
 				targetSize: 1,
 				baseRefResolver: () => "",
 			});
 			pool2.startFilling();
-			for (let i = 0; i < 50 && pool2.size === 0; i++) {
+			for (let i = 0; i < 200 && pool2.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool2.size, 1, "empty-string resolver must fall back to today's behaviour");
 		} finally {
+			if (pool) await pool.drain().catch(() => { /* best-effort */ });
+			if (pool2) await pool2.drain().catch(() => { /* best-effort */ });
 			await rmRepo(repo);
 		}
 	});

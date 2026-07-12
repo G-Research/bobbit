@@ -57,16 +57,21 @@ describe("WorktreePool — multi-repo prebuild + claim", () => {
 
 	it("fills multi-repo pool sets and claim returns the full set on session/<id8>", async () => {
 		const root = await makeMultiRepoRoot(["api", "web", "shared"]);
+		let pool: WorktreePool | undefined;
 		try {
 			const components: Component[] = [
 				{ name: "api", repo: "api", commands: { build: "echo ok" } },
 				{ name: "web", repo: "web", commands: { build: "echo ok" } },
 				{ name: "shared", repo: "shared" }, // data-only — must be in the set
 			];
-			const pool = new WorktreePool({ repoPath: root, targetSize: 1, componentsResolver: () => components });
+			pool = new WorktreePool({ repoPath: root, targetSize: 1, componentsResolver: () => components });
 			pool.startFilling();
 
-			for (let i = 0; i < 100 && pool.size === 0; i++) {
+			// Generous poll budget: this is a 3-repo `createWorktreeSet` fill and the
+			// e2e Group A lane runs every node relocate spec in ONE shared, often
+			// heavily-loaded process. A tight budget times out the (correct) fill
+			// under load; the size===1 assertion itself is unchanged.
+			for (let i = 0; i < 300 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1, "pool should have one multi-repo entry after fill");
@@ -96,12 +101,17 @@ describe("WorktreePool — multi-repo prebuild + claim", () => {
 			assert.ok(claim!.container, "container path should be set on multi-repo claim");
 			assert.equal(path.basename(claim!.container!), "session-abcd1234");
 
-			// Replenishment: pool should fill again after claim.
-			for (let i = 0; i < 100 && pool.size === 0; i++) {
+			// Replenishment: pool should fill again after claim (generous budget for
+			// the shared, loaded Group A process — see the initial-fill note above).
+			for (let i = 0; i < 300 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1, "pool should replenish after claim");
 		} finally {
+			// Quiesce background fill/freshen before removing the multi-repo root so
+			// leaked `git` children can't race teardown or bleed into later Group A
+			// tests running in the same process.
+			if (pool) await pool.drain().catch(() => { /* best-effort */ });
 			await rmRoot(root);
 		}
 	});
