@@ -422,7 +422,11 @@ export function discoverSlashSkills(
 		// stale list across differently-wired projects (finding #3).
 		(marketContext?.serverBase ?? "") + "|" +
 		(marketContext?.projectBase ?? "") + "|" +
-		(marketContext?.serverConfigStore?.get("pack_order") ?? "");
+		(marketContext?.serverConfigStore?.get("pack_order") ?? "") + "|" +
+		// Project-scope pack_order also reorders/enables market skill packs — include
+		// it so two differently-wired project scopes sharing a projectBase but
+		// differing in project pack_order can't reuse a stale cached list (finding C).
+		(marketContext?.projectConfigStore?.get("pack_order") ?? "");
 	if (_cache && _cache.cwd === cwd && _cache.configVal === configVal && Date.now() - _cache.ts < CACHE_TTL_MS) {
 		return _cache.skills;
 	}

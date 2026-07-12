@@ -115,17 +115,19 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 			directories = [];
 		}
 
-		// Load custom skill directories from the scope-appropriate config store. The
-		// resolver honours BOTH the migrated structured `config_directories` (entries whose
-		// `types` include "skills") and the legacy `skill_directories`, so the editable list
-		// must be the union of the two — otherwise a skills dir added via Settings (stored as
-		// config_directories) drives resolution but is invisible here.
+		// Load the page-managed custom skill directories from the scope-appropriate
+		// config store. The Skills page manages ONLY skills-only directories — a
+		// skills-only structured entry (`types` EXACTLY ["skills"]) or a legacy
+		// `skill_directories` entry (inherently skills-only). Multi-type entries
+		// (e.g. {path, types:["skills","mcp"]}) are EXCLUDED here so we never rewrite
+		// them on save — they remain visible only in the read-only "directories"
+		// list (via getSkillDirectories) and are edited via Settings.
 		try {
 			const configRes = await gatewayFetch(configEndpoint());
 			if (configRes.ok) {
 				const config = await configRes.json();
 				const fromStructured = parseConfigDirectories(config.config_directories)
-					.filter((e) => e.types.includes("skills"))
+					.filter((e) => isSkillsOnlyEntry(e))
 					.map((e) => e.path);
 				const fromLegacy = parseLegacySkillDirs(config.skill_directories);
 				const seen = new Set<string>();
@@ -241,7 +243,15 @@ async function saveCustomDirs(): Promise<void> {
 		} catch {
 			// ignore — fall back to writing only the page-managed skills dirs
 		}
-		const skillsEntries: ConfigDirEntry[] = customDirs.map((d) => ({ path: d.path, types: ["skills"] }));
+		// GUARD: never emit a path both as a preserved (multi-type / non-skills)
+		// entry AND as a page-managed skills-only entry — the server resolver dedups
+		// by expanded path with LATER entries winning, so an appended skills-only
+		// duplicate would silently downgrade a shared multi-type dir. Skip any
+		// customDirs path already present in `preserved`.
+		const preservedPaths = new Set(preserved.map((e) => e.path));
+		const skillsEntries: ConfigDirEntry[] = customDirs
+			.filter((d) => !preservedPaths.has(d.path))
+			.map((d) => ({ path: d.path, types: ["skills"] }));
 		const nextDirs = [...preserved, ...skillsEntries];
 		await gatewayFetch(configEndpoint(), {
 			method: "PUT",
@@ -263,8 +273,10 @@ async function saveCustomDirs(): Promise<void> {
 	}
 }
 
-async function addCustomDir(): Promise<void> {
-	const trimmed = newDirPath.trim();
+// Exported for tests (Fix A): accepts an optional explicit path; defaults to the
+// pending `newDirPath` bound to the Add-row input.
+export async function addCustomDir(path?: string): Promise<void> {
+	const trimmed = (path ?? newDirPath).trim();
 	if (!trimmed) return;
 	customDirs = [...customDirs, { path: trimmed }];
 	newDirPath = "";

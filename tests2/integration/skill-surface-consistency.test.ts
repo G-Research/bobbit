@@ -27,11 +27,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const P_SKILL = "only-in-p";
+const R_SKILL = "only-in-custom-dir";
 
 let pRoot: string;
 let qRoot: string;
+let rRoot: string;
+let rCustomDir: string;
 let pProjectId: string;
 let qProjectId: string;
+let rProjectId: string;
 
 function writeSkill(root: string, name: string, description: string): void {
 	const dir = join(root, ".claude", "skills", name);
@@ -60,15 +64,25 @@ test.beforeAll(async () => {
 	writeSkill(pRoot, P_SKILL, "A skill that exists only under project P");
 	mkdirSync(join(qRoot, ".claude", "skills"), { recursive: true });
 
+	// Project R exercises a PROJECT-SCOPE custom skill directory (Facet 1b): the
+	// skill lives in a directory OUTSIDE R's rootPath, wired via config_directories.
+	rRoot = join(tmpdir(), `bobbit-skill-surface-r-${stamp}`);
+	rCustomDir = join(tmpdir(), `bobbit-skill-custom-dir-${stamp}`);
+	mkdirSync(join(rRoot, ".claude", "skills"), { recursive: true });
+	writeSkill(rCustomDir, R_SKILL, "A skill wired via a project-scope custom directory");
+
 	const p = await registerProject({ name: `skill-surface-p-${stamp}`, rootPath: pRoot, seedWorkflows: false });
 	const q = await registerProject({ name: `skill-surface-q-${stamp}`, rootPath: qRoot, seedWorkflows: false });
+	const r = await registerProject({ name: `skill-surface-r-${stamp}`, rootPath: rRoot, seedWorkflows: false });
 	pProjectId = p.id;
 	qProjectId = q.id;
+	rProjectId = r.id;
 });
 
 test.afterAll(async () => {
 	if (pProjectId) await apiFetch(`/api/projects/${pProjectId}`, { method: "DELETE" }).catch(() => {});
 	if (qProjectId) await apiFetch(`/api/projects/${qProjectId}`, { method: "DELETE" }).catch(() => {});
+	if (rProjectId) await apiFetch(`/api/projects/${rProjectId}`, { method: "DELETE" }).catch(() => {});
 });
 
 test.describe("Skill surface consistency — page details vs composer autocomplete", () => {
@@ -82,6 +96,26 @@ test.describe("Skill surface consistency — page details vs composer autocomple
 		// The project-only skill must appear in BOTH.
 		expect(composer).toContain(P_SKILL);
 		expect(details).toContain(P_SKILL);
+	});
+
+	test("a project-scope custom skill directory is honored by BOTH surfaces (Facet 1b)", async () => {
+		// Wire the custom directory (outside rootPath) via project-scope config BEFORE
+		// discovery. config_directories participates in the discovery cache key, so this
+		// PUT invalidates any prior cached list for R.
+		const put = await apiFetch(`/api/projects/${encodeURIComponent(rProjectId)}/config`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ config_directories: [{ path: rCustomDir, types: ["skills"] }], skill_directories: null }),
+		});
+		expect(put.ok, `config PUT -> ${put.status}`).toBe(true);
+
+		const composer = await fetchNames(`/api/slash-skills?projectId=${encodeURIComponent(rProjectId)}`);
+		const details = await fetchNames(`/api/slash-skills/details?projectId=${encodeURIComponent(rProjectId)}`);
+
+		// Both surfaces must include the custom-dir skill and stay set-equal.
+		expect(composer).toContain(R_SKILL);
+		expect(details).toContain(R_SKILL);
+		expect([...new Set(composer)].sort()).toEqual([...new Set(details)].sort());
 	});
 
 	test("a different project Q does not surface P's project-only skill (scope isolation)", async () => {

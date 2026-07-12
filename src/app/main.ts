@@ -62,6 +62,7 @@ function clearDashboardState(): void {
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 import { loadPersistedPanelWorkspace } from "./panel-workspace.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
+import { restoreActiveProjectFromLastSession } from "./skills-active-project.js";
 import { bootMark } from "./boot-timing.js";
 
 // Boot-timing: this fires only after the entire eager module graph has been
@@ -544,6 +545,7 @@ async function handleHashChange(): Promise<void> {
 			// project rather than latching on Headquarters pre-hydration. See skills-page.ts.
 			renderApp();
 			await refreshSessions();
+			restoreActiveProjectFromLastSession();
 			const { loadSkillsPageData } = await import("./skills-page.js");
 			loadSkillsPageData();
 		} else if (route.view === "market") {
@@ -798,6 +800,7 @@ async function initApp() {
 				// on Headquarters/system pre-hydration. Mirrors the goal-dashboard/ext
 				// branches above. See skills-page.ts::loadSkillsPageData.
 				await refreshSessions();
+				restoreActiveProjectFromLastSession();
 				const { loadSkillsPageData } = await import("./skills-page.js");
 				loadSkillsPageData();
 			} else if (route.view === "market") {
