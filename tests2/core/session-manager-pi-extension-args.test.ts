@@ -164,6 +164,22 @@ describe("marketplace pi extension activation args", () => {
 			assert.equal(manager.resolveInitialModel(undefined, undefined), "anthropic/claude-sonnet-4-5");
 			roleModel = "google/gemini-2.5-pro";
 			assert.equal(manager.resolveInitialModel("coder", undefined), "google/gemini-2.5-pro");
+
+			// (5) GOOGLE_CLOUD_ACCESS_TOKEN env credential also makes a Code Assist
+			// default.sessionModel spawn-pinnable even with no stored auth.json — the
+			// env-token path (used by manual live-config / env-token deployments) must
+			// not be silently stripped before spawn.
+			const prevAccessToken = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+			try {
+				clearGoogleAuth();
+				roleModel = undefined;
+				sessionModelPref = "google-gemini-cli/gemini-2.5-pro";
+				process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "ya29.env-token";
+				assert.equal(manager.resolveInitialModel(undefined, undefined), "google-gemini-cli/gemini-2.5-pro");
+			} finally {
+				if (prevAccessToken === undefined) delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+				else process.env.GOOGLE_CLOUD_ACCESS_TOKEN = prevAccessToken;
+			}
 		} finally {
 			resetAgentDirForTest();
 			if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
