@@ -69,6 +69,10 @@ export function resolveThinkingClampModel(
 		id: modelId,
 		provider: normalizedProvider,
 		reasoning: meta.reasoning,
+		// inferMeta usually omits thinkingLevelMap (heuristic path handles xhigh),
+		// but routed families like GPT 5.6 Luna/Sol/Terra attach an explicit map so
+		// the new `max` tier is preserved instead of clamping down to xhigh.
+		...(meta.thinkingLevelMap !== undefined ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 		metadataSource: "inferMeta",
 	};
 }

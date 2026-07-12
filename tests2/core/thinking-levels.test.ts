@@ -89,6 +89,10 @@ const matrix: MatrixRow[] = [
 	// aigw-routed gpt-5.2 / gpt-5.4 — same rule.
 	{ label: "aigw/gpt-5.2", model: { id: "gpt-5.2", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "aigw/gpt-5.4", model: { id: "gpt-5.4", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	// gpt-5.6 without a map falls back to the family heuristic (xhigh only; max
+	// needs explicit metadata). Routed provider-prefixed ids must still match.
+	{ label: "gpt-5.6-luna bare (heuristic xhigh)", model: { id: "gpt-5.6-luna", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	{ label: "aigw/openai/gpt-5.6-luna (heuristic xhigh)", model: { id: "openai/gpt-5.6-luna", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
 ];
 
 test("THINKING_LEVELS contains the canonical 7-element ordered set", () => {
@@ -134,6 +138,8 @@ test("supportsXHigh: uses metadata first, else Opus 4.6+ and gpt-5.1-codex-max /
 	assert.equal(supportsXHigh({ id: "gpt-5.2-codex", provider: "openai" }), true);
 	assert.equal(supportsXHigh({ id: "gpt-5.4", provider: "openai" }), true);
 	assert.equal(supportsXHigh({ id: "gpt-5.5-pro", provider: "openai" }), true);
+	assert.equal(supportsXHigh({ id: "gpt-5.6-luna", provider: "openai" }), true);
+	assert.equal(supportsXHigh({ id: "openai/gpt-5.6-luna", provider: "aigw" }), true);
 	assert.equal(supportsXHigh({ id: "gpt-5.1-codex-max", provider: "openai" }), true);
 	assert.equal(supportsXHigh({ id: "future-reasoner", provider: "openai", thinkingLevelMap: { xhigh: "xhigh" } }), true);
 	assert.equal(supportsXHigh({ id: "gpt-5.5", provider: "openai", thinkingLevelMap: { xhigh: null } }), false);

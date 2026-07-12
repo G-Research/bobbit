@@ -89,6 +89,31 @@ describe("inferMeta()", () => {
 		assert.ok(meta.input!.includes("image"));
 	});
 
+	it("GPT-5.6 Luna (routed id) → reasoning + thinkingLevelMap xhigh/max", () => {
+		const meta = inferMeta("openai/gpt-5.6-luna");
+		assert.equal(meta.reasoning, true);
+		assert.equal(meta.contextWindow, 272_000);
+		assert.equal(meta.maxTokens, 128_000);
+		assert.ok(meta.input!.includes("image"));
+		assert.ok(meta.thinkingLevelMap, "routed GPT 5.6 should carry a thinkingLevelMap");
+		assert.equal(meta.thinkingLevelMap!.xhigh, "xhigh");
+		assert.equal(meta.thinkingLevelMap!.max, "max");
+	});
+
+	it("GPT-5.6 Sol/Terra (bare + routed) → reasoning + max map", () => {
+		for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "openai/gpt-5.6-terra"]) {
+			const meta = inferMeta(id);
+			assert.equal(meta.reasoning, true, `${id} should be reasoning-capable`);
+			assert.equal(meta.thinkingLevelMap!.max, "max", `${id} should expose max`);
+		}
+	});
+
+	it("GPT-5.6 does not disturb the generic GPT-5 non-reasoning fallback", () => {
+		const meta = inferMeta("gpt-5");
+		assert.equal(meta.reasoning, false);
+		assert.equal(meta.thinkingLevelMap, undefined);
+	});
+
 	it("GPT-5.5 pro → 1.05M context, 128K max, reasoning=true", () => {
 		const meta = inferMeta("gpt-5.5-pro");
 		assert.equal(meta.contextWindow, 1_050_000);

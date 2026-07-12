@@ -39,6 +39,7 @@ export interface AigwModel {
 	contextWindow: number;
 	maxTokens: number;
 	cost?: AigwModelCost;
+	thinkingLevelMap?: Record<string, string | null>;
 	compat?: Record<string, unknown>;
 }
 
@@ -54,6 +55,13 @@ interface ModelMeta {
 	maxTokens: number;
 	reasoning: boolean;
 	input: ("text" | "image")[];
+	/**
+	 * Optional per-model effort metadata, mirroring pi-ai's `thinkingLevelMap`.
+	 * Only set for families where a bare/routed id would otherwise fall through
+	 * to a generic rule and lose extended (`xhigh`/`max`) thinking support
+	 * (e.g. AIGW-routed GPT 5.6 Luna/Sol/Terra).
+	 */
+	thinkingLevelMap?: Record<string, string | null>;
 	compat?: Record<string, unknown>;
 }
 
@@ -140,6 +148,13 @@ const INFER_RULES: InferRule[] = [
 	{ test: /claude/, meta: { contextWindow: 200_000, maxTokens: 16_384, reasoning: false, input: ["text", "image"] } },
 
 	// ── OpenAI GPT-5.x (pro first so it doesn't match base variants) ─
+	// gpt-5.6 (Luna/Sol/Terra + routed variants) are reasoning models that
+	// advertise both xhigh and the new pi-0.80.6 `max` tier. Carry an explicit
+	// thinkingLevelMap so routed ids (e.g. `openai/gpt-5.6-luna`) that only match
+	// this substring rule keep extended thinking instead of collapsing to the
+	// generic `/gpt-5/` non-reasoning fallback. Placed before the 5.5 rules so
+	// the digit is unambiguous (substring `gpt-5.6` never matches 5.5 rules).
+	{ test: /gpt-5\.6/, meta: { contextWindow: 272_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], thinkingLevelMap: { xhigh: "xhigh", max: "max" } } },
 	{ test: /gpt-5\.5-pro/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.5/, meta: { contextWindow: 272_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.4-pro/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
@@ -888,6 +903,7 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
 			contextWindow: Math.max(ctxFromGw || 0, meta.contextWindow),
 			maxTokens: Math.max(maxTokFromGw || 0, meta.maxTokens),
 			cost: normalizeAigwPricing(m.pricing),
+			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 			...(meta.compat ? { compat: meta.compat } : {}),
 		};
 	});

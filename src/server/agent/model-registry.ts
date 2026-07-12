@@ -172,13 +172,17 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 		}
 	}
 
-	// Tier 3: inferMeta (no thinkingLevelMap). Marked `inferred` so live-frame
-	// callers preserve any more-accurate live metadata instead of clobbering it.
+	// Tier 3: inferMeta. Marked `inferred` so live-frame callers preserve any
+	// more-accurate live metadata instead of clobbering it. inferMeta usually
+	// carries no thinkingLevelMap (client then applies the family heuristic), but
+	// a few routed families (e.g. GPT 5.6 Luna/Sol/Terra) attach an explicit map
+	// so extended `xhigh`/`max` thinking survives the fallback path.
 	const meta = inferMeta(modelId);
 	return {
 		contextWindow: meta.contextWindow,
 		maxTokens: meta.maxTokens,
 		reasoning: meta.reasoning,
+		...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 		input: meta.input,
 		source: "inferred",
 	};
@@ -329,6 +333,10 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 					contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
 					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
 					reasoning: meta.reasoning || m.reasoning || false,
+					// Preserve extended-thinking metadata for routed families that would
+					// otherwise lose it (e.g. AIGW-routed GPT 5.6 Luna/Sol/Terra, whose
+					// `openai/gpt-5.6-*` id only matches inferMeta's substring rule).
+					...(meta.thinkingLevelMap ?? m.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap ?? m.thinkingLevelMap } : {}),
 					input: meta.input || ["text"],
 					cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					authenticated: true, // aigw is always authenticated (no key needed)
