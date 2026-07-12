@@ -181,7 +181,7 @@
     },
     {
       "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
-      "reason": "Pi 0.80.5 browser journey coverage: pins user-facing /api/models metadata in the settings model selector, browser-safe pi-ai provider/key-test routes, and session reload/restore after transcript parsing."
+      "reason": "Pi 0.80.6 browser journey coverage: pins the user-facing GPT 5.6 catalog (gpt-5.6-luna/sol/terra) exposed through /api/models and selectable in the settings model selector, browser-safe pi-ai provider/key-test routes, and session reload/restore after transcript parsing."
     },
     {
       "path": "tests2/core/headset-accessory.test.ts",
