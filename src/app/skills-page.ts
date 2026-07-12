@@ -17,7 +17,10 @@ let directories: Array<{ path: string; source: string; isCustom: boolean }> = []
 let customDirs: Array<{ path: string }> = [];
 let newDirPath = "";
 let directoriesExpanded = false;
-let scopeInitialized = false;
+// True once the user explicitly picks a scope via the Skills-page scope selector.
+// Until then, every load auto-follows state.activeProjectId so the page shows the
+// skills the active session's composer actually resolves.
+let userPickedScope = false;
 
 export function clearSkillsPageState(): void {
 	slashSkills = [];
@@ -28,7 +31,43 @@ export function clearSkillsPageState(): void {
 	customDirs = [];
 	newDirPath = "";
 	directoriesExpanded = false;
-	scopeInitialized = false;
+	userPickedScope = false;
+}
+
+interface ConfigDirEntry { path: string; types: string[]; }
+
+/** config_directories may arrive as a structured array (project endpoint) or a JSON
+ *  string (server-scope endpoint). Normalise to an array of {path, types}. */
+function parseConfigDirectories(raw: unknown): ConfigDirEntry[] {
+	let value: unknown = raw;
+	if (typeof value === "string") {
+		try { value = JSON.parse(value); } catch { return []; }
+	}
+	if (!Array.isArray(value)) return [];
+	return value
+		.filter((e): e is { path?: unknown; types?: unknown } => !!e && typeof e === "object")
+		.map((e) => ({
+			path: typeof e.path === "string" ? e.path : "",
+			types: Array.isArray(e.types) ? e.types.filter((t): t is string => typeof t === "string") : [],
+		}))
+		.filter((e) => e.path);
+}
+
+/** Legacy `skill_directories` is a JSON-encoded string array of {path}. */
+function parseLegacySkillDirs(raw: unknown): string[] {
+	if (typeof raw !== "string" || !raw) return [];
+	try {
+		const parsed = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return parsed
+			.map((e) => (e && typeof e === "object" && typeof (e as { path?: unknown }).path === "string" ? (e as { path: string }).path : ""))
+			.filter((p) => p);
+	} catch { return []; }
+}
+
+/** True for a config_directories entry that is exactly ["skills"] — page-managed. */
+function isSkillsOnlyEntry(entry: ConfigDirEntry): boolean {
+	return entry.types.length === 1 && entry.types[0] === "skills";
 }
 
 function slashSkillsDetailsUrl(): string {
@@ -44,22 +83,18 @@ function configEndpoint(): string {
 }
 
 export async function loadSkillsPageData(showLoading = true): Promise<void> {
-	// Seed the config scope from the active project once per page lifecycle, so the
-	// listed skills match what that project's sessions actually resolve. An explicit
-	// user scope selection (via handleScopeChange) runs after first load and is respected.
+	// Follow the active project on EVERY load, so the listed skills match what that
+	// project's sessions actually resolve — UNLESS the user has explicitly picked a scope
+	// on this page (handleScopeChange sets userPickedScope). Re-seeding unconditionally
+	// (not only when scope==="system") lets the page move from project P to a newly-active
+	// project Q when the user switches sessions and reopens Skills.
 	//
-	// Do NOT latch the one-shot when there is no active project yet: on a hard refresh /
-	// deep-link to #/skills, main.ts may invoke this before refreshSessions() hydrates
-	// state.activeProjectId. Latching then would freeze the page on Headquarters/system
-	// and never reseed after hydration (the reported hard-refresh symptom). Only mark
-	// initialized once we actually have an active project to seed from.
-	if (!scopeInitialized) {
+	// When there is no active project yet (pre-hydration on hard refresh / deep-link to
+	// #/skills, before refreshSessions() populates state.activeProjectId) leave the scope
+	// as-is; a later load reseeds once hydration completes.
+	if (!userPickedScope) {
 		const active = state.activeProjectId;
-		if (active) {
-			scopeInitialized = true;
-			if (getConfigScope() === "system") setConfigScope(active);
-		}
-		// active still null (pre-hydration): leave scopeInitialized false so a later load seeds.
+		if (active) setConfigScope(active);
 	}
 
 	if (showLoading) {
@@ -80,15 +115,25 @@ export async function loadSkillsPageData(showLoading = true): Promise<void> {
 			directories = [];
 		}
 
-		// Load custom directories from the scope-appropriate config store
+		// Load custom skill directories from the scope-appropriate config store. The
+		// resolver honours BOTH the migrated structured `config_directories` (entries whose
+		// `types` include "skills") and the legacy `skill_directories`, so the editable list
+		// must be the union of the two — otherwise a skills dir added via Settings (stored as
+		// config_directories) drives resolution but is invisible here.
 		try {
 			const configRes = await gatewayFetch(configEndpoint());
 			if (configRes.ok) {
 				const config = await configRes.json();
-				if (config.skill_directories) {
-					try { customDirs = JSON.parse(config.skill_directories); } catch { customDirs = []; }
-				} else {
-					customDirs = [];
+				const fromStructured = parseConfigDirectories(config.config_directories)
+					.filter((e) => e.types.includes("skills"))
+					.map((e) => e.path);
+				const fromLegacy = parseLegacySkillDirs(config.skill_directories);
+				const seen = new Set<string>();
+				customDirs = [];
+				for (const path of [...fromStructured, ...fromLegacy]) {
+					if (seen.has(path)) continue;
+					seen.add(path);
+					customDirs.push({ path });
 				}
 			}
 		} catch {
@@ -107,7 +152,10 @@ function toggleSkill(id: string): void {
 	renderApp();
 }
 
-async function handleScopeChange(scope: string): Promise<void> {
+// Exported for tests: the explicit-scope-selection path (Finding 1 follow-behaviour).
+export async function handleScopeChange(scope: string): Promise<void> {
+	// The user explicitly chose a scope — stop auto-following the active project.
+	userPickedScope = true;
 	setConfigScope(scope);
 	await loadSkillsPageData();
 }
@@ -179,10 +227,28 @@ function renderSkillCard(skill: typeof slashSkills[0]): TemplateResult {
 async function saveCustomDirs(): Promise<void> {
 	renderApp();
 	try {
+		// Persist page-managed skills dirs into the migrated `config_directories` (mirroring
+		// settings-page.ts::saveConfigDirs), PRESERVING every existing entry that is not a
+		// pure skills-only entry (mcp/tools/agents and multi-type dirs stay managed via
+		// Settings). Fetch the current config first so we don't clobber those.
+		let preserved: ConfigDirEntry[] = [];
+		try {
+			const configRes = await gatewayFetch(configEndpoint());
+			if (configRes.ok) {
+				const config = await configRes.json();
+				preserved = parseConfigDirectories(config.config_directories).filter((e) => !isSkillsOnlyEntry(e));
+			}
+		} catch {
+			// ignore — fall back to writing only the page-managed skills dirs
+		}
+		const skillsEntries: ConfigDirEntry[] = customDirs.map((d) => ({ path: d.path, types: ["skills"] }));
+		const nextDirs = [...preserved, ...skillsEntries];
 		await gatewayFetch(configEndpoint(), {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ skill_directories: JSON.stringify(customDirs) }),
+			// Send structured array (server rejects a JSON string for the migrated field) and
+			// clear the legacy key so resolution reads a single source of truth.
+			body: JSON.stringify({ config_directories: nextDirs, skill_directories: null }),
 		});
 		// Background refresh to pick up any newly discovered skills
 		const slashRes = await gatewayFetch(slashSkillsDetailsUrl());
