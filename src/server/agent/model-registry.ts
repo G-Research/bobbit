@@ -94,6 +94,15 @@ export interface ResolvedModelStateMeta {
 	/** Present only when upstream metadata provides it (omitted otherwise). */
 	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
+	/**
+	 * Which resolution tier produced this metadata:
+	 *   - `cache` / `catalog`: authoritative — safe to overwrite live frame fields
+	 *     (fixes stale/incorrect frames, e.g. Fable's 1M context + max thinking).
+	 *   - `inferred`: last-resort defaults from `inferMeta`. Callers holding more
+	 *     accurate live fields (custom/aigw/unknown providers) should PRESERVE the
+	 *     live values rather than clobber them with these inferred defaults.
+	 */
+	source: "cache" | "catalog" | "inferred";
 }
 
 /**
@@ -131,6 +140,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 				reasoning: hit.reasoning,
 				...(hit.thinkingLevelMap ? { thinkingLevelMap: hit.thinkingLevelMap } : {}),
 				input: hit.input,
+				source: "cache",
 			};
 		}
 	}
@@ -154,6 +164,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 					reasoning: model.reasoning ?? inferred.reasoning,
 					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
 					input,
+					source: "catalog",
 				};
 			}
 		} catch {
@@ -161,13 +172,15 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 		}
 	}
 
-	// Tier 3: inferMeta (no thinkingLevelMap).
+	// Tier 3: inferMeta (no thinkingLevelMap). Marked `inferred` so live-frame
+	// callers preserve any more-accurate live metadata instead of clobbering it.
 	const meta = inferMeta(modelId);
 	return {
 		contextWindow: meta.contextWindow,
 		maxTokens: meta.maxTokens,
 		reasoning: meta.reasoning,
 		input: meta.input,
+		source: "inferred",
 	};
 }
 
