@@ -115,12 +115,17 @@ function isOpusXHigh(id: string, provider: string): boolean {
 /**
  * Does the given model's id/provider indicate an OpenAI family that
  * supports xhigh in Bobbit's fallback heuristic? Currently
- * gpt-5.1-codex-max and any gpt-5.2* / gpt-5.4* / gpt-5.5*.
+ * gpt-5.1-codex-max and any gpt-5.2* / gpt-5.4* / gpt-5.5* / gpt-5.6*.
+ *
+ * Matches both bare ids (`gpt-5.6-luna`) and provider/gateway-routed ids
+ * (`openai/gpt-5.6-luna`) so AIGW-routed models still light up xhigh when a
+ * payload arrives without an explicit thinkingLevelMap. `max` remains gated on
+ * explicit upstream metadata (inferMeta supplies it for GPT 5.6).
  */
 function isOpenAiXHigh(id: string, provider: string): boolean {
 	if (!providerMatches(provider, "openai")) return false;
-	if (/^gpt-5\.1-codex-max\b/i.test(id)) return true;
-	if (/^gpt-5\.(?:2|4|5)(?:\b|[-.])/i.test(id)) return true;
+	if (/(?:^|\/)gpt-5\.1-codex-max\b/i.test(id)) return true;
+	if (/(?:^|\/)gpt-5\.(?:2|4|5|6)(?:\b|[-.])/i.test(id)) return true;
 	return false;
 }
 
