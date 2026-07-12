@@ -192,6 +192,10 @@
       "reason": "Protocol-compatibility pin: tests/e2e/ledger-lease-bridge.mjs (Playwright-safe lease client) and scripts/testing-v2/ledger.mjs share the same on-disk lease protocol so the global concurrency caps hold across the browser + vitest tiers; also pins the standalone vitest cap below parent-ledger grants."
     },
     {
+      "path": "tests2/core/unit-lanes-scheduling.test.ts",
+      "reason": "Pins the unit-lanes ORCHESTRATOR scheduling contract so `npm run test:unit` (run-unit-lanes.mjs) completes within the gate wall-time budget: ledger.reserveVitestLaneBudget() grants the fair core budget (not the single-process STANDALONE_VITEST_CAP throttle, which is left unchanged at 2), and planLaneConcurrency() distributes it so lanes overlap (maxConcurrent=floor(grant/perLane)) without ever raising a single vitest process above the Windows-RPC-safe per-process fork cap. Guards against the serial-lane gate timeout regression."
+    },
+    {
       "path": "tests2/integration/gateway-fixture-leak.test.ts",
       "reason": "Harness contract: per-test scope() cleanup / entity leak detector."
     },
