@@ -434,14 +434,23 @@ export default async function (pi) {
 		}
 	});
 
+	it("defaults the discovery cache key file-count limit to 1000", () => {
+		// Production default must stay exactly 1000; the injection seam below relies on this.
+		assert.equal(PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFiles, 1000);
+	});
+
 	it("bounds discovery cache key file count", () => {
 		const dir = tempDir();
 		try {
+			// Exercise the same `hash_file_count_limit` invariant via a narrow test-only
+			// limit-injection seam so we can trip it with a handful of files instead of
+			// materializing 1001+ files (slow/flaky on Windows under full unit-lane load).
+			const maxFiles = 3;
 			const entry = write(path.join(dir, "extension.mjs"), "export default function () {}\n");
-			for (let i = 0; i < PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFiles + 1; i++) {
+			for (let i = 0; i < maxFiles + 1; i++) {
 				write(path.join(dir, `helper-${i}.js`), `export const value${i} = ${i};\n`);
 			}
-			const result = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry);
+			const result = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry, { hashLimits: { maxFiles } });
 			assert.equal(result.cacheKey, undefined);
 			assert.equal(result.diagnostic?.code, "hash_file_count_limit");
 		} finally {

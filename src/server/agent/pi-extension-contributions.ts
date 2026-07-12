@@ -218,6 +218,23 @@ export const PI_EXTENSION_DISCOVERY_HASH_LIMITS = {
 	maxTotalBytes: 8 * 1024 * 1024,
 } as const;
 
+export type PiExtensionDiscoveryHashLimits = {
+	maxDepth: number;
+	maxFiles: number;
+	maxFileBytes: number;
+	maxTotalBytes: number;
+};
+
+/**
+ * Test-only seam: resolve effective hash limits, letting tests exercise limit
+ * diagnostics (e.g. `hash_file_count_limit`) with tiny values instead of
+ * materializing thousands of files. Production callers never pass an override,
+ * so the defaults above remain exactly unchanged.
+ */
+function resolveHashLimits(override?: Partial<PiExtensionDiscoveryHashLimits>): PiExtensionDiscoveryHashLimits {
+	return override ? { ...PI_EXTENSION_DISCOVERY_HASH_LIMITS, ...override } : { ...PI_EXTENSION_DISCOVERY_HASH_LIMITS };
+}
+
 /** Resolve one contents.pi-extensions ref to a safe runtime entry path, preserving source layout. */
 export function resolvePiExtensionEntry(packRoot: string, listName: string, manifest?: PackManifest, opts?: { cacheSalt?: string }): PiExtensionEntryResolution {
 	const absPackRoot = path.resolve(packRoot);
@@ -367,11 +384,10 @@ function hashLimitDiagnostic(code: string, message: string): PiExtensionDiagnost
 	return makePiExtensionDiagnostic("discovery-failed", code, message);
 }
 
-function collectHashFiles(root: string): { files: string[]; diagnostic?: PiExtensionDiagnostic } {
+function collectHashFiles(root: string, limits: PiExtensionDiscoveryHashLimits): { files: string[]; diagnostic?: PiExtensionDiagnostic } {
 	const out: string[] = [];
 	let visitedEntries = 0;
 	let diagnostic: PiExtensionDiagnostic | undefined;
-	const limits = PI_EXTENSION_DISCOVERY_HASH_LIMITS;
 	const walk = (dir: string, depth: number): void => {
 		if (diagnostic) return;
 		if (depth > limits.maxDepth) {
@@ -406,7 +422,7 @@ function collectHashFiles(root: string): { files: string[]; diagnostic?: PiExten
 
 export function computePiExtensionDiscoveryCacheKeyWithDiagnostics(
 	entryPath: string,
-	opts: { packRoot?: string; manifest?: PackManifest; cacheSalt?: string } = {},
+	opts: { packRoot?: string; manifest?: PackManifest; cacheSalt?: string; hashLimits?: Partial<PiExtensionDiscoveryHashLimits> } = {},
 ): PiExtensionDiscoveryCacheKeyResult {
 	let st: fs.Stats;
 	try {
@@ -414,6 +430,7 @@ export function computePiExtensionDiscoveryCacheKeyWithDiagnostics(
 	} catch {
 		return {};
 	}
+	const limits = resolveHashLimits(opts.hashLimits);
 	const hash = createHash("sha256");
 	const packRoot = opts.packRoot ? path.resolve(opts.packRoot) : undefined;
 	const root = st.isDirectory() ? entryPath : path.dirname(entryPath);
@@ -428,14 +445,14 @@ export function computePiExtensionDiscoveryCacheKeyWithDiagnostics(
 			const metaPath = path.join(packRoot, ".pack-meta.yaml");
 			if (fs.existsSync(metaPath)) {
 				const metaStat = fs.statSync(metaPath);
-				if (metaStat.size > PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes) {
-					return { diagnostic: hashLimitDiagnostic("hash_file_size_limit", `.pack-meta.yaml exceeds maximum hashed file size of ${PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes} bytes.`) };
+				if (metaStat.size > limits.maxFileBytes) {
+					return { diagnostic: hashLimitDiagnostic("hash_file_size_limit", `.pack-meta.yaml exceeds maximum hashed file size of ${limits.maxFileBytes} bytes.`) };
 				}
 				hash.update(fs.readFileSync(metaPath));
 			}
 		} catch { /* best-effort metadata salt */ }
 	}
-	const collected = collectHashFiles(root);
+	const collected = collectHashFiles(root, limits);
 	if (collected.diagnostic) return { diagnostic: collected.diagnostic };
 	let totalBytes = 0;
 	for (const file of collected.files) {
@@ -447,11 +464,11 @@ export function computePiExtensionDiscoveryCacheKeyWithDiagnostics(
 		}
 		const rel = path.relative(root, file).split(path.sep).join("/");
 		hash.update(JSON.stringify({ rel, size: fileStat.size, mtimeMs: Math.trunc(fileStat.mtimeMs) }));
-		if (fileStat.size > PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes) {
-			return { diagnostic: hashLimitDiagnostic("hash_file_size_limit", `Pi extension discovery cache key refused to hash ${rel}: file size ${fileStat.size} exceeds ${PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes} bytes.`) };
+		if (fileStat.size > limits.maxFileBytes) {
+			return { diagnostic: hashLimitDiagnostic("hash_file_size_limit", `Pi extension discovery cache key refused to hash ${rel}: file size ${fileStat.size} exceeds ${limits.maxFileBytes} bytes.`) };
 		}
-		if (totalBytes + fileStat.size > PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxTotalBytes) {
-			return { diagnostic: hashLimitDiagnostic("hash_total_size_limit", `Pi extension discovery cache key exceeded maximum total hashed bytes of ${PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxTotalBytes}.`) };
+		if (totalBytes + fileStat.size > limits.maxTotalBytes) {
+			return { diagnostic: hashLimitDiagnostic("hash_total_size_limit", `Pi extension discovery cache key exceeded maximum total hashed bytes of ${limits.maxTotalBytes}.`) };
 		}
 		totalBytes += fileStat.size;
 		try {
@@ -463,7 +480,7 @@ export function computePiExtensionDiscoveryCacheKeyWithDiagnostics(
 
 export function computePiExtensionDiscoveryCacheKey(
 	entryPath: string,
-	opts: { packRoot?: string; manifest?: PackManifest; cacheSalt?: string } = {},
+	opts: { packRoot?: string; manifest?: PackManifest; cacheSalt?: string; hashLimits?: Partial<PiExtensionDiscoveryHashLimits> } = {},
 ): string | undefined {
 	return computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath, opts).cacheKey;
 }
