@@ -118,8 +118,6 @@ import type { RoleStore } from "./role-store.js";
 import { resolveRole as resolveRoleFromGoal, listAvailableRoles } from "./resolve-role.js";
 import { GoalPausedError } from "./goal-paused-guard.js";
 import type { PersistedGoal } from "./goal-store.js";
-import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
-import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch, parseBaseRef } from "../skills/git.js";
 import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
@@ -173,7 +171,6 @@ import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
-import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv } from "./host-tokens.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
@@ -2628,23 +2625,6 @@ export class VerificationHarness {
 		return detectPrimaryBranch(cwd).catch(() => "master");
 	}
 
-	private resolveToolActivationDeps(goalId?: string): VerificationToolActivationDeps {
-		let toolManager: ToolManager | undefined;
-		let groupPolicyStore: GroupPolicyProvider | undefined;
-		const ctx = goalId ? this.projectContextManager?.getContextForGoal(goalId) : undefined;
-		if (ctx) {
-			toolManager = ctx.toolManager;
-			groupPolicyStore = ctx.toolGroupPolicyStore;
-		}
-		return {
-			toolManager,
-			groupPolicyStore,
-			mcpManager: goalId && ctx
-				? this.sessionManager?.getMcpManager({ projectId: ctx.project.id }) ?? this.sessionManager?.getMcpManager() ?? undefined
-				: this.sessionManager?.getMcpManager() ?? undefined,
-		};
-	}
-
 	/**
 	 * Pick a component to source `config.qa_*` from when an agent-qa step
 	 * does not declare `component:` explicitly. Preference order:
@@ -4093,9 +4073,9 @@ export class VerificationHarness {
 		gate?: WorkflowGate,
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
-		// Goal-scoped inline roles win over the role store. The fallback to
-		// "reviewer" preserves the legacy default — used when an `llm-review`
-		// step omits `role`. Either name may resolve from inlineRoles.
+		// Goal-scoped inline roles win over the role store. The default
+		// "reviewer" role is used when an `llm-review` step omits `role`.
+		// Either name may resolve from inlineRoles.
 		const goalForLookup: PersistedGoal | undefined = goalId
 			? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
 			: undefined;
@@ -4109,10 +4089,9 @@ export class VerificationHarness {
 
 		const timeoutMs = resolveReviewStepTimeoutSec({ type: "llm-review", timeout: step.timeout }) * 1000;
 
-		// Build the combined prompt sections (shared between session-based and direct-RpcBridge paths)
 		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, this.commandRunner);
 
-		// Build the kickoff message (shared between both paths)
+		// Build the kickoff message.
 		const kickoff = [
 			`Perform the review for the gate verification step: "${step.name}".`,
 			"",
@@ -4130,13 +4109,10 @@ export class VerificationHarness {
 			"Do NOT emit <verdict> XML tags. Do NOT call gate_signal.",
 		].join("\n");
 
-		// ── Session-based path (visible in UI) ──
-		if (this.sessionManager && goalId) {
-			return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId);
+		if (!this.sessionManager || !goalId) {
+			throw new Error("LLM review requires an active SessionManager and goalId");
 		}
-
-		// ── Legacy direct-RpcBridge path (fallback when SessionManager unavailable) ──
-		return this.runLlmReviewDirect(step, cwd, role, combinedPrompt, kickoff, timeoutMs, roleName, goalId);
+		return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId);
 	}
 
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
@@ -5171,247 +5147,8 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Legacy direct-RpcBridge path for LLM review (invisible to UI).
-	 * Used when SessionManager is not available.
-	 */
-	private async runLlmReviewDirect(
-		step: { name: string; prompt?: string; timeout?: number },
-		cwd: string,
-		role: { promptTemplate: string; toolPolicies?: Record<string, string> },
-		combinedPrompt: string,
-		kickoff: string,
-		timeoutMs: number,
-		roleName?: string,
-		goalId?: string,
-	): Promise<ReviewStepExecutionResult> {
-		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 
-		// Set up verification_result promise
-		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
-		this.pendingResults.set(subSessionId, resultResolver);
 
-		// Assemble system prompt to temp file
-		const systemPromptPath = assembleSystemPrompt(subSessionId, {
-			cwd,
-			goalSpec: combinedPrompt,
-			goalTitle: `LLM Review: ${step.name}`,
-			goalState: "active",
-		});
-
-		const toolActivation = buildVerificationToolActivation(
-			subSessionId,
-			cwd,
-			role,
-			this.resolveToolActivationDeps(goalId),
-		);
-		const bridgeOptions: RpcBridgeOptions = {
-			cwd,
-			args: toolActivation.args,
-			env: toolActivation.env,
-			toolManager: toolActivation.toolManager,
-		};
-		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
-
-		// Resolve and pin model + thinking level at spawn time (legacy direct path).
-		const _preLegacyRoleOverrides = roleName ? this.resolveRoleForGoal(roleName, goalId) : undefined;
-		const _preLegacyRoleModel = _preLegacyRoleOverrides?.model;
-		const _preLegacyReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		const _preLegacyInitialModel = (_preLegacyRoleModel && /^[^/]+\/.+$/.test(_preLegacyRoleModel))
-			? _preLegacyRoleModel
-			: ((_preLegacyReviewPref && /^[^/]+\/.+$/.test(_preLegacyReviewPref)) ? _preLegacyReviewPref : undefined);
-		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
-		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
-			model: bridgeOptions.initialModel,
-			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
-		});
-		const _preLegacyRoleThinking = _preLegacyRoleOverrides?.thinkingLevel;
-		const _preLegacyReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-		const _legacyValidLevels = THINKING_LEVELS as readonly string[];
-		const _preLegacyInitialThinkingRaw = (_preLegacyRoleThinking && _legacyValidLevels.includes(_preLegacyRoleThinking))
-			? _preLegacyRoleThinking
-			: ((_preLegacyReviewThinkPref && _legacyValidLevels.includes(_preLegacyReviewThinkPref)) ? _preLegacyReviewThinkPref : "off");
-		const _preLegacyInitialThinking = clampReviewThinking(_preLegacyInitialThinkingRaw, _preLegacyInitialModel) ?? _preLegacyInitialThinkingRaw;
-		bridgeOptions.initialThinkingLevel = _preLegacyInitialThinking;
-
-		const rpc = new RpcBridge(bridgeOptions);
-		let unregisterSession: (() => void) | undefined;
-		let legacyLastErroredToolOutput: string | null = null;
-		let legacyErrListenerUnsub: (() => void) | undefined;
-
-		try {
-			await rpc.start();
-
-			legacyErrListenerUnsub = rpc.onEvent((event: any) => {
-				if (event.type === "tool_execution_end" && event.isError) {
-					legacyLastErroredToolOutput = extractToolResultText(event.result);
-				}
-			});
-
-			// Register as a viewable session so users can watch the review live.
-			if (this.sessionManager) {
-				const reviewProjectId = goalId ? this.projectContextManager?.getContextForGoal(goalId)?.project.id : undefined;
-				if (reviewProjectId) {
-					unregisterSession = this.sessionManager.registerExternalSession(subSessionId, rpc, {
-						title: `LLM Review: ${step.name}`,
-						cwd,
-						role: "reviewer",
-						projectId: reviewProjectId,
-					});
-				}
-			}
-
-			// Resolve role overrides from the goal's explicit project scope.
-			const roleOverrides_s = roleName ? this.resolveRoleForGoal(roleName, goalId) : undefined;
-			const roleModel_s = roleOverrides_s?.model;
-			const roleThinking_s = roleOverrides_s?.thinkingLevel;
-
-			// Override model: role wins, else default.reviewModel preference.
-			// Sub-session path: no UI session, no persistence (sessionManager=null).
-			// Throws on failure/mismatch — outer catch converts to a failed gate result.
-			if (roleModel_s) {
-				try {
-					await applyModelString(rpc, roleModel_s, {
-						sessionManager: null,
-						sessionId: null,
-						contextLabel: `role.${roleName}.model`,
-						skipSetModel: _preLegacyInitialModel === roleModel_s,
-						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
-					});
-					console.log(`[verification] Applied role model policy for sub-session ${subSessionId} (selected="${roleModel_s}", role=${roleName})`);
-				} catch (err) {
-					console.error(`[verification] Role model "${sanitizeModelErrorForLog(roleModel_s, 500)}" failed for sub-session ${subSessionId}: ${sanitizeModelErrorForLog(err)}`);
-					throw err;
-				}
-			} else if (this.preferencesStore) {
-				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
-				try {
-					await applyReviewModelOverrides(rpc, {
-						prefs: { get: (k) => this.preferencesStore!.get(k) },
-						sessionManager: null,
-						sessionId: null,
-						role: "subsession",
-						skipSetModel: !!reviewModelPref && _preLegacyInitialModel === reviewModelPref,
-						controlledFallback: controlledSessionModelFallback(this.preferencesStore),
-					});
-					if (reviewModelPref) {
-						console.log(`[verification] Applied review model policy for ${subSessionId} (selected="${reviewModelPref}")`);
-					}
-				} catch (err) {
-					console.error(`[verification] applyReviewModelOverrides failed for sub-session ${subSessionId} (pref="${reviewModelPref ? sanitizeModelErrorForLog(reviewModelPref, 500) : "<unset>"}"): ${sanitizeModelErrorForLog(err)}`);
-					throw err;
-				}
-			}
-
-			// Apply thinking level: role wins; else default.reviewThinkingLevel pref; else "off".
-			{
-				let level: string;
-				if (roleThinking_s) {
-					level = roleThinking_s;
-				} else {
-					const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
-						? reviewThinking : "off";
-				}
-				level = clampReviewThinking(level, roleModel_s ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
-				if (_preLegacyInitialThinking === level) {
-					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${subSessionId}`);
-				} else {
-					try {
-						await rpc.setThinkingLevel(level);
-						console.log(`[verification] Set review thinking level "${level}" for ${subSessionId}"${roleThinking_s ? " (role override)" : ""}`);
-					} catch (err) {
-						console.error(`[verification] Failed to set review thinking level:`, err);
-					}
-				}
-			}
-
-			const initialTurnEnded = deferred<void>();
-			const initialEndUnsub = rpc.onEvent((event: any) => {
-				if (event.type === "agent_end") initialTurnEnded.resolve();
-			});
-
-			await rpc.prompt(kickoff);
-
-			// Prompt transport is outside the allowance. Start the full active-turn
-			// timer only after kickoff dispatch, while retaining the pre-dispatch
-			// agent_end listener so a very fast idle transition is not missed.
-			const result = await this.waitForDirectReviewTurn(resultPromise, initialTurnEnded.promise, timeoutMs);
-			try { initialEndUnsub(); } catch { /* ignore */ }
-
-			if (result.type === "result") {
-				return { passed: result.verdict, output: result.summary, sessionId: subSessionId };
-			}
-			if (result.type === "timeout") {
-				return this.reviewTimeoutResult("LLM review", timeoutMs, result.elapsedMs, subSessionId);
-			}
-
-			// Agent completed without calling the tool — send reminder
-			console.log(`[verification] No verification_result from ${subSessionId}, sending reminder`);
-
-			const reminderTurnEnded = deferred<void>();
-			const reminderEndUnsub = rpc.onEvent((event: any) => {
-				if (event.type === "agent_end") reminderTurnEnded.resolve();
-			});
-
-			const legacyJsonErr = legacyLastErroredToolOutput ? detectJsonValidationError(legacyLastErroredToolOutput) : null;
-			const legacyReminderPrompt = legacyJsonErr ? buildJsonRetryPrompt(legacyJsonErr) : VERIFICATION_RESULT_REMINDER;
-			if (legacyJsonErr) {
-				console.log(`[verification] Detected JSON/arg-validation glitch in ${subSessionId}, sending targeted retry prompt`);
-			}
-			await rpc.prompt(legacyReminderPrompt);
-			// Wait briefly for the agent to acknowledge the reminder (agent_start)
-			// before racing against agent_end — mirror of SessionManager.waitForStreaming
-			// for the legacy direct-RpcBridge path.
-			await new Promise<void>((resolve) => {
-				const t = this.clock.setTimeout(() => { try { unsub(); } catch { /* ignore */ } resolve(); }, 10_000);
-				const unsub = rpc.onEvent((event: any) => {
-					if (event.type === "agent_start") {
-						this.clock.clearTimeout(t);
-						try { unsub(); } catch { /* ignore */ }
-						resolve();
-					}
-				});
-			}).catch(() => {});
-
-			// The fixed acknowledgement settle is operational; the reminder receives
-			// a fresh full allowance after it, independent of the initial turn.
-			const result2 = await this.waitForDirectReviewTurn(resultPromise, reminderTurnEnded.promise, timeoutMs);
-			try { reminderEndUnsub(); } catch { /* ignore */ }
-
-			if (result2.type === "result") {
-				return { passed: result2.verdict, output: result2.summary, sessionId: subSessionId };
-			}
-			if (result2.type === "timeout") {
-				return this.reviewTimeoutResult("LLM review", timeoutMs, result2.elapsedMs, subSessionId);
-			}
-
-			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId: subSessionId };
-		} catch (err: any) {
-			const isTimeout = err.message?.includes("timed out");
-			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
-			const errOutput = isTimeout
-				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
-				: `LLM review failed: ${err.message}`;
-			if (isProcessDeath) {
-				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${subSessionId}): ${err.message}`);
-			}
-			return { passed: false, output: errOutput, sessionId: subSessionId };
-		} finally {
-			try { legacyErrListenerUnsub?.(); } catch { /* ignore */ }
-			this.pendingResults.delete(subSessionId);
-			await rpc.stop().catch(() => {});
-			// Unregister the session (archives it so chat history remains viewable)
-			if (unregisterSession) unregisterSession();
-			try {
-				const promptDir = path.join(this._stateDir, "session-prompts");
-				const promptFile = path.join(promptDir, `${subSessionId}.md`);
-				if (fs.existsSync(promptFile)) fs.unlinkSync(promptFile);
-			} catch { /* ignore */ }
-
-		}
-	}
-
-	/**
 	 * Substitute namespaced variables in a template string.
 	 *
 	 * Namespaces:
