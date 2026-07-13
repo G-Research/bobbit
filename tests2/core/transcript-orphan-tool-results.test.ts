@@ -279,6 +279,41 @@ describe("sanitizeTranscriptContent — orphan Pi tool results", () => {
 		expect(source).toContain(JSON.stringify(inactiveOrphan));
 	});
 
+	it("reparents active and inactive children when an active orphan is their shared ancestor", () => {
+		const source = jsonl([
+			user("root", null),
+			assistant("a", "root", [], "text only"),
+			result("shared-orphan", "a", "never-called"),
+			user("inactive-child", "shared-orphan", "alternate branch"),
+			user("active-child", "shared-orphan", "active branch"),
+		]);
+		const repaired = sanitizeTranscriptContent(source);
+		const entries = parsedEntries(repaired.content);
+
+		expect(repaired.rewritten).toBe(1);
+		expect(ids(repaired.content)).toEqual(["root", "a", "inactive-child", "active-child"]);
+		expect(entries.find((entry) => entry.id === "inactive-child")?.parentId).toBe("a");
+		expect(entries.find((entry) => entry.id === "active-child")?.parentId).toBe("a");
+	});
+
+	it("bypasses consecutive removed ancestors for every surviving branch", () => {
+		const source = jsonl([
+			assistant("a", null, [], "text only"),
+			result("orphan-1", "a", "missing-1"),
+			result("orphan-2", "orphan-1", "missing-2"),
+			metadata("inactive-from-first", "orphan-1", { branch: "first" }),
+			metadata("inactive-from-second", "orphan-2", { branch: "second" }),
+			user("active-child", "orphan-2"),
+		]);
+		const repaired = sanitizeTranscriptContent(source);
+		const entries = parsedEntries(repaired.content);
+
+		expect(repaired.rewritten).toBe(2);
+		expect(entries.find((entry) => entry.id === "inactive-from-first")?.parentId).toBe("a");
+		expect(entries.find((entry) => entry.id === "inactive-from-second")?.parentId).toBe("a");
+		expect(entries.find((entry) => entry.id === "active-child")?.parentId).toBe("a");
+	});
+
 	it("ignores pre-boundary orphan results excluded by the latest compaction projection", () => {
 		const source = jsonl([
 			assistant("old-a", null, [], "old text-only turn"),

@@ -5,9 +5,9 @@
  *
  * Orphan repair follows Pi's parent-linked active branch and latest compaction
  * projection. A message-level `toolResult` is removed only when the current
- * assistant result run does not contain its id; inactive branches and unrelated
- * lines remain byte-identical, and surviving descendants minimally bypass a
- * removed parent link.
+ * assistant result run does not contain its id; unrelated inactive records and
+ * lines remain byte-identical, while every surviving branch minimally bypasses
+ * a removed shared-ancestor link.
  *
  * Blank-content background: the model API rejects a user message whose ContentBlock has a
  * blank `text` field (next to an image block, or as a standalone empty text
@@ -241,9 +241,10 @@ function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number
 
 /**
  * Remove structurally orphaned message-level Pi `toolResult` records from the
- * active context branch. Untouched JSONL lines remain byte-identical. When a
- * removed record has a surviving active descendant, only that descendant's
- * `parentId` is rewritten to bypass the removed link and keep the tree usable.
+ * active context branch. Untouched JSONL lines remain byte-identical. Every
+ * surviving child whose parent chain crosses a removed record is minimally
+ * reparented to the nearest retained ancestor, including children on inactive
+ * branches that shared the removed active-branch ancestor.
  */
 function repairOrphanToolResults(content: string): SanitizeResult {
 	if (!content) return { content, changed: false, rewritten: 0 };
@@ -260,7 +261,11 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 		}
 	}
 
-	for (const record of activeBranch) {
+	// A record removed from the active branch may also be an ancestor of one or
+	// more inactive branches. Repair every surviving direct child of the removed
+	// chain; limiting this pass to activeBranch would leave those branches with a
+	// dangling parentId and make them impossible for Pi to resume later.
+	for (const record of parsed) {
 		if (removedLineIndexes.has(record.lineIndex)) continue;
 		let parentId = record.parentId;
 		const visited = new Set<string>();
