@@ -108,6 +108,12 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 			return session;
 		},
 		getSession: (id: string) => sessions.get(id),
+		enqueuePrompt: vi.fn(async (id: string, text: string, opts?: any) => {
+			const session = sessions.get(id);
+			if (session) session.lastPromptSource = opts?.source ?? "user";
+			await session?.rpcClient.prompt(text);
+			return { status: "dispatched" };
+		}),
 		setTitle: (id: string, title: string) => {
 			const s = sessions.get(id);
 			if (s) s.title = title;
@@ -194,6 +200,19 @@ function createTeamManager(sm: any, config = DEFAULT_CONFIG, clock?: ManualClock
 	if (clock) tm.stopStuckSweep();
 	_createdManagers.push(tm);
 	return tm;
+}
+
+function assertAndClearSystemKickoff(enqueuePrompt: ReturnType<typeof vi.fn>, sessionId = "session-0"): void {
+	assert.deepEqual(
+		enqueuePrompt.mock.calls[0],
+		[
+			sessionId,
+			"# Goal Spec\n\n# Test Goal\nDo something\n\n---\n\nExecute the task described in your system prompt. Follow the instructions carefully.",
+			{ source: "system", suppressTitleGen: true },
+		],
+		"team lead kickoff text must be unchanged and attributed to Bobbit system provenance",
+	);
+	enqueuePrompt.mockClear();
 }
 
 // ---------------------------------------------------------------------------
@@ -774,8 +793,9 @@ describe("TeamManager", () => {
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
 
-			// Add enqueuePrompt to the mock session manager (not present by default)
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			// Track prompt routing separately so the sleep guard can ignore the system kickoff.
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			sm.enqueuePrompt = enqueuePrompt;
 
 			// Capture onEvent callbacks so we can simulate lifecycle events
@@ -799,6 +819,7 @@ describe("TeamManager", () => {
 
 			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 
 			// Get the team lead session and inject a fake active worker
 			const entry = (team as any).teams.get("goal-1")!;
@@ -847,7 +868,8 @@ describe("TeamManager", () => {
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			sm.enqueuePrompt = enqueuePrompt;
 
 			const eventCallbacks: Array<(event: any) => void> = [];
@@ -860,6 +882,7 @@ describe("TeamManager", () => {
 
 			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 
 			const entry = (team as any).teams.get("goal-1")!;
 			const workerSession = {
@@ -899,7 +922,8 @@ describe("TeamManager", () => {
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			sm.enqueuePrompt = enqueuePrompt;
 
 			const eventCallbacks: Array<(event: any) => void> = [];
@@ -912,6 +936,7 @@ describe("TeamManager", () => {
 
 			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 
 			const entry = (team as any).teams.get("goal-1")!;
 			const workerSession = {
@@ -942,7 +967,8 @@ describe("TeamManager", () => {
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			sm.enqueuePrompt = enqueuePrompt;
 
 			const eventCallbacks: Array<(event: any) => void> = [];
@@ -955,6 +981,7 @@ describe("TeamManager", () => {
 
 			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 
 			const entry = (team as any).teams.get("goal-1")!;
 			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
@@ -975,7 +1002,8 @@ describe("TeamManager", () => {
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			sm.enqueuePrompt = enqueuePrompt;
 
 			const eventCallbacks: Array<(event: any) => void> = [];
@@ -988,6 +1016,7 @@ describe("TeamManager", () => {
 
 			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 
 			const entry = (team as any).teams.get("goal-1")!;
 			// Worker streaming since "now" (virtual clock) — well under 30m
@@ -1023,7 +1052,8 @@ describe("TeamManager", () => {
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			sm.enqueuePrompt = enqueuePrompt;
 
 			const eventCallbacks: Array<(event: any) => void> = [];
@@ -1036,6 +1066,7 @@ describe("TeamManager", () => {
 
 			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 
 			const entry = (team as any).teams.get("goal-1")!;
 			// Worker that has been streaming for a long time already (45m ago, virtual clock)
@@ -1070,7 +1101,8 @@ describe("TeamManager", () => {
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			sm.enqueuePrompt = enqueuePrompt;
 
 			const eventCallbacks: Array<(event: any) => void> = [];
@@ -1083,6 +1115,7 @@ describe("TeamManager", () => {
 
 			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
 			await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 
 			const entry = (team as any).teams.get("goal-1")!;
 			const workerSession = {
@@ -1117,7 +1150,8 @@ describe("TeamManager", () => {
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			const deliverLiveSteer = vi.fn(async (_id: string, _msg: string) => {});
 			const retryLastPrompt = vi.fn((_id: string, _opts?: any) => ({ status: "queued" }));
 			sm.enqueuePrompt = enqueuePrompt;
@@ -1126,6 +1160,7 @@ describe("TeamManager", () => {
 
 			const team = createTeamManager(sm);
 			const teamLead = await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 			(teamLead as any).status = "idle";
 			(teamLead as any).lastTurnErrored = true;
 			(teamLead as any).lastTurnErrorMessage = "server_error: upstream provider returned retryable server error";
@@ -1153,7 +1188,8 @@ describe("TeamManager", () => {
 			const goal = createMockGoal();
 			goals.set(goal.id, goal);
 			const sm = createMockSessionManager(goals);
-			const enqueuePrompt = vi.fn((_id: string, _msg: string, _opts?: any) => {});
+			const enqueuePrompt = vi.fn((_id: string, _msg: string, opts?: any) =>
+				opts?.source === "system" ? Promise.resolve({ status: "dispatched" }) : undefined);
 			sm.enqueuePrompt = enqueuePrompt;
 			sm.deliverLiveSteer = vi.fn(async (_id: string, _msg: string) => {});
 
@@ -1172,6 +1208,7 @@ describe("TeamManager", () => {
 			};
 			const team = createTeamManager(sm, { ...DEFAULT_CONFIG, taskManager: taskManager as any });
 			const teamLead = await team.startTeam("goal-1");
+			assertAndClearSystemKickoff(enqueuePrompt);
 			(teamLead as any).status = "idle";
 
 			const entry = (team as any).teams.get("goal-1")!;
@@ -1429,7 +1466,8 @@ describe("TeamManager", () => {
 			const fixture = createGitFixture();
 			const { sm, team } = createRepoTeam(fixture);
 
-			await team.startTeam("goal-1");
+			const teamLead = await team.startTeam("goal-1");
+			sm.enqueuePrompt.mockClear();
 			const result = await team.spawnRole("goal-1", "coder", "Implement feature X");
 
 			assert.ok(result.sessionId);
@@ -1447,6 +1485,18 @@ describe("TeamManager", () => {
 			const session = sm.getSession(result.sessionId);
 			assert.ok(session, "session should exist");
 			assert.equal(session.rpcClient.prompt.mock.calls.length, 1);
+			assert.deepEqual(
+				sm.enqueuePrompt.mock.calls[0],
+				[
+					result.sessionId,
+					"Implement feature X",
+					{
+						source: "agent",
+						author: { kind: "agent", id: `session:${teamLead.id}`, label: teamLead.title },
+					},
+				],
+				"worker task text must be unchanged and attributed to the owning team lead",
+			);
 		});
 
 		it("spawns from an unpublished local goal branch without publishing the member branch", async () => {
