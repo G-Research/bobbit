@@ -1,3 +1,6 @@
+import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../shared/message-author.js";
+import type { InFlightSteerRecord, PersistedInFlightSteer } from "./session-store.js";
+
 /**
  * Splice an in-flight `message_update` payload into a snapshot messages
  * array returned by `session.rpcClient.getMessages()`. Pure helper, no
@@ -53,7 +56,8 @@ function extractUserText(message: any): string {
 /**
  * Splice synthetic user-role messages for every entry in the steer shadow
  * ledger (`session.inFlightSteerTexts`) that is NOT already represented as
- * a user message in the snapshot.
+ * a user message in the snapshot. Both legacy string entries and structured
+ * records are accepted at this persistence-facing boundary.
  *
  * Companion to `spliceInFlightMessage` (which handles in-flight assistant
  * `message_update`). Solves a steer-specific continuity race:
@@ -82,7 +86,7 @@ function extractUserText(message: any): string {
  */
 export function spliceInFlightSteers(
 	messages: any[],
-	inFlightSteerTexts?: string[],
+	inFlightSteerTexts?: readonly PersistedInFlightSteer[],
 ): any[] {
 	if (!Array.isArray(messages)) return messages;
 	if (!inFlightSteerTexts || inFlightSteerTexts.length === 0) return messages;
@@ -103,7 +107,18 @@ export function spliceInFlightSteers(
 
 	const additions: any[] = [];
 	let i = 0;
-	for (const text of inFlightSteerTexts) {
+	for (const entry of inFlightSteerTexts) {
+		const record: InFlightSteerRecord | undefined = typeof entry === "string"
+			? (entry.length > 0
+				? {
+					text: entry,
+					promptId: `legacy-inflight-steer:${i}`,
+					source: "user",
+					author: LOCAL_USER_AUTHOR,
+				}
+				: undefined)
+			: entry;
+		const text = record?.text;
 		if (!text) { i++; continue; }
 		const remaining = presentCounts.get(text) ?? 0;
 		if (remaining > 0) {
@@ -112,14 +127,17 @@ export function spliceInFlightSteers(
 			i++;
 			continue;
 		}
+		const author: MessageAuthor | undefined = isMessageAuthor(record.author) ? record.author : undefined;
 		additions.push({
-			// Stable, content-derived id so repeated `get_messages` calls during
-			// the same dispatch→echo window produce the same synthetic row. The
-			// real echo's id won't collide (agents use uuid-shaped ids). The index
-			// prefix keeps two identical-text steers distinct.
-			id: `inflight-steer:${i}:${text.slice(0, 32)}`,
+			// New structured entries use their stable prompt identity. Keep the
+			// legacy content-derived shape so reconnect behaviour is unchanged for
+			// old persisted string ledgers.
+			id: typeof entry === "string"
+				? `inflight-steer:${i}:${text.slice(0, 32)}`
+				: `inflight-steer:${record.promptId}`,
 			role: "user",
 			content: [{ type: "text", text }],
+			...(author ? { author } : {}),
 			_inFlightSteer: true,
 		});
 		i++;
