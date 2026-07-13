@@ -14,7 +14,8 @@ import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd } from "./session-manager.js";
+import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent } from "./session-manager.js";
+import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
@@ -1002,18 +1003,19 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 	return session.rpcClient.onEvent((event: any) => {
 		session.lastActivity = Date.now();
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });
-		ctx.handleAgentLifecycle(session, event);
+		const preparedEvent = prepareVisibleAgentEvent(session, event);
+		ctx.handleAgentLifecycle(session, preparedEvent);
 		// Suppress Pi retryable agent_end ({ willRetry:true }) before it reaches
 		// clients/EventBuffer. Pi 0.80+ emits a non-terminal agent_end before each
 		// internal auto-retry; clients treat every agent_end as terminal and would
 		// clear the streaming message/tool calls. This mirrors SessionManager's
 		// emitAgentEvent() so every rpcClient.onEvent path shares one contract.
 		// Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
-		if (!isRetryableAgentEnd(event)) {
-			const truncated = truncateLargeToolContent(event);
+		if (!isRetryableAgentEnd(preparedEvent)) {
+			const truncated = truncateLargeToolContent(preparedEvent);
 			emitSessionEvent(session, truncated);
 		}
-		ctx.trackCostFromEvent(session, event);
+		ctx.trackCostFromEvent(session, preparedEvent);
 	});
 }
 
@@ -1718,6 +1720,7 @@ export function handleSetupFailure(
 			type: "message_end",
 			message: {
 				role: "assistant",
+				author: BOBBIT_SYSTEM_AUTHOR,
 				content: [{ type: "text", text: `Session setup failed: ${safeErrorMessage}` }],
 				stopReason: "error",
 				errorMessage: safeErrorMessage,
