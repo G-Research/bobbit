@@ -42,7 +42,7 @@ export interface DeliverSessionPromptTarget {
 export type DeliverSessionPromptRecovery = {
 	status: "recovered";
 	reason: ErroredPromptRecoveryDecision["reason"];
-	queued: true;
+	queued: boolean;
 	queuedId?: string;
 };
 
@@ -120,6 +120,25 @@ export async function deliverSessionPrompt(
 		const recovery = deps.getErroredPromptRecoveryDecision!(sessionId);
 		if (!recovery.recoverable) {
 			throw new SessionPromptDeliveryError(recoveryBlockedMessage(recovery), "PROMPT_RECOVERY_BLOCKED", 409);
+		}
+		// Orphan tool-result history is repaired by enqueuePrompt's user-driven
+		// follow-up path. Do not queue the new intent behind a replay of the old
+		// prompt, and do not call retryLastPrompt(auto:true): poison recovery must
+		// never be an automatic retry loop.
+		if (recovery.reason === "poisoned-history") {
+			const delivered = await deps.enqueuePrompt(sessionId, message, queuePromptOptions(mode, opts.source));
+			return {
+				ok: true,
+				mode,
+				status: "recovered",
+				recovered: true,
+				recovery: {
+					status: "recovered",
+					reason: recovery.reason,
+					queued: delivered.status === "queued",
+				},
+				target,
+			};
 		}
 		const queued = await deps.enqueuePromptForRetryRecovery!(sessionId, message, queuePromptOptions(mode, opts.source));
 		await deps.retryLastPrompt!(sessionId, { auto: true, preserveQueueIds: queued.queuedId ? [queued.queuedId] : undefined });
