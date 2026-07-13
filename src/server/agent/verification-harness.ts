@@ -4166,35 +4166,6 @@ export class VerificationHarness {
 		}
 	}
 
-	private async waitForDirectReviewTurn(
-		resultPromise: Promise<VerificationResult>,
-		turnEnded: Promise<void>,
-		timeoutMs: number,
-	): Promise<
-		| ({ type: "result" } & VerificationResult)
-		| { type: "idle" }
-		| { type: "timeout"; elapsedMs: number }
-	> {
-		const startedAt = this.clock.now();
-		let timer: ReturnType<Clock["setTimeout"]> | undefined;
-		try {
-			const timeoutPromise = new Promise<{ type: "timeout"; elapsedMs: number }>(resolve => {
-				timer = this.clock.setTimeout(() => {
-					timer = undefined;
-					resolve({ type: "timeout", elapsedMs: Math.max(timeoutMs, this.clock.now() - startedAt) });
-				}, timeoutMs);
-				(timer as any)?.unref?.();
-			});
-			return await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				turnEnded.then(() => ({ type: "idle" as const })),
-				timeoutPromise,
-			]);
-		} finally {
-			if (timer) this.clock.clearTimeout(timer);
-		}
-	}
-
 	private reviewTimeoutResult(
 		label: "LLM review" | "Agent QA",
 		timeoutMs: number,
