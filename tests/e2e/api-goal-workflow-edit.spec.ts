@@ -219,7 +219,12 @@ test.describe("PUT /api/goals/:goalId/workflow HTTP lifecycle", () => {
 
 			const slowSignal = await apiFetch(`/api/goals/${goal.id}/gates/added/signal`, {
 				method: "POST",
-				body: JSON.stringify({}),
+				body: JSON.stringify({
+					metadata: {
+						artifact: "workflow-edit-e2e",
+						owner: "test-engineer",
+					},
+				}),
 			});
 			expect(slowSignal.status, await slowSignal.clone().text()).toBe(201);
 			await waitForRunningVerification(goal.id, "added");
@@ -238,7 +243,7 @@ test.describe("PUT /api/goals/:goalId/workflow HTTP lifecycle", () => {
 			conflictResponse = await putWorkflow(goal.id, removedActive);
 			expect(conflictResponse.status, await conflictResponse.clone().text()).toBe(409);
 			expect((await readGoal(goal.id)).workflow).toEqual(replaced);
-			expect((await readGate(goal.id, "added")).status).toBe("running");
+			expect((await readGate(goal.id, "added")).status).toBe("pending");
 
 			const cancelResponse = await apiFetch(`/api/goals/${goal.id}/gates/added/cancel-verification`, {
 				method: "POST",
