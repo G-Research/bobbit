@@ -5,6 +5,13 @@ import { registerMessageRenderer, type MessageRenderer } from "../ui/components/
 import { html } from "lit";
 import { gatewayFetch } from "./api.js";
 import { isSubgoalsEnabled } from "./subgoals-flag.js";
+import type { BobbitMessage, MessageAuthor } from "../shared/message-author.js";
+
+const CLIENT_SYSTEM_AUTHOR: MessageAuthor = {
+	kind: "system",
+	id: "system:bobbit",
+	label: "Bobbit",
+};
 
 // ============================================================================
 // 1. EXTEND AppMessage TYPE VIA DECLARATION MERGING
@@ -16,6 +23,7 @@ export interface SystemNotificationMessage {
 	variant: "default" | "destructive";
 	category?: "system" | "task" | "team" | "error";
 	timestamp: string;
+	author?: MessageAuthor;
 }
 
 /**
@@ -30,6 +38,7 @@ export interface MutationPendingMessage {
 	kind: "fix-up" | "expansion" | "restructure" | "criteria-drop";
 	summary: string;
 	timestamp: string;
+	author?: MessageAuthor;
 	/** Set to "approved" / "rejected" once the user clicks; disables buttons. */
 	decided?: "approved" | "rejected";
 }
@@ -154,6 +163,7 @@ export function createSystemNotification(
 		variant,
 		category,
 		timestamp: new Date().toISOString(),
+		author: CLIENT_SYSTEM_AUTHOR,
 	};
 }
 
@@ -170,6 +180,7 @@ export function createMutationPending(
 		kind,
 		summary,
 		timestamp: new Date().toISOString(),
+		author: CLIENT_SYSTEM_AUTHOR,
 	};
 }
 
@@ -177,8 +188,8 @@ export function createMutationPending(
 // 6. CUSTOM MESSAGE TRANSFORMER
 // ============================================================================
 
-export function customConvertToLlm(messages: AgentMessage[]): Message[] {
-	const processed = messages.map((m): AgentMessage => {
+export function customConvertToLlm(messages: BobbitMessage<AgentMessage>[]): Message[] {
+	const processed = messages.map((m): BobbitMessage<AgentMessage> => {
 		if (m.role === "system-notification") {
 			const notification = m as SystemNotificationMessage;
 			return {

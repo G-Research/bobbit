@@ -15,6 +15,8 @@
  * - Server snapshot is authoritative for any id it contains.
  */
 
+import type { MessageAuthor } from "../shared/message-author.js";
+
 export type MessageOrigin = "server" | "optimistic" | "synthetic" | "permission";
 
 export interface OrderedMessage {
@@ -22,6 +24,7 @@ export interface OrderedMessage {
 	id?: string;
 	role: string;
 	timestamp?: number;
+	author?: MessageAuthor;
 	/**
 	 * Sort primary. Server-stamped (positive seq for live, negative for
 	 * snapshot) or sentinel for optimistic/synthetic.
