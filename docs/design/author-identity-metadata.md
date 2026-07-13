@@ -1,0 +1,577 @@
+# Author Identity Metadata
+
+**Status:** implementation design  
+**Scope:** Bobbit-visible message metadata only; Pi 0.80.6 roles, transcript schema, and model/provider input remain unchanged.
+
+## 1. Problem and goals
+
+Bobbit currently treats `role` as both transport shape and apparent authorship. That is insufficient because a Pi `role: "user"` row can be a human prompt, a Bobbit orchestration prompt, an extension session write, or provider-history tool output. Conversely, Bobbit-created custom rows can use assistant-like roles without being model-authored.
+
+Add an optional, Bobbit-owned author envelope:
+
+```ts
+export type MessageAuthorKind = "user" | "agent" | "system";
+
+export interface MessageAuthor {
+  kind: MessageAuthorKind;
+  id: string;
+  label: string;
+}
+```
+
+The field is additive and optional. `role` continues to control Pi/provider semantics and rendering. `author` answers only who is accountable for the Bobbit-visible row.
+
+Required outcomes:
+
+- human prompts/steers resolve to `user`;
+- model responses resolve to the target session's `agent` identity;
+- server notifications, nudges, hidden context, and extension writes resolve to `system`;
+- agent-to-agent prompts resolve to the calling session's `agent` identity;
+- tool results never introduce a fourth author kind;
+- live events and reloaded snapshots converge on the same author;
+- old sessions with no author data remain readable and receive safe inferred authors;
+- ordinary single-human chat remains visually unchanged.
+
+## 2. Current architecture and constraints
+
+### 2.1 Message ownership
+
+Pi 0.80.6 owns the canonical agent JSONL and its provider-facing message types. Bobbit must not add arbitrary fields to the Pi transcript or rely on Pi preserving them. The relevant Bobbit paths are:
+
+- live RPC events: `src/server/agent/session-manager.ts::handleAgentLifecycle`, `emitAgentEvent`, and `emitSessionEvent`;
+- live WS envelopes: `src/server/ws/protocol.ts::ServerMessage` (`type: "event"`);
+- snapshots: `src/server/ws/handler.ts::case "get_messages"`;
+- in-flight rows: `src/server/agent/splice-inflight-message.ts::{spliceInFlightMessage,spliceInFlightSteers}`;
+- queue persistence: `src/server/ws/protocol.ts::QueuedMessage`, `src/server/agent/prompt-queue.ts::PromptQueue`, and `src/server/agent/session-store.ts::PersistedSession.messageQueue`;
+- restore: `src/server/agent/session-manager.ts` constructs `new PromptQueue(ps.messageQueue)` for dormant/live restore;
+- archived history: `src/server/agent/session-manager.ts::getArchivedMessages`;
+- transcript tools and pre-compaction history: `src/server/agent/transcript-reader.ts::{readTranscript,readOrphanedBeforeCompaction}`;
+- UI state: `src/app/remote-agent.ts` and `src/app/message-reducer.ts`;
+- rendering: `src/ui/components/{Messages,MessageList}.ts`.
+
+`AgentMessage` and Pi `Message` remain role unions (`user`, `assistant`, `toolResult`, plus Bobbit custom roles). Bobbit should use an intersection type rather than changing those role unions.
+
+### 2.2 Existing provenance
+
+`src/server/agent/session-manager.ts::PromptSource` is internal delivery provenance. Move its declaration to dependency-neutral `src/shared/prompt-source.ts` and re-export it from `session-manager.ts`, so `ws/protocol.ts`, queues, and server delivery code share one union without a protocol -> session-manager runtime cycle:
+
+```ts
+type PromptSource =
+  | "user"
+  | "auto-nudge"
+  | "task-notification"
+  | "verification"
+  | "system"
+  | "agent"
+  | "child-complete"
+  | "extension";
+```
+
+It controls idle-nudge backoff through `SessionInfo.lastPromptSource`; it is not the public author model. Preserve all values and existing backoff behavior. Add an explicit mapping rather than collapsing or renaming `PromptSource`.
+
+### 2.3 Sidecar precedent
+
+Bobbit already keeps host-side metadata outside Pi JSONL:
+
+- `<stateDir>/skill-sidecar/<sessionId>.jsonl` in `src/server/skills/skill-sidecar.ts`;
+- `<stateDir>/compaction-sidecar/<sessionId>.jsonl` in `src/server/agent/compaction-sidecar.ts`;
+- `<agent-jsonl-stem>.bobbit.json` in `src/server/agent/session-sidecar.ts`.
+
+Author persistence must follow the first two for sandbox safety: use the Bobbit session id and the host state directory, never the possibly in-container transcript path.
+
+## 3. Design decisions
+
+1. **One public field:** Bobbit-visible message objects may carry `author?: MessageAuthor`. No provider `name`, source header, or text prefix is added.
+2. **Three accountable kinds only:** tools and extensions are not kinds. An extension session write is a system action with a more specific system id. A tool result inherits an accountable user/agent/system identity.
+3. **Prompt authors are persisted outside Pi:** queue rows carry authors while waiting; dispatched prompt authors are written to an author sidecar for transcript/snapshot recovery.
+4. **Assistant authors are deterministic:** model messages derive from session metadata and do not require sidecar storage.
+5. **Normalization is the compatibility boundary:** every Bobbit-visible live event, snapshot, archived read, and transcript read runs through the same inference rules. Missing/corrupt sidecars degrade to inference, never to failure.
+6. **No new visible chrome:** components accept the metadata but do not render a label for routine rows. Future ambiguity/detail surfaces can consume it without a transcript redesign.
+7. **Server-derived identity only:** callers cannot submit an author over browser/REST protocol. The server derives the human fallback, authenticated caller session, or extension surface identity.
+
+## 4. Types and identity construction
+
+### 4.1 Shared types
+
+Add `src/shared/message-author.ts`:
+
+```ts
+export type MessageAuthorKind = "user" | "agent" | "system";
+
+export interface MessageAuthor {
+  kind: MessageAuthorKind;
+  id: string;
+  label: string;
+}
+
+export type BobbitMessage<T extends object = Record<string, unknown>> =
+  T & { author?: MessageAuthor };
+
+export const LOCAL_USER_AUTHOR: MessageAuthor = {
+  kind: "user",
+  id: "user:local",
+  label: "User",
+};
+```
+
+Also export `isMessageAuthor(value): value is MessageAuthor`, which validates the kind and non-empty bounded strings before data crosses trust/storage boundaries. Do not add `author` to Pi package declarations.
+
+Use `BobbitMessage<AgentMessage>` in `MessageList`, `RemoteAgent` state, and renderer properties. Custom Bobbit message interfaces (`UserMessageWithAttachments`, `ArtifactMessage`, `SystemNotificationMessage`, and `MutationPendingMessage`) receive `author?: MessageAuthor` where they are independently referenced.
+
+### 4.2 Agent identity
+
+Add pure/server helpers in `src/server/agent/message-author.ts`:
+
+```ts
+agentAuthorForSession(
+  session: Pick<SessionInfo, "id" | "title" | "role" | "staffId">,
+  deps?: {
+    getStaff?: (id: string) => PersistedStaff | undefined;
+    getRole?: (name: string) => Role | undefined;
+  },
+): MessageAuthor
+```
+
+Identity rules, in priority order:
+
+- staff session: `id: "staff:<staffId>"`, label from `PersistedStaff.name`;
+- other session: `id: "session:<session.id>"`;
+- non-staff label: non-empty `session.title`, then role label, then role name, then `"Agent"`.
+
+The id never depends on a mutable title. Archived reads use the equivalent fields from `PersistedSession`.
+
+### 4.3 System identity
+
+Core-generated content uses:
+
+```ts
+{ kind: "system", id: "system:bobbit", label: "Bobbit" }
+```
+
+Specific identities are allowed when the producer is known:
+
+- extension write: `system:extension:<encoded-pack-id>:<encoded-tool>`, label from the pack contribution label when available, otherwise `<packId>/<tool>`;
+- hidden provider context: `system:bobbit:dynamic-context`, label `"Bobbit context"`;
+- mixed-author batch assembled by Bobbit: `system:bobbit:batch`, label `"Bobbit"`.
+
+Ids must use a shared sanitizer (lowercase where identity is case-insensitive, replace unsafe separators, and cap each component) so sidecars/search cannot receive unbounded or path-shaped identity strings.
+
+### 4.4 PromptSource mapping
+
+Export and unit-test:
+
+```ts
+export function authorKindForPromptSource(source: PromptSource): MessageAuthorKind {
+  if (source === "user") return "user";
+  if (source === "agent") return "agent";
+  return "system";
+}
+```
+
+`resolvePromptAuthor(source, context)` applies that mapping:
+
+- `user` -> `LOCAL_USER_AUTHOR`;
+- `agent` -> authenticated caller/owner session author; if caller identity is unexpectedly unavailable, fall back to `system:bobbit` rather than inventing an agent id;
+- all notification/retry/orchestration sources -> Bobbit system author;
+- `extension` -> the extension-specific system author supplied by the surface-token handler.
+
+The `PromptSource` mapping does not change the separate nudge-counter reset table.
+
+## 5. Author sidecar
+
+### 5.1 Location and module
+
+Add `src/server/agent/author-sidecar.ts` with:
+
+- `initAuthorSidecarDir(stateDir)`;
+- `appendPromptAuthorDispatch(sessionId, record)`;
+- `appendPromptAuthorSettlement(sessionId, settlement)`;
+- `readAuthorSidecar(sessionId)`;
+- `mergeAuthorSidecarIntoMessages(entries, messages, context)`;
+- `copyAuthorSidecar(fromSessionId, toSessionId)`;
+- `purgeAuthorSidecar(sessionId)`.
+
+Storage is `<stateDir>/author-sidecar/<sanitized-sessionId>.jsonl`. Initialize it in `src/server/server.ts` beside `initSkillSidecarDir` and `initCompactionSidecarDir`.
+
+### 5.2 Versioned append-only schema
+
+Use two v1 line variants:
+
+```ts
+interface PromptAuthorDispatchRecord {
+  schemaVersion: 1;
+  type: "prompt-author";
+  promptId: string;       // queue id, steer-batch id, or generated direct id
+  dispatchedAt: number;   // epoch ms
+  modelText: string;      // exact text sent to Pi; lookup only, never rendered
+  source: PromptSource;
+  author: MessageAuthor;
+}
+
+interface PromptAuthorSettlementRecord {
+  schemaVersion: 1;
+  type: "prompt-author-settlement";
+  promptId: string;
+  settledAt: number;
+  outcome: "echoed" | "cancelled";
+  messageId?: string;     // Pi-visible message id when available
+  messageTimestamp?: number;
+}
+```
+
+Rationale:
+
+- dispatch records are appended immediately before the RPC call, closing the crash window before Pi echoes/persists the row;
+- a rejected RPC appends `cancelled`, preventing a stale identical text from claiming a later prompt;
+- a matching live user `message_end` appends `echoed` and records Pi's id/timestamp when available;
+- redispatch can reuse the same queue/batch `promptId`; readers fold by prompt id and use the latest dispatch plus latest settlement;
+- malformed lines, unknown versions/types, invalid authors, and settlements without a dispatch are skipped.
+
+Do not store images, attachments, or rewritten display text. `modelText` is already persisted in Pi JSONL and is needed only as a fallback correlation key. Sidecar I/O is best-effort: log and continue with inference if append/read fails.
+
+### 5.3 Matching algorithm
+
+`readAuthorSidecar` folds records into active and echoed prompt-author bindings. Snapshot/transcript merge matches user-prompt rows in this order:
+
+1. exact `message.id === settlement.messageId`;
+2. exact message timestamp/settlement timestamp within 2 seconds plus exact `modelText`;
+3. exact `modelText`, FIFO by `dispatchedAt`, consuming each sidecar record once.
+
+Cancelled records never match. Duplicate identical prompts remain distinct because matching consumes a multiset, not a `Set`. When compaction removes an earlier duplicate, timestamp/id binding prevents the retained duplicate from consuming the removed prompt's author. If a legacy message has neither id nor timestamp, FIFO text matching is the final safe fallback.
+
+The merge clones only changed message objects and is idempotent. It never rewrites Pi JSONL.
+
+## 6. Queue and in-flight state
+
+### 6.1 QueuedMessage
+
+Extend `src/server/ws/protocol.ts::QueuedMessage`:
+
+```ts
+source?: PromptSource;
+author?: MessageAuthor;
+```
+
+`source` is optional because old `sessions.json` rows lack it. `author` is optional on the wire and disk for backward compatibility.
+
+Update `PromptQueue.enqueue` and `enqueueAtFront` to accept/copy both fields. `steer`, remove, reorder, `toArray`, and the `SessionStore` need no special serialization because they already preserve the whole row. Constructor normalization validates present authors; old rows default at dispatch to `source: "user"` and `LOCAL_USER_AUTHOR`.
+
+`SessionManager.enqueuePrompt`, `deliverLiveSteer`, and `enqueuePromptForRetryRecovery` resolve author once at acceptance and put both `source` and `author` on every queued row. `drainQueue` sets `session.lastPromptSource` from the dequeued row (not whichever unrelated prompt most recently touched the session) and dispatches with that row's author.
+
+### 6.2 Structured in-flight steers
+
+The current persisted `inFlightSteerTexts?: string[]` loses identity. Keep the property name for disk compatibility but widen its element shape:
+
+```ts
+export interface InFlightSteerRecord {
+  text: string;
+  promptId: string;
+  source?: PromptSource;
+  author?: MessageAuthor;
+}
+
+type PersistedInFlightSteer = string | InFlightSteerRecord;
+```
+
+At restore, normalize legacy strings to records with `source: "user"` and local-user author. Runtime `SessionInfo` should use `InFlightSteerRecord[]`; only the `PersistedSession` boundary accepts strings. Update `_dispatchSteer`, `_consumeSteerEcho`, `_reconcileAfterAbort`, `persistInFlightSteerLedger`, and `spliceInFlightSteers` to operate on records.
+
+For a steer batch:
+
+- preserve the existing joined text and single Pi RPC, so model behavior is byte-equivalent;
+- if all rows have the same author, retain it;
+- if authors differ, use `system:bobbit:batch` because Bobbit assembled one indivisible Pi message from multiple accountable inputs;
+- generate a deterministic `promptId` from the ordered queue ids so retry/reconcile reuses the sidecar binding.
+
+`spliceInFlightSteers` copies `record.author` to its synthetic `role: "user"` row. Thus a `get_messages` call during the dispatch-to-echo gap exposes the same identity as the eventual live echo.
+
+### 6.3 Runtime pending bindings
+
+Add `SessionInfo.pendingPromptAuthors?: PromptAuthorDispatchRecord[]`. Every direct/queued/steer dispatch pushes a record before invoking Pi and appends it to the sidecar. User-role `message_end` consumes the first exact-text pending record, stamps its author on the cloned visible event, and appends an `echoed` settlement. Rejection removes the pending record and appends `cancelled`.
+
+Keep this independent of `pendingSkillExpansions`; both may match the same echo. Skill rewriting and author stamping must be applied to the same cloned event without either helper discarding the other's fields.
+
+## 7. Live event flow
+
+### 7.1 Single normalization chokepoint
+
+Add to `src/server/agent/message-author.ts`:
+
+```ts
+normalizeVisibleAgentEvent(session, event, deps): unknown
+normalizeVisibleMessage(message, context): BobbitMessage
+normalizeVisibleMessages(messages, context): BobbitMessage[]
+```
+
+All `rpcClient.onEvent` subscriptions in `session-manager.ts` and `session-setup.ts` must normalize once before lifecycle tracking and emission. A small `SessionManager.prepareVisibleAgentEvent(session, rawEvent)` method prevents the restore, role-switch, external-session, refresh, and respawn listeners from drifting.
+
+Order:
+
+1. clone/stamp author on message-bearing events;
+2. pass the normalized event to `handleAgentLifecycle` so `latestMessageUpdate` stores the authored message;
+3. truncate large content;
+4. apply the existing skill/file-mention splice while retaining `author`;
+5. `emitSessionEvent` buffers and broadcasts the authored event.
+
+`message_update` and final assistant `message_end` both receive the same `agentAuthorForSession(session)`. Since EventBuffer stores the normalized event, resume replay also preserves authors.
+
+Server-synthesized message events that bypass `rpcClient.onEvent` must provide a validated author explicitly. In particular, `src/server/agent/session-setup.ts::handleSetupFailure` currently calls `emitSessionEvent` with a synthetic `role: "assistant"` error; stamp it with `system:bobbit` before emission so it is not inferred as model-authored. Keep `emitSessionEvent`'s input type permissive for non-message lifecycle events, but assert in tests that every server-created message-bearing event is authored.
+
+### 7.2 Message inference rules
+
+Apply rules in this order:
+
+1. `customType === "bobbit:dynamic-context"`, `display === false` dynamic context, Bobbit `system-notification`, mutation/setup/retry notification rows, and compaction synthetic rows -> system;
+2. assistant/model message -> session agent;
+3. ordinary user/user-with-attachments echo -> matched pending/sidecar author, else local user;
+4. message-level `toolResult`, `tool_result`/`tool` aliases, or a provider-history `role: "user"` message whose meaningful content consists only of tool-result blocks -> closest preceding accountable author, normally the preceding assistant agent; if no predecessor is available, use the session agent;
+5. unknown Bobbit-created custom rows -> system unless their creator supplied a validated author.
+
+Detection of tool-result blocks must recognize the same shapes already handled by `transcript-reader.ts` and `tool-result-error-normalizer.ts`: `toolResult`, `tool_result`, `tool`, and block-level `tool_result`/`toolResult`. It must never emit `kind: "tool"`.
+
+## 8. Snapshot and transcript flow
+
+### 8.1 Central snapshot pipeline
+
+Create `src/server/agent/visible-message-snapshot.ts` so every client snapshot uses one pipeline rather than duplicating logic in WS and session-manager call sites:
+
+```text
+Pi snapshot
+  -> normalizeToolResultErrorSnapshot
+  -> spliceInFlightMessage
+  -> spliceInFlightSteers
+  -> mergeCompactionSidecarIntoMessages
+  -> mergeAuthorSidecarIntoMessages + infer remaining authors
+  -> truncateLargeToolContentInMessages
+  -> mergeSkillSidecarEntriesIntoMessages
+  -> stampSnapshotOrder (WS boundary only)
+```
+
+Author merge runs before skill display-text rewriting because the sidecar key is exact `modelText`. Existing `author` fields survive truncation and skill rewriting via object spread.
+
+Use the helper from:
+
+- `src/server/ws/handler.ts::case "get_messages"` for active sessions;
+- `src/server/agent/session-manager.ts::refreshAfterCompaction`;
+- role-switch/refresh message broadcasts in `session-manager.ts`;
+- archived `get_messages` after `getArchivedMessages` parses envelopes;
+- any attach/reconnect branch that emits `type: "messages"`.
+
+Title generation (`generateSessionTitle`) continues to use raw Pi messages; it does not need author metadata.
+
+### 8.2 Archived messages
+
+Refactor `SessionManager.getArchivedMessages` to retain each JSONL envelope's outer `id` and timestamp during normalization, even though the returned visible message keeps the same Pi role/content shape. Pass persisted session metadata and author-sidecar entries to `normalizeVisibleMessages`, then discard any private correlation-only fields before WS send.
+
+Archive is soft deletion, so retain the author sidecar. Hard purge/termination cleanup invokes `purgeAuthorSidecar` beside transcript/session-sidecar cleanup.
+
+### 8.3 Transcript reader and pre-compaction history
+
+Extend `CompactMessage` and `VerboseMessage` in `src/server/agent/transcript-reader.ts` with `author?: MessageAuthor`. When `VerboseMessage.message` is included, place the same author on that message object so `<message-list>` receives it.
+
+Extend `ReadTranscriptOptions` and `ReadOrphanedOptions` with an optional author-resolution context containing:
+
+- Bobbit session/persisted-session identity fields;
+- folded author-sidecar entries.
+
+`parseJsonl` already retains `entryId`, timestamp, role, and `fullMessage`; use those fields for sidecar correlation. `readTranscript` and `readOrphanedBeforeCompaction` run sequential author normalization over the selected transcript ordering before compact/verbose projection. Direct library callers that omit context keep today's output except for safely inferred `user`/`system` where session-independent; server routes always supply context.
+
+The REST response remains additive. Older clients ignore `author`.
+
+### 8.4 Fork and continue
+
+The fork and continue routes in `src/server/server.ts` copy Pi JSONL at the `destJsonl` paths around the existing `sessionFileCopy` calls. After the destination Bobbit session id is known, call `copyAuthorSidecar(sourceSessionId, destinationSessionId)`. Failure is non-fatal and produces legacy inference on the clone. Failed-fork cleanup removes the destination author sidecar together with cloned transcript state.
+
+### 8.5 Search
+
+Search role/weight behavior remains unchanged. Add author metadata only:
+
+- `src/server/search/sources/message-source.ts` loads/folds the session author sidecar once per session and resolves each parsed message author;
+- `src/server/search/search-service.ts::indexMessage` reads a validated `message.author` on live indexing;
+- emitted `Indexable.metadata` gains `authorKind`, `authorId`, and `authorLabel` when available.
+
+Do not add author labels to indexed message text or snippets. No search schema version bump is required because metadata is schemaless, but a normal rebuild/backfill should populate it for existing rows. If the index cannot access a sandbox transcript/sidecar, retain current indexing behavior without author metadata.
+
+## 9. Prompt producer audit
+
+Every producer must pass the correct `PromptSource` and, for agent/extension relays, server-derived identity context.
+
+### Human (`user`)
+
+- `src/server/ws/handler.ts` cases `prompt` and `steer`;
+- `src/server/server.ts` ask-response submit (`enqueuePrompt(sessionId, envelope)`), because the answers are human input;
+- user-operated team steer endpoints only when the authenticated request is from the app rather than an agent tool.
+
+Optimistic client rows in `src/app/remote-agent.ts::{prompt,steer}` must include `LOCAL_USER_AUTHOR` so the first paint and server echo agree.
+
+### Agent relay (`agent`)
+
+- `src/server/server.ts` `/api/sessions/:id/prompt`: derive caller from `X-Bobbit-Session-Secret` and use that caller session's agent author;
+- `src/server/server.ts` team prompt/steer routes invoked by the team tools: derive the caller with existing session authentication, never from body fields;
+- `src/server/agent/orchestration-core.ts::{spawn,prompt,steer}`: initial child instructions and follow-ups are authored by `ownerSessionId`;
+- `src/server/agent/session-prompt-delivery.ts` threads `source` and resolved `author` through normal, steer, and errored-recovery queue paths.
+
+### System
+
+Explicitly correct current default-`user` internal paths:
+
+- `src/server/agent/inbox-nudger.ts::applyPolicyThenNudge` -> `source: "system"`;
+- `src/server/agent/team-manager.ts::notifyTeamLeadOfSpecChange` -> `source: "system"`;
+- `src/server/agent/nested-goal-routes.ts` parent pause/replan notification -> `source: "system"` or `"child-complete"` as appropriate;
+- existing auto nudge, task completion, child completion, verification, and orchestration reminder calls retain their specific non-user `PromptSource`;
+- restart/retry/setup-failure continuations use `source: "system"` even if their Pi transport remains user-role.
+
+### Extension system identity
+
+In `src/server/ws/handler.ts::ext_session_post`, the server already resolves trusted `surf.packId` and `surf.tool`. Construct the extension system author there and pass it through both `enqueuePrompt` and `deliverLiveSteer`. `postMsg.role` remains a framing/display choice and does not make the browser extension a human author. No caller-supplied pack/tool/author is trusted.
+
+## 10. UI behavior
+
+Update client mirrors in:
+
+- `src/app/remote-agent.ts::QueuedMessage`;
+- `src/ui/components/MessageEditor.ts::QueuedMessage`;
+- `src/app/message-reducer.ts::OrderedMessage`;
+- `src/ui/components/Messages.ts` and `MessageList.ts` message property types.
+
+Reducers already preserve unknown object fields through spread/replacement; add assertions so author survives optimistic replacement, live `message_end`, snapshot merge, and in-flight streaming state. Dedup keys remain role/content/id based; author must not split otherwise-equivalent rows during optimistic-to-server reconciliation.
+
+Do not add badges or per-bubble author text. Existing user, assistant, tool, artifact, permission, and system renderers remain visually identical. Detail/diagnostic code may inspect `message.author` programmatically.
+
+`defaultConvertToLlm` and `customConvertToLlm` must strip Bobbit-only `author` before returning Pi `Message` objects. This is a defensive guarantee that future local-agent use cannot accidentally forward metadata, while current text/role/content bytes remain unchanged.
+
+## 11. Failure handling and backward compatibility
+
+- `author` remains optional in every persisted/wire/client type.
+- Old queued rows and legacy in-flight steer strings normalize to local user; no migration is required.
+- Old transcript rows infer by role/content. Assistant -> session agent; ordinary user -> local user; hidden/custom -> system; tool result -> preceding/session agent.
+- Missing, empty, corrupt, partially written, or future-version author sidecars are treated as absent. Log bounded warnings and continue.
+- A sidecar append failure affects only author precision after reload; live normalization still stamps the event.
+- Sidecar data never gates prompt dispatch, retry, restore, archive, compaction, transcript reading, or search.
+- Do not rewrite existing Pi JSONL files. Backfill is read-time normalization; the first search rebuild may persist only derived search metadata.
+- Unknown/invalid incoming `author` fields from Pi transcript data are not authoritative. Replace them with Bobbit-derived values unless they originated from a validated Bobbit sidecar/live normalization path.
+- IDs/labels are metadata, not authorization principals. Existing session secrets, surface tokens, and REST authorization remain the authority.
+
+## 12. Implementation file plan
+
+| Path | Change |
+|---|---|
+| `src/shared/message-author.ts` | New public types, constants, guards, `BobbitMessage` intersection. |
+| `src/shared/prompt-source.ts` | Dependency-neutral home for the unchanged eight-value `PromptSource` union; `session-manager.ts` re-exports it for compatibility. |
+| `src/server/agent/message-author.ts` | New pure identity construction, PromptSource mapping, tool-result detection, event/message normalization. |
+| `src/server/agent/author-sidecar.ts` | New host-side versioned JSONL dispatch/settlement persistence, merge/copy/purge. |
+| `src/server/agent/visible-message-snapshot.ts` | New shared snapshot pipeline used by active, refresh, role-switch, and archived paths. |
+| `src/server/ws/protocol.ts` | Optional `source`/`author` on `QueuedMessage`; import shared author type. |
+| `src/server/agent/prompt-queue.ts` | Preserve author/source on enqueue/front/restore. |
+| `src/server/agent/session-store.ts` | Back-compatible structured in-flight steer element type. |
+| `src/server/agent/session-manager.ts` | Re-export `PromptSource`; resolve/stash authors, author-aware dispatch/drain/steer/retry, normalize every live event, use shared snapshot helper, archived normalization, cleanup. |
+| `src/server/agent/session-setup.ts` | Stamp the server-synthesized setup-failure `message_end` as Bobbit system. |
+| `src/server/agent/session-prompt-delivery.ts` | Thread resolved author through prompt/steer/recovery options. |
+| `src/server/agent/splice-inflight-message.ts` | Stamp authored in-flight steer rows and accept legacy/new ledger records. |
+| `src/server/agent/transcript-reader.ts` | Add optional authors to compact/verbose output and normalize legacy/pre-compaction messages. |
+| `src/server/ws/handler.ts` | Initialize/use authored snapshots; human and extension author context; extension pack/tool identity. |
+| `src/server/server.ts` | Initialize sidecar, derive agent relay identities, audit system sources, copy/purge sidecars on fork/continue/failure. |
+| `src/server/agent/{team-manager,inbox-nudger,nested-goal-routes,orchestration-core}.ts` | Correct producer sources and caller identities. |
+| `src/server/search/{search-service.ts,sources/message-source.ts}` | Add author metadata without changing indexed text/role weights. |
+| `src/app/{remote-agent,message-reducer,custom-messages}.ts` | Client types, optimistic/system authors, preservation, provider-conversion stripping. |
+| `src/ui/components/{Messages,MessageList,MessageEditor}.ts` | Author-aware types only; no label rendering. |
+
+Avoid a broad Pi type augmentation and avoid adding author fields to client command payloads.
+
+## 13. Test plan
+
+All new tests live under `tests2/` and are registered through the repository's v2 test inventory process.
+
+### 13.1 Core/unit
+
+1. **`tests2/core/message-author.test.ts`**
+   - all eight `PromptSource` values map correctly;
+   - staff/session/role label priority and stable ids;
+   - hidden dynamic context -> system;
+   - assistant -> agent;
+   - ordinary legacy user -> local user;
+   - message-level and block-level tool results inherit agent/accountable author and never produce `tool`;
+   - invalid pre-existing author is ignored.
+
+2. **`tests2/core/author-sidecar.test.ts`**
+   - dispatch + echoed settlement round-trip;
+   - cancelled dispatch excluded;
+   - duplicate identical texts consume FIFO;
+   - id match wins over text;
+   - timestamp disambiguates compacted duplicates;
+   - corrupt/unknown-version lines are skipped;
+   - missing directory/file is empty and non-throwing;
+   - copy and purge behavior.
+
+3. **`tests2/core/prompt-queue-author.test.ts`** (or extend the v2 queue tests)
+   - author/source survive enqueue, reorder, steer promotion, `toArray`, persisted restore, and front re-enqueue;
+   - old rows without fields still construct and default safely;
+   - mixed-author steer batching uses the Bobbit batch system author without changing joined text.
+
+4. **Extend `tests2/core/session-manager-getmessages-splice.test.ts`**
+   - in-flight assistant splice has target agent author;
+   - in-flight human/agent/system steers retain their author;
+   - two identical in-flight steers remain distinct;
+   - snapshot and live final event authors converge.
+
+5. **Extend `tests2/core/transcript-reader.test.ts`**
+   - legacy compact/verbose rows infer authors;
+   - sidecar system prompt overrides user-role inference;
+   - verbose `message.author` equals envelope `author`;
+   - provider-history user-role tool-result blocks do not become user/tool authors;
+   - pre-compaction reader applies the same rules.
+
+6. **Extend reducer/client tests**
+   - optimistic local-user author survives until authoritative replacement;
+   - `message_update`/`message_end` and snapshot reductions retain author;
+   - author does not alter existing dedup/order behavior;
+   - `defaultConvertToLlm` strips author.
+
+### 13.2 Integration
+
+Add `tests2/integration/message-author-lifecycle.test.ts` using the real gateway fixture and mock agent:
+
+- send a normal WS prompt; assert live user `message_end.author.kind === "user"` and assistant update/end `=== "agent"`;
+- request `get_messages`; assert ids/kinds equal the live frames;
+- reconnect/reload and assert equality again;
+- enqueue while busy, restart gateway, and assert queued `author` survives and the eventual echo/snapshot is still user;
+- trigger one server path (prefer task notification or auto-nudge with injectable timers); assert its Pi user-role row has `author.kind === "system"` live and after snapshot reload;
+- exercise `session_prompt` from an authenticated caller session; assert target prompt author is the caller agent identity;
+- exercise extension session write; assert system kind and extension pack/tool id.
+
+Retain existing role/content assertions to prove roles and model text did not change.
+
+### 13.3 Browser
+
+Add `tests2/browser/e2e/message-author-reload.spec.ts` (or a journey using existing tail-chat fixtures):
+
+1. create/open a session;
+2. send a normal prompt and wait for reply;
+3. inspect the active `RemoteAgent.state.messages` and assert user/assistant author metadata;
+4. reload or navigate away/back to force `get_messages`;
+5. assert the same author ids/kinds remain in client state;
+6. assert normal user/assistant bubbles contain no new visible author badge/label and their existing layout remains present.
+
+### 13.4 Commands
+
+```bash
+npm run check
+npm run test:unit
+npm run test:browser -- message-author-reload.spec.ts
+npm run test:e2e
+```
+
+Run the full E2E suite because queue persistence, restart recovery, and extension session-write delivery are modified.
+
+## 14. Acceptance traceability
+
+| Acceptance criterion | Design mechanism |
+|---|---|
+| Correct live user/assistant/system kinds | PromptSource mapping + single live normalization chokepoint (§4.4, §7). |
+| Legacy sessions load/render/search | Optional types + read-time inference + sidecar failure fallback (§8, §11). |
+| Server prompts distinguishable from humans | Corrected producer audit + prompt-author sidecar (§5, §9). |
+| Tool is not an author kind | Three-kind type and tool-result inheritance rules (§3, §7.2). |
+| In-flight steer/assistant snapshots authored | Structured steer ledger + normalized `latestMessageUpdate` (§6, §7). |
+| Reload matches live stream | EventBuffer normalization + centralized snapshot/sidecar merge (§7, §8). |
+| UI remains uncluttered | Type-only UI change; no label rendering (§10). |
+| Provider behavior unchanged | No transcript mutation/text prefix/provider-name mapping; defensive conversion stripping (§3, §10). |
+| Bobbit-owned/additive persistence | Host-side versioned author sidecar and optional queue fields (§5, §6). |
