@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isMessageAuthor, type MessageAuthor } from "../../shared/message-author.js";
-import type { PromptSource } from "../../shared/prompt-source.js";
+import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 
 interface PromptQueueEnqueueOptions {
@@ -13,11 +13,18 @@ interface PromptQueueEnqueueOptions {
 }
 
 function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
-	if (message.author === undefined || isMessageAuthor(message.author)) {
-		return { ...message };
-	}
 	const normalized = { ...message };
-	delete normalized.author;
+	if (normalized.author !== undefined && !isMessageAuthor(normalized.author)) {
+		delete normalized.author;
+	}
+	if (normalized.source !== undefined && !isPromptSource(normalized.source)) {
+		delete normalized.source;
+	}
+	// Older partial records may carry the accountable author without source.
+	// Recover the coarser source rather than defaulting an agent/system row to user.
+	if (normalized.source === undefined && isMessageAuthor(normalized.author)) {
+		normalized.source = normalized.author.kind;
+	}
 	return normalized;
 }
 

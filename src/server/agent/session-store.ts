@@ -4,7 +4,7 @@ import { realClock, realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { recordDeletionTombstone } from "./deletion-tombstones.js";
 import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../shared/message-author.js";
-import type { PromptSource } from "../../shared/prompt-source.js";
+import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
@@ -60,17 +60,6 @@ export interface InFlightSteerRecord {
 /** The persisted boundary accepts legacy string-only steer ledgers. */
 export type PersistedInFlightSteer = string | InFlightSteerRecord;
 
-function isPromptSource(value: unknown): value is PromptSource {
-	return value === "user"
-		|| value === "auto-nudge"
-		|| value === "task-notification"
-		|| value === "verification"
-		|| value === "system"
-		|| value === "agent"
-		|| value === "child-complete"
-		|| value === "extension";
-}
-
 /**
  * Normalize the persisted steer ledger for runtime use. Legacy strings are
  * human-authored because they predate caller provenance and only the browser
@@ -103,7 +92,10 @@ export function normalizePersistedInFlightSteers(
 				: `legacy-inflight-steer:${index}`,
 		};
 		if (isPromptSource(entry.source)) record.source = entry.source;
-		if (isMessageAuthor(entry.author)) record.author = entry.author;
+		if (isMessageAuthor(entry.author)) {
+			record.author = entry.author;
+			if (record.source === undefined) record.source = entry.author.kind;
+		}
 		records.push(record);
 	}
 	return records.length > 0 ? records : undefined;

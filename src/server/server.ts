@@ -113,6 +113,7 @@ import {
 	copyAuthorSidecar,
 	initAuthorSidecarDir,
 	purgeAuthorSidecar,
+	readAuthorSidecar,
 } from "./agent/author-sidecar.js";
 import { agentAuthorForSession, BOBBIT_SYSTEM_AUTHOR } from "./agent/message-author.js";
 import { LOCAL_USER_AUTHOR } from "../shared/message-author.js";
@@ -14003,6 +14004,14 @@ async function handleApiRoute(
 			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 			const envelope = await readTranscript(params, {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
+				authorContext: {
+					session: targetPs,
+					sidecarEntries: readAuthorSidecar(targetId),
+					agentDeps: {
+						getStaff: (id) => staffManager.getStaff(id),
+						getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+					},
+				},
 			});
 			json(envelope);
 		} catch (err) {
@@ -14073,6 +14082,14 @@ async function handleApiRoute(
 				{
 					readContent: () => sessionFileRead(ctx2, targetPs.agentSessionFile!, sandboxManager),
 					firstKeptEntryId: entry.firstKeptEntryId,
+					authorContext: {
+						session: targetPs,
+						sidecarEntries: readAuthorSidecar(targetId),
+						agentDeps: {
+							getStaff: (id) => staffManager.getStaff(id),
+							getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+						},
+					},
 				},
 			);
 			json(envelope);
