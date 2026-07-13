@@ -114,6 +114,10 @@ function emitAgentEvent(rpcClient: any, event: Record<string, unknown>): void {
 }
 
 function surfacePoisonedHistoryError(session: any, consecutiveErrorTurns: number): void {
+	// This fixture represents an established conversation. Without this marker,
+	// the mock's first artificial agent_end runs deferred setup and get_state,
+	// which rewrites the canonical JSONL before the recovery boundary reads it.
+	session.setupComplete = true;
 	emitAgentEvent(session.rpcClient, {
 		type: "message_end",
 		message: {
@@ -173,10 +177,20 @@ test.describe("Journey: orphan tool-result recovery", () => {
 
 			await session.rpcClient.setModel(MODEL.provider, MODEL.id);
 			sessionManager.persistSessionModel(sessionId, MODEL.provider, MODEL.id);
-			const state = await session.rpcClient.getState();
-			const transcriptFile = state.data.sessionFile as string;
+			let persisted: any;
+			await expect.poll(
+				() => {
+					persisted = sessionManager.getPersistedSession(sessionId);
+					return persisted?.agentSessionFile;
+				},
+				{ timeout: 15_000, message: "ORPHAN_TOOL_RESULT_BROWSER_RECOVERY: persisted transcript path missing" },
+			).toEqual(expect.any(String));
+			// Use the canonical SessionStore path: every real repair boundary reads
+			// this path, while a test-only switch_session alone does not update it.
+			const transcriptFile = persisted.agentSessionFile as string;
 			writeJsonl(transcriptFile, affectedPiSequence());
 			await session.rpcClient.sendCommand({ type: "switch_session", sessionPath: transcriptFile });
+			expect(sessionManager.getPersistedSession(sessionId)?.agentSessionFile).toBe(transcriptFile);
 			session.lastPromptText = RETRY_INTENT;
 
 			await openApp(page);
@@ -187,6 +201,11 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			const initialSidebarRows = await page.locator(`[data-session-id="${sessionId}"]`).count();
 			expect(initialSidebarRows).toBeGreaterThan(0);
 
+			// The browser harness mock rewrites its current transcript on get_state.
+			// Re-seed after app hydration so Retry exercises Bobbit's real persisted-
+			// transcript repair boundary rather than a clobbered, id-less mock file.
+			writeJsonl(transcriptFile, affectedPiSequence());
+			expect(orphanIdsIn(transcriptFile)).toEqual([...ORPHAN_IDS]);
 			const retryRpc = session.rpcClient;
 			surfacePoisonedHistoryError(session, 3);
 			await expect(page.getByText(/unexpected tool_use_id/i).last()).toBeVisible({ timeout: 10_000 });
@@ -202,6 +221,8 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			session = requireSession(sessionManager, sessionId);
 			await expect.poll(() => messageTextCount(session, RETRY_INTENT), { timeout: 20_000 }).toBe(1);
 			await expect.poll(() => modelOf(session), { timeout: 20_000 }).toEqual(expect.objectContaining(MODEL));
+			await page.reload();
+			await expect(editor).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText("OK", { exact: true }).last()).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText(PRESERVED_HISTORY, { exact: true }).first()).toBeVisible();
 			await assertSingleSessionIdentity(page, sessionId, initialSidebarRows);
@@ -225,6 +246,8 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			await expect.poll(() => messageTextCount(session, FOLLOW_UP_INTENT), { timeout: 20_000 }).toBe(1);
 			await expect.poll(() => session.promptQueue.toArray().filter((row: any) => row.text.includes(FOLLOW_UP_INTENT)).length, { timeout: 20_000 }).toBe(0);
 			await expect.poll(() => modelOf(session), { timeout: 20_000 }).toEqual(expect.objectContaining(MODEL));
+			await page.reload();
+			await expect(editor).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText(FOLLOW_UP_INTENT, { exact: true }).last()).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText("OK", { exact: true }).last()).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText(PRESERVED_HISTORY, { exact: true }).first()).toBeVisible();
