@@ -21,13 +21,13 @@
  *   - seed { workflow: "feature", options: "Enable QA Testing" } → 400 (label NOT a valid key)
  *   - seed { workflow: "feature" }                  → 200 (no false rejection)
  *   - seed with omitted/empty workflow                → 400 MISSING_WORKFLOW (+ availableWorkflows)
- *   - project-less session (no workflows resolvable)  → 200 (validation skipped)
+ *   - target project with no workflows resolvable     → 200 (validation skipped)
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, rawApiFetch, readE2EToken, startTeam, teardownTeam } from "./_e2e/e2e-setup.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, readE2EToken, registerProject, startTeam, teardownTeam } from "./_e2e/e2e-setup.js";
 
 async function seedGoal(sid: string, args: Record<string, unknown>): Promise<Response> {
 	return apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
@@ -335,29 +335,35 @@ test.describe("goal proposal — workflow validation @smoke", () => {
 		await expectMissingWorkflow(r);
 	});
 
-	test("project-less session (no resolvable workflows) skips validation → 200", async () => {
-		// A tool assistant created with a bogus cwd and no projectId has
-		// projectId === undefined (see role-assistant-session.spec.ts), so
-		// resolveSessionWorkflows returns [] and validation is skipped — even an
-		// otherwise-unknown workflow id must NOT be rejected.
+	test("target project with no resolvable workflows skips validation → 200", async () => {
+		// When the resolved TARGET project has zero configured workflows,
+		// validation is skipped entirely — even an otherwise-unknown workflow id
+		// must NOT be rejected (validateGoalProposalWorkflow's empty-list branch).
+		//
+		// NOTE: a system-scope tool/role assistant (bogus cwd) resolves to the
+		// `system` project, which the cross-project seed resolver maps to the
+		// user-facing `headquarters` scope (docs/design/cross-project-proposals.md
+		// §6). Headquarters carries the default workflows, so that session shape
+		// now DOES validate; the target-based validation is covered in
+		// cross-project-proposals.test.ts (e). Here we exercise the skip branch
+		// against a freshly-registered project that has no workflows at all.
 		readE2EToken();
-		const bogusCwd = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-projectless-wf-"));
-		let projectlessSid: string | undefined;
+		const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-wfless-proj-"));
+		let wflessSid: string | undefined;
 		try {
-			const created = await rawApiFetch("/api/sessions", {
-				method: "POST",
-				body: JSON.stringify({ assistantType: "tool", cwd: bogusCwd }),
+			const project = await registerProject({
+				name: `wfless-${Date.now()}`,
+				rootPath: emptyRoot,
+				seedWorkflows: false,
 			});
-			expect(created.status, `expected 201 project-less tool session, got ${created.status}`).toBe(201);
-			projectlessSid = (await created.json()).id as string;
-			expect(projectlessSid).toBeTruthy();
+			wflessSid = await createSession({ cwd: emptyRoot, projectId: project.id });
 
-			const r = await seedGoal(projectlessSid, { title: "G", spec: "body\n", workflow: "does-not-exist" });
-			expect(r.status, "project-less session must skip workflow validation").toBe(200);
+			const r = await seedGoal(wflessSid, { title: "G", spec: "body\n", workflow: "does-not-exist" });
+			expect(r.status, "workflow-less target project must skip validation").toBe(200);
 			expect((await r.json()).ok).toBe(true);
 		} finally {
-			if (projectlessSid) await rawApiFetch(`/api/sessions/${projectlessSid}`, { method: "DELETE" }).catch(() => {});
-			try { fs.rmSync(bogusCwd, { recursive: true, force: true }); } catch { /* best-effort */ }
+			if (wflessSid) await deleteSession(wflessSid).catch(() => {});
+			try { fs.rmSync(emptyRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
 });

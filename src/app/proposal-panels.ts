@@ -57,6 +57,7 @@ import {
 	markProposalDismissed,
 	backToSessions,
 	uncacheSession,
+	resolveProjectMode,
 } from "./session-manager.js";
 import { deleteProposalFile, metadataObjectToRows, metadataRowsToObject } from "./proposal-helpers.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
@@ -71,7 +72,8 @@ import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { ACCESSORY_IDS, getAccessory, statusBobbit } from "./session-colors.js";
-import { defaultCwdForProjectSession, isHeadquartersProject } from "./headquarters.js";
+import { defaultCwdForProjectSession, isHeadquartersProject, projectDisplayName } from "./headquarters.js";
+import { getProjectAccentColor } from "./render-helpers.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 import { reloadStaffList } from "./sidebar.js";
 import {
@@ -123,6 +125,80 @@ function resolveGoalProposalProjectId(sessionId: string | null | undefined, fiel
 	const session = sessionId ? state.gatewaySessions.find(s => s.id === sessionId) : undefined;
 	if (session?.reattemptGoalId) return state.goals.find(g => g.id === session.reattemptGoalId)?.projectId;
 	return undefined;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Cross-project proposal banner (design §7)
+//
+// A proposal made from one project may target a DIFFERENT project via its
+// optional `projectId`. When the resolved target differs from the proposer's
+// session project we surface a prominent "Proposing into <Target>" banner at
+// the top of the panel. Same-project / unknown / undeterminable → no chrome.
+// ──────────────────────────────────────────────────────────────────────
+
+/** Normalise the hidden `system` scope to the user-facing `headquarters` id. */
+function normalizeProposalProjectId(id: string | null | undefined): string | undefined {
+	if (typeof id !== "string") return undefined;
+	const t = id.trim();
+	if (!t) return undefined;
+	return t === "system" ? "headquarters" : t;
+}
+
+/** The (normalised) project of the session that authored the proposal. */
+function proposerSessionProjectId(sessionId: string | null | undefined): string | undefined {
+	if (!sessionId) return undefined;
+	const session = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	return normalizeProposalProjectId(session?.projectId);
+}
+
+/**
+ * Resolve the cross-project banner target for a proposal, or undefined when no
+ * banner should render. Returns the target project record ONLY when it is
+ * registered AND differs from the proposer's session project.
+ */
+function crossProjectTarget(
+	type: ProposalType,
+	sessionId: string | null | undefined,
+): (typeof state.projects)[number] | undefined {
+	let rawTarget: string | undefined;
+	if (type === "goal") {
+		rawTarget = resolveGoalProposalProjectId(sessionId, state.activeProposals.goal?.fields as Record<string, unknown> | undefined);
+	} else if (type === "project") {
+		// Project proposals only banner an EXPLICIT, registered target — a
+		// brand-new / unknown project shows no banner (matches §3 tri-state).
+		const explicit = state.activeProposals.project?.fields?.projectId;
+		rawTarget = typeof explicit === "string" && explicit.trim() ? explicit.trim() : undefined;
+	} else {
+		rawTarget = proposalProjectId(type, sessionId);
+	}
+	const target = normalizeProposalProjectId(rawTarget);
+	if (!target) return undefined;
+	const record = state.projects.find(p => p.id === target);
+	if (!record) return undefined; // unknown target → no banner
+	const proposer = proposerSessionProjectId(sessionId);
+	// Only banner when we can confirm the target differs from the proposer.
+	if (!proposer || proposer === target) return undefined;
+	return record;
+}
+
+/** "Proposing into <Target Project>" banner, tinted with the target's accent. */
+function crossProjectBanner(type: ProposalType, sessionId: string | null | undefined): TemplateResult | typeof nothing {
+	const target = crossProjectTarget(type, sessionId);
+	if (!target) return nothing;
+	const accent = getProjectAccentColor(target);
+	const name = projectDisplayName(target);
+	return html`
+		<div
+			class="shrink-0 flex items-center gap-2 px-5 py-2 text-xs font-medium border-b"
+			data-testid="cross-project-banner"
+			data-target-project-id=${target.id}
+			style=${`border-color: color-mix(in oklch, ${accent} 45%, transparent); background: color-mix(in oklch, ${accent} 12%, transparent); color: var(--foreground);`}
+		>
+			<span class="inline-block w-2 h-2 rounded-full shrink-0" style=${`background: ${accent};`}></span>
+			<span>Proposing into <span class="font-semibold" data-testid="cross-project-target-name">${name}</span></span>
+		</div>
+	`;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -226,6 +302,12 @@ function normalizeWorkflowSelections(): void {
 // and the setter is already an exported cross-module API.
 try {
 	(window as unknown as Record<string, unknown>).__bobbitSetSelectedWorkflowId = setSelectedWorkflowId;
+	// Test seam: expose the shared config-scope getter so browser E2E can assert
+	// that a cross-project tool proposal's "View Tool" routed the editor to the
+	// TARGET project's config scope. Read-only getter; carries no secrets.
+	void import("./config-scope.js").then((m) => {
+		(window as unknown as Record<string, unknown>).__bobbitGetConfigScope = m.getConfigScope;
+	}).catch(() => { /* module unavailable */ });
 } catch { /* non-window environment */ }
 
 function ensureWorkflowsLoaded(projectId?: string): void {
@@ -579,6 +661,11 @@ interface GoalFormConfig {
 	specEditMode: boolean;
 	enabledOptionalSteps: string[];
 	linkedProjectId?: string;
+
+	/** Cross-project "Proposing into <Target>" banner (design §7). Rendered at the
+	 *  very top of the form when the goal targets a project other than the
+	 *  proposer's session project; `nothing`/undefined leaves the panel unchanged. */
+	crossProjectBanner?: TemplateResult | typeof nothing;
 
 	/** Workflow availability for the linked project. Drives the empty-workflows
 	 *  banner and Accept-disabled state in the form header. */
@@ -1424,7 +1511,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				: activeTab === "metadata"
 					? renderProposalMetadataTab(config)
 					: renderProposalSubgoalsTab(config);
-	return html`${tabBar}${panel}${footer}`;
+	return html`${config.crossProjectBanner ?? nothing}${tabBar}${panel}${footer}`;
 }
 
 // ============================================================================
@@ -1882,6 +1969,7 @@ function goalPreviewPanel() {
 				sandboxed: _goalSandboxed,
 				specEditMode: state.previewSpecEditMode,
 				enabledOptionalSteps: _assistantEnabledOptionalSteps,
+				crossProjectBanner: crossProjectBanner("goal", state.activeProposals.goal?.sessionId ?? activeSessionId()),
 				linkedProjectId: state.previewProjectId || undefined,
 				workflowState: workflowStateFor(state.previewProjectId || undefined),
 				workflowErrorMessage,
@@ -2084,6 +2172,7 @@ function rolePreviewPanel() {
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="role-proposal">
 			${proposalToast()}
+			${crossProjectBanner("role", state.activeProposals.role?.sessionId ?? activeSessionId())}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -2269,7 +2358,17 @@ function toolPreviewPanel() {
 	const handleViewTool = async () => {
 		const toolName = state.toolPreviewName.trim();
 		if (!toolName) return;
+		// Cross-project routing: a propose_tool(projectId: target) must open and
+		// save the tool in the TARGET project's config store, not the proposer's
+		// current scope. loadToolPageData keys off the shared config scope
+		// (getConfigApiProjectId → getConfigScope), so set the scope to the
+		// resolved target BEFORE loading/routing.
+		const target = proposalProjectId("tool", state.activeProposals.tool?.sessionId ?? activeSessionId());
 		const { loadToolPageData } = await import("./tool-manager-page.js");
+		if (target) {
+			const { getConfigScope, setConfigScope } = await import("./config-scope.js");
+			if (target !== getConfigScope()) setConfigScope(target);
+		}
 		await loadToolPageData();
 		setHashRoute("tool-edit", toolName);
 		renderApp();
@@ -2293,6 +2392,7 @@ function toolPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="tool-proposal">
+			${crossProjectBanner("tool", state.activeProposals.tool?.sessionId ?? activeSessionId())}
 			<div ${ref(toolOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
 				<!-- Tool name header -->
 				<div>
@@ -2558,6 +2658,7 @@ function staffPreviewPanel() {
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="staff-proposal">
 			${proposalToast()}
+			${crossProjectBanner("staff", staffPreviewSessionId())}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -2782,6 +2883,9 @@ const PROJECT_LEGACY_QA_KEYS = new Set([
  *  proposal panel). Hidden from the panel even if the agent or current config
  *  carries them. */
 const PROJECT_PANEL_HIDDEN_KEYS = new Set([
+	// projectId is the cross-project target selector, not editable config; keep it
+	// out of the "Other settings" custom-field list so it can't be casually edited.
+	"projectId",
 	"sandbox",
 	"sandbox_image",
 	"sandbox_mounts",
@@ -2845,11 +2949,29 @@ function activeProjectProposalOrFail(): NonNullable<typeof state.activeProposals
 	return proposal ?? null;
 }
 
+/**
+ * Resolve the project a project-proposal accept should target (design §5,
+ * tri-state — mirrors the server mutation-boundary invariant in §3):
+ *   explicit + registered → that project id (EDIT)
+ *   explicit + unknown    → UNKNOWN_PROJECT error, null (REJECT, no create)
+ *   absent                → the project pinned on the proposal at creation
+ *                           (race-safe), else the session's project
+ * The UI only preflights; the server remains authoritative.
+ */
 function projectIdForProjectProposal(proposal: NonNullable<typeof state.activeProposals.project>): string | null {
-	// Prefer the project id pinned on the proposal at creation time. A background
-	// refreshSessions() poll can mutate the session→project link between proposal
-	// creation and accept (notably for provisional proposals), so re-deriving from
-	// the mutable session list here could promote/config-write the WRONG project.
+	const fields = proposal.fields as Record<string, unknown> | undefined;
+	const explicitRaw = fields?.projectId;
+	const explicit = typeof explicitRaw === "string" && explicitRaw.trim() ? explicitRaw.trim() : undefined;
+	if (explicit) {
+		if (state.projects.some(p => p.id === explicit)) return explicit; // EDIT registered target
+		showConnectionError(PROJECT_ACCEPT_FAILED, `Unknown project "${explicit}". Cross-project proposals must target an already-registered project.`);
+		return null; // explicit + unknown → never fall through to the new-project flow
+	}
+	// Absent explicit target: prefer the project pinned on the proposal at
+	// creation time. A background refreshSessions() poll can mutate the
+	// session→project link between proposal creation and accept (notably for
+	// provisional proposals), so re-deriving from the mutable session list here
+	// could promote/config-write the WRONG project.
 	const pinned = typeof proposal.projectId === "string" && proposal.projectId.trim()
 		? proposal.projectId.trim()
 		: undefined;
@@ -2912,7 +3034,14 @@ function notifyProjectProposalAccepted(sessionId: string, summary: string): void
 export async function acceptProjectProposalFromPanel(): Promise<boolean> {
 	const proposal = activeProjectProposalOrFail();
 	if (!proposal) return false;
-	return proposal.mode === "registered"
+	// Recompute the mode from the CURRENT fields at dispatch time. The stored
+	// proposal.mode can go stale because the accept sub-functions re-resolve the
+	// target from fields.projectId, which the user can edit in the panel after
+	// the slot was created. Dispatching on the stale mode could skip the required
+	// promote step (e.g. a registered-mode slot re-targeted to a provisional
+	// project). resolveProjectMode is the single source of truth.
+	const mode = resolveProjectMode(proposal.sessionId, proposal.fields as Record<string, unknown>);
+	return mode === "registered"
 		? acceptRegisteredProjectProposalFromPanel(proposal)
 		: acceptProvisionalProjectProposalFromPanel(proposal);
 }
@@ -3066,7 +3195,10 @@ function projectProposalPanel() {
 			try { fields[k] = JSON.stringify(v); } catch { fields[k] = String(v); }
 		}
 	}
-	const mode = proposal.mode ?? "provisional";
+	// Derive the mode from the CURRENT fields so the Accept button label
+	// ("Apply Changes" vs "Accept Project") matches the branch acceptProjectProposalFromPanel
+	// will actually run after any projectId edit. Mirrors the dispatch-time recompute.
+	const mode = resolveProjectMode(proposal.sessionId, rawFields);
 	const isRegistered = mode === "registered";
 
 	/** Build union of keys to render: known editable + proposal fields. */
@@ -3188,6 +3320,7 @@ function projectProposalPanel() {
 	const isHistoricalProject = _proposalOverride?.type === "project";
 	return html`
 		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode} data-historical-proposal=${isHistoricalProject ? "true" : "false"}>
+			${crossProjectBanner("project", proposal.sessionId)}
 			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
 				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
 				${proposal.rev > 0 ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${proposal.rev}</span>` : ""}
@@ -3960,7 +4093,9 @@ function goalProposalPanel() {
 		renderApp();
 	};
 
-	return renderGoalForm({
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full" data-panel="goal-proposal">
+			${renderGoalForm({
 		title: _proposalTitle,
 		spec: _proposalSpec,
 		cwd: _proposalCwd,
@@ -3968,6 +4103,7 @@ function goalProposalPanel() {
 		sandboxed: _proposalSandboxed,
 		specEditMode: _proposalSpecEditMode,
 		enabledOptionalSteps: _proposalEnabledOptionalSteps,
+		crossProjectBanner: crossProjectBanner("goal", state.activeProposals.goal?.sessionId ?? activeSessionId()),
 		linkedProjectId: state.previewProjectId || undefined,
 		workflowState: workflowStateFor(state.previewProjectId || undefined),
 		workflowErrorMessage,
@@ -4033,7 +4169,9 @@ function goalProposalPanel() {
 
 		// ---- Goal proposal tabs wiring ----
 		...goalProposalTabsConfig(_proposalWorkflowId, (id) => { _proposalWorkflowId = id; }),
-	});
+	})}
+		</div>
+	`;
 }
 
 

@@ -232,11 +232,28 @@ export function applyProjectPalette(projectId?: string): void {
 // goal-only call shape used by render.ts:goalProposalPanel.
 // ============================================================================
 
-/** Resolve provisional/registered mode for a project proposal slot from the
- *  current session→project mapping. Extracted for the unified onProposal
- *  callback (Slice E gap-closure). Returns "provisional" if no project is
- *  registered yet (fresh project assistant flow). */
-function resolveProjectMode(sessionId: string): "provisional" | "registered" {
+/** Resolve provisional/registered mode for a project proposal slot.
+ *
+ *  When the proposal carries an explicit `fields.projectId` naming an EXISTING
+ *  project, mode derives from THAT target: a provisional target takes the
+ *  "provisional" (promote/provision) path and a registered target takes the
+ *  "registered" (EDIT) path — regardless of the source session's own mode. This
+ *  ensures a cross-project proposal targeting a provisional project still
+ *  promotes it rather than skipping straight to a config EDIT. An explicit
+ *  target that is unknown/not-found falls through to the source-session default.
+ *  When `projectId` is absent (the common new-project flow) mode derives from
+ *  the source session's project, returning "provisional" if no project is
+ *  registered yet.
+ *  Extracted for the unified onProposal callback (Slice E gap-closure). */
+export function resolveProjectMode(sessionId: string, fields?: Record<string, unknown>): "provisional" | "registered" {
+	const explicit = typeof fields?.projectId === "string" ? (fields.projectId as string).trim() : "";
+	if (explicit) {
+		const target = state.projects.find(p => p.id === explicit);
+		// Explicit KNOWN target → mode from that target (provisional target →
+		// promote/provision; registered target → EDIT). Unknown target falls
+		// through to the source-session default below.
+		if (target) return target.provisional ? "provisional" : "registered";
+	}
 	const session = state.gatewaySessions.find(s => s.id === sessionId);
 	const project = state.projects.find(p => p.id === session?.projectId);
 	return project?.provisional ? "provisional" : "registered";
@@ -1996,8 +2013,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				sessionId,
 				fields: merged,
 				streaming: false,
+				// Always recompute for project proposals: resolveProjectMode is a pure
+				// function of the CURRENT merged fields + registry/session state, so a
+				// later revision that adds/changes fields.projectId (e.g. a cross-project
+				// target) must re-evaluate the mode. Preferring a sticky prev.mode here
+				// left accept on a stale promote/edit branch (Greptile P1, PR #1005).
 				mode: type === "project"
-					? (prev?.mode ?? resolveProjectMode(sessionId))
+					? resolveProjectMode(sessionId, merged)
 					: undefined,
 				// Pin the target project id on project proposals so accept promotes
 				// the intended project even if a background session refresh mutates

@@ -92,6 +92,18 @@
       "reason": "Reproducing test (TDD red) for the 'Cache empty git-widget state' goal (44e3b434): pins the HQ 409 / GOAL_GIT_UNAVAILABLE path where git-status maps to error, retries exhaust with no branch/status data, and the widget renders nothing. Expects a persisted 'hidden' repo hint, cached-hidden reconnect to start quiet with no gitStatusLoading=true skeleton, exactly one quiet showable recheck, and reveal/cache 'yes' when content appears. FAILS on HEAD until the hidden/empty cache state is implemented."
     },
     {
+      "path": "tests2/integration/cross-project-proposals.test.ts",
+      "reason": "Native v2 integration coverage for the 'Cross-project proposals' goal (96fddb01): the proposal seed endpoint resolves the TARGET project uniformly across goal/role/tool/staff — omitted → session project (system → headquarters), explicit valid cross-project accepted and stamped onto proposal.fields.projectId, explicit unknown → 422 UNKNOWN_PROJECT — while propose_project is exempt (a brand-new/unknown projectId is allowed at seed), and goal workflow validation resolves against the target project's workflows rather than the session's."
+    },
+    {
+      "path": "tests2/dom/resolve-project-mode.test.ts",
+      "reason": "PR #1005 review (Greptile P1) coverage for the 'Cross-project proposals' goal (96fddb01): src/app/session-manager.ts::resolveProjectMode must derive a project proposal's provisional/registered mode from an EXPLICIT fields.projectId target when that target EXISTS (provisional target → 'provisional'/promote path; registered target → 'registered'/EDIT path), regardless of the source session's own mode. Only an unknown explicit target falls through to the source session, and an absent projectId keeps the source-session new-project flow. Pins the fix so a registered source targeting a provisional project no longer skips the required promote."
+    },
+    {
+      "path": "tests2/dom/project-accept-dispatch.test.ts",
+      "reason": "PR #1005 review (Greptile P1, 'Mode Stays Stale') coverage for the 'Cross-project proposals' goal (96fddb01): src/app/proposal-panels.ts::acceptProjectProposalFromPanel must recompute the registered-vs-provisional accept branch from the CURRENT fields.projectId via resolveProjectMode at dispatch time, not from the stale stored proposal.mode. Pins that a 'registered'-mode slot re-targeted to a provisional project takes the promote branch (POST /promote), a 'provisional'-mode slot targeting a registered project takes the EDIT branch (PUT /api/projects/:id, no promote), and a correct provisional slot still promotes."
+    },
+    {
       "path": "tests2/integration/direct-agent-admin-token.test.ts",
       "reason": "Pinning test for the 'Direct-agent admin token' interim rollback: non-sandboxed (direct) agents receive the gateway ADMIN token (readToken()) via scopedGatewayEnvForDirectAgent (createSession/createDelegateSession) and applyScopedGatewayCredentials (restore/revive/respawn), while the sandbox path (mintScopedGatewayToken) still produces a per-project SCOPED token distinct from the admin token. Also pins the loud-throw when no admin token is available (no silent fallback)."
     },
@@ -275,6 +287,10 @@
     },
     {
       "path": "tests2/browser/journeys/crash-restart.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/cross-project-proposal-banner.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
