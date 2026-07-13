@@ -577,7 +577,7 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		);
 	});
 
-	it("resumed idle reviewers are reminded immediately without waiting for the long busy window", () => {
+	it("resumed idle reviewers are reminded immediately while busy reviewers get the resolved turn allowance", () => {
 		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/verification-harness.ts"), "utf8");
 		const start = source.indexOf("private async _tryResumeFromSession");
 		assert.ok(start >= 0, "_tryResumeFromSession should exist");
@@ -587,13 +587,13 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 
 		assert.match(
 			preReminder,
-			/const idleResult = session\.status === "idle"\s*\? \(\{ type: "idle" as const \}\)\s*:\s*await Promise\.race/,
-			"A restored reviewer that is already idle must go straight to the reminder instead of waiting for the 180s busy-session window.",
+			/const idleResult = session\.status === "idle"\s*\? \(\{ type: "idle" as const \}\)\s*:\s*await this\.waitForReviewTurn\(step\.sessionId, resultPromise, timeoutMs\);/,
+			"A restored reviewer that is already idle must go straight to the reminder; a busy reviewer must wait through the shared review-turn helper.",
 		);
 		assert.match(
 			preReminder,
-			/waitForIdle\(step\.sessionId, 180_000\)/,
-			"Busy resumed reviewers should still wait for actual idle before the reminder; the long wait must be explicit.",
+			/const timeoutMs = timeoutSec \* 1000;[\s\S]*await this\.waitForReviewTurn\(step\.sessionId, resultPromise, timeoutMs\)/,
+			"Busy resumed reviewers should receive the resolved per-step allowance rather than a hardcoded restart window.",
 		);
 	});
 
@@ -694,8 +694,8 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		const hardFailure = source.indexOf("output: \"Agent did not call verification_result after reminder.\"", livePathStart);
 		assert.ok(hardFailure >= 0, "live post-reminder ignored-reminder failure should exist");
 
-		const resultRace = source.lastIndexOf("const result2 = await Promise.race", hardFailure);
-		assert.ok(resultRace > livePathStart, "should find live post-reminder result2 race");
+		const resultRace = source.lastIndexOf("const result2 = await this.waitForReviewTurn(sessionId, resultPromise, timeoutMs)", hardFailure);
+		assert.ok(resultRace > livePathStart, "should find live post-reminder review-turn wait");
 		const postReminderIdlePath = source.slice(resultRace, hardFailure);
 
 		assert.match(
