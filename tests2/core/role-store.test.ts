@@ -42,8 +42,8 @@ describe("validateModelString", () => {
 });
 
 describe("validateThinkingLevel", () => {
-	it("accepts canonical values (including xhigh)", () => {
-		for (const v of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
+	it("accepts canonical values (including xhigh and max)", () => {
+		for (const v of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
 			assert.equal(validateThinkingLevel(v), v);
 		}
 	});

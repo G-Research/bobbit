@@ -30,11 +30,17 @@ function messageCarriesReturnedErrorFlag(message: any): boolean {
 	return false;
 }
 
+function contentCarriesReturnedErrorFlag(value: unknown): boolean {
+	const text = textFromContent(value);
+	return !!text && hasExplicitErrorFlag(parseJsonObject(text));
+}
+
 function eventCarriesReturnedErrorFlag(event: any): boolean {
 	if (!event || typeof event !== "object") return false;
 	if (hasExplicitErrorFlag(event)) return true;
 	if (hasExplicitErrorFlag(event.result) || hasExplicitErrorFlag(event.output)) return true;
 	if (typeof event.output === "string" && hasExplicitErrorFlag(parseJsonObject(event.output))) return true;
+	if (contentCarriesReturnedErrorFlag(event.result?.content) || contentCarriesReturnedErrorFlag(event.output?.content)) return true;
 	return false;
 }
 

@@ -86,20 +86,80 @@ function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[
 	return mergeSidecarEntriesIntoMessages(entries, messages);
 }
 
+const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+/**
+ * Build the `state.model` payload for a live/rehydrated frame.
+ *
+ * Authoritative metadata (registry cache / pi-ai catalog) always wins so stale
+ * or incorrect live frames get corrected — e.g. Claude Fable 5's 1M context,
+ * `reasoning:true`, and `thinkingLevelMap {..., max:"max"}`.
+ *
+ * When the resolver only produced INFERRED defaults (custom / aigw / unknown
+ * providers that legitimately fall through to `inferMeta`), those defaults must
+ * NOT clobber more-accurate live fields already present on `base` (the agent's
+ * live `state.model`). Inferred values are used only as a fallback for fields
+ * the live frame does not already carry.
+ */
+export function buildResolvedModelStateModel(provider: string, id: string, base?: Record<string, unknown>): Record<string, unknown> {
+	const meta = resolveModelStateMeta(provider, id);
+	const model: Record<string, unknown> = {
+		...(base ?? {}),
+		provider,
+		id,
+	};
+	const inferredFallback = meta.source === "inferred";
+
+	// contextWindow / maxTokens: authoritative overwrites; inferred only fills gaps.
+	model.contextWindow = inferredFallback && isPositiveNumber(base?.contextWindow)
+		? base!.contextWindow
+		: meta.contextWindow;
+	model.maxTokens = inferredFallback && isPositiveNumber(base?.maxTokens)
+		? base!.maxTokens
+		: meta.maxTokens;
+
+	// reasoning: authoritative overwrites; inferred keeps a live boolean when present.
+	model.reasoning = inferredFallback && typeof base?.reasoning === "boolean"
+		? base!.reasoning
+		: meta.reasoning;
+
+	// thinkingLevelMap: authoritative source is the sole owner. On inferred
+	// fallback keep a live map when present (else drop it so the client applies
+	// its family heuristic).
+	if (meta.thinkingLevelMap) {
+		model.thinkingLevelMap = meta.thinkingLevelMap;
+	} else if (inferredFallback && base?.thinkingLevelMap && typeof base.thinkingLevelMap === "object") {
+		model.thinkingLevelMap = base.thinkingLevelMap;
+	} else {
+		delete model.thinkingLevelMap;
+	}
+	return model;
+}
+
+function normalizeStateModelSnapshot(
+	data: Record<string, unknown>,
+	sessionManager: SessionManager,
+	sessionId: string,
+): Record<string, unknown> {
+	const model = data.model;
+	if (!model || typeof model !== "object") return data;
+	const modelRecord = model as Record<string, unknown>;
+	const persisted = sessionManager.getPersistedSession(sessionId);
+	const provider = typeof modelRecord.provider === "string" ? modelRecord.provider : persisted?.modelProvider;
+	const id = typeof modelRecord.id === "string" ? modelRecord.id : persisted?.modelId;
+	if (!provider || !id) return data;
+	return {
+		...data,
+		model: buildResolvedModelStateModel(provider, id, modelRecord),
+	};
+}
+
 /** Send persisted model info as fallback when getState() is unavailable. */
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
 	const data: Record<string, unknown> = {};
 	if (persisted?.modelProvider && persisted?.modelId) {
-		const meta = resolveModelStateMeta(persisted.modelProvider, persisted.modelId);
-		data.model = {
-			provider: persisted.modelProvider,
-			id: persisted.modelId,
-			contextWindow: meta.contextWindow,
-			maxTokens: meta.maxTokens,
-			reasoning: meta.reasoning,
-			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
-		};
+		data.model = buildResolvedModelStateModel(persisted.modelProvider, persisted.modelId);
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) {
@@ -145,15 +205,7 @@ function buildArchivedStateData(
 		statusVersion: 0,
 	};
 	if (archived.modelProvider && archived.modelId) {
-		const meta = resolveModelStateMeta(archived.modelProvider, archived.modelId);
-		data.model = {
-			provider: archived.modelProvider,
-			id: archived.modelId,
-			contextWindow: meta.contextWindow,
-			maxTokens: meta.maxTokens,
-			reasoning: meta.reasoning,
-			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
-		};
+		data.model = buildResolvedModelStateModel(archived.modelProvider, archived.modelId);
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) data.imageGenerationModel = imageModel;
@@ -504,7 +556,11 @@ export function handleWebSocketConnection(
 					if (stateResponse.success) {
 						// Splice canonical session status + version so the client's `case "state"`
 						// can prime `_lastStatusVersion` from the snapshot.
-						const spliced = { ...(stateResponse.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
+						const spliced = normalizeStateModelSnapshot(
+							{ ...(stateResponse.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 },
+							sessionManager,
+							sessionId,
+						);
 						sendStateWithCost(ws, sessionManager, sessionId, spliced);
 						sendImageModelState(ws, sessionManager, sessionId);
 						// If agent state lacks model info, supplement with persisted data
@@ -1006,7 +1062,11 @@ export function handleWebSocketConnection(
 							// Splice canonical session status + version into the snapshot so
 							// the client's `case "state"` can prime `_lastStatusVersion` from
 							// the snapshot path (e.g. on reconnect via get_state).
-							const spliced = { ...(stateResp.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
+							const spliced = normalizeStateModelSnapshot(
+								{ ...(stateResp.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 },
+								sessionManager,
+								sessionId,
+							);
 							sendStateWithCost(ws, sessionManager, sessionId, spliced);
 							sendImageModelState(ws, sessionManager, sessionId);
 							// If agent state lacks model info, supplement with persisted data

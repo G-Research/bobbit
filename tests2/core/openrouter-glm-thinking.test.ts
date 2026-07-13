@@ -24,7 +24,7 @@ process.env.BOBBIT_AGENT_DIR = agentDir;
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
-const { getModel } = await import("@earendil-works/pi-ai");
+const { getBuiltinModel } = await import("@earendil-works/pi-ai/providers/all");
 const { clampThinkingLevelForModel, resolveThinkingClampModel } = await import("../../src/server/agent/thinking-level-clamp.ts");
 
 const managers: any[] = [];
@@ -92,14 +92,14 @@ describe("OpenRouter/AIGW GLM 5.x thinking clamp", () => {
 	});
 
 	it("runtime persisted OpenRouter GLM 5.2 clamp uses pi-ai catalog metadata", () => {
-		const catalogModel = getModel("openrouter" as any, "z-ai/glm-5.2") as any;
+		const catalogModel = getBuiltinModel("openrouter" as any, "z-ai/glm-5.2" as any) as any;
 		assert.equal(catalogModel?.reasoning, true, "pi-ai catalog should mark OpenRouter GLM 5.2 as reasoning-capable");
 
 		const resolved = resolveThinkingClampModel("openrouter", "z-ai/glm-5.2");
 		assert.equal(resolved.metadataSource, "pi-ai-catalog");
 		assert.equal(resolved.reasoning, true);
 		assert.equal(clampThinkingLevelForModel("high", "openrouter", "z-ai/glm-5.2"), "high");
-		assert.equal(clampThinkingLevelForModel("xhigh", "openrouter", "z-ai/glm-5.2"), "high");
+		assert.equal(clampThinkingLevelForModel("xhigh", "openrouter", "z-ai/glm-5.2"), "xhigh");
 	});
 
 	it("runtime persisted AIGW GLM 5.2 clamp keeps inferMeta fallback", () => {
@@ -113,6 +113,36 @@ describe("OpenRouter/AIGW GLM 5.x thinking clamp", () => {
 		assert.equal(clampThinkingLevelForModel("xhigh", "aigw", "z-ai/glm-5.2", { catalogLookup: throwingCatalogLookup }), "high");
 	});
 
+	it("runtime persisted AIGW GPT 5.6 clamp preserves max via inferMeta map", () => {
+		const throwingCatalogLookup = () => {
+			throw new Error("AIGW must not consult the built-in catalog");
+		};
+		const resolved = resolveThinkingClampModel("aigw", "openai/gpt-5.6-luna", { catalogLookup: throwingCatalogLookup });
+		assert.equal(resolved.metadataSource, "inferMeta");
+		assert.equal(resolved.reasoning, true);
+		assert.equal(resolved.thinkingLevelMap?.xhigh, "xhigh");
+		assert.equal(resolved.thinkingLevelMap?.max, "max");
+		assert.equal(clampThinkingLevelForModel("xhigh", "aigw", "openai/gpt-5.6-luna", { catalogLookup: throwingCatalogLookup }), "xhigh");
+		assert.equal(clampThinkingLevelForModel("max", "aigw", "openai/gpt-5.6-luna", { catalogLookup: throwingCatalogLookup }), "max");
+	});
+
+	it("/api/models marks AIGW-routed GPT 5.6 entries reasoning + max-capable", async () => {
+		await withAigwServer([
+			{ id: "openai/gpt-5.6-luna", context_length: 272_000, max_tokens: 128_000 },
+		], async (baseUrl) => {
+			const prefs = new PreferencesStore(fs.mkdtempSync(path.join(stateDir, "aigw-gpt56-prefs-")));
+			prefs.set("aigw.url", baseUrl);
+			invalidateModelCache();
+
+			const models = await getAvailableModels(prefs);
+			const luna = models.find((m: any) => m.provider === "aigw" && m.id === "openai/gpt-5.6-luna");
+			assert.ok(luna, "expected openai/gpt-5.6-luna in model registry output");
+			assert.equal(luna.reasoning, true);
+			assert.equal(luna.thinkingLevelMap?.xhigh, "xhigh");
+			assert.equal(luna.thinkingLevelMap?.max, "max");
+		});
+	});
+
 	it("catalog thinkingLevelMap metadata is passed through to xhigh support", () => {
 		const catalogLookup = () => ({ reasoning: true, thinkingLevelMap: { xhigh: "xhigh" as const } });
 		const resolved = resolveThinkingClampModel("openrouter", "vendor/future-reasoner", { catalogLookup });
@@ -122,7 +152,7 @@ describe("OpenRouter/AIGW GLM 5.x thinking clamp", () => {
 	});
 
 	it("runtime persisted older GLM clamp follows catalog for OpenRouter but inferMeta for AIGW", () => {
-		const catalogModel = getModel("openrouter" as any, "z-ai/glm-4.5") as any;
+		const catalogModel = getBuiltinModel("openrouter" as any, "z-ai/glm-4.5" as any) as any;
 		assert.equal(catalogModel?.reasoning, true, "pi-ai catalog should drive built-in OpenRouter metadata when present");
 		assert.equal(clampThinkingLevelForModel("high", "openrouter", "z-ai/glm-4.5"), "high");
 		assert.equal(clampThinkingLevelForModel("high", "aigw", "z-ai/glm-4.5"), "off", "older AIGW GLM should remain non-reasoning by inferMeta fallback");

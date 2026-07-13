@@ -180,11 +180,17 @@ describe("restoreSession source guard", () => {
 		const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
 		assert.ok(idx > 0, "restoreSession declaration not found");
 		const window = src.slice(idx, idx + 15_000);
-		const persistedIdx = window.indexOf("if (ps.modelProvider && ps.modelId)");
-		const initialModelIdx = window.indexOf("bridgeOptions.initialModel = `${ps.modelProvider}/${ps.modelId}`", persistedIdx);
-		const fallbackIdx = window.indexOf("this.resolveInitialModel(ps.role, ps.projectId)", persistedIdx);
-		assert.ok(persistedIdx >= 0, "restoreSession must check persisted modelProvider/modelId");
-		assert.ok(initialModelIdx > persistedIdx, "restoreSession must pass persisted anthropic/claude-opus-4-8 as bridgeOptions.initialModel");
+		// 1. derive a persisted model from ps.modelProvider + ps.modelId
+		const derivedIdx = window.indexOf("const psPersistedModel = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined");
+		// 2. guard the pin with isSpawnPinnableModelString(psPersistedModel)
+		const guardIdx = window.indexOf("if (psPersistedModel && isSpawnPinnableModelString(psPersistedModel))", derivedIdx);
+		// 3. assign the persisted model to bridgeOptions.initialModel before the fallback
+		const initialModelIdx = window.indexOf("bridgeOptions.initialModel = psPersistedModel", guardIdx);
+		// 4. fall back to role/preference resolution only after the persisted branch
+		const fallbackIdx = window.indexOf("this.resolveInitialModel(ps.role, ps.projectId)", initialModelIdx);
+		assert.ok(derivedIdx >= 0, "restoreSession must check persisted modelProvider/modelId");
+		assert.ok(guardIdx > derivedIdx, "restoreSession must guard the persisted pin with isSpawnPinnableModelString(psPersistedModel) after deriving it");
+		assert.ok(initialModelIdx > guardIdx, "restoreSession must assign bridgeOptions.initialModel = psPersistedModel inside the spawn-pinnable guard");
 		assert.ok(fallbackIdx > initialModelIdx, "restoreSession must fall back to role/default model resolution only after the persisted model branch");
 	});
 });

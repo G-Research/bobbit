@@ -596,10 +596,11 @@ export class ProjectSandbox {
 				primaryWorktreeRoot: "/workspace",
 				skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
 				recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
-				exec: async (cmd, cwd, env) => {
+				execHandlesTimeout: true,
+				exec: async (cmd, cwd, env, timeoutMs) => {
 					const execEnv: Record<string, string> = {};
 					if (env.SOURCE_REPO) execEnv.SOURCE_REPO = String(env.SOURCE_REPO);
-					await this._dockerExec(containerId, ["sh", "-c", cmd], { cwd, env: execEnv, timeout: 120_000 });
+					await this._dockerExec(containerId, ["sh", "-c", cmd], { cwd, env: execEnv, timeout: timeoutMs });
 				},
 			});
 		} catch (err) {

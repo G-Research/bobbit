@@ -234,6 +234,23 @@ async function ensureClaimedBranchSafeUpstream(worktreePath: string, branch: str
 export class WorktreePool {
 	private pool: PoolEntry[] = [];
 	private filling = false;
+	/**
+	 * Set by `stop()` / `drain()`. Once true no new background fill / freshen /
+	 * startup reclaim is scheduled — `replenish()`, `freshenInBackground()`, and
+	 * `startFilling()` become no-ops. This closes a real teardown race: a
+	 * `claim()` fires background `replenish()`/`freshenInBackground()` that used to
+	 * be able to run AFTER `removeWorktreePool()`'s `drain()`, rebuilding worktrees
+	 * for a project being deleted (and, in tests, racing repo cleanup).
+	 */
+	private stopped = false;
+	/**
+	 * In-flight background operations (fill, freshen, startup reclaim). Tracked so
+	 * `stop()`/`drain()` can await them and callers never race a live background
+	 * `git` child against a repo/worktree-root that is about to be removed (which
+	 * otherwise surfaces as `spawn git ENOENT` or a misreported
+	 * `base_ref '<ref>' no longer exists` from `git worktree add`).
+	 */
+	private readonly backgroundOps = new Set<Promise<unknown>>();
 	private repoPath: string;
 	private targetSize: number;
 	private commandRunner: CommandRunner;
@@ -344,10 +361,37 @@ export class WorktreePool {
 	 *   a session's working directory on restart.
 	 */
 	startFilling(activeWorktreePaths?: Set<string>): void {
+		if (this.stopped) return;
 		if (cpuDiagnosticsEnabled()) {
 			getCpuDiagnostics().recordTimer("worktree-pool:startFilling", 0, { calls: 1, activeWorktreePaths: activeWorktreePaths?.size ?? 0, ready: this.pool.length, target: this.targetSize });
 		}
-		this.reclaimOrphaned(activeWorktreePaths).then(() => this.replenish()).catch(() => this.replenish());
+		this.trackBackground(this.reclaimOrphaned(activeWorktreePaths).then(() => this.replenish()).catch(() => this.replenish()));
+	}
+
+	/**
+	 * Register a fire-and-forget background op so `stop()`/`drain()` can await it.
+	 * The tracked promise is already rejection-safe (callers pass caught chains);
+	 * it auto-removes itself from the set on settle.
+	 */
+	private trackBackground<T>(op: Promise<T>): Promise<T> {
+		const tracked = op.finally(() => { this.backgroundOps.delete(tracked); });
+		this.backgroundOps.add(tracked);
+		return tracked;
+	}
+
+	/**
+	 * Stop scheduling new background work and await all in-flight background
+	 * operations. Idempotent. After this resolves nothing is filling or freshening
+	 * and nothing is pending, so callers can safely remove the repo / worktree
+	 * root without racing a background `git` child. Loops until the set converges
+	 * to empty: the `stopped` guard makes any op that settles a no-op re-scheduler,
+	 * so newly-tracked work cannot appear.
+	 */
+	async stop(): Promise<void> {
+		this.stopped = true;
+		while (this.backgroundOps.size > 0) {
+			await Promise.allSettled([...this.backgroundOps]);
+		}
 	}
 
 	/**
@@ -590,7 +634,8 @@ export class WorktreePool {
 	 * Errors are non-fatal and logged — the worktree is still usable.
 	 */
 	private freshenInBackground(worktreePath: string, branch: string): void {
-		this.freshen(worktreePath, branch).catch(() => { /* swallow — already logged */ });
+		if (this.stopped) return;
+		this.trackBackground(this.freshen(worktreePath, branch).catch(() => { /* swallow — already logged */ }));
 	}
 
 	/**
@@ -747,6 +792,7 @@ export class WorktreePool {
 	/** Fill pool up to targetSize in the background. */
 	private replenish(): void {
 		const diagEnabled = cpuDiagnosticsEnabled();
+		if (this.stopped) return;
 		if (this.filling) {
 			if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:replenish", 0, { calls: 1, skippedFilling: 1, ready: this.pool.length, target: this.targetSize });
 			return;
@@ -757,11 +803,11 @@ export class WorktreePool {
 		}
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:replenish", 0, { calls: 1, started: 1, ready: this.pool.length, target: this.targetSize });
 		this.filling = true;
-		this._fill().catch((err) => {
+		this.trackBackground(this._fill().catch((err) => {
 			console.error("[worktree-pool] Fill error:", err);
 		}).finally(() => {
 			this.filling = false;
-		});
+		}));
 	}
 
 	private async _fill(): Promise<void> {
@@ -860,8 +906,9 @@ export class WorktreePool {
 								timeoutMs: setupTimeoutMs,
 								skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
 								recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
-								exec: async (cmd, cwd, env) => {
-									await execShellCommand(cmd, { cwd, env, timeout: setupTimeoutMs });
+								execHandlesTimeout: true,
+								exec: async (cmd, cwd, env, timeoutMs) => {
+									await execShellCommand(cmd, { cwd, env, timeout: timeoutMs });
 								},
 							});
 						} catch (err) {
@@ -909,6 +956,12 @@ export class WorktreePool {
 	async drain(): Promise<void> {
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;
+		// Stop scheduling and await in-flight background work FIRST so worktree
+		// cleanup below never races a background fill/freshen `git` child (which,
+		// once the repo is gone, fails with spawn ENOENT or a misreported
+		// "base_ref no longer exists") and so a post-claim replenish cannot rebuild
+		// entries for a pool being torn down.
+		await this.stop();
 		const entries = this.pool.splice(0);
 		if (entries.length === 0) {
 			if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:drain", performance.now() - diagStart, { entries: 0, skippedEmpty: 1 });

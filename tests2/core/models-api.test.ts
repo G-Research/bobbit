@@ -87,4 +87,30 @@ describe("Model registry", () => {
 		assert.ok(model, "openai-codex/gpt-5.5 should be available");
 		assert.equal(model.contextWindow, 272_000);
 	});
+
+	it("exposes Pi 0.80.6 GPT-5.6 catalog entries including routed variants", () => {
+		const requireModel = (provider: string, id: string) => {
+			const model = models.find((m) => m.provider === provider && m.id === id);
+			assert.ok(model, `${provider}/${id} should be available`);
+			assert.equal(model.reasoning, true, `${provider}/${id} should be reasoning-capable`);
+			assert.ok(model.thinkingLevelMap?.xhigh, `${provider}/${id} should expose xhigh metadata`);
+			assert.ok(model.thinkingLevelMap?.max, `${provider}/${id} should expose max metadata`);
+			return model;
+		};
+
+		for (const id of ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]) {
+			const openai = requireModel("openai", id);
+			assert.equal(openai.api, "openai-responses");
+			assert.equal(openai.contextWindow, 272_000);
+
+			const codex = requireModel("openai-codex", id);
+			assert.equal(codex.api, "openai-codex-responses");
+			assert.equal(codex.contextWindow, 372_000);
+		}
+
+		for (const id of ["openai/gpt-5.6-luna", "openai/gpt-5.6-sol", "openai/gpt-5.6-terra"]) {
+			assert.ok(models.some((m) => m.provider === "openrouter" && m.id === id), `openrouter/${id} should be available`);
+			assert.ok(models.some((m) => m.provider === "vercel-ai-gateway" && m.id === id), `vercel-ai-gateway/${id} should be available`);
+		}
+	});
 });

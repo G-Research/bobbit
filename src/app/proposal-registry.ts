@@ -56,6 +56,11 @@ export interface ProposalSlot {
 	fields: Record<string, unknown>;
 	streaming: boolean;
 	mode?: "provisional" | "registered";
+	/** For `project` proposals: the id of the project this proposal targets,
+	 *  pinned at creation time. Accept promotes/writes against THIS id rather
+	 *  than re-deriving from the mutable session list, which a background
+	 *  `refreshSessions()` poll can change out from under an in-flight accept. */
+	projectId?: string;
 	rev: number;
 	workflowValidationError?: GoalWorkflowValidationError;
 }

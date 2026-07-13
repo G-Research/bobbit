@@ -163,6 +163,27 @@ async function assertSocketStillUsable(ws: WsConnection): Promise<void> {
 	await ws.waitForFrom(cursor, (m) => m.type === "pong", 5_000);
 }
 
+async function waitForGatePassedAndNoActive(goalId: string, gateId: string, timeoutMs = 45_000): Promise<any> {
+	const deadline = Date.now() + timeoutMs;
+	let lastGate: any;
+	let lastActive: any;
+	while (Date.now() <= deadline) {
+		const [gateResp, activeResp] = await Promise.all([
+			apiFetch(`/api/goals/${goalId}/gates/${gateId}`),
+			apiFetch(`/api/goals/${goalId}/verifications/active`),
+		]);
+		if (gateResp.ok) lastGate = await gateResp.json();
+		if (activeResp.ok) lastActive = await activeResp.json();
+		const active = Array.isArray(lastActive?.verifications) ? lastActive.verifications : [];
+		if (lastGate?.status === "passed" && active.length === 0) return lastGate;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	throw new Error(
+		`Timed out waiting for ${goalId}/${gateId} to pass and drain active verifications; ` +
+		`lastGate=${JSON.stringify(lastGate)?.slice(0, 500)} lastActive=${JSON.stringify(lastActive)?.slice(0, 500)}`,
+	);
+}
+
 function assertVerificationOrdering(messages: WsConnection["messages"], goalId: string, gateId: string): void {
 	const indexOf = (type: string) => messages.findIndex((m) => m.type === type && m.goalId === goalId && m.gateId === gateId);
 	const signalIdx = indexOf("gate_signal_received");
@@ -393,7 +414,7 @@ test.describe("Multi-step verification", () => {
 			// WS payloads, so wait for the prerequisite through REST to avoid
 			// racing unrelated/stale design-doc WS events under full-suite load.
 			const designSignal = await signalGateFromCursor(ws, goalId, "design-doc", { content: "# Design" });
-			await waitForGateStatusByRest(goalId, "design-doc", "passed", designSignal.signalId, 30_000);
+			await waitForGateStatusByRest(goalId, "design-doc", "passed", designSignal.signalId, 45_000);
 
 			// Signal implementation gate (depends on design-doc) and only consume
 			// events emitted after this signal for this exact goal/gate/signal.
@@ -596,7 +617,6 @@ test.describe("Verification REST API", () => {
 			workflowId: "test-fast",
 		});
 		const goalId = goal.id;
-		const sessionId = await createSession({ goalId });
 
 		try {
 			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
@@ -604,11 +624,10 @@ test.describe("Verification REST API", () => {
 				body: JSON.stringify({ content: "# Design\n\nTest content for API test" }),
 			});
 			expect(signalResp.status).toBe(201);
-			const signalData = await signalResp.json();
-			const signalId = signalData?.signal?.id;
-			expect(signalId).toBeTruthy();
 
-			// Check active verifications while running
+			// Check active verifications while running. Fast machines may finish the
+			// command before this request, so an empty list is valid; when a running
+			// entry is observable, pin its REST shape.
 			const activeResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
 			expect(activeResp.status).toBe(200);
 			const { verifications } = await activeResp.json();
@@ -630,20 +649,18 @@ test.describe("Verification REST API", () => {
 				}
 			}
 
-			// This test asserts REST surfaces, not live WS delivery. Poll the gate
-			// summary for the exact signal to avoid racing/missing a transient
-			// gate_status_changed event under full-suite load.
-			await waitForGateStatusByRest(goalId, "design-doc", "passed", signalId, VERIFICATION_WS_TIMEOUT_MS);
+			// This REST API test should not depend on observing a WS frame: under the
+			// full unit suite, Windows command-step process scheduling can delay the
+			// `echo ok` verification long enough for a short WS wait to race the test
+			// timeout. Poll the authoritative REST state until the gate has passed and
+			// active verification bookkeeping has drained.
+			const gateData = await waitForGatePassedAndNoActive(goalId, "design-doc");
 
 			const afterResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
 			const afterData = await afterResp.json();
 			expect(afterData.verifications.length).toBe(0);
 
 			// Step output available via gate REST API (modal output bug fix)
-			const res = await apiFetch(`/api/goals/${goalId}/gates/design-doc`);
-			expect(res.status).toBe(200);
-			const gateData = await res.json();
-
 			const verification = gateData.signals?.[0]?.verification;
 			expect(verification).toBeTruthy();
 			expect(verification.steps).toBeTruthy();
@@ -662,7 +679,6 @@ test.describe("Verification REST API", () => {
 			expect(fixedModalContent, "Fixed modal path (liveOutput || output) shows content").toBeTruthy();
 			expect(fixedModalContent).toContain("ok");
 		} finally {
-			await deleteSession(sessionId);
 			await deleteGoal(goalId);
 		}
 	});

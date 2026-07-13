@@ -28,6 +28,7 @@ import {
 	hasGoogleCodeAssistCredential,
 	isSessionSelectableProvider,
 	isSessionSelectableModelString,
+	isSpawnPinnableModelString,
 	convertContextToCodeAssist,
 	parseCodeAssistStreamChunk,
 	mapFinishReason,
@@ -46,6 +47,7 @@ import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/ag
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevProject = process.env.GOOGLE_CLOUD_PROJECT;
 const prevProjectId = process.env.GOOGLE_CLOUD_PROJECT_ID;
+const prevAccessToken = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
 let dir: string;
 
 beforeEach(() => {
@@ -55,6 +57,9 @@ beforeEach(() => {
 	// Project env override must not leak across tests (it short-circuits onboarding).
 	delete process.env.GOOGLE_CLOUD_PROJECT;
 	delete process.env.GOOGLE_CLOUD_PROJECT_ID;
+	// The Code Assist env Bearer token gates spawn-pinnability; clear it so each
+	// test starts from a known unauthenticated baseline.
+	delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
 	resetCodeAssistProjectCache();
 });
 
@@ -65,6 +70,8 @@ afterEach(() => {
 	else process.env.GOOGLE_CLOUD_PROJECT = prevProject;
 	if (prevProjectId === undefined) delete process.env.GOOGLE_CLOUD_PROJECT_ID;
 	else process.env.GOOGLE_CLOUD_PROJECT_ID = prevProjectId;
+	if (prevAccessToken === undefined) delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+	else process.env.GOOGLE_CLOUD_ACCESS_TOKEN = prevAccessToken;
 	resetAgentDirForTest();
 	rmSync(dir, { recursive: true, force: true });
 });
@@ -287,6 +294,50 @@ describe("session-selectability guard (Code Assist runtime now registered)", () 
 			assert.notEqual(m.sessionSelectable, false, `${m.id} must be selectable for sessions`);
 			assert.equal(m.sessionUnavailableReason, undefined, `${m.id} must not carry an unavailable reason`);
 		}
+	});
+});
+
+describe("isSpawnPinnableModelString (auth-aware spawn pin guard)", () => {
+	it("skips google-gemini-cli when no Google credential is present", () => {
+		// No auth.json written → hasGoogleCodeAssistCredential() is false.
+		assert.equal(hasGoogleCodeAssistCredential(), false);
+		assert.equal(isSpawnPinnableModelString("google-gemini-cli/gemini-2.5-pro"), false);
+		// It remains session-*selectable* (the model selector must still allow it).
+		assert.equal(isSessionSelectableModelString("google-gemini-cli/gemini-2.5-pro"), true);
+	});
+
+	it("pins google-gemini-cli once a Google credential exists", () => {
+		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
+		assert.equal(hasGoogleCodeAssistCredential(), true);
+		assert.equal(isSpawnPinnableModelString("google-gemini-cli/gemini-2.5-pro"), true);
+	});
+
+	it("treats an expired-but-present credential as pinnable (re-auth is late/lazy)", () => {
+		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok-stale", expires: Date.now() - 1000 } });
+		assert.equal(isSpawnPinnableModelString("google-gemini-cli/gemini-2.5-pro"), true);
+	});
+
+	it("pins google-gemini-cli when GOOGLE_CLOUD_ACCESS_TOKEN env credential is present (no auth.json)", () => {
+		// Env Bearer token is a first-class Code Assist credential: the generated
+		// provider extension registers models synchronously at load when it exists,
+		// so an explicit google-gemini-cli/* selection must survive to Pi --model.
+		process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "ya29.env-token";
+		assert.equal(hasGoogleCodeAssistCredential(), false); // no stored auth.json
+		assert.equal(isSpawnPinnableModelString("google-gemini-cli/gemini-2.5-pro"), true);
+		// Still session-selectable, as always.
+		assert.equal(isSessionSelectableModelString("google-gemini-cli/gemini-2.5-pro"), true);
+	});
+
+	it("does not pin google-gemini-cli when GOOGLE_CLOUD_ACCESS_TOKEN is empty/whitespace", () => {
+		process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "   ";
+		assert.equal(isSpawnPinnableModelString("google-gemini-cli/gemini-2.5-pro"), false);
+	});
+
+	it("leaves other providers and malformed strings unchanged regardless of Google auth", () => {
+		// No Google credential present.
+		assert.equal(isSpawnPinnableModelString("anthropic/claude-sonnet-4-5"), true);
+		assert.equal(isSpawnPinnableModelString("google/gemini-2.5-pro"), true);
+		assert.equal(isSpawnPinnableModelString("no-slash"), true);
 	});
 });
 

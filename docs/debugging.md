@@ -201,7 +201,7 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 
 After a server restart, the context bar may show wrong info (e.g. 200k instead of 1M) or nothing at all. This happens because the agent process's `getState()` RPC may fail or return incomplete data before the process is fully ready.
 
-- **Server-side fallback**: `sendFallbackModelState()` in `handler.ts` reads persisted `modelProvider`/`modelId` from the session store and calls `resolveModelStateMeta()` (registry cache → pi-ai catalog → `inferMeta`) to attach the correct `contextWindow` / `reasoning` / `thinkingLevelMap`. This runs when `getState()` fails, is skipped (dormant/preparing sessions), or returns data without model metadata. Deriving the frame from `inferMeta` alone was the cause of the 200k-instead-of-1M symptom and the missing thinking selector for models like Claude Fable 5 — see [Per-model thinking-level capabilities](thinking-levels.md#the-thinkinglevelmap-has-to-reach-the-client-to-be-useful).
+- **Server-side fallback**: `sendFallbackModelState()` in `handler.ts` reads persisted `modelProvider`/`modelId` from the session store and calls `resolveModelStateMeta()` (registry cache → pi-ai catalog → `inferMeta`) to attach the correct `contextWindow` / `reasoning` / `thinkingLevelMap`. This runs when `getState()` fails, is skipped (dormant/preparing sessions), or returns data without model metadata. Deriving the frame from `inferMeta` alone was the cause of the 200k-instead-of-1M symptom and the missing thinking selector for models like Claude Fable 5; reconnect/`get_state` must preserve the full map, including `max` when Pi advertises it — see [Per-model thinking-level capabilities](thinking-levels.md#the-thinkinglevelmap-has-to-reach-the-client-to-be-useful).
 - **Client-side retry**: `remote-agent.ts` retries `get_state` after 3s on reconnect if `contextWindow` is still 0.
 - **Default contextWindow is 0**: Before the server provides real data, `contextWindow` starts at 0 (not 200k), so the context bar shows nothing rather than a misleading value.
 - If context bar still shows wrong info after restart, check that `modelProvider` and `modelId` are persisted in `<project-root>/.bobbit/state/sessions.json` for the affected session.
@@ -1259,6 +1259,19 @@ If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-s
 - **Rule**: in any file that combines pi-ai schema helpers (or hands a schema to a pi-ai-typed slot) with `Type.Object(...)` / `Static<typeof X>`, use one typebox flavor consistently. Server-side pi interop can import the schema helpers from `@earendil-works/pi-ai`; browser runtime paths should prefer direct `typebox` imports plus pi-ai type-only imports so the bare pi-ai index stays out of UI chunks.
 - **Reference**: `src/ui/tools/artifacts/artifacts.ts` is the browser-side example — runtime schema helpers come from `typebox` / local helpers, while `Static` and `ToolCall` stay type-only from pi-ai.
 - **Diagnosis tip**: if the error count is large (dozens to hundreds) and all variants of `TSchema is not assignable to TSchema` originate from the same module, you're looking at a flavor mismatch, not a real type bug. Pick one schema flavor in that file and re-run `npm run check` before changing any schema definitions.
+
+## Browser build fails or pulls Node shims after Pi 0.80 import changes
+
+- **Symptom**: Vite warns about `node:fs` / Node shims from UI code, or `npm run check` / browser tests fail after changing `src/app/pi-ai-lazy.ts` imports during a Pi upgrade.
+- **Rule**: browser runtime code must not import the bare `@earendil-works/pi-ai` package. Pi `0.80.x` first-message streaming imports belong under package-exported `@earendil-works/pi-ai/api/*` subpaths, while provider catalog/key-test flows stay behind `/api/pi-ai/*` server routes.
+- **Pinning test**: `tests2/core/pi-ai-browser-boundary.test.ts`. See [Pi runtime compatibility](pi-runtime-compatibility.md#browser-safe-pi-ai-boundary).
+
+## Session goes idle or drains queued prompts during Pi internal retry
+
+- **Symptom**: after a transient provider failure, the session briefly becomes idle, queued prompts dispatch early, or one-time tool grants are revoked while Pi is still retrying the same turn.
+- **Cause**: Pi `0.80.x` emits retryable `agent_end` events with `willRetry: true`; those are not final turn boundaries.
+- **Fix**: `SessionManager` must ignore `agent_end.willRetry === true` for idle transition, queue drain, one-time grant revocation, and `waitForIdle()` resolution. Only the final non-retry `agent_end` completes the Bobbit turn.
+- **Pinning test**: `tests2/core/pi-rpc-agent-end-retry.test.ts`.
 
 ## Bundle-size assertion fails
 

@@ -100,4 +100,5 @@ dist/
 - [Security](security.md) — auth, TLS, and threat model
 - [Networking](networking.md) — remote access and multi-device setup
 - [Per-model thinking-level capabilities](thinking-levels.md) — how the reasoning-level selector adapts to the active model
-- [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — model catalog, ranking, spawn pinning, transcript, and regression-test notes for the Pi upgrade
+- [Pi runtime compatibility](pi-runtime-compatibility.md) — browser imports, model catalog subpaths, RPC lifecycle, transcript normalization, and upgrade checks
+- [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — historical Opus 4.8-specific model, ranking, and spawn notes

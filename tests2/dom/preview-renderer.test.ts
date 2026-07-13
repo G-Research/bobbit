@@ -133,6 +133,25 @@ function resetPreviewState() {
 	state.panelWorkspaceActiveBySession = {};
 	state.sidePanelWorkspaceBySession = {};
 	state.lastWorkspaceRevisionBySession = {};
+	// Cross-file isolation: this file runs under pool:forks + isolate:false in the
+	// v2-dom lane, so the `state` singleton (and its non-preview panel inputs) are
+	// SHARED with sibling dom test files. When sidePanelWorkspaceBySession[sid] is
+	// empty (as it is after this reset), the file:// fixture path rebuilds the base
+	// workspace via buildPanelWorkspaceTabs, which derives a `proposal:<type>` /
+	// review / inbox tab from these fields. A prior file that leaves e.g.
+	// `activeProposals.goal` set (its afterEach doesn't clear the singleton) would
+	// otherwise bleed a phantom `proposal:goal` tab into every preview assertion
+	// here. Reset the full set of derived-tab inputs so the preview flow only ever
+	// sees the tabs this file creates. (Product behaviour — deriving a proposal tab
+	// from activeProposals — is intentional and deliberately NOT changed.)
+	state.isPreviewSession = false;
+	state.activeProposals = {};
+	state.assistantType = null;
+	state.assistantHasProposal = false;
+	state.reviewPanelOpen = false;
+	state.reviewDocuments = new Map();
+	state.inboxPanelOpen = false;
+	state.inboxEntries = [];
 }
 
 function container(): HTMLElement {

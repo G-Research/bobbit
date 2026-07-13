@@ -2954,10 +2954,12 @@ function activeProjectProposalOrFail(): NonNullable<typeof state.activeProposals
  * tri-state — mirrors the server mutation-boundary invariant in §3):
  *   explicit + registered → that project id (EDIT)
  *   explicit + unknown    → UNKNOWN_PROJECT error, null (REJECT, no create)
- *   absent                → session's project (unchanged new-project/provisional flow)
+ *   absent                → the project pinned on the proposal at creation
+ *                           (race-safe), else the session's project
  * The UI only preflights; the server remains authoritative.
  */
-function projectIdForProjectProposal(sessionId: string, fields?: Record<string, unknown>): string | null {
+function projectIdForProjectProposal(proposal: NonNullable<typeof state.activeProposals.project>): string | null {
+	const fields = proposal.fields as Record<string, unknown> | undefined;
 	const explicitRaw = fields?.projectId;
 	const explicit = typeof explicitRaw === "string" && explicitRaw.trim() ? explicitRaw.trim() : undefined;
 	if (explicit) {
@@ -2965,7 +2967,15 @@ function projectIdForProjectProposal(sessionId: string, fields?: Record<string, 
 		showConnectionError(PROJECT_ACCEPT_FAILED, `Unknown project "${explicit}". Cross-project proposals must target an already-registered project.`);
 		return null; // explicit + unknown → never fall through to the new-project flow
 	}
-	const projectId = state.gatewaySessions.find(s => s.id === sessionId)?.projectId;
+	// Absent explicit target: prefer the project pinned on the proposal at
+	// creation time. A background refreshSessions() poll can mutate the
+	// session→project link between proposal creation and accept (notably for
+	// provisional proposals), so re-deriving from the mutable session list here
+	// could promote/config-write the WRONG project.
+	const pinned = typeof proposal.projectId === "string" && proposal.projectId.trim()
+		? proposal.projectId.trim()
+		: undefined;
+	const projectId = pinned ?? state.gatewaySessions.find(s => s.id === proposal.sessionId)?.projectId;
 	if (!projectId) showConnectionError(PROJECT_ACCEPT_FAILED, UNLINKED_PROJECT_PROPOSAL);
 	return projectId || null;
 }
@@ -3061,7 +3071,7 @@ async function terminateProjectAssistantSessionFromPanel(sessionId: string): Pro
 
 async function acceptProvisionalProjectProposalFromPanel(proposal: NonNullable<typeof state.activeProposals.project>): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
-	const projectId = projectIdForProjectProposal(propSessionId, fields as Record<string, unknown>);
+	const projectId = projectIdForProjectProposal(proposal);
 	if (!projectId) return false;
 	if (!await promoteProjectProposal(projectId, typeof fields.name === "string" ? fields.name : "")) return false;
 	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
@@ -3079,7 +3089,7 @@ async function acceptProvisionalProjectProposalFromPanel(proposal: NonNullable<t
 
 async function acceptRegisteredProjectProposalFromPanel(proposal: NonNullable<typeof state.activeProposals.project>): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
-	const projectId = projectIdForProjectProposal(propSessionId, fields as Record<string, unknown>);
+	const projectId = projectIdForProjectProposal(proposal);
 	if (!projectId) return false;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 	if (fieldNameStr) {

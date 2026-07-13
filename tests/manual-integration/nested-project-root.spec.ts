@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { dirname, join, normalize, relative, resolve, sep } from "node:path";
 import { manualTmpRoot } from "./manual-test-paths.ts";
+import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 import { fileURLToPath } from "node:url";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.js";
 
@@ -46,6 +47,7 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	seedManualTestModelPreferences(dir);
 	const proc = spawn(process.execPath, [
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
@@ -123,13 +125,36 @@ async function pollIdle(gw: GW, id: string, ms = 120_000): Promise<any> {
 	throw new Error(`Session ${id} not idle in ${ms}ms`);
 }
 
+function isTransientGoalPollError(err: unknown): boolean {
+	let cur: any = err;
+	while (cur) {
+		const message = typeof cur.message === "string" ? cur.message : "";
+		const code = typeof cur.code === "string" ? cur.code : "";
+		if (code === "ECONNRESET" || /ECONNRESET|fetch failed|terminated|UND_ERR_SOCKET/i.test(message)) return true;
+		cur = cur.cause;
+	}
+	return err instanceof SyntaxError && /Unexpected end of JSON input/i.test(err.message);
+}
+
 async function pollGoalReady(gw: GW, goalId: string, ms = 60_000): Promise<any> {
 	const t0 = Date.now();
 	while (Date.now() - t0 < ms) {
-		const res = await api(gw, `/api/goals/${goalId}`);
-		const goal = await res.json();
-		if (goal.setupStatus === "ready") return goal;
-		if (goal.setupStatus === "error") throw new Error(`Goal setup failed: ${goal.setupError ?? JSON.stringify(goal)}`);
+		let res: Response;
+		try {
+			res = await api(gw, `/api/goals/${goalId}`);
+		} catch (err) {
+			if (!isTransientGoalPollError(err)) throw err;
+			await new Promise(r => setTimeout(r, 500));
+			continue;
+		}
+		if (!res.ok) throw new Error(`Goal fetch failed: ${res.status} ${await res.text()}`);
+		try {
+			const goal = await res.json();
+			if (goal.setupStatus === "ready") return goal;
+			if (goal.setupStatus === "error") throw new Error(`Goal setup failed: ${goal.setupError ?? JSON.stringify(goal)}`);
+		} catch (err) {
+			if (!isTransientGoalPollError(err)) throw err;
+		}
 		await new Promise(r => setTimeout(r, 500));
 	}
 	throw new Error(`Goal ${goalId} setup not ready in ${ms}ms`);

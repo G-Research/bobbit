@@ -639,6 +639,16 @@ npm run test:manual                 # Headless, API assertions only (~5 min)
 SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
 ```
 
+To run the manual gateway with the same model defaults and provider credentials as the currently running Bobbit server, opt in explicitly:
+
+```bash
+BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1 npm run test:manual
+MANUAL_TEST_MODEL=openai-codex/gpt-5.5 MANUAL_TEST_THINKING_LEVEL=max \
+  BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1 npm run test:manual
+```
+
+`BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1` reads the parent process `BOBBIT_DIR`, copies only model/provider preferences (`default.*Model`, `default.*ThinkingLevel`, `providerKey.*`, `allowSessionModelFallback`, AI Gateway/custom-provider settings) plus Pi agent auth/config files (`agent/auth.json`, `settings.json`, `models.json`, `google-code-assist.json`) into each isolated manual gateway. It does **not** point tests at the live directory and does not copy sessions, goals, projects, gateway tokens, or TLS material. Explicit `MANUAL_TEST_MODEL` / `MANUAL_TEST_THINKING_LEVEL` still win over inherited session defaults.
+
 ### Real-LLM tests live under `tests/manual-integration/`
 
 Any test that needs a real LLM call lives under `tests/manual-integration/` and runs only via `npm run test:manual` (real agent / Docker). There is **no** separate real-LLM e2e config or `test:e2e:real` script — those were retired so the only gate-exempt path is `tests/manual-integration/**` (see the phase invariant at the top of this doc). Compaction's manual `/compact` and auto/threshold paths are both covered deterministically (mock agent, no LLM) by the `@live-compaction-affordance` tests in `tests/e2e/ui/pre-compaction-history.spec.ts`. The former real-LLM manual specs (`compaction.spec.ts`, `compaction-pressure.spec.ts`) were removed because they seeded auth by copying a static `auth.json` OAuth snapshot whose short-lived access token expired mid-run (`invalid_grant`), so they could not authenticate reliably. See [compaction.md](compaction.md) for the feature-level walkthrough.

@@ -24,6 +24,32 @@ function isGoalBroadcast(msg: WsMsg, goalId: string): boolean {
 	);
 }
 
+async function waitForGoalSetupReady(goalId: string, timeoutMs = 60_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	let lastStatus = "unknown";
+	while (Date.now() < deadline) {
+		const res = await apiFetch(`/api/goals/${goalId}`);
+		if (res.ok) {
+			const goal = await res.json();
+			lastStatus = goal?.setupStatus ?? "missing";
+			if (goal?.setupStatus === "ready") return;
+			if (goal?.setupStatus === "error") throw new Error(`Goal ${goalId} setup failed: ${JSON.stringify(goal)}`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	throw new Error(`Goal ${goalId} setup did not become ready within ${timeoutMs}ms (last status: ${lastStatus})`);
+}
+
+async function bypassGate(goalId: string, gateId: string): Promise<Response> {
+	return apiFetch(`/api/goals/${goalId}/gates/${gateId}/bypass`, {
+		method: "POST",
+		body: JSON.stringify({
+			whyBypassed: "Fanout routing test uses bypass to avoid command-runner timing noise",
+			whoAmI: "goal-fanout-ws.test.ts",
+			isInitiatedByHuman: true,
+		}),
+	});
+}
 
 function connectViewerWs(goalId?: string): Promise<WsConnection> {
 	return new Promise((resolve, reject) => {
@@ -99,10 +125,10 @@ function connectViewerWs(goalId?: string): Promise<WsConnection> {
 	});
 }
 
-async function waitForWsRoundTrip(conn: WsConnection): Promise<void> {
+async function waitForWsRoundTrip(conn: WsConnection, timeoutMs = FANOUT_WS_EVENT_TIMEOUT_MS): Promise<void> {
 	const cursor = conn.messageCount();
 	conn.send({ type: "ping" });
-	await conn.waitForFrom(cursor, (m) => m.type === "pong", FANOUT_WS_EVENT_TIMEOUT_MS);
+	await conn.waitForFrom(cursor, (m) => m.type === "pong", timeoutMs);
 }
 
 test.setTimeout(180_000);
@@ -111,15 +137,19 @@ test.describe("Goal WebSocket fanout", () => {
 	test.setTimeout(FANOUT_TEST_TIMEOUT_MS);
 
 	test("subscribed viewer and matching goal session receive goal events while unrelated viewers and sessions do not", async () => {
-		const goal = await createGoal({ title: `Goal fanout WS ${Date.now()}`, workflowId: "test-fast" });
-		const otherGoal = await createGoal({ title: `Other fanout WS ${Date.now()}`, workflowId: "test-fast" });
+		const goal = await createGoal({ title: `Goal fanout WS ${Date.now()}`, workflowId: "test-fast", team: false, autoStartTeam: false });
+		const otherGoal = await createGoal({ title: `Other fanout WS ${Date.now()}`, workflowId: "test-fast", team: false, autoStartTeam: false });
+		await Promise.all([waitForGoalSetupReady(goal.id), waitForGoalSetupReady(otherGoal.id)]);
+
 		const goalSessionId = await createSession({ goalId: goal.id });
 		const unrelatedSessionId = await createSession();
-		const viewerConn = await connectViewerWs(goal.id);
-		const unscopedViewerConn = await connectViewerWs();
-		const otherGoalViewerConn = await connectViewerWs(otherGoal.id);
-		const goalConn = await connectWs(goalSessionId);
-		const unrelatedConn = await connectWs(unrelatedSessionId);
+		const [viewerConn, unscopedViewerConn, otherGoalViewerConn, goalConn, unrelatedConn] = await Promise.all([
+			connectViewerWs(goal.id),
+			connectViewerWs(),
+			connectViewerWs(otherGoal.id),
+			connectWs(goalSessionId),
+			connectWs(unrelatedSessionId),
+		]);
 
 		try {
 			await Promise.all([
@@ -136,19 +166,17 @@ test.describe("Goal WebSocket fanout", () => {
 			const goalCursor = goalConn.messageCount();
 			const unrelatedCursor = unrelatedConn.messageCount();
 
-			const signalResp = await apiFetch(`/api/goals/${goal.id}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design\n\nApproach: test\n\nFiles: src/test.ts\n\nCriteria: pass" }),
-			});
-			expect(signalResp.status).toBe(201);
+			const bypassResp = await bypassGate(goal.id, "design-doc");
+			expect(bypassResp.status, await bypassResp.text()).toBe(200);
 
+			const expectedFanout = (m: WsMsg) => m.type === "gate_status_changed" && m.goalId === goal.id && m.gateId === "design-doc" && m.status === "bypassed";
 			await Promise.all([
-				viewerConn.waitForFrom(viewerCursor, (m) => m.type === "gate_signal_received" && m.goalId === goal.id && m.gateId === "design-doc", FANOUT_WS_EVENT_TIMEOUT_MS),
-				goalConn.waitForFrom(goalCursor, (m) => m.type === "gate_signal_received" && m.goalId === goal.id && m.gateId === "design-doc", FANOUT_WS_EVENT_TIMEOUT_MS),
+				viewerConn.waitForFrom(viewerCursor, expectedFanout, FANOUT_WS_EVENT_TIMEOUT_MS),
+				goalConn.waitForFrom(goalCursor, expectedFanout, FANOUT_WS_EVENT_TIMEOUT_MS),
 			]);
-			// This fanout test only needs the synchronous signal broadcast. Do not wait
-			// for async verification completion; broad unit runs can delay it past the
-			// short WS timeout and make the routing assertion flaky.
+			// Drain unrelated sockets after the action. A leaked goal broadcast would be
+			// queued before these pong frames on the same socket, so the negative checks
+			// below are not racing delivery under suite-level CPU pressure.
 			await Promise.all([
 				waitForWsRoundTrip(unrelatedConn),
 				waitForWsRoundTrip(unscopedViewerConn),

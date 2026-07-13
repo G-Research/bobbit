@@ -29,7 +29,9 @@
  *           no double registration).
  *         • Otherwise it performs a full standalone reservation for this kind,
  *           registers ONE child reservation, starts a 2s heartbeat, and returns
- *           the granted count + a release() that removes the entry.
+ *           the granted count + a release() that removes the entry. Standalone
+ *           vitest is capped below the parent-suite fast path to keep direct
+ *           verification commands from starving Vitest's own worker RPC loop.
  *
  *   reserveParentBundle(opts?) -> { vitest: number, playwright: number, total: number,
  *                                   parentRunId: string, release: () => void,
@@ -110,6 +112,14 @@ const DEFAULT_GRANT_TIMEOUT_MS = 180_000;
 const MIN_BUNDLE = 4;
 const MAX_BUNDLE = 12;
 const VITEST_CAP = 8;
+// Direct `npx vitest --config vitest.config.ts` runs do not have the parent
+// run-v2 bundle's browser/render split and have repeatedly starved Vitest's own
+// worker RPC loop at higher fork counts (`Timeout calling "onTaskUpdate"`) or
+// starved gateway verification polling before it could pass. Keep the full
+// 8-fork fast path for parent-ledger grants, but make standalone vitest a
+// conservative verification-safe throttle; VITEST_MAX_FORKS remains the explicit
+// local/debug override when speed is preferred over gate stability.
+const STANDALONE_VITEST_CAP = 2;
 // Cap on chromium workers per run. Earlier tuning claimed "2 ≈ 4 workers
 // throughput" (IO-bound), but a fresh isolated measurement on the 24-core box
 // disproved that for a SOLO run: the tier-2 browser suite (~620 specs) took
@@ -551,7 +561,7 @@ function reserveBundle(kinds, opts = {}) {
 			usableGrant = Math.min(usableGrant, remaining, MAX_BUNDLE);
 			if (usableGrant < floorCommit) return { retry: true };
 
-			const records = allocateKinds(kinds, usableGrant, activeParents);
+			const records = allocateKinds(kinds, usableGrant, activeParents, opts);
 			removePending(state, parentRunId);
 			const startedAt = new Date().toISOString();
 			for (const rec of records) {
@@ -578,7 +588,7 @@ function reserveBundle(kinds, opts = {}) {
 	}
 }
 
-function allocateKinds(kinds, grant, activeParents = 1) {
+function allocateKinds(kinds, grant, activeParents = 1, opts = {}) {
 	if (kinds.length === 2) {
 		const { vitest, playwright } = splitBundle(grant, activeParents);
 		return [
@@ -587,7 +597,15 @@ function allocateKinds(kinds, grant, activeParents = 1) {
 		];
 	}
 	const kind = kinds[0];
-	const cap = kind === "playwright" ? PLAYWRIGHT_CAP : VITEST_CAP;
+	// STANDALONE_VITEST_CAP throttles a SINGLE direct vitest process (one process's
+	// onTaskUpdate RPC loop starves past ~2 forks). A lane ORCHESTRATOR
+	// (run-unit-lanes.mjs) instead distributes its grant across MULTIPLE independent
+	// per-lane vitest processes, each capped at its own safe per-process fork count,
+	// so the orchestrator's TOTAL budget is the fair core grant (VITEST_CAP), NOT the
+	// single-process throttle. opts.orchestrator selects that budget without ever
+	// raising any single vitest process above the safe cap.
+	const vitestCap = opts.orchestrator ? VITEST_CAP : STANDALONE_VITEST_CAP;
+	const cap = kind === "playwright" ? PLAYWRIGHT_CAP : vitestCap;
 	return [{ id: newId(kind), kind, workerSlots: clamp(Math.min(grant, cap), 1, cap) }];
 }
 
@@ -824,6 +842,49 @@ export function reserveWorkerSlots(kind, opts = {}) {
 	return { workerSlots: record.workerSlots, release, reservationId: record.id, parentRunId: runId, managedByParent: false };
 }
 
+/**
+ * Reserve a fair vitest budget for a LANE ORCHESTRATOR — run-unit-lanes.mjs, which
+ * spawns MULTIPLE concurrent `vitest run --project ...` child processes, each with
+ * its OWN Windows-RPC-safe per-process fork pool.
+ *
+ * WHY NOT reserveWorkerSlots("vitest"): that returns STANDALONE_VITEST_CAP (=2) —
+ * the SINGLE-PROCESS throttle that stops ONE direct vitest process from starving
+ * its own onTaskUpdate RPC loop past ~2 forks. Using that as the orchestrator's
+ * TOTAL budget collapses lane parallelism: perLane=2 forks ⇒ maxConcurrent =
+ * floor(2/2) = 1 ⇒ the lanes run SERIALLY (wall = Σ lanes) and blow the gate's
+ * wall-time budget. The orchestrator never runs a single process above the safe
+ * cap; it buys throughput by running several capped 2-fork processes side by side,
+ * so its fair budget is the CORE grant (VITEST_CAP), not the per-process throttle.
+ *
+ * Precedence mirrors reserveWorkerSlots:
+ *   • under a parent (BOBBIT_V2_LEDGER_PARENT + BOBBIT_V2_SLOTS_VITEST): reuse the
+ *     parent grant with a no-op release — preserves run-v2.mjs ledger behavior and
+ *     never double-registers.
+ *   • standalone: reserve ONE vitest reservation sized to the fair grant (capped at
+ *     VITEST_CAP). Each spawned lane then re-uses THIS grant via the parent-grant
+ *     env with its own per-lane cap, so it stays the run's single ledger entry.
+ */
+export function reserveVitestLaneBudget(opts = {}) {
+	const parentRunId = process.env.BOBBIT_V2_LEDGER_PARENT;
+	// Under a parent orchestrator: reuse the pre-committed grant, no re-register.
+	if (parentRunId && process.env.BOBBIT_V2_SLOTS_VITEST != null && process.env.BOBBIT_V2_SLOTS_VITEST !== "") {
+		const workerSlots = Math.max(1, Number(process.env.BOBBIT_V2_SLOTS_VITEST) || 1);
+		return { workerSlots, release: () => {}, reservationId: `${parentRunId}:vitest`, parentRunId, managedByParent: true };
+	}
+	// Standalone: reserve a single vitest reservation sized to the fair CORE grant
+	// (orchestrator budget), not the single-process STANDALONE_VITEST_CAP throttle.
+	const { parentRunId: runId, records, heartbeat } = reserveBundle(["vitest"], { ...opts, orchestrator: true });
+	const record = records[0];
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		releaseRecords([record.id], heartbeat, opts);
+	};
+	process.once("exit", release);
+	return { workerSlots: record.workerSlots, release, reservationId: record.id, parentRunId: runId, managedByParent: false };
+}
+
 export function readLedger(opts = {}) {
 	const cores = totalCores(opts);
 	if (!existsSync(reservationsPath())) return { totalCores: cores, generation: 0, reservations: [] };
@@ -916,6 +977,7 @@ function cliSelftest() {
 	console.log(`  reserveWorkerSlots("vitest") -> ${solo.workerSlots} slots (id=${solo.reservationId})`);
 	const afterSolo = readLedger();
 	const sum2 = afterSolo.reservations.reduce((s, r) => s + r.workerSlots, 0);
+	assert(solo.workerSlots <= STANDALONE_VITEST_CAP, `standalone vitest capped at ${STANDALONE_VITEST_CAP}, got ${solo.workerSlots}`);
 	assert(sum2 <= totalCores(), `sum(workerSlots)=${sum2} <= cores=${totalCores()} after standalone reserve`);
 
 	// 4) Release everything; ledger returns to empty.

@@ -20,6 +20,10 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/model-state-frame-preservation.test.ts",
+      "reason": "Pinning tests for buildResolvedModelStateModel (ws/handler.ts): custom/unknown provider (resolver source=inferred) preserves live contextWindow/maxTokens/reasoning/thinkingLevelMap, while known Fable model still gets authoritative catalog metadata incl. thinkingLevelMap.max over stale live base."
+    },
+    {
       "path": "tests2/core/scan-skill-dir-nested.test.ts",
       "reason": "Reproducing test (TDD red) for the 'Fix skill autocomplete gap' goal (9e081770), Facet 2: scanSkillDir must discover nested Claude-plugin skills under BOTH a plugins-parent root (<dir>/<plugin>/skills/<name>/SKILL.md) and a plugin root (<dir>/skills/<name>/SKILL.md), keeping source=custom, while preserving the existing one-level <dir>/<name>/SKILL.md behaviour (no duplication). FAILS on HEAD (single-depth scan resolves zero nested skills), passes post-fix. Failure token SKILL_AUTOCOMPLETE_GAP."
     },
@@ -196,12 +200,28 @@
       "reason": "The v2 bucket-membership guard itself (self-covering; must not manage itself)."
     },
     {
+      "path": "tests2/core/pi-ai-browser-boundary.test.ts",
+      "reason": "Pi 0.80 browser import boundary canary: src/app/pi-ai-lazy.ts must keep runtime streaming imports lazy/provider-specific and use only package-exported @earendil-works/pi-ai/providers/* subpaths, while preserving the no bare pi-ai runtime import invariant."
+    },
+    {
+      "path": "tests2/core/manual-test-model-seeding.test.ts",
+      "reason": "Manual integration live-config mode pin: BOBBIT_MANUAL_INHERIT_SERVER_CONFIG copies only model/provider preferences plus Pi agent auth/config files into isolated manual gateways, while MANUAL_TEST_MODEL/THINKING overrides inherited defaults and live sessions/tokens stay isolated."
+    },
+    {
+      "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
+      "reason": "Pi 0.80.6 browser journey coverage: pins the user-facing GPT 5.6 catalog (gpt-5.6-luna/sol/terra) exposed through /api/models and selectable in the settings model selector, browser-safe pi-ai provider/key-test routes, and session reload/restore after transcript parsing."
+    },
+    {
       "path": "tests2/core/headset-accessory.test.ts",
       "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context."
     },
     {
       "path": "tests2/core/ledger-lease-bridge-interop.test.ts",
-      "reason": "Protocol-compatibility pin: tests/e2e/ledger-lease-bridge.mjs (Playwright-safe lease client) and scripts/testing-v2/ledger.mjs share the same on-disk lease protocol so the global concurrency caps hold across the browser + vitest tiers."
+      "reason": "Protocol-compatibility pin: tests/e2e/ledger-lease-bridge.mjs (Playwright-safe lease client) and scripts/testing-v2/ledger.mjs share the same on-disk lease protocol so the global concurrency caps hold across the browser + vitest tiers; also pins the standalone vitest cap below parent-ledger grants."
+    },
+    {
+      "path": "tests2/core/unit-lanes-scheduling.test.ts",
+      "reason": "Pins the unit-lanes ORCHESTRATOR scheduling contract so `npm run test:unit` (run-unit-lanes.mjs) completes within the gate wall-time budget: ledger.reserveVitestLaneBudget() grants the fair core budget (not the single-process STANDALONE_VITEST_CAP throttle, which is left unchanged at 2), and planLaneConcurrency() distributes it so lanes overlap (maxConcurrent=floor(grant/perLane)) without ever raising a single vitest process above the Windows-RPC-safe per-process fork cap. Guards against the serial-lane gate timeout regression."
     },
     {
       "path": "tests2/integration/gateway-fixture-leak.test.ts",
@@ -248,6 +268,10 @@
       "reason": "Reproducing test for the chaos node_modules-wipe goal: pins junction-safe teardown (unlinkReparsePoint / cleanupChaosRoot preserve an external junction target) and the no-inner-node_modules layout (ensureNodeModulesJunction removed). Temp-FS only, external-free core tier. FAILS on HEAD (helpers absent, ensureNodeModulesJunction still defined), passes post-fix."
     },
     {
+      "path": "tests2/core/pi-rpc-agent-end-retry.test.ts",
+      "reason": "Pi 0.80.5 RPC compatibility: retryable agent_end events carry willRetry=true before Pi internal auto-retry settles. Bobbit must not mark the session idle, drain queued prompts, revoke one-time grants, or resolve waitForIdle until the final non-retry agent_end."
+    },
+    {
       "path": "tests2/core/verification-verifier-lifecycle-repro.test.ts",
       "reason": "Failing-first reproducing tests for Retry Reviewer Resume: verifier llm-review/agent-qa sessions must preserve identity/history, use same-session auto-retry for fetch/connection errors, resurrect dead processes up to 3 times before failing, and give idle agent-qa fair repeated reminder/streaming grace instead of creating blank replacements."
     }
@@ -291,6 +315,10 @@
     },
     {
       "path": "tests2/browser/journeys/project-settings.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
