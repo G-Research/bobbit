@@ -54,6 +54,12 @@ async function loadWorkflow(page: Page, workflow: FixtureWorkflow): Promise<void
 }
 
 async function openAdvanced(page: Page): Promise<void> {
+	const stepBody = page.locator(".wf-vstep-body").first();
+	if (!(await stepBody.isVisible())) {
+		await page.locator(".wf-vstep-collapsed-header").first().click();
+	}
+	await expect(stepBody).toBeVisible();
+
 	const details = page.locator("details.wf-vstep-advanced").first();
 	if (!(await details.evaluate((node: HTMLDetailsElement) => node.open))) {
 		await details.locator("summary").click();
@@ -128,13 +134,15 @@ test("workflow editor explains and preserves review-agent per-turn timeout rules
 	await page.getByTestId("wf-step-timeout").fill("0");
 	const zeroBody = await save(page);
 	expect(zeroBody.gates[0].verify[0].timeout).toBeUndefined();
+	await openAdvanced(page);
 	await page.getByTestId("wf-step-timeout").fill("3.8");
-	await expect(page.getByTestId("wf-step-timeout")).toHaveValue("3");
 	const fractionBody = await save(page);
 	expect(fractionBody.gates[0].verify[0].timeout).toBe(3);
 
 	// Switching to human sign-off hides the field and strips the stale timeout
 	// rather than silently serializing an inapplicable review setting.
+	await openAdvanced(page);
+	await expect(page.getByTestId("wf-step-timeout")).toHaveValue("3");
 	await page.getByTestId("wf-step-type").selectOption("human-signoff");
 	await expect(page.getByTestId("wf-step-timeout")).toHaveCount(0);
 	await stepBody.getByTestId("wf-step-prompt").fill("Approve the timeout contract");
