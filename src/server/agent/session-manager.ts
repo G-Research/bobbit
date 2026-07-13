@@ -1,6 +1,10 @@
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { realClock, realCommandRunner } from "../gateway-deps.js";
-import { randomUUID } from "node:crypto";
+import type { MessageAuthor } from "../../shared/message-author.js";
+import { LOCAL_USER_AUTHOR, isMessageAuthor } from "../../shared/message-author.js";
+import type { PromptSource } from "../../shared/prompt-source.js";
+export type { PromptSource } from "../../shared/prompt-source.js";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
@@ -21,6 +25,14 @@ import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ON
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
+import { appendPromptAuthorDispatch, appendPromptAuthorSettlement } from "./author-sidecar.js";
+import {
+	BATCH_SYSTEM_AUTHOR,
+	BOBBIT_SYSTEM_AUTHOR,
+	agentAuthorForSession,
+	normalizeVisibleAgentEvent,
+	resolvePromptAuthor,
+} from "./message-author.js";
 import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
@@ -31,7 +43,13 @@ import {
 	mergeCompactionSidecarIntoMessages,
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
-import { SessionStore, type PersistedSession, type WorktreePushPolicy } from "./session-store.js";
+import {
+	SessionStore,
+	normalizePersistedInFlightSteers,
+	type InFlightSteerRecord,
+	type PersistedSession,
+	type WorktreePushPolicy,
+} from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
@@ -554,20 +572,15 @@ function isBlankContentBlockError(errMsg: string | undefined): boolean {
 	return /text field in the ContentBlock/i.test(errMsg) && /is blank/i.test(errMsg);
 }
 
-/** Provenance of a prompt enqueued into a session. Read by TeamManager on
- *  agent_start to decide whether to reset idle-nudge backoff counters.
- *  Only "user" and "system" reset the counter; everything else preserves it. */
-export type PromptSource =
-	| "user"
-	| "auto-nudge"
-	| "task-notification"
-	| "verification"
-	| "system"
-	| "agent"
-	| "child-complete"
-	// Extension Host C2: a pack's `host.session.postMessage` drove this prompt
-	// (gesture-gated, allowedTools-scoped, audited — see session-write.ts).
-	| "extension";
+export type { InFlightSteerRecord } from "./session-store.js";
+
+export interface PendingPromptAuthorRecord {
+	promptId: string;
+	dispatchedAt: number;
+	modelText: string;
+	source: PromptSource;
+	author: MessageAuthor;
+}
 
 export interface SessionInfo {
 	id: string;
@@ -700,6 +713,8 @@ export interface SessionInfo {
 	 *  enqueuePrompt / deliverLiveSteer. Defaults to "user" when callers
 	 *  don't supply a source. Read by TeamManager.subscribeTeamLeadEvents. */
 	lastPromptSource?: PromptSource;
+	/** Author binding for prompts dispatched but not yet echoed by Pi. */
+	pendingPromptAuthors?: PendingPromptAuthorRecord[];
 	/** Pending grant request from the guard extension's long-poll */
 	pendingGrantRequest?: {
 		resolve: (result: ToolGrantResolution) => void;
@@ -775,7 +790,7 @@ export interface SessionInfo {
 	 * Bounded growth: every entry has a paired SDK echo or a reconcile drain;
 	 * neither path is silently dropped.
 	 */
-	inFlightSteerTexts?: string[];
+	inFlightSteerTexts?: InFlightSteerRecord[];
 	/**
 	 * Latest in-flight `message_update` payload. Set on every `message_update`
 	 * event with a non-empty `event.message`; cleared on `message_end`,
@@ -794,6 +809,31 @@ export interface SessionInfo {
 // for backwards compat with existing call sites.
 export { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
 import { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
+
+function resolveAcceptedPromptAuthor(source: PromptSource, explicit?: MessageAuthor): MessageAuthor {
+	if (source === "agent") {
+		return resolvePromptAuthor(source, {
+			agentAuthor: isMessageAuthor(explicit) && explicit.kind === "agent" ? explicit : undefined,
+		});
+	}
+	return resolvePromptAuthor(source, {
+		systemAuthor: isMessageAuthor(explicit) && explicit.kind === "system" ? explicit : undefined,
+	});
+}
+
+function sameAuthor(left: MessageAuthor, right: MessageAuthor): boolean {
+	return left.kind === right.kind && left.id === right.id && left.label === right.label;
+}
+
+function authorForSteerRows(rows: QueuedMessage[]): MessageAuthor {
+	const authors = rows.map((row) => resolveAcceptedPromptAuthor(row.source ?? "user", row.author));
+	return authors.every((author) => sameAuthor(author, authors[0])) ? authors[0] : BATCH_SYSTEM_AUTHOR;
+}
+
+function batchPromptId(prefix: string, rows: QueuedMessage[]): string {
+	const digest = createHash("sha256").update(rows.map((row) => row.id).join("\0")).digest("hex");
+	return `${prefix}:${digest}`;
+}
 
 /** Helper: extract the text body of a user message (string or block array). */
 function extractUserMessageText(message: any): string {
@@ -821,6 +861,57 @@ function rewriteUserMessageText(message: any, newText: string): any {
 		return { ...message, content };
 	}
 	return { ...message, content: newText };
+}
+
+/**
+ * Stamp Bobbit-owned author metadata before lifecycle tracking and emission.
+ * The raw Pi event is never mutated and the message content/role is unchanged.
+ */
+export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): unknown {
+	if (!event || typeof event !== "object") return event;
+	const raw = event as any;
+	if ((raw.type !== "message_update" && raw.type !== "message_end") || !raw.message || typeof raw.message !== "object") {
+		return event;
+	}
+
+	const message = raw.message as any;
+	let author: MessageAuthor;
+	const userRole = message.role === "user" || message.role === "user-with-attachments";
+	const modelText = userRole ? extractUserMessageText(message) : "";
+	let pendingIndex = -1;
+	if (userRole && modelText && session.pendingPromptAuthors?.length) {
+		pendingIndex = session.pendingPromptAuthors.findIndex((record) => record.modelText === modelText);
+	}
+
+	if (pendingIndex !== -1) {
+		author = session.pendingPromptAuthors![pendingIndex].author;
+	} else if (message.role === "assistant") {
+		author = agentAuthorForSession(session);
+	} else {
+		author = normalizeVisibleAgentEvent(session, raw, {
+			agentAuthor: agentAuthorForSession(session),
+			systemAuthor: BOBBIT_SYSTEM_AUTHOR,
+		}).message.author;
+	}
+
+	const prepared = normalizeVisibleAgentEvent(session, raw, {
+		agentAuthor: agentAuthorForSession(session),
+		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
+		promptAuthor: author,
+	});
+	if (raw.type === "message_end" && pendingIndex !== -1) {
+		const [pending] = session.pendingPromptAuthors!.splice(pendingIndex, 1);
+		void appendPromptAuthorSettlement(session.id, {
+			schemaVersion: 1,
+			type: "prompt-author-settlement",
+			promptId: pending.promptId,
+			settledAt: sessionManagerModuleClock.now(),
+			outcome: "echoed",
+			...(typeof message.id === "string" ? { messageId: message.id } : {}),
+			...(typeof message.timestamp === "number" ? { messageTimestamp: message.timestamp } : {}),
+		});
+	}
+	return prepared;
 }
 
 /**
@@ -3186,9 +3277,9 @@ export class SessionManager {
 		if (session) this.broadcastQueue(session);
 	}
 
-	private persistedInFlightSteerTexts(session: SessionInfo): string[] | undefined {
-		const ledger = session.inFlightSteerTexts?.filter(text => typeof text === "string" && text.length > 0) ?? [];
-		return ledger.length > 0 ? [...ledger] : undefined;
+	private persistedInFlightSteerTexts(session: SessionInfo): InFlightSteerRecord[] | undefined {
+		const ledger = session.inFlightSteerTexts?.filter((record) => record.text.length > 0) ?? [];
+		return ledger.length > 0 ? ledger.map((record) => ({ ...record })) : undefined;
 	}
 
 	private persistInFlightSteerLedger(session: SessionInfo): void {
@@ -3204,7 +3295,7 @@ export class SessionManager {
 			sessionId: session.id,
 			queue,
 		});
-		const updates: { messageQueue: QueuedMessage[]; inFlightSteerTexts?: string[] } = { messageQueue: queue };
+		const updates: { messageQueue: QueuedMessage[]; inFlightSteerTexts?: InFlightSteerRecord[] } = { messageQueue: queue };
 		if (opts?.includeInFlightSteers) updates.inFlightSteerTexts = this.persistedInFlightSteerTexts(session);
 		this.resolveStoreForSession(session.id).update(session.id, updates);
 	}
@@ -3250,6 +3341,8 @@ export class SessionManager {
 		/** Provenance of this prompt. Defaults to "user". Read by TeamManager
 		 *  on agent_start to decide whether to reset idle-nudge backoff counters. */
 		source?: PromptSource;
+		/** Trusted server-resolved author. Browser clients cannot set this field. */
+		author?: MessageAuthor;
 		/** Dispatch against a possibly-cold (freshly-restored) agent: the direct
 		 *  dispatch waits for readiness and uses a generous prompt timeout via
 		 *  RpcBridge.promptWhenReady, so the boot-resume nudge actually lands
@@ -3299,7 +3392,9 @@ export class SessionManager {
 			// object — unchanged behavior for genuinely unrevivable sessions.
 		}
 
-		session.lastPromptSource = opts?.source ?? "user";
+		const source = opts?.source ?? "user";
+		const author = resolveAcceptedPromptAuthor(source, opts?.author);
+		session.lastPromptSource = source;
 
 		// modelText is what the model sees; text is the user's verbatim input.
 		// When no expansions, both are equal and dispatch is byte-equal to today.
@@ -3356,6 +3451,8 @@ export class SessionManager {
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
 					suppressTitleGen: opts?.suppressTitleGen,
+					source,
+					author,
 				});
 				this.broadcastQueue(session);
 				return { status: "queued" };
@@ -3403,7 +3500,7 @@ export class SessionManager {
 					// where attachments aren't tracked on SessionInfo), fall back to
 					// the synthetic phrase so we never re-send blank/invalid content.
 					const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
-					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
+					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
 					return { status: "dispatched" };
 				}
 			}
@@ -3414,7 +3511,7 @@ export class SessionManager {
 			// cleared).
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
+			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
 			return { status: "dispatched" };
 		}
 
@@ -3423,7 +3520,7 @@ export class SessionManager {
 		// slow, and clients/API polling must see the turn as in-flight immediately.
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
+			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
 			return { status: "dispatched" };
 		}
 
@@ -3436,6 +3533,8 @@ export class SessionManager {
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
 			suppressTitleGen: opts?.suppressTitleGen,
+			source,
+			author,
 		});
 		this.broadcastQueue(session);
 
@@ -3457,10 +3556,12 @@ export class SessionManager {
 	 * Returns the underlying rpcClient.steer() promise so callers can await
 	 * or attach their own error handler.
 	 */
-	deliverLiveSteer(sessionId: string, message: string, opts?: { source?: PromptSource }): Promise<unknown> {
+	deliverLiveSteer(sessionId: string, message: string, opts?: { source?: PromptSource; author?: MessageAuthor }): Promise<unknown> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
-		session.lastPromptSource = opts?.source ?? "user";
+		const source = opts?.source ?? "user";
+		const author = resolveAcceptedPromptAuthor(source, opts?.author);
+		session.lastPromptSource = source;
 
 		// ERROR STATE GATING: same cap as enqueuePrompt. Idle-but-errored means
 		// there is no live turn to inject into, so we either dispatch a regular
@@ -3473,7 +3574,7 @@ export class SessionManager {
 				);
 				// Persist to promptQueue so it survives Stop/Retry. drainQueue will
 				// pick it up after user Retry.
-				const queued = session.promptQueue.enqueue(message, { isSteered: true });
+				const queued = session.promptQueue.enqueue(message, { isSteered: true, source, author });
 				this.broadcastQueue(session);
 				return Promise.resolve({ queued: true, parked: true, id: queued.id });
 			}
@@ -3484,13 +3585,13 @@ export class SessionManager {
 			);
 			// enqueuePrompt handles its own state-clear + pending-timer cancel +
 			// prefix application; we just route through it with the raw message.
-			return this.enqueuePrompt(sessionId, message, { isSteered: true, source: opts?.source });
+			return this.enqueuePrompt(sessionId, message, { isSteered: true, source, author });
 		}
 
 		// Happy path: enqueue then dispatch via the single _dispatchSteer site.
 		// _dispatchSteer removes the row from promptQueue *before* awaiting the
 		// RPC and persists an in-flight ledger for restart durability until echo.
-		const queued = session.promptQueue.enqueue(message, { isSteered: true });
+		const queued = session.promptQueue.enqueue(message, { isSteered: true, source, author });
 		this.broadcastQueue(session);
 		return this._dispatchSteer(session, [queued]);
 	}
@@ -3518,6 +3619,42 @@ export class SessionManager {
 		return true;
 	}
 
+	private recordPromptAuthorDispatch(
+		session: SessionInfo,
+		promptId: string,
+		modelText: string,
+		source: PromptSource,
+		author: MessageAuthor,
+	): PendingPromptAuthorRecord {
+		const pending: PendingPromptAuthorRecord = {
+			promptId,
+			dispatchedAt: this.clock.now(),
+			modelText,
+			source,
+			author,
+		};
+		if (!session.pendingPromptAuthors) session.pendingPromptAuthors = [];
+		session.pendingPromptAuthors.push(pending);
+		void appendPromptAuthorDispatch(session.id, {
+			schemaVersion: 1,
+			type: "prompt-author",
+			...pending,
+		});
+		return pending;
+	}
+
+	private cancelPromptAuthorDispatch(session: SessionInfo, promptId: string): void {
+		const idx = session.pendingPromptAuthors?.findIndex((record) => record.promptId === promptId) ?? -1;
+		if (idx !== -1) session.pendingPromptAuthors!.splice(idx, 1);
+		void appendPromptAuthorSettlement(session.id, {
+			schemaVersion: 1,
+			type: "prompt-author-settlement",
+			promptId,
+			settledAt: this.clock.now(),
+			outcome: "cancelled",
+		});
+	}
+
 	/**
 	 * Single dispatch site for steered prompts. Removes rows from promptQueue
 	 * *before* awaiting rpcClient.steer() and persists an in-flight ledger so
@@ -3534,6 +3671,12 @@ export class SessionManager {
 		const bg = (this as any).bgProcessManager;
 		if (bg) bg.abortAllWaits(session.id);
 		const batchText = rows.map(r => r.text).join("\n");
+		const promptId = batchPromptId("steer", rows);
+		const source = rows.every((row) => (row.source ?? "user") === (rows[0].source ?? "user"))
+			? (rows[0].source ?? "user")
+			: "system";
+		const author = authorForSteerRows(rows);
+		const ledgerRecord: InFlightSteerRecord = { text: batchText, promptId, source, author };
 
 		// Record on the shadow ledger BEFORE persisting queue removal. The store
 		// update below writes both the now-empty promptQueue slice and this ledger
@@ -3543,7 +3686,8 @@ export class SessionManager {
 		// On RPC failure we splice this exact entry back out and re-enqueue
 		// the rows at front of promptQueue, so the next drain redispatches.
 		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
-		session.inFlightSteerTexts.push(batchText);
+		session.inFlightSteerTexts.push(ledgerRecord);
+		this.recordPromptAuthorDispatch(session, promptId, batchText, source, author);
 		for (const r of rows) session.promptQueue.remove(r.id);
 		this.broadcastQueue(session, { includeInFlightSteers: true });
 		try {
@@ -3556,11 +3700,16 @@ export class SessionManager {
 			// it. Abort/restart reconciliation can drain the same ledger while the
 			// steer RPC is pending; in that case the row has already been recovered
 			// exactly once and must not be enqueued again here.
-			const lidx = session.inFlightSteerTexts.lastIndexOf(batchText);
+			const lidx = session.inFlightSteerTexts.findIndex((record) => record.promptId === promptId);
 			if (lidx !== -1) {
 				session.inFlightSteerTexts.splice(lidx, 1);
+				this.cancelPromptAuthorDispatch(session, promptId);
 				for (const r of [...rows].reverse()) {
-					session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
+					session.promptQueue.enqueueAtFront(r.text, {
+						isSteered: true,
+						source: r.source,
+						author: r.author,
+					});
 				}
 				this.broadcastQueue(session, { includeInFlightSteers: true });
 				// A steer rejection can race with abort settlement: agent_end may have
@@ -3591,7 +3740,7 @@ export class SessionManager {
 		if (event.message?.role !== "user") return;
 		const text = extractUserMessageText(event.message);
 		if (!text) return;
-		const idx = ledger.indexOf(text);
+		const idx = ledger.findIndex((record) => record.text === text);
 		if (idx !== -1) {
 			ledger.splice(idx, 1);
 			this.persistInFlightSteerLedger(session);
@@ -3608,8 +3757,13 @@ export class SessionManager {
 	private _reconcileInFlightSteers(session: SessionInfo): void {
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
-		for (const text of [...ledger].reverse()) {
-			session.promptQueue.enqueueAtFront(text, { isSteered: true });
+		for (const record of [...ledger].reverse()) {
+			this.cancelPromptAuthorDispatch(session, record.promptId);
+			session.promptQueue.enqueueAtFront(record.text, {
+				isSteered: true,
+				source: record.source,
+				author: record.author,
+			});
 		}
 		ledger.length = 0;
 		this.broadcastQueue(session, { includeInFlightSteers: true });
@@ -3715,6 +3869,8 @@ export class SessionManager {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
+		source?: PromptSource;
+		author?: MessageAuthor;
 	}>, reason: string, source: string): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
 		const providerAuthFailure = isProviderAuthFailure(reason);
@@ -3735,6 +3891,8 @@ export class SessionManager {
 				images: r.images,
 				attachments: r.attachments,
 				isSteered: r.isSteered,
+				source: r.source,
+				author: r.author,
 			});
 			recoveredIds.push(recovered.id);
 		}
@@ -3786,13 +3944,19 @@ export class SessionManager {
 		attachments?: unknown[],
 		isSteered?: boolean,
 		coldStart?: boolean,
+		source: PromptSource = "user",
+		author: MessageAuthor = LOCAL_USER_AUTHOR,
+		promptId = `prompt:${randomUUID()}`,
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
+		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
 
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered }];
+		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
+		this.recordPromptAuthorDispatch(session, promptId, text, source, author);
 		let recovered = false;
+		let cancelled = false;
 		try {
 			// Cold (freshly-restored) agent: wait for readiness, then prompt with a
 			// generous timeout so a boot-resume nudge lands instead of timing out
@@ -3802,12 +3966,15 @@ export class SessionManager {
 				: await session.rpcClient.prompt(text, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
+				this.cancelPromptAuthorDispatch(session, promptId);
+				cancelled = true;
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
 				recovered = true;
 				throw this.safeDispatchError(session, reason);
 			}
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
+			if (!cancelled) this.cancelPromptAuthorDispatch(session, promptId);
 			if (!recovered) {
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
 			}
@@ -3838,7 +4005,11 @@ export class SessionManager {
 
 		if (steered.length > 0) {
 			const batchText = steered.map(m => m.text).join('\n');
-			next = { ...steered[0], text: batchText };
+			const batchAuthor = authorForSteerRows(steered);
+			const batchSource: PromptSource = steered.every((row) => (row.source ?? "user") === (steered[0].source ?? "user"))
+				? (steered[0].source ?? "user")
+				: "system";
+			next = { ...steered[0], text: batchText, source: batchSource, author: batchAuthor };
 		} else {
 			// Skip already-dispatched messages (steered mid-turn), then pop the next
 			next = session.promptQueue.dequeue();
@@ -3852,9 +4023,13 @@ export class SessionManager {
 		// first genuine user message.
 		if (!next.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, next.text);
 
-		// Track for retry
+		// Track for retry and nudge provenance from the row being dispatched.
+		const promptSource = next.source ?? "user";
+		const promptAuthor = resolveAcceptedPromptAuthor(promptSource, next.author);
+		const promptId = steered.length > 0 ? batchPromptId("queue-batch", steered) : next.id;
 		session.lastPromptText = next.text;
 		session.lastPromptImages = next.images;
+		session.lastPromptSource = promptSource;
 
 		// Optimistic status update to prevent double-dispatch race
 		this.markPromptDispatchStreaming(session);
@@ -3864,8 +4039,8 @@ export class SessionManager {
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
 		// when drainQueue races the SDK's finishRun() during a graceful abort).
 		const dispatchedRowsForRecovery = steered.length > 0
-			? steered.map(r => ({ text: r.text, images: r.images, attachments: r.attachments, isSteered: true }))
-			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered }];
+			? steered.map(r => ({ text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, author: r.author }))
+			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, author: promptAuthor }];
 
 		const recoverDispatchedRows = (reason: string) => {
 			// Suppress recovery only after an inbound agent event proves the dequeued
@@ -3882,6 +4057,7 @@ export class SessionManager {
 			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
 		};
 
+		this.recordPromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
 		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
 		dispatchPromise
 			.then((resp: any) => {
@@ -3890,6 +4066,7 @@ export class SessionManager {
 				// race below). Treat that the same as a thrown rejection — recover
 				// the dequeued rows so a future drain can redispatch them.
 				if (resp && resp.success === false) {
+					this.cancelPromptAuthorDispatch(session, promptId);
 					recoverDispatchedRows(resp.error || "unknown");
 				} else {
 					// Dispatch landed — clear the busy-guard retry budget so a
@@ -3898,6 +4075,7 @@ export class SessionManager {
 				}
 			})
 			.catch((err: any) => {
+				this.cancelPromptAuthorDispatch(session, promptId);
 				const reason = err?.message || String(err);
 				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
@@ -4514,16 +4692,21 @@ export class SessionManager {
 		modelText?: string;
 		suppressTitleGen?: boolean;
 		source?: PromptSource;
+		author?: MessageAuthor;
 	}): { status: "queued"; queuedId?: string } {
 		const session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
-		session.lastPromptSource = opts?.source ?? "user";
+		const source = opts?.source ?? "user";
+		const author = resolveAcceptedPromptAuthor(source, opts?.author);
+		session.lastPromptSource = source;
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
 		const queued = session.promptQueue.enqueue(dispatchText, {
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
 			suppressTitleGen: opts?.suppressTitleGen,
+			source,
+			author,
 		});
 		this.broadcastQueue(session);
 		return { status: "queued", queuedId: queued.id };
@@ -4580,7 +4763,7 @@ export class SessionManager {
 				if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
 				target.lastPromptText = retryText;
 				target.lastPromptImages = savedPromptImages;
-				await this.dispatchDirectPrompt(target, retryText, savedPromptImages);
+				await this.dispatchDirectPrompt(target, retryText, savedPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR);
 				return;
 			}
 		}
@@ -4590,7 +4773,8 @@ export class SessionManager {
 			await this.dispatchDirectPrompt(session,
 				"[SYSTEM: The model API returned an error while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
-				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
+				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]",
+				undefined, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR,
 			);
 		} else if (session.lastPromptText || session.lastPromptImages?.length) {
 			// Fresh response error — re-send the original prompt. Run the text
@@ -4608,13 +4792,14 @@ export class SessionManager {
 			if (!this.consumeRecoveredPromptDispatchRows(session)) {
 				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
-			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
+			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			this.consumeRecoveredPromptDispatchRows(session);
 			await this.dispatchDirectPrompt(session,
 				"[SYSTEM: The model API returned an error on your last response. " +
-				"Please review your conversation history and retry what you were doing.]"
+				"Please review your conversation history and retry what you were doing.]",
+				undefined, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR,
 			);
 		}
 	}
@@ -5131,6 +5316,10 @@ export class SessionManager {
 	 * (willRetry:false) agent_end events are emitted/replayed.
 	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
 	 */
+	private prepareVisibleAgentEvent(session: SessionInfo, event: unknown): unknown {
+		return prepareVisibleAgentEvent(session, event);
+	}
+
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
 		if (isRetryableAgentEnd(event)) return;
 		emitSessionEvent(session, truncateLargeToolContent(event));
@@ -5512,7 +5701,7 @@ export class SessionManager {
 			allowedTools: ps.allowedTools,
 			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
-			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
+			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 		});
 	}
 
@@ -5864,7 +6053,7 @@ export class SessionManager {
 			streamingStartedAt: ps.streamingStartedAt,
 			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
-			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
+			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			repoPath: ps.repoPath,
@@ -5899,10 +6088,11 @@ export class SessionManager {
 				}
 			}
 
-			this.handleAgentLifecycle(session, event);
+			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+			this.handleAgentLifecycle(session, preparedEvent);
 
-			this.emitAgentEvent(session, event);
-			if (!restoring) this.trackCostFromEvent(session, event);
+			this.emitAgentEvent(session, preparedEvent);
+			if (!restoring) this.trackCostFromEvent(session, preparedEvent);
 		});
 
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
@@ -7311,9 +7501,10 @@ export class SessionManager {
 
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = this.clock.now();
-			this.handleAgentLifecycle(session, event);
-			this.emitAgentEvent(session, event);
-			this.trackCostFromEvent(session, event);
+			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+			this.handleAgentLifecycle(session, preparedEvent);
+			this.emitAgentEvent(session, preparedEvent);
+			this.trackCostFromEvent(session, preparedEvent);
 		});
 		session.unsubscribe = unsub;
 
@@ -7772,9 +7963,10 @@ export class SessionManager {
 				session.lastActivity = this.clock.now();
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
-			this.handleAgentLifecycle(session, event);
-			this.emitAgentEvent(session, event);
-			if (!switchingSession) this.trackCostFromEvent(session, event);
+			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+			this.handleAgentLifecycle(session, preparedEvent);
+			this.emitAgentEvent(session, preparedEvent);
+			if (!switchingSession) this.trackCostFromEvent(session, preparedEvent);
 		});
 
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
@@ -9888,10 +10080,11 @@ export class SessionManager {
 					abortStore.update(id, { lastActivity: session.lastActivity });
 				}
 
-				this.handleAgentLifecycle(session, event);
+				const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+				this.handleAgentLifecycle(session, preparedEvent);
 
-				this.emitAgentEvent(session, event);
-				if (!switchingSession) this.trackCostFromEvent(session, event);
+				this.emitAgentEvent(session, preparedEvent);
+				if (!switchingSession) this.trackCostFromEvent(session, preparedEvent);
 			});
 
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
