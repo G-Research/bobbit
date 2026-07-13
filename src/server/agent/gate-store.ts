@@ -7,6 +7,13 @@ import type { GateStepDiagnostics } from "../gate-diagnostics.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
+export interface VerificationTimeoutInfo {
+	/** Resolved per-turn review allowance. */
+	configuredSeconds: number;
+	/** Elapsed time for the specific active turn that exhausted its allowance. */
+	elapsedMs: number;
+}
+
 export interface GateSignalStep {
 	name: string;
 	type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
@@ -27,9 +34,11 @@ export interface GateSignalStep {
 	 * completed rows. Set on initial enumeration by
 	 * `VerificationHarness.beginVerification()` so the gate-store signal
 	 * carries useful progress information from the moment it is recorded,
-	 * then preserved as `passed`/`failed`/`skipped` for historical rendering.
+	 * then preserved as `passed`/`failed`/`timeout`/`skipped` for historical rendering.
 	 */
-	status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+	status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+	/** Present only when a review turn exhausted its configured allowance. */
+	timeout?: VerificationTimeoutInfo;
 	/** Optional phase number, mirrored from the workflow VerifyStep for ordering. */
 	phase?: number;
 }
