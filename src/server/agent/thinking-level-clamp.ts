@@ -1,4 +1,4 @@
-import { getModel } from "@earendil-works/pi-ai";
+import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import { inferMeta } from "./aigw-manager.js";
 import { clampThinkingLevel, type ModelLike, type ThinkingLevel } from "../../shared/thinking-levels.js";
 
@@ -15,7 +15,7 @@ export type ThinkingClampModel = ModelLike & { metadataSource: ThinkingClampMeta
 
 function lookupPiCatalogModel(provider: string, modelId: string): CatalogThinkingMetadata | undefined {
 	try {
-		return getModel(provider as any, modelId) as CatalogThinkingMetadata | undefined;
+		return getBuiltinModel(provider as any, modelId as any) as CatalogThinkingMetadata | undefined;
 	} catch {
 		return undefined;
 	}
@@ -69,6 +69,10 @@ export function resolveThinkingClampModel(
 		id: modelId,
 		provider: normalizedProvider,
 		reasoning: meta.reasoning,
+		// inferMeta usually omits thinkingLevelMap (heuristic path handles xhigh),
+		// but routed families like GPT 5.6 Luna/Sol/Terra attach an explicit map so
+		// the new `max` tier is preserved instead of clamping down to xhigh.
+		...(meta.thinkingLevelMap !== undefined ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 		metadataSource: "inferMeta",
 	};
 }

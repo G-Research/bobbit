@@ -28,7 +28,16 @@
  * EXPECTED TO FAIL on current HEAD (mirror empty → submit disabled/absent). It
  * passes once the unified onProposal bridge mirrors role/tool/staff fields.
  */
-import { test, expect, openApp, createSessionViaUI } from "../_helpers/journey-fixture.js";
+import {
+	test,
+	expect,
+	openApp,
+	createSessionViaUI,
+	createSession,
+	deleteSession,
+	defaultProjectId,
+	navigateToHash,
+} from "../_helpers/journey-fixture.js";
 import type { Page } from "@playwright/test";
 
 // Deterministic bug repro — a failure here is the bug, not a flake budget.
@@ -39,6 +48,35 @@ async function ensureUnifiedProposalReady(page: Page): Promise<void> {
 		const s = (window as any).bobbitState ?? (window as any).__bobbitState;
 		return !!s?.remoteAgent && typeof s.remoteAgent.onProposal === "function";
 	}, undefined, { timeout: 20_000 });
+}
+
+async function waitForActiveSessionProjectRoot(page: Page, expectedSessionId?: string): Promise<void> {
+	await page.waitForFunction((expected: string | undefined) => {
+		const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const projects = Array.isArray(s?.projects) ? s.projects : [];
+		if (projects.length === 0) return false;
+
+		const selectedSessionId = typeof s?.selectedSessionId === "string" ? s.selectedSessionId : "";
+		const routeSessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1] ?? "";
+		const sessionId = expected || selectedSessionId || routeSessionId;
+		if (!sessionId) return false;
+		if (expected && (selectedSessionId !== expected || routeSessionId !== expected)) return false;
+
+		const sessions = [
+			...(Array.isArray(s?.gatewaySessions) ? s.gatewaySessions : []),
+			...(Array.isArray(s?.archivedSessions) ? s.archivedSessions : []),
+		];
+		const session = sessions.find((entry: any) => entry?.id === sessionId);
+		const projectId = session?.projectId || s?.chatPanel?.agentInterface?.projectId;
+		if (typeof projectId !== "string" || projectId.trim() === "") return false;
+
+		const project = projects.find((entry: any) => entry?.id === projectId);
+		return !!project
+			&& project.id !== "headquarters"
+			&& project.kind !== "headquarters"
+			&& typeof project.rootPath === "string"
+			&& project.rootPath.trim() !== "";
+	}, expectedSessionId, { timeout: 20_000 });
 }
 
 /**
@@ -157,43 +195,54 @@ test.describe("Journey: cross-session proposal panels populate form-mirror (unif
 	});
 
 	test("staff proposal via unified seed path populates mirror + enables submit", async ({ page }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-		await ensureUnifiedProposalReady(page);
-		await assertNotMatchingAssistant(page, "staff");
+		// Staff proposals default cwd from the active session's project root. Create
+		// the session against the harness default project directly so a transient
+		// sidebar project-list race cannot fall back to a Headquarters session.
+		const projectId = await defaultProjectId();
+		expect(projectId, "staff proposal setup needs a non-Headquarters default project").toBeTruthy();
+		const sessionId = await createSession({ projectId });
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await ensureUnifiedProposalReady(page);
+			await assertNotMatchingAssistant(page, "staff");
+			await waitForActiveSessionProjectRoot(page, sessionId);
 
-		const fields = {
-			name: "helper-bot",
-			description: "A little helper agent.",
-			prompt: "You are a helpful staff agent.",
-			triggers: '[{"type":"cron","value":"0 9 * * *"}]',
-			cwd: "C:/tmp/bobbit-staff-fixture",
-		};
-		await driveUnifiedProposal(page, "staff", fields, "seed");
-		await activatePanel(page, "Staff", '[data-panel="staff-proposal"]');
-
-		const r = await page.evaluate(() => {
-			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
-			const btn = document.querySelector(
-				'[data-panel="staff-proposal"] [data-testid="proposal-primary-submit"] button',
-			) as HTMLButtonElement | null;
-			return {
-				name: s.staffPreviewName,
-				description: s.staffPreviewDescription,
-				prompt: s.staffPreviewPrompt,
-				triggers: s.staffPreviewTriggers,
-				cwd: s.staffPreviewCwd,
-				submitPresent: !!btn,
-				submitDisabled: btn ? btn.disabled : null,
+			const fields = {
+				name: "helper-bot",
+				description: "A little helper agent.",
+				prompt: "You are a helpful staff agent.",
+				triggers: '[{"type":"cron","value":"0 9 * * *"}]',
+				cwd: "",
 			};
-		});
+			await driveUnifiedProposal(page, "staff", fields, "seed");
+			await activatePanel(page, "Staff", '[data-panel="staff-proposal"]');
 
-		expect(r.name, "CROSS_SESSION_MIRROR_BUG: staffPreviewName not populated from unified onProposal seed path").toBe(fields.name);
-		expect(r.description, "CROSS_SESSION_MIRROR_BUG: staffPreviewDescription not populated").toBe(fields.description);
-		expect(r.prompt, "CROSS_SESSION_MIRROR_BUG: staffPreviewPrompt not populated").toBe(fields.prompt);
-		expect(r.triggers, "CROSS_SESSION_MIRROR_BUG: staffPreviewTriggers not populated").toBe(fields.triggers);
-		expect(r.cwd, "CROSS_SESSION_MIRROR_BUG: staffPreviewCwd not populated from unified onProposal seed path").toBe(fields.cwd);
-		expect(r.submitPresent, "CROSS_SESSION_MIRROR_BUG: staff submit button missing").toBe(true);
-		expect(r.submitDisabled, "CROSS_SESSION_MIRROR_BUG: staff submit disabled — staff form-mirror empty").toBe(false);
+			const r = await page.evaluate(() => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				const btn = document.querySelector(
+					'[data-panel="staff-proposal"] [data-testid="proposal-primary-submit"] button',
+				) as HTMLButtonElement | null;
+				return {
+					name: s.staffPreviewName,
+					description: s.staffPreviewDescription,
+					prompt: s.staffPreviewPrompt,
+					triggers: s.staffPreviewTriggers,
+					cwd: s.staffPreviewCwd,
+					submitPresent: !!btn,
+					submitDisabled: btn ? btn.disabled : null,
+				};
+			});
+
+			expect(r.name, "CROSS_SESSION_MIRROR_BUG: staffPreviewName not populated from unified onProposal seed path").toBe(fields.name);
+			expect(r.description, "CROSS_SESSION_MIRROR_BUG: staffPreviewDescription not populated").toBe(fields.description);
+			expect(r.prompt, "CROSS_SESSION_MIRROR_BUG: staffPreviewPrompt not populated").toBe(fields.prompt);
+			expect(r.triggers, "CROSS_SESSION_MIRROR_BUG: staffPreviewTriggers not populated").toBe(fields.triggers);
+			expect(r.cwd, "CROSS_SESSION_MIRROR_BUG: staffPreviewCwd not populated (should default to project root)").not.toBe("");
+			expect(r.submitPresent, "CROSS_SESSION_MIRROR_BUG: staff submit button missing").toBe(true);
+			expect(r.submitDisabled, "CROSS_SESSION_MIRROR_BUG: staff submit disabled — staff form-mirror empty").toBe(false);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
 	});
 });

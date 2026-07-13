@@ -103,6 +103,7 @@ async function mountGoalStatusWidget(fixture: {
 
 	await customElements.whenDefined("goal-status-widget");
 	const container = document.createElement("div");
+	document.body.appendChild(container);
 	// Create the host imperatively so the fixture uses this file's custom-element registry,
 	// not lit-html's cached template document from another isolate:false DOM file.
 	const el = document.createElement("goal-status-widget") as any;
@@ -110,7 +111,6 @@ async function mountGoalStatusWidget(fixture: {
 	el.token = "test-token";
 	el.branch = "fixture/branch";
 	container.appendChild(el);
-	document.body.appendChild(container);
 	await el.updateComplete;
 	await sleep(20);
 	await el.updateComplete;

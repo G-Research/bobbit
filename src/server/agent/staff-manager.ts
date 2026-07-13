@@ -253,8 +253,9 @@ export class StaffManager {
 					primaryWorktreeRoot: support.repoPath,
 					skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
 					recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
-					exec: async (cmd, setupCwd, env) => {
-						await execShellCommand(cmd, { cwd: setupCwd, env, timeout: 120_000 });
+					execHandlesTimeout: true,
+					exec: async (cmd, setupCwd, env, timeoutMs) => {
+						await execShellCommand(cmd, { cwd: setupCwd, env, timeout: timeoutMs });
 					},
 				});
 			} catch (err) {
@@ -621,8 +622,9 @@ export class StaffManager {
 					primaryWorktreeRoot: staff.repoPath ?? ctx?.project.rootPath ?? staff.cwd,
 					skipNpmCi: this.worktreeSetupRuntime.skipNpmCi,
 					recordSetupPath: this.worktreeSetupRuntime.recordSetupPath,
-					exec: async (cmd, cwd, env) => {
-						await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
+					execHandlesTimeout: true,
+					exec: async (cmd, cwd, env, timeoutMs) => {
+						await execShellCommand(cmd, { cwd, env, timeout: timeoutMs });
 					},
 				});
 			} catch (err) {

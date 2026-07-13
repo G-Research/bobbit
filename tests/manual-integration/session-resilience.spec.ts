@@ -1178,28 +1178,33 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			// Non-sandbox worktree sessions: verify host worktree directory exists on disk
 			if (!v.sandboxed && v.worktree && restored && existsSync(s.cwd)) {
 				const br = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: s.cwd, encoding: "utf-8" }).trim();
-				expect(br).not.toBe("master");
+				expect(br).not.toMatch(/^(main|master)$/);
 				console.log(`    worktree dir exists, branch=${br} ✓`);
 			} else if (!v.sandboxed && v.worktree && restored) {
 				console.log(`    WARNING: worktree dir ${s.cwd} does not exist on disk`);
 			}
 
 			// ── Git status API check ──
-			// After restart, the git-status endpoint should still return valid data
+			// After restart, the git-status endpoint should still return valid data.
+			// Do not assume a plain project-root session is necessarily on the configured
+			// primary branch: live-config runs may carry project-level base_ref state, and
+			// this smoke only needs the endpoint/widget to report the branch truthfully.
+			let primaryBranch = "master";
+			let gitStatusBranch = "";
+			let gitStatusIsOnPrimary = false;
 			if (restored) {
 				const gitStatus = await fetchGitStatusApi(gw, s.id);
 				if (gitStatus) {
+					primaryBranch = gitStatus.primaryBranch || primaryBranch;
+					gitStatusBranch = gitStatus.branch;
+					gitStatusIsOnPrimary = gitStatus.isOnPrimary;
 					expect(gitStatus.branch).toBeTruthy();
-					if (!v.sandboxed) {
-						if (v.worktree) {
-							expect(gitStatus.branch).not.toBe("master");
-							expect(gitStatus.isOnPrimary).toBe(false);
-						} else {
-							expect(gitStatus.branch).toBe("master");
-							expect(gitStatus.isOnPrimary).toBe(true);
-						}
+					expect(gitStatus.isOnPrimary).toBe(gitStatus.branch === primaryBranch);
+					if (!v.sandboxed && v.worktree) {
+						expect(gitStatus.branch).not.toBe(primaryBranch);
+						expect(gitStatus.isOnPrimary).toBe(false);
 					}
-					console.log(`    git-status API: branch=${gitStatus.branch} clean=${gitStatus.clean} isOnPrimary=${gitStatus.isOnPrimary} ✓`);
+					console.log(`    git-status API: branch=${gitStatus.branch} primary=${primaryBranch} clean=${gitStatus.clean} isOnPrimary=${gitStatus.isOnPrimary} ✓`);
 				} else {
 					console.log(`    git-status API: not available (may be expected for sandbox after restart)`);
 				}
@@ -1225,10 +1230,11 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			const widgetText = await checkGitStatusWidget(page);
 			if (widgetText) {
 				expect(widgetText).toContain("⎇");
-				if (!v.sandboxed && !v.worktree) {
-					expect(widgetText).toContain("master");
-				} else if (!v.sandboxed && v.worktree) {
-					expect(widgetText).not.toContain("master");
+				if (!v.sandboxed && gitStatusBranch) {
+					expect(widgetText).toContain(gitStatusBranch);
+					if (v.worktree || !gitStatusIsOnPrimary) {
+						expect(widgetText).not.toContain(primaryBranch);
+					}
 				}
 				console.log(`    git-status widget: "${widgetText}" ✓`);
 			} else {

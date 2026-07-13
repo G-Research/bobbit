@@ -2,9 +2,10 @@
 
 The "thinking level" picker controls how much reasoning effort the underlying
 model spends before answering. Not every model supports every level — Opus 4.8
-exposes an extra `xhigh` step, plain `gpt-4` exposes none — and the set of
-levels has to stay consistent across UI selectors, REST endpoints, the
-WebSocket boundary, and the verification harness.
+exposes an extra `xhigh` step, GPT 5.6 models expose `max`, plain `gpt-4`
+exposes none — and the set of levels has to stay consistent across UI
+selectors, REST endpoints, the WebSocket boundary, and the verification
+harness.
 
 Rather than scattering hardcoded `["off","minimal","low","medium","high"]`
 arrays around the codebase, all capability questions go through one shared
@@ -27,8 +28,8 @@ was duplicated in roughly ten places:
 - UI selectors (per-session footer, settings page, role manager, message
   editor callback type).
 
-Adding `xhigh` upstream would have meant editing all of them. Worse, the
-duplication had already drifted: picking an xhigh-capable Opus model in
+Adding `xhigh` or `max` upstream would have meant editing all of them. Worse,
+the duplication had already drifted: picking an xhigh-capable Opus model in
 Bobbit silently capped the user at `high` because the server's value table
 never knew `xhigh` existed, and the settings page offered `minimal` on models
 that don't support it.
@@ -45,12 +46,13 @@ present](#mirroring-pi-ai-when-a-thinkinglevelmap-is-present) below.
 ## The canonical set
 
 ```ts
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 ```
 
-Ranked low→high. `off` is always supported (the model just doesn't reason).
-`xhigh` is the recent addition for Opus 4.6+ (including Opus 4.8) and certain
-gpt-5.1/5.2 models.
+Ranked low→high. `off` is available unless upstream explicitly disables it
+with `off: null` (forced adaptive thinking). `xhigh` is supported by Opus
+4.6+ and some GPT 5.x families. `max` is the Pi `0.80.6` addition for models
+whose upstream `thinkingLevelMap` explicitly includes it.
 
 The canonical `ThinkingLevel` type, the `ModelLike` shape consumed by
 capability detection, and the helpers below all live in
@@ -69,6 +71,9 @@ model. The first branch that applies wins:
 | `thinkingLevelMap` **absent** and `supportsXHigh(model)` | `off, minimal, low, medium, high, xhigh` |
 | `thinkingLevelMap` **absent** otherwise | `off, minimal, low, medium, high` |
 
+`max` is intentionally absent from all map-less fallback rows. Bobbit only
+offers `max` when Pi's catalog explicitly advertises it.
+
 ### Mirroring pi-ai when a `thinkingLevelMap` is present
 
 When the model carries a `thinkingLevelMap`, Bobbit trusts it **completely**
@@ -80,29 +85,31 @@ of which efforts the model accepts). The rule per level is:
   unsupported). Crucially, `off: null` means *forced adaptive thinking* — the
   model cannot have reasoning disabled — so `off` itself is removed.
 - **Level absent from the map** → **kept** (the provider applies its default
-  for that effort). The one exception is `xhigh`, which is only kept when it
-  is present with a non-null value.
+  for that effort). The extended levels `xhigh` and `max` are exceptions:
+  they are kept only when present with a non-null value.
 
-Why trust the map fully rather than only reading `xhigh` from it? Because the
-map is what the agent runtime obeys. If Bobbit offered a level the model
-rejects (or hid one it accepts), the picker and the runtime would disagree —
-exactly the drift this module exists to prevent. Reading only `xhigh` from the
-map while assuming the full `off→high` ladder was wrong the moment a model
-started dropping `off` (Fable) or a middle level (gpt-5.5's `minimal: null`).
+Why trust the map fully rather than only reading `xhigh`/`max` from it?
+Because the map is what the agent runtime obeys. If Bobbit offered a level the
+model rejects (or hid one it accepts), the picker and the runtime would
+disagree — exactly the drift this module exists to prevent. Reading only the
+extended levels from the map while assuming the full `off→high` ladder was
+wrong the moment a model started dropping `off` (Fable) or a middle level
+(gpt-5.5's `minimal: null`).
 
 **Worked outcomes (verified against the live pi-ai catalog):**
 
 | Model | `thinkingLevelMap` | Supported levels |
 |---|---|---|
-| Claude Fable 5 | `{ off: null, xhigh: "xhigh" }` | `minimal, low, medium, high, xhigh` — **no `off`** |
+| Claude Fable 5 | `{ off: null, xhigh: "xhigh", max: "max" }` | `minimal, low, medium, high, xhigh, max` — **no `off`** |
 | Claude Opus 4.8 | `{ xhigh: "xhigh" }` | `off, minimal, low, medium, high, xhigh` |
 | gpt-5.2 | `{ off: "none", xhigh: "xhigh" }` | `off, minimal, low, medium, high, xhigh` |
 | gpt-5.5 | `{ off: "none", xhigh: "xhigh", minimal: null }` | `off, low, medium, high, xhigh` — **no `minimal`** |
+| gpt-5.6 Luna/Sol/Terra | non-null `xhigh` and `max` entries | `off, minimal, low, medium, high, xhigh, max` |
 
 Fable is the headline case: `off: null` forces adaptive thinking, so the
 thinking selector appears **without an Off option** offering
-minimal/low/medium/high/xhigh — not the old full `off→high` ladder, and not
-"only Off + Extra high".
+minimal/low/medium/high/xhigh/max — not the old full `off→high` ladder, and
+not "only Off + Extra high".
 
 ### Family heuristic when the map is absent
 
@@ -113,7 +120,8 @@ family matching:
 When the map is present, `supportsXHigh` is irrelevant to
 `getSupportedThinkingLevels` — the map alone decides. `supportsXHigh` still
 resolves metadata-first (non-null `xhigh` map entry) so callers that ask it
-directly stay correct, then falls back to family matching.
+directly stay correct, then falls back to family matching. There is no
+`supportsMax` family heuristic: `max` requires explicit metadata.
 
 The fallback families currently qualify:
 
@@ -152,7 +160,7 @@ providers may collide intentionally.
 
 The default is closed: an unknown or mismatched provider does **not** light
 up `xhigh`, even if the id matches the family regex. This pin is covered by
-the cross-provider-collision case in `tests/thinking-levels.test.ts`.
+the cross-provider-collision case in `tests2/core/thinking-levels.test.ts`.
 
 ## Clamping, not rejection
 
@@ -162,7 +170,7 @@ Otherwise the walk is **up-then-down** — first step **up** by rank to the
 nearest supported level, and only if none exists above it, step **down**:
 
 ```
-1. up:   token → … → xhigh   (nearest higher supported level)
+1. up:   token → … → max     (nearest higher supported level)
 2. down: token → … → off     (only if nothing supported above)
 ```
 
@@ -175,7 +183,7 @@ old pure-down walk got wrong:
   for `minimal` now clamps **up to `low`**, not down to `off` — valid
   reasoning intent is never silently disabled.
 - **A map drops `off` itself.** Fable's `off: null` yields supported
-  `minimal, low, medium, high, xhigh`. A request for `off` clamps **up to
+  `minimal, low, medium, high, xhigh, max`. A request for `off` clamps **up to
   `minimal`** (the lowest supported level) rather than returning an
   unsupported `off`.
 
@@ -186,8 +194,8 @@ old down-only walk did — the fix is strictly additive for the
 
 - `xhigh` on Sonnet 4.6 (no xhigh) clamps to `high`.
 - `xhigh` on a non-reasoning model (e.g. Haiku) clamps to `off`.
-- `off` on Fable (`off` unsupported) clamps **up** to `minimal`; `high` stays
-  `high`.
+- `off` on Fable (`off` unsupported) clamps **up** to `minimal`; `high` and
+  `max` stay unchanged when the Fable map includes them.
 - Unknown strings (`"weird"`, stale tokens from old prefs) are normalised to
   `off` first, then clamped — which yields the lowest supported level.
 - An empty/undefined level with `opts.allowEmpty: true` returns `undefined`
@@ -195,19 +203,20 @@ old down-only walk did — the fix is strictly additive for the
 
 Clamping rather than rejecting was a deliberate choice. The same preference
 key (`default.sessionThinkingLevel`) is consulted across many sessions; a
-user might set `xhigh` while Opus 4.7 is their default, then later change
-the role's model to one that doesn't support it. Rejecting would either:
+user might set `xhigh` or `max` while a capable model is their default, then
+later change the role's model to one that doesn't support it. Rejecting would
+either:
 
 - silently drop the preference (lose the user's intent the moment they
   switch models), or
 - error out and block the session from starting (refuse to run a session
   because of a stored preference).
 
-Clamping does neither — the user's `xhigh` preference is preserved in
+Clamping does neither — the user's `xhigh`/`max` preference is preserved in
 storage, and at session start it is degraded to the best level the resolved
-model can actually run. If they switch back to Opus 4.7, `xhigh` is honoured
-again. The behaviour mirrors pi-mono's "Fixed adaptive thinking … clamped
-unsupported xhigh effort values to supported levels" fix.
+model can actually run. If they switch back to a capable model, the original
+preference is honoured again. The behaviour mirrors pi-mono's "Fixed adaptive
+thinking … clamped unsupported effort values to supported levels" fix.
 
 ## The `thinkingLevelMap` has to reach the client to be useful
 
@@ -321,7 +330,7 @@ model and pushes the clamped value through `session.setThinkingLevel(...)`
 — which round-trips through the WS `set_thinking_level` handler so the
 server agrees with the client. The full-name label map in this file is the
 single place to extend if a new level is added; `xhigh` is labelled "Extra
-high".
+high" and `max` is labelled "Max".
 
 ### Settings page and role manager (`src/app/settings-page.ts`)
 
@@ -348,12 +357,12 @@ the wire:
 
 | Test | What it pins |
 |---|---|
-| `tests/thinking-levels.test.ts` | Capability matrix for Opus 4.5/4.6/4.7/4.8, dotted Opus ids, AIGW-routed Opus ids, Sonnet 4.6, gpt-5/5.1/5.1-codex-max/5.2, non-reasoning models, clamping behaviour, and the cross-provider-collision pin. Plus the `thinkingLevelMap`-present matrix: Fable's `{off:null, xhigh:"xhigh"}` → `minimal/low/medium/high/xhigh` (no `off`), opus-style `{xhigh:"xhigh"}` → full ladder, gpt-5.5's `{off:"none", xhigh:"xhigh", minimal:null}` → `off/low/medium/high/xhigh`, a map-less reasoning model unchanged, and the up-clamp of `off`→`minimal` on Fable. |
-| `tests/fable-thinking-levels-repro.test.ts` | Regression repro for the Fable-specific outcome — forced adaptive thinking (`off` dropped) with the selector present. |
-| `tests/model-state-meta-resolver.test.ts` | `resolveModelStateMeta` returns pi-ai values for `claude-fable-5` (1M ctx, `reasoning:true`, `thinkingLevelMap` present) and falls back to `inferMeta` for a genuinely-unknown id. |
-| `tests/thinking-levels-per-model.{html,spec.ts}` | Fixture-based browser tests that exercise a minimal HTML page mirroring the selector logic, including the map-present cases. The HTML mirror is annotated to stay in sync with the canonical module. |
-| `tests/e2e/fable-model-state-frame.spec.ts` | Selecting Fable emits a `state.model` frame with 1M context, `reasoning:true`, and the map — asserting the resolver reaches the wire, not just the dropdown. |
-| `tests/e2e/ui/thinking-levels.spec.ts` | Gateway-connected E2E specs that switch model in the footer, assert dropdown options change, persist `xhigh` across reload on xhigh-capable Opus, and verify the clamp-on-model-switch flow end to end. |
+| `tests2/core/thinking-levels.test.ts` | Capability matrix for Opus 4.5/4.6/4.7/4.8, dotted Opus ids, AIGW-routed Opus ids, Sonnet 4.6, GPT 5.x, non-reasoning models, clamping behaviour, and the cross-provider-collision pin. It also covers map-present cases including Fable's `{off:null, xhigh:"xhigh", max:"max"}` and GPT 5.6 `max` exposure. |
+| `tests2/core/fable-thinking-levels-repro.test.ts` | Regression repro for the Fable-specific outcome — forced adaptive thinking (`off` dropped) with the selector present. |
+| `tests2/core/model-state-meta-resolver.test.ts` | `resolveModelStateMeta` returns pi-ai values for `claude-fable-5` (1M ctx, `reasoning:true`, full `thinkingLevelMap`) and falls back to `inferMeta` for a genuinely-unknown id. |
+| `tests2/dom/thinking-levels-per-model.test.ts` | Fixture-based browser tests that exercise selector logic, including the map-present cases. |
+| `tests2/integration/fable-model-state-frame.test.ts` | Selecting Fable emits a `state.model` frame with 1M context, `reasoning:true`, and the map, then preserves it across reconnect/`get_state`. |
+| `tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts` | Browser journey for model metadata through settings/model selection and transcript reload after a mock-agent exchange. |
 
 The unit suite is the authoritative spec — if a behaviour isn't pinned
 there, the rule isn't real. The fixture and E2E layers prevent regressions
@@ -361,7 +370,7 @@ in the wiring between the shared module and the UI / server boundary.
 
 ## Out of scope
 
-- **Adding levels beyond `off|minimal|low|medium|high|xhigh`** is upstream's
+- **Adding levels beyond `off|minimal|low|medium|high|xhigh|max`** is upstream's
   call (pi-mono / pi-coding-agent). Bobbit will accept new levels once they
   appear in the upstream enum.
 - **How thinking levels are passed to the agent process** — `--thinking

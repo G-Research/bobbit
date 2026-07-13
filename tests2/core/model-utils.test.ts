@@ -11,7 +11,7 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { getModels } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { inferMeta } from "../../src/server/agent/aigw-manager.ts";
 import { modelRecencyRank } from "../../src/server/agent/model-registry.ts";
 
@@ -73,6 +73,15 @@ describe("inferMeta()", () => {
 		assert.equal(meta.contextWindow, 400_000);
 	});
 
+	it("non-GPT-5.6 reasoning models keep conservative supportsReasoningEffort:false", () => {
+		// Only families that explicitly opt in (GPT 5.6) should flip this flag; a
+		// broad all-reasoning change would regress the conservative gateway default.
+		for (const id of ["openai/gpt-5.2", "gpt-5.5", "gpt-5.4", "o4-mini", "claude-sonnet-4-6"]) {
+			const meta = inferMeta(id);
+			assert.equal(meta.compat!.supportsReasoningEffort, false, `${id} must keep supportsReasoningEffort:false`);
+		}
+	});
+
 	it("GPT-5.4 → 272K context and reasoning=true so xhigh does not clamp to off", () => {
 		const meta = inferMeta("gpt-5.4");
 		assert.equal(meta.contextWindow, 272_000);
@@ -87,6 +96,40 @@ describe("inferMeta()", () => {
 		assert.equal(meta.maxTokens, 128_000);
 		assert.equal(meta.reasoning, true);
 		assert.ok(meta.input!.includes("image"));
+	});
+
+	it("GPT-5.6 Luna (routed id) → reasoning + thinkingLevelMap xhigh/max", () => {
+		const meta = inferMeta("openai/gpt-5.6-luna");
+		assert.equal(meta.reasoning, true);
+		assert.equal(meta.contextWindow, 272_000);
+		assert.equal(meta.maxTokens, 128_000);
+		assert.ok(meta.input!.includes("image"));
+		assert.ok(meta.thinkingLevelMap, "routed GPT 5.6 should carry a thinkingLevelMap");
+		assert.equal(meta.thinkingLevelMap!.xhigh, "xhigh");
+		assert.equal(meta.thinkingLevelMap!.max, "max");
+		// GPT 5.6 must opt into reasoning effort so Pi's openai-completions sends the
+		// selected effort for the advertised `max` tier. Other conservative gateway
+		// compat flags must be preserved (only supportsReasoningEffort is flipped).
+		assert.equal(meta.compat!.supportsReasoningEffort, true, "GPT 5.6 must opt into reasoning effort");
+		assert.equal(meta.compat!.supportsStore, false);
+		assert.equal(meta.compat!.supportsDeveloperRole, false);
+		assert.equal(meta.compat!.supportsUsageInStreaming, false);
+		assert.equal(meta.compat!.supportsStrictMode, false);
+		assert.equal(meta.compat!.maxTokensField, "max_tokens");
+	});
+
+	it("GPT-5.6 Sol/Terra (bare + routed) → reasoning + max map", () => {
+		for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "openai/gpt-5.6-terra"]) {
+			const meta = inferMeta(id);
+			assert.equal(meta.reasoning, true, `${id} should be reasoning-capable`);
+			assert.equal(meta.thinkingLevelMap!.max, "max", `${id} should expose max`);
+		}
+	});
+
+	it("GPT-5.6 does not disturb the generic GPT-5 non-reasoning fallback", () => {
+		const meta = inferMeta("gpt-5");
+		assert.equal(meta.reasoning, false);
+		assert.equal(meta.thinkingLevelMap, undefined);
 	});
 
 	it("GPT-5.5 pro → 1.05M context, 128K max, reasoning=true", () => {
@@ -172,7 +215,7 @@ describe("inferMeta()", () => {
 
 const piAnthropicOpus48 = (() => {
 	try {
-		return getModels("anthropic" as any).find((model) => model.id.includes("claude-opus-4-8"));
+		return getBuiltinModels("anthropic").find((model) => model.id.includes("claude-opus-4-8"));
 	} catch {
 		return undefined;
 	}

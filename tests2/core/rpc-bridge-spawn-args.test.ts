@@ -196,14 +196,14 @@ describe("buildAgentArgs", () => {
 	});
 
 	it("ignores invalid thinking levels", () => {
-		for (const bad of ["bogus", "MEDIUM", "max", ""]) {
+		for (const bad of ["bogus", "MEDIUM", ""]) {
 			const args = buildAgentArgs({ initialThinkingLevel: bad });
 			assert.ok(!args.includes("--thinking"), `should ignore "${bad}", got: ${args.join(" ")}`);
 		}
 	});
 
-	it("accepts every valid thinking level, including xhigh", () => {
-		for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
+	it("accepts every valid thinking level, including xhigh and max", () => {
+		for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
 			const args = buildAgentArgs({ initialThinkingLevel: level });
 			const idx = args.indexOf("--thinking");
 			assert.ok(idx >= 0);

@@ -11,7 +11,7 @@
  * shows (built from `getAvailableModels` / `assembleModels`), so selecting a
  * model never clobbers the correct pi-ai values with `inferMeta`'s heuristic
  * catch-all. Regression target: Claude Fable 5 (1M context, `reasoning:true`,
- * `thinkingLevelMap {off:null, xhigh:"xhigh"}`) rendered as a 200k
+ * `thinkingLevelMap {off:null, xhigh:"xhigh", max:"max"}`) rendered as a 200k
  * non-reasoning model because live frames derived from `inferMeta` alone.
  *
  * Tiers exercised:
@@ -47,7 +47,7 @@ describe("resolveModelStateMeta", () => {
 		const meta = resolveModelStateMeta("anthropic", "claude-fable-5");
 		assert.equal(meta.contextWindow, 1_000_000, "Fable context window must be 1M");
 		assert.equal(meta.reasoning, true, "Fable must be reasoning:true");
-		assert.deepEqual(meta.thinkingLevelMap, { off: null, xhigh: "xhigh" }, "Fable thinkingLevelMap must be preserved");
+		assert.deepEqual(meta.thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" }, "Fable thinkingLevelMap must be preserved");
 		assert.equal(meta.maxTokens, 128_000, "Fable maxTokens must be 128k");
 		assert.deepEqual(meta.input, ["text", "image"]);
 	});
@@ -57,7 +57,7 @@ describe("resolveModelStateMeta", () => {
 		const meta = resolveModelStateMeta("anthropic", "claude-fable-5");
 		assert.equal(meta.contextWindow, 1_000_000);
 		assert.equal(meta.reasoning, true);
-		assert.deepEqual(meta.thinkingLevelMap, { off: null, xhigh: "xhigh" });
+		assert.deepEqual(meta.thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" });
 	});
 
 	it("tier 3 (inferMeta fallback): unknown provider+id with empty cache carries no thinkingLevelMap", () => {

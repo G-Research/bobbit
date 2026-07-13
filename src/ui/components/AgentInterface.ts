@@ -2018,6 +2018,7 @@ export class AgentInterface extends LitElement {
 			medium: i18n("Medium"),
 			high: i18n("High"),
 			xhigh: i18n("Extra high"),
+			max: i18n("Max"),
 		};
 		const supportedLevels: ThinkingLevel[] = state.model
 			? getSupportedThinkingLevels(state.model as any)
@@ -3029,8 +3030,8 @@ export class AgentInterface extends LitElement {
 		const labelSpan = host.querySelector('button > span') as HTMLElement | null;
 		if (!labelSpan) return;
 		const level = (this.session?.state?.thinkingLevel as string | undefined) ?? "off";
-		const abbrev: Record<string, string> = { off: "Off", minimal: "Min", low: "Low", medium: "Med", high: "Hi", xhigh: "XHi" };
-		const full: Record<string, string> = { off: i18n("Off"), minimal: i18n("Minimal"), low: i18n("Low"), medium: i18n("Medium"), high: i18n("High"), xhigh: i18n("Extra high") };
+		const abbrev: Record<string, string> = { off: "Off", minimal: "Min", low: "Low", medium: "Med", high: "Hi", xhigh: "XHi", max: "Max" };
+		const full: Record<string, string> = { off: i18n("Off"), minimal: i18n("Minimal"), low: i18n("Low"), medium: i18n("Medium"), high: i18n("High"), xhigh: i18n("Extra high"), max: i18n("Max") };
 		const desired = this._isNarrow ? (abbrev[level] ?? abbrev.off) : (full[level] ?? full.off);
 		// The label span contains: whitespace text nodes (from Lit template formatting),
 		// an icon <span>, and the label text node. We want to update only the label —

@@ -690,7 +690,7 @@ Cold ≈ warm: the SSR transform of the `src/server` graph dominates and is paid
 - Wall ≈ **10.0 s** (transform ≈ 4.7 s, collect ≈ 8.0 s, tests ≈ 1.9 s), `retries:0`, 3/3 reps green.
 - Well inside the tier-1 ≤100 s / ≤7.5 CPU-min budget with headroom for the mass-migration file count.
 
-**Pool-stability note.** Under `pool:"forks"` + `isolate:false`, tinypool spinning DOWN an idle fork mid-run (a fast file finishes while a slow gateway-boot fork is still working) surfaces a spurious `Error: Terminating worker thread` unhandled rejection that fails the whole run despite every test passing. The fix, pinned in `vitest.config.ts`, is a fixed-size pool (`minForks === maxForks`) so the pool is torn down exactly once, after all files complete. The ledger sets that fixed size per invocation.
+**Pool-stability note.** Under `pool:"forks"` + `isolate:false`, tinypool spinning DOWN an idle fork mid-run (a fast file finishes while a slow gateway-boot fork is still working) surfaces a spurious `Error: Terminating worker thread` unhandled rejection that fails the whole run despite every test passing. The fix, pinned in `vitest.config.ts`, is a fixed-size pool (`minForks === maxForks`) so the pool is torn down exactly once, after all files complete. The ledger sets that fixed size per invocation. Direct standalone vitest runs are capped at 2 forks; the parent `run-v2.mjs` ledger grant can still pass the full 8-fork fast path, and `VITEST_MAX_FORKS` remains the explicit override for local debugging.
 
 ## 8. Parity proof mechanics
 

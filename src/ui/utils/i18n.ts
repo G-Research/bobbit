@@ -150,6 +150,7 @@ declare module "@mariozechner/mini-lit" {
 		Medium: string;
 		High: string;
 		"Extra high": string;
+		Max: string;
 		"Storage Permission Required": string;
 		"This app needs persistent storage to save your conversations": string;
 		"Why is this needed?": string;
@@ -383,6 +384,7 @@ export const translations = {
 		Medium: "Medium",
 		High: "High",
 		"Extra high": "Extra high",
+		Max: "Max",
 		"Storage Permission Required": "Storage Permission Required",
 		"This app needs persistent storage to save your conversations":
 			"This app needs persistent storage to save your conversations",

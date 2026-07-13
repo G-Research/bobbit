@@ -398,7 +398,7 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 			}
 			assert.equal(pool.size, 1, "pool should still expose the entry (setup failure is non-fatal)");
 			const u = await pool.claim("session/abcd1234");
-			assert.ok(u);
+			assert.ok(u, "claim should succeed after timed-out setup cleanup releases worktree handles");
 			assert.equal(
 				fs.existsSync(path.join(u!.worktreePath, "SETUP_RAN")),
 				false,
@@ -606,5 +606,73 @@ describe("Regression: legacy top-level worktree_setup_command must not be read",
 			[],
 			`Files reading legacy top-level worktree_setup_command via .get(): ${hits.join(", ")}`,
 		);
+	});
+});
+
+describe("WorktreePool — drain() stops and settles background work (teardown race)", () => {
+	// Pins the lifecycle contract that keeps Group A (single shared node:test
+	// process) deterministic: after `drain()` resolves, NO background fill /
+	// freshen `git` child is still running or pending. Previously a `claim()`'s
+	// fire-and-forget `replenish()` + `freshenInBackground()` could outlive the
+	// test and race `rmRepo()` — spewing `spawn git ENOENT` / misreported
+	// `base_ref '<ref>' no longer exists`, and starving later tests' fills so
+	// their `pool.size` polls timed out at 0. It is also a real production
+	// teardown race: `removeWorktreePool()` -> `drain()` must not let a
+	// post-claim replenish rebuild worktrees for a project being deleted.
+	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
+	before(() => {
+		process.env.BOBBIT_TEST_NO_PUSH = "1";
+		process.env.BOBBIT_SKIP_NPM_CI = "1";
+	});
+	after(() => {
+		if (originalNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
+		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
+		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
+		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
+	});
+
+	it("after claim + drain, no background fill leaks and the pool stays quiescent", async () => {
+		const repo = await makeRepo();
+		try {
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 1 });
+			pool.startFilling();
+			for (let i = 0; i < 100 && pool.size === 0; i++) await new Promise(r => setTimeout(r, 100));
+			assert.equal(pool.size, 1, "pool should fill one entry before claim");
+
+			// claim() schedules a background replenish() (refill) AND a
+			// freshenInBackground() on the claimed worktree. Both are fire-and-forget.
+			const claim = await pool.claim("session/abcd1234");
+			assert.ok(claim, "claim should succeed");
+
+			// drain() must set the stop flag and AWAIT the in-flight replenish +
+			// freshen before returning. So once it resolves, isFilling is false and
+			// there is no live `git` child to race the rmRepo() below.
+			await pool.drain();
+			assert.equal(pool.isFilling, false, "drain() must await the in-flight fill (isFilling clears)");
+			assert.equal(pool.size, 0, "drain() must leave the pool empty");
+
+			// After drain the pool is stopped: further startFilling() is inert and
+			// MUST NOT rebuild entries (guards the production teardown race).
+			pool.startFilling();
+			for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 100));
+			assert.equal(pool.size, 0, "a stopped pool must not refill after startFilling()");
+			assert.equal(pool.isFilling, false, "a stopped pool must not enter the filling state");
+		} finally {
+			await rmRepo(repo);
+		}
+	});
+
+	it("drain() is idempotent and safe on a pool that never started", async () => {
+		const repo = await makeRepo();
+		try {
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 1 });
+			await pool.drain();
+			await pool.drain();
+			assert.equal(pool.size, 0);
+			assert.equal(pool.isFilling, false);
+		} finally {
+			await rmRepo(repo);
+		}
 	});
 });

@@ -1,5 +1,4 @@
 import "../../src/ui/components/AgentInterface.js";
-import { streamSimple } from "@earendil-works/pi-ai";
 
 type Listener = (event: any) => void;
 
@@ -41,9 +40,13 @@ function longTranscript() {
 	return messages;
 }
 
+const fixtureStreamSimple = async () => {
+	throw new Error("permission-card UX fixture should not start a model stream");
+};
+
 class PermissionFixtureSession {
 	sessionId = "permission-card-ux-fixture";
-	streamFn = streamSimple;
+	streamFn = fixtureStreamSimple;
 	grantCalls: any[] = [];
 	denyCalls: any[] = [];
 	private listeners = new Set<Listener>();

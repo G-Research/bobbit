@@ -1845,6 +1845,7 @@ export function renderModelRow(
 		medium: "Medium",
 		high: "High",
 		xhigh: "Extra high",
+		max: "Max",
 	};
 
 	// Availability + Test button state

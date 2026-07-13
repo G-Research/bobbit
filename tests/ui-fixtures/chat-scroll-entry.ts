@@ -1,5 +1,4 @@
 import "../../src/ui/components/AgentInterface.js";
-import { streamSimple } from "@earendil-works/pi-ai";
 
 type Listener = (event: any) => void | Promise<void>;
 type FixtureMessage = Record<string, any>;
@@ -38,7 +37,7 @@ function buildTranscript(prefix: string, turns: number): FixtureMessage[] {
 
 class FixtureSession {
 	sessionId = "chat-scroll-fixture";
-	streamFn = streamSimple;
+	streamFn = async () => { throw new Error("chat-scroll fixture streamFn should be replaced by AgentInterface"); };
 	getApiKey = async () => "fixture-key";
 	private listeners = new Set<Listener>();
 	state: any = {

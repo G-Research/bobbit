@@ -10,7 +10,7 @@ Status: shipped (HEAD `ed850b65`)  •  Goal branch: `goal/shrink-ini-cf48655b` 
 > raw budget. A later clean-build-warning pass made the browser pi-ai
 > boundary stricter: no runtime static or dynamic bare imports from
 > `@earendil-works/pi-ai`; use server-backed APIs or narrow browser-safe
-> provider subpaths.
+> Pi package-exported API/provider subpaths.
 
 ## Outcome
 
@@ -29,8 +29,9 @@ What landed:
 - **Task A** — `@earendil-works/pi-ai`'s side-effectful bare index no
   longer sits on browser runtime paths. Browser provider/model/key-test
   needs go through server APIs, and first-message streaming imports
-  narrow provider subpaths from `src/app/pi-ai-lazy.ts`. Type-only
-  imports stay untouched because `tsc` erases them.
+  narrow Pi package-exported API subpaths from
+  `src/app/pi-ai-lazy.ts`. Type-only imports stay untouched because
+  `tsc` erases them.
 - **Task B** — `src/ui/tools/highlight-core.ts` replaces every direct
   `import hljs from "highlight.js"` call site. It pulls
   `highlight.js/lib/core` plus 10 eager grammars (`javascript`,
@@ -220,7 +221,9 @@ Current implementation is stricter than the original lazy-wrapper plan:
 2. **Use browser-safe boundaries.** Provider/model catalog and provider
    key-test flows go through server APIs. First-message streaming goes
    through `src/app/pi-ai-lazy.ts`, which switches on `model.api` and
-   imports narrow provider subpaths such as
+   imports narrow Pi package-exported API subpaths such as
+   `@earendil-works/pi-ai/api/openai-responses`. Pi `0.80.x` removed
+   legacy direct runtime subpaths such as
    `@earendil-works/pi-ai/openai-responses`.
 3. **Keep schema helpers off the bare index.** Browser runtime schema
    helpers use direct `typebox` imports or local helpers when needed;
@@ -243,8 +246,8 @@ Current implementation is stricter than the original lazy-wrapper plan:
 - `npm run check` — types must resolve without the static import.
 - `npm run build:ui` — browser chunks no longer warn about `node:fs`
   being externalized by `@earendil-works/pi-ai`.
-- `npx tsx --test tests/clean-build-warnings-regression.test.ts` — pins
-  the no-bare-runtime-import rule for browser code.
+- `vitest run --config vitest.config.ts tests2/core/pi-ai-browser-boundary.test.ts` — pins
+  the no-bare-runtime-import rule and the Pi `0.80.x` API/provider subpath allowlist for browser code.
 - `npm run test:e2e` — chat flow still works. Existing E2E coverage of
   message streaming is enough; no new test needed.
 

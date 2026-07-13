@@ -65,7 +65,13 @@ export interface RunComponentSetupsOpts {
 	/** Resolved per-command timeout (ms). Defaults to {@link DEFAULT_WORKTREE_SETUP_TIMEOUT_MS}. */
 	timeoutMs?: number;
 	/** Caller-supplied exec — host or in-container. */
-	exec: (cmd: string, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
+	exec: (cmd: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<void>;
+	/**
+	 * True when `exec` enforces `timeoutMs` itself and only rejects after any
+	 * timed-out subprocess tree has been cleaned up. This avoids returning a
+	 * worktree to callers while a killed setup shell still holds directory handles.
+	 */
+	execHandlesTimeout?: boolean;
 	clock?: Clock;
 	skipNpmCi?: boolean;
 	recordSetupPath?: string;
@@ -118,7 +124,9 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 
 			const componentStart = diagEnabled ? performance.now() : 0;
 			try {
-				await withTimeout(opts.exec(c.worktreeSetupCommand, cwd, env), timeoutMs, `[worktree-setup] ${c.name}`, clock);
+				const setupPromise = opts.exec(c.worktreeSetupCommand, cwd, env, timeoutMs);
+				if (opts.execHandlesTimeout) await setupPromise;
+				else await withTimeout(setupPromise, timeoutMs, `[worktree-setup] ${c.name}`, clock);
 				if (counters) counters.successes++;
 				console.log(`[worktree-setup] ${c.name}: ok`);
 				if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-setup:component", performance.now() - componentStart, { commands: 1, successes: 1, failures: 0 });

@@ -5,9 +5,14 @@
  * `google-gemini-cli` with `api: "google-code-assist"` so the runtime routes them to
  * the Code Assist Bearer adapter instead of the API-key Gemini Developer API.
  *
- * Models are only emitted when a Google account credential is present (see
- * `hasGoogleCodeAssistCredential`), so the selector is not cluttered with
- * non-functional account models for users who never log in with Google.
+ * Models are only emitted when a Google account (Code Assist) credential is
+ * present via EITHER supported path — a stored `auth.json` OAuth credential or a
+ * pre-acquired `GOOGLE_CLOUD_ACCESS_TOKEN` Bearer env token (see
+ * `hasGoogleCodeAssistSpawnCredential`) — so the selector is not cluttered with
+ * non-functional account models for users who never log in with Google, while
+ * env-token deployments still surface authenticated account models. A generic
+ * `GOOGLE_API_KEY` / `GEMINI_API_KEY` (the API-key `google` provider) is a
+ * different wire protocol and never counts as a Code Assist credential here.
  *
  * These models ARE runnable in agent sessions: the generated Code Assist provider
  * extension registers a `google-code-assist` api inside the pi-coding-agent runtime
@@ -22,13 +27,13 @@
  * Design: docs/design/google-session-models.md; docs/design/google-oauth-model-auth.md §4.5.
  */
 
-import { getModels } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 
 import type { ApiModel } from "./model-registry.js";
 import {
 	GOOGLE_CODE_ASSIST_API,
 	GOOGLE_GEMINI_CLI_PROVIDER,
-	hasGoogleCodeAssistCredential,
+	hasGoogleCodeAssistSpawnCredential,
 } from "./google-code-assist.js";
 
 /**
@@ -72,11 +77,11 @@ function isCodeAssistEligible(id: string): boolean {
  *   not at spawn time). See google-code-assist-provider-extension.ts.
  */
 export function getGoogleCodeAssistModels(opts?: { ignoreCredential?: boolean }): ApiModel[] {
-	if (!opts?.ignoreCredential && !hasGoogleCodeAssistCredential()) return [];
+	if (!opts?.ignoreCredential && !hasGoogleCodeAssistSpawnCredential()) return [];
 
 	let base: Array<Record<string, any>> = [];
 	try {
-		base = getModels("google" as any) as unknown as Array<Record<string, any>>;
+		base = getBuiltinModels("google" as any) as unknown as Array<Record<string, any>>;
 	} catch {
 		return [];
 	}

@@ -362,6 +362,7 @@ export const state = {
 			fields: Record<string, unknown>;
 			streaming: boolean;
 			mode?: "provisional" | "registered";
+			projectId?: string;
 			rev: number;
 		}
 	>>,

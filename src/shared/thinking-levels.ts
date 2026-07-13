@@ -16,7 +16,7 @@
  *     unsupported). Notably `off: null` = forced adaptive thinking, so "off"
  *     is NOT selectable (e.g. Claude Fable 5 → minimal/low/medium/high/xhigh).
  *   - A level ABSENT from the map is KEPT (uses provider default), except
- *     "xhigh" which is kept only when present with a non-null value.
+ *     "xhigh" and "max" which are kept only when present with a non-null value.
  *
  * Map-absent (heuristic) rules:
  *   - "off" is supported.
@@ -25,19 +25,18 @@
  *       • Anthropic Claude Opus 4.6+ (claude-opus-4-6, claude-opus-4.8, …)
  *       • OpenAI gpt-5.1-codex-max
  *       • OpenAI gpt-5.2* / gpt-5.4* / gpt-5.5*
+ *   - "max" is supported only when upstream per-model metadata explicitly lists it.
  *
  * Clamping (`clampThinkingLevel`) resolves the requested token (unknown →
- * "off"), returns it if supported, else steps **down** by rank to the
- * next-lower supported level; if none exists below it steps **up** to the
- * lowest supported level (needed when a map drops "off" itself, e.g. Fable).
- * This preserves the documented down-clamp for every current family while
- * fixing the off-unsupported case, matching pi-ai's clamp direction.
+ * "off"), returns it if supported, else steps **up** by rank to the
+ * next-higher supported level, then down if none exists above. This preserves
+ * Pi's clamp direction for maps that drop a middle or low level.
  */
 
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
 
-/** Numeric rank for clamping. off=0 .. xhigh=5. */
+/** Numeric rank for clamping. off=0 .. max=6. */
 const RANK: Record<ThinkingLevel, number> = {
 	off: 0,
 	minimal: 1,
@@ -45,10 +44,11 @@ const RANK: Record<ThinkingLevel, number> = {
 	medium: 3,
 	high: 4,
 	xhigh: 5,
+	max: 6,
 };
 
 /** Ordered low→high for clamp-down traversal. */
-const ORDERED: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const ORDERED: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /**
  * Minimal model shape consumed by capability detection. Mirrors the fields
@@ -115,12 +115,17 @@ function isOpusXHigh(id: string, provider: string): boolean {
 /**
  * Does the given model's id/provider indicate an OpenAI family that
  * supports xhigh in Bobbit's fallback heuristic? Currently
- * gpt-5.1-codex-max and any gpt-5.2* / gpt-5.4* / gpt-5.5*.
+ * gpt-5.1-codex-max and any gpt-5.2* / gpt-5.4* / gpt-5.5* / gpt-5.6*.
+ *
+ * Matches both bare ids (`gpt-5.6-luna`) and provider/gateway-routed ids
+ * (`openai/gpt-5.6-luna`) so AIGW-routed models still light up xhigh when a
+ * payload arrives without an explicit thinkingLevelMap. `max` remains gated on
+ * explicit upstream metadata (inferMeta supplies it for GPT 5.6).
  */
 function isOpenAiXHigh(id: string, provider: string): boolean {
 	if (!providerMatches(provider, "openai")) return false;
-	if (/^gpt-5\.1-codex-max\b/i.test(id)) return true;
-	if (/^gpt-5\.(?:2|4|5)(?:\b|[-.])/i.test(id)) return true;
+	if (/(?:^|\/)gpt-5\.1-codex-max\b/i.test(id)) return true;
+	if (/(?:^|\/)gpt-5\.(?:2|4|5|6)(?:\b|[-.])/i.test(id)) return true;
 	return false;
 }
 
@@ -147,7 +152,7 @@ export function supportsXHigh(m: ModelLike): boolean {
  * When `thinkingLevelMap` is present, mirror pi-ai's `getSupportedThinkingLevels`
  * exactly: filter the canonical ladder, dropping any level mapped to `null`
  * (e.g. `off: null` = forced adaptive thinking → "off" unsupported) and keeping
- * absent levels (except "xhigh", which needs an explicit non-null entry).
+ * absent levels (except "xhigh" and "max", which need an explicit non-null entry).
  *
  * When the map is absent (sparse AIGW / persisted-fallback payloads), fall back
  * to Bobbit's family heuristic: off, minimal, low, medium, high (+ xhigh iff
@@ -164,7 +169,7 @@ export function getSupportedThinkingLevels(m: ModelLike): ThinkingLevel[] {
 		return THINKING_LEVELS.filter((level) => {
 			const mapped = map[level];
 			if (mapped === null) return false;          // explicit null → dropped (unsupported)
-			if (level === "xhigh") return mapped !== undefined; // xhigh needs an explicit non-null entry
+			if (level === "xhigh" || level === "max") return mapped !== undefined; // extended levels need an explicit non-null entry
 			return true;                                 // absent (undefined) → kept (provider default)
 		});
 	}

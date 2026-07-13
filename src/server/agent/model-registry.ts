@@ -2,7 +2,7 @@
  * Unified Model Registry — single server-side source of truth for all available models.
  *
  * Assembles a merged model list from:
- * 1. Built-in providers (from pi-ai getProviders()/getModels())
+ * 1. Built-in providers (from pi-ai getBuiltinProviders()/getBuiltinModels())
  * 2. AI Gateway models (if configured, live fetch via discoverAigwModels())
  * 3. Custom local providers (Ollama, LM Studio, vLLM, llama.cpp)
  *
@@ -12,12 +12,13 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { getProviders, getModels, getModel } from "@earendil-works/pi-ai";
+import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
+import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ export interface ApiModel {
 	reasoning: boolean;
 	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; tiers?: Array<{ input: number; output: number; cacheRead: number; cacheWrite: number; inputTokensAbove: number }> };
 	headers?: Record<string, string>;
 	compat?: unknown;
 	authenticated: boolean;
@@ -94,6 +95,15 @@ export interface ResolvedModelStateMeta {
 	/** Present only when upstream metadata provides it (omitted otherwise). */
 	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
+	/**
+	 * Which resolution tier produced this metadata:
+	 *   - `cache` / `catalog`: authoritative — safe to overwrite live frame fields
+	 *     (fixes stale/incorrect frames, e.g. Fable's 1M context + max thinking).
+	 *   - `inferred`: last-resort defaults from `inferMeta`. Callers holding more
+	 *     accurate live fields (custom/aigw/unknown providers) should PRESERVE the
+	 *     live values rather than clobber them with these inferred defaults.
+	 */
+	source: "cache" | "catalog" | "inferred";
 }
 
 /**
@@ -105,7 +115,7 @@ export interface ResolvedModelStateMeta {
  * shows (which is built from `getAvailableModels` / `assembleModels`). Deriving
  * live state from `inferMeta` alone clobbers the correct merged pi-ai metadata
  * (e.g. Claude Fable 5's 1M context, `reasoning:true`, and
- * `thinkingLevelMap {off:null, xhigh:"xhigh"}`).
+ * `thinkingLevelMap {off:null, xhigh:"xhigh", max:"max"}`).
  *
  * Resolution order (first hit wins):
  *   1. Registry cache (`cachedModels`) keyed by exact provider+id — the same
@@ -113,7 +123,7 @@ export interface ResolvedModelStateMeta {
  *      IGNORED: model metadata is static per id, so a stale cache entry is
  *      strictly better than dropping to inferMeta. Synchronous, so it serves
  *      the sync broadcast sites (e.g. sendFallbackModelState).
- *   2. pi-ai catalog via `getModel(provider, id)` for known upstream providers
+ *   2. pi-ai catalog via `getBuiltinModel(provider, id)` for known upstream providers
  *      (skip empty / `aigw` / `custom`; aigw strips prefixes and merges no
  *      thinkingLevelMap, so it legitimately falls through to inferMeta). Any
  *      missing numeric is filled from inferMeta.
@@ -131,6 +141,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 				reasoning: hit.reasoning,
 				...(hit.thinkingLevelMap ? { thinkingLevelMap: hit.thinkingLevelMap } : {}),
 				input: hit.input,
+				source: "cache",
 			};
 		}
 	}
@@ -139,7 +150,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 	const normalizedProvider = (provider ?? "").toLowerCase();
 	if (normalizedProvider && normalizedProvider !== "aigw" && normalizedProvider !== "custom") {
 		try {
-			const model = getModel(normalizedProvider as any, modelId as any) as {
+			const model = getBuiltinModel(normalizedProvider as any, modelId as any) as {
 				contextWindow?: number; maxTokens?: number; reasoning?: boolean;
 				thinkingLevelMap?: Record<string, string | null>; input?: ("text" | "image")[];
 			} | undefined;
@@ -154,6 +165,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 					reasoning: model.reasoning ?? inferred.reasoning,
 					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
 					input,
+					source: "catalog",
 				};
 			}
 		} catch {
@@ -161,13 +173,19 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 		}
 	}
 
-	// Tier 3: inferMeta (no thinkingLevelMap).
+	// Tier 3: inferMeta. Marked `inferred` so live-frame callers preserve any
+	// more-accurate live metadata instead of clobbering it. inferMeta usually
+	// carries no thinkingLevelMap (client then applies the family heuristic), but
+	// a few routed families (e.g. GPT 5.6 Luna/Sol/Terra) attach an explicit map
+	// so extended `xhigh`/`max` thinking survives the fallback path.
 	const meta = inferMeta(modelId);
 	return {
 		contextWindow: meta.contextWindow,
 		maxTokens: meta.maxTokens,
 		reasoning: meta.reasoning,
+		...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 		input: meta.input,
+		source: "inferred",
 	};
 }
 
@@ -176,7 +194,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
  * Results are cached for 5 seconds.
  */
 export function getBuiltInProviderIds(): string[] {
-	return getProviders().map(provider => String(provider));
+	return getBuiltinProviders().map((provider) => String(provider));
 }
 
 export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiModel[]> {
@@ -245,9 +263,9 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	if (!aigwExclusive) {
 		// 1. Built-in providers from pi-ai
 		try {
-			const providers = getProviders();
+			const providers = getBuiltinProviders();
 			for (const providerId of providers) {
-				const models = getModels(providerId as any);
+				const models = getBuiltinModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);
 				const bobbitAdditions = getOpenAIModelAdditions(providerId as string);
 				const mergedModels = [
@@ -316,6 +334,10 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 					contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
 					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
 					reasoning: meta.reasoning || m.reasoning || false,
+					// Preserve extended-thinking metadata for routed families that would
+					// otherwise lose it (e.g. AIGW-routed GPT 5.6 Luna/Sol/Terra, whose
+					// `openai/gpt-5.6-*` id only matches inferMeta's substring rule).
+					...(meta.thinkingLevelMap ?? m.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap ?? m.thinkingLevelMap } : {}),
 					input: meta.input || ["text"],
 					cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					authenticated: true, // aigw is always authenticated (no key needed)
@@ -343,7 +365,13 @@ const ENV_MAP: Record<string, string> = {
 	"anthropic": "ANTHROPIC_API_KEY",
 	"openai": "OPENAI_API_KEY",
 	"google": "GOOGLE_API_KEY",
-	"google-gemini-cli": "GOOGLE_API_KEY",
+	// Google account (Code Assist) authenticates via the Bearer access token, NOT a
+	// Gemini Developer API key. Mapping this to GOOGLE_API_KEY would let a generic
+	// GOOGLE_API_KEY/GEMINI_API_KEY masquerade as an authenticated account provider
+	// and cross-contaminate isolation. Auth is ultimately resolved through the shared
+	// spawn-credential helper (see detectProviderAuth) so whitespace-only tokens and
+	// stored OAuth are handled consistently; this entry documents the association.
+	"google-gemini-cli": "GOOGLE_CLOUD_ACCESS_TOKEN",
 	"google-vertex": "GOOGLE_APPLICATION_CREDENTIALS",
 	"xai": "XAI_API_KEY",
 	"amazon-bedrock": "AWS_ACCESS_KEY_ID",
@@ -369,6 +397,15 @@ function detectProviderAuth(provider: string, prefs: PreferencesStore): boolean 
 	// Check provider key in preferences (migrated from IndexedDB)
 	const storedKey = prefs.get(`providerKey.${provider}`) as string | undefined;
 	if (storedKey) return true;
+
+	// Code Assist (Google account) is authenticated ONLY by a stored auth.json OAuth
+	// credential OR a pre-acquired GOOGLE_CLOUD_ACCESS_TOKEN Bearer env token. Route
+	// through the shared spawn-credential helper so settings/model-API auth metadata,
+	// spawn-pinning, and the generated provider extension's authenticatedAtLoad gate
+	// all agree on the credential picture (including trimming whitespace-only tokens).
+	// A generic GOOGLE_API_KEY/GEMINI_API_KEY must never authenticate the account
+	// provider, and the Bearer token must never authenticate the API-key `google`.
+	if (provider === GOOGLE_GEMINI_CLI_PROVIDER) return hasGoogleCodeAssistSpawnCredential();
 
 	// Check env vars
 	const envVar = ENV_MAP[provider];

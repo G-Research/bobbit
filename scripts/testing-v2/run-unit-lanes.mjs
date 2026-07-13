@@ -35,9 +35,9 @@ import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
-import { reserveWorkerSlots, readLedger } from "./ledger.mjs";
+import { reserveVitestLaneBudget, readLedger } from "./ledger.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -157,6 +157,30 @@ function vitestCmd() {
 	return process.platform === "win32" ? "npx.cmd" : "npx";
 }
 
+/**
+ * Pure scheduling math (pinned by tests2/core/unit-lanes-scheduling.test.ts).
+ *
+ * The orchestrator holds ONE fair vitest grant and distributes it across lanes,
+ * each its OWN process capped at `perLaneCap` forks (Windows-RPC-safe; default 2).
+ *   - perLane      = min(perLaneCap, grant)  — never raise a single process above
+ *                    the safe cap, and never ask for more forks than granted.
+ *   - maxConcurrent = floor(grant / perLane) — instantaneous forks
+ *                    (inFlight*perLane) never exceed the grant; clamped to ≥1 (so
+ *                    the run always makes progress) and to the job count (no idle
+ *                    concurrency slots). This is what turns lane wall time from
+ *                    Σ(lanes) back into max(lanes): with the SINGLE-PROCESS
+ *                    throttle (grant=2) it collapses to 1 (serial); with the fair
+ *                    orchestrator grant it opens back up so the lanes overlap.
+ */
+export function planLaneConcurrency({ grant, perLaneCap, jobCount }) {
+	const g = Math.max(1, Math.floor(Number(grant)) || 1);
+	const cap = Math.max(1, Math.floor(Number(perLaneCap)) || 1);
+	const jobs = Math.max(1, Math.floor(Number(jobCount)) || 1);
+	const perLane = Math.min(cap, g);
+	const maxConcurrent = Math.max(1, Math.min(jobs, Math.floor(g / perLane)));
+	return { perLane, maxConcurrent };
+}
+
 function runLane(name, projects, forks, files, parentRunId, stats) {
 	const startWall = performance.now();
 	mkdirSync(LOG_DIR, { recursive: true });
@@ -269,18 +293,22 @@ async function main() {
 		return;
 	}
 
-	// Reserve ONCE for the whole unit run. reserveWorkerSlots("vitest") returns the
-	// ledger's fair grant W (shrinks as concurrent goals appear via pending/committed
-	// accounting), OR — when spawned under run-v2 — the pre-committed parent grant
-	// with a no-op release. Either way this is the ONLY ledger entry for the run.
-	const reservation = reserveWorkerSlots("vitest");
+	// Reserve ONCE for the whole unit run. reserveVitestLaneBudget() returns the
+	// ledger's fair CORE grant W (an ORCHESTRATOR budget, capped at VITEST_CAP — NOT
+	// the single-process STANDALONE_VITEST_CAP throttle, which would collapse lane
+	// parallelism to maxConcurrent=1 and serialise the lanes past the gate wall-time
+	// budget). W shrinks as concurrent goals appear via pending/committed accounting,
+	// OR — when spawned under run-v2 — is the pre-committed parent grant with a no-op
+	// release. Either way this is the ONLY ledger entry for the run; each spawned lane
+	// re-uses this grant via the parent-grant env with its own per-lane fork cap.
+	const reservation = reserveVitestLaneBudget();
 	const grant = Math.max(1, reservation.workerSlots || 1);
-	const perLane = Math.min(PER_LANE_FORK_CAP, grant);
 	// Distribute the grant across lanes: at most floor(grant/perLane) lanes run
 	// CONCURRENTLY (each `perLane` forks), so instantaneous forks = inFlight*perLane
-	// <= grant. Extra jobs queue and run in waves. This is what keeps us inside the
-	// reservation under concurrent goals instead of oversubscribing the box.
-	const maxConcurrent = Math.max(1, Math.floor(grant / perLane));
+	// <= grant. Extra jobs queue and run in waves. This keeps us inside the
+	// reservation under concurrent goals instead of oversubscribing the box, while
+	// still overlapping the independent lanes (wall = max(lanes), not Σ lanes).
+	const { perLane, maxConcurrent } = planLaneConcurrency({ grant, perLaneCap: PER_LANE_FORK_CAP, jobCount: jobs.length });
 	const snap = readLedger();
 	const sigma = snap.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
 	console.log(`[unit-lanes] ledger grant=${grant} (parent=${reservation.parentRunId}, managedByParent=${reservation.managedByParent}); ledger Σ=${sigma}/${snap.totalCores}`);
@@ -370,4 +398,9 @@ async function main() {
 	process.exit(realFailedLanes.length ? 1 : 0);
 }
 
-main().catch((e) => { console.error("[unit-lanes] fatal:", e); process.exit(1); });
+// Only run when invoked directly (`node run-unit-lanes.mjs`), so tests can import
+// the pure `planLaneConcurrency` helper without triggering a full unit run.
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+	main().catch((e) => { console.error("[unit-lanes] fatal:", e); process.exit(1); });
+}

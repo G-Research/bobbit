@@ -13,7 +13,15 @@ import { describe, it, beforeAll, afterAll } from "vitest";
 // Both modules resolve their state dir from os.tmpdir()/bobbit-test-v2-ledger and
 // read os.tmpdir() live on each call, so pointing TEMP/TMP/TMPDIR at a fresh dir
 // fully isolates this test from the real ledger (and concurrent runs).
-const origEnv = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR, MAX: process.env.BOBBIT_V2_MAX_BROWSER };
+const origEnv = {
+	TEMP: process.env.TEMP,
+	TMP: process.env.TMP,
+	TMPDIR: process.env.TMPDIR,
+	BOBBIT_V2_MAX_BROWSER: process.env.BOBBIT_V2_MAX_BROWSER,
+	BOBBIT_V2_TOTAL_CORES: process.env.BOBBIT_V2_TOTAL_CORES,
+	BOBBIT_V2_LEDGER_PARENT: process.env.BOBBIT_V2_LEDGER_PARENT,
+	BOBBIT_V2_SLOTS_VITEST: process.env.BOBBIT_V2_SLOTS_VITEST,
+};
 let isolatedTmp: string;
 
 async function loadBoth() {
@@ -28,6 +36,9 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 		process.env.TEMP = isolatedTmp;
 		process.env.TMP = isolatedTmp;
 		process.env.TMPDIR = isolatedTmp;
+		process.env.BOBBIT_V2_TOTAL_CORES = "24";
+		delete process.env.BOBBIT_V2_LEDGER_PARENT;
+		delete process.env.BOBBIT_V2_SLOTS_VITEST;
 	});
 	afterAll(() => {
 		for (const [k, v] of Object.entries(origEnv)) {
@@ -48,6 +59,38 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 		delete process.env.BOBBIT_V2_MAX_BROWSER;
 		assert.equal(bridge.leaseCap("browser", { cap: 3 }), 3);
 		assert.equal(ledger.leaseCap("browser", { cap: 3 }), 3);
+	});
+
+	it("caps standalone vitest below parent-ledger grants", async () => {
+		const { ledger } = await loadBoth();
+		const standalone = ledger.reserveWorkerSlots("vitest", { coalesceMs: 0, totalCores: 24 });
+		try {
+			assert.equal(standalone.managedByParent, false);
+			assert.equal(standalone.workerSlots, 2, "direct vitest verification runs should use the stability throttle");
+			const snapshot = ledger.readLedger({ totalCores: 24 });
+			const record = snapshot.reservations.find((r: any) => r.id === standalone.reservationId);
+			assert.equal(record?.workerSlots, 2, "the persisted reservation must match the returned standalone cap");
+		} finally {
+			standalone.release();
+		}
+
+		const parent = ledger.reserveParentBundle({ coalesceMs: 0, totalCores: 24 });
+		try {
+			assert.equal(parent.vitest, 8, "run-v2 parent-ledger fast path still grants the full vitest split");
+		} finally {
+			parent.release();
+		}
+
+		process.env.BOBBIT_V2_LEDGER_PARENT = "parent-test";
+		process.env.BOBBIT_V2_SLOTS_VITEST = "8";
+		try {
+			const child = ledger.reserveWorkerSlots("vitest", { coalesceMs: 0, totalCores: 24 });
+			assert.equal(child.managedByParent, true);
+			assert.equal(child.workerSlots, 8, "child configs must preserve an explicit parent grant");
+		} finally {
+			delete process.env.BOBBIT_V2_LEDGER_PARENT;
+			delete process.env.BOBBIT_V2_SLOTS_VITEST;
+		}
 	});
 
 	it("a lease taken by one impl is SEEN by the other (shared cross-process pool)", async () => {

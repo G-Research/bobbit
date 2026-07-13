@@ -74,7 +74,7 @@ import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./
 import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
-import { isSessionSelectableModelString } from "./google-code-assist.js";
+import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
@@ -969,11 +969,30 @@ function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
 	return next;
 }
 
+/** True for a Pi retryable `agent_end` (`{ type:"agent_end", willRetry:true }`).
+ *  Pi 0.80+ emits agent_end for every retryable failed attempt BEFORE its
+ *  internal auto-retry loop settles; only the final `willRetry:false` agent_end
+ *  is a real turn boundary. Clients treat every agent_end as terminal
+ *  (`src/app/remote-agent.ts` clears the streaming message/tool calls and
+ *  notifies; `src/ui/components/AgentInterface.ts` clears the streaming
+ *  container), so a retryable agent_end must never reach clients via
+ *  `emitSessionEvent` or settle a wait/abort listener as final. Shared by every
+ *  `rpcClient.onEvent` emit path so the suppression contract stays consistent.
+ *  Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts. */
+export function isRetryableAgentEnd(event: unknown): boolean {
+	return !!event
+		&& typeof event === "object"
+		&& (event as { type?: unknown }).type === "agent_end"
+		&& (event as { willRetry?: unknown }).willRetry === true;
+}
+
 /** Push a raw event into the session's EventBuffer (assigning seq/ts) and
  *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
  *  This is the single emit path for live agent events — every call site that
  *  used to do `eventBuffer.push(ev); broadcast(clients, {type:"event", data:ev})`
  *  must route through here so envelope fields stay consistent.
+ *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
+ *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
 	const normalized = normalizeToolResultErrorEvent(truncated);
@@ -4018,6 +4037,16 @@ export class SessionManager {
 				}
 			}
 		} else if (event.type === "agent_end") {
+			// Pi 0.80+ emits agent_end for retryable failed attempts before its
+			// internal auto-retry loop settles. Do not mark Bobbit idle, revoke
+			// one-time grants, drain queued prompts, or count the turn until the
+			// final (willRetry:false) agent_end. Incrementing completedTurnCount on
+			// a retryable attempt double-counts a single user-visible turn (the
+			// final agent_end increments again) and shifts lifecycle turn indexes.
+			if (event.willRetry === true) {
+				return;
+			}
+
 			// Revoke one-time granted tools after the turn completes
 			if (session.oneTimeGrantedTools && session.oneTimeGrantedTools.length > 0) {
 				const toRevoke = new Set(session.oneTimeGrantedTools.map(t => t.toLowerCase()));
@@ -5093,6 +5122,21 @@ export class SessionManager {
 	}
 
 	/**
+	 * Emit a live agent event to clients, suppressing retryable Pi agent_end
+	 * (see `isRetryableAgentEnd`). Pi 0.80+ emits a non-terminal `agent_end`
+	 * ({ willRetry:true }) before each internal auto-retry; clients treat every
+	 * agent_end as terminal and would clear the streaming message/tool calls, so
+	 * these must never reach clients. Shared by every `rpcClient.onEvent` path so
+	 * the suppression contract is applied uniformly; only real terminal
+	 * (willRetry:false) agent_end events are emitted/replayed.
+	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
+	 */
+	private emitAgentEvent(session: SessionInfo, event: unknown): void {
+		if (isRetryableAgentEnd(event)) return;
+		emitSessionEvent(session, truncateLargeToolContent(event));
+	}
+
+	/**
 	 * Check an event for usage data and record it via the cost tracker.
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
@@ -5747,8 +5791,13 @@ export class SessionManager {
 		// redundant initial `model_change` event with its hardcoded default.
 		// Prefer the persisted model if known (avoids surprising changes after
 		// restart); fall back to role/preference resolution.
-		if (ps.modelProvider && ps.modelId) {
-			bridgeOptions.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		const psPersistedModel = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined;
+		// Keep an explicit, still-runnable persisted pin (incl. authenticated Code
+		// Assist), but fall back to role/pref resolution when the persisted model is
+		// no longer spawn-pinnable — e.g. a Code Assist model whose Google credential
+		// was removed/expired, which Pi could not resolve as `--model`.
+		if (psPersistedModel && isSpawnPinnableModelString(psPersistedModel)) {
+			bridgeOptions.initialModel = psPersistedModel;
 		} else {
 			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
@@ -5852,8 +5901,7 @@ export class SessionManager {
 
 			this.handleAgentLifecycle(session, event);
 
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			this.emitAgentEvent(session, event);
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
@@ -6496,7 +6544,7 @@ export class SessionManager {
 			}, timeoutMs);
 
 			unsub = session.rpcClient.onEvent((event: any) => {
-				if (event.type === "agent_end") {
+				if (event.type === "agent_end" && event.willRetry !== true) {
 					waiter.cleanup();
 					resolve();
 				}
@@ -6788,11 +6836,14 @@ export class SessionManager {
 			const m = this.resolveRoleModelValue(role, projectId);
 			// Skip models that can't run in an agent session (e.g. google-gemini-cli
 			// Code Assist) so a role override doesn't pin an unrunnable provider.
-			if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
+			// `isSpawnPinnableModelString` additionally screens out Code Assist when
+			// no Google credential is present (unauthenticated `google-gemini-cli/*`
+			// would fail to resolve as Pi's `--model`).
+			if (m && /^[^/]+\/.+$/.test(m) && isSpawnPinnableModelString(m)) return m;
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSpawnPinnableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -6838,10 +6889,10 @@ export class SessionManager {
 	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
 		if (role) {
 			const m = this.resolveRoleModelValue(role, projectId);
-			if (m && /^[^/]+\/.+$/.test(m) && isSessionSelectableModelString(m)) return m;
+			if (m && /^[^/]+\/.+$/.test(m) && isSpawnPinnableModelString(m)) return m;
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref) && isSessionSelectableModelString(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && isSpawnPinnableModelString(pref)) return pref;
 		return undefined;
 	}
 
@@ -7261,8 +7312,7 @@ export class SessionManager {
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = this.clock.now();
 			this.handleAgentLifecycle(session, event);
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			this.emitAgentEvent(session, event);
 			this.trackCostFromEvent(session, event);
 		});
 		session.unsubscribe = unsub;
@@ -7695,8 +7745,14 @@ export class SessionManager {
 
 		// Pin model/thinking-level at spawn for the respawn (after role assignment).
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
-		if (respawnPersisted?.modelProvider && respawnPersisted?.modelId) {
-			bridgeOptions.initialModel = `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`;
+		const respawnPersistedModel =
+			respawnPersisted?.modelProvider && respawnPersisted?.modelId
+				? `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`
+				: undefined;
+		// See spawn path: skip a persisted pin that is no longer spawn-pinnable
+		// (e.g. unauthenticated Code Assist) so the respawn falls back cleanly.
+		if (respawnPersistedModel && isSpawnPinnableModelString(respawnPersistedModel)) {
+			bridgeOptions.initialModel = respawnPersistedModel;
 		} else {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
@@ -7717,8 +7773,7 @@ export class SessionManager {
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
 			this.handleAgentLifecycle(session, event);
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			this.emitAgentEvent(session, event);
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
@@ -9672,7 +9727,11 @@ export class SessionManager {
 			resolveSettled(false);
 		}, gracePeriodMs);
 		const unsubSettle = session.rpcClient.onEvent((event: any) => {
-			if (event.type === "agent_end") {
+			// A retryable agent_end (willRetry:true) means Pi is about to retry the
+			// attempt, not that the run stopped — treating it as settled would end
+			// the grace race early and skip force-kill while the agent is still
+			// live. Only a final (willRetry:false) agent_end settles the abort.
+			if (event.type === "agent_end" && event.willRetry !== true) {
 				this.clock.clearTimeout(settleTimer);
 				unsubSettle();
 				resolveSettled(true);
@@ -9802,8 +9861,14 @@ export class SessionManager {
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
-			if (forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId) {
-				bridgeOptions.initialModel = `${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`;
+			const forceRespawnPersistedModel =
+				forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId
+					? `${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`
+					: undefined;
+			// See spawn path: skip a persisted pin that is no longer spawn-pinnable
+			// (e.g. unauthenticated Code Assist) so the force-respawn falls back cleanly.
+			if (forceRespawnPersistedModel && isSpawnPinnableModelString(forceRespawnPersistedModel)) {
+				bridgeOptions.initialModel = forceRespawnPersistedModel;
 			} else {
 				const initModel = this.resolveInitialModel(session.role, session.projectId);
 				if (initModel) bridgeOptions.initialModel = initModel;
@@ -9825,8 +9890,7 @@ export class SessionManager {
 
 				this.handleAgentLifecycle(session, event);
 
-				const truncated = truncateLargeToolContent(event);
-				emitSessionEvent(session, truncated);
+				this.emitAgentEvent(session, event);
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 
