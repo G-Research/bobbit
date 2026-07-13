@@ -6,6 +6,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
 	readTranscript,
+	readOrphanedBeforeCompaction,
 	parseJsonl,
 	resolveOffset,
 	TranscriptReaderError,
@@ -475,5 +476,78 @@ describe("transcript-reader / readTranscript", () => {
 		assert.equal(env.returned, 1);
 		assert.equal(env.offsetStart, 1);
 		assert.equal(env.messages[0].role, "assistant");
+	});
+
+	it("infers legacy authors sequentially without treating tool output as human/tool-authored", async () => {
+		const text = makeJsonl([
+			{ role: "user", content: "question" },
+			{ role: "assistant", content: [{ type: "text", text: "calling" }] },
+			{ role: "user", content: [{ type: "tool_result", content: "output" }] },
+		]);
+		const env = await readTranscript({}, {
+			...reader(text),
+			authorContext: { session: { id: "target", title: "Target agent" } },
+		});
+		assert.deepEqual(env.messages.map((message: any) => message.author), [
+			{ kind: "user", id: "user:local", label: "User" },
+			{ kind: "agent", id: "session:target", label: "Target agent" },
+			{ kind: "agent", id: "session:target", label: "Target agent" },
+		]);
+		assert.notEqual((env.messages[2] as any).author.kind, "tool");
+	});
+
+	it("uses a sidecar binding to distinguish a system prompt from a human prompt", async () => {
+		const text = JSON.stringify({
+			type: "message",
+			id: "message-system",
+			message: { role: "user", content: "notification" },
+		}) + "\n";
+		const env = await readTranscript({}, {
+			...reader(text),
+			authorContext: {
+				session: { id: "target", title: "Target" },
+				sidecarEntries: [{
+					schemaVersion: 1,
+					type: "prompt-author",
+					promptId: "prompt-system",
+					dispatchedAt: 100,
+					modelText: "notification",
+					source: "task-notification",
+					author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+					settlement: {
+						schemaVersion: 1,
+						type: "prompt-author-settlement",
+						promptId: "prompt-system",
+						settledAt: 110,
+						outcome: "echoed",
+						messageId: "message-system",
+					},
+				}],
+			},
+		});
+		assert.deepEqual((env.messages[0] as any).author, {
+			kind: "system", id: "system:bobbit", label: "Bobbit",
+		});
+	});
+});
+
+describe("transcript-reader / pre-compaction authors", () => {
+	it("adds the same inferred author to the verbose envelope and renderable message", async () => {
+		const text = [
+			{ type: "message", id: "old-user", message: { role: "user", content: "before" } },
+			{ type: "message", id: "old-agent", message: { role: "assistant", content: "answer" } },
+			{ type: "message", id: "first-kept", message: { role: "user", content: "after" } },
+		].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+		const env = await readOrphanedBeforeCompaction(
+			{ compactionId: "compaction-1", verbose: true },
+			{
+				...reader(text),
+				firstKeptEntryId: "first-kept",
+				authorContext: { session: { id: "target", title: "Target" } },
+			},
+		);
+		const assistant = env.messages[1] as any;
+		assert.deepEqual(assistant.author, { kind: "agent", id: "session:target", label: "Target" });
+		assert.deepEqual(assistant.message.author, assistant.author);
 	});
 });

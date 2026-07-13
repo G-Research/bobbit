@@ -21,9 +21,18 @@ import type { IndexSource, IndexSourceContext, Indexable } from "../types.js";
 import { extractForIndexing } from "../content-policy.js";
 import { contentHashOf } from "./hash.js";
 import { formatSessionSearchTitle } from "./session-title.js";
+import {
+	readAuthorSidecar,
+	mergeAuthorSidecarIntoMessages,
+	type PromptAuthorBinding,
+} from "../../agent/author-sidecar.js";
 
 export class MessageIndexSource implements IndexSource {
 	readonly sourceId = "messages" as const;
+
+	constructor(
+		private readonly readAuthorBindings: (sessionId: string) => PromptAuthorBinding[] = readAuthorSidecar,
+	) {}
 
 	async *iterate(ctx: IndexSourceContext): AsyncIterable<Indexable> {
 		const sessions = ctx.sessionStore.getAll();
@@ -61,6 +70,12 @@ export class MessageIndexSource implements IndexSource {
 				crlfDelay: Infinity,
 			});
 
+			interface ParsedRow {
+				msgIdx: number;
+				message: Record<string, unknown>;
+				timestamp: number;
+			}
+			const parsedRows: ParsedRow[] = [];
 			let msgIdx = 0;
 			try {
 				for await (const line of rl) {
@@ -75,60 +90,86 @@ export class MessageIndexSource implements IndexSource {
 					// Agent session files wrap the actual message in `{ message: {...} }`
 					// for tool events; fall back to the envelope itself otherwise.
 					const envelope = entry as Record<string, unknown>;
-					const msg = (envelope.message as Record<string, unknown> | undefined) ?? envelope;
+					const rawMessage = (envelope.message as Record<string, unknown> | undefined) ?? envelope;
 
 					// Timestamp precedence: per-message timestamp if present, else
 					// envelope timestamp, else session lastActivity.
-					const rawTs =
-						(msg as Record<string, unknown>).timestamp ??
-						(envelope as Record<string, unknown>).timestamp;
+					const rawTs = rawMessage.timestamp ?? envelope.timestamp;
 					const timestamp =
 						typeof rawTs === "number"
 							? rawTs
 							: typeof rawTs === "string"
 								? Date.parse(rawTs) || (session.lastActivity ?? 0)
 								: session.lastActivity ?? 0;
-
-					const hit = extractForIndexing(msg);
-					for (const entry of hit.entries) {
-						const id = `message:${session.id}:${msgIdx}:${entry.blockKey}`;
-						const metadata: Record<string, string | number | boolean> = {
-							sessionId: session.id,
-							msgIdx,
-							blockKey: entry.blockKey,
-							...(session.goalId ? { goalId: session.goalId } : {}),
-						};
-						if (goalTitle) metadata.goalTitle = goalTitle;
-						if (displayTitle) metadata.sessionTitle = displayTitle;
-						const indexable: Indexable = {
-							id,
-							sourceId: "messages",
-							text: entry.text,
-							metadata,
-							contentHash: contentHashOf(
-								`${entry.text}\n${displayTitle}`,
-								entry.weight,
-								entry.role,
-								timestamp,
-							),
-							timestamp,
-							projectId: session.projectId ?? ctx.projectId,
-							archived: session.archived === true,
-							weight: entry.weight,
-							role: entry.role,
-							display: {
-								title: displayTitle,
-							},
-						};
-						yield indexable;
-					}
-					msgIdx++;
+					const { author: _untrustedAuthor, ...message } = rawMessage;
+					parsedRows.push({
+						msgIdx: msgIdx++,
+						timestamp,
+						message: {
+							...message,
+							...(typeof envelope.id === "string" ? { entryId: envelope.id } : {}),
+							...(rawTs !== undefined ? { timestamp: rawTs } : {}),
+						},
+					});
 				}
 			} catch {
-				// Unreadable mid-stream — stop for this file, continue with others.
+				// Unreadable mid-stream — index the complete prefix already read.
 			} finally {
 				rl.close();
 				try { stream.close(); } catch { /* ignore */ }
+			}
+
+			// Fold the host-side sidecar once per session, then normalize the full
+			// ordered sequence so duplicate prompt and tool-result attribution is stable.
+			const authoredMessages = mergeAuthorSidecarIntoMessages(
+				this.readAuthorBindings(session.id),
+				parsedRows.map((row) => row.message),
+				{
+					session,
+					agentDeps: {
+						getStaff: (id: string) => typeof ctx.staffStore.get === "function" ? ctx.staffStore.get(id) : undefined,
+					},
+				},
+			);
+			for (let rowIndex = 0; rowIndex < parsedRows.length; rowIndex++) {
+				const { msgIdx: index, timestamp } = parsedRows[rowIndex];
+				const msg = authoredMessages[rowIndex];
+				const hit = extractForIndexing(msg);
+				for (const entry of hit.entries) {
+					const id = `message:${session.id}:${index}:${entry.blockKey}`;
+					const metadata: Record<string, string | number | boolean> = {
+						sessionId: session.id,
+						msgIdx: index,
+						blockKey: entry.blockKey,
+						...(session.goalId ? { goalId: session.goalId } : {}),
+					};
+					if (goalTitle) metadata.goalTitle = goalTitle;
+					if (displayTitle) metadata.sessionTitle = displayTitle;
+					if (msg.author) {
+						metadata.authorKind = msg.author.kind;
+						metadata.authorId = msg.author.id;
+						metadata.authorLabel = msg.author.label;
+					}
+					const indexable: Indexable = {
+						id,
+						sourceId: "messages",
+						text: entry.text,
+						metadata,
+						contentHash: contentHashOf(
+							`${entry.text}\n${displayTitle}`,
+							entry.weight,
+							entry.role,
+							timestamp,
+						),
+						timestamp,
+						projectId: session.projectId ?? ctx.projectId,
+						archived: session.archived === true,
+						weight: entry.weight,
+						role: entry.role,
+						display: { title: displayTitle },
+					};
+					yield indexable;
+				}
 			}
 		}
 	}
