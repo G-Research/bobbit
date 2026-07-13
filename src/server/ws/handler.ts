@@ -4,6 +4,9 @@ import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { spliceInFlightMessage, spliceInFlightSteers } from "../agent/splice-inflight-message.js";
+import { mergeAuthorSidecarIntoMessages, readAuthorSidecar } from "../agent/author-sidecar.js";
+import { extensionSystemAuthor } from "../agent/message-author.js";
+import { LOCAL_USER_AUTHOR } from "../../shared/message-author.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
@@ -84,6 +87,26 @@ function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[
 	const entries = readSkillSidecarEntries(sessionId);
 	if (entries.length === 0) return messages;
 	return mergeSidecarEntriesIntoMessages(entries, messages);
+}
+
+/** Add Bobbit-owned author metadata before any display-text sidecar rewrites. */
+function mergeAuthorsIntoMessages(
+	sessionManager: SessionManager,
+	sessionId: string,
+	messages: any[],
+): any[] {
+	if (!Array.isArray(messages)) return messages;
+	const live = sessionManager.getSession(sessionId);
+	const persisted = sessionManager.getPersistedSession(sessionId);
+	const identity = live ?? persisted;
+	return mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), messages, {
+		session: {
+			id: sessionId,
+			title: identity?.title,
+			role: identity?.role,
+			staffId: identity?.staffId,
+		},
+	});
 }
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
@@ -658,7 +681,8 @@ export function handleWebSocketConnection(
 				case "get_messages": {
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					const messages = await sessionManager.getArchivedMessages(sessionId);
-					send(ws, { type: "messages", data: stampSnapshotOrder(messages) as unknown[] });
+					const authored = mergeAuthorsIntoMessages(sessionManager, sessionId, messages);
+					send(ws, { type: "messages", data: stampSnapshotOrder(authored) as unknown[] });
 					break;
 				}
 				case "ping":
@@ -877,6 +901,9 @@ export function handleWebSocketConnection(
 						skillExpansions: expansions.length ? expansions : undefined,
 						fileMentions: wireFileMentions,
 						modelText: modelChanged ? mergedModelText : undefined,
+						// Browser clients cannot assert identity: this authenticated WS path is human input.
+						source: "user",
+						author: LOCAL_USER_AUTHOR,
 						// Assistant auto-kickoff prompts opt out of first-message title-gen.
 						suppressTitleGen: msg.suppressTitleGen === true,
 					});
@@ -887,9 +914,16 @@ export function handleWebSocketConnection(
 					// (real-time interrupt, bypasses queue intentionally).
 					// Otherwise enqueue as a steered message and drain if idle.
 					if (session.status === "streaming") {
-						await sessionManager.deliverLiveSteer(sessionId, msg.text);
+						await sessionManager.deliverLiveSteer(sessionId, msg.text, {
+							source: "user",
+							author: LOCAL_USER_AUTHOR,
+						});
 					} else {
-						await sessionManager.enqueuePrompt(sessionId, msg.text, { isSteered: true });
+						await sessionManager.enqueuePrompt(sessionId, msg.text, {
+							isSteered: true,
+							source: "user",
+							author: LOCAL_USER_AUTHOR,
+						});
 					}
 					break;
 				case "steer_queued":
@@ -1121,14 +1155,16 @@ export function handleWebSocketConnection(
 								(session as any).inFlightSteerTexts,
 							);
 							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
-							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
+							const withAuthors = mergeAuthorsIntoMessages(sessionManager, sessionId, withCompaction);
+							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withAuthors));
 						} else if (raw && Array.isArray(raw.messages)) {
 							const spliced = spliceInFlightSteers(
 								spliceInFlightMessage(raw.messages, (session as any).latestMessageUpdate),
 								(session as any).inFlightSteerTexts,
 							);
 							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
-							const truncated = truncateLargeToolContentInMessages(withCompaction);
+							const withAuthors = mergeAuthorsIntoMessages(sessionManager, sessionId, withCompaction);
+							const truncated = truncateLargeToolContentInMessages(withAuthors);
 							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
 							data = merged === raw.messages ? raw : { ...raw, messages: merged };
 						}
@@ -1604,6 +1640,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "ext_session_post_result", requestId, ok: false, error: surf.error });
 						break;
 					}
+					const extensionAuthor = extensionSystemAuthor(surf.packId, surf.tool ?? "surface");
 					const result = await handleSessionPost({
 						tool: surf.tool,
 						packId: surf.packId,
@@ -1623,9 +1660,15 @@ export function handleWebSocketConnection(
 							// for role "system"). "user"/"system" share the user/steer transport;
 							// resumeTurn !== false resumes the turn, === false delivers without.
 							if (opts.resume) {
-								await sessionManager.enqueuePrompt(sid, text, { source: "extension" });
+								await sessionManager.enqueuePrompt(sid, text, {
+									source: "extension",
+									author: extensionAuthor,
+								});
 							} else {
-								await sessionManager.deliverLiveSteer(sid, text, { source: "extension" });
+								await sessionManager.deliverLiveSteer(sid, text, {
+									source: "extension",
+									author: extensionAuthor,
+								});
 							}
 						},
 						audit: (rec) => {

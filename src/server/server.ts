@@ -110,6 +110,13 @@ import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-a
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import {
+	copyAuthorSidecar,
+	initAuthorSidecarDir,
+	purgeAuthorSidecar,
+} from "./agent/author-sidecar.js";
+import { agentAuthorForSession, BOBBIT_SYSTEM_AUTHOR } from "./agent/message-author.js";
+import { LOCAL_USER_AUTHOR } from "../shared/message-author.js";
+import {
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
 } from "./agent/compaction-sidecar.js";
@@ -1910,6 +1917,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	initPromptDirs(stateDir);
 	initSkillSidecarDir(stateDir);
 	initCompactionSidecarDir(stateDir);
+	initAuthorSidecarDir(stateDir);
 	initAssistantRegistry(configDir);
 
 	// Project registry — persisted at server level. Every server exposes the
@@ -3090,6 +3098,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			console.error(`[broadcast] session_removed failed for ${sessionId}:`, err);
 		}
 		if (info.reason === "purged") {
+			purgeAuthorSidecar(sessionId);
 			try { previewArtifacts.removeArtifacts(sessionId); } catch (err) {
 				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
 			}
@@ -11536,6 +11545,20 @@ async function handleApiRoute(
 			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
 		);
 	};
+	const authorForAgentSession = (caller: SessionInfo) => agentAuthorForSession(caller, {
+		getStaff: (id) => staffManager.getStaff(id),
+		getRole: (name) => resolveRoleForProject(name, caller.projectId),
+	});
+	const resolveRequestPromptIdentity = () => {
+		const callerSessionId = resolveAuthenticCallerFromSessionSecret();
+		const callerSession = callerSessionId ? sessionManager.getSession(callerSessionId) : undefined;
+		if (callerSession) return { source: "agent" as const, author: authorForAgentSession(callerSession) };
+		// A sandbox-authenticated agent that omitted its session secret must never
+		// be misattributed as the local human. Preserve the existing authorization
+		// decision, but use Bobbit's safe system fallback for accountability.
+		if (sandboxScope) return { source: "system" as const, author: BOBBIT_SYSTEM_AUTHOR };
+		return { source: "user" as const, author: LOCAL_USER_AUTHOR };
+	};
 	const denyDismissNotOwned = (sessionId: string, message = "Caller session is not the team lead for this goal") => json({
 		ok: false,
 		status: "not-owned",
@@ -11913,7 +11936,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			await sessionManager.deliverLiveSteer(session.id, body.message);
+			await sessionManager.deliverLiveSteer(session.id, body.message, resolveRequestPromptIdentity());
 			json({ ok: true, dispatched: true });
 		} catch (err) {
 			jsonError(500, err);
@@ -12047,6 +12070,7 @@ async function handleApiRoute(
 					message = ctx + "\n\n---\n\n" + message;
 				}
 			}
+			const requestIdentity = resolveRequestPromptIdentity();
 			const result = ownChildOwner
 				? await orchestrationCore.prompt(ownChildOwner, body.sessionId, message, { mode })
 				: await deliverSessionPrompt({
@@ -12056,7 +12080,11 @@ async function handleApiRoute(
 					getErroredPromptRecoveryDecision: (id) => sessionManager.getErroredPromptRecoveryDecision(id),
 					enqueuePromptForRetryRecovery: (id, text, opts) => sessionManager.enqueuePromptForRetryRecovery(id, text, opts),
 					retryLastPrompt: (id, opts) => sessionManager.retryLastPrompt(id, opts),
-				}, body.sessionId, message, { mode, defaultMode: "steer" });
+				}, body.sessionId, message, {
+					mode,
+					defaultMode: "steer",
+					...requestIdentity,
+				});
 			json(result);
 		} catch (err) {
 			if (err instanceof SessionPromptDeliveryError || err instanceof OrchestrationCoreError) {
@@ -12409,6 +12437,7 @@ async function handleApiRoute(
 
 		try {
 			const fork = await sessionManager.createSession(sessionCwd, undefined, ps.goalId, ps.assistantType, createOpts);
+			copyAuthorSidecar(sourceId, fork.id);
 			const baseTitle = (ps.title || source.title || "session").trim() || "session";
 			const title = `Fork: ${baseTitle}`;
 			sessionManager.setTitle(fork.id, title, { markGenerated: true });
@@ -12424,6 +12453,7 @@ async function handleApiRoute(
 			}, 201);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			purgeAuthorSidecar(forkId);
 			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
 		}
 		return;
@@ -12472,7 +12502,12 @@ async function handleApiRoute(
 				getErroredPromptRecoveryDecision: (id) => sessionManager.getErroredPromptRecoveryDecision(id),
 				enqueuePromptForRetryRecovery: (id, text, opts) => sessionManager.enqueuePromptForRetryRecovery(id, text, opts),
 				retryLastPrompt: (id, opts) => sessionManager.retryLastPrompt(id, opts),
-			}, targetSessionId, body.message, { mode: body.mode, defaultMode: "prompt" });
+			}, targetSessionId, body.message, {
+				mode: body.mode,
+				defaultMode: "prompt",
+				source: "agent",
+				author: authorForAgentSession(callerSession),
+			});
 			json(result);
 		} catch (err) {
 			if (err instanceof SessionPromptDeliveryError) {
@@ -12973,6 +13008,7 @@ async function handleApiRoute(
 			newSession = await sessionManager.createSession(
 				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);
+			copyAuthorSidecar(archivedId, newSession.id);
 		} catch (err) {
 			const failedRecord = sessionManager.getPersistedSession(newSessionId);
 			cleanupFailedContinue(failedRecord?.agentSessionFile || destJsonl, newSessionId, bobbitStateDir());
@@ -16299,7 +16335,10 @@ async function handleApiRoute(
 		// duplicate /submit is rejected deterministically.
 		askSubmittedToolUseIds.add(dedupKey);
 		try {
-			await sessionManager.enqueuePrompt(sessionId, envelope);
+			await sessionManager.enqueuePrompt(sessionId, envelope, {
+				source: "user",
+				author: LOCAL_USER_AUTHOR,
+			});
 		} catch (e: any) {
 			// Roll back the dedup flag so the caller can retry.
 			askSubmittedToolUseIds.delete(dedupKey);
