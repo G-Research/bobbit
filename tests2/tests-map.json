@@ -2,16 +2,16 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, then reconciled (migrated/v2Path/v2Native) against tests2/ on disk",
   "note": "Buckets/methods/rationale come from `node scripts/testing-v2/gen-inventory.mjs` (curated overrides live in the generator). The `migrated`/`v2Path` per-entry fields and the top-level `v2Native` allowlist are reconciled against the tests2/ tree and are validated by scripts/testing-v2/parity.mjs and tests2/core/guard-v2.test.ts â€” do not hand-edit them blindly.",
-  "censusTotal": 1126,
+  "censusTotal": 1127,
   "buckets": {
     "daily": 56,
     "v2-browser": 216,
     "v2-core": 509,
     "v2-dom": 144,
-    "v2-integration": 201
+    "v2-integration": 202
   },
   "methods": {
-    "adapter": 272,
+    "adapter": 273,
     "codemod": 509,
     "relocate": 45,
     "legacy-pending": 153,
@@ -1339,6 +1339,15 @@
       "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
       "migrated": true,
       "v2Path": "tests2/integration/aigw-title-generator.test.ts"
+    },
+    {
+      "file": "tests/e2e/api-goal-workflow-edit.spec.ts",
+      "bucket": "v2-integration",
+      "method": "adapter",
+      "replacement": [],
+      "rationale": "Backend workflow-replacement HTTP lifecycle coverage against a real gateway, including persistence, validation, active-verification conflicts, and gate reconciliation.",
+      "migrated": true,
+      "v2Path": "tests2/integration/api-goal-workflow-edit.test.ts"
     },
     {
       "file": "tests/e2e/api-goals-child-autostart-ready.spec.ts",
