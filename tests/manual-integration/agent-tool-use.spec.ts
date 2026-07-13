@@ -6,7 +6,7 @@
  * exercised a real LLM-driven agent calling tools end-to-end. This file
  * closes that gap.
  *
- * Seven scenarios, each in its own fresh sandboxed session:
+ * Nine scenarios, each in its own fresh session:
  *   1. bash         — builtin shell, command echo produces sentinel HELLO_<nonce>
  *   2. edit         — defaults/tools/filesystem/edit on a pre-created file, sentinel DONE
  *   3. find         — defaults/tools/filesystem/find on pre-created files, sentinel COUNT=3
@@ -14,6 +14,8 @@
  *   5. error        — edit on missing file, sentinel EDIT_FAILED:
  *   6. web_fetch    — Bobbit extension tool, fetches gateway /api/health, sentinel HEALTH_OK_<nonce>
  *   7. mcp_describe — MCP meta-tool, describes playwright MCP server, sentinel MCP_OPS_<nonce>=<n>
+ *   8. host recovery — force-abort parallel bash after one result, then follow up
+ *   9. sandbox recovery — same interrupted parallel-tool recovery in Docker
  *
  * Assertions are tool-name-specific (not substring-of-any-card): every
  * tool-card wrapper in the UI carries `data-tool-name="<name>"`, and
@@ -548,18 +550,125 @@ function cleanTestDockerContainers() {
 // ---------------------------------------------------------------------------
 
 /**
- * Create a fresh sandboxed session and wait for it to be idle.
+ * Create a fresh host or sandbox session and wait for it to be idle.
  * Returns the session id.
  */
-async function createFreshSession(gw: GW): Promise<string> {
+async function createFreshSession(gw: GW, sandboxed = true): Promise<string> {
 	const res = await api(gw, "/api/sessions", {
 		method: "POST",
-		body: JSON.stringify({ worktree: true, sandboxed: true }),
+		body: JSON.stringify({ worktree: true, sandboxed }),
 	});
 	expect(res.status).toBe(201);
 	const id = ((await res.json()) as any).id;
 	await pollIdle(gw, id, 180_000);
 	return id;
+}
+
+interface CompactTranscriptMessage {
+	role: string;
+	text: string;
+	toolUses?: Array<{ name: string; inputPreview: string }>;
+	toolResults?: Array<{ preview?: string; status?: "ok" | "error" | "unknown" }>;
+}
+
+async function getCompactTranscript(gw: GW, id: string): Promise<CompactTranscriptMessage[]> {
+	const res = await api(gw, `/api/sessions/${id}/transcript?offset=0&limit=200&include_tool_results=true`);
+	if (!res.ok) throw new Error(`Transcript read failed for ${id}: ${res.status} ${await res.text().catch(() => "")}`);
+	return ((await res.json()) as { messages?: CompactTranscriptMessage[] }).messages ?? [];
+}
+
+function findParallelBashMessage(messages: CompactTranscriptMessage[], fastTag: string, slowTag: string) {
+	return messages.find(message => {
+		if (message.role !== "assistant") return false;
+		const bashUses = (message.toolUses ?? []).filter(use => use.name === "bash");
+		return bashUses.length === 2
+			&& bashUses.some(use => use.inputPreview.includes(fastTag))
+			&& bashUses.some(use => use.inputPreview.includes(slowTag));
+	});
+}
+
+function hasSuccessfulToolResult(messages: CompactTranscriptMessage[], sentinel: string) {
+	return messages.some(message => (message.toolResults ?? [])
+		.some(result => result.status !== "error" && result.preview?.includes(sentinel)));
+}
+
+async function waitForParallelTurnReadyToAbort(
+	page: Page,
+	gw: GW,
+	id: string,
+	fastTag: string,
+	slowTag: string,
+	ms = 120_000,
+): Promise<void> {
+	const deadline = Date.now() + ms;
+	let lastStatus = "unknown";
+	let lastMessages: CompactTranscriptMessage[] = [];
+	while (Date.now() < deadline) {
+		const info = await getSession(gw, id).catch(() => undefined);
+		lastStatus = info?.status ?? lastStatus;
+		lastMessages = await getCompactTranscript(gw, id).catch(() => lastMessages);
+		const hasParallelUse = !!findParallelBashMessage(lastMessages, fastTag, slowTag);
+		const hasFastResult = hasSuccessfulToolResult(lastMessages, fastTag);
+		const hasBothCards = await page.evaluate(({ fastTag, slowTag }) => {
+			const cards = Array.from(document.querySelectorAll<HTMLElement>('div[data-tool-name="bash"]'));
+			return cards.some(card => (card.textContent || "").includes(fastTag))
+				&& cards.some(card => (card.textContent || "").includes(slowTag));
+		}, { fastTag, slowTag }).catch(() => false);
+		if (lastStatus === "streaming" && hasParallelUse && hasFastResult && hasBothCards) return;
+		if (lastStatus === "error" || lastStatus === "terminated" || lastStatus === "archived") break;
+		await page.waitForTimeout(500);
+	}
+	throw new Error(
+		`Parallel turn ${id} was not safely interruptible within ${ms}ms ` +
+		`(status=${lastStatus}, parallelUse=${!!findParallelBashMessage(lastMessages, fastTag, slowTag)}, ` +
+		`fastResult=${hasSuccessfulToolResult(lastMessages, fastTag)})\n${await buildSessionDiagnostics(gw, id)}`,
+	);
+}
+
+async function exerciseInterruptedParallelRecovery(page: Page, gw: GW, sandboxed: boolean): Promise<void> {
+	const id = await createFreshSession(gw, sandboxed);
+	const nonce = Math.random().toString(36).slice(2, 10).toUpperCase();
+	const fastTag = `PAR_FAST_${nonce}`;
+	const slowTag = `PAR_SLOW_${nonce}`;
+	const recoveredTag = `PAR_RECOVERED_${nonce}`;
+	const fastCommand = `node -e "console.log('${fastTag}')"`;
+	const slowCommand = `node -e "console.log('${slowTag}'); setTimeout(() => console.log('${slowTag}_END'), 120000)"`;
+
+	await page.goto(sessionUrl(gw, id));
+	await waitForConnectedEditor(page, id);
+	await sendPromptViaUi(page,
+		`Issue exactly two bash tool calls in parallel in one assistant response; do not wait for either result before issuing the other. ` +
+		`The first command must be exactly: ${fastCommand}. The second command must be exactly: ${slowCommand}. ` +
+		`Do not call any other tool. After both results return, reply PARALLEL_FINISHED.`);
+
+	// The fast sibling is a completed, valid tool result while the slow sibling
+	// keeps the same parallel turn open. This is the vulnerable force-abort window:
+	// recovery must retain the valid pair and never strand either result.
+	await waitForParallelTurnReadyToAbort(page, gw, id, fastTag, slowTag);
+	const beforeAbort = await getCompactTranscript(gw, id);
+	expect(findParallelBashMessage(beforeAbort, fastTag, slowTag), "both bash uses must share one assistant message").toBeTruthy();
+	expect(hasSuccessfulToolResult(beforeAbort, fastTag), "fast parallel result must persist before force-abort").toBe(true);
+
+	const abortRes = await api(gw, `/api/sessions/${id}/abort`, { method: "POST" });
+	expect(abortRes.ok, `force-abort failed: ${abortRes.status} ${await abortRes.text().catch(() => "")}`).toBe(true);
+	await pollIdle(gw, id, 120_000);
+
+	await browserSend(page, gw, id,
+		`The interrupted parallel-tool turn is over. Do not call any tool. Reply with exactly ${recoveredTag}.`,
+		240_000);
+
+	const recoveredSession = await getSession(gw, id);
+	expect(recoveredSession.id, "recovery must preserve the Bobbit session identity").toBe(id);
+	expect(recoveredSession.status).toBe("idle");
+	const afterRecovery = await getCompactTranscript(gw, id);
+	expect(findParallelBashMessage(afterRecovery, fastTag, slowTag), "valid parallel tool-use message must survive recovery").toBeTruthy();
+	expect(hasSuccessfulToolResult(afterRecovery, fastTag), "valid completed sibling result must survive recovery").toBe(true);
+
+	const body = await page.locator("body").innerText();
+	expect(body).toContain(recoveredTag);
+	expect(body).not.toMatch(/unexpected tool_use_id|unexpected tool use id/i);
+	expect(await countToolCardsByName(page, "bash", fastTag)).toBeGreaterThan(0);
+	expect(await countToolCardsByName(page, "bash", slowTag)).toBeGreaterThan(0);
 }
 
 /**
@@ -628,7 +737,6 @@ test.describe.serial("Agent tool use", () => {
 	test.setTimeout(420_000); // 7 minutes per individual test — covers cold-start LLM latency.
 		// (Headline budget for the spec as a whole is ~5 min when warm; this ceiling
 		// just absorbs first-test cold-start variability without introducing flakes.)
-	test.skip(!HAS_DOCKER, "requires Docker — sandboxed sessions only");
 
 	let gw: GW;
 	let dir: string;
@@ -636,8 +744,11 @@ test.describe.serial("Agent tool use", () => {
 	let sandboxAvailable = false;
 	let manualPreflightSkipMessage: string | undefined;
 
-	test.beforeEach(() => {
+	test.beforeEach(({}, ti) => {
 		if (manualPreflightSkipMessage) test.skip(true, manualPreflightSkipMessage);
+		if (!sandboxAvailable && !ti.title.startsWith("8. host")) {
+			test.skip(true, "requires an available Docker sandbox; host recovery coverage remains runnable without Docker");
+		}
 	});
 
 	test.beforeAll(async ({}, ti) => {
@@ -696,7 +807,7 @@ test.describe.serial("Agent tool use", () => {
 		// Wait for sandbox to be available
 		const ss0 = await (await api(gw, "/api/sandbox-status")).json();
 		sandboxAvailable = ss0.configured && ss0.available;
-		if (ss0.configured && !ss0.available) {
+		if (HAS_DOCKER && ss0.configured && !ss0.available) {
 			const deadline = Date.now() + 180_000;
 			while (Date.now() < deadline) {
 				const r = await (await api(gw, "/api/sandbox-status")).json();
@@ -705,7 +816,6 @@ test.describe.serial("Agent tool use", () => {
 			}
 		}
 		console.log(`  Sandbox available: ${sandboxAvailable}`);
-		if (!sandboxAvailable) throw new Error("Sandbox unavailable — sandboxed sessions are required by this spec");
 	});
 
 	test.afterAll(async ({}, ti) => {
@@ -1038,4 +1148,18 @@ test.describe.serial("Agent tool use", () => {
 		const body = await page.locator("body").innerText();
 		expect(body).toMatch(new RegExp(`${sentinel}=(\\d+|ERROR)`));
 	});
+
+	// ---------------------------------------------------------------
+	// 8–9. Interrupted parallel tool-result recovery — host + sandbox
+	// ---------------------------------------------------------------
+	for (const variant of [
+		{ number: 8, name: "host", sandboxed: false },
+		{ number: 9, name: "sandbox", sandboxed: true },
+	] as const) {
+		test(`${variant.number}. ${variant.name} interrupted parallel tools — force-abort then follow-up`, async ({ page }) => {
+			if (variant.sandboxed) test.skip(!sandboxAvailable, "sandbox recovery requires an available Docker sandbox");
+			await exerciseInterruptedParallelRecovery(page, gw, variant.sandboxed);
+			await takeScreenshot(page, `tooluse-${variant.number}-parallel-recovery-${variant.name}.png`);
+		});
+	}
 });
