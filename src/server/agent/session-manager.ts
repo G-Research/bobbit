@@ -22,6 +22,7 @@ import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContext
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
 import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
@@ -388,7 +389,7 @@ const BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS = 3;
 export type ErroredPromptRecoveryDecision =
 	| {
 		recoverable: true;
-		reason: "provider-backoff" | "transient" | "generic";
+		reason: "provider-backoff" | "transient" | "generic" | "poisoned-history";
 		attempts: number;
 		maxAttempts?: number;
 	}
@@ -411,6 +412,11 @@ export function classifyErroredPromptRecovery(input: {
 	const errMsg = input.lastTurnErrorMessage || "";
 	if (!errMsg) {
 		return { recoverable: false, reason: "missing-error", message: "Session has no recorded retryable error message." };
+	}
+	// This Anthropic 400 is not transient, but a user-driven prompt can repair
+	// the persisted transcript and respawn the same Bobbit session in place.
+	if (isOrphanToolResultOrderingError(errMsg)) {
+		return { recoverable: true, reason: "poisoned-history", attempts: 0, maxAttempts: 1 };
 	}
 	if (isNonRetryableAgentError(errMsg)) {
 		return { recoverable: false, reason: "non-retryable", message: "Last session error is non-retryable and requires human/upstream action." };
@@ -1237,6 +1243,8 @@ export class SessionManager {
 	private static readonly STATUS_HEARTBEAT_INTERVAL_MS = 15_000;
 	/** Per-session restore/respawn mutex. Concurrent revive triggers join this promise instead of replacing each other. */
 	private _restoreCoordinators = new Map<string, RestoreCoordinator>();
+	/** User-driven orphan-history recoveries include their redrive so duplicate Retry clicks join instead of dispatching twice. */
+	private _poisonedHistoryRecoveries = new Map<string, Promise<void>>();
 	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
 	private _sessionRespawnGenerations = new Map<string, number>();
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
@@ -3261,6 +3269,13 @@ export class SessionManager {
 		 *  mark the session titleGenerated, so the next real prompt still names it. */
 		suppressTitleGen?: boolean;
 	}): Promise<{ status: "dispatched" | "queued" }> {
+		// An in-place poison respawn temporarily removes SessionInfo. Join before
+		// looking it up so prompts arriving in that window are not silently lost.
+		const poisonRecovery = this._poisonedHistoryRecoveries.get(sessionId);
+		if (poisonRecovery) {
+			await poisonRecovery;
+			return this.enqueuePrompt(sessionId, text, opts);
+		}
 		let session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
 
@@ -3345,6 +3360,40 @@ export class SessionManager {
 			// retry banner/timer running, since the user has signalled fresh intent
 			// and the next action will be an explicit Retry click or fix upstream.
 			this.cancelPendingAutoRetry(session, "new-prompt");
+
+			// Anthropic orphan tool-result ordering poison cannot be unstuck by
+			// sending another prompt to Pi's current in-memory history. Recover it
+			// before the generic error cap so a normal follow-up is itself the
+			// user-driven redrive, ahead of already parked queue rows.
+			if (isOrphanToolResultOrderingError(session.lastTurnErrorMessage)) {
+				const inFlight = this._poisonedHistoryRecoveries.get(session.id);
+				if (inFlight) {
+					await inFlight;
+					return this.enqueuePrompt(sessionId, text, opts);
+				}
+
+				const recovery = (async () => {
+					this.consumeRecoveredPromptDispatchRows(session);
+					const recovered = await this._recoverPoisonedHistory(session, "follow-up");
+					if (!recovered) throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+					recovered.lastTurnErrored = false;
+					recovered.lastTurnErrorMessage = undefined;
+					recovered.turnHadToolCalls = false;
+					recovered.transientRetryAttempts = 0;
+					recovered.lastPromptSource = opts?.source ?? "user";
+					if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+					await this.dispatchDirectPrompt(recovered, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
+				})();
+				this._poisonedHistoryRecoveries.set(session.id, recovery);
+				try {
+					await recovery;
+				} finally {
+					if (this._poisonedHistoryRecoveries.get(session.id) === recovery) {
+						this._poisonedHistoryRecoveries.delete(session.id);
+					}
+				}
+				return { status: "dispatched" };
+			}
 
 			if (consec >= MAX_CONSECUTIVE_ERROR_TURNS) {
 				// Cap reached — park. Human must click Retry (or fix upstream) to drain.
@@ -4340,6 +4389,9 @@ export class SessionManager {
 		const GENERIC_RETRY_DELAYS_MS = [1000, 5000, 60_000] as const;
 		const errMsg = session.lastTurnErrorMessage || "";
 		if (!errMsg) return false;
+		// A poisoned transcript requires a user-driven sanitize/respawn. Never
+		// arm an automatic timer that could repeatedly redispatch the same 400.
+		if (isOrphanToolResultOrderingError(errMsg)) return false;
 		if (isNonRetryableAgentError(errMsg)) return false;
 
 		const isBackoff = isProviderBackoffError(errMsg);
@@ -4467,6 +4519,25 @@ export class SessionManager {
 		return restored ?? this.sessions.get(session.id);
 	}
 
+	/** Repair an Anthropic orphan-tool-result poison and replace Pi in place. */
+	private async _recoverPoisonedHistory(
+		session: SessionInfo,
+		boundary: "retry" | "follow-up",
+	): Promise<SessionInfo | undefined> {
+		let ps: PersistedSession | undefined;
+		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
+		catch { ps = undefined; }
+		if (!ps?.agentSessionFile) return undefined;
+
+		const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+		const repairedRecords = await sanitizeAgentTranscriptFile(fileCtx, ps.agentSessionFile, this.sandboxManager);
+		console.info(
+			`[session-manager] Poisoned-history repair session=${session.id} boundary=${boundary} repairedRecords=${repairedRecords} sandboxed=${ps.sandboxed === true} project=${session.projectId ?? ps.projectId ?? "unknown"}`,
+		);
+		const restored = await this._respawnAgentInPlace(session, ps);
+		return restored ?? this.sessions.get(session.id);
+	}
+
 	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
 		const ids = session.recoveredPromptDispatchQueueIds;
 		if (!ids?.length) return false;
@@ -4535,17 +4606,71 @@ export class SessionManager {
 	 * - Mid-work error (tool calls already executed): sends a system continuation
 	 */
 	async retryLastPrompt(sessionId: string, opts?: { auto?: boolean; preserveQueueIds?: string[] }): Promise<void> {
+		// Join before looking up SessionInfo: a real in-place respawn removes the
+		// old entry briefly, and duplicate Retry clicks must not fail or redrive.
+		const poisonRecovery = this._poisonedHistoryRecoveries.get(sessionId);
+		if (poisonRecovery) return poisonRecovery;
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
 		const isAuto = opts?.auto === true;
 		const preserveQueueIds = new Set(opts?.preserveQueueIds ?? []);
 		const hadToolCalls = session.turnHadToolCalls;
-		// Capture before clearing — used to route a live blank-text-poisoned
-		// session through respawn so it rehydrates from the sanitized transcript.
+		// Capture all retry intent before any in-place respawn replaces SessionInfo.
 		const poisonedByBlankText = isBlankContentBlockError(session.lastTurnErrorMessage);
+		const poisonedByOrphanResult = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
 		const savedPromptText = session.lastPromptText;
 		const savedPromptImages = session.lastPromptImages;
+		const savedPromptSource = session.lastPromptSource;
+
+		if (poisonedByOrphanResult) {
+			if (isAuto) {
+				throw new Error("Poisoned session history requires a user Retry or follow-up prompt");
+			}
+			this.cancelPendingAutoRetry(session, "explicit-retry");
+			const recovery = (async () => {
+				const target = await this._recoverPoisonedHistory(session, "retry");
+				if (!target) throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+				target.lastTurnErrored = false;
+				target.lastTurnErrorMessage = undefined;
+				target.turnHadToolCalls = false;
+				target.consecutiveErrorTurns = 0;
+				target.transientRetryAttempts = 0;
+				target.lastPromptSource = savedPromptSource;
+
+				if (hadToolCalls) {
+					await this.dispatchDirectPrompt(target,
+						"[SYSTEM: The model API returned an error while you were mid-turn. " +
+						"Your previous work has been preserved. Please continue where you left off. " +
+						"Do NOT start over — review your recent messages and resume from the exact point of interruption.]",
+					);
+					return;
+				}
+				if (savedPromptText || savedPromptImages?.length) {
+					const retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
+					if (!this.consumeRecoveredPromptDispatchRows(target)) {
+						this.consumeQueuedRetryRow(target, [retryText, savedPromptText], savedPromptImages, preserveQueueIds);
+					}
+					await this.dispatchDirectPrompt(target, retryText, savedPromptImages);
+					return;
+				}
+				this.consumeRecoveredPromptDispatchRows(target);
+				await this.dispatchDirectPrompt(target,
+					"[SYSTEM: The model API returned an error on your last response. " +
+					"Please review your conversation history and retry what you were doing.]",
+				);
+			})();
+			this._poisonedHistoryRecoveries.set(sessionId, recovery);
+			try {
+				await recovery;
+			} finally {
+				if (this._poisonedHistoryRecoveries.get(sessionId) === recovery) {
+					this._poisonedHistoryRecoveries.delete(sessionId);
+				}
+			}
+			return;
+		}
+
 		session.lastTurnErrored = false;
 		session.turnHadToolCalls = false;
 		// Explicit retry resets the cap — human intervention gets a fresh budget.
