@@ -31,6 +31,7 @@ import { formatSessionSearchTitle } from "./sources/session-title.js";
 import { progressBus as sharedProgressBus, type ProgressBus } from "./progress-bus.js";
 import { needsRebuild as metaNeedsRebuild, buildCurrentMeta } from "./meta.js";
 import { CONTENT_POLICY_VERSION, extractForIndexing } from "./content-policy.js";
+import { isMessageAuthor } from "../../shared/message-author.js";
 
 // ── Module-level rebuild queue ───────────────────────────────────────
 
@@ -406,6 +407,10 @@ export class SearchService {
 		const displayTitle = formatSessionSearchTitle(st, goalTitle);
 		const hit = extractForIndexing(message);
 		if (hit.entries.length === 0) return;
+		const candidateAuthor = message && typeof message === "object"
+			? (message as Record<string, unknown>).author
+			: undefined;
+		const author = isMessageAuthor(candidateAuthor) ? candidateAuthor : undefined;
 		const resolvedProjectId = pid ?? this.projectId;
 		const idx = typeof msgIdx === "number" ? msgIdx : ts;
 		const indexables = hit.entries.map((entry) => ({
@@ -419,6 +424,11 @@ export class SearchService {
 				...(goalId ? { goalId } : {}),
 				...(goalTitle ? { goalTitle } : {}),
 				...(displayTitle ? { sessionTitle: displayTitle } : {}),
+				...(author ? {
+					authorKind: author.kind,
+					authorId: author.id,
+					authorLabel: author.label,
+				} : {}),
 			},
 			contentHash: contentHashOf(`${entry.text}\n${displayTitle}`, entry.weight, entry.role, ts),
 			timestamp: ts,

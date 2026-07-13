@@ -335,9 +335,15 @@ describe("MessageIndexSource", () => {
 		expect(user.weight).toBe(2.0);
 		expect(user.id).toBe("message:s1:0:text:0");
 		expect(user.metadata.sessionTitle, "message rows should carry parent session title metadata").toBe("Chat");
+		expect(user.metadata.authorKind).toBe("user");
+		expect(user.metadata.authorId).toBe("user:local");
+		expect(user.metadata.authorLabel).toBe("User");
 
 		const assistant = out.find((o) => o.role === "assistant")!;
 		expect(assistant.weight).toBe(1.0);
+		expect(assistant.metadata.authorKind).toBe("agent");
+		expect(assistant.metadata.authorId).toBe("session:s1");
+		expect(assistant.metadata.authorLabel).toBe("Chat");
 		expect(assistant.text.includes("<thinking>")).toBe(false);
 
 		const toolCall = out.find((o) => o.role === "tool_call")!;
@@ -345,6 +351,44 @@ describe("MessageIndexSource", () => {
 		expect(toolCall.text.startsWith("write ")).toBe(true);
 
 		// Cleanup
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("adds sidecar-resolved system author metadata without changing indexed text or weights", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-author-source-"));
+		const file = path.join(dir, "session.jsonl");
+		fs.writeFileSync(file, JSON.stringify({
+			id: "system-message",
+			message: { role: "user", content: "SystemPromptSearchToken" },
+		}) + "\n", "utf-8");
+		const source = new MessageIndexSource(() => [{
+			schemaVersion: 1,
+			type: "prompt-author",
+			promptId: "system-prompt",
+			dispatchedAt: 100,
+			modelText: "SystemPromptSearchToken",
+			source: "task-notification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		}]);
+
+		const [message] = await collect(source, makeCtx({
+			sessions: [{
+				id: "system-session",
+				title: "System session",
+				cwd: "/tmp",
+				agentSessionFile: file,
+				createdAt: 1,
+				lastActivity: 2,
+			}],
+		}));
+		expect(message.text).toBe("SystemPromptSearchToken");
+		expect(message.role).toBe("user");
+		expect(message.weight).toBe(2.0);
+		expect(message.metadata.authorKind).toBe("system");
+		expect(message.metadata.authorId).toBe("system:bobbit");
+		expect(message.metadata.authorLabel).toBe("Bobbit");
+		expect(message.text).not.toContain("Bobbit");
+
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
