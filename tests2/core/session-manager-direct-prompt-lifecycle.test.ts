@@ -122,6 +122,19 @@ function autoRetryCancelledEvents(session: any): any[] {
 		.filter((event: any) => event?.type === "auto_retry_cancelled");
 }
 
+function assertLocalUserSteerLedger(ledger: any, text: string): void {
+	assert.ok(Array.isArray(ledger));
+	assert.equal(ledger.length, 1);
+	assert.equal(ledger[0]?.text, text);
+	assert.equal(ledger[0]?.source, "user");
+	assert.match(ledger[0]?.promptId ?? "", /^steer:[a-f0-9]{64}$/);
+	assert.deepEqual(ledger[0]?.author, {
+		kind: "user",
+		id: "user:local",
+		label: "User",
+	});
+}
+
 async function flushAutoRetryMicrotasks(): Promise<void> {
 	await Promise.resolve();
 	await Promise.resolve();
@@ -474,15 +487,23 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		const ledgerUpdate = manager._testStore.update.mock.calls
 			.map((call: any) => call[1])
 			.find((update: any) => Array.isArray(update?.inFlightSteerTexts));
-		assert.deepEqual(ledgerUpdate, {
-			messageQueue: [],
-			inFlightSteerTexts: ["durable steer"],
-		});
+		assert.deepEqual(ledgerUpdate?.messageQueue, []);
+		assertLocalUserSteerLedger(ledgerUpdate?.inFlightSteerTexts, "durable steer");
+		assertLocalUserSteerLedger(session.inFlightSteerTexts, "durable steer");
 
-		manager.handleAgentLifecycle(session, {
+		const rawEcho: any = {
 			type: "message_end",
 			message: { role: "user", content: [{ type: "text", text: "durable steer" }] },
+		};
+		const preparedEcho = manager.prepareVisibleAgentEvent(session, rawEcho);
+		assert.deepEqual(preparedEcho.message.author, {
+			kind: "user",
+			id: "user:local",
+			label: "User",
 		});
+		assert.equal(rawEcho.message.author, undefined, "Bobbit metadata must not mutate the provider event");
+		assert.equal(session.pendingPromptAuthors.length, 0, "the echoed prompt author should settle exactly once");
+		manager.handleAgentLifecycle(session, preparedEcho);
 		const clearUpdate = manager._testStore.update.mock.calls.at(-1)?.[1];
 		assert.deepEqual(clearUpdate, { inFlightSteerTexts: undefined });
 
@@ -503,7 +524,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(steer.mock.calls.length, 1);
 		assert.equal(session.promptQueue.length, 0);
-		assert.deepEqual(session.inFlightSteerTexts, ["recover steer exactly once"]);
+		assertLocalUserSteerLedger(session.inFlightSteerTexts, "recover steer exactly once");
 
 		manager._reconcileAfterAbort(session);
 		assert.deepEqual(session.inFlightSteerTexts, []);
@@ -533,7 +554,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(steer.mock.calls.length, 1);
 		assert.equal(session.promptQueue.length, 0);
-		assert.deepEqual(session.inFlightSteerTexts, ["redrain rejected steer"]);
+		assertLocalUserSteerLedger(session.inFlightSteerTexts, "redrain rejected steer");
 
 		// Model the race where abort's agent_end has already returned the session to
 		// idle and run its drain before the in-flight steer RPC rejects.

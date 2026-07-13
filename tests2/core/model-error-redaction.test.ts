@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { redactSensitive } from "../../src/server/auth/redact.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "../../src/server/agent/model-error-sanitizer.js";
+import { BOBBIT_SYSTEM_AUTHOR } from "../../src/server/agent/message-author.js";
 import { applyModelString, type ReviewModelRpc } from "../../src/server/agent/review-model-override.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -72,6 +73,7 @@ function loadHandleSetupFailure(): (session: any, plan: any, error: Error, ctx: 
 		"broadcastStatus",
 		"isWorktreePathReferencedByLiveSession",
 		"cleanupWorktree",
+		"BOBBIT_SYSTEM_AUTHOR",
 		`return function handleSetupFailure(session, plan, error, ctx) {${body}\n};`,
 	)(
 		sanitizeModelErrorText,
@@ -80,6 +82,7 @@ function loadHandleSetupFailure(): (session: any, plan: any, error: Error, ctx: 
 		broadcastStatus,
 		isWorktreePathReferencedByLiveSession,
 		cleanupWorktree,
+		BOBBIT_SYSTEM_AUTHOR,
 	);
 }
 
@@ -164,6 +167,7 @@ describe("model setup error redaction", () => {
 		const event = buffered[0] as any;
 		const emittedText = event?.message?.content?.[0]?.text ?? "";
 		const emittedError = event?.message?.errorMessage ?? "";
+		assert.deepEqual(event?.message?.author, BOBBIT_SYSTEM_AUTHOR);
 		assert.match(emittedText, /Session setup failed: .*provider unavailable/);
 		assert.match(emittedError, /provider unavailable/);
 		assertRedacted(emittedText);
