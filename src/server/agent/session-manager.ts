@@ -25,7 +25,13 @@ import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ON
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
-import { appendPromptAuthorDispatch, appendPromptAuthorSettlement } from "./author-sidecar.js";
+import {
+	appendPromptAuthorDispatch,
+	appendPromptAuthorSettlement,
+	extractPromptModelText,
+	readAuthorSidecar,
+	type PromptAuthorBinding,
+} from "./author-sidecar.js";
 import { buildVisibleMessageSnapshot as buildVisibleMessageSnapshotData } from "./visible-message-snapshot.js";
 import {
 	BATCH_SYSTEM_AUTHOR,
@@ -582,6 +588,12 @@ export interface PendingPromptAuthorRecord {
 	author: MessageAuthor;
 }
 
+interface LivePromptAuthorMessageBinding {
+	promptId: string;
+	author: MessageAuthor;
+	settled: boolean;
+}
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -715,6 +727,9 @@ export interface SessionInfo {
 	lastPromptSource?: PromptSource;
 	/** Author binding for prompts dispatched but not yet echoed by Pi. */
 	pendingPromptAuthors?: PendingPromptAuthorRecord[];
+	/** Stable Pi-message-id bindings. Retained after settlement so duplicate
+	 * update/end replay cannot consume a later identical-text prompt record. */
+	promptAuthorMessageBindings?: Map<string, LivePromptAuthorMessageBinding>;
 	/** Pending grant request from the guard extension's long-poll */
 	pendingGrantRequest?: {
 		resolve: (result: ToolGrantResolution) => void;
@@ -835,15 +850,64 @@ function batchPromptId(prefix: string, rows: QueuedMessage[]): string {
 	return `${prefix}:${digest}`;
 }
 
-/** Helper: extract the text body of a user message (string or block array). */
+/** Helper: extract the exact model text used by author-sidecar correlation. */
 function extractUserMessageText(message: any): string {
-	if (!message) return "";
-	if (typeof message.content === "string") return message.content;
-	if (Array.isArray(message.content)) {
-		const block = message.content.find((c: any) => c?.type === "text");
-		return block?.text ?? "";
+	if (!message || typeof message !== "object") return "";
+	return extractPromptModelText(message as Record<string, unknown>) ?? "";
+}
+
+function promptAuthorMessageKey(message: Record<string, unknown>): string | undefined {
+	for (const field of ["id", "entryId", "_entryId", "_bobbitEntryId"] as const) {
+		const value = message[field];
+		if (typeof value === "string" && value) return `id:${value}`;
 	}
-	return "";
+	const timestamp = message.timestamp ?? message.ts;
+	if ((typeof timestamp === "string" && timestamp) || (typeof timestamp === "number" && Number.isFinite(timestamp))) {
+		return `timestamp:${String(timestamp)}`;
+	}
+	return undefined;
+}
+
+const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
+type PromptAuthorEventBinding = { promptId: string; alreadySettled: boolean };
+
+/** Rebuild live correlation state before switch_session replays transcript events. */
+export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
+	session.pendingPromptAuthors = entries
+		.filter((entry) => entry.settlement === undefined)
+		.map(({ promptId, dispatchedAt, modelText, source, author }) => ({
+			promptId,
+			dispatchedAt,
+			modelText,
+			source,
+			author,
+		}));
+	const messageBindings = new Map<string, LivePromptAuthorMessageBinding>();
+	for (const entry of entries) {
+		if (entry.settlement?.outcome !== "echoed" || !entry.settlement.messageId) continue;
+		messageBindings.set(`id:${entry.settlement.messageId}`, {
+			promptId: entry.promptId,
+			author: entry.author,
+			settled: true,
+		});
+	}
+	session.promptAuthorMessageBindings = messageBindings;
+
+	// Settlement may have reached the durable sidecar just before a gateway
+	// crash, while the in-flight steer ledger update did not. The echoed
+	// settlement wins: retaining that ledger row would redispatch the steer.
+	const echoedPromptIds = new Set(
+		entries
+			.filter((entry) => entry.settlement?.outcome === "echoed")
+			.map((entry) => entry.promptId),
+	);
+	const before = session.inFlightSteerTexts?.length ?? 0;
+	if (before > 0) {
+		session.inFlightSteerTexts = session.inFlightSteerTexts!.filter(
+			(record) => !echoedPromptIds.has(record.promptId),
+		);
+	}
+	return before - (session.inFlightSteerTexts?.length ?? 0);
 }
 
 /** Helper: rewrite the text body of a user message in place (returns a new object). */
@@ -874,16 +938,35 @@ export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): 
 		return event;
 	}
 
-	const message = raw.message as any;
+	const message = raw.message as Record<string, unknown>;
 	let author: MessageAuthor;
 	const userRole = message.role === "user" || message.role === "user-with-attachments";
 	const modelText = userRole ? extractUserMessageText(message) : "";
-	let pendingIndex = -1;
-	if (userRole && modelText && session.pendingPromptAuthors?.length) {
-		pendingIndex = session.pendingPromptAuthors.findIndex((record) => record.modelText === modelText);
+	const messageKey = userRole ? promptAuthorMessageKey(message) : undefined;
+	let stableBinding = messageKey ? session.promptAuthorMessageBindings?.get(messageKey) : undefined;
+	let pendingIndex = stableBinding && !stableBinding.settled
+		? (session.pendingPromptAuthors?.findIndex((record) => record.promptId === stableBinding!.promptId) ?? -1)
+		: -1;
+	if (!stableBinding && userRole && modelText && session.pendingPromptAuthors?.length) {
+		const reservedPromptIds = new Set(
+			[...(session.promptAuthorMessageBindings?.values() ?? [])]
+				.filter((binding) => !binding.settled)
+				.map((binding) => binding.promptId),
+		);
+		pendingIndex = session.pendingPromptAuthors.findIndex((record) =>
+			record.modelText === modelText && !reservedPromptIds.has(record.promptId),
+		);
+		if (pendingIndex !== -1 && messageKey) {
+			const pending = session.pendingPromptAuthors[pendingIndex];
+			stableBinding = { promptId: pending.promptId, author: pending.author, settled: false };
+			if (!session.promptAuthorMessageBindings) session.promptAuthorMessageBindings = new Map();
+			session.promptAuthorMessageBindings.set(messageKey, stableBinding);
+		}
 	}
 
-	if (pendingIndex !== -1) {
+	if (stableBinding) {
+		author = stableBinding.author;
+	} else if (pendingIndex !== -1) {
 		author = session.pendingPromptAuthors![pendingIndex].author;
 	} else if (message.role === "assistant") {
 		author = agentAuthorForSession(session);
@@ -899,8 +982,18 @@ export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): 
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
-	if (raw.type === "message_end" && pendingIndex !== -1) {
+	if (raw.type === "message_end" && stableBinding?.settled) {
+		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
+			promptId: stableBinding.promptId,
+			alreadySettled: true,
+		} satisfies PromptAuthorEventBinding;
+	} else if (raw.type === "message_end" && pendingIndex !== -1) {
 		const [pending] = session.pendingPromptAuthors!.splice(pendingIndex, 1);
+		if (stableBinding) stableBinding.settled = true;
+		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
+			promptId: pending.promptId,
+			alreadySettled: false,
+		} satisfies PromptAuthorEventBinding;
 		void appendPromptAuthorSettlement(session.id, {
 			schemaVersion: 1,
 			type: "prompt-author-settlement",
@@ -3737,10 +3830,16 @@ export class SessionManager {
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
 		if (event.type !== "message_end") return;
-		if (event.message?.role !== "user") return;
+		if (event.message?.role !== "user" && event.message?.role !== "user-with-attachments") return;
+		const authorBinding = event[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
+		// A replayed/duplicate end frame for an already-settled Pi message must not
+		// consume the next same-text steer. The first end consumes by prompt id.
+		if (authorBinding?.alreadySettled) return;
 		const text = extractUserMessageText(event.message);
 		if (!text) return;
-		const idx = ledger.findIndex((record) => record.text === text);
+		const idx = authorBinding
+			? ledger.findIndex((record) => record.promptId === authorBinding.promptId)
+			: ledger.findIndex((record) => record.text === text);
 		if (idx !== -1) {
 			ledger.splice(idx, 1);
 			this.persistInFlightSteerLedger(session);
@@ -6069,6 +6168,10 @@ export class SessionManager {
 				: undefined,
 			sandboxed: ps.sandboxed,
 		};
+		// The sidecar is the durable source for dispatches that crossed a gateway
+		// restart before Pi echoed them. Hydrate before subscribing/switch_session
+		// so replayed update/end frames retain and settle the original identity.
+		const settledSteersPruned = restorePromptAuthorBindings(session, readAuthorSidecar(ps.id));
 
 		// Skip cost tracking during session restore (switch_session replays
 		// all historical message_update events which would double-count costs)
@@ -6150,6 +6253,7 @@ export class SessionManager {
 		}
 
 		this.sessions.set(ps.id, session);
+		if (settledSteersPruned > 0) this.persistInFlightSteerLedger(session);
 
 		// `switch_session` replays durable user message echoes and `_consumeSteerEcho`
 		// clears matching ledger entries. Anything left here was accepted for

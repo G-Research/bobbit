@@ -23,7 +23,7 @@ import { createManualClock } from "../harness/clock.js";
 // callbacks settle before assertions.
 const flush = () => new Promise((r) => setImmediate(r));
 
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager, restorePromptAuthorBindings } = await import("../../src/server/agent/session-manager.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 
@@ -509,6 +509,80 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		pending.resolve({ success: true });
 		await steerPromise;
+	});
+
+	it("correlates duplicate multi-block update/end streams to stable prompt bindings", () => {
+		const manager = makeManager();
+		const systemAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		const agentAuthor = { kind: "agent", id: "session:caller", label: "Caller" } as const;
+		const text = "part one\npart two";
+		const { session } = putSession(manager, {
+			pendingPromptAuthors: [
+				{ promptId: "p1", dispatchedAt: 1, modelText: text, source: "system", author: systemAuthor },
+				{ promptId: "p2", dispatchedAt: 2, modelText: text, source: "agent", author: agentAuthor },
+			],
+		});
+		const message = (id: string) => ({
+			role: "user",
+			id,
+			content: [{ type: "text", text: "part one" }, { type: "text", text: "part two" }],
+		});
+
+		const update1: any = manager.prepareVisibleAgentEvent(session, { type: "message_update", message: message("m1") });
+		const update2: any = manager.prepareVisibleAgentEvent(session, { type: "message_update", message: message("m2") });
+		assert.deepEqual(update1.message.author, systemAuthor);
+		assert.deepEqual(update2.message.author, agentAuthor);
+
+		const end1: any = manager.prepareVisibleAgentEvent(session, { type: "message_end", message: message("m1") });
+		assert.deepEqual(end1.message.author, systemAuthor);
+		assert.deepEqual(session.pendingPromptAuthors.map((row: any) => row.promptId), ["p2"]);
+
+		const replayedEnd1: any = manager.prepareVisibleAgentEvent(session, { type: "message_end", message: message("m1") });
+		assert.deepEqual(replayedEnd1.message.author, systemAuthor);
+		assert.deepEqual(session.pendingPromptAuthors.map((row: any) => row.promptId), ["p2"], "duplicate end must not reuse p2");
+
+		const end2: any = manager.prepareVisibleAgentEvent(session, { type: "message_end", message: message("m2") });
+		assert.deepEqual(end2.message.author, agentAuthor);
+		assert.equal(session.pendingPromptAuthors.length, 0);
+	});
+
+	it("restores unresolved sidecar dispatches and consumes a replayed steer exactly once", () => {
+		const manager = makeManager();
+		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		const { session } = putSession(manager, {
+			inFlightSteerTexts: [
+				{ text: "same", promptId: "old", source: "user", author: { kind: "user", id: "user:local", label: "User" } },
+				{ text: "same", promptId: "steer-2", source: "system", author },
+			],
+		});
+		restorePromptAuthorBindings(session, [
+			{
+				schemaVersion: 1, type: "prompt-author", promptId: "old", dispatchedAt: 1,
+				modelText: "same", source: "user", author: { kind: "user", id: "user:local", label: "User" },
+				settlement: { schemaVersion: 1, type: "prompt-author-settlement", promptId: "old", settledAt: 2, outcome: "echoed", messageId: "m-old" },
+			},
+			{
+				schemaVersion: 1, type: "prompt-author", promptId: "steer-2", dispatchedAt: 3,
+				modelText: "same", source: "system", author,
+			},
+		]);
+		assert.deepEqual(session.pendingPromptAuthors.map((row: any) => row.promptId), ["steer-2"]);
+		assert.deepEqual(session.inFlightSteerTexts.map((row: any) => row.promptId), ["steer-2"], "durably settled steer must not replay");
+
+		const raw = { type: "message_end", message: { id: "m-new", role: "user", content: "same" } };
+		const first: any = manager.prepareVisibleAgentEvent(session, raw);
+		manager.handleAgentLifecycle(session, first);
+		assert.deepEqual(first.message.author, author);
+		assert.equal(session.pendingPromptAuthors.length, 0);
+		assert.equal(session.inFlightSteerTexts.length, 0);
+
+		// Replaying the same end frame after restart/reconnect is idempotent: it
+		// retains the binding and cannot settle/consume another same-text record.
+		const duplicate: any = manager.prepareVisibleAgentEvent(session, raw);
+		manager.handleAgentLifecycle(session, duplicate);
+		assert.deepEqual(duplicate.message.author, author);
+		assert.equal(session.pendingPromptAuthors.length, 0);
+		assert.equal(session.inFlightSteerTexts.length, 0);
 	});
 
 	it("does not duplicate a pending steer when abort reconciliation wins the rejection race", async () => {
