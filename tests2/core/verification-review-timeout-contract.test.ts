@@ -154,9 +154,9 @@ describe("active review turn allowances", () => {
 			setTitle: () => {},
 			updateSessionMeta: () => {},
 			getSession: () => session,
-			waitForIdle: async (_id: string, timeoutMs: number) => {
+			waitForIdle: async (id: string, timeoutMs: number) => {
 				idleTimeouts.push(timeoutMs);
-				throw new Error(`waitForIdle timed out after ${timeoutMs}ms`);
+				throw new Error(`Timeout waiting for session ${id} to become idle`);
 			},
 			waitForStreaming: async () => {},
 			terminateSession: async () => {},
@@ -294,8 +294,20 @@ describe("recovery windows and provider exclusion", () => {
 		assert.match(runStep, /return this\.runLlmReviewDirect\(/, `${MARKER}: legacy direct routing was removed prematurely`);
 		assert.match(direct, /runLlmReviewDirect/);
 		assert.ok((direct.match(/timeoutMs/g) ?? []).length >= 3, `${MARKER}: direct initial/reminder timers must continue using the resolved allowance`);
-		assert.match(direct, /status:\s*["']timeout["']/, `${MARKER}: direct timeout result must carry the machine-readable marker`);
-		assert.match(direct, /configuredSeconds/, `${MARKER}: direct timeout result must carry configured timing metadata`);
-		assert.match(direct, /elapsedMs/, `${MARKER}: direct timeout result must carry elapsed timing metadata`);
+		assert.ok(
+			(direct.match(/return this\.reviewTimeoutResult\("LLM review", timeoutMs, (?:result|result2)\.elapsedMs, subSessionId\);/g) ?? []).length >= 2,
+			`${MARKER}: direct initial/reminder timeouts must delegate to the shared timeout result helper`,
+		);
+	});
+
+	it("shared review timeout results carry machine-readable status and timing", () => {
+		const { harness } = makeReviewHarness();
+		assert.deepEqual(harness.reviewTimeoutResult("LLM review", 7_000, 7_321, "direct-review"), {
+			passed: false,
+			status: "timeout",
+			timeout: { configuredSeconds: 7, elapsedMs: 7_321 },
+			output: "LLM review timed out after 7s.",
+			sessionId: "direct-review",
+		});
 	});
 });
