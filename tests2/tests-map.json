@@ -24,6 +24,18 @@
       "reason": "Failing-first raw Pi 0.80.6 reproducer for orphan message-level toolResult records on the active transcript branch: the two affected toolCallIds follow a text-only assistant with no matching toolCall blocks and must be removed before Anthropic rehydration. FAILS on HEAD until transcript sanitization removes them. Failure token ORPHAN_TOOL_RESULTS_ACTIVE_BRANCH."
     },
     {
+      "path": "tests2/core/orphan-tool-result-recovery.test.ts",
+      "reason": "Native v2 coverage for Anthropic orphan tool-result poison classification and one-shot in-place recovery through Retry, normal follow-up, and session_prompt while preserving session identity, model selection, queued prompts, and user intent."
+    },
+    {
+      "path": "tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
+      "reason": "Native v2 coverage that host and sandbox transcript paths resolve in the correct filesystem realm and every pre-existing-session setup path sanitizes before path translation and switch_session dispatch."
+    },
+    {
+      "path": "tests2/browser/journeys/orphan-tool-result-recovery.journey.spec.ts",
+      "reason": "Browser journey for an Anthropic-poisoned session recovering through visible Retry and follow-up flows: orphan records are removed, the agent respawns in place, preserved history/model remain visible, intent completes once, and no replacement session is created."
+    },
+    {
       "path": "tests2/core/model-state-frame-preservation.test.ts",
       "reason": "Pinning tests for buildResolvedModelStateModel (ws/handler.ts): custom/unknown provider (resolver source=inferred) preserves live contextWindow/maxTokens/reasoning/thinkingLevelMap, while known Fable model still gets authoritative catalog metadata incl. thinkingLevelMap.max over stale live base."
     },
@@ -311,6 +323,10 @@
     },
     {
       "path": "tests2/browser/journeys/misc.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/orphan-tool-result-recovery.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
