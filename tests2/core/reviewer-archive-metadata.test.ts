@@ -124,7 +124,7 @@ describe("reviewer archive metadata persistence", () => {
 		const agentQaBody = extractSourceSlice(
 			harness,
 			"private async runAgentQaStep(",
-			"\t/**\n\t * Substitute namespaced variables",
+			"private substituteVars(",
 		);
 
 		assertVerifierCreateSessionIsPreStamped(llmReviewBody, "llm-review");
