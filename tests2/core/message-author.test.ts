@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
 	LOCAL_USER_AUTHOR,
 	isMessageAuthor,
+	type MessageAuthor,
 } from "../../src/shared/message-author.ts";
 import type { PromptSource } from "../../src/shared/prompt-source.ts";
+import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
+import { normalizePersistedInFlightSteers, SessionStore } from "../../src/server/agent/session-store.ts";
+import { spliceInFlightMessage, spliceInFlightSteers } from "../../src/server/agent/splice-inflight-message.ts";
 import {
 	BATCH_SYSTEM_AUTHOR,
 	BOBBIT_SYSTEM_AUTHOR,
@@ -130,6 +137,92 @@ describe("message author primitives", () => {
 		expect((normalized as any).message.author.kind).toBe("agent");
 		const lifecycle = { type: "agent_start" };
 		expect(normalizeVisibleAgentEvent({ id: "abc" }, lifecycle)).toBe(lifecycle);
+	});
+
+	it("preserves queue author provenance across persistence restore and accepts legacy rows", () => {
+		const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
+		const queued = new PromptQueue();
+		queued.enqueue("notification", { isSteered: true, source: "task-notification", author: systemAuthor });
+		queued.enqueue("legacy prompt");
+
+		const persisted = JSON.parse(JSON.stringify(queued.toArray()));
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-author-queue-"));
+		try {
+			const store = new SessionStore(root);
+			store.put({
+				id: "author-queue-session",
+				title: "Author queue",
+				cwd: root,
+				agentSessionFile: path.join(root, "agent.jsonl"),
+				createdAt: 1,
+				lastActivity: 1,
+				messageQueue: persisted,
+			} as any);
+			const reloaded = new SessionStore(root).get("author-queue-session");
+			const restored = new PromptQueue(reloaded?.messageQueue).toArray();
+			expect(restored[0]).toMatchObject({
+				text: "notification",
+				isSteered: true,
+				source: "task-notification",
+				author: systemAuthor,
+			});
+			expect(restored[1]).toMatchObject({ text: "legacy prompt" });
+			expect(restored[1].source).toBeUndefined();
+			expect(restored[1].author).toBeUndefined();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+
+		const invalid = new PromptQueue([{ ...persisted[0], author: { kind: "tool", id: "tool:x", label: "Tool" } }]);
+		expect(invalid.peek()?.author).toBeUndefined();
+	});
+
+	it("normalizes legacy and structured in-flight steer ledgers without inventing tool authors", () => {
+		const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
+		const restored = normalizePersistedInFlightSteers([
+			"legacy human steer",
+			{ text: "server steer", promptId: "prompt-system", source: "auto-nudge", author: systemAuthor },
+			{ text: "invalid author", promptId: "prompt-invalid", source: "system", author: { kind: "tool", id: "tool:x", label: "Tool" } as any },
+		]);
+		expect(restored).toEqual([
+			{
+				text: "legacy human steer",
+				promptId: "legacy-inflight-steer:0",
+				source: "user",
+				author: LOCAL_USER_AUTHOR,
+			},
+			{ text: "server steer", promptId: "prompt-system", source: "auto-nudge", author: systemAuthor },
+			{ text: "invalid author", promptId: "prompt-invalid", source: "system" },
+		]);
+	});
+
+	it("keeps authors on in-flight assistant and steer snapshot splices", () => {
+		const agentAuthor: MessageAuthor = { kind: "agent", id: "session:abc", label: "Coder" };
+		const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
+		const assistant = {
+			id: "assistant-live",
+			role: "assistant",
+			content: [{ type: "text", text: "partial" }],
+			author: agentAuthor,
+		};
+		const withAssistant = spliceInFlightMessage([], { id: assistant.id, message: assistant });
+		expect(withAssistant).toEqual([assistant]);
+
+		const snapshot = spliceInFlightSteers(withAssistant, [{
+			text: "automatic reminder",
+			promptId: "system-steer",
+			source: "auto-nudge",
+			author: systemAuthor,
+		}]);
+		expect(snapshot).toHaveLength(2);
+		expect(snapshot[0]).toMatchObject({ role: "assistant", author: agentAuthor });
+		expect(snapshot[1]).toMatchObject({
+			id: "inflight-steer:system-steer",
+			role: "user",
+			author: systemAuthor,
+			_inFlightSteer: true,
+		});
+		expect(snapshot[1].content).toEqual([{ type: "text", text: "automatic reminder" }]);
 	});
 
 	it("exposes the mixed-author batch identity as a system author", () => {

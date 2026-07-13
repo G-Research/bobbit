@@ -274,6 +274,26 @@
     {
       "path": "tests2/core/verification-verifier-lifecycle-repro.test.ts",
       "reason": "Failing-first reproducing tests for Retry Reviewer Resume: verifier llm-review/agent-qa sessions must preserve identity/history, use same-session auto-retry for fetch/connection errors, resurrect dead processes up to 3 times before failing, and give idle agent-qa fair repeated reminder/streaming grace instead of creating blank replacements."
+    },
+    {
+      "path": "tests2/core/author-sidecar.test.ts",
+      "reason": "Native author identity coverage for Bobbit-owned prompt-author sidecar persistence, corruption tolerance, settlement correlation, duplicate consumption, copy/purge, and accountable tool-result inference."
+    },
+    {
+      "path": "tests2/core/message-author.test.ts",
+      "reason": "Native author identity coverage for PromptSource mapping, identity construction, legacy/tool-result inference, queue and in-flight steer restore compatibility, and authored assistant/steer snapshot splices."
+    },
+    {
+      "path": "tests2/dom/client-message-author.test.ts",
+      "reason": "Native client coverage for preserving server authors through reducer snapshots/live updates, stamping optimistic human rows, and stripping Bobbit-only metadata at Pi model conversion boundaries."
+    },
+    {
+      "path": "tests2/integration/message-author-ws-server.test.ts",
+      "reason": "Native gateway integration coverage for human and server-generated author identity across live websocket events, reconnects, and get_messages snapshots without changing message roles or text."
+    },
+    {
+      "path": "tests2/browser/journeys/author-metadata.journey.spec.ts",
+      "reason": "Browser acceptance journey proving user/assistant author identities survive reload in client state while ordinary one-human chat renders no noisy author labels."
     }
   ],
   "journeys": [
