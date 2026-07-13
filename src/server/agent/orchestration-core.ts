@@ -1,7 +1,9 @@
 // src/server/agent/orchestration-core.ts
 //
 import { deliverSessionPrompt, type DeliverSessionPromptResult, type SessionPromptMode } from "./session-prompt-delivery.js";
-import type { ErroredPromptRecoveryDecision } from "./session-manager.js";
+import type { MessageAuthor } from "../../shared/message-author.js";
+import { agentAuthorForSession } from "./message-author.js";
+import type { ErroredPromptRecoveryDecision, PromptSource } from "./session-manager.js";
 
 // OrchestrationCore — the ONE goal-agnostic implementation of "launch and
 // orchestrate a child agent (a new, properly-scoped principal)".
@@ -286,6 +288,8 @@ export interface OrchestrationSessionLike {
 	id: string;
 	status: RawSessionStatus | string;
 	title?: string;
+	role?: string;
+	staffId?: string;
 	cwd?: string;
 	allowedTools?: string[];
 	/** Pending prompt-queue rows — drives the `queued` status mapping (M3). */
@@ -324,6 +328,9 @@ export interface OrchestrationSessionView {
 		childKind?: string;
 		/** Persisted read-only marker (§2.2). Tool gating is via `allowedTools`. */
 		readOnly?: boolean;
+		/** Initial task provenance: child instructions are relayed by the owner agent. */
+		source?: PromptSource;
+		author?: MessageAuthor;
 	}): Promise<{ id: string }>;
 	createSession(
 		cwd: string,
@@ -516,6 +523,11 @@ export class OrchestrationCore {
 		return this.deps.sessionManager.getSession(ownerId)?.cwd;
 	}
 
+	private resolveOwnerAuthor(ownerId: string): MessageAuthor | undefined {
+		const owner = this.deps.sessionManager.getSession(ownerId);
+		return owner ? agentAuthorForSession(owner) : undefined;
+	}
+
 	async spawn(opts: SpawnOpts): Promise<ChildHandle> {
 		this.assertCanSpawn(opts.ownerSessionId);
 
@@ -529,6 +541,7 @@ export class OrchestrationCore {
 		const lifecycle: SpawnLifecycle = opts.lifecycle ?? (opts.readOnly ? "bare" : "bare");
 
 		const sharedMode = !opts.worktree || opts.worktree.mode === "shared";
+		const ownerAuthor = this.resolveOwnerAuthor(opts.ownerSessionId);
 
 		let childId: string;
 		if (lifecycle === "bare" && sharedMode) {
@@ -551,6 +564,8 @@ export class OrchestrationCore {
 				childKind,
 				role: opts.role,
 				readOnly: opts.readOnly,
+				source: "agent",
+				author: ownerAuthor,
 			});
 			childId = child.id;
 		} else {
@@ -613,7 +628,10 @@ export class OrchestrationCore {
 			// child but does NOT enqueue the kickoff, so the caller can write its binding
 			// before starting the child via an explicit follow-up `prompt`.
 			if (!opts.deferInitialPrompt) {
-				await this.deps.sessionManager.enqueuePrompt(childId, opts.instructions);
+				await this.deps.sessionManager.enqueuePrompt(childId, opts.instructions, {
+					source: "agent",
+					author: ownerAuthor,
+				});
 			}
 		}
 
@@ -719,6 +737,7 @@ export class OrchestrationCore {
 		opts?: { mode?: SessionPromptMode; defaultMode?: SessionPromptMode },
 	): Promise<DeliverSessionPromptResult | { status: "dispatched" | "queued" }> {
 		this.requireOwnChild(ownerId, childId);
+		const ownerAuthor = this.resolveOwnerAuthor(ownerId);
 		const result = await deliverSessionPrompt({
 			getSession: (id) => this.deps.sessionManager.getSession(id),
 			enqueuePrompt: async (id, text, promptOpts) => {
@@ -735,7 +754,12 @@ export class OrchestrationCore {
 			retryLastPrompt: this.deps.sessionManager.retryLastPrompt
 				? (id, retryOpts) => this.deps.sessionManager.retryLastPrompt!(id, retryOpts)
 				: undefined,
-		}, childId, message, { mode: opts?.mode, defaultMode: opts ? (opts.defaultMode ?? "steer") : "prompt" });
+		}, childId, message, {
+			mode: opts?.mode,
+			defaultMode: opts ? (opts.defaultMode ?? "steer") : "prompt",
+			source: "agent",
+			author: ownerAuthor,
+		});
 		this.audit({ event: result.mode === "steer" ? "steer" : "prompt", ownerSessionId: ownerId, childSessionId: childId });
 		return opts ? result : { status: "status" in result && result.status === "queued" ? "queued" : "dispatched" };
 	}
@@ -749,7 +773,10 @@ export class OrchestrationCore {
 				"NOT_STREAMING",
 			);
 		}
-		const result = await this.deps.sessionManager.deliverLiveSteer(childId, message);
+		const result = await this.deps.sessionManager.deliverLiveSteer(childId, message, {
+			source: "agent",
+			author: this.resolveOwnerAuthor(ownerId),
+		});
 		this.audit({ event: "steer", ownerSessionId: ownerId, childSessionId: childId });
 		return result;
 	}

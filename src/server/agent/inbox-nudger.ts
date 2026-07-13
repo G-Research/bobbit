@@ -195,7 +195,7 @@ export class InboxNudger {
 				if (counters) counters.updateStaffErrors = 1;
 				console.warn(`[inbox-nudger] updateStaff(lastWakeAt) failed for ${staff.id} (non-fatal):`, err);
 			}
-			await this.sessionManager.enqueuePrompt(staff.currentSessionId!, msg, { isSteered: true });
+			await this.sessionManager.enqueuePrompt(staff.currentSessionId!, msg, { isSteered: true, source: "system" });
 			if (counters) counters.nudgesSent = 1;
 		} catch (err) {
 			if (counters) counters.errors = 1;
