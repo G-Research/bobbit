@@ -26,6 +26,13 @@ const flush = () => new Promise((r) => setImmediate(r));
 const { SessionManager, restorePromptAuthorBindings } = await import("../../src/server/agent/session-manager.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
+const {
+	appendPromptAuthorDispatch,
+	initAuthorSidecarDir,
+	purgeAuthorSidecar,
+	readAuthorSidecar,
+} = await import("../../src/server/agent/author-sidecar.ts");
+initAuthorSidecarDir(tmpRoot);
 
 const AUTH_SECRET = "sk-or-retry-secret-never-leak";
 const AUTH_ERROR = `No API key found for openrouter: ${AUTH_SECRET}`;
@@ -544,6 +551,42 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		const end2: any = manager.prepareVisibleAgentEvent(session, { type: "message_end", message: message("m2") });
 		assert.deepEqual(end2.message.author, agentAuthor);
 		assert.equal(session.pendingPromptAuthors.length, 0);
+	});
+
+	it("persists settlement ids from every live-correlation id alias", () => {
+		const manager = makeManager();
+		const aliases = ["id", "entryId", "_entryId", "_bobbitEntryId"] as const;
+		for (const field of aliases) {
+			const sessionId = `s-settlement-${field}`;
+			const promptId = `prompt-${field}`;
+			const messageId = `message-${field}`;
+			const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+			appendPromptAuthorDispatch(sessionId, {
+				promptId,
+				dispatchedAt: 1,
+				modelText: "same prompt",
+				source: "system",
+				author,
+			});
+			const { session } = putSession(manager, {
+				id: sessionId,
+				pendingPromptAuthors: [{
+					promptId,
+					dispatchedAt: 1,
+					modelText: "same prompt",
+					source: "system",
+					author,
+				}],
+			});
+
+			manager.prepareVisibleAgentEvent(session, {
+				type: "message_end",
+				message: { role: "user", content: "same prompt", [field]: messageId },
+			});
+
+			assert.equal(readAuthorSidecar(sessionId)[0]?.settlement?.messageId, messageId, field);
+			purgeAuthorSidecar(sessionId);
+		}
 	});
 
 	it("restores unresolved sidecar dispatches and consumes a replayed steer exactly once", () => {

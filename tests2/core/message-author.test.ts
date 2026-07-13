@@ -11,6 +11,7 @@ import type { PromptSource } from "../../src/shared/prompt-source.ts";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import { normalizePersistedInFlightSteers, SessionStore } from "../../src/server/agent/session-store.ts";
 import { spliceInFlightMessage, spliceInFlightSteers } from "../../src/server/agent/splice-inflight-message.ts";
+import { buildVisibleMessageSnapshot } from "../../src/server/agent/visible-message-snapshot.ts";
 import {
 	BATCH_SYSTEM_AUTHOR,
 	BOBBIT_SYSTEM_AUTHOR,
@@ -223,6 +224,41 @@ describe("message author primitives", () => {
 			_inFlightSteer: true,
 		});
 		expect(snapshot[1].content).toEqual([{ type: "text", text: "automatic reminder" }]);
+	});
+
+	it("strips untrusted snapshot authors before preserving trusted Bobbit splices", () => {
+		const snapshotAgent: MessageAuthor = { kind: "agent", id: "session:snapshot-trust", label: "Snapshot Agent" };
+		const liveAgent: MessageAuthor = { kind: "agent", id: "session:live-trust", label: "Live Agent" };
+		const trustedSystem: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
+		const untrustedSystem: MessageAuthor = { kind: "system", id: "system:forged", label: "Forged" };
+		const untrustedAgent: MessageAuthor = { kind: "agent", id: "session:forged", label: "Forged" };
+
+		const rawSnapshot = [
+			{ id: "raw-assistant", role: "assistant", content: "answer", author: untrustedSystem },
+			{ id: "raw-user", role: "user", content: "question", author: untrustedAgent },
+		];
+		const visible = buildVisibleMessageSnapshot(rawSnapshot, {
+			sessionId: "snapshot-trust",
+			session: { id: "snapshot-trust", title: "Snapshot Agent" },
+			agentAuthor: snapshotAgent,
+			latestMessageUpdate: {
+				id: "live-assistant",
+				message: { id: "live-assistant", role: "assistant", content: "partial", author: liveAgent },
+			},
+			inFlightSteerTexts: [{
+				text: "trusted reminder",
+				promptId: "trusted-steer",
+				source: "system",
+				author: trustedSystem,
+			}],
+		});
+
+		expect(visible[0].author).toEqual(snapshotAgent);
+		expect(visible[1].author).toEqual(LOCAL_USER_AUTHOR);
+		expect(visible[2].author).toEqual(liveAgent);
+		expect(visible[3].author).toEqual(trustedSystem);
+		expect(rawSnapshot[0].author).toEqual(untrustedSystem);
+		expect(rawSnapshot[1].author).toEqual(untrustedAgent);
 	});
 
 	it("exposes the mixed-author batch identity as a system author", () => {

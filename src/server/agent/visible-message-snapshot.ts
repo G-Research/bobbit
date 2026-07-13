@@ -19,9 +19,26 @@ export interface VisibleMessageSnapshotContext {
 	inFlightSteerTexts?: readonly PersistedInFlightSteer[];
 }
 
+function stripUntrustedSnapshotAuthors(messages: any[]): any[] {
+	let changed = false;
+	const stripped = messages.map((message) => {
+		if (!message || typeof message !== "object" || Array.isArray(message) || !("author" in message)) {
+			return message;
+		}
+		const { author: _untrustedAuthor, ...withoutAuthor } = message;
+		changed = true;
+		return withoutAuthor;
+	});
+	return changed ? stripped : messages;
+}
+
 function transformMessages(messages: any[], context: VisibleMessageSnapshotContext): any[] {
+	// Pi transcript rows are untrusted at this boundary. Remove even
+	// valid-looking author metadata before Bobbit adds its trusted live,
+	// compaction, and sidecar identities below.
+	const trustedBase = stripUntrustedSnapshotAuthors(messages);
 	const withInFlight = spliceInFlightSteers(
-		spliceInFlightMessage(messages, context.latestMessageUpdate),
+		spliceInFlightMessage(trustedBase, context.latestMessageUpdate),
 		context.inFlightSteerTexts,
 	);
 	const withCompaction = mergeCompactionSidecarIntoMessages(context.sessionId, withInFlight);

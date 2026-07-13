@@ -856,11 +856,20 @@ function extractUserMessageText(message: any): string {
 	return extractPromptModelText(message as Record<string, unknown>) ?? "";
 }
 
-function promptAuthorMessageKey(message: Record<string, unknown>): string | undefined {
-	for (const field of ["id", "entryId", "_entryId", "_bobbitEntryId"] as const) {
+const PROMPT_AUTHOR_MESSAGE_ID_FIELDS = ["id", "entryId", "_entryId", "_bobbitEntryId"] as const;
+
+/** Extract the stable Pi/session entry id used by both live and sidecar correlation. */
+function promptAuthorMessageId(message: Record<string, unknown>): string | undefined {
+	for (const field of PROMPT_AUTHOR_MESSAGE_ID_FIELDS) {
 		const value = message[field];
-		if (typeof value === "string" && value) return `id:${value}`;
+		if (typeof value === "string" && value) return value;
 	}
+	return undefined;
+}
+
+function promptAuthorMessageKey(message: Record<string, unknown>): string | undefined {
+	const messageId = promptAuthorMessageId(message);
+	if (messageId) return `id:${messageId}`;
 	const timestamp = message.timestamp ?? message.ts;
 	if ((typeof timestamp === "string" && timestamp) || (typeof timestamp === "number" && Number.isFinite(timestamp))) {
 		return `timestamp:${String(timestamp)}`;
@@ -994,13 +1003,14 @@ export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): 
 			promptId: pending.promptId,
 			alreadySettled: false,
 		} satisfies PromptAuthorEventBinding;
+		const messageId = promptAuthorMessageId(message);
 		void appendPromptAuthorSettlement(session.id, {
 			schemaVersion: 1,
 			type: "prompt-author-settlement",
 			promptId: pending.promptId,
 			settledAt: sessionManagerModuleClock.now(),
 			outcome: "echoed",
-			...(typeof message.id === "string" ? { messageId: message.id } : {}),
+			...(messageId ? { messageId } : {}),
 			...(typeof message.timestamp === "number" ? { messageTimestamp: message.timestamp } : {}),
 		});
 	}
