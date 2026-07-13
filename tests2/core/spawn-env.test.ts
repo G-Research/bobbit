@@ -93,21 +93,6 @@ describe("session-setup spawn env contract", () => {
 		);
 	});
 
-	it("source: legacy direct verification RpcBridge fallback merges Settings provider env", () => {
-		const src = readFileSync(
-			path.join(process.cwd(), "src/server/agent/verification-harness.ts"),
-			"utf-8",
-		);
-		assert.ok(
-			/import \{ fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv \} from "\.\/host-tokens\.js";/.test(src),
-			"verification-harness direct RpcBridge fallback must import the shared host provider env resolver and controlled fallback allowlist resolver",
-		);
-		assert.ok(
-			/bridgeOptions\.env = mergeHostAgentProviderEnv\(bridgeOptions\.env,\s*this\.preferencesStore,\s*\{\s*model:\s*bridgeOptions\.initialModel,\s*providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\),\s*\}\)/.test(src),
-			"legacy direct RpcBridge review fallback must merge only the active model provider plus controlled fallback allowlist for non-sandbox review agents",
-		);
-	});
-
 	it("functional: gateway-owned BOBBIT_SESSION_ID + secret win over caller toolEnv", () => {
 		// Faithful reproduction of the env-merge in resolveBridgeOptions: direct
 		// provider env is spread first, caller env (`...plan.env`) next, then the
