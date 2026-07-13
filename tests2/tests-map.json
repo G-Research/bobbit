@@ -20,6 +20,10 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/transcript-orphan-tool-results.test.ts",
+      "reason": "Failing-first raw Pi 0.80.6 reproducer for orphan message-level toolResult records on the active transcript branch: the two affected toolCallIds follow a text-only assistant with no matching toolCall blocks and must be removed before Anthropic rehydration. FAILS on HEAD until transcript sanitization removes them. Failure token ORPHAN_TOOL_RESULTS_ACTIVE_BRANCH."
+    },
+    {
       "path": "tests2/core/model-state-frame-preservation.test.ts",
       "reason": "Pinning tests for buildResolvedModelStateModel (ws/handler.ts): custom/unknown provider (resolver source=inferred) preserves live contextWindow/maxTokens/reasoning/thinkingLevelMap, while known Fable model still gets authoritative catalog metadata incl. thinkingLevelMap.max over stale live base."
     },
