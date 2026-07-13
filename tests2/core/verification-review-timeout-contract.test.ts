@@ -282,22 +282,15 @@ describe("recovery windows and provider exclusion", () => {
 		assert.deepEqual(legacy.streamingTimeouts, [10_000]);
 	});
 
-	it("keeps the legacy direct path reachable with separate initial/reminder timers", () => {
+	it("keeps LLM review routing session-only after direct-path removal", () => {
 		const runStep = HARNESS_SOURCE.slice(
 			HARNESS_SOURCE.indexOf("private async runLlmReviewStep("),
 			HARNESS_SOURCE.indexOf("private async waitForReviewerErroredTurnRecovery("),
 		);
-		const direct = HARNESS_SOURCE.slice(
-			HARNESS_SOURCE.indexOf("private async runLlmReviewDirect("),
-			HARNESS_SOURCE.indexOf("private substituteVars("),
-		);
-		assert.match(runStep, /return this\.runLlmReviewDirect\(/, `${MARKER}: legacy direct routing was removed prematurely`);
-		assert.match(direct, /runLlmReviewDirect/);
-		assert.ok((direct.match(/timeoutMs/g) ?? []).length >= 3, `${MARKER}: direct initial/reminder timers must continue using the resolved allowance`);
-		assert.ok(
-			(direct.match(/return this\.reviewTimeoutResult\("LLM review", timeoutMs, (?:result|result2)\.elapsedMs, subSessionId\);/g) ?? []).length >= 2,
-			`${MARKER}: direct initial/reminder timeouts must delegate to the shared timeout result helper`,
-		);
+		assert.match(runStep, /return this\.runLlmReviewViaSession\(/, `${MARKER}: LLM reviews must route through managed sessions`);
+		assert.doesNotMatch(runStep, /runLlmReviewDirect/, `${MARKER}: direct review routing must stay removed`);
+		assert.doesNotMatch(HARNESS_SOURCE, /private async runLlmReviewDirect\(/, `${MARKER}: direct review method must stay removed`);
+		assert.doesNotMatch(HARNESS_SOURCE, /private async waitForDirectReviewTurn\(/, `${MARKER}: obsolete direct-turn helper must stay removed`);
 	});
 
 	it("shared review timeout results carry machine-readable status and timing", () => {
