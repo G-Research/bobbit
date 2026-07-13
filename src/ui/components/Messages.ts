@@ -26,6 +26,7 @@ import type { SkillChipData } from "./SkillChip.js";
 import "./FileMentionChip.js";
 import type { FileMentionChipData, FileMentionKind } from "./FileMentionChip.js";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { BobbitMessage, MessageAuthor } from "../../shared/message-author.js";
 
 /** Format a message timestamp for display (locale-appropriate time). */
 export function formatTimestamp(ts: number | string | undefined): string {
@@ -81,6 +82,7 @@ export type UserMessageWithAttachments = {
 	attachments?: Attachment[];
 	skillExpansions?: SkillExpansion[];
 	fileMentions?: FileMention[];
+	author?: MessageAuthor;
 };
 
 // Artifact message type for session persistence
@@ -91,6 +93,7 @@ export interface ArtifactMessage {
 	content?: string;
 	title?: string;
 	timestamp: string;
+	author?: MessageAuthor;
 }
 
 declare module "@earendil-works/pi-agent-core" {
@@ -236,7 +239,7 @@ function buildChipItems(
 
 @customElement("user-message")
 export class UserMessage extends LitElement {
-	@property({ type: Object }) message!: UserMessageWithAttachments | UserMessageType;
+	@property({ type: Object }) message!: BobbitMessage<UserMessageWithAttachments | UserMessageType>;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -299,12 +302,12 @@ export class UserMessage extends LitElement {
 
 @customElement("assistant-message")
 export class AssistantMessage extends LitElement {
-	@property({ type: Object }) message!: AssistantMessageType;
+	@property({ type: Object }) message!: BobbitMessage<AssistantMessageType>;
 	@property({ type: Array }) tools?: AgentTool<any>[];
 	@property({ type: Object }) pendingToolCalls?: Set<string>;
 	@property({ type: Object }) permissionBlockedTools?: Set<string>;
 	@property({ type: Boolean }) hideToolCalls = false;
-	@property({ type: Object }) toolResultsById?: Map<string, ToolResultMessageType>;
+	@property({ type: Object }) toolResultsById?: Map<string, BobbitMessage<ToolResultMessageType>>;
 	@property({ type: Object }) toolPartialResults?: Record<string, any>;
 	@property({ type: Boolean }) isStreaming: boolean = false;
 	@property({ type: Boolean }) hidePendingToolCalls = false;
@@ -536,7 +539,7 @@ export class AssistantMessage extends LitElement {
 @customElement("tool-message-debug")
 export class ToolMessageDebugView extends LitElement {
 	@property({ type: Object }) callArgs: any;
-	@property({ type: Object }) result?: ToolResultMessageType;
+	@property({ type: Object }) result?: BobbitMessage<ToolResultMessageType>;
 	@property({ type: Boolean }) hasResult: boolean = false;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -593,7 +596,7 @@ export class ToolMessageDebugView extends LitElement {
 export class ToolMessage extends LitElement {
 	@property({ type: Object }) toolCall!: ToolCall;
 	@property({ type: Object }) tool?: AgentTool<any>;
-	@property({ type: Object }) result?: ToolResultMessageType;
+	@property({ type: Object }) result?: BobbitMessage<ToolResultMessageType>;
 	@property({ type: Object }) partialResult?: any;
 	@property({ type: Boolean }) pending: boolean = false;
 	@property({ type: Boolean }) permissionBlocked: boolean = false;
@@ -845,14 +848,14 @@ export function imageAttachmentsFromContent(content: unknown): Attachment[] {
 /**
  * Check if a message is a UserMessageWithAttachments.
  */
-export function isUserMessageWithAttachments(msg: AgentMessage): msg is UserMessageWithAttachments {
+export function isUserMessageWithAttachments(msg: BobbitMessage<AgentMessage>): msg is BobbitMessage<UserMessageWithAttachments> {
 	return (msg as UserMessageWithAttachments).role === "user-with-attachments";
 }
 
 /**
  * Check if a message is an ArtifactMessage.
  */
-export function isArtifactMessage(msg: AgentMessage): msg is ArtifactMessage {
+export function isArtifactMessage(msg: BobbitMessage<AgentMessage>): msg is BobbitMessage<ArtifactMessage> {
 	return (msg as ArtifactMessage).role === "artifact";
 }
 
@@ -864,7 +867,7 @@ export function isArtifactMessage(msg: AgentMessage): msg is ArtifactMessage {
  * - ArtifactMessage: filtered out (UI-only, for session reconstruction)
  * - Standard LLM messages (user, assistant, toolResult): passed through
  */
-export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
+export function defaultConvertToLlm(messages: BobbitMessage<AgentMessage>[]): Message[] {
 	return messages
 		.filter((m) => {
 			// Filter out artifact messages - they're for session reconstruction only
@@ -890,9 +893,11 @@ export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 				} as Message;
 			}
 
-			// Pass through standard LLM roles
+			// Pass through standard LLM roles, defensively removing Bobbit-only
+			// metadata before a message can cross the provider boundary.
 			if (m.role === "user" || m.role === "assistant" || m.role === "toolResult") {
-				return m as Message;
+				const { author: _author, ...providerMessage } = m;
+				return providerMessage as Message;
 			}
 
 			// Filter out unknown message types

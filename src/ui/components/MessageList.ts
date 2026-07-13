@@ -23,6 +23,7 @@ import {
 	isPerfFlagEnabled,
 	PERF_FLAG_DEFER_OFFSCREEN_RENDER,
 } from "../../app/perf-flags.js";
+import type { BobbitMessage } from "../../shared/message-author.js";
 
 /** Number of items at the bottom of the transcript that render eagerly
  *  even when the defer-offscreen perf flag is on. The transcript auto-scrolls
@@ -125,7 +126,7 @@ function isPermissionActionable(msg: any): boolean {
 }
 
 export class MessageList extends LitElement {
-	@property({ type: Array }) messages: AgentMessage[] = [];
+	@property({ type: Array }) messages: BobbitMessage<AgentMessage>[] = [];
 	@property({ type: Array }) tools: AgentTool[] = [];
 	@property({ type: Object }) pendingToolCalls?: Set<string>;
 	@property({ type: Boolean }) isStreaming: boolean = false;
@@ -155,10 +156,10 @@ export class MessageList extends LitElement {
 
 	private buildRenderItems() {
 		// Map tool results by call id for quick lookup
-		const resultByCallId = new Map<string, ToolResultMessageType>();
+		const resultByCallId = new Map<string, BobbitMessage<ToolResultMessageType>>();
 		for (const message of this.messages) {
 			if (message.role === "toolResult") {
-				resultByCallId.set(message.toolCallId, message);
+				resultByCallId.set(message.toolCallId, message as BobbitMessage<ToolResultMessageType>);
 			}
 		}
 
