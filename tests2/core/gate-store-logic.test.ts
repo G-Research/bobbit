@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { GateStore } from "../../src/server/agent/gate-store.ts";
 import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.ts";
-import { createMemFs } from "../harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 let dirSeq = 0;
 
@@ -37,10 +37,12 @@ function gate(id: string, dependsOn: string[] = []): WorkflowGate {
 
 describe("GateStore", () => {
 	let store: InstanceType<typeof GateStore>;
+	let memfs: MemFs;
+	let stateDir: string;
 
 	beforeEach(() => {
-		const memfs = createMemFs();
-		const stateDir = path.resolve("/memfs/gate-store", `state-${dirSeq++}`);
+		memfs = createMemFs();
+		stateDir = path.resolve("/memfs/gate-store", `state-${dirSeq++}`);
 		memfs.mkdirSync(stateDir);
 		store = new GateStore(stateDir, memfs);
 	});
@@ -68,6 +70,108 @@ describe("GateStore", () => {
 		it("handles empty gate list", () => {
 			store.initGatesForGoal("goal-1", []);
 			assert.equal(store.getGatesForGoal("goal-1").length, 0);
+		});
+	});
+
+	// --- reconcileGatesForGoal ---
+
+	describe("reconcileGatesForGoal", () => {
+		it("retains unchanged state, removes obsolete gates, adds pending gates, and resets modified gates in one save", () => {
+			store.initGatesForGoal("goal-1", ["unchanged", "removed", "modified"]);
+			store.initGatesForGoal("goal-2", ["other"]);
+			for (const gateId of ["unchanged", "removed", "modified"]) {
+				store.updateGateStatus("goal-1", gateId, "passed");
+			}
+			store.updateGateStatus("goal-2", "other", "failed");
+			store.updateGateContent("goal-1", "modified", "# Historical content", 3);
+			store.updateGateMetadata("goal-1", "modified", { audit: "retained" });
+			store.recordSignal({
+				id: "unchanged-signal",
+				gateId: "unchanged",
+				goalId: "goal-1",
+				sessionId: "session-1",
+				timestamp: 100,
+				commitSha: "abc123",
+				verification: { status: "passed", steps: [] },
+			});
+			store.recordSignal({
+				id: "modified-signal",
+				gateId: "modified",
+				goalId: "goal-1",
+				sessionId: "session-1",
+				timestamp: 200,
+				commitSha: "def456",
+				verification: { status: "passed", steps: [] },
+			});
+
+			const unchanged = store.getGate("goal-1", "unchanged")!;
+			const unchangedSnapshot = structuredClone(unchanged);
+			const other = store.getGate("goal-2", "other")!;
+			const otherSnapshot = structuredClone(other);
+			const originalWrite = memfs.writeFileSync.bind(memfs) as (...args: any[]) => void;
+			let writeCount = 0;
+			(memfs as any).writeFileSync = (...args: any[]) => {
+				writeCount += 1;
+				originalWrite(...args);
+			};
+			const beforeReconcile = Date.now();
+
+			store.reconcileGatesForGoal(
+				"goal-1",
+				new Set(["unchanged", "modified", "added"]),
+				new Set(["modified"]),
+			);
+
+			assert.equal(writeCount, 1);
+			assert.strictEqual(store.getGate("goal-1", "unchanged"), unchanged);
+			assert.deepEqual(store.getGate("goal-1", "unchanged"), unchangedSnapshot);
+			assert.equal(store.getGate("goal-1", "removed"), undefined);
+			assert.deepEqual(store.getGate("goal-1", "added"), {
+				gateId: "added",
+				goalId: "goal-1",
+				status: "pending",
+				signals: [],
+				updatedAt: store.getGate("goal-1", "added")!.updatedAt,
+			});
+
+			const modified = store.getGate("goal-1", "modified")!;
+			assert.equal(modified.status, "pending");
+			assert.equal(modified.currentContent, "# Historical content");
+			assert.equal(modified.currentContentVersion, 3);
+			assert.deepEqual(modified.currentMetadata, { audit: "retained" });
+			assert.equal(modified.signals.length, 1);
+			assert.equal(modified.signals[0]?.id, "modified-signal");
+			assert.ok((modified.verificationCacheInvalidatedAt ?? 0) >= beforeReconcile);
+			assert.strictEqual(store.getGate("goal-2", "other"), other);
+			assert.deepEqual(store.getGate("goal-2", "other"), otherSnapshot);
+		});
+
+		it("persists the reconciled state across store reloads", () => {
+			store.initGatesForGoal("goal-1", ["keep", "remove", "modify"]);
+			store.initGatesForGoal("goal-2", ["isolated"]);
+			store.updateGateStatus("goal-1", "keep", "passed");
+			store.updateGateStatus("goal-1", "modify", "passed");
+			store.updateGateStatus("goal-2", "isolated", "bypassed");
+			store.recordSignal({
+				id: "audit-signal",
+				gateId: "modify",
+				goalId: "goal-1",
+				sessionId: "session-2",
+				timestamp: 300,
+				commitSha: "789abc",
+				verification: { status: "passed", steps: [] },
+			});
+
+			store.reconcileGatesForGoal("goal-1", ["keep", "modify", "new"], ["modify"]);
+			const reloaded = new GateStore(stateDir, memfs);
+
+			assert.equal(reloaded.getGate("goal-1", "keep")?.status, "passed");
+			assert.equal(reloaded.getGate("goal-1", "remove"), undefined);
+			assert.equal(reloaded.getGate("goal-1", "new")?.status, "pending");
+			assert.equal(reloaded.getGate("goal-1", "modify")?.status, "pending");
+			assert.equal(reloaded.getGate("goal-1", "modify")?.signals[0]?.id, "audit-signal");
+			assert.equal(typeof reloaded.getGate("goal-1", "modify")?.verificationCacheInvalidatedAt, "number");
+			assert.equal(reloaded.getGate("goal-2", "isolated")?.status, "bypassed");
 		});
 	});
 
