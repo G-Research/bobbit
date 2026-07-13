@@ -101,4 +101,5 @@ dist/
 - [Networking](networking.md) — remote access and multi-device setup
 - [Per-model thinking-level capabilities](thinking-levels.md) — how the reasoning-level selector adapts to the active model
 - [Pi runtime compatibility](pi-runtime-compatibility.md) — browser imports, model catalog subpaths, RPC lifecycle, transcript normalization, and upgrade checks
+- [Message author identity](message-author-identity.md) — accountable user, agent, and system metadata across live events, persistence, transcripts, search, and client state
 - [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — historical Opus 4.8-specific model, ranking, and spawn notes
