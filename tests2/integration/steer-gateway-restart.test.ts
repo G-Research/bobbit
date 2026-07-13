@@ -76,7 +76,12 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 				};
 			}, { timeout: 10_000, interval: 50 }).toEqual({
 				queueLen: 0,
-				ledger: [steeredText],
+				ledger: [expect.objectContaining({
+					text: steeredText,
+					promptId: expect.stringMatching(/^steer:[a-f0-9]{64}$/),
+					source: "user",
+					author: { kind: "user", id: "user:local", label: "User" },
+				})],
 			});
 
 			// Test sanity: restart before the user-message echo is durable. This is
@@ -104,7 +109,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			// and echoed as a real user message.
 			conn = await connectWs(sessionId);
 			await conn.waitFor((m: any) => m.type === "queue_update", 5_000);
-			await conn.waitFor(
+			const restoredEcho = await conn.waitFor(
 				(m: any) =>
 					m.type === "event" &&
 					m.data?.type === "message_end" &&
@@ -113,6 +118,11 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 					String(m.data?.message?.content?.[0]?.text || "").includes("RESTART_M2"),
 				30_000,
 			);
+			expect(restoredEcho.data.message.author).toEqual({
+				kind: "user",
+				id: "user:local",
+				label: "User",
+			});
 			await conn.waitFor(statusPredicate("idle"), 30_000).catch(() => { /* already idle/no status replay */ });
 
 			const readUserBodies = async (): Promise<string[]> => {
@@ -142,6 +152,17 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			}, { timeoutMs: 10_000, intervalMs: 250, label: "restored in-flight steer persisted exactly once" }))!;
 			expect(countOccurrences(userBodies, "RESTART_M1")).toBe(1);
 			expect(countOccurrences(userBodies, "RESTART_M2")).toBe(1);
+
+			// Recovery atomically moves the unresolved structured ledger entry back
+			// through the queue; once its prompt echo is durable neither persistence
+			// surface may retain a replayable copy.
+			await expect.poll(() => {
+				const storeState = sm.resolveStoreForSession(sessionId).get(sessionId);
+				return {
+					queueLen: storeState?.messageQueue?.length ?? 0,
+					ledger: storeState?.inFlightSteerTexts ?? [],
+				};
+			}, { timeout: 10_000, interval: 50 }).toEqual({ queueLen: 0, ledger: [] });
 
 			// Ordering: M1 must appear at-or-before M2 in the joined transcript.
 			const joined = userBodies.join("\n");
