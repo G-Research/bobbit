@@ -102,6 +102,126 @@ describe("workflow-validator — positive cases", () => {
 		};
 		assert.deepEqual(validateWorkflow(wf, components), []);
 	});
+
+	it("accepts positive integer timeout boundaries", () => {
+		const wf: ValidatorWorkflow = {
+			id: "timeouts",
+			name: "Timeouts",
+			gates: [{
+				id: "verify",
+				name: "Verify",
+				verify: [
+					{ name: "Minimum", type: "command", run: "true", timeout: 1 },
+					{ name: "Maximum safe integer", type: "command", run: "true", timeout: Number.MAX_SAFE_INTEGER },
+				],
+			}],
+		};
+		assert.deepEqual(validateWorkflow(wf, components), []);
+	});
+
+	it("accepts rich gate, verification, and subgoal metadata without mutating it", () => {
+		const wf: ValidatorWorkflow = {
+			id: "rich-workflow",
+			name: "Rich workflow",
+			description: "Exercises the complete supported workflow shape.",
+			gates: [
+				{
+					id: "plan",
+					name: "Plan",
+					content: true,
+					injectDownstream: true,
+					optional: true,
+					manual: true,
+					metadata: { plan_file: "string", approved: "boolean" },
+				},
+				{
+					id: "execution",
+					name: "Execution",
+					dependsOn: ["plan"],
+					verify: [
+						{
+							name: "Expected failure",
+							type: "command",
+							run: "npm test",
+							expect: "failure",
+							timeout: 30,
+							phase: 1,
+							optional: true,
+							optionalLabel: "Run reproducer",
+							description: "Runs the reproducing test.",
+						},
+						{
+							name: "Component build",
+							type: "command",
+							component: "api",
+							command: "build",
+							expect: "success",
+						},
+						{
+							name: "Review",
+							type: "llm-review",
+							prompt: "Review {{goal_spec}}.",
+							role: "code-reviewer",
+							phase: 2,
+							timeout: 60,
+							description: "Reviews implementation quality.",
+						},
+						{
+							name: "QA",
+							type: "agent-qa",
+							prompt: "Run the acceptance scenarios.",
+							role: "qa-tester",
+							component: "web",
+							phase: 2,
+							timeout: 90,
+							optional: true,
+							optionalLabel: "Run browser QA",
+							description: "Exercises the user journey.",
+						},
+						{
+							name: "Approval",
+							type: "human-signoff",
+							prompt: "Approve the release.",
+							label: "Release approval",
+							phase: 3,
+							optional: true,
+							optionalLabel: "Require release approval",
+							description: "Requests explicit human approval.",
+						},
+						{
+							name: "API child",
+							type: "subgoal",
+							phase: 4,
+							timeout: 120,
+							description: "Implements the API portion.",
+							subgoal: {
+								planId: "api-child",
+								title: "Implement API",
+								spec: "Implement the API acceptance criteria.",
+								workflowId: "feature",
+								suggestedRole: "backend-engineer",
+							},
+						},
+						{
+							name: "Web child",
+							type: "subgoal",
+							phase: 4,
+							subgoal: {
+								planId: "web-child",
+								title: "Implement web",
+								spec: "Implement the web acceptance criteria.",
+								dependsOn: ["api-child"],
+							},
+						},
+					],
+				},
+			],
+		};
+		const before = structuredClone(wf);
+
+		assert.deepEqual(validateWorkflow(wf, components), []);
+		assert.deepEqual(wf, before);
+	});
 });
 
 describe("workflow-validator — negative cases", () => {
@@ -248,6 +368,80 @@ describe("workflow-validator — negative cases", () => {
 		assert.match(errs[0].message, /unknown step type "wat"/);
 		// human-signoff must appear in the accepted-set hint so authors know about it.
 		assert.match(errs[0].message, /human-signoff/);
+	});
+
+	it.each([
+		["zero", 0],
+		["negative", -1],
+		["fractional", 1.5],
+		["string", "30"],
+		["positive infinity", Number.POSITIVE_INFINITY],
+		["negative infinity", Number.NEGATIVE_INFINITY],
+		["NaN", Number.NaN],
+	])("rejects a %s timeout", (_label, timeout) => {
+		const wf: ValidatorWorkflow = {
+			id: "bad-timeout",
+			name: "Bad timeout",
+			gates: [{
+				id: "verify",
+				name: "Verify",
+				verify: [{ name: "Command", type: "command", run: "true", timeout }],
+			}],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(error => /timeout.*positive integer/i.test(error.message)),
+			`expected positive-integer timeout error, got: ${errs.map(error => error.message).join("; ")}`);
+	});
+
+	it("rejects duplicate gate IDs", () => {
+		const wf: ValidatorWorkflow = {
+			id: "duplicate-gates",
+			name: "Duplicate gates",
+			gates: [
+				{ id: "build", name: "Build" },
+				{ id: "build", name: "Build again" },
+			],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(error => /duplicate gate id.*build/i.test(error.message)),
+			`expected duplicate gate ID error, got: ${errs.map(error => error.message).join("; ")}`);
+	});
+
+	it("rejects dependencies on unknown gates", () => {
+		const wf: ValidatorWorkflow = {
+			id: "unknown-dependency",
+			name: "Unknown dependency",
+			gates: [{ id: "deploy", name: "Deploy", dependsOn: ["missing"] }],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(error => /deploy.*depends.*unknown.*missing/i.test(error.message)),
+			`expected unknown dependency error, got: ${errs.map(error => error.message).join("; ")}`);
+	});
+
+	it("rejects self dependencies", () => {
+		const wf: ValidatorWorkflow = {
+			id: "self-dependency",
+			name: "Self dependency",
+			gates: [{ id: "build", name: "Build", dependsOn: ["build"] }],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(error => /build.*depends on itself/i.test(error.message)),
+			`expected self-dependency error, got: ${errs.map(error => error.message).join("; ")}`);
+	});
+
+	it("rejects multi-node dependency cycles", () => {
+		const wf: ValidatorWorkflow = {
+			id: "cyclic",
+			name: "Cyclic",
+			gates: [
+				{ id: "design", name: "Design", dependsOn: ["release"] },
+				{ id: "build", name: "Build", dependsOn: ["design"] },
+				{ id: "release", name: "Release", dependsOn: ["build"] },
+			],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(error => /circular|cycle/i.test(error.message)),
+			`expected dependency cycle error, got: ${errs.map(error => error.message).join("; ")}`);
 	});
 
 	it("rejects human-signoff step with missing prompt", () => {
