@@ -226,9 +226,10 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 	// Mirror real SessionManager.enqueuePrompt: set lastPromptSource on the
 	// target session. TeamManager.subscribeTeamLeadEvents reads it on
 	// agent_start to decide whether to reset idle-nudge counters.
-	const enqueuePrompt = vi.fn((sid: string, _msg: string, opts?: any) => {
+	const enqueuePrompt = vi.fn(async (sid: string, _msg: string, opts?: any) => {
 		const s = sm._sessions.get(sid);
 		if (s) s.lastPromptSource = opts?.source ?? "user";
+		return { status: "dispatched" };
 	});
 	const retryLastPrompt = vi.fn(async (_sid: string, _opts?: any) => {});
 	const deliverLiveSteer = vi.fn(async (_sid: string, _msg: string, _opts?: any) => {});
@@ -256,6 +257,18 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 	const clock = createManualClock();
 	const team = createTeamManager(sm, clock);
 	await team.startTeam("goal-1");
+
+	assert.deepEqual(
+		enqueuePrompt.mock.calls[0],
+		[
+			"session-0",
+			"# Goal Spec\n\n# Test Goal\nDo something\n\n---\n\nExecute the task described in your system prompt. Follow the instructions carefully.",
+			{ source: "system", suppressTitleGen: true },
+		],
+		"team lead kickoff text must be unchanged and attributed to Bobbit system provenance",
+	);
+	// The tests below isolate later idle-nudge deliveries, not the kickoff.
+	enqueuePrompt.mockClear();
 
 	const entry = (team as any).teams.get("goal-1")!;
 	const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
@@ -600,7 +613,7 @@ describe("TeamManager — nudgePending clears when delivery does not start a tur
 					// prompt is parked/queued and no agent_start event is emitted.
 					s.lastPromptSource = opts?.source ?? "user";
 				}
-				return Promise.resolve({ queued: true, parked: true, id: "parked-auto-nudge" });
+				return Promise.resolve({ status: "queued", queued: true, parked: true, id: "parked-auto-nudge" });
 			});
 
 			const BASE = 5 * 60 * 1000;

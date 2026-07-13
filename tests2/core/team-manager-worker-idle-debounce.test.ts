@@ -233,9 +233,10 @@ async function setupTeamWithWorker() {
 
 	// Mirror real SessionManager.enqueuePrompt: record the call and set
 	// lastPromptSource on the target session.
-	const enqueuePrompt = vi.fn((sid: string, _msg: string, opts?: any) => {
+	const enqueuePrompt = vi.fn(async (sid: string, _msg: string, opts?: any) => {
 		const s = sm._sessions.get(sid);
 		if (s) s.lastPromptSource = opts?.source ?? "user";
+		return { status: "dispatched" };
 	});
 	sm.enqueuePrompt = enqueuePrompt;
 	// notifyTeamLead uses deliverLiveSteer only when the lead is streaming; the
@@ -247,6 +248,18 @@ async function setupTeamWithWorker() {
 	const clock = createManualClock();
 	const team = createTeamManager(sm, clock);
 	await team.startTeam("goal-1");
+
+	assert.deepEqual(
+		enqueuePrompt.mock.calls[0],
+		[
+			"session-0",
+			"# Goal Spec\n\n# Test Goal\nDo something\n\n---\n\nExecute the task described in your system prompt. Follow the instructions carefully.",
+			{ source: "system", suppressTitleGen: true },
+		],
+		"team lead kickoff text must be unchanged and attributed to Bobbit system provenance",
+	);
+	// The tests below isolate later worker-idle notifications, not the kickoff.
+	enqueuePrompt.mockClear();
 
 	const entry = (team as any).teams.get("goal-1")!;
 	const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
