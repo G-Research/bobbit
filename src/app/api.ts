@@ -2218,6 +2218,11 @@ export interface GateState {
 	signalCount?: number;
 }
 
+export interface VerificationTimeoutInfo {
+	configuredSeconds: number;
+	elapsedMs: number;
+}
+
 export interface GateSignal {
 	id: string;
 	gateId: string;
@@ -2243,7 +2248,9 @@ export interface GateSignal {
 				metadata?: Record<string, string>;
 			};
 			/** Lifecycle status for in-flight rows seeded by beginVerification. */
-			status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+			status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+			/** Present only when a review turn exhausted its configured allowance. */
+			timeout?: VerificationTimeoutInfo;
 			/** Optional phase number, mirrored from the workflow VerifyStep. */
 			phase?: number;
 			/** True when the step was skipped (optional step or phase abort). */
