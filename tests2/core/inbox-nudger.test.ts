@@ -112,8 +112,11 @@ describe("InboxNudger — periodic tick", () => {
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
 		const call = h.enqueuePrompt.mock.calls[0];
 		assert.equal(call[0], h.session.id);
-		assert.match(call[1], /\[INBOX\] You have 1 pending item\./);
-		assert.deepEqual(call[2], { isSteered: true });
+		assert.equal(
+			call[1],
+			"[INBOX] You have 1 pending item. Use inbox_list to inspect, then process each with inbox_complete or inbox_dismiss.",
+		);
+		assert.deepEqual(call[2], { isSteered: true, source: "system" });
 
 		h.nudger.stop();
 	});
