@@ -1,8 +1,15 @@
 /**
  * Transcript sanitizer — un-poison persisted agent `.jsonl` transcripts whose
- * `user` messages carry a blank text body.
+ * active branch contains orphaned tool results or whose `user` messages carry
+ * a blank text body.
  *
- * Background: the model API rejects a user message whose ContentBlock has a
+ * Orphan repair follows Pi's parent-linked active branch and latest compaction
+ * projection. A message-level `toolResult` is removed only when the current
+ * assistant result run does not contain its id; inactive branches and unrelated
+ * lines remain byte-identical, and surviving descendants minimally bypass a
+ * removed parent link.
+ *
+ * Blank-content background: the model API rejects a user message whose ContentBlock has a
  * blank `text` field (next to an image block, or as a standalone empty text
  * block). Before the source-prevention fix (synthesizeAttachmentText in
  * session-manager.enqueuePrompt), an image/attachment-only prompt committed
@@ -96,10 +103,183 @@ function rewriteBlankUserContent(content: unknown): unknown {
 export interface SanitizeResult {
 	/** The (possibly unchanged) JSONL content. */
 	content: string;
-	/** Whether any line was rewritten. */
+	/** Whether any line was repaired, removed, or rewritten. */
 	changed: boolean;
-	/** Number of transcript records rewritten. */
+	/** Number of poisoned transcript records repaired. */
 	rewritten: number;
+}
+
+interface ParsedTranscriptLine {
+	lineIndex: number;
+	entry: any;
+	id: string | null;
+	parentId: string | null;
+}
+
+function parseTranscriptLines(lines: string[]): ParsedTranscriptLine[] {
+	const parsed: ParsedTranscriptLine[] = [];
+	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+		const trimmed = lines[lineIndex].trim();
+		if (!trimmed) continue;
+		try {
+			const entry = JSON.parse(trimmed);
+			if (!entry || typeof entry !== "object") continue;
+			parsed.push({
+				lineIndex,
+				entry,
+				id: typeof entry.id === "string" && entry.id.length > 0 ? entry.id : null,
+				parentId: typeof entry.parentId === "string" && entry.parentId.length > 0 ? entry.parentId : null,
+			});
+		} catch {
+			// Malformed and non-JSON lines are opaque transcript data.
+		}
+	}
+	return parsed;
+}
+
+/**
+ * Return the parent-linked branch ending at Pi's current leaf. Session headers
+ * are not tree entries; the last parsed, id-bearing non-header record is the
+ * leaf. Missing parents and cycles terminate the walk conservatively.
+ */
+function activeTranscriptBranch(parsed: ParsedTranscriptLine[]): ParsedTranscriptLine[] {
+	let leaf: ParsedTranscriptLine | undefined;
+	const byId = new Map<string, ParsedTranscriptLine>();
+	for (const record of parsed) {
+		if (!record.id || record.entry.type === "session") continue;
+		byId.set(record.id, record);
+		leaf = record;
+	}
+	if (!leaf) return [];
+
+	const reverseBranch: ParsedTranscriptLine[] = [];
+	const visited = new Set<string>();
+	let current: ParsedTranscriptLine | undefined = leaf;
+	while (current?.id && !visited.has(current.id)) {
+		reverseBranch.push(current);
+		visited.add(current.id);
+		current = current.parentId ? byId.get(current.parentId) : undefined;
+	}
+	return reverseBranch.reverse();
+}
+
+function projectedContextBranch(branch: ParsedTranscriptLine[]): ParsedTranscriptLine[] {
+	let compactionIndex = -1;
+	for (let i = 0; i < branch.length; i++) {
+		if (branch[i].entry.type === "compaction") compactionIndex = i;
+	}
+	if (compactionIndex < 0) return branch;
+
+	const compaction = branch[compactionIndex].entry;
+	const firstKeptId = typeof compaction.firstKeptEntryId === "string"
+		? compaction.firstKeptEntryId
+		: "";
+	const firstKeptIndex = firstKeptId
+		? branch.findIndex((record, index) => index < compactionIndex && record.id === firstKeptId)
+		: -1;
+
+	// Pi projects the latest summary ahead of its preserved tail. The compaction
+	// record is metadata, not a conversation message. When its boundary cannot
+	// be resolved, only descendants written after compaction are known-active.
+	const keptTail = firstKeptIndex >= 0
+		? branch.slice(firstKeptIndex, compactionIndex)
+		: [];
+	return [...keptTail, ...branch.slice(compactionIndex + 1)];
+}
+
+function assistantToolCallIds(content: unknown): Set<string> {
+	const ids = new Set<string>();
+	if (!Array.isArray(content)) return ids;
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const type = (block as any).type;
+		const id = (block as any).id;
+		if ((type === "toolCall" || type === "tool_use") && typeof id === "string" && id.trim().length > 0) {
+			ids.add(id);
+		}
+	}
+	return ids;
+}
+
+function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number> {
+	const orphanLines = new Set<number>();
+	let pendingToolCallIds: Set<string> | null = null;
+
+	for (const record of projectedContextBranch(branch)) {
+		const entry = record.entry;
+		if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") {
+			continue; // Tree metadata does not interrupt an assistant/result run.
+		}
+
+		const message = entry.message;
+		if (message.role === "assistant") {
+			pendingToolCallIds = assistantToolCallIds(message.content);
+			continue;
+		}
+		if (message.role === "toolResult") {
+			const toolCallId = message.toolCallId;
+			if (
+				typeof toolCallId !== "string" ||
+				toolCallId.trim().length === 0 ||
+				!pendingToolCallIds?.has(toolCallId)
+			) {
+				orphanLines.add(record.lineIndex);
+			} else {
+				// One result settles one call. Repeated results for the same id are
+				// structurally invalid even when the assistant originally called it.
+				pendingToolCallIds.delete(toolCallId);
+			}
+			continue;
+		}
+
+		// Any other conversation-bearing message ends the result run.
+		pendingToolCallIds = null;
+	}
+
+	return orphanLines;
+}
+
+/**
+ * Remove structurally orphaned message-level Pi `toolResult` records from the
+ * active context branch. Untouched JSONL lines remain byte-identical. When a
+ * removed record has a surviving active descendant, only that descendant's
+ * `parentId` is rewritten to bypass the removed link and keep the tree usable.
+ */
+function repairOrphanToolResults(content: string): SanitizeResult {
+	if (!content) return { content, changed: false, rewritten: 0 };
+	const lines = content.split("\n");
+	const parsed = parseTranscriptLines(lines);
+	const activeBranch = activeTranscriptBranch(parsed);
+	const removedLineIndexes = orphanToolResultLineIndexes(activeBranch);
+	if (removedLineIndexes.size === 0) return { content, changed: false, rewritten: 0 };
+
+	const removedParents = new Map<string, string | null>();
+	for (const record of activeBranch) {
+		if (removedLineIndexes.has(record.lineIndex) && record.id) {
+			removedParents.set(record.id, record.parentId);
+		}
+	}
+
+	for (const record of activeBranch) {
+		if (removedLineIndexes.has(record.lineIndex)) continue;
+		let parentId = record.parentId;
+		const visited = new Set<string>();
+		while (parentId && removedParents.has(parentId) && !visited.has(parentId)) {
+			visited.add(parentId);
+			parentId = removedParents.get(parentId) ?? null;
+		}
+		if (parentId === record.parentId) continue;
+		record.entry.parentId = parentId;
+		const carriageReturn = lines[record.lineIndex].endsWith("\r") ? "\r" : "";
+		lines[record.lineIndex] = JSON.stringify(record.entry) + carriageReturn;
+	}
+
+	const repairedLines = lines.filter((_line, index) => !removedLineIndexes.has(index));
+	return {
+		content: repairedLines.join("\n"),
+		changed: true,
+		rewritten: removedLineIndexes.size,
+	};
 }
 
 export interface RebaseTranscriptCwdMetadataOptions {
@@ -110,13 +290,14 @@ export interface RebaseTranscriptCwdMetadataOptions {
 }
 
 /**
- * Sanitize raw `.jsonl` content. Pure — no I/O. Rewrites blank-text `user`
- * messages in place, preserving every other line byte-for-byte (including the
- * original trailing-newline shape). Idempotent: re-running on sanitized output
- * yields `changed:false`.
+ * Sanitize raw `.jsonl` content. Pure — no I/O. Removes active-branch orphan
+ * tool results and rewrites blank-text `user` messages. All unrelated lines and
+ * the original trailing-newline shape are preserved. Idempotent: re-running on
+ * sanitized output yields `changed:false`.
  */
 export function sanitizeTranscriptContent(content: string): SanitizeResult {
-	return transformTranscriptJsonl(content, (entry) => {
+	const orphanRepair = repairOrphanToolResults(content);
+	const blankRepair = transformTranscriptJsonl(orphanRepair.content, (entry) => {
 		if (!entry || entry.type !== "message" || !entry.message) return false;
 		if (entry.message.role !== "user") return false;
 
@@ -130,6 +311,11 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 		entry.message.content = rewriteBlankUserContent(entry.message.content);
 		return true;
 	});
+	return {
+		content: blankRepair.content,
+		changed: orphanRepair.changed || blankRepair.changed,
+		rewritten: orphanRepair.rewritten + blankRepair.rewritten,
+	};
 }
 
 /**
@@ -415,7 +601,7 @@ function writeFileNoFollow(realPath: string, data: string): void {
  * container-path is translated to its host path and written there (visible
  * inside the container via the mount).
  *
- * @returns the number of user messages rewritten (0 when nothing changed).
+ * @returns the number of poisoned transcript records repaired (0 when unchanged).
  */
 export async function sanitizeAgentTranscriptFile(
 	ctx: SessionFsContext,
@@ -428,7 +614,7 @@ export async function sanitizeAgentTranscriptFile(
 		sandboxManager,
 		sanitizeTranscriptContent,
 		"sanitize",
-		(file, rewritten) => `Un-poisoned ${rewritten} blank-text user message(s) in ${file}`,
+		(file, rewritten) => `Repaired ${rewritten} poisoned transcript record(s) in ${file}`,
 	);
 }
 
