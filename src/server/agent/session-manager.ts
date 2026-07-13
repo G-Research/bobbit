@@ -26,6 +26,7 @@ import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContext
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
 import { appendPromptAuthorDispatch, appendPromptAuthorSettlement } from "./author-sidecar.js";
+import { buildVisibleMessageSnapshot as buildVisibleMessageSnapshotData } from "./visible-message-snapshot.js";
 import {
 	BATCH_SYSTEM_AUTHOR,
 	BOBBIT_SYSTEM_AUTHOR,
@@ -40,7 +41,6 @@ import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
-	mergeCompactionSidecarIntoMessages,
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
 import {
@@ -88,7 +88,7 @@ let sessionManagerModuleClock: Clock = realClock;
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
-import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
+import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
@@ -808,7 +808,7 @@ export interface SessionInfo {
 // transitively pulls flexsearch, pi-coding-agent, etc.). Re-exported here
 // for backwards compat with existing call sites.
 export { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
-import { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
+import { spliceInFlightMessage } from "./splice-inflight-message.js";
 
 function resolveAcceptedPromptAuthor(source: PromptSource, explicit?: MessageAuthor): MessageAuthor {
 	if (source === "agent") {
@@ -6884,26 +6884,7 @@ export class SessionManager {
 
 			const msgs = await session.rpcClient.getMessages();
 			if (msgs.success) {
-				const raw: any = normalizeToolResultErrorSnapshot(msgs.data);
-				let data: any = raw;
-				if (Array.isArray(raw)) {
-					const spliced = spliceInFlightSteers(
-						spliceInFlightMessage(raw, session.latestMessageUpdate),
-						session.inFlightSteerTexts,
-					);
-					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
-					data = truncateLargeToolContentInMessages(withCompaction);
-				} else if (raw && Array.isArray(raw.messages)) {
-					const spliced = spliceInFlightSteers(
-						spliceInFlightMessage(raw.messages, session.latestMessageUpdate),
-						session.inFlightSteerTexts,
-					);
-					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
-					const truncated = truncateLargeToolContentInMessages(withCompaction);
-					data = spliced === raw.messages && truncated === raw.messages && withCompaction === raw.messages
-						? raw
-						: { ...raw, messages: truncated };
-				}
+				const data = this.buildVisibleMessageSnapshot(session.id, msgs.data);
 				broadcast(session.clients, { type: "messages", data });
 			}
 			const st = await session.rpcClient.getState();
@@ -7439,6 +7420,28 @@ export class SessionManager {
 
 	getSession(id: string): SessionInfo | undefined {
 		return this.sessions.get(id);
+	}
+
+	/** Apply the single Bobbit-visible snapshot pipeline to Pi RPC/transcript data. */
+	buildVisibleMessageSnapshot<T>(id: string, snapshot: T): T {
+		const live = this.sessions.get(id);
+		const persisted = this.resolveStoreForId(id)?.get(id);
+		const identity = live ?? persisted;
+		return buildVisibleMessageSnapshotData(snapshot, {
+			sessionId: id,
+			session: {
+				id,
+				title: identity?.title,
+				role: identity?.role,
+				staffId: identity?.staffId,
+			},
+			agentDeps: {
+				getStaff: this.staffRecordSource ? (staffId) => this.staffRecordSource!.getStaff(staffId) : undefined,
+				getRole: (name) => this.resolveSessionRole(name, identity?.assistantType, identity?.projectId),
+			},
+			latestMessageUpdate: live?.latestMessageUpdate,
+			inFlightSteerTexts: live?.inFlightSteerTexts,
+		});
 	}
 
 	/**
@@ -8010,20 +8013,7 @@ export class SessionManager {
 		try {
 			const msgs = await rpcClient.getMessages();
 			if (msgs.success) {
-				const raw: any = normalizeToolResultErrorSnapshot(msgs.data);
-				let data: any = raw;
-				if (Array.isArray(raw)) {
-					data = spliceInFlightSteers(
-						spliceInFlightMessage(raw, session.latestMessageUpdate),
-						session.inFlightSteerTexts,
-					);
-				} else if (raw && Array.isArray(raw.messages)) {
-					const spliced = spliceInFlightSteers(
-						spliceInFlightMessage(raw.messages, session.latestMessageUpdate),
-						session.inFlightSteerTexts,
-					);
-					data = spliced === raw.messages ? raw : { ...raw, messages: spliced };
-				}
+				const data = this.buildVisibleMessageSnapshot(session.id, msgs.data);
 				broadcast(session.clients, { type: "messages", data });
 			}
 			const st = await rpcClient.getState();
@@ -8554,7 +8544,7 @@ export class SessionManager {
 					// Skip malformed lines
 				}
 			}
-			return normalizeToolResultErrorSnapshot(truncateLargeToolContentInMessages(messages)) as unknown[];
+			return normalizeToolResultErrorSnapshot(messages) as unknown[];
 		} catch {
 			return [];
 		}

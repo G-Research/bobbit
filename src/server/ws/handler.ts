@@ -3,8 +3,6 @@ import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
-import { spliceInFlightMessage, spliceInFlightSteers } from "../agent/splice-inflight-message.js";
-import { mergeAuthorSidecarIntoMessages, readAuthorSidecar } from "../agent/author-sidecar.js";
 import { extensionSystemAuthor } from "../agent/message-author.js";
 import { LOCAL_USER_AUTHOR } from "../../shared/message-author.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
@@ -20,13 +18,9 @@ import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { resolveModelStateMeta } from "../agent/model-registry.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
-import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
-import { normalizeToolResultErrorSnapshot } from "../agent/tool-result-error-normalizer.js";
-import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
-	mergeCompactionSidecarIntoMessages,
 } from "../agent/compaction-sidecar.js";
 import { EventBuffer } from "../agent/event-buffer.js";
 import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
@@ -72,42 +66,6 @@ function stampSnapshotOrder(data: unknown): unknown {
 // patchModelContextWindow removed — live model-state frames now resolve context
 // windows, reasoning, and thinkingLevelMap via resolveModelStateMeta() (registry
 // cache → pi-ai catalog → inferMeta), matching the ModelSelector dropdown.
-
-/**
- * Merge persisted skill-expansion sidecar entries into a list of agent
- * messages. For each user message whose text body equals a sidecar
- * `modelText`, rewrite the body to `originalText` and attach
- * `skillExpansions` AND `fileMentions` (mirroring the live broadcast splice
- * in `spliceSkillExpansionsIntoEvent`, so @-mention chips survive reload /
- * the authoritative post-turn snapshot). Idempotent: messages without
- * matching sidecar entries pass through unchanged.
- */
-function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[] {
-	if (!Array.isArray(messages) || messages.length === 0) return messages;
-	const entries = readSkillSidecarEntries(sessionId);
-	if (entries.length === 0) return messages;
-	return mergeSidecarEntriesIntoMessages(entries, messages);
-}
-
-/** Add Bobbit-owned author metadata before any display-text sidecar rewrites. */
-function mergeAuthorsIntoMessages(
-	sessionManager: SessionManager,
-	sessionId: string,
-	messages: any[],
-): any[] {
-	if (!Array.isArray(messages)) return messages;
-	const live = sessionManager.getSession(sessionId);
-	const persisted = sessionManager.getPersistedSession(sessionId);
-	const identity = live ?? persisted;
-	return mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), messages, {
-		session: {
-			id: sessionId,
-			title: identity?.title,
-			role: identity?.role,
-			staffId: identity?.staffId,
-		},
-	});
-}
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
 
@@ -681,8 +639,8 @@ export function handleWebSocketConnection(
 				case "get_messages": {
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					const messages = await sessionManager.getArchivedMessages(sessionId);
-					const authored = mergeAuthorsIntoMessages(sessionManager, sessionId, messages);
-					send(ws, { type: "messages", data: stampSnapshotOrder(authored) as unknown[] });
+					const visible = sessionManager.buildVisibleMessageSnapshot(sessionId, messages);
+					send(ws, { type: "messages", data: stampSnapshotOrder(visible) as unknown[] });
 					break;
 				}
 				case "ping":
@@ -1145,29 +1103,7 @@ export function handleWebSocketConnection(
 					}
 					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
-						const raw = normalizeToolResultErrorSnapshot(msgsResp.data as any);
-						// msgsResp.data may be an array or { messages: [...] }
-						let data: any = raw;
-						if (Array.isArray(raw)) {
-							// H3: splice in-flight message_update before truncation/sidecar/stamp.
-							const spliced = spliceInFlightSteers(
-								spliceInFlightMessage(raw, (session as any).latestMessageUpdate),
-								(session as any).inFlightSteerTexts,
-							);
-							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
-							const withAuthors = mergeAuthorsIntoMessages(sessionManager, sessionId, withCompaction);
-							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withAuthors));
-						} else if (raw && Array.isArray(raw.messages)) {
-							const spliced = spliceInFlightSteers(
-								spliceInFlightMessage(raw.messages, (session as any).latestMessageUpdate),
-								(session as any).inFlightSteerTexts,
-							);
-							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
-							const withAuthors = mergeAuthorsIntoMessages(sessionManager, sessionId, withCompaction);
-							const truncated = truncateLargeToolContentInMessages(withAuthors);
-							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
-							data = merged === raw.messages ? raw : { ...raw, messages: merged };
-						}
+						const data = sessionManager.buildVisibleMessageSnapshot(sessionId, msgsResp.data as any);
 						const tPipeline = perf ? performance.now() : 0;
 						const stamped = stampSnapshotOrder(data);
 						const tStamp = perf ? performance.now() : 0;
@@ -1270,17 +1206,7 @@ export function handleWebSocketConnection(
 							restored.rpcClient.getMessages?.()
 								.then((msgs: any) => {
 									if (!msgs) return;
-									const raw = normalizeToolResultErrorSnapshot(msgs.data ?? msgs);
-									let data: any = raw;
-									if (Array.isArray(raw)) {
-										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw);
-										data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
-									} else if (raw && Array.isArray(raw.messages)) {
-										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw.messages);
-										const truncated = truncateLargeToolContentInMessages(withCompaction);
-										const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
-										data = merged === raw.messages ? raw : { ...raw, messages: merged };
-									}
+									const data = sessionManager.buildVisibleMessageSnapshot(sessionId, msgs.data ?? msgs);
 									send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
 								})
 								.catch(() => {});
