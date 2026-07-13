@@ -11,7 +11,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-tool-recovery-"));
 process.env.BOBBIT_DIR = tmpRoot;
 process.env.BOBBIT_AGENT_DIR = path.join(tmpRoot, "agent");
 
-const { SessionManager, classifyErroredPromptRecovery } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager, classifyErroredPromptRecovery, emitSessionEvent } = await import("../../src/server/agent/session-manager.ts");
 const { deliverSessionPrompt } = await import("../../src/server/agent/session-prompt-delivery.ts");
 const { isOrphanToolResultOrderingError } = await import("../../src/server/agent/poisoned-history.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
@@ -98,11 +98,12 @@ function harness(options?: { hadToolCalls?: boolean; queue?: string[] }) {
 	let respawns = 0;
 	manager._respawnAgentInPlace = async (current: any) => {
 		respawns++;
-		// Match the real helper's temporary SessionInfo gap so duplicate actions
-		// must join the recovery before looking up the session.
+		// Match the real helper's temporary SessionInfo gap and fresh SessionInfo.
+		// In particular, restore does not copy process-local pending prompt envelopes.
 		manager.sessions.delete(current.id);
 		await Promise.resolve();
-		const restored = { ...current, rpcClient: bridge(newPrompts) };
+		const { pendingSkillExpansions: _discardedEnvelope, ...restoredState } = current;
+		const restored = { ...restoredState, rpcClient: bridge(newPrompts) };
 		manager.sessions.set(current.id, restored);
 		return restored;
 	};
@@ -174,6 +175,61 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["already parked"]);
 		assert.equal(restored.lastPromptSource, "user");
 		assert.doesNotMatch(h.newPrompts[0].text, /previous turn failed/i);
+	});
+
+	it("preserves a slash-skill envelope across follow-up respawn for the live echo", async () => {
+		const h = harness();
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		const originalText = "/mockup hero";
+		const modelText = "expanded mockup instructions\n\nhero";
+		const skillExpansions = [{
+			name: "mockup",
+			args: "hero",
+			source: "built-in",
+			filePath: "/skills/mockup/SKILL.md",
+			range: [0, 7],
+			expanded: "expanded mockup instructions",
+		}];
+
+		await h.manager.enqueuePrompt(h.session.id, originalText, { modelText, skillExpansions, source: "user" });
+		const restored = h.manager.sessions.get(h.session.id);
+		emitSessionEvent(restored, {
+			type: "message_end",
+			message: { role: "user", content: [{ type: "text", text: modelText }] },
+		});
+
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), [modelText]);
+		const echo: any = restored.eventBuffer.getAll().at(-1)?.event;
+		assert.equal(echo.message.content[0].text, originalText);
+		assert.deepEqual(echo.message.skillExpansions, skillExpansions);
+		assert.equal(restored.pendingSkillExpansions.length, 0);
+	});
+
+	it("preserves an @file mention envelope across follow-up respawn for the live echo", async () => {
+		const h = harness();
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		const originalText = "review @src/app.ts";
+		const modelText = "review <file-reference path=\"src/app.ts\">export const app = true;</file-reference>";
+		const fileMentions = [{
+			path: "src/app.ts",
+			range: [7, 18],
+			kind: "text",
+			content: "export const app = true;",
+		}];
+
+		await h.manager.enqueuePrompt(h.session.id, originalText, { modelText, fileMentions, source: "user" });
+		const restored = h.manager.sessions.get(h.session.id);
+		emitSessionEvent(restored, {
+			type: "message_end",
+			message: { role: "user", content: modelText },
+		});
+
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), [modelText]);
+		const echo: any = restored.eventBuffer.getAll().at(-1)?.event;
+		assert.equal(echo.message.content, originalText);
+		assert.deepEqual(echo.message.skillExpansions, []);
+		assert.deepEqual(echo.message.fileMentions, fileMentions);
+		assert.equal(restored.pendingSkillExpansions.length, 0);
 	});
 
 	it("does not permit an automatic retry to start poisoned-history repair", async () => {

@@ -4529,13 +4529,25 @@ export class SessionManager {
 		catch { ps = undefined; }
 		if (!ps?.agentSessionFile) return undefined;
 
+		// Follow-up prompts register their skill/file-mention echo envelope before
+		// error-state gating. A real in-place respawn builds a fresh SessionInfo, so
+		// carry those process-local envelopes across or the restored Pi echo exposes
+		// expanded model text and loses its UI chips.
+		const pendingPromptEnvelopes = session.pendingSkillExpansions?.slice();
 		const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 		const repairedRecords = await sanitizeAgentTranscriptFile(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		console.info(
 			`[session-manager] Poisoned-history repair session=${session.id} boundary=${boundary} repairedRecords=${repairedRecords} sandboxed=${ps.sandboxed === true} project=${session.projectId ?? ps.projectId ?? "unknown"}`,
 		);
 		const restored = await this._respawnAgentInPlace(session, ps);
-		return restored ?? this.sessions.get(session.id);
+		const target = restored ?? this.sessions.get(session.id);
+		if (target && target !== session && pendingPromptEnvelopes?.length) {
+			target.pendingSkillExpansions = [
+				...pendingPromptEnvelopes,
+				...(target.pendingSkillExpansions ?? []),
+			];
+		}
+		return target;
 	}
 
 	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
