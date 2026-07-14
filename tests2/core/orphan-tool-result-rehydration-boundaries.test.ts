@@ -1305,10 +1305,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(rollback.dormant).toBe(true);
 		expect(rollback.lifecycleFenced).toBe(true);
 		expect(rollback.clients.has(client)).toBe(true);
-		const expectedParkedIntent = firstAction === "follow-up"
+		const expectedAfterFailure = firstAction === "follow-up"
 			? ["parked queue intent", "preserved failed follow-up"]
+			: ["original user intent", "parked queue intent"];
+		const expectedAfterSuccess = firstAction === "follow-up"
+			? expectedAfterFailure
 			: ["parked queue intent"];
-		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedParkedIntent);
+		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedAfterFailure);
 		expect(rollback.lastPromptText).toBe("original user intent");
 		expect(rollback.modelId).toBe("claude-sonnet-4-5");
 		expect(rollback.thinkingLevel).toBe("high");
@@ -1340,7 +1343,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(restored.id).toBe(ps.id);
 		expect(restored.title).toBe(`Visible ${realm} history`);
 		expect(restored.clients.has(client)).toBe(true);
-		expect(restored.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedParkedIntent);
+		expect(restored.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedAfterSuccess);
 		expect(restored.spawnPinnedModel).toBe("anthropic/claude-sonnet-4-5");
 		expect(restored.spawnPinnedThinkingLevel).toBe("high");
 		expect(restored.allowedTools).toEqual(["read", "grep", "bash"]);
@@ -1461,7 +1464,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(rollback.lastPromptText).toBe("original sandbox retry intent");
 		expect(rollback.turnHadToolCalls).toBe(false);
 		expect(rollback.pendingSkillExpansions).toHaveLength(1);
-		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual(["parked sandbox intent"]);
+		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual([
+			"original sandbox retry intent",
+			"parked sandbox intent",
+		]);
 		expect(rollback.sessionOnlyGrantedTools).toEqual(["grep"]);
 		expect(rollback.oneTimeGrantedTools).toEqual(["bash"]);
 		expect(ps.sandboxed).toBe(true);

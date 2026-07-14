@@ -372,6 +372,10 @@ export type RestartRedriveSnapshot = {
 export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedriveSnapshot): boolean {
 	const status = typeof snapshot === "string" ? snapshot : snapshot.status;
 	const restoreStartupWasStreaming = typeof snapshot === "string" ? undefined : snapshot.restoreStartupWasStreaming;
+	// A cold-restore continuation remains durable until the final canonical bridge
+	// accepts it. The provisional restore can already look idle (or be rolled back
+	// to a dormant/terminated capsule), so status alone must not clear this marker.
+	if (restoreStartupWasStreaming === true) return true;
 	if (status === "idle" || status === "terminated") return false;
 	if (status === "starting" && restoreStartupWasStreaming !== undefined) return restoreStartupWasStreaming;
 	return true;
@@ -639,6 +643,8 @@ export interface SessionInfo {
 	promptQueue: PromptQueue;
 	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
 	recoveredPromptDispatchQueueIds?: string[];
+	/** Exact durable row owned by an explicit Retry until canonical dispatch accepts it. */
+	explicitRetryQueueRowId?: string;
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
 	restoreError?: string;
 	/**
@@ -4047,7 +4053,7 @@ export class SessionManager {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
-	}>, reason: string, source: string, durableQueueRowIds?: Array<string | undefined>): void {
+	}>, reason: string, source: string, durableQueueRowIds?: Array<string | undefined>, manualRecoveryRequired = false): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
 		const providerAuthFailure = isProviderAuthFailure(reason);
 		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
@@ -4086,6 +4092,20 @@ export class SessionManager {
 					...recoveredIds,
 				]),
 			];
+			// A rejected poison follow-up/Retry remains the front-priority human
+			// recovery action. Move the exact durable rows by ID; never infer identity
+			// from equal text/images or let older parked work overtake them.
+			session.promptQueue.reorderByIds([...recoveredIds].reverse());
+		}
+		if (manualRecoveryRequired) {
+			session.lastTurnErrored = true;
+			session.lastTurnErrorMessage = safeReason;
+			session.turnHadToolCalls = false;
+			session.recoverDrainAttempts = 0;
+			if (providerAuthFailure) this.surfaceProviderAuthFailure(session, reason, source);
+			else broadcastStatus(session, "idle");
+			this.broadcastQueue(session);
+			return;
 		}
 		if (providerAuthFailure) {
 			this.surfaceProviderAuthFailure(session, reason, source);
@@ -4146,12 +4166,15 @@ export class SessionManager {
 				: await session.rpcClient.prompt(text, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId]);
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 				recovered = true;
 				throw this.safeDispatchError(session, reason);
 			}
 			// The RPC accepted the intent; only now consume its durable acceptance row.
 			if (durableQueueRowId && session.promptQueue.remove(durableQueueRowId)) {
+				if (session.explicitRetryQueueRowId === durableQueueRowId) {
+					session.explicitRetryQueueRowId = undefined;
+				}
 				session.recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds
 					?.filter(id => id !== durableQueueRowId);
 				if (session.recoveredPromptDispatchQueueIds?.length === 0) {
@@ -4162,7 +4185,7 @@ export class SessionManager {
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
 			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId]);
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 			}
 			if (isProviderAuthFailure(reason)) {
 				throw this.safeDispatchError(session, reason);
@@ -4918,6 +4941,9 @@ export class SessionManager {
 			removedAny = session.promptQueue.remove(id) || removedAny;
 		}
 		session.recoveredPromptDispatchQueueIds = undefined;
+		if (session.explicitRetryQueueRowId && !session.promptQueue.toArray().some(row => row.id === session.explicitRetryQueueRowId)) {
+			session.explicitRetryQueueRowId = undefined;
+		}
 		if (removedAny) this.broadcastQueue(session);
 		return removedAny;
 	}
@@ -4951,26 +4977,45 @@ export class SessionManager {
 		return removed;
 	}
 
-	private ensureDurableRetryRow(
+	private enqueueDurableRetryRow(
 		session: SessionInfo,
 		text: string,
 		images?: Array<{ type: "image"; data: string; mimeType: string }>,
-		excludeIds?: ReadonlySet<string>,
-	): string {
-		const tracked = new Set(session.recoveredPromptDispatchQueueIds ?? []);
-		const imageSignature = JSON.stringify(images ?? []);
-		const trackedMatch = session.promptQueue.toArray().find(row =>
-			tracked.has(row.id)
-			&& !excludeIds?.has(row.id)
-			&& row.text === text
-			&& JSON.stringify(row.images ?? []) === imageSignature
-		);
-		if (trackedMatch) return trackedMatch.id;
-		const existing = this.findQueuedRetryRow(session, [text], images, excludeIds);
-		if (existing) return existing.id;
+	): QueuedMessage {
+		const existing = session.explicitRetryQueueRowId
+			? session.promptQueue.toArray().find(row => row.id === session.explicitRetryQueueRowId)
+			: undefined;
+		if (existing) {
+			session.recoveredPromptDispatchQueueIds = [
+				...new Set([...(session.recoveredPromptDispatchQueueIds ?? []), existing.id]),
+			];
+			session.promptQueue.reorderByIds([existing.id]);
+			this.broadcastQueue(session);
+			return existing;
+		}
 		const row = session.promptQueue.enqueueAtFront(text, { images });
+		session.explicitRetryQueueRowId = row.id;
+		session.recoveredPromptDispatchQueueIds = [
+			...new Set([...(session.recoveredPromptDispatchQueueIds ?? []), row.id]),
+		];
+		// enqueueAtFront preserves the queue's steer grouping. Explicit Retry is a
+		// separate front-priority human action, so pin its unique row first by ID.
+		session.promptQueue.reorderByIds([row.id]);
 		this.broadcastQueue(session);
-		return row.id;
+		return row;
+	}
+
+	private ensureDurableRetryRow(session: SessionInfo, accepted: QueuedMessage): string {
+		if (!session.promptQueue.toArray().some(row => row.id === accepted.id)) {
+			// Replacement reconciliation normally carries the persisted row. Retain
+			// its original ID if a test/failure seam rebuilt SessionInfo without it.
+			session.promptQueue = new PromptQueue([accepted, ...session.promptQueue.toArray()]);
+		} else {
+			session.promptQueue.reorderByIds([accepted.id]);
+		}
+		session.explicitRetryQueueRowId = accepted.id;
+		this.broadcastQueue(session);
+		return accepted.id;
 	}
 
 	getErroredPromptRecoveryDecision(sessionId: string): ErroredPromptRecoveryDecision {
@@ -5031,6 +5076,18 @@ export class SessionManager {
 				throw new Error("Poisoned session history requires a user Retry or follow-up prompt");
 			}
 			this.cancelPendingAutoRetry(session, "explicit-retry");
+			const retryText = hadToolCalls
+				? "[SYSTEM: The model API returned an error while you were mid-turn. " +
+					"Your previous work has been preserved. Please continue where you left off. " +
+					"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
+				: (savedPromptText || savedPromptImages?.length)
+					? synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages)
+					: "[SYSTEM: The model API returned an error on your last response. " +
+						"Please review your conversation history and retry what you were doing.]";
+			const retryImages = hadToolCalls ? undefined : savedPromptImages;
+			// Explicit Retry owns a newly allocated durable row. Equal text/images in
+			// the existing queue are independent accepted intent and must survive.
+			const acceptedRetry = this.enqueueDurableRetryRow(session, retryText, retryImages);
 			const recovery = (async () => {
 				const target = await this._recoverPoisonedHistory(session, "retry", async (canonical) => {
 					canonical.lastTurnErrored = false;
@@ -5039,36 +5096,15 @@ export class SessionManager {
 					canonical.consecutiveErrorTurns = 0;
 					canonical.transientRetryAttempts = 0;
 					canonical.lastPromptSource = savedPromptSource;
-
-					const dispatchRetry = async (text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>) => {
-						const durableId = this.ensureDurableRetryRow(canonical, text, images, preserveQueueIds);
-						try {
-							await this.dispatchDirectPrompt(canonical, text, images, undefined, false, false, durableId);
-						} catch (err) {
-							canonical.lastTurnErrored = true;
-							canonical.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
-							throw err;
-						}
-						this.consumeRecoveredPromptDispatchRows(canonical);
-					};
-
-					if (hadToolCalls) {
-						const continuation =
-							"[SYSTEM: The model API returned an error while you were mid-turn. " +
-							"Your previous work has been preserved. Please continue where you left off. " +
-							"Do NOT start over — review your recent messages and resume from the exact point of interruption.]";
-						await dispatchRetry(continuation);
-						return;
+					const durableId = this.ensureDurableRetryRow(canonical, acceptedRetry);
+					try {
+						await this.dispatchDirectPrompt(canonical, retryText, retryImages, undefined, false, false, durableId);
+					} catch (err) {
+						canonical.lastTurnErrored = true;
+						canonical.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
+						throw err;
 					}
-					if (savedPromptText || savedPromptImages?.length) {
-						const retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
-						await dispatchRetry(retryText, savedPromptImages);
-						return;
-					}
-					const fallback =
-						"[SYSTEM: The model API returned an error on your last response. " +
-						"Please review your conversation history and retry what you were doing.]";
-					await dispatchRetry(fallback);
+					this.consumeRecoveredPromptDispatchRows(canonical);
 				});
 				if (!target && this.sessions.has(session.id)) {
 					throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
@@ -5108,29 +5144,29 @@ export class SessionManager {
 		// persisted transcript file (e.g. unit harness) — the normal branch below
 		// already synthesizes text.
 		if (poisonedByBlankText) {
+			// We know this turn was a blank-content poison, so attachment/image
+			// content was present. For a legacy non-image attachment-only failure,
+			// synthesizeAttachmentText can still return blank; never resend it.
+			let retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
+			if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
+			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, savedPromptImages) : undefined;
 			const target = await this._recoverBlankTextPoison(session);
-			if (target) {
-				// We know this turn was a blank-content poison, so attachment/image
-				// content was present. For a legacy non-image attachment-only
-				// failure savedPromptText==="" and savedPromptImages===undefined, so
-				// synthesizeAttachmentText returns "" — fall back to the synthetic
-				// phrase unconditionally rather than re-send blank/invalid content.
-				let retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
-				if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
-				target.lastPromptText = retryText;
-				target.lastPromptImages = savedPromptImages;
-				await this.dispatchDirectPrompt(target, retryText, savedPromptImages);
-				return;
-			}
+			const dispatchTarget = target ?? session;
+			dispatchTarget.lastPromptText = retryText;
+			dispatchTarget.lastPromptImages = savedPromptImages;
+			const durableId = acceptedRetry ? this.ensureDurableRetryRow(dispatchTarget, acceptedRetry) : undefined;
+			await this.dispatchDirectPrompt(dispatchTarget, retryText, savedPromptImages, undefined, false, false, durableId);
+			return;
 		}
 
 		if (hadToolCalls) {
-			// Agent was mid-work — send a system continuation prompt
-			await this.dispatchDirectPrompt(session,
+			// Agent was mid-work — send a system continuation prompt.
+			const continuation =
 				"[SYSTEM: The model API returned an error while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
-				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
-			);
+				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]";
+			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, continuation) : undefined;
+			await this.dispatchDirectPrompt(session, continuation, undefined, undefined, false, false, acceptedRetry?.id);
 		} else if (session.lastPromptText || session.lastPromptImages?.length) {
 			// Fresh response error — re-send the original prompt. Run the text
 			// through synthesizeAttachmentText so an already-stuck session whose
@@ -5140,21 +5176,21 @@ export class SessionManager {
 			// generic fallback branch (which drops the image).
 			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
 			// Dispatch failures before agent_start re-enqueue the failed row for
-			// recovery. Explicit/auto retry is the recovery dispatch, so consume
-			// that row first; otherwise the next successful agent_end drain would
-			// send it a second time. Prefer tracked recovery row IDs; fall back to
-			// text matching for sessions created before the ID ledger existed.
-			if (!this.consumeRecoveredPromptDispatchRows(session)) {
+			// recovery. Auto retry may use the legacy text fallback; explicit Retry
+			// consumes only the ID ledger and allocates its own unique durable row.
+			if (!this.consumeRecoveredPromptDispatchRows(session) && isAuto) {
 				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
-			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages);
+			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages) : undefined;
+			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages, undefined, false, false, acceptedRetry?.id);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			this.consumeRecoveredPromptDispatchRows(session);
-			await this.dispatchDirectPrompt(session,
+			const fallback =
 				"[SYSTEM: The model API returned an error on your last response. " +
-				"Please review your conversation history and retry what you were doing.]"
-			);
+				"Please review your conversation history and retry what you were doing.]";
+			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, fallback) : undefined;
+			await this.dispatchDirectPrompt(session, fallback, undefined, undefined, false, false, acceptedRetry?.id);
 		}
 	}
 
@@ -6147,7 +6183,17 @@ export class SessionManager {
 			"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
 			"Your previous work has been preserved. Please continue where you left off. " +
 			"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
-		).catch((err: any) => {
+		).then((response: any) => {
+			if (response?.success === false) {
+				throw new Error(response.error ?? "boot continuation dispatch rejected");
+			}
+			// Clear the durable marker only after the final canonical bridge accepts
+			// the continuation. A gateway death during provisional restore therefore
+			// rehydrates wasStreaming=true and safely tries again on the next boot.
+			if (!this._sessionWriterIsCurrent(session)) return;
+			session.restoreStartupWasStreaming = false;
+			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false });
+		}).catch((err: any) => {
 			console.error(`[session-manager] Failed to re-prompt interrupted session ${session.id}:`, err);
 		});
 	}
@@ -6642,13 +6688,14 @@ export class SessionManager {
 		// (`resumeInterruptedVerifications()` -> `_tryResumeFromSession`, which
 		// waits for readiness and sends its own reminder prompt). Firing the boot
 		// nudge here too would race two prompts on the same cold reviewer agent.
-		// We still clear `wasStreaming` so the flag doesn't leak across restarts.
+		// Non-interactive verification owns a separate durable re-drive marker, so
+		// this compatibility flag can clear when ownership is handed off.
 		if (ps.wasStreaming && ps.nonInteractive) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn but is nonInteractive — leaving re-drive to the verification harness`);
+			session.restoreStartupWasStreaming = false;
 			restoreStore.update(ps.id, { wasStreaming: false });
 		} else if (ps.wasStreaming) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn — re-prompting to continue`);
-			restoreStore.update(ps.id, { wasStreaming: false });
 			// A restore may be only a provisional winner: role/restart/Stop/terminate
 			// requests can already be queued behind it. Defer the continuation until
 			// the coordinator releases its final canonical bridge. Direct test/legacy

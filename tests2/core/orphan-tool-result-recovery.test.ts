@@ -180,26 +180,50 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.doesNotMatch(h.newPrompts[0].text, /previous turn failed/i);
 	});
 
-	it("keeps a rejected poison redrive durable exactly once and restores idle error state", async () => {
-		const h = harness({ rejectRedriveWith: "fixture canonical bridge rejected redrive" });
+	it("keeps a rejected poison follow-up front-priority, durable, and error-gated", async () => {
+		const h = harness({
+			queue: ["older parked intent"],
+			rejectRedriveWith: "fixture canonical bridge rejected redrive",
+		});
 		vi.spyOn(console, "info").mockImplementation(() => {});
 		vi.spyOn(console, "warn").mockImplementation(() => {});
+		const drain = vi.spyOn(h.manager, "drainQueue");
 
 		await assert.rejects(
 			() => h.manager.enqueuePrompt(h.session.id, "intent survives rejected redrive", { source: "user" }),
 			/fixture canonical bridge rejected redrive/,
 		);
+		await new Promise((resolve) => setTimeout(resolve, 20));
 
 		const restored = h.manager.sessions.get(h.session.id);
 		const rows = restored.promptQueue.toArray();
-		assert.deepEqual(rows.map((row: any) => row.text), ["intent survives rejected redrive"]);
-		assert.equal(new Set(rows.map((row: any) => row.id)).size, 1, "rejection must not duplicate the durable row");
-		assert.deepEqual(h.persistedRecord.messageQueue, rows, "the surviving intent remains durable");
+		assert.deepEqual(rows.map((row: any) => row.text), [
+			"intent survives rejected redrive",
+			"older parked intent",
+		]);
+		assert.equal(new Set(rows.map((row: any) => row.id)).size, 2, "rejection must not duplicate either durable row");
+		assert.deepEqual(h.persistedRecord.messageQueue, rows, "the exact surviving order remains durable");
 		assert.equal(restored.status, "idle", "rejected canonical dispatch rolls streaming back to idle");
 		assert.equal(restored.lastTurnErrored, true);
 		assert.equal(restored.lastTurnErrorMessage, "fixture canonical bridge rejected redrive");
 		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rows[0].id]);
+		assert.equal(drain.mock.calls.length, 0, "manual recovery gate must not drain unrelated parked work");
 		assert.equal(restored.lifecycleGeneration, h.manager._currentRespawnGeneration(h.session.id));
+	});
+
+	it("uses a unique durable Retry row and preserves an independently queued identical prompt", async () => {
+		const h = harness({ queue: ["original user intent"] });
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		const independent = h.session.promptQueue.toArray()[0];
+
+		await h.manager.retryLastPrompt(h.session.id);
+
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), ["original user intent"]);
+		const restored = h.manager.sessions.get(h.session.id);
+		const rows = restored.promptQueue.toArray();
+		assert.deepEqual(rows.map((row: any) => row.text), ["original user intent"]);
+		assert.equal(rows[0].id, independent.id, "Retry must consume only its new row identity");
+		assert.deepEqual(h.persistedRecord.messageQueue, rows);
 	});
 
 	it("durably parks every distinct concurrent follow-up when their shared recovery rejects", async () => {
