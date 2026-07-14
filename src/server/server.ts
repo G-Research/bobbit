@@ -1,5 +1,5 @@
 import { exec } from "node:child_process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
@@ -54,6 +54,7 @@ import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettled
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
+import { freezeWorkflowDefinition } from "./agent/workflow-validator.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
@@ -7194,6 +7195,20 @@ async function handleApiRoute(
 				if (n >= 1 && n <= 8) effMaxConcurrentChildren = n;
 			}
 			const explicitWorktree = typeof body?.worktree === "boolean" ? body.worktree : undefined;
+			// Validate the raw definition before normalization can discard malformed
+			// aliases/metadata, then snapshot the same canonical deep clone used by
+			// goal-workflow replacement. Component/command references are deliberately
+			// not re-resolved here: the selected workflow may come from another cascade
+			// layer or predate the target project's current component commands. Project
+			// workflow mutations and the workflow PUT endpoint remain strict.
+			if (resolvedWorkflow) {
+				resolvedWorkflow = freezeWorkflowDefinition(
+					resolvedWorkflow,
+					targetCtx.projectConfigStore.getComponents(),
+					resolvedWorkflowId,
+					{ validateComponentReferences: false },
+				);
+			}
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -7277,6 +7292,80 @@ async function handleApiRoute(
 		} catch (err) {
 			jsonError(400, err);
 		}
+		return;
+	}
+
+	// PUT /api/goals/:goalId/workflow — replace the goal's complete frozen workflow snapshot.
+	const goalWorkflowPutMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/workflow$/);
+	if (goalWorkflowPutMatch && req.method === "PUT") {
+		const goalId = goalWorkflowPutMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!goal.workflow) { json({ error: "Goal has no workflow to replace" }, 400); return; }
+		const workflowCtx = projectContextManager.getContextForGoal(goalId);
+		if (!workflowCtx) { json({ error: "Goal project context not found" }, 404); return; }
+
+		// This is the only await in the route. The active-verification read and all
+		// mutations below intentionally form one synchronous continuation so a new
+		// verification cannot interleave with the conflict check.
+		const body = await readBody(req);
+		if (body === null || typeof body !== "object" || Array.isArray(body)) {
+			json({ error: "Workflow body must be a plain object" }, 400);
+			return;
+		}
+		const oldWorkflow = goal.workflow;
+		if (Object.prototype.hasOwnProperty.call(body, "id") && body.id !== oldWorkflow.id) {
+			json({ error: `Workflow id must remain "${oldWorkflow.id}"` }, 400);
+			return;
+		}
+
+		let frozen: Workflow;
+		try {
+			frozen = freezeWorkflowDefinition({
+				...body,
+				id: oldWorkflow.id,
+				createdAt: oldWorkflow.createdAt,
+				updatedAt: Date.now(),
+				hidden: oldWorkflow.hidden,
+			}, workflowCtx.projectConfigStore.getComponents(), oldWorkflow.id);
+		} catch (error) {
+			jsonError(400, error);
+			return;
+		}
+
+		// Gate array order is presentation-only. Compare canonical definitions by
+		// id; ordering inside dependsOn/verify remains significant via deep equality.
+		const oldById = new Map(oldWorkflow.gates.map(gate => [gate.id, gate]));
+		const newById = new Map(frozen.gates.map(gate => [gate.id, gate]));
+		const modifiedOrRemoved = new Set<string>();
+		for (const [gateId, oldGate] of oldById) {
+			const newGate = newById.get(gateId);
+			if (!newGate || !isDeepStrictEqual(oldGate, newGate)) modifiedOrRemoved.add(gateId);
+		}
+
+		const conflictingGateIds = [...new Set(
+			verificationHarness.getActiveVerifications(goalId)
+				.filter(active => !active.cancelled && active.overallStatus === "running" && modifiedOrRemoved.has(active.gateId))
+				.map(active => active.gateId),
+		)];
+		if (conflictingGateIds.length > 0) {
+			json({
+				error: "Workflow cannot modify or remove gates with active verifications",
+				code: "WORKFLOW_ACTIVE_VERIFICATION",
+				gateIds: conflictingGateIds,
+			}, 409);
+			return;
+		}
+
+		workflowCtx.goalManager.getGoalStore().update(goalId, { workflow: frozen });
+		goal.workflow = frozen;
+		type WorkflowGateReconciler = {
+			reconcileGatesForGoal(goalId: string, nextGateIds: Iterable<string>, modifiedGateIds?: Iterable<string>): void;
+		};
+		(workflowCtx.gateStore as typeof workflowCtx.gateStore & WorkflowGateReconciler)
+			.reconcileGatesForGoal(goalId, newById.keys(), modifiedOrRemoved);
+		broadcastToAll({ type: "goal_state_changed", goalId });
+		json(frozen);
 		return;
 	}
 

@@ -138,6 +138,52 @@ export class GateStore {
 		this.save();
 	}
 
+	/**
+	 * Reconcile persisted gate state after replacing a goal's workflow snapshot.
+	 * Existing gates retain their exact state unless explicitly marked modified.
+	 */
+	reconcileGatesForGoal(
+		goalId: string,
+		nextGateIds: Iterable<string>,
+		modifiedGateIds: Iterable<string> = [],
+	): void {
+		const remainingGateIds = new Set(nextGateIds);
+		const modifiedIds = new Set(modifiedGateIds);
+		const now = Date.now();
+		let changed = false;
+
+		for (const [key, gate] of this.gates) {
+			if (gate.goalId !== goalId) continue;
+
+			if (!remainingGateIds.has(gate.gateId)) {
+				this.gates.delete(key);
+				changed = true;
+				continue;
+			}
+
+			remainingGateIds.delete(gate.gateId);
+			if (modifiedIds.has(gate.gateId)) {
+				gate.status = "pending";
+				gate.verificationCacheInvalidatedAt = now;
+				gate.updatedAt = now;
+				changed = true;
+			}
+		}
+
+		for (const gateId of remainingGateIds) {
+			this.gates.set(compositeKey(goalId, gateId), {
+				gateId,
+				goalId,
+				status: "pending",
+				signals: [],
+				updatedAt: now,
+			});
+			changed = true;
+		}
+
+		if (changed) this.save();
+	}
+
 	getGate(goalId: string, gateId: string): GateState | undefined {
 		return this.gates.get(compositeKey(goalId, gateId));
 	}
