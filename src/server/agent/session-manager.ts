@@ -1371,11 +1371,22 @@ export class SessionManager {
 				kind,
 			};
 			owned.active = token;
-			const result = await operation(token);
-			if (!this._replacementTokenIsCurrent(sessionId, token)) {
-				throw new Error(`Session ${sessionId} ${kind} replacement was superseded`);
+			try {
+				const result = await operation(token);
+				if (!this._replacementTokenIsCurrent(sessionId, token)) {
+					throw new Error(`Session ${sessionId} ${kind} replacement was superseded`);
+				}
+				return result;
+			} finally {
+				// Token generation is finalized in exactly one place. Operations may
+				// legitimately no-op (for example Stop queued behind a role swap), or
+				// throw after reinstalling a rollback capsule; either way the surviving
+				// canonical writer must match the generation the coordinator advanced.
+				if (this._replacementTokenIsCurrent(sessionId, token)) {
+					const canonical = this.sessions.get(sessionId);
+					if (canonical) canonical.lifecycleGeneration = token.generation;
+				}
 			}
-			return result;
 		});
 		let resultPromise!: Promise<T>;
 		resultPromise = operationPromise.finally(() => {
@@ -1404,11 +1415,9 @@ export class SessionManager {
 	}
 
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
-		return this._coordinateSessionReplacement(ps.id, "restore", async (token) => {
+		return this._coordinateSessionReplacement(ps.id, "restore", async (_token) => {
 			await this.restoreSession(ps);
-			const restored = this.sessions.get(ps.id);
-			if (restored) restored.lifecycleGeneration = token.generation;
-			return restored;
+			return this.sessions.get(ps.id);
 		}, { coalesceKey: "rehydrate", drainOnRelease: true });
 	}
 
@@ -3304,7 +3313,11 @@ export class SessionManager {
 	}): { status: "queued" } | undefined {
 		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
 		if (!coordinator) return undefined;
-		const session = this.sessions.get(sessionId) ?? coordinator.promptOwner;
+		// Keep one ordered acceptance ledger for the coordinator's whole lifetime.
+		// A replacement can install its fresh SessionInfo before post-install work
+		// finishes; switching prompt ownership at that point splits the queue and
+		// makes final reconciliation append an earlier prompt after a later one.
+		const session = coordinator.promptOwner ?? this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
 		coordinator.promptOwner ??= session;
 		session.lastPromptSource = opts?.source ?? "user";
@@ -5506,7 +5519,6 @@ export class SessionManager {
 		}
 		const restored = this.sessions.get(id);
 		if (restored) {
-			restored.lifecycleGeneration = token.generation;
 			for (const ws of savedClients) {
 				if ((ws as any).readyState === 1) restored.clients.add(ws);
 			}
@@ -8168,11 +8180,6 @@ export class SessionManager {
 		if (!this._replacementTokenIsCurrent(id, token)) {
 			throw new Error(`Session ${id} role replacement was superseded before staging`);
 		}
-		// Role assignment swaps the bridge on the same SessionInfo. Advance its
-		// writer generation now so both commit and rollback remain canonical when
-		// the coordinator releases queued intent.
-		session.lifecycleGeneration = token.generation;
-
 		// Get the agent session file so we can restore conversation. A structured
 		// getState rejection is just as much a fallback case as a thrown RPC error;
 		// start from the durable value and replace it only with a non-empty live one.
@@ -8704,7 +8711,11 @@ export class SessionManager {
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
-		if (!this.sessions.has(id)) return false;
+		// In-place restore temporarily removes the SessionInfo from the map. A
+		// terminate accepted during that gap must serialize behind the replacement,
+		// not report "not live" and let a successfully restored ghost survive after
+		// the caller archives its persisted record.
+		if (!this.sessions.has(id) && !this._sessionReplacementCoordinators.has(id)) return false;
 		return this._coordinateSessionReplacement(id, "terminate", (token) =>
 			this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
 	}
@@ -10329,11 +10340,6 @@ export class SessionManager {
 		if (!this._replacementTokenIsCurrent(id, token)) {
 			throw new Error(`Session ${id} force-abort was superseded before start`);
 		}
-		// Graceful abort keeps the same SessionInfo/bridge, so advance its writer
-		// generation before the fence suppresses lifecycle events. Coordinator
-		// release can then drain reconciled intent against this canonical writer.
-		session.lifecycleGeneration = token.generation;
-
 		// Broadcast aborting status so UI shows feedback during grace period
 		broadcastStatus(session, "aborting");
 
@@ -10390,14 +10396,14 @@ export class SessionManager {
 
 		// Get the agent session file before killing so we can restore.
 		// Path is in the agent's coordinate system — no translation needed.
-		let agentSessionFile: string | undefined;
+		const persistedBeforeAbort = this.resolveStoreForSession(id).get(id);
+		let agentSessionFile = persistedBeforeAbort?.agentSessionFile;
 		try {
 			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
-		} catch {
-			const persisted = this.resolveStoreForSession(id).get(id);
-			agentSessionFile = persisted?.agentSessionFile;
-		}
+			if (stateResp.success && stateResp.data?.sessionFile) {
+				agentSessionFile = stateResp.data.sessionFile;
+			}
+		} catch { /* retain the durable transcript path */ }
 
 		// Kill the process
 		session.unsubscribe();
@@ -10421,7 +10427,6 @@ export class SessionManager {
 			if (!this._replacementTokenIsCurrent(id, token)) {
 				throw new Error(`Session ${id} force-abort recovery was superseded before replacement start`);
 			}
-			session.lifecycleGeneration = token.generation;
 			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
@@ -10546,7 +10551,10 @@ export class SessionManager {
 			const abortPs = { ...forceRespawnPersisted, ...session, agentSessionFile } as PersistedSession;
 			const abortFileCtx = sessionFsContextForAgentFile(abortPs, agentSessionFile);
 			try {
-				if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
+				if (agentSessionFile) {
+					if (!await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
+						throw new Error(`Cannot recover force-aborted session ${id}: persisted conversation history is unavailable`);
+					}
 					await this.switchSessionForRehydration(rpcClient, abortPs, agentSessionFile);
 				}
 			} catch (err) {

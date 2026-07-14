@@ -208,6 +208,7 @@ function makeManager(ps: any, bridge: any): any {
 	const manager: any = new SessionManager();
 	manager._testStore = {
 		get: vi.fn(() => ps),
+		getLive: vi.fn(() => [ps]),
 		update: vi.fn(() => {}),
 		put: vi.fn(() => {}),
 		archive: vi.fn(() => {}),
@@ -723,6 +724,99 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
+	it("finalizes the canonical generation after a queued forceAbort becomes a no-op", async () => {
+		const file = hostTranscript("assign-role-noop-abort-generation");
+		const startGate = deferred<void>();
+		const replacement = recordingBridge(() => {});
+		replacement.start = vi.fn(() => startGate.promise);
+		replacement.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted("assign-role-noop-abort-generation", file);
+		const manager = makeManager(ps, replacement);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.stop = vi.fn(async () => {});
+		const original = liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() });
+		manager.sessions.set(ps.id, original);
+
+		const assignment = manager.assignRole(ps.id, {
+			name: "replacement-role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+		});
+		await vi.waitFor(() => expect(replacement.start).toHaveBeenCalledTimes(1));
+		await manager.enqueuePrompt(ps.id, "intent survives queued no-op Stop");
+		const abort = manager.forceAbort(ps.id, 5);
+
+		startGate.resolve();
+		await expect(Promise.all([assignment, abort])).resolves.toEqual([true, undefined]);
+
+		const canonical = manager.sessions.get(ps.id);
+		expect(canonical.lifecycleGeneration).toBe(manager._currentRespawnGeneration(ps.id));
+		expect(canonical.lifecycleFenced).not.toBe(true);
+		expect(replacement.prompt).toHaveBeenCalledTimes(1);
+		expect(replacement.prompt).toHaveBeenCalledWith("intent survives queued no-op Stop", undefined);
+		expect(canonical.promptQueue.isEmpty).toBe(true);
+	});
+
+	it("preserves prompt acceptance order before and after replacement installation", async () => {
+		const file = hostTranscript("respawn-install-prompt-order");
+		const startGate = deferred<void>();
+		const bgRestoreGate = deferred<void>();
+		const replacement = recordingBridge(() => {});
+		replacement.start = vi.fn(() => startGate.promise);
+		replacement.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted("respawn-install-prompt-order", file);
+		const manager = makeManager(ps, replacement);
+		manager.bgProcessManager = { restoreSession: vi.fn(() => bgRestoreGate.promise) };
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.stop = vi.fn(async () => {});
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() }));
+
+		const restart = manager.restartAgent(ps.id);
+		await vi.waitFor(() => expect(replacement.start).toHaveBeenCalledTimes(1));
+		expect(manager.sessions.has(ps.id)).toBe(false);
+		await manager.enqueuePrompt(ps.id, "accepted before install");
+
+		startGate.resolve();
+		await vi.waitFor(() => expect(manager.bgProcessManager.restoreSession).toHaveBeenCalledTimes(1));
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		await manager.enqueuePrompt(ps.id, "accepted after install");
+		expect(replacement.prompt).not.toHaveBeenCalled();
+
+		bgRestoreGate.resolve();
+		await restart;
+
+		expect(replacement.prompt).toHaveBeenCalledTimes(1);
+		expect(replacement.prompt).toHaveBeenCalledWith("accepted before install", undefined);
+		expect(manager.sessions.get(ps.id)?.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["accepted after install"]);
+	});
+
+	it("serializes termination requested while an in-place respawn is absent from the session map", async () => {
+		const file = hostTranscript("respawn-map-gap-termination");
+		const startGate = deferred<void>();
+		const replacement = recordingBridge(() => {});
+		replacement.start = vi.fn(() => startGate.promise);
+		replacement.stop = vi.fn(async () => {});
+		const ps = persisted("respawn-map-gap-termination", file);
+		const manager = makeManager(ps, replacement);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.stop = vi.fn(async () => {});
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() }));
+
+		const restart = manager.restartAgent(ps.id);
+		await vi.waitFor(() => expect(replacement.start).toHaveBeenCalledTimes(1));
+		expect(manager.sessions.has(ps.id)).toBe(false);
+		const termination = manager.terminateSession(ps.id);
+
+		startGate.resolve();
+		await expect(Promise.all([restart, termination])).resolves.toEqual([undefined, true]);
+
+		expect(manager.sessions.has(ps.id)).toBe(false);
+		expect(replacement.stop).toHaveBeenCalledTimes(1);
+		expect(manager._testStore.archive).toHaveBeenCalledWith(ps.id);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
 	it("assignRole wires a real sandbox replacement before rehydrating container history", async () => {
 		const { containerFile, hostFile } = containerTranscript("assign-role-real-sandbox");
 		const sandboxFx = realSandboxFixture(containerFile, "container-role-boundary");
@@ -835,6 +929,39 @@ describe("executable SessionManager rehydration boundaries", () => {
 		await manager.forceAbort(ps.id, 5);
 
 		expect(switches).toEqual([file]);
+	});
+
+	it("fails closed when hard force-abort cannot read declared durable history", async () => {
+		const file = hostTranscript("force-abort-missing-history");
+		fs.rmSync(file, { force: true });
+		const switches: string[] = [];
+		const replacement = recordingBridge((sessionPath) => switches.push(sessionPath));
+		replacement.stop = vi.fn(async () => {});
+		replacement.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted("force-abort-missing-history", file);
+		const manager = makeManager(ps, replacement);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.getState = vi.fn(async () => ({ success: true, data: { sessionFile: file } }));
+		oldBridge.abort = vi.fn(() => new Promise(() => {}));
+		oldBridge.stop = vi.fn(async () => {});
+		const original = liveSession(ps.id, oldBridge, {
+			status: "streaming",
+			streamingStartedAt: Date.now(),
+		});
+		original.promptQueue.enqueue("must remain parked with missing history");
+		manager.sessions.set(ps.id, original);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await manager.forceAbort(ps.id, 5);
+
+		expect(switches).toEqual([]);
+		expect(replacement.stop).toHaveBeenCalledTimes(1);
+		expect(replacement.prompt).not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect(original.rpcClient).toBe(oldBridge);
+		expect(original.status).toBe("terminated");
+		expect(original.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["must remain parked with missing history"]);
 	});
 
 	it.each([
