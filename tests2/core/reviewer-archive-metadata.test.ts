@@ -124,11 +124,33 @@ describe("reviewer archive metadata persistence", () => {
 		const agentQaBody = extractSourceSlice(
 			harness,
 			"private async runAgentQaStep(",
-			"private async runLlmReviewDirect(",
+			"private substituteVars(",
 		);
 
 		assertVerifierCreateSessionIsPreStamped(llmReviewBody, "llm-review");
 		assertVerifierCreateSessionIsPreStamped(agentQaBody, "agent-qa");
+	});
+
+	it("uses only SessionManager-backed LLM review execution", () => {
+		const harness = src("verification-harness.ts");
+		assert.doesNotMatch(harness, /runLlmReviewDirect/);
+
+		const llmReviewStep = extractSourceSlice(
+			harness,
+			"private async runLlmReviewStep(",
+			"// buildReviewPrompt is exported at module scope",
+		);
+		assert.doesNotMatch(llmReviewStep, /new RpcBridge|runLlmReviewDirect|direct-RpcBridge|fallback/i);
+		assert.match(
+			llmReviewStep,
+			/if \(!this\.sessionManager \|\| !goalId\) \{\s*throw new Error\("LLM review requires an active SessionManager and goalId"\);\s*\}/,
+			"LLM review must fail fast with an actionable error when SessionManager or goalId is unavailable",
+		);
+		assert.match(
+			llmReviewStep,
+			/return this\.runLlmReviewViaSession\(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId\);/,
+			"LLM review must delegate exclusively to the visible SessionManager-backed execution path",
+		);
 	});
 
 	it("normalizes legacy verifier archive rows with goalId-only while leaving standalone archived sessions unchanged", () => {

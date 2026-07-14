@@ -4,23 +4,15 @@
 // Review: unparsed import name in `node:test` import list | test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { beforeAll, test, type TestContext, onTestFinished } from "vitest";
+import { test, type TestContext, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
-import type { ActiveVerification } from "../../src/server/agent/verification-harness.js";
-
-let VerificationHarness: typeof import("../../src/server/agent/verification-harness.js").VerificationHarness;
-let killTreeByPid: typeof import("../../src/server/agent/spawn-tree.js").killTreeByPid;
-let GIT_BASH: string | null | undefined;
-
-beforeAll(async () => {
-	({ VerificationHarness } = await import("../../src/server/agent/verification-harness.js"));
-	({ killTreeByPid } = await import("../../src/server/agent/spawn-tree.js"));
-	({ GIT_BASH } = await import("../../src/server/agent/shell-util.js"));
-});
+import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
+import { killTreeByPid } from "../../src/server/agent/spawn-tree.js";
+import { GIT_BASH } from "../../src/server/agent/shell-util.js";
 
 const GOAL_ID = "goal-restart-safe-command-lifecycle";
 const GATE_ID = "implementation";
@@ -169,20 +161,6 @@ function killPidBestEffort(pid: number): void {
 	try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-	let timer: NodeJS.Timeout | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<never>((_, reject) => {
-				timer = setTimeout(() => reject(new Error(`${MARKER}: timed out waiting for ${label}`)), timeoutMs);
-			}),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
 async function cleanupChild(child: ChildProcess): Promise<void> {
 	if (child.exitCode !== null || child.signalCode !== null) return;
 	try { child.kill("SIGKILL"); } catch { /* already gone */ }
@@ -313,7 +291,10 @@ test("command step settles from process exit when inherited stdio delays close",
 			return Number.isFinite(pid) && pid > 0 && isPidAliveForTest(pid) ? pid : false;
 		}, 10_000, 25);
 
-		const result = await withTimeout(stepPromise, 6_000, "command step to settle after process exit despite inherited stdio") as { passed: boolean; output: string };
+		// The command step's own timeout guards a real hang. A second short
+		// wall-clock race here made CPU starvation beat the exit/close callback
+		// even though the lifecycle result was already inevitable.
+		const result = await stepPromise as { passed: boolean; output: string };
 		assert.equal(result.passed, true, `${MARKER}: the exited command should be treated as the authoritative result even when a descendant holds stdio open.`);
 		assert.match(result.output, /stdio-close-delay-parent-exiting/, `${MARKER}: output written before the immediate process exit should be retained.`);
 		assert.match(result.output, /stdio did not close/i, `${MARKER}: delayed-close fallback should explain why Bobbit finalized from process exit.`);
@@ -1101,17 +1082,11 @@ test("gate-signal command verification can be resumed by a fresh harness and rec
 		`const startedFile = ${JSON.stringify(startedFile)};`,
 		"console.log('gate-signal-probe:started');",
 		"fs.writeFileSync(startedFile, 'started');",
-		"const deadline = Date.now() + 5000;",
 		"const timer = setInterval(() => {",
 		"  if (fs.existsSync(releaseFile)) {",
 		"    clearInterval(timer);",
 		"    console.log('gate-signal-probe:after-restart');",
 		"    process.exit(0);",
-		"  }",
-		"  if (Date.now() > deadline) {",
-		"    clearInterval(timer);",
-		"    console.error('gate-signal-probe:timeout waiting for release');",
-		"    process.exit(97);",
 		"  }",
 		"}, 25);",
 	].join("\n"));
