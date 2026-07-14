@@ -387,6 +387,54 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.equal(rollback.lastPromptSource, "agent");
 	});
 
+	it("reports queued after parking behind a failed shared recovery and drains that accepted envelope once", async () => {
+		const h = harness();
+		const failedRecovery = Promise.reject(new Error("fixture shared recovery failed"));
+		h.manager._poisonedHistoryRecoveries.set(h.session.id, failedRecovery);
+		const skillExpansions = [{
+			name: "mockup",
+			args: "hero",
+			source: "built-in",
+			filePath: "/skills/mockup/SKILL.md",
+			range: [0, 7],
+			expanded: "expanded mockup instructions",
+		}];
+
+		const result = await h.manager.enqueuePrompt(h.session.id, "/mockup hero", {
+			modelText: "expanded mockup instructions\n\nhero",
+			skillExpansions,
+			images: [{ type: "image", data: "fixture-image", mimeType: "image/png" }],
+			attachments: [{ name: "fixture.txt" }],
+			source: "agent",
+		});
+
+		assert.deepEqual(result, { status: "queued" }, "durably accepted intent must not reject and invite caller resubmission");
+		const rollback = h.manager.sessions.get(h.session.id);
+		const queued = rollback.promptQueue.toArray();
+		assert.equal(queued.length, 1);
+		assert.equal(queued[0].text, "expanded mockup instructions\n\nhero");
+		assert.deepEqual(queued[0].images, [{ type: "image", data: "fixture-image", mimeType: "image/png" }]);
+		assert.deepEqual(queued[0].attachments, [{ name: "fixture.txt" }]);
+		assert.equal(h.persistedRecord.messageQueue[0].id, queued[0].id, "durable parking must preserve the queue row identity");
+		assert.deepEqual(rollback.pendingSkillExpansions, [{
+			modelText: "expanded mockup instructions\n\nhero",
+			originalText: "/mockup hero",
+			skillExpansions,
+		}]);
+		assert.equal(rollback.lastPromptSource, "agent");
+
+		// The queued result is the acceptance contract: the caller does not resubmit.
+		// Once recovery gating clears, the one durable row must drain exactly once.
+		h.manager._poisonedHistoryRecoveries.delete(h.session.id);
+		rollback.lastTurnErrored = false;
+		h.manager.drainQueue(rollback);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		h.manager.drainQueue(rollback);
+		assert.deepEqual(h.oldPrompts.map((entry) => entry.text), ["expanded mockup instructions\n\nhero"]);
+		assert.equal(rollback.promptQueue.isEmpty, true);
+		assert.deepEqual(h.persistedRecord.messageQueue, []);
+	});
+
 	it("preserves a slash-skill envelope across follow-up respawn for the live echo", async () => {
 		const h = harness();
 		vi.spyOn(console, "info").mockImplementation(() => {});
@@ -456,7 +504,7 @@ describe("SessionManager poisoned-history recovery", () => {
 
 describe("session_prompt poisoned-history follow-up", () => {
 	it("routes new intent through enqueuePrompt recovery instead of returning 409 or auto-retrying the old prompt", async () => {
-		const enqueuePrompt = vi.fn(async () => ({ status: "dispatched" as const }));
+		const enqueuePrompt = vi.fn(async () => ({ status: "queued" as const }));
 		const enqueuePromptForRetryRecovery = vi.fn(() => ({ status: "queued" as const, queuedId: "q1" }));
 		const retryLastPrompt = vi.fn(async () => {});
 		const result = await deliverSessionPrompt({
@@ -470,6 +518,7 @@ describe("session_prompt poisoned-history follow-up", () => {
 
 		assert.equal(result.ok, true);
 		assert.equal((result as any).status, "recovered");
+		assert.equal((result as any).recovery.queued, true, "session_prompt must report the durable queued acceptance truthfully");
 		assert.deepEqual(enqueuePrompt.mock.calls, [["session-fixture", "new REST intent", { source: "agent" }]]);
 		assert.equal(enqueuePromptForRetryRecovery.mock.calls.length, 0);
 		assert.equal(retryLastPrompt.mock.calls.length, 0);

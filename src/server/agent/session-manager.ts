@@ -3462,43 +3462,43 @@ export class SessionManager {
 		// An in-place poison respawn temporarily removes SessionInfo. Join before
 		// looking it up so prompts arriving in that window are not silently lost.
 		// If the shared replacement fails, this is a distinct accepted follow-up,
-		// not a duplicate Retry click: durably park it on the rollback capsule.
+		// not a duplicate Retry click: durably park it on the rollback capsule and
+		// report that acceptance as queued so the caller does not resubmit it.
 		const poisonRecovery = this._poisonedHistoryRecoveries.get(sessionId);
 		if (poisonRecovery) {
 			try {
 				await poisonRecovery;
 			} catch (err) {
 				const rollback = this.sessions.get(sessionId);
-				if (rollback) {
-					rollback.lastPromptSource = opts?.source ?? "user";
-					const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-					const hasSkillExpansions = !!opts?.skillExpansions?.length;
-					const hasFileMentions = !!opts?.fileMentions?.length;
-					if (hasSkillExpansions || hasFileMentions) {
-						appendSkillSidecarEntry(sessionId, {
-							ts: this.clock.now(),
-							modelText: dispatchText,
-							originalText: text,
-							skillExpansions: opts?.skillExpansions ?? [],
-							...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-						});
-						if (!rollback.pendingSkillExpansions) rollback.pendingSkillExpansions = [];
-						rollback.pendingSkillExpansions.push({
-							modelText: dispatchText,
-							originalText: text,
-							skillExpansions: opts?.skillExpansions ?? [],
-							...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-						});
-					}
-					rollback.promptQueue.enqueue(dispatchText, {
-						images: opts?.images,
-						attachments: opts?.attachments,
-						isSteered: opts?.isSteered,
-						suppressTitleGen: opts?.suppressTitleGen,
+				if (!rollback) throw err;
+				rollback.lastPromptSource = opts?.source ?? "user";
+				const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
+				const hasSkillExpansions = !!opts?.skillExpansions?.length;
+				const hasFileMentions = !!opts?.fileMentions?.length;
+				if (hasSkillExpansions || hasFileMentions) {
+					appendSkillSidecarEntry(sessionId, {
+						ts: this.clock.now(),
+						modelText: dispatchText,
+						originalText: text,
+						skillExpansions: opts?.skillExpansions ?? [],
+						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
 					});
-					this.broadcastQueue(rollback);
+					if (!rollback.pendingSkillExpansions) rollback.pendingSkillExpansions = [];
+					rollback.pendingSkillExpansions.push({
+						modelText: dispatchText,
+						originalText: text,
+						skillExpansions: opts?.skillExpansions ?? [],
+						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+					});
 				}
-				throw err;
+				rollback.promptQueue.enqueue(dispatchText, {
+					images: opts?.images,
+					attachments: opts?.attachments,
+					isSteered: opts?.isSteered,
+					suppressTitleGen: opts?.suppressTitleGen,
+				});
+				this.broadcastQueue(rollback);
+				return { status: "queued" };
 			}
 			return this.enqueuePrompt(sessionId, text, opts);
 		}
