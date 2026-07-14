@@ -15,20 +15,19 @@
  *   - it has an isolated module registry, so the node<->happy-dom environment
  *     bleed that forces `groupOrder`/single-fork hacks in the shared run does not
  *     apply across lanes;
- *   - Windows keeps integration and DOM at one fork, avoiding the Vitest 3.2
- *     onTaskUpdate worker-RPC failures seen when every concurrent lane used two
- *     forks (#8164/#6511), and cost-balances integration over two disjoint jobs.
- *     The much longer core lane may use a second fork only after the grant can
- *     fund the maximum three concurrent processes at one worker each. This avoids
- *     both the one-fork core timeout and the old all-lanes-two-fork saturation.
- *     Non-Windows keeps the two-fork, single-integration-job defaults. Windows
- *     also caps active lane jobs at three: the fourth job introduced by
- *     integration sharding runs in a second wave instead of starving every
- *     Vitest process.
+ *   - Windows defaults each lane to one fork, avoiding the Vitest 3.2
+ *     onTaskUpdate worker-RPC failures seen even at two forks under concurrent
+ *     lane load (#8164/#6511), and cost-balances integration over two disjoint
+ *     jobs so the one-fork pole stays inside the gate wall time. Non-Windows keeps
+ *     the two-fork, single-integration-job defaults. Windows also caps active
+ *     lane jobs at three: the fourth job introduced by integration sharding runs
+ *     in a second wave instead of starving every Vitest process. Parallelism
+ *     comes from running independent lanes side by side, not from raising fork
+ *     counts.
  *
- * UNIT_LANES_FORK_CAP remains an experimental core override on Windows (all
- * lanes elsewhere); UNIT_LANES_INTEGRATION_SHARDS still controls sharding. A
- * Vitest 4.x upgrade carrying the full #8297 fix is the larger alternative.
+ * UNIT_LANES_FORK_CAP and UNIT_LANES_INTEGRATION_SHARDS remain explicit
+ * experimental overrides. A Vitest 4.x upgrade carrying the full #8297 fix is
+ * the larger alternative.
  *
  * Concurrent full vitest runs are an anticipated mode (see
  * docs/testing-v2/concurrency-proof.md and the retry bridge in vitest.config.ts),
@@ -50,35 +49,23 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 const LOG_DIR = join(REPO_ROOT, ".profiles", "unit-lanes");
 
 // Vitest 3.2's worker RPC is unstable on Windows when concurrent lanes each use
-// two forks, even though two forks is safe for a standalone process. Keep the
-// Windows short lanes at one fork while preserving the existing two-fork default
-// on other platforms. The Windows core lane has a separate two-fork cap because
-// it is the long pole. Invalid overrides fall back to the platform default
-// instead of poisoning scheduler math with NaN (which would stall every lane).
+// two forks, even though two forks is safe for a standalone process. Default
+// Windows lanes to one fork while preserving the existing two-fork default on
+// other platforms. UNIT_LANES_FORK_CAP remains an explicit override. Invalid
+// overrides fall back to the platform default instead of poisoning scheduler
+// math with NaN (which would stall every lane).
 export function defaultPerLaneForkCap(platform = process.platform) {
 	return platform === "win32" ? 1 : 2;
 }
 
-export function defaultCoreForkCap(platform = process.platform) {
-	return platform === "win32" ? 2 : defaultPerLaneForkCap(platform);
-}
-
-function resolveForkCap(override, fallback) {
+export function resolvePerLaneForkCap({ platform = process.platform, override = process.env.UNIT_LANES_FORK_CAP } = {}) {
+	const fallback = defaultPerLaneForkCap(platform);
 	if (override == null || String(override).trim() === "") return fallback;
 	const parsed = Number(override);
 	return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : fallback;
 }
 
-export function resolvePerLaneForkCap({ platform = process.platform, override = process.env.UNIT_LANES_FORK_CAP } = {}) {
-	return resolveForkCap(override, defaultPerLaneForkCap(platform));
-}
-
-export function resolveCoreForkCap({ platform = process.platform, override = process.env.UNIT_LANES_FORK_CAP } = {}) {
-	return resolveForkCap(override, defaultCoreForkCap(platform));
-}
-
 const PER_LANE_FORK_CAP = resolvePerLaneForkCap();
-const CORE_FORK_CAP = resolveCoreForkCap();
 
 // Heartbeat cadence for the live progress line. Clamp to >=1s and reject
 // non-numeric/zero/negative values so a bad override can't flood the console
@@ -235,9 +222,20 @@ function vitestCmd() {
 /**
  * Pure scheduling math (pinned by tests2/core/unit-lanes-scheduling.test.ts).
  *
- * The uniform planner remains the non-Windows policy: every lane gets the same
- * safe per-process fork cap and the process count shrinks until total workers fit
- * the grant.
+ * The orchestrator holds ONE fair vitest grant and distributes it across lanes,
+ * each its OWN process capped at `perLaneCap` forks (default 1 on Windows, 2
+ * elsewhere).
+ *   - perLane      = min(perLaneCap, grant)  — never raise a single process above
+ *                    the safe cap, and never ask for more forks than granted.
+ *   - maxConcurrent = min(floor(grant / perLane), concurrentJobCap) —
+ *                    instantaneous forks (inFlight*perLane) never exceed the
+ *                    grant; clamped to ≥1 (so the run always makes progress) and
+ *                    to the job count (no idle concurrency slots). Windows adds
+ *                    a three-job process cap; other platforms use no extra cap.
+ *                    This is what turns lane wall time from
+ *                    Σ(lanes) back into max(lanes): with the SINGLE-PROCESS
+ *                    throttle (grant=2) it collapses to 1 (serial); with the fair
+ *                    orchestrator grant it opens back up so the lanes overlap.
  */
 export function planLaneConcurrency({ grant, perLaneCap, jobCount, concurrentJobCap = Number.POSITIVE_INFINITY }) {
 	const g = Math.max(1, Math.floor(Number(grant)) || 1);
@@ -250,49 +248,6 @@ export function planLaneConcurrency({ grant, perLaneCap, jobCount, concurrentJob
 	const perLane = Math.min(cap, g);
 	const maxConcurrent = Math.max(1, Math.min(jobs, jobCap, Math.floor(g / perLane)));
 	return { perLane, maxConcurrent };
-}
-
-/**
- * Deterministic per-job allocation. Windows funds process fairness first: up to
- * three jobs receive one worker, then any remaining grant may raise only the core
- * job to its cap. Thus grants 1..3 never let core monopolize a worker needed to
- * overlap another lane, while grant >=4 yields core=2 + two short one-fork jobs.
- * Integration and DOM always remain at one fork. Non-Windows preserves the
- * uniform planner above.
- */
-export function planLaneAllocation({
-	grant,
-	jobs,
-	platform = process.platform,
-	perLaneCap = resolvePerLaneForkCap({ platform }),
-	coreForkCap = resolveCoreForkCap({ platform }),
-	concurrentJobCap = defaultConcurrentLaneJobCap(platform),
-}) {
-	const g = Math.max(1, Math.floor(Number(grant)) || 1);
-	const plannedJobs = [...jobs];
-	if (platform !== "win32") {
-		const { perLane, maxConcurrent } = planLaneConcurrency({
-			grant: g,
-			perLaneCap,
-			jobCount: plannedJobs.length,
-			concurrentJobCap,
-		});
-		return { jobs: plannedJobs.map((job) => ({ ...job, forks: perLane })), maxConcurrent };
-	}
-
-	const requestedJobCap = Number(concurrentJobCap);
-	const jobCap = Number.isFinite(requestedJobCap)
-		? Math.max(1, Math.floor(requestedJobCap) || 1)
-		: plannedJobs.length;
-	const maxConcurrent = Math.max(1, Math.min(plannedJobs.length || 1, jobCap, g));
-	const safeCoreCap = Math.max(1, Math.floor(Number(coreForkCap)) || 1);
-	// Reserve one worker for every process that can run concurrently before giving
-	// core its second worker. This is the low-grant fairness invariant.
-	const coreForks = 1 + Math.min(safeCoreCap - 1, Math.max(0, g - maxConcurrent));
-	return {
-		jobs: plannedJobs.map((job) => ({ ...job, forks: job.name === "core" ? coreForks : 1 })),
-		maxConcurrent,
-	};
 }
 
 // Kill the complete lane process tree. Windows needs taskkill /T because killing
@@ -511,75 +466,60 @@ async function main() {
 	const uninstallTerminationHandlers = installRunTerminationHandlers(cleanup);
 	try {
 	const grant = Math.max(1, reservation.workerSlots || 1);
-	// Distribute the grant across lanes. Windows reserves one worker for each of
-	// its three process slots before raising only the long core lane to two forks;
-	// non-Windows keeps uniform per-lane allocation. The launch loop independently
-	// enforces activeWorkers <= grant while extra jobs queue in deterministic waves.
-	const allocation = planLaneAllocation({
+	// Distribute the grant across lanes: at most floor(grant/perLane) lanes run
+	// CONCURRENTLY (each `perLane` forks), so instantaneous forks = inFlight*perLane
+	// <= grant. Extra jobs queue and run in waves. This keeps us inside the
+	// reservation under concurrent goals instead of oversubscribing the box, while
+	// still overlapping the independent lanes (wall = max(lanes), not Σ lanes).
+	const { perLane, maxConcurrent } = planLaneConcurrency({
 		grant,
-		jobs,
 		perLaneCap: PER_LANE_FORK_CAP,
-		coreForkCap: CORE_FORK_CAP,
+		jobCount: jobs.length,
 		concurrentJobCap: defaultConcurrentLaneJobCap(),
 	});
-	const scheduledJobs = allocation.jobs;
-	const { maxConcurrent } = allocation;
 	const snap = readLedger();
 	const sigma = snap.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
 	console.log(`[unit-lanes] ledger grant=${grant} (parent=${reservation.parentRunId}, managedByParent=${reservation.managedByParent}); ledger Σ=${sigma}/${snap.totalCores}`);
-	console.log(`[unit-lanes] ${scheduledJobs.length} job(s), maxConcurrent=${maxConcurrent} (waves if jobs>maxConcurrent): ${scheduledJobs.map((j) => `${j.name}=${j.forks}`).join(", ")} forks`);
+	console.log(`[unit-lanes] ${jobs.length} job(s), perLane=${perLane} forks, maxConcurrent=${maxConcurrent} (waves if jobs>maxConcurrent): ${jobs.map((j) => j.name).join(", ")}`);
 
 	const startWall = performance.now();
 	// Live per-lane counters (updated by runLane as the reporter emits file lines).
 	const stats = {};
-	for (const j of scheduledJobs) stats[j.name] = { files: 0, tests: 0, failedTests: 0, failedFiles: [], failNotes: [], rpcTimeouts: 0, summarySeen: false, summaryFailed: 0, summaryPassed: 0, infraFlake: false, done: false, started: false, wallMs: 0 };
+	for (const j of jobs) stats[j.name] = { files: 0, tests: 0, failedTests: 0, failedFiles: [], failNotes: [], rpcTimeouts: 0, summarySeen: false, summaryFailed: 0, summaryPassed: 0, infraFlake: false, done: false, started: false, wallMs: 0 };
 
 	// Heartbeat: a compact progress line so the run is never silent and early
 	// feedback (counts + failures-so-far) is visible while work is in flight.
 	const heartbeat = setInterval(() => {
 		const el = ((performance.now() - startWall) / 1000).toFixed(0);
-		const parts = scheduledJobs.map((j) => {
+		const parts = jobs.map((j) => {
 			const s = stats[j.name];
 			if (!s.started) return `${j.name} · queued`;
 			const mark = s.done ? "✓done" : "…";
 			return `${j.name} ${mark} ${s.files}f/${s.tests}t${s.failedTests ? ` ✗${s.failedTests}` : ""}`;
 		});
-		const totT = scheduledJobs.reduce((a, j) => a + stats[j.name].tests, 0);
-		const totF = scheduledJobs.reduce((a, j) => a + stats[j.name].failedTests, 0);
+		const totT = jobs.reduce((a, j) => a + stats[j.name].tests, 0);
+		const totF = jobs.reduce((a, j) => a + stats[j.name].failedTests, 0);
 		console.log(`[unit-lanes +${el}s] ${totT} tests${totF ? `, ${totF} FAILED` : ""} | ${parts.join("  |  ")}`);
 	}, HEARTBEAT_MS);
 	cleanup.setHeartbeat(heartbeat);
 	if (typeof heartbeat.unref === "function") heartbeat.unref();
 
 	const results = [];
-	const queue = [...scheduledJobs];
+	const queue = [...jobs];
 	const active = new Set();
-	let activeWorkers = 0;
 	const launch = (j) => {
 		if (!j.projects.length) {
 			console.error(`[unit-lanes] unknown lane "${j.name}" (known: ${Object.keys(LANES).join(", ")})`);
 			return Promise.resolve({ name: j.name, projects: [], code: 1, wallMs: 0, error: "unknown lane" });
 		}
 		stats[j.name].started = true;
-		console.log(`▸ [${j.name}] started (${j.forks} forks): ${j.projects.join(", ")}${j.files ? ` · ${j.files.length} files` : ""}`);
-		return runLane(j.name, j.projects, j.forks, j.files, reservation.parentRunId, stats, cleanup);
+		console.log(`▸ [${j.name}] started (${perLane} forks): ${j.projects.join(", ")}${j.files ? ` · ${j.files.length} files` : ""}`);
+		return runLane(j.name, j.projects, perLane, j.files, reservation.parentRunId, stats, cleanup);
 	};
 	while (queue.length || active.size) {
 		while (queue.length && active.size < maxConcurrent) {
-			// Deterministic first-fit keeps queue order whenever possible while making
-			// the worker-grant bound explicit at the launch boundary.
-			const nextIndex = queue.findIndex((job) => activeWorkers + job.forks <= grant);
-			if (nextIndex < 0) break;
-			const [j] = queue.splice(nextIndex, 1);
-			activeWorkers += j.forks;
-			let p;
-			p = launch(j).then((r) => {
-				results.push(r);
-				return r;
-			}).finally(() => {
-				active.delete(p);
-				activeWorkers -= j.forks;
-			});
+			const j = queue.shift();
+			const p = launch(j).then((r) => { active.delete(p); results.push(r); return r; });
 			active.add(p);
 		}
 		if (active.size) await Promise.race(active);
@@ -594,10 +534,10 @@ async function main() {
 	}
 	const slowest = results.reduce((a, r) => (r.wallMs > a ? r.wallMs : a), 0);
 	const serialSum = results.reduce((a, r) => a + r.wallMs, 0);
-	const grandPassed = scheduledJobs.reduce((a, j) => a + (stats[j.name].summarySeen ? stats[j.name].summaryPassed : stats[j.name].tests), 0);
-	const grandFailed = scheduledJobs.reduce((a, j) => a + (stats[j.name].summarySeen ? stats[j.name].summaryFailed : stats[j.name].failedTests), 0);
-	const grandRpc = scheduledJobs.reduce((a, j) => a + stats[j.name].rpcTimeouts, 0);
-	console.log(`\n[unit-lanes] ${grandPassed} tests passed, ${grandFailed} failed across ${scheduledJobs.length} lane(s)${grandRpc ? ` · ${grandRpc} worker-RPC timeout(s) under load` : ""}`);
+	const grandPassed = jobs.reduce((a, j) => a + (stats[j.name].summarySeen ? stats[j.name].summaryPassed : stats[j.name].tests), 0);
+	const grandFailed = jobs.reduce((a, j) => a + (stats[j.name].summarySeen ? stats[j.name].summaryFailed : stats[j.name].failedTests), 0);
+	const grandRpc = jobs.reduce((a, j) => a + stats[j.name].rpcTimeouts, 0);
+	console.log(`\n[unit-lanes] ${grandPassed} tests passed, ${grandFailed} failed across ${jobs.length} lane(s)${grandRpc ? ` · ${grandRpc} worker-RPC timeout(s) under load` : ""}`);
 	console.log(`[unit-lanes] total wall ${(totalWallMs / 1000).toFixed(1)}s (slowest lane ${(slowest / 1000).toFixed(1)}s; serial-sum would be ${(serialSum / 1000).toFixed(1)}s)`);
 
 	// Real failures = lanes that failed AFTER the infra-flake downgrade.

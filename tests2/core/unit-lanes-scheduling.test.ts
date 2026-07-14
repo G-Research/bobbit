@@ -5,13 +5,12 @@
 // THE BUG THIS GUARDS AGAINST: run-unit-lanes is an orchestrator that spawns
 // MULTIPLE independent `vitest run --project ...` processes. Vitest 3.2 still
 // produced worker-RPC timeouts on Windows when all concurrent lanes used the old
-// two-fork default, so Windows keeps integration and DOM at one fork. The long
-// core lane, however, cannot finish inside the gate at one fork. It receives a
-// second fork only after the grant funds one worker for each of the three active
-// process slots. Windows also cost-balances integration over two disjoint one-fork
-// jobs, with at most three jobs active at once to avoid the four-process starvation
-// seen in gates; non-Windows retains the single integration job and uniform
-// grant-only concurrency. Its wall time is designed to be max(lanes), not
+// two-fork default, so Windows now defaults each lane to one fork while other
+// platforms keep two. A single one-fork integration lane then narrowly exceeded
+// the gate wall time, so Windows cost-balances its integration files over two
+// disjoint one-fork jobs, with at most three jobs active at once to avoid the
+// four-process starvation seen in gates; non-Windows retains the single integration
+// job and grant-only concurrency. Its wall time is designed to be max(lanes), not
 // Σ(lanes). Earlier it reserved its budget via
 // reserveWorkerSlots("vitest"), which returns the SINGLE-PROCESS throttle
 // STANDALONE_VITEST_CAP (=2). Feeding that (=2) into the scheduler as the TOTAL
@@ -24,10 +23,10 @@
 //      (up to VITEST_CAP), NOT the single-process throttle — while
 //      reserveWorkerSlots("vitest") standalone is UNCHANGED at 2 (a single direct
 //      vitest process must still stay under the RPC-safe per-process cap).
-//   2. planLaneAllocation() deterministically gives Windows core two forks only
-//      when the grant covers core=2 plus two short one-fork processes. Low grants
-//      fund process overlap before core parallelism, integration/DOM stay at one,
-//      and Windows never runs more than three lane processes.
+//   2. planLaneConcurrency() distributes that grant across lanes: perLane never
+//      exceeds the safe per-process cap, maxConcurrent stays within the ledger
+//      grant, and Windows additionally caps active lane jobs at three so the lanes
+//      overlap without four-process starvation.
 //   3. signal/error cleanup kills every active lane process tree and releases the
 //      single ledger reservation, preventing timed-out gates from leaking either.
 import { EventEmitter } from "node:events";
@@ -75,21 +74,16 @@ describe("unit-lanes orchestrator scheduling", () => {
 		try { rmSync(isolatedTmp, { recursive: true, force: true }); } catch { /* best-effort */ }
 	});
 
-	it("uses one fork for Windows short lanes and two for core by default", async () => {
-		const { defaultPerLaneForkCap, defaultCoreForkCap, resolvePerLaneForkCap, resolveCoreForkCap } = await loadLanes();
+	it("uses one fork per Windows lane by default while preserving overrides and non-Windows defaults", async () => {
+		const { defaultPerLaneForkCap, resolvePerLaneForkCap } = await loadLanes();
 		assert.equal(defaultPerLaneForkCap("win32"), 1);
-		assert.equal(defaultCoreForkCap("win32"), 2);
 		assert.equal(defaultPerLaneForkCap("linux"), 2);
-		assert.equal(defaultCoreForkCap("linux"), 2);
 		assert.equal(defaultPerLaneForkCap("darwin"), 2);
-		assert.equal(defaultCoreForkCap("darwin"), 2);
 		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: undefined }), 1);
-		assert.equal(resolveCoreForkCap({ platform: "win32", override: undefined }), 2);
-		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: "garbage" }), 1, "invalid overrides use the Windows short-lane default");
-		assert.equal(resolveCoreForkCap({ platform: "win32", override: "garbage" }), 2, "invalid overrides use the Windows core default");
+		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: "garbage" }), 1, "invalid overrides use the Windows default");
 		assert.equal(resolvePerLaneForkCap({ platform: "linux", override: "garbage" }), 2, "invalid overrides use the non-Windows default");
-		assert.equal(resolveCoreForkCap({ platform: "win32", override: "3" }), 3, "an explicit experimental override is preserved for core");
-		assert.equal(resolveCoreForkCap({ platform: "win32", override: "0" }), 1, "explicit values remain clamped to one");
+		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: "3" }), 3, "an explicit override is preserved");
+		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: "0" }), 1, "explicit values remain clamped to one");
 	});
 
 	it("defaults Windows integration to two shards while preserving overrides and non-Windows behavior", async () => {
@@ -148,8 +142,8 @@ describe("unit-lanes orchestrator scheduling", () => {
 		}
 	});
 
-	it("gives fair-grant Windows core two forks while keeping three one-fork short jobs", async () => {
-		const { planLaneAllocation, defaultConcurrentLaneJobCap, planLaneJobs } = await loadLanes();
+	it("caps the four-job Windows default at three concurrent lanes", async () => {
+		const { planLaneConcurrency, defaultConcurrentLaneJobCap, defaultPerLaneForkCap, planLaneJobs } = await loadLanes();
 		const jobs = planLaneJobs({
 			laneNames: ["core", "integration", "dom"],
 			platform: "win32",
@@ -157,72 +151,25 @@ describe("unit-lanes orchestrator scheduling", () => {
 		});
 		assert.equal(jobs.length, 4, "core + two integration shards + dom");
 		assert.equal(defaultConcurrentLaneJobCap("win32"), 3);
-		const plan = planLaneAllocation({ grant: 8, jobs, platform: "win32" });
-		assert.equal(plan.maxConcurrent, 3, "the fourth Windows process must wait for a second wave");
-		assert.deepEqual(plan.jobs.map((job: any) => [job.name, job.forks]), [
-			["core", 2],
-			["integration-1", 1],
-			["integration-2", 1],
-			["dom", 1],
-		]);
-		assert.deepEqual(jobs.map((job: any) => job.forks), [undefined, undefined, undefined, undefined], "planning must not mutate lane definitions");
+		const plan = planLaneConcurrency({
+			grant: 8,
+			perLaneCap: defaultPerLaneForkCap("win32"),
+			jobCount: jobs.length,
+			concurrentJobCap: defaultConcurrentLaneJobCap("win32"),
+		});
+		assert.deepEqual(plan, { perLane: 1, maxConcurrent: 3 });
 	});
 
-	it("funds low-grant Windows process fairness before a second core fork", async () => {
-		const { planLaneAllocation } = await loadLanes();
-		const jobs = [{ name: "core" }, { name: "integration-1" }, { name: "integration-2" }, { name: "dom" }];
-		for (const grant of [1, 2, 3]) {
-			const plan = planLaneAllocation({ grant, jobs, platform: "win32" });
-			assert.equal(plan.maxConcurrent, grant, `grant=${grant} should fund ${grant} one-fork process slot(s)`);
-			assert.deepEqual(plan.jobs.map((job: any) => job.forks), [1, 1, 1, 1], `grant=${grant} must not let core reduce lane overlap`);
-		}
-		const plan = planLaneAllocation({ grant: 4, jobs, platform: "win32" });
-		assert.equal(plan.maxConcurrent, 3);
-		assert.deepEqual(plan.jobs.map((job: any) => job.forks), [2, 1, 1, 1], "the first worker beyond three-way overlap goes to core");
-
-		assert.deepEqual(
-			planLaneAllocation({ grant: 2, jobs: [{ name: "core" }], platform: "win32" }).jobs.map((job: any) => job.forks),
-			[2],
-			"a core-only run may use its second fork as soon as the total instantaneous grant covers it",
-		);
-		assert.deepEqual(
-			planLaneAllocation({ grant: 2, jobs: [{ name: "core" }, { name: "dom" }], platform: "win32" }).jobs.map((job: any) => job.forks),
-			[1, 1],
-			"a two-worker grant must overlap core and DOM rather than monopolize both workers in core",
-		);
-		assert.deepEqual(
-			planLaneAllocation({ grant: 3, jobs: [{ name: "core" }, { name: "dom" }], platform: "win32" }).jobs.map((job: any) => job.forks),
-			[2, 1],
-			"core gets its second fork once both active processes remain funded",
-		);
-	});
-
-	it("keeps every possible Windows wave within the ledger grant", async () => {
-		const { planLaneAllocation } = await loadLanes();
-		const jobs = [{ name: "core" }, { name: "integration-1" }, { name: "integration-2" }, { name: "dom" }];
-		for (const grant of [1, 2, 3, 4, 6, 8]) {
-			const plan = planLaneAllocation({ grant, jobs, platform: "win32" });
-			const largestWave = plan.jobs
-				.map((job: any) => job.forks)
-				.sort((a: number, b: number) => b - a)
-				.slice(0, plan.maxConcurrent)
-				.reduce((sum: number, forks: number) => sum + forks, 0);
-			assert.ok(largestWave <= grant, `grant=${grant}: ${largestWave} instantaneous workers must fit the ledger grant`);
-			assert.ok(plan.maxConcurrent <= 3, "Windows must never run four lane processes at once");
-			for (const job of plan.jobs.filter((candidate: any) => candidate.name !== "core")) {
-				assert.equal(job.forks, 1, `${job.name} must remain at one fork`);
-			}
-		}
-	});
-
-	it("preserves non-Windows uniform scheduling and Windows shard/core overrides", async () => {
-		const { planLaneAllocation, defaultConcurrentLaneJobCap, planLaneJobs } = await loadLanes();
+	it("preserves non-Windows grant scheduling and Windows fork/shard overrides", async () => {
+		const { planLaneConcurrency, defaultConcurrentLaneJobCap, resolvePerLaneForkCap, planLaneJobs } = await loadLanes();
 		assert.equal(defaultConcurrentLaneJobCap("linux"), Number.POSITIVE_INFINITY);
 		assert.equal(defaultConcurrentLaneJobCap("darwin"), Number.POSITIVE_INFINITY);
-		const linuxJobs = [{ name: "core" }, { name: "integration" }, { name: "dom" }, { name: "extra" }];
-		const linuxPlan = planLaneAllocation({ grant: 8, jobs: linuxJobs, platform: "linux", perLaneCap: 2 });
-		assert.equal(linuxPlan.maxConcurrent, 4, "non-Windows remains limited only by its ledger grant");
-		assert.deepEqual(linuxPlan.jobs.map((job: any) => job.forks), [2, 2, 2, 2]);
+		assert.deepEqual(planLaneConcurrency({
+			grant: 8,
+			perLaneCap: 2,
+			jobCount: 4,
+			concurrentJobCap: defaultConcurrentLaneJobCap("linux"),
+		}), { perLane: 2, maxConcurrent: 4 }, "non-Windows remains limited only by its ledger grant");
 
 		const jobs = planLaneJobs({
 			laneNames: ["core", "integration", "dom"],
@@ -235,10 +182,12 @@ describe("unit-lanes orchestrator scheduling", () => {
 			],
 		});
 		assert.equal(jobs.length, 5, "explicit three-shard override remains effective");
-		const windowsPlan = planLaneAllocation({ grant: 8, jobs, platform: "win32", coreForkCap: 3 });
-		assert.equal(windowsPlan.maxConcurrent, 3, "active Windows jobs stay capped");
-		assert.equal(windowsPlan.jobs.find((job: any) => job.name === "core").forks, 3, "the core-only experimental fork override is preserved");
-		assert.ok(windowsPlan.jobs.filter((job: any) => job.name !== "core").every((job: any) => job.forks === 1), "short lanes remain at one fork despite a core override");
+		assert.deepEqual(planLaneConcurrency({
+			grant: 8,
+			perLaneCap: resolvePerLaneForkCap({ platform: "win32", override: "2" }),
+			jobCount: jobs.length,
+			concurrentJobCap: defaultConcurrentLaneJobCap("win32"),
+		}), { perLane: 2, maxConcurrent: 3 }, "fork override is preserved while active jobs stay capped");
 	});
 
 	it("planLaneConcurrency never raises a lane above the per-process fork cap", async () => {
@@ -316,15 +265,10 @@ describe("unit-lanes orchestrator scheduling", () => {
 			const rec = snap.reservations.find((r: any) => r.id === orch.reservationId);
 			assert.equal(rec?.workerSlots, orch.workerSlots, "the persisted reservation must match the returned grant");
 			assert.equal(snap.reservations.length, 1, "the orchestrator holds exactly ONE ledger entry for the run");
-			// The fair grant unblocks three-process overlap and the second core fork.
-			const { planLaneAllocation } = await loadLanes();
-			const plan = planLaneAllocation({
-				grant: orch.workerSlots,
-				jobs: [{ name: "core" }, { name: "integration" }, { name: "dom" }],
-				platform: "win32",
-			});
-			assert.equal(plan.maxConcurrent, 3, `fair grant ${orch.workerSlots} must run all 3 lanes concurrently`);
-			assert.equal(plan.jobs[0].forks, 2, `fair grant ${orch.workerSlots} must fund core's second fork`);
+			// The fair grant unblocks concurrency: maxConcurrent >= 3 for the 3 lanes.
+			const { planLaneConcurrency } = await loadLanes();
+			const plan = planLaneConcurrency({ grant: orch.workerSlots, perLaneCap: 2, jobCount: 3 });
+			assert.ok(plan.maxConcurrent >= 3, `fair grant ${orch.workerSlots} must run all 3 lanes concurrently, got maxConcurrent=${plan.maxConcurrent}`);
 		} finally {
 			orch.release();
 		}
