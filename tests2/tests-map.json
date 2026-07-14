@@ -32,6 +32,10 @@
       "reason": "Chromium workflow-editor journey for type-aware command/llm-review/agent-qa timeout placeholders and help, explicit-shorter persistence, invalid-value normalization, and stale timeout removal when switching to human-signoff."
     },
     {
+      "path": "tests2/browser/verification-timeout-remediation.spec.ts",
+      "reason": "Deterministic Chromium journey using the real gate inspect/live renderers to pin structured timeout presentation, marker-derived timing, failed aggregate semantics, remediation validation, current/future/both scope routing, inherited-workflow customization ordering, active-snapshot isolation, and partial inline errors."
+    },
+    {
       "path": "tests2/core/model-state-frame-preservation.test.ts",
       "reason": "Pinning tests for buildResolvedModelStateModel (ws/handler.ts): custom/unknown provider (resolver source=inferred) preserves live contextWindow/maxTokens/reasoning/thinkingLevelMap, while known Fable model still gets authoritative catalog metadata incl. thinkingLevelMap.max over stale live base."
     },
