@@ -829,10 +829,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const termination = manager.terminateSession(ps.id);
 		oldStopGate.resolve();
 
-		await expect(Promise.all([followUp, termination])).resolves.toEqual([
-			{ status: "dispatched" },
-			true,
-		]);
+		await expect(followUp).rejects.toThrow("respawn cancelled by terminate");
+		await expect(termination).resolves.toBe(true);
 		expect(poisonBridge.prompt).not.toHaveBeenCalled();
 		expect(manager.sessions.has(ps.id)).toBe(false);
 		expect(manager._testStore.archive).toHaveBeenCalledWith(ps.id);
@@ -875,11 +873,63 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(original.status).toBe("terminated");
 	});
 
-	it("finalizes the canonical generation after a queued forceAbort becomes a no-op", async () => {
+	it("keeps Stop sticky across poison recovery and cancels a queued role install", async () => {
+		const file = hostTranscript("poison-role-stop-sticky");
+		const oldStopGate = deferred<void>();
+		const poisonBridge = recordingBridge(() => {});
+		poisonBridge.stop = vi.fn(async () => {});
+		poisonBridge.prompt = vi.fn(async () => ({ success: true }));
+		const factory = vi.fn(() => poisonBridge);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("poison-role-stop-sticky", file);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn((_id: string, patch: Record<string, unknown>) => Object.assign(ps, patch)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => {});
+		oldBridge.stop = vi.fn(() => oldStopGate.promise);
+		const original = liveSession(ps.id, oldBridge, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+		});
+		manager.sessions.set(ps.id, original);
+		const stagedRole = vi.spyOn(manager, "_assignRoleStaged");
+
+		const followUp = manager.enqueuePrompt(ps.id, "intent remains after sticky Stop");
+		await vi.waitFor(() => expect(oldBridge.stop).toHaveBeenCalledTimes(1));
+		const assignment = manager.assignRole(ps.id, {
+			name: "must-not-install",
+			promptTemplate: "Must not install",
+			accessory: "none",
+		});
+		const stop = manager.forceAbort(ps.id, 5);
+		oldStopGate.resolve();
+
+		await expect(followUp).rejects.toThrow("respawn cancelled by stop");
+		await expect(assignment).resolves.toBe(false);
+		await expect(stop).resolves.toBeUndefined();
+		expect(stagedRole).not.toHaveBeenCalled();
+		expect(factory).toHaveBeenCalledTimes(1);
+		expect(poisonBridge.stop).toHaveBeenCalledTimes(1);
+		expect(poisonBridge.prompt).not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect(original.status).toBe("terminated");
+		expect(original.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["intent remains after sticky Stop"]);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
+	it("cancels an active staged role on Stop and restores the untouched canonical bridge", async () => {
 		const file = hostTranscript("assign-role-noop-abort-generation");
 		const startGate = deferred<void>();
 		const replacement = recordingBridge(() => {});
 		replacement.start = vi.fn(() => startGate.promise);
+		replacement.stop = vi.fn(async () => {});
 		replacement.prompt = vi.fn(async () => ({ success: true }));
 		const ps = persisted("assign-role-noop-abort-generation", file);
 		const manager = makeManager(ps, replacement);
@@ -898,14 +948,18 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const abort = manager.forceAbort(ps.id, 5);
 
 		startGate.resolve();
-		await expect(Promise.all([assignment, abort])).resolves.toEqual([true, undefined]);
+		await expect(assignment).rejects.toThrow("superseded before old bridge stop");
+		await expect(abort).resolves.toBeUndefined();
 
 		const canonical = manager.sessions.get(ps.id);
 		expect(canonical.lifecycleGeneration).toBe(manager._currentRespawnGeneration(ps.id));
 		expect(canonical.lifecycleFenced).not.toBe(true);
-		expect(replacement.prompt).toHaveBeenCalledTimes(1);
-		expect(replacement.prompt).toHaveBeenCalledWith("intent survives queued no-op Stop", undefined);
-		expect(canonical.promptQueue.isEmpty).toBe(true);
+		expect(canonical.rpcClient).toBe(oldBridge);
+		expect(canonical.status).toBe("idle");
+		expect(replacement.stop).toHaveBeenCalledTimes(1);
+		expect(replacement.prompt).not.toHaveBeenCalled();
+		expect(canonical.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["intent survives queued no-op Stop"]);
 	});
 
 	it("preserves prompt acceptance order before and after replacement installation", async () => {
@@ -960,7 +1014,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const termination = manager.terminateSession(ps.id);
 
 		startGate.resolve();
-		await expect(Promise.all([restart, termination])).resolves.toEqual([undefined, true]);
+		await expect(restart).rejects.toThrow("respawn cancelled by terminate");
+		await expect(termination).resolves.toBe(true);
 
 		expect(manager.sessions.has(ps.id)).toBe(false);
 		expect(replacement.stop).toHaveBeenCalledTimes(1);

@@ -244,6 +244,76 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		), "durable restart bookkeeping records an idle session");
 	});
 
+	it("performs hard-abort terminal bookkeeping before replacement grant derivation", async () => {
+		registerRpcBridgeFactory(() => { throw new Error("stop after activation capture"); });
+		const manager: any = new SessionManager();
+		const update = vi.fn(() => {});
+		const persisted: any = {
+			id: "s-hard-bookkeeping",
+			modelProvider: "anthropic",
+			wasStreaming: true,
+			allowedTools: ["read", "write"],
+		};
+		manager._testStore = { update, get: vi.fn(() => persisted) };
+		manager.lifecycleHub = { dispatch: vi.fn(async () => {}) };
+		const resolveIdleWaiters = vi.fn();
+		manager.resolveIdleWaiters = resolveIdleWaiters;
+		let activationAllowed: string[] | undefined;
+		manager.buildToolActivationArgs = (_id: string, allowed: any[] | undefined) => {
+			activationAllowed = allowed?.map((entry: any) => entry.name);
+			return { args: [], env: {}, runtimeExtensions: [] };
+		};
+		managers.push(manager);
+
+		const session: any = {
+			id: persisted.id,
+			title: "Hard bookkeeping",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "streaming",
+			statusVersion: 1,
+			streamingStartedAt: Date.now(),
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			allowedTools: ["read", "write"],
+			oneTimeGrantedTools: ["write"],
+			completedTurnCount: 2,
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "abort artifact",
+			consecutiveErrorTurns: 1,
+			setupComplete: true,
+			unsubscribe: vi.fn(),
+			rpcClient: {
+				abort: () => new Promise<void>(() => {}),
+				onEvent: () => () => {},
+				getState: async () => ({ success: false }),
+				stop: vi.fn(async () => {}),
+			},
+		};
+		manager.sessions.set(session.id, session);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await manager.forceAbort(session.id, 20);
+		await vi.waitFor(() => assert.equal(manager.lifecycleHub.dispatch.mock.calls.length, 1));
+
+		assert.equal(session.completedTurnCount, 3);
+		assert.deepEqual(session.oneTimeGrantedTools, []);
+		assert.deepEqual(session.allowedTools, ["read"]);
+		assert.deepEqual(activationAllowed, ["read"], "replacement activation cannot inherit the spent one-turn grant");
+		assert.equal(session.lastTurnErrored, false);
+		assert.equal(session.lastTurnErrorMessage, undefined);
+		assert.equal(session.consecutiveErrorTurns, 0);
+		assert.equal(session.streamingStartedAt, undefined);
+		assert.equal(resolveIdleWaiters.mock.calls.length, 1);
+		assert.ok(update.mock.calls.some(([, patch]: any[]) =>
+			patch.wasStreaming === false && patch.streamingStartedAt === undefined
+		), "hard abort durably records terminal idle bookkeeping");
+	});
+
 	it("cancels a pending auto-retry timer even when not streaming (S40)", async () => {
 		const manager: any = new SessionManager();
 		manager._testStore = { update: vi.fn(() => {}), get: vi.fn(() => undefined) };

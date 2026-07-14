@@ -30,19 +30,21 @@ afterEach(() => {
 	}
 });
 
-function bridge(prompts: Array<{ text: string; images?: unknown }>): any {
+function bridge(prompts: Array<{ text: string; images?: unknown }>, rejectWith?: string): any {
 	return {
 		running: true,
 		async stop() {},
 		prompt(text: string, images?: unknown) {
 			prompts.push({ text, images });
-			return Promise.resolve({ success: true });
+			return Promise.resolve(rejectWith
+				? { success: false, error: rejectWith }
+				: { success: true });
 		},
 		onEvent() { return () => {}; },
 	};
 }
 
-function harness(options?: { hadToolCalls?: boolean; queue?: string[] }) {
+function harness(options?: { hadToolCalls?: boolean; queue?: string[]; rejectRedriveWith?: string }) {
 	const oldPrompts: Array<{ text: string; images?: unknown }> = [];
 	const newPrompts: Array<{ text: string; images?: unknown }> = [];
 	const manager: any = new SessionManager();
@@ -104,7 +106,7 @@ function harness(options?: { hadToolCalls?: boolean; queue?: string[] }) {
 		manager.sessions.delete(current.id);
 		await Promise.resolve();
 		const { pendingSkillExpansions: _discardedEnvelope, ...restoredState } = current;
-		const restored = { ...restoredState, rpcClient: bridge(newPrompts) };
+		const restored = { ...restoredState, rpcClient: bridge(newPrompts, options?.rejectRedriveWith) };
 		manager.sessions.set(current.id, restored);
 		return restored;
 	};
@@ -176,6 +178,28 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["already parked"]);
 		assert.equal(restored.lastPromptSource, "user");
 		assert.doesNotMatch(h.newPrompts[0].text, /previous turn failed/i);
+	});
+
+	it("keeps a rejected poison redrive durable exactly once and restores idle error state", async () => {
+		const h = harness({ rejectRedriveWith: "fixture canonical bridge rejected redrive" });
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		await assert.rejects(
+			() => h.manager.enqueuePrompt(h.session.id, "intent survives rejected redrive", { source: "user" }),
+			/fixture canonical bridge rejected redrive/,
+		);
+
+		const restored = h.manager.sessions.get(h.session.id);
+		const rows = restored.promptQueue.toArray();
+		assert.deepEqual(rows.map((row: any) => row.text), ["intent survives rejected redrive"]);
+		assert.equal(new Set(rows.map((row: any) => row.id)).size, 1, "rejection must not duplicate the durable row");
+		assert.deepEqual(h.persistedRecord.messageQueue, rows, "the surviving intent remains durable");
+		assert.equal(restored.status, "idle", "rejected canonical dispatch rolls streaming back to idle");
+		assert.equal(restored.lastTurnErrored, true);
+		assert.equal(restored.lastTurnErrorMessage, "fixture canonical bridge rejected redrive");
+		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rows[0].id]);
+		assert.equal(restored.lifecycleGeneration, h.manager._currentRespawnGeneration(h.session.id));
 	});
 
 	it("durably parks every distinct concurrent follow-up when their shared recovery rejects", async () => {
