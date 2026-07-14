@@ -120,6 +120,19 @@ function toolResultIds(content: string): unknown[] {
 		.map((entry) => entry.message.toolCallId);
 }
 
+const MESSAGE_LEVEL_TOOL_RESULT_ROLES = ["toolResult", "tool_result", "tool"] as const;
+const PERSISTED_TOOL_USE_ID_KEYS = ["toolCallId", "toolUseId", "tool_use_id", "tool_call_id", "id"] as const;
+
+function rawAliasSequence(role: string, idKey: string, valid: boolean): string {
+	const assistantContent = valid
+		? `[{"type":"toolCall","id":"alias-call","name":"read","arguments":{"path":"fixture"}}]`
+		: `[{"type":"text","text":"No tool call was persisted."}]`;
+	return [
+		`{"type":"message","id":"alias-assistant","parentId":null,"message":{"role":"assistant","content":${assistantContent}}}`,
+		`{"type":"message","id":"alias-result","parentId":"alias-assistant","message":{"role":"${role}","${idKey}":"alias-call","toolName":"read","content":[{"type":"text","text":"ok"}],"isError":false}}`,
+	].join("\n") + "\n";
+}
+
 const AFFECTED_PI_0806_SEQUENCE = jsonl([
 	{
 		type: "message",
@@ -246,6 +259,34 @@ describe("sanitizeTranscriptContent — orphan Pi tool results", () => {
 			result("r", "a", "compat-call"),
 		]);
 		expect(sanitizeTranscriptContent(source)).toEqual({ content: source, changed: false, rewritten: 0 });
+	});
+
+	it("removes orphaned raw JSONL rows for every message-level result role and persisted id alias", () => {
+		for (const role of MESSAGE_LEVEL_TOOL_RESULT_ROLES) {
+			for (const idKey of PERSISTED_TOOL_USE_ID_KEYS) {
+				const source = rawAliasSequence(role, idKey, false);
+				const repaired = sanitizeTranscriptContent(source);
+
+				expect(repaired, `${role}.${idKey}`).toEqual({
+					content: source.split("\n")[0] + "\n",
+					changed: true,
+					rewritten: 1,
+				});
+			}
+		}
+	});
+
+	it("preserves valid raw JSONL alias pairs byte-for-byte and remains idempotent", () => {
+		for (const role of MESSAGE_LEVEL_TOOL_RESULT_ROLES) {
+			for (const idKey of PERSISTED_TOOL_USE_ID_KEYS) {
+				const source = rawAliasSequence(role, idKey, true);
+				const once = sanitizeTranscriptContent(source);
+				const twice = sanitizeTranscriptContent(once.content);
+
+				expect(once, `${role}.${idKey} first pass`).toEqual({ content: source, changed: false, rewritten: 0 });
+				expect(twice, `${role}.${idKey} second pass`).toEqual(once);
+			}
+		}
 	});
 
 	it("preserves interrupted and incomplete assistant turns", () => {

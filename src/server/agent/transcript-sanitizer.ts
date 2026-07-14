@@ -4,8 +4,8 @@
  * a blank text body.
  *
  * Orphan repair follows Pi's parent-linked active branch and latest compaction
- * projection. A message-level `toolResult` is removed only when the current
- * assistant result run does not contain its id; unrelated inactive records and
+ * projection. A message-level `toolResult`/`tool_result`/`tool` is removed only
+ * when the current assistant result run does not contain its id; unrelated inactive records and
  * lines remain byte-identical, while every surviving branch minimally bypasses
  * a removed shared-ancestor link.
  *
@@ -187,16 +187,29 @@ function projectedContextBranch(branch: ParsedTranscriptLine[]): ParsedTranscrip
 	return [...keptTail, ...branch.slice(compactionIndex + 1)];
 }
 
+const TOOL_USE_ID_KEYS = ["toolCallId", "toolUseId", "tool_use_id", "tool_call_id", "id"] as const;
+
+function persistedToolUseId(value: unknown): string | null {
+	if (!value || typeof value !== "object") return null;
+	for (const key of TOOL_USE_ID_KEYS) {
+		const id = (value as Record<string, unknown>)[key];
+		if (typeof id === "string" && id.trim().length > 0) return id;
+	}
+	return null;
+}
+
+function isMessageLevelToolResultRole(role: unknown): boolean {
+	return role === "toolResult" || role === "tool_result" || role === "tool";
+}
+
 function assistantToolCallIds(content: unknown): Set<string> {
 	const ids = new Set<string>();
 	if (!Array.isArray(content)) return ids;
 	for (const block of content) {
 		if (!block || typeof block !== "object") continue;
 		const type = (block as any).type;
-		const id = (block as any).id;
-		if ((type === "toolCall" || type === "tool_use") && typeof id === "string" && id.trim().length > 0) {
-			ids.add(id);
-		}
+		const id = persistedToolUseId(block);
+		if ((type === "toolCall" || type === "tool_use") && id) ids.add(id);
 	}
 	return ids;
 }
@@ -229,13 +242,9 @@ function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number
 			pendingToolCallIds = assistantToolCallIds(message.content);
 			continue;
 		}
-		if (message.role === "toolResult") {
-			const toolCallId = message.toolCallId;
-			if (
-				typeof toolCallId !== "string" ||
-				toolCallId.trim().length === 0 ||
-				!pendingToolCallIds?.has(toolCallId)
-			) {
+		if (isMessageLevelToolResultRole(message.role)) {
+			const toolCallId = persistedToolUseId(message);
+			if (!toolCallId || !pendingToolCallIds?.has(toolCallId)) {
 				orphanLines.add(record.lineIndex);
 			} else {
 				// One result settles one call. Repeated results for the same id are
@@ -253,7 +262,7 @@ function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number
 }
 
 /**
- * Remove structurally orphaned message-level Pi `toolResult` records from the
+ * Remove structurally orphaned message-level Pi tool-result records from the
  * active context branch. Untouched JSONL lines remain byte-identical. Every
  * surviving child whose parent chain crosses a removed record is minimally
  * reparented to the nearest retained ancestor, including children on inactive
