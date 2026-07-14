@@ -4322,6 +4322,8 @@ export class SessionManager {
 		// Record it for the current canonical generation even while a replacement
 		// coordinator suppresses ordinary lifecycle effects: poison redrive and boot
 		// continuation deliberately dispatch before that coordinator releases.
+		const coordinator = this._sessionReplacementCoordinators.get(session.id);
+		const writerIsCurrent = this._sessionWriterIsCurrent(session);
 		const observesAcceptedTurn =
 			event.type === "agent_start" ||
 			event.type === "tool_execution_start" ||
@@ -4330,20 +4332,23 @@ export class SessionManager {
 				event.message?.role === "user-with-attachments" ||
 				event.message?.role === "assistant"
 			));
-		if (observesAcceptedTurn && this._sessionWriterIsCurrent(session)) {
+		if (observesAcceptedTurn && writerIsCurrent) {
 			session.agentObservedTurnVersion = (session.agentObservedTurnVersion ?? 0) + 1;
 			// Boot continuation may receive agent_start before its prompt RPC ack while
-			// coordinator ownership suppresses the ordinary agent_start branch below.
+			// coordinator ownership remains installed.
 			if (event.type === "agent_start") this._bootRepromptedSessions.delete(session.id);
 		}
 
-		// A coordinated replacement may keep the old bridge subscribed until its
-		// successor is validated. Fence all other lifecycle side effects during that
-		// window: accepted intent belongs to the eventual canonical bridge, never this
-		// writer. Graceful force-abort is the sole exception: it replays the canonical
-		// terminal events exactly once because the ordinary listener was fenced while
-		// Stop owned the coordinator.
-		if (this._sessionReplacementCoordinators.has(session.id) && !opts?.replacementOwnedTerminal) return;
+		// A coordinated replacement may keep a superseded bridge subscribed until its
+		// successor is validated. Fence only those stale writers. The final canonical
+		// bridge can already be running a poison redrive or boot continuation while its
+		// prompt RPC acknowledgement is pending; its terminal lifecycle must still make
+		// the session idle, record errors, and complete turn bookkeeping. Queue draining
+		// is deferred until coordinator release so the still-durable acceptance row is
+		// consumed before anything can be dispatched again.
+		if (coordinator && !opts?.replacementOwnedTerminal && !writerIsCurrent) return;
+		const deferQueueDrain = opts?.deferQueueDrain === true
+			|| (!!coordinator && !opts?.replacementOwnedTerminal);
 
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
@@ -4539,10 +4544,14 @@ export class SessionManager {
 				// Fresh budget for the one-microtask drainQueue→finishRun race on
 				// this turn boundary (see MAX_RECOVER_DRAIN_RETRIES).
 				session.recoverDrainAttempts = 0;
-				// A graceful Stop replays terminal bookkeeping while replacement
-				// ownership is still held. The coordinator performs the sole drain.
-				if (!opts?.deferQueueDrain) this.drainQueue(session);
-			} else if (!opts?.deferQueueDrain) {
+				// A graceful Stop or canonical coordinated prompt performs terminal
+				// bookkeeping while replacement ownership is still held. The coordinator
+				// performs the sole drain after prompt acknowledgement settles.
+				if (!deferQueueDrain) this.drainQueue(session);
+				else if (coordinator && writerIsCurrent && !opts?.replacementOwnedTerminal) {
+					coordinator.drainOnRelease = true;
+				}
+			} else if (!deferQueueDrain) {
 				// Auto-retry transient model/streaming glitches (e.g. malformed
 				// tool-call JSON from the model's streamed input_json_delta).
 				// Matches the set of patterns the verification harness already
@@ -6211,6 +6220,13 @@ export class SessionManager {
 		// Mark streaming as a second fence for the instant after coordinator release,
 		// including the case where agent_start arrived before the RPC acknowledgement.
 		this.markPromptDispatchStreaming(session);
+		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
+		const markAccepted = (): boolean => {
+			if (!this._sessionWriterIsCurrent(session)) return false;
+			session.restoreStartupWasStreaming = false;
+			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false });
+			return true;
+		};
 		try {
 			const response = await session.rpcClient.promptWhenReady(
 				"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
@@ -6227,10 +6243,20 @@ export class SessionManager {
 			// Clear the durable marker only after the final canonical bridge accepts
 			// the continuation. A gateway death during provisional restore therefore
 			// rehydrates wasStreaming=true and safely tries again on the next boot.
-			if (!this._sessionWriterIsCurrent(session)) return;
-			session.restoreStartupWasStreaming = false;
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false });
+			markAccepted();
 		} catch (err) {
+			// A terminal event proves Pi accepted and completed the continuation even
+			// when the command acknowledgement subsequently rejects or times out. Keep
+			// that completed lifecycle and clear the durable boot marker rather than
+			// scheduling the same continuation again after a later gateway restart.
+			if ((session.agentObservedTurnVersion ?? 0) !== dispatchObservedTurnVersion && markAccepted()) {
+				this._bootRepromptedSessions.delete(session.id);
+				const reason = err instanceof Error ? err.message : String(err);
+				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
+				console.warn(`[session-manager] Boot continuation for ${session.id} reported ${safeReason} after agent observed the turn; treating the dispatch as accepted`);
+				return;
+			}
 			this._bootRepromptedSessions.delete(session.id);
 			if (this._sessionWriterIsCurrent(session) && session.status === "streaming") {
 				broadcastStatus(session, "idle");
@@ -8411,6 +8437,13 @@ export class SessionManager {
 		if (!session) return false;
 		if (!this._replacementTokenIsCurrent(id, token) || token.coordinator.terminalRequest) {
 			throw new Error(`Session ${id} role replacement was superseded before staging`);
+		}
+		// A request can join during a session-map gap, but the preceding coordinated
+		// operation may have dispatched a continuation/redrive before this queued turn
+		// starts. Re-check the final canonical state here so role assignment never stops
+		// an active bridge merely because a coordinator existed at API-entry time.
+		if (session.status === "streaming") {
+			throw new Error("Cannot assign role while agent is streaming");
 		}
 		// Get the agent session file so we can restore conversation. A structured
 		// getState rejection is just as much a fallback case as a thrown RPC error;

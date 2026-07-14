@@ -337,17 +337,30 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager.sessions.get(ps.id)?.promptQueue.isEmpty).toBe(true);
 	});
 
-	it("keeps boot continuation dispatch fenced until promptWhenReady settles", async () => {
+	it("keeps boot continuation fenced and preserves terminal lifecycle before delayed prompt acknowledgement", async () => {
 		const file = hostTranscript("boot-continuation-dispatch-fence");
 		const bootEntered = deferred<void>();
 		const bootAccepted = deferred<void>();
+		let listener: ((event: any) => void) | undefined;
 		const bridge = recordingBridge(() => {});
+		bridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
 		bridge.promptWhenReady = vi.fn(async () => {
 			bootEntered.resolve();
 			await bootAccepted.promise;
 			return { success: true };
 		});
-		bridge.prompt = vi.fn(async () => ({ success: true }));
+		bridge.prompt = vi.fn(async () => {
+			listener?.({ type: "agent_start" });
+			listener?.({
+				type: "message_end",
+				message: { role: "assistant", content: [{ type: "text", text: "queued done" }], stopReason: "stop" },
+			});
+			listener?.({ type: "agent_end", messages: [] });
+			return { success: true };
+		});
 		const ps = persisted("boot-continuation-dispatch-fence", file, { wasStreaming: true });
 		const manager = makeManager(ps, bridge);
 
@@ -358,18 +371,67 @@ describe("executable SessionManager rehydration boundaries", () => {
 		await expect(manager.enqueuePrompt(ps.id, "accepted while boot prompt is pending"))
 			.resolves.toEqual({ status: "queued" });
 		expect(bridge.prompt).not.toHaveBeenCalled();
-		expect(manager.sessions.get(ps.id)?.promptQueue.toArray().map((row: any) => row.text))
+
+		listener?.({ type: "agent_start" });
+		listener?.({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "continued" }], stopReason: "stop" },
+		});
+		listener?.({ type: "agent_end", messages: [] });
+		const canonicalBeforeAck = manager.sessions.get(ps.id);
+		expect(canonicalBeforeAck?.status).toBe("idle");
+		expect(canonicalBeforeAck?.completedTurnCount).toBe(1);
+		expect(canonicalBeforeAck?.promptQueue.toArray().map((row: any) => row.text))
 			.toEqual(["accepted while boot prompt is pending"]);
+		expect(bridge.prompt).not.toHaveBeenCalled();
 
 		bootAccepted.resolve();
 		await restore;
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
-		expect(bridge.prompt).not.toHaveBeenCalled();
+		expect(bridge.prompt).toHaveBeenCalledTimes(1);
+		expect(bridge.prompt).toHaveBeenCalledWith("accepted while boot prompt is pending", undefined);
+		const canonical = manager.sessions.get(ps.id);
+		expect(canonical?.status).toBe("idle");
+		expect(canonical?.promptQueue.isEmpty).toBe(true);
+		expect(canonical?.completedTurnCount).toBe(2);
+	});
+
+	it("treats a rejected boot-continuation acknowledgement as accepted after terminal lifecycle", async () => {
+		const file = hostTranscript("boot-continuation-terminal-before-rejection");
+		const bootEntered = deferred<void>();
+		const rejectAck = deferred<void>();
+		let listener: ((event: any) => void) | undefined;
+		const bridge = recordingBridge(() => {});
+		bridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		bridge.promptWhenReady = vi.fn(async () => {
+			bootEntered.resolve();
+			await rejectAck.promise;
+			throw new Error("Command timed out: prompt");
+		});
+		const ps = persisted("boot-continuation-terminal-before-rejection", file, { wasStreaming: true });
+		const manager = makeManager(ps, bridge);
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		const restore = manager._restoreSessionCoalesced(ps);
+		await bootEntered.promise;
+		listener?.({ type: "agent_start" });
+		listener?.({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "continued" }], stopReason: "stop" },
+		});
+		listener?.({ type: "agent_end", messages: [] });
+		rejectAck.resolve();
+		await restore;
 
 		const canonical = manager.sessions.get(ps.id);
-		manager.handleAgentLifecycle(canonical, { type: "agent_end", messages: [] });
-		await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-		expect(bridge.prompt).toHaveBeenCalledWith("accepted while boot prompt is pending", undefined);
+		expect(canonical?.status).toBe("idle");
+		expect(canonical?.completedTurnCount).toBe(1);
+		expect(canonical?.restoreStartupWasStreaming).toBe(false);
+		expect(manager._testStore.update).toHaveBeenCalledWith(ps.id, { wasStreaming: false });
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
 	it("repairs an in-place restart/respawn before the replacement process switches history", async () => {
@@ -757,6 +819,53 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(roleReplacement.prompt).toHaveBeenCalledTimes(1);
 		expect(roleReplacement.prompt).toHaveBeenCalledWith("intent waits for abort and role", undefined);
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
+	it("rejects queued assignRole when a coordinated poison redrive is already streaming", async () => {
+		const file = hostTranscript("active-poison-redrive-vs-role");
+		const redriveAccepted = deferred<void>();
+		const poisonBridge = recordingBridge(() => {});
+		poisonBridge.prompt = vi.fn(async () => {
+			await redriveAccepted.promise;
+			return { success: true };
+		});
+		poisonBridge.stop = vi.fn(async () => {});
+		const factory = vi.fn().mockReturnValueOnce(poisonBridge);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("active-poison-redrive-vs-role", file);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => {});
+		oldBridge.stop = vi.fn(async () => {});
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+		}));
+
+		const followUp = manager.enqueuePrompt(ps.id, "active redrive intent");
+		await vi.waitFor(() => expect(poisonBridge.prompt).toHaveBeenCalledTimes(1));
+		expect(manager.sessions.get(ps.id)?.status).toBe("streaming");
+		const assignment = manager.assignRole(ps.id, {
+			name: "must-not-interrupt-role",
+			promptTemplate: "Must not interrupt role",
+			accessory: "must-not-interrupt-accessory",
+		});
+
+		redriveAccepted.resolve();
+		await expect(followUp).resolves.toEqual({ status: "dispatched" });
+		await expect(assignment).rejects.toThrow("Cannot assign role while agent is streaming");
+		expect(factory).toHaveBeenCalledTimes(1);
+		expect(poisonBridge.stop).not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(poisonBridge);
+		expect(manager.sessions.get(ps.id)?.role).toBeUndefined();
+		expect(manager.sessions.get(ps.id)?.status).toBe("streaming");
 	});
 
 	it("redrives poisoned follow-up only after a queued assignRole commits", async () => {

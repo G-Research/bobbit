@@ -56,6 +56,8 @@ function harness(options?: {
 	queue?: string[];
 	rejectRedriveWith?: string;
 	observeTurnBeforeRedriveReject?: boolean;
+	completeTurnBeforeRedriveReject?: boolean;
+	terminalTurnError?: string;
 	throwRedriveRejection?: boolean;
 }) {
 	const oldPrompts: Array<{ text: string; images?: unknown }> = [];
@@ -120,13 +122,38 @@ function harness(options?: {
 		await Promise.resolve();
 		const { pendingSkillExpansions: _discardedEnvelope, ...restoredState } = current;
 		let restored: any;
+		let promptCallCount = 0;
+		const restoredBridge = bridge(newPrompts, options?.rejectRedriveWith, () => {
+			if (options?.observeTurnBeforeRedriveReject) {
+				manager.handleAgentLifecycle(restored, { type: "agent_start" });
+			}
+		}, options?.throwRedriveRejection);
+		if (options?.completeTurnBeforeRedriveReject) {
+			restoredBridge.prompt = (text: string, images?: unknown) => {
+				newPrompts.push({ text, images });
+				manager.handleAgentLifecycle(restored, { type: "agent_start" });
+				manager.handleAgentLifecycle(restored, {
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "done" }],
+						stopReason: options.terminalTurnError ? "error" : "stop",
+						errorMessage: options.terminalTurnError,
+					},
+				});
+				manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+				const call = promptCallCount++;
+				if (call === 0 && options.rejectRedriveWith) {
+					return options.throwRedriveRejection
+						? Promise.reject(new Error(options.rejectRedriveWith))
+						: Promise.resolve({ success: false, error: options.rejectRedriveWith });
+				}
+				return Promise.resolve({ success: true });
+			};
+		}
 		restored = {
 			...restoredState,
-			rpcClient: bridge(newPrompts, options?.rejectRedriveWith, () => {
-				if (options?.observeTurnBeforeRedriveReject) {
-					manager.handleAgentLifecycle(restored, { type: "agent_start" });
-				}
-			}, options?.throwRedriveRejection),
+			rpcClient: restoredBridge,
 		};
 		manager.sessions.set(current.id, restored);
 		return restored;
@@ -258,6 +285,58 @@ describe("SessionManager poisoned-history recovery", () => {
 		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		assert.deepEqual(h.newPrompts.map((entry) => entry.text), ["accepted exactly once"]);
+	});
+
+	it("processes a complete poison-redrive turn before RPC rejection without stranding or duplicating queued prompts", async () => {
+		const h = harness({
+			queue: ["queued behind accepted redrive"],
+			rejectRedriveWith: "Command timed out: prompt",
+			completeTurnBeforeRedriveReject: true,
+			throwRedriveRejection: true,
+		});
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		assert.deepEqual(
+			await h.manager.enqueuePrompt(h.session.id, "accepted exactly once", { source: "user" }),
+			{ status: "dispatched" },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const restored = h.manager.sessions.get(h.session.id);
+		assert.equal(restored.status, "idle", "pre-ack terminal lifecycle must settle the canonical session");
+		assert.equal(restored.lastTurnErrored, false);
+		assert.equal(restored.promptQueue.isEmpty, true, "coordinator release must drain the remaining queued prompt");
+		assert.equal(restored.recoveredPromptDispatchQueueIds, undefined);
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), [
+			"accepted exactly once",
+			"queued behind accepted redrive",
+		]);
+		assert.equal(restored.completedTurnCount, 2);
+	});
+
+	it("preserves a terminal model error that arrives before the poison-redrive RPC rejection", async () => {
+		const h = harness({
+			rejectRedriveWith: "Command timed out: prompt",
+			completeTurnBeforeRedriveReject: true,
+			terminalTurnError: "terminal provider failure",
+			throwRedriveRejection: true,
+		});
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		assert.deepEqual(
+			await h.manager.enqueuePrompt(h.session.id, "accepted errored turn", { source: "user" }),
+			{ status: "dispatched" },
+		);
+
+		const restored = h.manager.sessions.get(h.session.id);
+		assert.equal(restored.status, "idle");
+		assert.equal(restored.lastTurnErrored, true);
+		assert.equal(restored.lastTurnErrorMessage, "terminal provider failure");
+		assert.equal(restored.completedTurnCount, 1);
+		assert.equal(restored.promptQueue.isEmpty, true);
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), ["accepted errored turn"]);
 	});
 
 	it("uses a unique durable Retry row and preserves an independently queued identical prompt", async () => {
