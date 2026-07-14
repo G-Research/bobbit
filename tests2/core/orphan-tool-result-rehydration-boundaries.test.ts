@@ -253,6 +253,75 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(switches).toEqual([file]);
 	});
 
+	it.each(["response", "exception"] as const)(
+		"does not drain a durable restore queue when replayed agent_end precedes a failed switch (%s)",
+		async (failure) => {
+			const file = hostTranscript(`cold-restore-replay-${failure}`);
+			const queued = new PromptQueue();
+			queued.enqueue("durable queued intent");
+			const ps = persisted(`cold-restore-replay-${failure}`, file, {
+				messageQueue: queued.toArray(),
+			});
+			const bridge = recordingBridge(() => {});
+			let listener: ((event: any) => void) | undefined;
+			bridge.onEvent = vi.fn((nextListener: (event: any) => void) => {
+				listener = nextListener;
+				return () => { listener = undefined; };
+			});
+			bridge.prompt = vi.fn(async () => ({ success: true }));
+			bridge.sendCommand = vi.fn(async (command: any) => {
+				if (command?.type !== "switch_session") return { success: true };
+				listener?.({ type: "agent_end", messages: [] });
+				if (failure === "exception") throw new Error("fixture switch timeout");
+				return { success: false, error: "fixture switch rejected" };
+			});
+			const manager = makeManager(ps, bridge);
+
+			await expect(manager._restoreSessionCoalesced(ps)).rejects.toThrow(
+				failure === "exception" ? "fixture switch timeout" : "switch_session failed",
+			);
+
+			expect(bridge.prompt).not.toHaveBeenCalled();
+			expect(ps.messageQueue.map((message: any) => message.text)).toEqual(["durable queued intent"]);
+			expect(manager.sessions.has(ps.id)).toBe(false);
+		},
+	);
+
+	it("drains a durable restore queue once, only after replay succeeds and the replacement is canonical", async () => {
+		const file = hostTranscript("cold-restore-replay-success");
+		const queued = new PromptQueue();
+		queued.enqueue("durable queued intent");
+		const ps = persisted("cold-restore-replay-success", file, {
+			messageQueue: queued.toArray(),
+		});
+		const bridge = recordingBridge(() => {});
+		let listener: ((event: any) => void) | undefined;
+		bridge.onEvent = vi.fn((nextListener: (event: any) => void) => {
+			listener = nextListener;
+			return () => { listener = undefined; };
+		});
+		let manager: any;
+		bridge.prompt = vi.fn(async () => {
+			const canonical = manager.sessions.get(ps.id);
+			expect(canonical).toBeDefined();
+			expect(canonical.rpcClient).toBe(bridge);
+			return { success: true };
+		});
+		bridge.sendCommand = vi.fn(async (command: any) => {
+			if (command?.type === "switch_session") {
+				listener?.({ type: "agent_end", messages: [] });
+			}
+			return { success: true };
+		});
+		manager = makeManager(ps, bridge);
+
+		await manager._restoreSessionCoalesced(ps);
+
+		expect(bridge.prompt).toHaveBeenCalledTimes(1);
+		expect(bridge.prompt).toHaveBeenCalledWith("durable queued intent", undefined);
+		expect(manager.sessions.get(ps.id)?.promptQueue.isEmpty).toBe(true);
+	});
+
 	it("repairs an in-place restart/respawn before the replacement process switches history", async () => {
 		const file = hostTranscript("restart-respawn");
 		const switches: string[] = [];
@@ -444,6 +513,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			cwd: sandboxed ? "/workspace" : tmpRoot,
 			modelProvider: "anthropic",
 			modelId: "claude-sonnet-4-5",
+			allowedTools: ["read"],
 		});
 		const manager: any = new SessionManager();
 		manager._testStore = {
@@ -480,6 +550,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 			thinkingLevel: "high",
 			spawnPinnedModel: "anthropic/claude-sonnet-4-5",
 			spawnPinnedThinkingLevel: "high",
+			allowedTools: ["read", "grep", "bash"],
+			sessionOnlyGrantedTools: ["grep"],
+			oneTimeGrantedTools: ["bash"],
 		});
 		original.promptQueue.enqueue("parked queue intent");
 		ps.messageQueue = original.promptQueue.toArray();
@@ -509,6 +582,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(rollback.lastPromptText).toBe("original user intent");
 		expect(rollback.modelId).toBe("claude-sonnet-4-5");
 		expect(rollback.thinkingLevel).toBe("high");
+		expect(rollback.allowedTools).toEqual(["read", "grep", "bash"]);
+		expect(rollback.sessionOnlyGrantedTools).toEqual(["grep"]);
+		expect(rollback.oneTimeGrantedTools).toEqual(["bash"]);
 		expect(rollback.sandboxed).toBe(sandboxed);
 		expect(rollback.cwd).toBe(ps.cwd);
 		expect(ps.sandboxed).toBe(sandboxed);
@@ -537,6 +613,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(restored.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedParkedIntent);
 		expect(restored.spawnPinnedModel).toBe("anthropic/claude-sonnet-4-5");
 		expect(restored.spawnPinnedThinkingLevel).toBe("high");
+		expect(restored.allowedTools).toEqual(["read", "grep", "bash"]);
+		expect(restored.sessionOnlyGrantedTools).toEqual(["grep"]);
+		expect(restored.oneTimeGrantedTools).toEqual(["bash"]);
 		expect(restored.sandboxed).toBe(sandboxed);
 		expect(restored.cwd).toBe(ps.cwd);
 		expect(successfulPrompts).toEqual([

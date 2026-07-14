@@ -3281,6 +3281,8 @@ export class SessionManager {
 		let recoveredPoisonDuringRevive = false;
 		let revivedPoisonQueueIds: string[] | undefined;
 		let revivedPoisonPromptEnvelopes: SessionInfo["pendingSkillExpansions"];
+		let revivedSessionOnlyGrantedTools: string[] | undefined;
+		let revivedOneTimeGrantedTools: string[] | undefined;
 
 		// REVIVE-WINDOW JOIN (CS-R2 follow-up). A prompt that arrives while the
 		// session is dormant/terminated/fenced — or while an `addClient` dormant
@@ -3301,6 +3303,8 @@ export class SessionManager {
 			if (poisonedDormant) {
 				revivedPoisonQueueIds = session.recoveredPromptDispatchQueueIds?.slice();
 				revivedPoisonPromptEnvelopes = session.pendingSkillExpansions?.slice();
+				revivedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools?.slice();
+				revivedOneTimeGrantedTools = session.oneTimeGrantedTools?.slice();
 			}
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
 			if (ps && ps.agentSessionFile) {
@@ -3310,8 +3314,13 @@ export class SessionManager {
 				if (restoreInFlight) {
 					await this._restoreCoordinators.get(sessionId)?.promise;
 				} else if (poisonedDormant) {
+					const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 					await this._respawnAgentInPlace(session, ps, {
 						preserveSandboxRealm: session.sandboxed === true,
+						mutatePs: p => {
+							if (overrideAllowedTools !== undefined) (p as any)._overrideAllowedTools = overrideAllowedTools;
+							if (revivedSessionOnlyGrantedTools !== undefined) (p as any)._overrideGrantedTools = revivedSessionOnlyGrantedTools;
+						},
 					});
 				} else {
 					await this._restoreSessionCoalesced(ps);
@@ -3320,6 +3329,12 @@ export class SessionManager {
 				if (!revived) return { status: "queued" };
 				session = revived;
 				recoveredPoisonDuringRevive = poisonedDormant;
+				if (revivedSessionOnlyGrantedTools !== undefined) {
+					session.sessionOnlyGrantedTools = revivedSessionOnlyGrantedTools;
+				}
+				if (revivedOneTimeGrantedTools !== undefined) {
+					session.oneTimeGrantedTools = revivedOneTimeGrantedTools;
+				}
 				if (revivedPoisonPromptEnvelopes?.length) {
 					session.pendingSkillExpansions = [
 						...revivedPoisonPromptEnvelopes,
@@ -6163,17 +6178,20 @@ export class SessionManager {
 		const unsub = rpcClient.onEvent((event: any) => {
 			// During restore, switch_session replays every persisted message as an
 			// rpc event. Bumping lastActivity here would clobber the pre-restart
-			// timestamp with Date.now(). Gate on the restoring flag AND on
-			// isUserVisibleActivity so post-resume lifecycle frames (agent_start,
-			// agent_idle, connection_state, state, session_title) don't clobber it.
+			// timestamp with Date.now(). More importantly, replayed lifecycle frames
+			// must not drain the durable prompt queue or dispatch prompt() before the
+			// switch succeeds and this replacement becomes canonical.
 			if (!restoring) {
 				if (isUserVisibleActivity(event)) {
 					session.lastActivity = Date.now();
 					restoreStore.update(ps.id, { lastActivity: session.lastActivity });
 				}
+				this.handleAgentLifecycle(session, event);
+			} else {
+				// Preserve the narrow replay reconciliation that proves an accepted
+				// steer was already echoed, without running lifecycle dispatch hooks.
+				this._consumeSteerEcho(session, event);
 			}
-
-			this.handleAgentLifecycle(session, event);
 
 			this.emitAgentEvent(session, event);
 			if (!restoring) this.trackCostFromEvent(session, event);
@@ -6224,16 +6242,14 @@ export class SessionManager {
 			try { await rpcClient.stop(); } catch { /* best-effort process cleanup */ }
 			throw err;
 		}
-		restoring = false;
 
 		try {
 			await this.tryAutoSelectModel(session);
 		} catch (err) {
+			try { unsub(); } catch { /* best-effort listener cleanup */ }
 			await rpcClient.stop();
 			throw err;
 		}
-
-		broadcastStatus(session, "idle");
 
 		// For sandbox sessions, resolve the container ID so git-status and other
 		// host-side operations can run commands inside the container via docker exec.
@@ -6250,7 +6266,11 @@ export class SessionManager {
 			}
 		}
 
+		// Install the replacement before enabling lifecycle side effects. A replayed
+		// agent_end must never dequeue durable intent against a provisional bridge.
 		this.sessions.set(ps.id, session);
+		restoring = false;
+		broadcastStatus(session, "idle");
 
 		// `switch_session` replays durable user message echoes and `_consumeSteerEcho`
 		// clears matching ledger entries. Anything left here was accepted for
