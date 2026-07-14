@@ -5653,6 +5653,34 @@ export class SessionManager {
 		});
 	}
 
+	/**
+	 * Sanitize and switch a replacement bridge onto durable history before it can
+	 * become canonical. Sandbox agents need the same longer switch window used by
+	 * initial setup because the first container RPC can include startup overhead.
+	 *
+	 * Callers own replacement-process cleanup so they can preserve their existing
+	 * restore/termination semantics when this throws.
+	 */
+	private async switchSessionForRehydration(
+		rpcClient: RpcBridge,
+		ps: PersistedSession,
+		agentSessionFile: string,
+	): Promise<void> {
+		trustPersistedAgentSessionFile(agentSessionFile);
+		await sanitizeAgentTranscriptFile(
+			sessionFsContextForAgentFile(ps, agentSessionFile),
+			agentSessionFile,
+			this.sandboxManager,
+		);
+		const switchResp = await rpcClient.sendCommand(
+			{ type: "switch_session", sessionPath: switchSessionPathForAgent(ps) },
+			ps.sandboxed ? 60_000 : 15_000,
+		);
+		if (!switchResp.success) {
+			throw new Error(`switch_session failed: ${switchResp.error ?? "unknown error"}`);
+		}
+	}
+
 	private async restoreSession(ps: PersistedSession): Promise<void> {
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
@@ -6053,9 +6081,8 @@ export class SessionManager {
 		trustPersistedAgentSessionFile(ps.agentSessionFile);
 		const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 		const switchSessionPath = switchSessionPathForAgent(ps);
-		// Un-poison any blank-text user messages persisted before the
-		// attachment-only fix, so the agent doesn't re-send an invalid blank
-		// ContentBlock on resume (best-effort, non-fatal).
+		// Un-poison the persisted transcript before the agent rehydrates it
+		// (best-effort, non-fatal).
 		await sanitizeAgentTranscriptFile(
 			transcriptFileCtx,
 			ps.agentSessionFile,
@@ -7900,8 +7927,6 @@ export class SessionManager {
 		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
-		session.spawnPinnedModel = bridgeOptions.initialModel;
-		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		let switchingSession = true;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
@@ -7909,7 +7934,10 @@ export class SessionManager {
 				session.lastActivity = this.clock.now();
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
-			this.handleAgentLifecycle(session, event);
+			// switch_session replays historical events. Do not let replayed lifecycle
+			// frames mark the replacement usable or drain its queue before the switch
+			// command itself has succeeded.
+			if (!switchingSession) this.handleAgentLifecycle(session, event);
 			this.emitAgentEvent(session, event);
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
@@ -7917,25 +7945,29 @@ export class SessionManager {
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		await rpcClient.start();
 
-		// Restore conversation from session file.
+		// Restore conversation from session file. A failed switch must leave the
+		// original SessionInfo (including its identity, clients, queue, and durable
+		// history) in place rather than installing a fresh bridge with empty history.
 		const rolePs = { ...respawnPersisted, ...session, agentSessionFile } as PersistedSession;
 		const roleFileCtx = sessionFsContextForAgentFile(rolePs, agentSessionFile);
-		if (agentSessionFile) trustPersistedAgentSessionFile(agentSessionFile);
-		if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
-			await sanitizeAgentTranscriptFile(roleFileCtx, agentSessionFile, this.sandboxManager);
-			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: switchSessionPathForAgent(rolePs) },
-				15_000,
-			);
-			if (!switchResp.success) {
-				console.error(`[session-manager] switch_session failed after role assignment: ${switchResp.error}`);
+		try {
+			if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
+				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
 			}
+		} catch (err) {
+			switchingSession = false;
+			unsub();
+			await rpcClient.stop().catch(() => {});
+			broadcastStatus(session, "terminated");
+			throw err;
 		}
 		switchingSession = false;
 
-		// Swap in the new bridge and update metadata
+		// Swap in the new bridge and update metadata only after history rehydration.
 		session.rpcClient = rpcClient;
 		session.unsubscribe = unsub;
+		session.spawnPinnedModel = bridgeOptions.initialModel;
+		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowedNames;
@@ -10015,8 +10047,6 @@ export class SessionManager {
 			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceRespawnPersisted?.modelProvider);
 
 			const rpcClient = new RpcBridge(bridgeOptions);
-			session.spawnPinnedModel = bridgeOptions.initialModel;
-			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 			let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
@@ -10025,7 +10055,10 @@ export class SessionManager {
 					abortStore.update(id, { lastActivity: session.lastActivity });
 				}
 
-				this.handleAgentLifecycle(session, event);
+				// Ignore lifecycle side effects while switch_session replays history;
+				// especially, a replayed agent_end must not drain queued prompts before
+				// the switch response confirms that history was accepted.
+				if (!switchingSession) this.handleAgentLifecycle(session, event);
 
 				this.emitAgentEvent(session, event);
 				if (!switchingSession) this.trackCostFromEvent(session, event);
@@ -10034,28 +10067,27 @@ export class SessionManager {
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 			await rpcClient.start();
 
-			// Resume session if we have the session file.
+			// Resume session if we have the session file. Never install or drain a
+			// replacement process unless it accepted the sanitized durable history.
 			const abortPs = { ...forceRespawnPersisted, ...session, agentSessionFile } as PersistedSession;
 			const abortFileCtx = sessionFsContextForAgentFile(abortPs, agentSessionFile);
-			if (agentSessionFile) trustPersistedAgentSessionFile(agentSessionFile);
-			if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
-				// Un-poison blank-text user messages before rehydrating — this is
-				// the route a live already-stuck session takes (forceAbort →
-				// respawn), so the re-spawned agent reads a sanitized transcript.
-				await sanitizeAgentTranscriptFile(abortFileCtx, agentSessionFile, this.sandboxManager);
-				const switchResp = await rpcClient.sendCommand(
-					{ type: "switch_session", sessionPath: switchSessionPathForAgent(abortPs) },
-					15_000,
-				);
-				if (!switchResp.success) {
-					console.error(`[session-manager] switch_session failed after force abort: ${switchResp.error}`);
+			try {
+				if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
+					await this.switchSessionForRehydration(rpcClient, abortPs, agentSessionFile);
 				}
+			} catch (err) {
+				switchingSession = false;
+				unsub();
+				await rpcClient.stop().catch(() => {});
+				throw err;
 			}
 			switchingSession = false;
 
-			// Swap in the new bridge
+			// Swap in the new bridge only after history rehydration.
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
+			session.spawnPinnedModel = bridgeOptions.initialModel;
+			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 
 			try {
 				await this.tryAutoSelectModel(session);
