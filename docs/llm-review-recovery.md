@@ -56,6 +56,7 @@ The layers are deliberately separate. Session auto-retry preserves the current v
 
 Verifier sessions are server-managed regular agent sessions with a narrower prompt owner:
 
+- Both review types use the managed-session path exclusively. `llm-review` fails fast without an active `SessionManager` and goal id; there is no direct `RpcBridge` fallback. One path keeps transcript preservation, restart recovery, and timeout-marker propagation consistent across review and QA.
 - `VerificationHarness` creates and drives them, registers the `verification_result` resolver, and terminates them when the step is complete.
 - `SessionManager` owns the process lifecycle, persistence, auto-retry, resurrection, and restored-session status just like it does for normal agents.
 - The session id, transcript/history, role and display metadata, accessory, `nonInteractive` flag, working directory/sandbox context, tool extension state, and verification context should be preserved whenever the session is resumed or recovered.

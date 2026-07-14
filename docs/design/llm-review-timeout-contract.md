@@ -2,11 +2,13 @@
 
 ## Status and scope
 
-This design covers the `llm-review` and `agent-qa` timeout/recovery work in the **Timeout contract and recovery** subgoal. It deliberately does not change command/build timeout policy and originally deferred removal of the legacy direct-review fallback to a separate subgoal.
+This design covers the `llm-review` and `agent-qa` timeout/recovery work in the **Timeout contract and recovery** subgoal. It does not change command/build timeout policy.
 
-> **Integration addendum — 2026-07-14.** A later parent SG2 intentionally removed the legacy direct path. The user explicitly directed this child to merge that parent and preserve the deletion alongside the timeout changes. That reconciled session-only routing supersedes this design's earlier temporary SG1 direct-path-preservation constraint; references below to retaining or testing the legacy path describe the original sequencing plan, not the integrated state.
+> **Integration addendum — 2026-07-14.** Follow-on session-routing work (SG2) removed the legacy direct `RpcBridge` review path after this timeout design was approved. The integrated invariant is session-only routing: `llm-review` requires an active `SessionManager` and goal id, fails fast when either is unavailable, and shares the same managed-session timeout, recovery, persistence, and transcript contract as `agent-qa`. The superseded direct-path notes below are retained only where they explain the original implementation sequence.
 
 The incident behind this change involved reviewers that were still investigating when the undocumented 600-second allowance expired. The fix is not a whole-step deadline. It is a larger, explicit, repeatable allowance for each active review turn.
+
+For the durable operational contract, see [Verifier Recovery](../llm-review-recovery.md). Workflow-facing summaries live in [Goals, Workflows, Tasks & Gates](../goals-workflows-tasks.md) and the [Workflow Authoring Guide](../../defaults/workflow-authoring-guide.md).
 
 ## Contract
 
@@ -151,11 +153,11 @@ Each of those active/recovery turns receives the resolved allowance as a fresh w
 
 Persisted `startedAt` remains audit/UI timing; it is not used to subtract gateway downtime from the fresh recovery allowance.
 
-#### Legacy direct path
+#### Session-only routing after SG2
 
-Do **not** delete `runLlmReviewDirect()` or its routing call in this subgoal. It receives `timeoutMs` from `runLlmReviewStep()`, so moving timeout resolution to the shared resolver automatically raises its default and honors explicit shorter values. Keep its initial and reminder completion timers as separate fresh allowances. Add timeout metadata to its timeout return so it does not bypass marker propagation while it still exists.
+The integrated implementation has no `runLlmReviewDirect()` fallback. `runLlmReviewStep()` routes through `runLlmReviewViaSession()` and fails fast without an active `SessionManager` and goal id. Keeping one managed-session path prevents fallback reviews from bypassing transcript preservation, restart recovery, and timeout-marker propagation.
 
-Deletion and no-`SessionManager` fail-fast behavior are owned by the separate direct-path subgoal.
+The original sequencing plan temporarily retained the direct path so timeout resolution could land independently; SG2 then removed the route and its obsolete direct-turn wait helper. Pinning tests now assert that both remain absent.
 
 ## Timeout marker and payload contract
 
@@ -190,7 +192,7 @@ Only real allowance expiry sets the marker. Idle-without-result, deterministic f
 Propagate the fields through these exact types and construction points:
 
 - `src/server/agent/verification-harness.ts`
-  - internal review result shapes returned by `runLlmReviewStep()`, `runLlmReviewViaSession()`, `runAgentQaStep()`, `runLlmReviewDirect()`, `_tryResumeFromSession()`, `_rerunLlmReviewStep()`, `_rerunAgentQaStep()`, and process recovery;
+  - internal review result shapes returned by `runLlmReviewStep()`, `runLlmReviewViaSession()`, `runAgentQaStep()`, `_tryResumeFromSession()`, `_rerunLlmReviewStep()`, `_rerunAgentQaStep()`, and process recovery;
   - `ActiveVerification.steps[]`: add terminal `timeout?: VerificationTimeoutInfo`; extend `status` with `"timeout"`; keep `timeoutSec` for the running resolved allowance;
   - `ResumedVerificationStep`, `TerminalGateSignalStepStatus`, `terminalStatusForStep()`, and `persistedStatusForStep()`;
   - `gate_verification_step_started`: `timeoutSec?: number`;
@@ -287,9 +289,10 @@ Use fake clocks/session managers; no real LLM or long wait.
    - ordinary errored-turn start wait is 75,000 ms;
    - provider-overload start wait is 330,000 ms;
    - provider backoff continues into retry and does not emit timeout status merely because backoff outlasts the review allowance.
-5. **Legacy path preservation**
-   - source/runtime assertion that `runLlmReviewDirect()` remains reachable in this subgoal;
-   - its initial and reminder timers receive fresh resolved allowances and its timeout return carries metadata.
+5. **Session-only routing after SG2**
+   - source assertion that `runLlmReviewStep()` routes through `runLlmReviewViaSession()`;
+   - source assertions that `runLlmReviewDirect()` and the obsolete direct-turn wait helper remain absent;
+   - the shared managed-session timeout result retains its machine-readable status and timing.
 
 Extend `tests2/core/verification-verifier-lifecycle-repro.test.ts` only where its old shared-resurrection-budget assertion contradicts the new locked contract; update it to pin fresh per-recovery windows while preserving same-session identity and the alive-idle duplicate-prompt guard.
 
@@ -351,6 +354,6 @@ This SG1 browser journey validates authoring UX only. The separate timeout-rende
 - Timeout status and exact configured/per-cycle elapsed timing survive active state, WebSocket completion, gate persistence, app API typing, and gate snapshots.
 - Overall gate semantics remain failed for a timed-out step.
 - Command/build behavior is unchanged.
-- `runLlmReviewDirect()` remains present and functional in this subgoal.
+- `llm-review` routing is session-only; the legacy direct review route and its obsolete wait helper remain absent.
 - The three requested docs and type-aware workflow editor are updated during implementation.
 - Focused unit/integration tests and the authoring browser journey are registered in `tests2/tests-map.json`.
