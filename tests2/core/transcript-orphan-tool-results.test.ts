@@ -62,13 +62,36 @@ function user(id: string, parentId: string | null, text = "next prompt"): Entry 
 
 function metadata(id: string, parentId: string | null, extra: Record<string, unknown> = {}): Entry {
 	return {
+		type: "custom",
+		id,
+		parentId,
+		timestamp: "2026-07-12T19:41:18.250Z",
+		customType: "extension-state",
+		data: { fixture: true },
+		...extra,
+	};
+}
+
+function customMessage(id: string, parentId: string | null): Entry {
+	return {
 		type: "custom_message",
 		id,
 		parentId,
 		timestamp: "2026-07-12T19:41:18.250Z",
-		customType: "extension",
+		customType: "extension-context",
+		content: [{ type: "text", text: "Injected extension context" }],
 		display: false,
-		...extra,
+	};
+}
+
+function branchSummary(id: string, parentId: string | null): Entry {
+	return {
+		type: "branch_summary",
+		id,
+		parentId,
+		timestamp: "2026-07-12T19:41:18.250Z",
+		fromId: parentId ?? "root",
+		summary: "Summary of the abandoned branch",
 	};
 }
 
@@ -252,6 +275,38 @@ describe("sanitizeTranscriptContent — orphan Pi tool results", () => {
 			result("r1", "meta-1", "call-1"),
 			metadata("meta-2", "r1"),
 			result("r2", "meta-2", "call-2"),
+		]);
+		expect(sanitizeTranscriptContent(source)).toEqual({ content: source, changed: false, rewritten: 0 });
+	});
+
+	it.each([
+		["custom_message", customMessage],
+		["branch_summary", branchSummary],
+	] as const)("treats a Pi %s entry as ending the result run", (_type, contextEntry) => {
+		const source = jsonl([
+			assistant("a", null, ["call"]),
+			contextEntry("context", "a"),
+			result("late", "context", "call"),
+		]);
+		const repaired = sanitizeTranscriptContent(source);
+
+		expect(repaired.rewritten).toBe(1);
+		expect(ids(repaired.content)).toEqual(["a", "context"]);
+		expect(repaired.content).toContain(JSON.stringify(contextEntry("context", "a")));
+	});
+
+	it("keeps latest-compaction projection ordering transparent to a valid result run", () => {
+		const source = jsonl([
+			assistant("a", null, ["call"]),
+			{
+				type: "compaction",
+				id: "compact",
+				parentId: "a",
+				firstKeptEntryId: "a",
+				summary: "summary projected before the preserved tail",
+				tokensBefore: 100,
+			},
+			result("r", "compact", "call"),
 		]);
 		expect(sanitizeTranscriptContent(source)).toEqual({ content: source, changed: false, rewritten: 0 });
 	});

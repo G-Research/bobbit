@@ -208,7 +208,20 @@ function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number
 	for (const record of projectedContextBranch(branch)) {
 		const entry = record.entry;
 		if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") {
-			continue; // Tree metadata does not interrupt an assistant/result run.
+			// Pi projects these top-level entries into actual LLM messages. They
+			// therefore end the immediately-preceding assistant result run just as
+			// a user/custom message stored inside a `message` entry would. Other
+			// session-tree entries are state/display metadata and stay transparent.
+			// The latest compaction is deliberately absent from
+			// projectedContextBranch: Pi places its summary before the preserved
+			// tail, rather than at its physical JSONL position.
+			if (
+				entry.type === "custom_message" ||
+				(entry.type === "branch_summary" && entry.summary)
+			) {
+				pendingToolCallIds = null;
+			}
+			continue;
 		}
 
 		const message = entry.message;
