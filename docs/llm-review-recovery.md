@@ -43,6 +43,18 @@ A real allowance expiry is persisted and broadcast with an explicit machine-read
 
 `timeout.configuredSeconds` is the resolved per-turn allowance, while `timeout.elapsedMs` measures the particular active turn that expired. `duration_ms` remains total step elapsed time. Idle-without-result, cancellation, provider backoff, and other failures do not set `status: "timeout"`; a timed-out step still makes the overall gate outcome failed.
 
+## Timeout presentation and remediation
+
+Gate inspection and live verification render `status: "timeout"` as a distinct **Timed out** step with a warning clock, elapsed active-turn time, and configured limit. The gate remains failed, but separating timeout from a review finding tells the operator that changing the execution allowance may be the right remedy. The renderer requires both the explicit status and valid timing marker; it does not unlock timeout controls by matching output text.
+
+The **Change timeout** dialog edits the timed-out step by name and requires a positive whole number of seconds. Its scopes are independent:
+
+- **This goal** replaces the goal's frozen workflow snapshot through `PUT /api/goals/:goalId/workflow`. The server validates the complete workflow, resets the modified gate to `pending`, and invalidates its verification cache while preserving signal history. Re-signal the gate to run under the new allowance.
+- **Future goals in this project** updates the project workflow template, first creating a project-owned customization when needed. Only goals created afterward snapshot the new value; active goals are not retroactively changed.
+- Selecting **both** performs both writes. Per-scope status remains visible, so one failure cannot be mistaken for complete success and a retry does not repeat a successful write.
+
+The current-goal scope is selected by default. Choosing future-only deliberately leaves the timed-out goal on its original snapshot. This separation preserves stable goal requirements while still making unusually large diffs or QA scenarios easy to tune. The general snapshot replacement API can change any workflow field, not only timeouts; its validation, gate reconciliation, and active-verification race guard are documented in [Goal workflow replacement](rest-api.md#goal-workflow-replacement).
+
 ## Recovery layers
 
 Recovery happens at two layers:

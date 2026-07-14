@@ -289,6 +289,8 @@ For both `llm-review` and `agent-qa`, `timeout` is a per-active-turn allowance r
 
 Leave `timeout` empty to use these defaults; the workflow editor does not serialize placeholder values. Set a larger explicit value when unusually large diffs or long QA scenarios need more uninterrupted active time. Set a shorter value only when the workflow intentionally prefers a faster failure.
 
+Project workflow edits apply to goals created afterward because each goal freezes a workflow snapshot at creation. When a review step times out, its **Change timeout** dialog can update the current goal snapshot, the project template for future goals, or both explicitly. Current-goal replacement validates the complete workflow and resets the changed gate to `pending`; future-only never retroactively changes active goals. This split lets authors improve the reusable default without silently changing an in-progress goal's acceptance contract. See [Goals, Workflows, Tasks & Gates](../docs/goals-workflows-tasks.md#changing-a-timed-out-review-allowance).
+
 ### 4.4 `type: human-signoff`
 
 Parks the gate on a deferred resolver until a human approves or rejects via the chat-header `<goal-status-widget>`. Reuses the async-verification machinery from `llm-review` / `agent-qa` — restart-safe, cancellable on re-signal, and emits the same `{ passed, output, artifact }` shape every other step produces.

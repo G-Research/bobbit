@@ -41,9 +41,24 @@ A **workflow** is a reusable template that defines which gates a goal must pass,
 
 Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New normal projects do **not** receive any default seed; the project assistant designs workflows from the discovered components and commands, and a project may legitimately persist with zero workflows. Headquarters can own workflows too: `projectId=headquarters` reads the Headquarters `project.yaml::workflows` block from the aliased server config store. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only), [No default workflow scaffold](internals.md#no-default-workflow-scaffold), and [Headquarters project](headquarters.md).
 
-When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time. `POST /api/goals` can also receive an inline `workflow` object; that snapshot is used directly instead of resolving a project workflow template.
+When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. Later project-template edits do not change this frozen copy, so an active goal's requirements remain stable unless a caller explicitly replaces its snapshot. `POST /api/goals` can also receive an inline `workflow` object; that snapshot is used directly instead of resolving a project workflow template.
 
 Goals without workflows still work fine — workflows are optional **at the data-model layer**. However, the standard goal-creation flow (the +New Goal picker and the goal assistant) requires either a linked project workflow or a valid inline workflow snapshot carried by the proposal. See [Default workflow resolution](#default-workflow-resolution) below for the resolution rules and the empty-workflows UX.
+
+#### Replacing an active goal's workflow snapshot
+
+`PUT /api/goals/:goalId/workflow` is the explicit escape hatch for changing an active goal's frozen requirements. It accepts a complete workflow definition rather than a partial patch, so it supports general changes: names and descriptions, gates, dependency edges, gate metadata, verification arrays, and step fields such as `timeout`. The workflow id cannot change. The server runs the same full workflow validation used by authoring before persisting anything; malformed fields, missing or cyclic dependencies, invalid component/command references, and non-positive or fractional timeouts are rejected.
+
+Replacement also reconciles persisted gate state so it cannot disagree with the new DAG:
+
+- unchanged gates retain their status, history, and verification cache;
+- modified gates return to `pending`, retain their signal history for audit, and invalidate cached verification results;
+- removed gates are dropped from gate state;
+- added gates start `pending` with no signals.
+
+A presentation-only reorder of unchanged gates does not reset them. If a changed or removed gate has verification running, the server rejects the whole replacement with `409 WORKFLOW_ACTIVE_VERIFICATION`; unrelated gate edits remain safe. The guard and persistence are one uninterrupted server continuation, preventing a verification from starting between the conflict check and mutation.
+
+This endpoint is intentionally goal-local. Editing the project workflow template affects snapshots created by future goals, not goals already in progress. See the [REST contract](rest-api.md#goal-workflow-replacement) and [Changing a timed-out review allowance](#changing-a-timed-out-review-allowance) for the scoped UI built on these two write paths.
 
 #### Default workflow resolution
 
@@ -456,6 +471,18 @@ Only actual allowance expiry emits the durable/live machine contract:
 ```
 
 `configuredSeconds` is the resolved per-active-turn allowance and `elapsedMs` is the elapsed time for the turn that expired. Total `duration_ms` may be larger after retries, reminders, recovery, or provider waits. Other failures and idle-without-result do not use the timeout marker. See [Verifier Recovery](llm-review-recovery.md) for lifecycle details.
+
+#### Changing a timed-out review allowance
+
+Gate inspection and the live verification card use the structured marker above to render a warning clock, the distinct **Timed out** label, elapsed active-turn time, and configured limit. The overall gate still fails for dependency purposes. A generic failed step whose output merely mentions a timeout does not receive this presentation or remediation control; the UI never infers timeout state from prose.
+
+A marked step exposes **Change timeout**. The dialog requires a positive whole number of seconds and offers two independent checkboxes:
+
+- **This goal** replaces the current goal's frozen workflow snapshot through `PUT /api/goals/:goalId/workflow`. Only the named verification step is patched in the submitted copy. Reconciliation returns that changed gate to `pending`, after which it can be re-signaled with the new allowance.
+- **Future goals in this project** updates the project workflow template through `PUT /api/workflows/:workflowId?projectId=…`. If the resolved workflow is not yet a project-owned override, Bobbit first calls `POST /api/workflows/:workflowId/customize?projectId=…`. Newly created goals snapshot the new value; every existing goal, including the one whose card opened the dialog, remains unchanged.
+- Selecting **both** performs both independent writes. Each scope reports success or failure separately. A partial success is not reported as complete, and Retry skips a scope that already succeeded.
+
+The dialog defaults to the current-goal scope. Future-only is useful when the current failure should remain auditable under its original contract; both is the explicit choice when the current retry and later goals need the same allowance. Template updates never retroactively reconfigure active goals.
 
 #### Active verification snapshots
 
