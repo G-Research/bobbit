@@ -126,9 +126,11 @@ export class ChangeVerificationTimeoutDialog extends DialogBase {
 
 	protected override renderContent(): TemplateResult {
 		const complete = this.selectedScopesSucceeded();
-		return html`${DialogContent({
-			className: "flex flex-col",
-			children: html`
+		return html`
+			<div role="dialog" aria-modal="true" aria-label="Change verification timeout">
+				${DialogContent({
+					className: "flex flex-col",
+					children: html`
 				${DialogHeader({
 					title: "Change verification timeout",
 					description: "Choose how long this verification step may run before timing out.",
@@ -221,7 +223,9 @@ export class ChangeVerificationTimeoutDialog extends DialogBase {
 						>${this.saving ? "Saving…" : (this.goalStatus.state === "error" || this.futureStatus.state === "error") ? "Retry" : "Save"}</button>
 					`}
 				</div>
-			`,
-		})}`;
+					`,
+				})}
+			</div>
+		`;
 	}
 }

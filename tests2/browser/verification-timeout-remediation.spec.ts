@@ -7,6 +7,7 @@ const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const ENTRY = path.resolve("tests/ui-fixtures/verification-timeout-remediation-entry.ts");
 const INSPECT_SRC = path.resolve("src/ui/tools/renderers/GateInspectRenderer.ts");
 const LIVE_SRC = path.resolve("src/ui/tools/renderers/GateVerificationLive.ts");
+const DIALOG_SRC = path.resolve("src/ui/dialogs/ChangeVerificationTimeoutDialog.ts");
 const RENDERERS_DIR = path.resolve("src/ui/tools/renderers");
 const DIALOGS_DIR = path.resolve("src/ui/dialogs");
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
@@ -45,12 +46,15 @@ test.beforeAll(() => {
 		entry: ENTRY,
 		outfile: BUNDLE,
 		// Directory mtimes also invalidate when the implementation adds the lazy dialog/helper.
-		deps: [ENTRY, INSPECT_SRC, LIVE_SRC, RENDERERS_DIR, DIALOGS_DIR],
+		deps: [ENTRY, INSPECT_SRC, LIVE_SRC, DIALOG_SRC, RENDERERS_DIR, DIALOGS_DIR],
 	});
 });
 
 async function loadFixture(page: Page, options: { goalPutError?: string } = {}): Promise<void> {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
+	// The fixture does not load the application's Tailwind bundle. Supply the
+	// positioning primitives DialogBase relies on so controls are exercised in-view.
+	await page.addStyleTag({ content: ".fixed { position: fixed; } .inset-0 { inset: 0; }" });
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__timeoutRemediationReady === true, null, { timeout: 10_000 });
 	await page.evaluate((resetOptions) => (window as any).__timeoutFixtureReset(resetOptions), options);
@@ -66,7 +70,7 @@ async function fixtureState(page: Page): Promise<{ activeWorkflow: any; projectW
 
 async function openDialog(page: Page, surfaceTestId = "inspect-surface"): Promise<Locator> {
 	await page.getByTestId(surfaceTestId).getByRole("button", { name: "Change timeout", exact: true }).click();
-	const dialog = page.getByRole("dialog");
+	const dialog = page.getByRole("dialog", { name: "Change verification timeout" });
 	await expect(dialog).toBeVisible();
 	return dialog;
 }
@@ -84,7 +88,7 @@ function futureScope(dialog: Locator): Locator {
 }
 
 function saveButton(dialog: Locator): Locator {
-	return dialog.getByRole("button", { name: /save|update timeout/i });
+	return dialog.getByRole("button", { name: /save|retry|update timeout/i });
 }
 
 async function submitAndWaitFor(page: Page, dialog: Locator, expectedMutationCount: number): Promise<void> {
@@ -104,6 +108,10 @@ test("structured timeout markers drive inspect/live presentation and picker vali
 		await expect(card.getByText("Timed out", { exact: true })).toBeVisible();
 		await expect(card).toContainText("7.0s elapsed");
 		await expect(card).toContainText("7s limit");
+		if (surfaceId === "live-surface") {
+			await expect(card).not.toContainText("opaque reviewer payload zxq-4711");
+			await card.getByText("LLM review", { exact: true }).click();
+		}
 		await expect(card).toContainText("opaque reviewer payload zxq-4711");
 		await expect(card).not.toContainText("91.2s");
 		await expect(card).not.toContainText("✗");
