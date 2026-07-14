@@ -4,17 +4,22 @@
  * Design: docs/design/cross-project-proposals.md §1, §2, §3, §6.
  *
  * A `propose_*` seed may target a DIFFERENT project than the session's via the
- * optional `projectId`. The seed endpoint resolves the TARGET uniformly:
+ * optional `projectId`. The seed endpoint resolves the TARGET uniformly for
+ * goal/role/tool/staff:
  *   - omitted  → session's project (system → headquarters);
  *   - explicit → validated against the registry and stamped onto the draft;
- *   - unknown  → 422 UNKNOWN_PROJECT (goal/role/tool/staff);
- *   - `project` proposals are exempt — they may name a brand-new project.
+ *   - unknown  → 422 UNKNOWN_PROJECT.
  *
- * Acceptance covered here:
- *   (a) omitted projectId → session project (incl. system → headquarters)
- *   (b) explicit valid cross-project accepted for goal/role/tool/staff/project
+ * `project` proposals are the intentional exception. Their seed fields remain
+ * untouched: absent `fields.projectId` stays absent (create intent), while an
+ * explicit id stays explicit so acceptance can edit a known project or reject
+ * an unknown one. The source session's project is never stamped into that field.
+ *
+ * Coverage here:
+ *   (a) omitted projectId → session project for goal/role/tool/staff
+ *   (b) explicit valid cross-project accepted and stamped
  *   (c) explicit unknown → 422 UNKNOWN_PROJECT for goal/role/tool/staff
- *   (d) unknown projectId allowed at seed for a brand-new propose_project
+ *   (d) propose_project preserves absent/explicit projectId seed semantics
  *   (e) goal workflow validated against the TARGET project's workflows
  */
 import fs from "node:fs";
@@ -219,13 +224,27 @@ test.describe("cross-project proposal seed @smoke", () => {
 		}
 	});
 
-	test("propose_project brand-new with name + root_path still seeds (create)", async () => {
+	test("propose_project brand-new with name + root_path preserves absent projectId (create)", async () => {
 		const s = await createSession();
 		try {
 			const r = await seed(s, "project", { name: "Brand New Create", root_path: "/tmp/brand-new-create" });
 			expect(r.status, `project create seed: ${await r.clone().text()}`).toBe(200);
 			const fields = await seededFields(s, "project");
 			expect(fields?.root_path).toBe("/tmp/brand-new-create");
+			expect(fields?.projectId, "project create seed must not inherit the registered source session project").toBeUndefined();
+		} finally {
+			await deleteSession(s);
+		}
+	});
+
+	test("Headquarters propose_project with omitted projectId also preserves create intent", async () => {
+		const s = await createSession({ projectId: HEADQUARTERS_PROJECT_ID });
+		try {
+			const r = await seed(s, "project", { name: "HQ Brand New", root_path: "/tmp/hq-brand-new-create" });
+			expect(r.status, `Headquarters project create seed: ${await r.clone().text()}`).toBe(200);
+			const fields = await seededFields(s, "project");
+			expect(fields).toMatchObject({ name: "HQ Brand New", root_path: "/tmp/hq-brand-new-create" });
+			expect(fields?.projectId, "Headquarters provenance must not be reinterpreted as the proposal target").toBeUndefined();
 		} finally {
 			await deleteSession(s);
 		}
@@ -268,16 +287,29 @@ test.describe("cross-project proposal seed @smoke", () => {
 		}
 	});
 
-	// ── (d) unknown projectId allowed at seed for propose_project ──────
-	test("(d) unknown projectId is allowed at seed for a brand-new propose_project", async () => {
+	// ── (d) explicit projectId is preserved for acceptance resolution ─
+	test("(d) unknown projectId stays explicit at seed for acceptance-time rejection", async () => {
 		const s = await createSession();
 		try {
-			const r = await seed(s, "project", { name: "Brand New", root_path: "/tmp/brand-new", projectId: "not-yet-registered" });
-			expect(r.status, `project unknown seed: ${await r.clone().text()}`).toBe(200);
+			const r = await seed(s, "project", { name: "Explicit Unknown", root_path: "/tmp/explicit-unknown", projectId: "not-registered-target" });
+			expect(r.status, `project explicit-unknown seed: ${await r.clone().text()}`).toBe(200);
 			const fields = await seededFields(s, "project");
-			expect(fields?.projectId).toBe("not-yet-registered");
+			expect(fields?.projectId).toBe("not-registered-target");
 		} finally {
 			await deleteSession(s);
+		}
+	});
+
+	test("(d) id-addressed project mutation routes reject an unknown target with UNKNOWN_PROJECT", async () => {
+		const unknownId = `unknown-project-${Date.now()}`;
+		for (const request of [
+			{ path: `/api/projects/${unknownId}`, method: "PUT", body: { name: "must-not-create" } },
+			{ path: `/api/projects/${unknownId}/config`, method: "PUT", body: { test_command: "must-not-write" } },
+			{ path: `/api/projects/${unknownId}/promote`, method: "POST", body: { name: "must-not-promote" } },
+		]) {
+			const response = await apiFetch(request.path, { method: request.method, body: JSON.stringify(request.body) });
+			expect(response.status, `${request.method} ${request.path}`).toBe(422);
+			expect(await response.json()).toMatchObject({ ok: false, code: "UNKNOWN_PROJECT" });
 		}
 	});
 
