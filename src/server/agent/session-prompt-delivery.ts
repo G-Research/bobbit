@@ -87,7 +87,17 @@ export async function deliverSessionPrompt(
 	if (!session) {
 		throw new SessionPromptDeliveryError(`Session ${sessionId} is not live or was not found.`, "SESSION_NOT_FOUND", 404);
 	}
-	if (session.status === "terminated") {
+	// A failed poisoned-history respawn deliberately leaves the old SessionInfo
+	// behind as a terminated rollback capsule. SessionManager.enqueuePrompt can
+	// revive that exact capsule in place, but this shared REST/tool boundary used
+	// to reject it before the recovery path was reachable. Keep the exception
+	// narrow: only the poison classifier may admit a terminated session.
+	const terminatedRecovery = session.status === "terminated" && session.lastTurnErrored
+		? deps.getErroredPromptRecoveryDecision?.(sessionId)
+		: undefined;
+	const recoverablePoisonRollback = terminatedRecovery?.recoverable === true
+		&& terminatedRecovery.reason === "poisoned-history";
+	if (session.status === "terminated" && !recoverablePoisonRollback) {
 		throw new SessionPromptDeliveryError(`Session ${sessionId} is terminated.`, "SESSION_TERMINATED", 409);
 	}
 	const target: DeliverSessionPromptTarget = { sessionId: session.id };
@@ -116,8 +126,8 @@ export async function deliverSessionPrompt(
 		);
 	}
 
-	if (session.status === "idle" && session.lastTurnErrored && canRecoverErroredPrompt(deps)) {
-		const recovery = deps.getErroredPromptRecoveryDecision!(sessionId);
+	if (session.lastTurnErrored && (recoverablePoisonRollback || (session.status === "idle" && canRecoverErroredPrompt(deps)))) {
+		const recovery = terminatedRecovery ?? deps.getErroredPromptRecoveryDecision!(sessionId);
 		if (!recovery.recoverable) {
 			throw new SessionPromptDeliveryError(recoveryBlockedMessage(recovery), "PROMPT_RECOVERY_BLOCKED", 409);
 		}
