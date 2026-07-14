@@ -5309,13 +5309,13 @@ export class VerificationHarness {
 				const writeHeartbeat = `printf '{"pid":%s,"nonce":%s,"ts":%s}\\n' "$__bobbit_pid" ${shellSingleQuote(nonceJson)} "$(date +%s 2>/dev/null || printf 0)" > ${shellSingleQuote(heartbeatTmp)} && mv ${shellSingleQuote(heartbeatTmp)} ${shellSingleQuote(heartbeatFile)}`;
 				const trimLogs = `for __bobbit_f in ${qOut} ${qErr}; do if [ -f "$__bobbit_f" ] && [ "$(wc -c < "$__bobbit_f" 2>/dev/null || echo 0)" -gt ${MAX_RETAINED_LOG_BYTES} ]; then tail -c ${MAX_RETAINED_LOG_BYTES} "$__bobbit_f" > "$__bobbit_f.trim" 2>/dev/null && cat "$__bobbit_f.trim" > "$__bobbit_f" && rm -f "$__bobbit_f.trim"; fi; done`;
 				// Run command in a subshell so its `exit` does not short-circuit our
-				// exit-file write; capture $?, write atomically, then propagate. The
-				// wrapper appends stdout/stderr to restart-surviving files and keeps
-				// those files tail-bounded while the gateway is down. Helper loops are
-				// signalled but not waited on: on Windows/Git-Bash, waiting for a helper
-				// that is itself sleeping can deadlock the wrapper after command output is
-				// complete, leaving the gate "running" until an outer timeout/cancel.
-				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( while kill -0 "$__bobbit_pid" 2>/dev/null; do ${trimLogs}; sleep 5; done ) & __bobbit_trim=$!; ( ${command}\n) >> ${qOut} 2>> ${qErr}; __ec=$?; kill "$__bobbit_hb" "$__bobbit_trim" 2>/dev/null; ${trimLogs}; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; exit $__ec`;
+				// exit-file write; capture $?, publish the durable verdict atomically,
+				// then propagate. Publish BEFORE best-effort helper cleanup: under load,
+				// Windows/Git-Bash can delay helper signalling/log trimming after the
+				// command has already exited. Resume must not misclassify that gap as a
+				// no-verdict restart interruption. Helper loops are signalled but not
+				// waited on because a sleeping helper can deadlock wrapper completion.
+				cmdToRun = `__bobbit_pid=$$; ${writeIdentity}; ( while :; do ${writeHeartbeat}; sleep 1; done ) & __bobbit_hb=$!; ( while kill -0 "$__bobbit_pid" 2>/dev/null; do ${trimLogs}; sleep 5; done ) & __bobbit_trim=$!; ( ${command}\n) >> ${qOut} 2>> ${qErr}; __ec=$?; printf %s "$__ec" > ${shellSingleQuote(exitTmp)} && mv ${shellSingleQuote(exitTmp)} ${shellSingleQuote(exitFile)}; kill "$__bobbit_hb" "$__bobbit_trim" 2>/dev/null; ${trimLogs}; exit $__ec`;
 			}
 
 			// Resolve a synchronously-thrown spawn error the same way we'd
@@ -5769,6 +5769,19 @@ export class VerificationHarness {
 				return null;
 			}
 		};
+		const waitForDurableExitFile = async (): Promise<boolean> => {
+			if (!step.exitFile) return false;
+			const deadline = Date.now() + COMMAND_EXIT_CLOSE_GRACE_MS;
+			while (this._isResumeStillActive(v) && Date.now() < deadline) {
+				if (fs.existsSync(step.exitFile)) return true;
+				// The wrapper publishes the exit code only after the command process
+				// disappears. Under load, resume can observe that disappearance in the
+				// short gap before the atomic exit-file rename. This wait is tied to a
+				// real OS process, so keep it on the real clock rather than a test clock.
+				await new Promise<void>(resolve => realClock.setTimeout(resolve, 50));
+			}
+			return fs.existsSync(step.exitFile);
+		};
 		const retainedTail = (): string => retainedCommandOutputTail(step.outFile, step.errFile);
 		const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
 			if (!step.outFile && !step.errFile) return undefined;
@@ -5897,6 +5910,9 @@ export class VerificationHarness {
 		}
 		const identity = this._verifyPersistedCommandIdentity(step, identityFile);
 		if (!identity.verified || !identity.pid) {
+			if (identity.reason === "command process is no longer alive" && await waitForDurableExitFile()) {
+				return finalize(readExitFile());
+			}
 			return restartInterrupted(`Could not verify command process identity after restart: ${identity.reason}`);
 		}
 
@@ -5934,6 +5950,7 @@ export class VerificationHarness {
 		}
 
 		try {
+			let identityFailureReason: string | undefined;
 			while (this.clock.now() < deadline) {
 				if (!this._isResumeStillActive(v)) return null;
 				await new Promise<void>(r => this.clock.setTimeout(() => r(), 500));
@@ -5941,11 +5958,17 @@ export class VerificationHarness {
 					return finalize(readExitFile());
 				}
 				const current = this._verifyPersistedCommandIdentity(step);
-				if (!current.verified) break;
+				if (!current.verified) {
+					identityFailureReason = current.reason;
+					break;
+				}
 			}
 
 			if (!this._isResumeStillActive(v)) return null;
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
+				return finalize(readExitFile());
+			}
+			if (identityFailureReason === "command process is no longer alive" && await waitForDurableExitFile()) {
 				return finalize(readExitFile());
 			}
 			if (this.clock.now() >= deadline) {
