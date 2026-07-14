@@ -9,7 +9,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { ShieldCheck } from "lucide";
 import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
-import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 import { getResult, gateBadge } from "./GateToolRenderers.js";
 import { ansiToHtml, hasAnsi } from "../../utils/ansi.js";
 
@@ -193,7 +193,7 @@ function renderInspectHeader(
 // ── Renderer ─────────────────────────────────────────────────────────
 
 export class GateInspectRenderer implements ToolRenderer {
-	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
+	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean, ctx?: ToolRenderContext): ToolRenderResult {
 		ensureMarkdownBlock();
 		const state = getToolState(result, isStreaming);
 		const gateId = params?.gate_id || "gate";
@@ -230,7 +230,7 @@ export class GateInspectRenderer implements ToolRenderer {
 
 		switch (section) {
 			case "content": return this._renderContent(state, gateId, data, argSummary, argTooltip);
-			case "verification": return this._renderVerification(state, gateId, data, params, result, argSummary, argTooltip);
+			case "verification": return this._renderVerification(state, gateId, data, ctx?.goalId, argSummary, argTooltip);
 			case "signals": return this._renderSignals(state, gateId, data, argSummary, argTooltip);
 			default: return this._renderContent(state, gateId, data, argSummary, argTooltip);
 		}
@@ -258,14 +258,13 @@ export class GateInspectRenderer implements ToolRenderer {
 
 	// ── section="verification" ───────────────────────────────────────
 
-	private _renderVerification(state: any, gateId: string, data: any, params: any, result: ToolResultMessage, argSummary: string, argTooltip: string): ToolRenderResult {
+	private _renderVerification(state: any, gateId: string, data: any, goalId: string | undefined, argSummary: string, argTooltip: string): ToolRenderResult {
 		const signalIndex = data?.signalIndex ?? "?";
 		const signalId = data?.signalId || "";
 		const steps: any[] = data?.steps || [];
 		const summary = verificationSummary(data, steps);
 		const overallStatus = normalizeStatus(data?.status);
 		const overallLabel = overallStatus === "passed" ? "Passed" : overallStatus === "failed" || overallStatus === "timeout" ? "Failed" : undefined;
-		const goalId = data?.goalId || params?.goalId || params?.goal_id || (result as any)?.goalId || "";
 
 		const toggleStep = (e: Event) => {
 			const card = (e.currentTarget as HTMLElement).parentElement!;

@@ -157,24 +157,28 @@ async function mount(): Promise<void> {
 	if (!app) throw new Error("#app missing");
 	app.innerHTML = `
 		<section data-testid="inspect-surface"><h2>Inspect surface</h2><div data-testid="inspect-renderer"></div></section>
+		<section data-testid="inspect-without-context-surface"><h2>Inspect surface without context</h2><div data-testid="inspect-without-context-renderer"></div></section>
 		<section data-testid="live-surface"><h2>Live surface</h2><div data-testid="live-renderer"></div></section>
 	`;
 
+	const inspectResult = toolResult({
+		section: "verification",
+		gateId: GATE_ID,
+		signalIndex: 0,
+		signalId: "signal-timeout",
+		status: "failed",
+		statusCounts: { failed: 1 },
+		steps: [clone(timeoutStep)],
+	});
+	const inspectParams = { gate_id: GATE_ID, section: "verification" };
+
 	const inspectHost = app.querySelector("[data-testid='inspect-renderer']") as HTMLElement;
-	const inspect = new GateInspectRenderer().render(
-		{ gate_id: GATE_ID, goal_id: GOAL_ID, section: "verification" },
-		toolResult({
-			section: "verification",
-			goalId: GOAL_ID,
-			gateId: GATE_ID,
-			signalIndex: 0,
-			signalId: "signal-timeout",
-			status: "failed",
-			statusCounts: { failed: 1 },
-			steps: [clone(timeoutStep)],
-		}),
-	);
+	const inspect = new GateInspectRenderer().render(inspectParams, inspectResult, undefined, { goalId: GOAL_ID });
 	render(inspect.content, inspectHost);
+
+	const inspectWithoutContextHost = app.querySelector("[data-testid='inspect-without-context-renderer']") as HTMLElement;
+	const inspectWithoutContext = new GateInspectRenderer().render(inspectParams, inspectResult);
+	render(inspectWithoutContext.content, inspectWithoutContextHost);
 
 	const liveHost = app.querySelector("[data-testid='live-renderer']") as HTMLElement;
 	const live = document.createElement("gate-verification-live") as any;

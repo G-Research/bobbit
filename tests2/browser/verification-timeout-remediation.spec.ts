@@ -119,6 +119,10 @@ test("structured timeout markers drive inspect/live presentation and picker vali
 		await expect(surface.getByRole("button", { name: "Change timeout", exact: true })).toBeVisible();
 	}
 
+	const inspectWithoutContext = page.getByTestId("inspect-without-context-surface");
+	await expect(inspectWithoutContext.getByText("Timed out", { exact: true })).toBeVisible();
+	await expect(inspectWithoutContext.getByRole("button", { name: "Change timeout", exact: true })).toHaveCount(0);
+
 	const dialog = await openDialog(page);
 	const input = timeoutInput(dialog);
 	const current = thisGoalScope(dialog);
