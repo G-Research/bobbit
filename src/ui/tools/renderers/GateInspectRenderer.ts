@@ -23,6 +23,7 @@ function formatDuration(ms: number): string {
 const STATUS_LABELS: Record<string, string> = {
 	passed: "passed",
 	failed: "failed",
+	timeout: "timed out",
 	skipped: "skipped",
 	running: "running",
 	waiting: "waiting",
@@ -33,7 +34,8 @@ function normalizeStatus(status: unknown): string | undefined {
 	if (typeof status !== "string") return undefined;
 	const key = status.toLowerCase().replace(/_/g, "-");
 	if (key === "passed" || key === "success" || key === "completed") return "passed";
-	if (key === "failed" || key === "failure" || key === "error" || key === "timeout") return "failed";
+	if (key === "timeout") return "timeout";
+	if (key === "failed" || key === "failure" || key === "error") return "failed";
 	if (key === "skipped") return "skipped";
 	if (key === "running" || key === "in-progress" || key === "starting") return "running";
 	if (key === "waiting" || key === "pending" || key === "queued" || key === "yet-to-run") return "waiting";
@@ -44,6 +46,7 @@ function normalizeStatus(status: unknown): string | undefined {
 function stepStatusIcon(status: string): TemplateResult {
 	if (status === "passed") return html`<span class="text-green-600 dark:text-green-400">✓</span>`;
 	if (status === "failed") return html`<span class="text-red-600 dark:text-red-400">✗</span>`;
+	if (status === "timeout") return html`<span data-timeout-icon title="Timed out" class="text-warning">⏱</span>`;
 	if (status === "skipped") return html`<span class="text-muted-foreground">⊘</span>`;
 	if (status === "waiting") return html`<span class="text-muted-foreground">○</span>`;
 	if (status === "blocked") return html`<span class="text-muted-foreground">—</span>`;
@@ -53,6 +56,7 @@ function stepStatusIcon(status: string): TemplateResult {
 function stepStatusClass(status: string): string {
 	if (status === "passed") return "bg-green-500/15 text-green-700 dark:text-green-300";
 	if (status === "failed") return "bg-red-500/15 text-red-700 dark:text-red-300";
+	if (status === "timeout") return "bg-warning/15 text-warning";
 	if (status === "running") return "bg-blue-500/15 text-blue-700 dark:text-blue-300";
 	return "bg-muted text-muted-foreground";
 }
@@ -69,12 +73,24 @@ function deriveStepStatus(step: any): string {
 function shouldShowDuration(status: string, durationMs: unknown): durationMs is number {
 	if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) return false;
 	if ((status === "waiting" || status === "blocked" || status === "skipped") && durationMs <= 0) return false;
-	return status === "running" || status === "passed" || status === "failed" || durationMs > 0;
+	return status === "running" || status === "passed" || status === "failed" || status === "timeout" || durationMs > 0;
+}
+
+function timeoutInfo(value: unknown): { configuredSeconds: number; elapsedMs: number } | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const marker = value as { configuredSeconds?: unknown; elapsedMs?: unknown };
+	if (typeof marker.configuredSeconds !== "number" || !Number.isFinite(marker.configuredSeconds) || marker.configuredSeconds <= 0) return undefined;
+	if (typeof marker.elapsedMs !== "number" || !Number.isFinite(marker.elapsedMs) || marker.elapsedMs < 0) return undefined;
+	return { configuredSeconds: marker.configuredSeconds, elapsedMs: marker.elapsedMs };
+}
+
+function formatTimeoutTiming(timeout: { configuredSeconds: number; elapsedMs: number }): string {
+	return `${(timeout.elapsedMs / 1000).toFixed(1)}s elapsed · ${timeout.configuredSeconds}s limit`;
 }
 
 function formatCountSummary(counts: Record<string, unknown> | undefined): string {
 	if (!counts) return "";
-	const order = ["passed", "failed", "running", "waiting", "blocked", "skipped"];
+	const order = ["passed", "failed", "timeout", "running", "waiting", "blocked", "skipped"];
 	return order
 		.map((status) => {
 			const value = Number(counts[status] ?? 0);
@@ -85,10 +101,10 @@ function formatCountSummary(counts: Record<string, unknown> | undefined): string
 }
 
 function verificationSummary(data: any, steps: any[]): string {
-	if (typeof data?.summary === "string") return data.summary;
 	const counts = data?.statusCounts || data?.counts || data?.summary?.counts;
 	const explicitSummary = formatCountSummary(counts);
 	if (explicitSummary) return explicitSummary;
+	if (steps.length === 0 && typeof data?.summary === "string") return data.summary;
 	const derivedCounts: Record<string, number> = {};
 	for (const step of steps) {
 		const status = deriveStepStatus(step);
@@ -214,7 +230,7 @@ export class GateInspectRenderer implements ToolRenderer {
 
 		switch (section) {
 			case "content": return this._renderContent(state, gateId, data, argSummary, argTooltip);
-			case "verification": return this._renderVerification(state, gateId, data, result, argSummary, argTooltip);
+			case "verification": return this._renderVerification(state, gateId, data, params, result, argSummary, argTooltip);
 			case "signals": return this._renderSignals(state, gateId, data, argSummary, argTooltip);
 			default: return this._renderContent(state, gateId, data, argSummary, argTooltip);
 		}
@@ -242,11 +258,14 @@ export class GateInspectRenderer implements ToolRenderer {
 
 	// ── section="verification" ───────────────────────────────────────
 
-	private _renderVerification(state: any, gateId: string, data: any, _result: ToolResultMessage, argSummary: string, argTooltip: string): ToolRenderResult {
+	private _renderVerification(state: any, gateId: string, data: any, params: any, result: ToolResultMessage, argSummary: string, argTooltip: string): ToolRenderResult {
 		const signalIndex = data?.signalIndex ?? "?";
 		const signalId = data?.signalId || "";
 		const steps: any[] = data?.steps || [];
 		const summary = verificationSummary(data, steps);
+		const overallStatus = normalizeStatus(data?.status);
+		const overallLabel = overallStatus === "passed" ? "Passed" : overallStatus === "failed" || overallStatus === "timeout" ? "Failed" : undefined;
+		const goalId = data?.goalId || params?.goalId || params?.goal_id || (result as any)?.goalId || "";
 
 		const toggleStep = (e: Event) => {
 			const card = (e.currentTarget as HTMLElement).parentElement!;
@@ -261,13 +280,19 @@ export class GateInspectRenderer implements ToolRenderer {
 		return {
 			content: html`<div>
 				${renderInspectHeader(state, html`Inspect gate <span class="font-mono">${gateId}</span> — verification`, argSummary, argTooltip)}
-				<div class="text-xs text-muted-foreground mt-1">Signal #${signalIndex}${signalId ? html` · ${signalId}` : nothing}${summary ? html` · ${summary}` : nothing}</div>
+				<div class="text-xs text-muted-foreground mt-1">
+					Signal #${signalIndex}${signalId ? html` · ${signalId}` : nothing}
+					${overallLabel ? html` · <span class=${overallStatus === "passed" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}>${overallLabel}</span>` : nothing}
+					${summary ? html` · ${summary}` : nothing}
+				</div>
 				<div class="mt-2 space-y-1">
 					${steps.map((step: any, _i: number) => {
 						const status = deriveStepStatus(step);
 						const hasOutput = !!step.output;
-						const isFailed = status === "failed";
-						const statusLabel = STATUS_LABELS[status] || status;
+						const isFailed = status === "failed" || status === "timeout";
+						const marker = status === "timeout" ? timeoutInfo(step.timeout) : undefined;
+						const statusLabel = status === "timeout" ? "Timed out" : (STATUS_LABELS[status] || status);
+						const canChangeTimeout = !!marker && !!goalId && typeof step.name === "string" && !!step.name;
 						const typeBadgeCls = step.type === "command"
 							? "bg-muted text-muted-foreground"
 							: "bg-purple-500/20 text-purple-600 dark:text-purple-400";
@@ -282,7 +307,21 @@ export class GateInspectRenderer implements ToolRenderer {
 									<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name}</span>
 									<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${stepStatusClass(status)}">${statusLabel}</span>
 									<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
-									${shouldShowDuration(status, step.duration_ms) ? html`<span class="text-xs text-muted-foreground tabular-nums">${formatDuration(step.duration_ms)}</span>` : nothing}
+									${marker
+										? html`<span data-timeout-timing class="text-xs text-muted-foreground tabular-nums">${formatTimeoutTiming(marker)}</span>`
+										: shouldShowDuration(status, step.duration_ms) ? html`<span class="text-xs text-muted-foreground tabular-nums">${formatDuration(step.duration_ms)}</span>` : nothing}
+									${canChangeTimeout ? html`
+										<button
+											type="button"
+											data-testid="change-verification-timeout"
+											class="shrink-0 rounded border border-warning/30 px-1.5 py-0.5 text-[10px] font-medium text-warning hover:bg-warning/10"
+											@click=${async (event: Event) => {
+												event.stopPropagation();
+												const { ChangeVerificationTimeoutDialog } = await import("../../dialogs/ChangeVerificationTimeoutDialog.js");
+												ChangeVerificationTimeoutDialog.show({ goalId, gateId, stepName: step.name, configuredSeconds: marker.configuredSeconds });
+											}}
+										>Change timeout</button>
+									` : nothing}
 									${hasOutput ? html`<span data-step-chevron class="text-muted-foreground text-[10px] shrink-0">${isFailed ? "▴" : "▾"}</span>` : nothing}
 								</div>
 								${hasOutput ? (

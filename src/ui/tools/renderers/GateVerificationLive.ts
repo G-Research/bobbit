@@ -21,7 +21,12 @@ import {
 	renderSessionLink,
 } from "./delegate-cards.js";
 
-type VerificationStepStatus = "running" | "passed" | "failed" | "waiting" | "skipped" | "blocked";
+type VerificationStepStatus = "running" | "passed" | "failed" | "timeout" | "waiting" | "skipped" | "blocked";
+
+type VerificationTimeoutInfo = {
+	configuredSeconds: number;
+	elapsedMs: number;
+};
 
 type InitialVerificationStep = {
 	name: string;
@@ -35,6 +40,7 @@ type InitialVerificationStep = {
 	output?: string;
 	startedAt?: number;
 	sessionId?: string;
+	timeout?: VerificationTimeoutInfo;
 };
 
 interface VerificationStep {
@@ -46,13 +52,15 @@ interface VerificationStep {
 	output?: string;
 	startedAt: number;
 	sessionId?: string;
+	timeout?: VerificationTimeoutInfo;
 }
 
 function normalizeStepStatus(step: Partial<InitialVerificationStep>, fallback: VerificationStepStatus = "running"): VerificationStepStatus {
 	if (typeof step.status === "string") {
 		const key = step.status.toLowerCase().replace(/_/g, "-");
 		if (key === "passed" || key === "success" || key === "completed") return "passed";
-		if (key === "failed" || key === "failure" || key === "error" || key === "timeout") return "failed";
+		if (key === "timeout") return "timeout";
+		if (key === "failed" || key === "failure" || key === "error") return "failed";
 		if (key === "skipped") return "skipped";
 		if (key === "waiting" || key === "pending" || key === "queued" || key === "yet-to-run") return "waiting";
 		if (key === "blocked" || key === "blocked-by-earlier-failure") return "blocked";
@@ -77,6 +85,7 @@ function mapVerificationStep(step: InitialVerificationStep, fallback: Verificati
 		output: step.output,
 		startedAt: step.startedAt || (durationMs && durationMs > 0 ? Date.now() - durationMs : status === "running" ? Date.now() : 0),
 		sessionId: step.sessionId,
+		timeout: step.timeout,
 	};
 }
 
@@ -87,7 +96,7 @@ function hasExplicitStepStatus(step: InitialVerificationStep): boolean {
 /** Map verification step status to delegate-cards status strings */
 function toDelegateStatus(status: string): string {
 	if (status === "passed") return "completed";
-	if (status === "failed") return "error";
+	if (status === "failed" || status === "timeout") return "error";
 	if (status === "waiting") return "waiting";
 	if (status === "skipped" || status === "blocked") return "skipped";
 	return "running";
@@ -96,6 +105,7 @@ function toDelegateStatus(status: string): string {
 function stepStatusBadgeClass(status: VerificationStepStatus): string {
 	if (status === "passed") return "bg-green-500/15 text-green-700 dark:text-green-300";
 	if (status === "failed") return "bg-red-500/15 text-red-700 dark:text-red-300";
+	if (status === "timeout") return "bg-warning/15 text-warning";
 	if (status === "running") return "bg-blue-500/15 text-blue-700 dark:text-blue-300";
 	return "bg-muted text-muted-foreground";
 }
@@ -106,6 +116,7 @@ function statusSummary(steps: VerificationStep[]): string {
 	const labels: Array<[VerificationStepStatus, string]> = [
 		["passed", "passed"],
 		["failed", "failed"],
+		["timeout", "timed out"],
 		["running", "running"],
 		["waiting", "waiting"],
 		["blocked", "blocked"],
@@ -118,6 +129,18 @@ function statusSummary(steps: VerificationStep[]): string {
 		})
 		.filter(Boolean)
 		.join(", ");
+}
+
+function timeoutInfo(value: unknown): VerificationTimeoutInfo | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const marker = value as Partial<VerificationTimeoutInfo>;
+	if (typeof marker.configuredSeconds !== "number" || !Number.isFinite(marker.configuredSeconds) || marker.configuredSeconds <= 0) return undefined;
+	if (typeof marker.elapsedMs !== "number" || !Number.isFinite(marker.elapsedMs) || marker.elapsedMs < 0) return undefined;
+	return marker as VerificationTimeoutInfo;
+}
+
+function formatTimeoutTiming(timeout: VerificationTimeoutInfo): string {
+	return `${(timeout.elapsedMs / 1000).toFixed(1)}s elapsed · ${timeout.configuredSeconds}s limit`;
 }
 
 function shouldRenderDuration(step: VerificationStep): boolean {
@@ -421,6 +444,7 @@ export class GateVerificationLive extends LitElement {
 						durationMs: detail.durationMs,
 						output: detail.output,
 						sessionId: detail.sessionId ?? updated[idx].sessionId,
+						timeout: detail.timeout,
 					};
 					this.steps = updated;
 				} else if (idx >= this.steps.length) {
@@ -435,6 +459,7 @@ export class GateVerificationLive extends LitElement {
 						status: normalizeStepStatus({ status: detail.status }, "failed"),
 						durationMs: detail.durationMs,
 						output: detail.output,
+						timeout: detail.timeout,
 					};
 					this.steps = updated;
 				}
@@ -501,7 +526,7 @@ export class GateVerificationLive extends LitElement {
 		}
 
 		const passedCount = this.steps.filter(s => s.status === "passed").length;
-		const failedCount = this.steps.filter(s => s.status === "failed").length;
+		const failedCount = this.steps.filter(s => s.status === "failed" || s.status === "timeout").length;
 		const total = this.steps.length;
 		const summary = statusSummary(this.steps);
 
@@ -614,6 +639,9 @@ export class GateVerificationLive extends LitElement {
 		const dStatus = toDelegateStatus(step.status);
 		const entry = toCardEntry(step, index);
 		const isRunningCommand = step.status === "running" && step.type === "command";
+		const marker = step.status === "timeout" ? timeoutInfo(step.timeout) : undefined;
+		const canChangeTimeout = !!marker && !!this.goalId && !!this.gateId && !!step.name;
+		const statusLabel = step.status === "timeout" ? "Timed out" : step.status;
 
 		const typeBadgeCls = step.type === "command"
 			? "bg-muted text-muted-foreground"
@@ -635,11 +663,32 @@ export class GateVerificationLive extends LitElement {
 						}
 					} : null}
 				>
-					<span class="${statusColor(dStatus)}">${statusIcon(dStatus)}</span>
+					${step.status === "timeout"
+						? html`<span data-timeout-icon title="Timed out" class="text-warning">⏱</span>`
+						: html`<span class="${statusColor(dStatus)}">${statusIcon(dStatus)}</span>`}
 					<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name || "step"}</span>
-					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${stepStatusBadgeClass(step.status)}">${step.status}</span>
+					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${stepStatusBadgeClass(step.status)}">${statusLabel}</span>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
-					${shouldRenderDuration(step) ? renderDuration(entry) : nothing}
+					${marker
+						? html`<span data-timeout-timing class="text-xs text-muted-foreground tabular-nums">${formatTimeoutTiming(marker)}</span>`
+						: shouldRenderDuration(step) ? renderDuration(entry) : nothing}
+					${canChangeTimeout ? html`
+						<button
+							type="button"
+							data-testid="change-verification-timeout"
+							class="shrink-0 rounded border border-warning/30 px-1.5 py-0.5 text-[10px] font-medium text-warning hover:bg-warning/10"
+							@click=${async (event: Event) => {
+								event.stopPropagation();
+								const { ChangeVerificationTimeoutDialog } = await import("../../dialogs/ChangeVerificationTimeoutDialog.js");
+								ChangeVerificationTimeoutDialog.show({
+									goalId: this.goalId,
+									gateId: this.gateId,
+									stepName: step.name,
+									configuredSeconds: marker.configuredSeconds,
+								});
+							}}
+						>Change timeout</button>
+					` : nothing}
 					${step.sessionId ? renderSessionLink(step.sessionId) : nothing}
 					${isRunningCommand ? html`<span class="text-muted-foreground text-[10px] shrink-0" title="View live output">▸</span>` : nothing}
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}
