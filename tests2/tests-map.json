@@ -21,7 +21,7 @@
   "v2Native": [
     {
       "path": "tests2/core/verification-review-timeout-contract.test.ts",
-      "reason": "Pins the review-agent timeout resolver and lifecycle contract: shared 1200s default/1s minimum, explicit-shorter and agent-QA precedence, unchanged command defaults, fresh attempt/reminder/resurrection/restart windows, fixed operational settles, provider-backoff exclusion with 75s/330s grace, and retained legacy direct routing."
+      "reason": "Pins the review-agent timeout resolver and lifecycle contract: shared 1200s default/1s minimum, explicit-shorter and agent-QA precedence, unchanged command defaults, fresh attempt/reminder/resurrection/restart windows, fixed operational settles, provider-backoff exclusion with 75s/330s grace, and session-only routing with the legacy direct path absent."
     },
     {
       "path": "tests2/integration/verification-review-timeout-payload.test.ts",
