@@ -58,6 +58,7 @@ import {
 	backToSessions,
 	uncacheSession,
 	resolveProjectMode,
+	resolveProjectProposalTarget,
 } from "./session-manager.js";
 import { deleteProposalFile, metadataObjectToRows, metadataRowsToObject } from "./proposal-helpers.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
@@ -2913,7 +2914,11 @@ export function resetProjectProposalPanel(): void {
 
 const PROJECT_ACCEPT_FAILED = "Project proposal accept failed";
 const NO_PROJECT_PROPOSAL = "There is no active project proposal to accept. Re-open the proposal and try again.";
-const UNLINKED_PROJECT_PROPOSAL = "This proposal is not linked to a project session. Re-open the project assistant or create the project again.";
+
+type ActiveProjectProposal = NonNullable<typeof state.activeProposals.project> & {
+	sourceProjectId?: string;
+	createdProjectId?: string;
+};
 
 function setProjectProposalAcceptError(title: string, message: string): void {
 	_projectProposalAcceptError = { title, message };
@@ -2932,52 +2937,63 @@ function showProjectProposalCaughtError(title: string, err: unknown): void {
 	showConnectionError(title, message, { code, stack });
 }
 
-async function showProjectProposalResponseError(res: Response, title: string, fallback: string): Promise<void> {
+async function showProjectProposalResponseError(
+	res: Response,
+	title: string,
+	fallback: string,
+	messagePrefix = "",
+): Promise<void> {
 	let data: any = {};
 	try { data = await res.json(); } catch { data = {}; }
 	const details = Array.isArray(data?.details) && data.details.length > 0
 		? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
-		: "";
-	const message = details || data?.error || `${fallback}: ${res.status}`;
+		: typeof data?.details === "string"
+			? data.details
+			: typeof data?.details?.message === "string"
+				? data.details.message
+				: "";
+	const responseMessage = details || data?.message || data?.error || `${fallback}: ${res.status}`;
+	const message = messagePrefix ? `${messagePrefix}\n\n${responseMessage}` : responseMessage;
 	setProjectProposalAcceptError(title, message);
 	showConnectionError(title, message, { code: data?.code, stack: data?.stack });
 }
 
-function activeProjectProposalOrFail(): NonNullable<typeof state.activeProposals.project> | null {
-	const proposal = state.activeProposals.project;
-	if (!proposal) showConnectionError(PROJECT_ACCEPT_FAILED, NO_PROJECT_PROPOSAL);
+function activeProjectProposalOrFail(): ActiveProjectProposal | null {
+	const proposal = state.activeProposals.project as ActiveProjectProposal | undefined;
+	if (!proposal) {
+		setProjectProposalAcceptError(PROJECT_ACCEPT_FAILED, NO_PROJECT_PROPOSAL);
+		showConnectionError(PROJECT_ACCEPT_FAILED, NO_PROJECT_PROPOSAL);
+	}
 	return proposal ?? null;
 }
 
+function rejectUnknownProjectProposal(projectId: string): false {
+	const message = `Unknown project "${projectId}". New-project proposals must omit projectId.`;
+	setProjectProposalAcceptError(PROJECT_ACCEPT_FAILED, message);
+	showConnectionError(PROJECT_ACCEPT_FAILED, message, { code: "UNKNOWN_PROJECT" });
+	return false;
+}
+
+function sourceSessionForProjectProposal(proposal: ActiveProjectProposal) {
+	return state.gatewaySessions.find(s => s.id === proposal.sessionId)
+		?? state.archivedSessions.find(s => s.id === proposal.sessionId);
+}
+
 /**
- * Resolve the project a project-proposal accept should target (design §5,
- * tri-state — mirrors the server mutation-boundary invariant in §3):
- *   explicit + registered → that project id (EDIT)
- *   explicit + unknown    → UNKNOWN_PROJECT error, null (REJECT, no create)
- *   absent                → the project pinned on the proposal at creation
- *                           (race-safe), else the session's project
- * The UI only preflights; the server remains authoritative.
+ * Once click-time resolution has established create intent, preserve the Add
+ * Project assistant implementation by promoting its source provisional project.
+ * Source provenance is never consulted to decide create-vs-edit intent.
  */
-function projectIdForProjectProposal(proposal: NonNullable<typeof state.activeProposals.project>): string | null {
-	const fields = proposal.fields as Record<string, unknown> | undefined;
-	const explicitRaw = fields?.projectId;
-	const explicit = typeof explicitRaw === "string" && explicitRaw.trim() ? explicitRaw.trim() : undefined;
-	if (explicit) {
-		if (state.projects.some(p => p.id === explicit)) return explicit; // EDIT registered target
-		showConnectionError(PROJECT_ACCEPT_FAILED, `Unknown project "${explicit}". Cross-project proposals must target an already-registered project.`);
-		return null; // explicit + unknown → never fall through to the new-project flow
-	}
-	// Absent explicit target: prefer the project pinned on the proposal at
-	// creation time. A background refreshSessions() poll can mutate the
-	// session→project link between proposal creation and accept (notably for
-	// provisional proposals), so re-deriving from the mutable session list here
-	// could promote/config-write the WRONG project.
-	const pinned = typeof proposal.projectId === "string" && proposal.projectId.trim()
-		? proposal.projectId.trim()
-		: undefined;
-	const projectId = pinned ?? state.gatewaySessions.find(s => s.id === proposal.sessionId)?.projectId;
-	if (!projectId) showConnectionError(PROJECT_ACCEPT_FAILED, UNLINKED_PROJECT_PROPOSAL);
-	return projectId || null;
+function sourceProvisionalProjectIdForCreate(proposal: ActiveProjectProposal): string | null {
+	const session = sourceSessionForProjectProposal(proposal);
+	if (session?.assistantType !== "project" && session?.assistantType !== "project-scaffolding") return null;
+	const sourceProjectId = typeof proposal.sourceProjectId === "string" && proposal.sourceProjectId.trim()
+		? proposal.sourceProjectId.trim()
+		// Legacy slots did not persist sourceProjectId. Their source session link is
+		// safe to consult here because the dispatcher has already classified create.
+		: session.projectId;
+	if (!sourceProjectId) return null;
+	return state.projects.some(p => p.id === sourceProjectId && p.provisional) ? sourceProjectId : null;
 }
 
 async function invalidateProjectProposalConfig(projectId: string): Promise<void> {
@@ -3004,21 +3020,38 @@ async function promoteProjectProposal(projectId: string, name: string): Promise<
 	}
 }
 
-async function writeProjectProposalConfig(projectId: string, fields: Record<string, unknown>): Promise<boolean> {
+async function writeProjectProposalConfig(
+	projectId: string,
+	fields: Record<string, unknown>,
+	errorContext?: { title: string; messagePrefix: string },
+): Promise<boolean> {
 	const diff = buildProjectConfigDiff(fields);
 	if (Object.keys(diff).length === 0) return true;
+	const title = errorContext?.title ?? "Failed to save project config";
 	try {
 		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
 			method: "PUT",
 			body: JSON.stringify(diff),
 		});
 		if (!res.ok) {
-			await showProjectProposalResponseError(res, "Failed to save project config", "Config write failed");
+			await showProjectProposalResponseError(
+				res,
+				title,
+				"Config write failed",
+				errorContext?.messagePrefix,
+			);
 			return false;
 		}
 		return true;
 	} catch (err) {
-		showProjectProposalCaughtError("Failed to save project config", err);
+		if (!errorContext) {
+			showProjectProposalCaughtError(title, err);
+			return false;
+		}
+		const { message, code, stack } = errorDetails(err);
+		const contextualMessage = `${errorContext.messagePrefix}\n\n${message}`;
+		setProjectProposalAcceptError(title, contextualMessage);
+		showConnectionError(title, contextualMessage, { code, stack });
 		return false;
 	}
 }
@@ -3034,16 +3067,28 @@ function notifyProjectProposalAccepted(sessionId: string, summary: string): void
 export async function acceptProjectProposalFromPanel(): Promise<boolean> {
 	const proposal = activeProjectProposalOrFail();
 	if (!proposal) return false;
-	// Recompute the mode from the CURRENT fields at dispatch time. The stored
-	// proposal.mode can go stale because the accept sub-functions re-resolve the
-	// target from fields.projectId, which the user can edit in the panel after
-	// the slot was created. Dispatching on the stale mode could skip the required
-	// promote step (e.g. a registered-mode slot re-targeted to a provisional
-	// project). resolveProjectMode is the single source of truth.
-	const mode = resolveProjectMode(proposal.sessionId, proposal.fields as Record<string, unknown>);
-	return mode === "registered"
-		? acceptRegisteredProjectProposalFromPanel(proposal)
-		: acceptProvisionalProjectProposalFromPanel(proposal);
+	// The stored mode is presentation-only and may be stale after a revision.
+	// Resolve solely from CURRENT fields at click time; source provenance cannot
+	// turn absent projectId create intent into an edit of the source project.
+	const target = resolveProjectProposalTarget(proposal.fields as Record<string, unknown>);
+	switch (target.kind) {
+		case "unknown":
+			return rejectUnknownProjectProposal(target.projectId);
+		case "existing":
+			return target.provisional
+				? acceptProvisionalProjectProposalFromPanel(proposal, target.projectId)
+				: acceptRegisteredProjectProposalFromPanel(proposal, target.projectId);
+		case "create": {
+			const provisionalSourceId = sourceProvisionalProjectIdForCreate(proposal);
+			return provisionalSourceId
+				? acceptProvisionalProjectProposalFromPanel(proposal, provisionalSourceId)
+				: acceptNewProjectProposalFromPanel(proposal);
+		}
+		default: {
+			const exhaustiveTarget: never = target;
+			return exhaustiveTarget;
+		}
+	}
 }
 
 async function terminateProjectAssistantSessionFromPanel(sessionId: string): Promise<void> {
@@ -3069,28 +3114,148 @@ async function terminateProjectAssistantSessionFromPanel(sessionId: string): Pro
 	renderApp();
 }
 
-async function acceptProvisionalProjectProposalFromPanel(proposal: NonNullable<typeof state.activeProposals.project>): Promise<boolean> {
-	const { fields, sessionId: propSessionId } = proposal;
-	const projectId = projectIdForProjectProposal(proposal);
-	if (!projectId) return false;
-	if (!await promoteProjectProposal(projectId, typeof fields.name === "string" ? fields.name : "")) return false;
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
+function normalizeProjectRootForComparison(rootPath: string): string {
+	const normalized = rootPath.trim().replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+	return /^[a-z]:\//i.test(normalized) || normalized.startsWith("//")
+		? normalized.toLowerCase()
+		: normalized;
+}
 
+function projectRootMatches(projectRoot: unknown, proposedRoot: string): boolean {
+	return typeof projectRoot === "string"
+		&& normalizeProjectRootForComparison(projectRoot) === normalizeProjectRootForComparison(proposedRoot);
+}
+
+async function refreshProjectProposalProjects(): Promise<void> {
 	setProjects(await fetchProjects());
+}
+
+async function acceptNewProjectProposalFromPanel(proposal: ActiveProjectProposal): Promise<boolean> {
+	const { fields, sessionId: propSessionId } = proposal;
+	const name = typeof fields.name === "string" ? fields.name.trim() : "";
+	const rootPath = typeof fields.root_path === "string" ? fields.root_path.trim() : "";
+	if (!name || !rootPath) {
+		const missing = [!name ? "name" : "", !rootPath ? "root_path" : ""].filter(Boolean).join(" and ");
+		const message = `A new project proposal requires ${missing} before it can be accepted.`;
+		setProjectProposalAcceptError(PROJECT_ACCEPT_FAILED, message);
+		showConnectionError(PROJECT_ACCEPT_FAILED, message);
+		return false;
+	}
+
+	let projectId = typeof proposal.createdProjectId === "string" && proposal.createdProjectId.trim()
+		? proposal.createdProjectId.trim()
+		: "";
+	if (projectId) {
+		let checkpointProject = state.projects.find(p => p.id === projectId);
+		if (!checkpointProject) {
+			// Verify the checkpoint directly. A collection refresh deliberately
+			// returns [] on transport failure, which must not be mistaken for a
+			// deleted project and trigger a duplicate registration POST.
+			try {
+				const res = await gatewayFetch(`/api/projects/${projectId}`);
+				if (res.status === 404) {
+					delete proposal.createdProjectId;
+					projectId = "";
+					saveProjectDraft(propSessionId);
+				} else if (!res.ok) {
+					await showProjectProposalResponseError(res, PROJECT_ACCEPT_FAILED, "Project checkpoint verification failed");
+					return false;
+				} else {
+					checkpointProject = await res.json();
+				}
+			} catch (err) {
+				showProjectProposalCaughtError(PROJECT_ACCEPT_FAILED, err);
+				return false;
+			}
+		}
+		if (checkpointProject && (isHeadquartersProject(checkpointProject) || !projectRootMatches(checkpointProject.rootPath, rootPath))) {
+			const message = `Project registration checkpoint "${projectId}" is not the new project at the proposed root. No configuration was written. Remove or correct that project before retrying.`;
+			setProjectProposalAcceptError(PROJECT_ACCEPT_FAILED, message);
+			showConnectionError(PROJECT_ACCEPT_FAILED, message, { code: "PROJECT_CHECKPOINT_MISMATCH" });
+			return false;
+		}
+	}
+
+	if (!projectId) {
+		let res: Response;
+		try {
+			res = await gatewayFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name, rootPath }),
+			});
+		} catch (err) {
+			showProjectProposalCaughtError(PROJECT_ACCEPT_FAILED, err);
+			return false;
+		}
+		if (!res.ok) {
+			await showProjectProposalResponseError(res, PROJECT_ACCEPT_FAILED, "Project registration failed");
+			return false;
+		}
+		let created: any = null;
+		try { created = await res.json(); } catch { created = null; }
+		if (typeof created?.id !== "string" || !created.id.trim()) {
+			const message = "The project was registered, but the server did not return its id. The proposal was retained; refresh projects before retrying.";
+			setProjectProposalAcceptError(PROJECT_ACCEPT_FAILED, message);
+			showConnectionError(PROJECT_ACCEPT_FAILED, message, { code: "INVALID_PROJECT_RESPONSE" });
+			return false;
+		}
+		projectId = created.id.trim();
+		proposal.createdProjectId = projectId;
+		// Persist this checkpoint before the config request. A failed config write
+		// can then retry idempotently without issuing a second registration POST.
+		saveProjectDraft(propSessionId);
+		await refreshProjectProposalProjects();
+	}
+
+	const partialMessage = `Project "${name}" was registered, but its configuration is incomplete. Retry Accept to finish configuration; registration will not be repeated.`;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, {
+		title: "Project registered; configuration incomplete",
+		messagePrefix: partialMessage,
+	})) return false;
+
+	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
 	void closeSidePanelTab(proposalPanelTabId("project"), { sessionId: propSessionId });
 	deleteProjectDraft(propSessionId);
 	void deleteProposalFile(propSessionId, "project");
-	await terminateProjectAssistantSessionFromPanel(propSessionId);
+	notifyProjectProposalAccepted(propSessionId, name);
+	renderApp();
 	return true;
 }
 
-async function acceptRegisteredProjectProposalFromPanel(proposal: NonNullable<typeof state.activeProposals.project>): Promise<boolean> {
+async function acceptProvisionalProjectProposalFromPanel(
+	proposal: ActiveProjectProposal,
+	projectId: string,
+): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
-	const projectId = projectIdForProjectProposal(proposal);
-	if (!projectId) return false;
+	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
+	if (!await promoteProjectProposal(projectId, fieldNameStr)) return false;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
+
+	await refreshProjectProposalProjects();
+	void invalidateProjectProposalConfig(projectId);
+	delete state.activeProposals.project;
+	state.assistantHasProposal = false;
+	void closeSidePanelTab(proposalPanelTabId("project"), { sessionId: propSessionId });
+	deleteProjectDraft(propSessionId);
+	void deleteProposalFile(propSessionId, "project");
+	const sourceSession = sourceSessionForProjectProposal(proposal);
+	if (sourceSession?.assistantType === "project" || sourceSession?.assistantType === "project-scaffolding") {
+		await terminateProjectAssistantSessionFromPanel(propSessionId);
+	} else {
+		notifyProjectProposalAccepted(propSessionId, fieldNameStr || "(unnamed)");
+		renderApp();
+	}
+	return true;
+}
+
+async function acceptRegisteredProjectProposalFromPanel(
+	proposal: ActiveProjectProposal,
+	projectId: string,
+): Promise<boolean> {
+	const { fields, sessionId: propSessionId } = proposal;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 	if (fieldNameStr) {
 		try {
@@ -3109,7 +3274,7 @@ async function acceptRegisteredProjectProposalFromPanel(proposal: NonNullable<ty
 	}
 	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
 
-	setProjects(await fetchProjects());
+	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);
 	state.projectProposalAcceptedBySessionId[propSessionId] = true;
 	delete state.activeProposals.project;
