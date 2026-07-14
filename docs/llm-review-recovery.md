@@ -6,6 +6,43 @@ This makes review and QA output visible, inspectable, and restartable, but it al
 
 The recovery policy treats infrastructure failures as recoverable before it marks the gate failed. A real review or QA finding should fail fast; a transient runtime failure should get a bounded retry window; provider overload should wait longer without a tight loop.
 
+## Review-agent timeout contract
+
+`llm-review` and `agent-qa` use a review-only timeout contract. Command and build timeouts are separate and unchanged.
+
+- An `llm-review` step with no `timeout` gets a 1200-second active-turn allowance.
+- An `agent-qa` step with no `timeout` gets the greater of 1200 seconds and `(qa_max_duration_minutes + 5) * 60` seconds. The QA duration defaults to 10 minutes when component configuration does not provide it.
+- An explicit positive `timeout` is authoritative for either review type, even when shorter than 1200 seconds. The supported minimum is one second.
+- Invalid zero, negative, or non-finite runtime values are treated as omitted. Positive fractional values from non-UI callers are floored to whole seconds and clamped to one second; workflow authoring surfaces require a positive integer.
+
+The resolved timeout is a **fresh active-turn allowance**, not a whole-step wall-clock deadline. Each from-scratch attempt, same-session reminder, session auto-retry, restart continuation or reminder, step-level retry, and same-session process resurrection receives the full resolved window after that turn starts streaming. Setup, readiness, prompt transport, retry backoff, and short settle/flush waits do not consume it. Total step `duration_ms` can therefore exceed one allowance.
+
+Active and idle turns are handled differently:
+
+- A streaming reviewer may continue for the full resolved allowance. Expiry produces a timeout; it is not reclassified as idle and does not enter the idle reminder path.
+- A reviewer that becomes idle without calling `verification_result` may enter same-session error recovery or reminder handling immediately.
+- A fixed start-settle wait that observes no streaming does not count as review thinking.
+
+Operational windows remain fixed outside the active allowance: 10 seconds for restart streaming settle, 15 seconds for ordinary reminder/resurrection streaming settle, 20 seconds for a late verdict, and 30 seconds for successful-result terminal flush. Retryable runtime errors also retain fixed start grace: 75 seconds for ordinary errors and 330 seconds for provider backoff. These grace windows only wait for a retry turn to begin; once it streams, the fresh resolved allowance starts.
+
+Provider overload and rate-limit backoff is excluded from the allowance. It remains on the existing effectively unbounded retry path, subject to cancellation and goal completion, so a 429/529 or overload wait does not become a terminal timeout merely because it exceeds 1200 seconds.
+
+A real allowance expiry is persisted and broadcast with an explicit machine-readable marker:
+
+```json
+{
+  "passed": false,
+  "status": "timeout",
+  "timeout": {
+    "configuredSeconds": 1200,
+    "elapsedMs": 1200000
+  },
+  "duration_ms": 1200000
+}
+```
+
+`timeout.configuredSeconds` is the resolved per-turn allowance, while `timeout.elapsedMs` measures the particular active turn that expired. `duration_ms` remains total step elapsed time. Idle-without-result, cancellation, provider backoff, and other failures do not set `status: "timeout"`; a timed-out step still makes the overall gate outcome failed.
+
 ## Recovery layers
 
 Recovery happens at two layers:
@@ -108,10 +145,10 @@ When a verifier session goes idle without `verification_result`, the harness che
 
 If the session has a pending auto-retry timer, the harness waits for the retry turn to actually start:
 
-- ordinary retryable runtime/socket errors: up to the step timeout, capped at 75s;
-- provider backoff: up to the step timeout, capped at 330s.
+- ordinary retryable runtime/socket errors: up to 75 seconds;
+- provider backoff: up to 330 seconds.
 
-Once the retry turn starts, the harness waits for either `verification_result` or idle. If that retry turn errors again and another auto-retry is pending, the grace loop repeats. Only after the recovery path is exhausted does the harness return a failed step and clean up the verifier session.
+These fixed start-grace windows are outside the active-turn allowance. Once the retry turn starts streaming, it receives the full resolved allowance and the harness waits for `verification_result`, real idle, or timeout. If that retry turn errors again and another auto-retry is pending, the grace loop repeats. Only after the recovery path is exhausted does the harness return a failed step and clean up the verifier session.
 
 ## Reminder-first behavior (in-session, multi-reminder)
 
@@ -144,15 +181,13 @@ The policy is deliberately bounded:
 - Each attempt preserves the original session id, transcript/history, metadata, working directory, and tool context.
 - `llm-review` uses the restart-aware continuation prompt; `agent-qa` uses the context-rich QA reminder because it needs the QA kickoff context.
 - If resurrection succeeds but the verifier is alive and idle without `verification_result`, recovery stops treating it as process death. The normal reminder/grace path handles alive-idle behavior; the harness does not burn attempts 2/3 on duplicate prompts to an already-live idle agent.
-- If the same-session recovery budget is exhausted, the step fails with a diagnostic message instead of reusing the id for a blank replacement.
+- If the same-session resurrection attempts are exhausted, the step fails with a diagnostic message instead of reusing the id for a blank replacement.
 
-### Timeout-budget accounting
+### Timeout allowance during resurrection
 
-Same-session resurrection shares the original verifier step timeout as one remaining budget. It does **not** multiply a 10-minute verifier timeout by three process-death attempts.
+Each same-session resurrection attempt receives a fresh full active-turn allowance after its continuation begins streaming. Readiness, restart, prompt transport, and the fixed 15-second streaming settle happen before that allowance; the fixed 20-second late-verdict check happens afterward. If the resurrected turn ends in a retryable error, the 75/330-second start grace remains outside the next active allowance.
 
-Within that shared budget, the harness bounds each phase separately: cold-start/streaming settle, idle wait, errored-turn auto-retry grace, and late-verdict settle. The late-verdict grace is intentionally short and cleared after the check; it exists only to catch a verdict POST already in flight, not to extend the verifier indefinitely.
-
-This keeps recovery fair to interrupted agents without letting a broken verifier block a gate for several full timeouts.
+This keeps interrupted reviewers from losing thinking time to infrastructure recovery. The separate three-attempt resurrection cap and the alive-idle duplicate-prompt guard still bound broken-session behavior.
 
 ## Late verdict during teardown is honored (no 404 drop)
 
@@ -168,7 +203,7 @@ The `POST /api/internal/verification-result` route logs accept vs 404-drop with 
 Verifier lifecycle events emit structured, greppable log lines so a future failure is diagnosable without re-deriving the code path:
 
 - **`[verification][reviewer-lifecycle]`** — verifier spawn/attempt (attempt N/max, session id, goal, timeout), from-scratch retry lineage (retired id → fresh id), `llm-review` reminders, termination reason (for example `reason=reminder-exhausted`), late-verdict-honored-during-teardown, and `verification_result` POST accept vs 404-drop.
-- **`[verification][verifier-lifecycle]`** — shared verifier behavior, especially `agent-qa` reminders and same-session process-death resurrection attempts. Look for `resurrection N/3`, `preserving same session id/history`, `remainingBudgetMs=...`, `termination reason=reminder-exhausted`, and `not issuing duplicate resurrection prompts`.
+- **`[verification][verifier-lifecycle]`** — shared verifier behavior, especially `agent-qa` reminders and same-session process-death resurrection attempts. Look for `resurrection N/3`, `preserving same session id/history`, `freshAllowanceMs=...`, `termination reason=reminder-exhausted`, and `not issuing duplicate resurrection prompts`.
 - **`[session-manager][session-id-clobber]`** — a caller tried to reuse a live or archived session id without `allowSessionReuse`; the transcript-clobber guard fired.
 
 Grep these prefixes in the gateway log to reconstruct a verifier's full lifecycle and transcript lineage across attempts.
@@ -186,8 +221,8 @@ In-flight verifier steps also persist in active verification state. After a gate
 - If the restored verifier is already `idle` because the gateway interrupted its turn, the first harness prompt is restart-aware continuation guidance, not `VERIFICATION_RESULT_REMINDER`. It tells the verifier that infrastructure restarted mid-turn, the transcript/context were preserved, it should continue the interrupted analysis, and it should call `verification_result` only when the work is complete.
 - If the restored verifier is idle for an ordinary non-restart reason, or if the post-restart continuation turn later goes idle without a result, the normal idle-without-result path still applies: a JSON/tool-validation retry prompt when appropriate, otherwise `VERIFICATION_RESULT_REMINDER`.
 - If the restored verifier is still busy, the harness waits for either `verification_result` or actual idle before prompting it. This keeps the harness from interrupting an active turn while making the waiting behavior explicit.
-- Prompt dispatch to a cold restored verifier uses `promptWhenReady()` so the agent has time to load before the prompt timeout starts.
-- After the continuation or reminder prompt is accepted, the harness waits for `waitForStreaming()` before racing against post-prompt idle, so an already-idle status cannot instantly fail and terminate the verifier before it has a real continuation turn.
+- Prompt dispatch to a cold restored verifier uses `promptWhenReady()` so the agent has time to load before the active-turn allowance starts.
+- After the continuation or reminder prompt is accepted, the harness uses a fixed 10-second `waitForStreaming()` settle before racing result, real idle, and timeout with a fresh full resolved allowance. An already-idle status therefore cannot instantly fail and terminate the verifier before it has a real continuation turn.
 - If the resume prompt cannot reach the verifier because of a cold-agent timeout or process/runtime transient, the result is marked as transient and restart-interrupted, not as a hard verifier failure.
 - `_resumeOneVerification()` then re-runs the original `llm-review` or `agent-qa` step from the workflow definition when context is available.
 - If the restart interruption cannot be safely re-run, the gate is left pending so it can be re-signaled instead of being marked failed for an infrastructure interruption.
@@ -209,7 +244,7 @@ When bounded verifier recovery is exhausted, or when the verifier ignores the re
 - Verifier ignored reminder: yes | no
 ```
 
-Provider-backoff timeouts also include a suffix describing the active provider backoff state and retry attempts when that information is available from the session snapshot. Process-death exhaustion returns a direct message such as `verifier process could not be recovered after 3 same-session resurrection attempt(s): ...`; that wording is intentional operator evidence that the harness did not create a blank replacement.
+Failures reported while provider backoff is active include a suffix describing the backoff state and retry attempts when that information is available from the session snapshot. Backoff time itself does not produce the timeout marker. Process-death exhaustion returns a direct message such as `verifier process could not be recovered after 3 same-session resurrection attempt(s): ...`; that wording is intentional operator evidence that the harness did not create a blank replacement.
 
 ## Maintainer map
 
@@ -240,7 +275,7 @@ Relevant unit coverage:
 - `tests2/core/auto-retry-policy.test.ts` — session-level auto-retry policy and schedules.
 - `tests2/core/verification-reminder-race.test.ts` — restart-aware continuation prompt selection, ordinary idle reminder behavior, and the reminder `waitForStreaming()` guard.
 - `tests2/core/verification-harness-review-reliability.test.ts` — fresh session id per from-scratch attempt (attempt 1's transcript preserved), late-`verification_result`-during-teardown honored (not 404-dropped), and the "did not call after reminder" non-transient classification.
-- `tests2/core/verification-verifier-lifecycle-repro.test.ts` — `agent-qa` same-session retryable fetch recovery, dead `llm-review` process resurrection up to 3 attempts, shared timeout-budget accounting, no fake resurrection attempts after alive-idle recovery, and `agent-qa` reminder/grace parity.
+- `tests2/core/verification-verifier-lifecycle-repro.test.ts` — `agent-qa` same-session retryable fetch recovery, dead `llm-review` process resurrection up to 3 attempts, fresh per-recovery timeout allowances, no fake resurrection attempts after alive-idle recovery, and `agent-qa` reminder/grace parity.
 - `tests2/core/session-id-clobber-guard.test.ts` — `createSession` refuses to clobber a live session id, while `allowSessionReuse` bypasses the guard for the sanctioned resume path.
 - `tests2/core/verification-resume-restart-prompt.test.ts` — cold restart resume prompt timeout routes to pending instead of hard failure.
 - `tests2/core/verification-resume-restart-recovery.test.ts` — cold verifier readiness wait and transient resume failure rerun path.
