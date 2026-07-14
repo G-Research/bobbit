@@ -724,6 +724,157 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
+	it("redrives poisoned follow-up only after a queued assignRole commits", async () => {
+		const file = hostTranscript("poison-redrive-vs-role");
+		const oldStopGate = deferred<void>();
+		const poisonBridge = recordingBridge(() => {});
+		const roleBridge = recordingBridge(() => {});
+		poisonBridge.prompt = vi.fn(async () => ({ success: true }));
+		roleBridge.prompt = vi.fn(async () => ({ success: true }));
+		const factory = vi.fn().mockReturnValueOnce(poisonBridge).mockReturnValueOnce(roleBridge);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("poison-redrive-vs-role", file);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => {});
+		oldBridge.stop = vi.fn(() => oldStopGate.promise);
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+		}));
+
+		const followUp = manager.enqueuePrompt(ps.id, "redrive after role");
+		await vi.waitFor(() => expect(oldBridge.stop).toHaveBeenCalledTimes(1));
+		const assignment = manager.assignRole(ps.id, {
+			name: "redrive-role",
+			promptTemplate: "Redrive role",
+			accessory: "redrive-accessory",
+		});
+		oldStopGate.resolve();
+
+		await expect(Promise.all([followUp, assignment])).resolves.toEqual([
+			{ status: "dispatched" },
+			true,
+		]);
+		expect(factory).toHaveBeenCalledTimes(2);
+		expect(poisonBridge.prompt).not.toHaveBeenCalled();
+		expect(roleBridge.prompt).toHaveBeenCalledTimes(1);
+		expect(roleBridge.prompt).toHaveBeenCalledWith("redrive after role", undefined);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(roleBridge);
+	});
+
+	it("redrives poisoned Retry only after a queued restart commits", async () => {
+		const file = hostTranscript("poison-redrive-vs-restart");
+		const oldStopGate = deferred<void>();
+		const poisonBridge = recordingBridge(() => {});
+		const restartBridge = recordingBridge(() => {});
+		poisonBridge.prompt = vi.fn(async () => ({ success: true }));
+		restartBridge.prompt = vi.fn(async () => ({ success: true }));
+		const factory = vi.fn().mockReturnValueOnce(poisonBridge).mockReturnValueOnce(restartBridge);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("poison-redrive-vs-restart", file);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => {});
+		oldBridge.stop = vi.fn(() => oldStopGate.promise);
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+			lastPromptText: "retry me once",
+		}));
+
+		const retry = manager.retryLastPrompt(ps.id);
+		await vi.waitFor(() => expect(oldBridge.stop).toHaveBeenCalledTimes(1));
+		const restart = manager.restartAgent(ps.id);
+		oldStopGate.resolve();
+
+		await expect(Promise.all([retry, restart])).resolves.toEqual([undefined, undefined]);
+		expect(factory).toHaveBeenCalledTimes(2);
+		expect(poisonBridge.prompt).not.toHaveBeenCalled();
+		expect(restartBridge.prompt).toHaveBeenCalledTimes(1);
+		expect(restartBridge.prompt).toHaveBeenCalledWith("retry me once", undefined);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(restartBridge);
+	});
+
+	it("lets queued termination win over poisoned redrive without deleting durable intent", async () => {
+		const file = hostTranscript("poison-redrive-vs-terminate");
+		const oldStopGate = deferred<void>();
+		const poisonBridge = recordingBridge(() => {});
+		poisonBridge.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted("poison-redrive-vs-terminate", file);
+		const manager = makeManager(ps, poisonBridge);
+		const oldBridge = recordingBridge(() => {});
+		oldBridge.stop = vi.fn(() => oldStopGate.promise);
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+		}));
+
+		const followUp = manager.enqueuePrompt(ps.id, "durable but never dispatched");
+		await vi.waitFor(() => expect(oldBridge.stop).toHaveBeenCalledTimes(1));
+		const termination = manager.terminateSession(ps.id);
+		oldStopGate.resolve();
+
+		await expect(Promise.all([followUp, termination])).resolves.toEqual([
+			{ status: "dispatched" },
+			true,
+		]);
+		expect(poisonBridge.prompt).not.toHaveBeenCalled();
+		expect(manager.sessions.has(ps.id)).toBe(false);
+		expect(manager._testStore.archive).toHaveBeenCalledWith(ps.id);
+		expect(manager._testStore.update).toHaveBeenCalledWith(
+			ps.id,
+			expect.objectContaining({
+				messageQueue: [expect.objectContaining({ text: "durable but never dispatched" })],
+			}),
+		);
+	});
+
+	it("lets queued Stop cancel poisoned redrive before bridge install", async () => {
+		const file = hostTranscript("poison-redrive-vs-stop");
+		const oldStopGate = deferred<void>();
+		const poisonBridge = recordingBridge(() => {});
+		poisonBridge.stop = vi.fn(async () => {});
+		poisonBridge.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted("poison-redrive-vs-stop", file);
+		const manager = makeManager(ps, poisonBridge);
+		const oldBridge = recordingBridge(() => {});
+		oldBridge.stop = vi.fn(() => oldStopGate.promise);
+		const original = liveSession(ps.id, oldBridge, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+		});
+		manager.sessions.set(ps.id, original);
+
+		const followUp = manager.enqueuePrompt(ps.id, "must remain durable after Stop");
+		await vi.waitFor(() => expect(oldBridge.stop).toHaveBeenCalledTimes(1));
+		const stop = manager.forceAbort(ps.id, 5);
+		oldStopGate.resolve();
+
+		await expect(followUp).rejects.toThrow("respawn cancelled by stop");
+		await expect(stop).resolves.toBeUndefined();
+		expect(poisonBridge.prompt).not.toHaveBeenCalled();
+		expect(poisonBridge.stop).toHaveBeenCalledTimes(1);
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect(original.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["must remain durable after Stop"]);
+		expect(original.status).toBe("terminated");
+	});
+
 	it("finalizes the canonical generation after a queued forceAbort becomes a no-op", async () => {
 		const file = hostTranscript("assign-role-noop-abort-generation");
 		const startGate = deferred<void>();
@@ -815,6 +966,43 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(replacement.stop).toHaveBeenCalledTimes(1);
 		expect(manager._testStore.archive).toHaveBeenCalledWith(ps.id);
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
+	it.each([
+		{ realm: "host", sandboxed: false },
+		{ realm: "sandbox", sandboxed: true },
+	])("serializes Stop through the $realm respawn map gap and cancels install", async ({ realm, sandboxed }) => {
+		const file = hostTranscript(`respawn-map-gap-stop-${realm}`);
+		const startGate = deferred<void>();
+		const replacement = recordingBridge(() => {});
+		replacement.start = vi.fn(() => startGate.promise);
+		replacement.stop = vi.fn(async () => {});
+		replacement.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted(`respawn-map-gap-stop-${realm}`, file, { sandboxed });
+		const manager = makeManager(ps, replacement);
+		manager.applySandboxWiring = vi.fn(async () => true);
+		const oldBridge = recordingBridge(() => {});
+		oldBridge.stop = vi.fn(async () => {});
+		const original = liveSession(ps.id, oldBridge, {
+			sandboxed,
+			unsubscribe: vi.fn(),
+		});
+		manager.sessions.set(ps.id, original);
+
+		const restart = manager.restartAgent(ps.id);
+		await vi.waitFor(() => expect(replacement.start).toHaveBeenCalledTimes(1));
+		expect(manager.sessions.has(ps.id)).toBe(false);
+		const stop = manager.forceAbort(ps.id, 5);
+		startGate.resolve();
+
+		await expect(restart).rejects.toThrow("respawn cancelled by stop");
+		await expect(stop).resolves.toBeUndefined();
+		expect(replacement.stop).toHaveBeenCalledTimes(1);
+		expect(replacement.prompt).not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect(original.status).toBe("terminated");
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+		if (sandboxed) expect(manager.applySandboxWiring).toHaveBeenCalled();
 	});
 
 	it("assignRole wires a real sandbox replacement before rehydrating container history", async () => {

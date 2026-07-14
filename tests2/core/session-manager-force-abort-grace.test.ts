@@ -169,6 +169,81 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.deepEqual(allowed!.map((e: any) => e.name), ["read"]);
 	});
 
+	it("replays graceful abort terminal bookkeeping exactly once before the coordinator drains", async () => {
+		const manager: any = new SessionManager();
+		const update = vi.fn(() => {});
+		manager._testStore = {
+			update,
+			get: vi.fn(() => ({ id: "s-graceful-bookkeeping", modelProvider: "anthropic", wasStreaming: true })),
+		};
+		manager.lifecycleHub = { dispatch: vi.fn(async () => {}) };
+		const drainQueue = vi.fn();
+		manager.drainQueue = drainQueue;
+		const resolveIdleWaiters = vi.fn();
+		manager.resolveIdleWaiters = resolveIdleWaiters;
+		managers.push(manager);
+
+		const listeners = new Set<(event: any) => void>();
+		const emit = (event: any) => {
+			for (const listener of [...listeners]) listener(event);
+		};
+		const prompt = vi.fn(async () => ({ success: true }));
+		const session: any = {
+			id: "s-graceful-bookkeeping",
+			title: "Graceful bookkeeping",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "streaming",
+			statusVersion: 1,
+			streamingStartedAt: Date.now(),
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			allowedTools: ["read", "write"],
+			oneTimeGrantedTools: ["write"],
+			completedTurnCount: 6,
+			setupComplete: true,
+			unsubscribe: () => {},
+			rpcClient: {
+				abort: async () => {
+					emit({
+						type: "message_end",
+						message: { role: "assistant", content: [{ type: "text", text: "stopped" }], stopReason: "error", errorMessage: "aborted" },
+					});
+					emit({ type: "agent_end", messages: [] });
+				},
+				onEvent: (listener: (event: any) => void) => {
+					listeners.add(listener);
+					return () => listeners.delete(listener);
+				},
+				prompt,
+				stop: vi.fn(async () => {}),
+			},
+		};
+		session.promptQueue.enqueue("queued after graceful Stop");
+		manager.sessions.set(session.id, session);
+
+		await manager.forceAbort(session.id, 100);
+		await vi.waitFor(() => assert.equal(manager.lifecycleHub.dispatch.mock.calls.length, 1));
+
+		assert.equal(session.completedTurnCount, 7, "one user-visible turn is counted exactly once");
+		assert.deepEqual(session.oneTimeGrantedTools, [], "one-time grants are revoked");
+		assert.deepEqual(session.allowedTools, ["read"], "revoked tools leave the active allowlist");
+		assert.equal(session.lastTurnErrored, false, "user Stop clears the synthetic abort error");
+		assert.equal(session.lastTurnErrorMessage, undefined);
+		assert.equal(session.streamingStartedAt, undefined);
+		assert.equal(session.status, "idle");
+		assert.equal(resolveIdleWaiters.mock.calls.length, 1, "idle waiters settle exactly once");
+		assert.equal(drainQueue.mock.calls.length, 1, "only coordinator release drains");
+		assert.equal(prompt.mock.calls.length, 0, "terminal replay itself never dispatches");
+		assert.ok(update.mock.calls.some(([, patch]: any[]) =>
+			patch.wasStreaming === false && patch.streamingStartedAt === undefined
+		), "durable restart bookkeeping records an idle session");
+	});
+
 	it("cancels a pending auto-retry timer even when not streaming (S40)", async () => {
 		const manager: any = new SessionManager();
 		manager._testStore = { update: vi.fn(() => {}), get: vi.fn(() => undefined) };

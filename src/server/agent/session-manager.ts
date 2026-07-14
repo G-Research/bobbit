@@ -1135,6 +1135,8 @@ type SessionReplacementCoordinator = {
 	promptOwner?: SessionInfo;
 	coalesced: Map<string, Promise<unknown>>;
 	drainOnRelease: boolean;
+	/** A Stop/terminate accepted while a bridge is absent cancels the active install. */
+	terminalRequest?: "stop" | "terminate";
 };
 
 type IdleWaiter = {
@@ -1400,6 +1402,9 @@ export class SessionManager {
 			owned.active = undefined;
 			const canonical = this.sessions.get(sessionId);
 			if (!canonical) return;
+			// Stop/terminate accepted through a transient map gap wins over startup:
+			// never make the rollback capsule idle or drain intent after cancellation.
+			if (owned.terminalRequest) return;
 			if (canonical.status === "starting") broadcastStatus(canonical, "idle");
 			if (
 				owned.drainOnRelease
@@ -3622,17 +3627,20 @@ export class SessionManager {
 				});
 				this.broadcastQueue(session);
 				const recovery = (async () => {
-					const recovered = await this._recoverPoisonedHistory(session, "follow-up");
-					if (!recovered) throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
-					if (recovered.promptQueue.remove(accepted.id)) this.broadcastQueue(recovered);
-					this.consumeRecoveredPromptDispatchRows(recovered);
-					recovered.lastTurnErrored = false;
-					recovered.lastTurnErrorMessage = undefined;
-					recovered.turnHadToolCalls = false;
-					recovered.transientRetryAttempts = 0;
-					recovered.lastPromptSource = opts?.source ?? "user";
-					if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
-					await this.dispatchDirectPrompt(recovered, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
+					const recovered = await this._recoverPoisonedHistory(session, "follow-up", async (target) => {
+						if (target.promptQueue.remove(accepted.id)) this.broadcastQueue(target);
+						this.consumeRecoveredPromptDispatchRows(target);
+						target.lastTurnErrored = false;
+						target.lastTurnErrorMessage = undefined;
+						target.turnHadToolCalls = false;
+						target.transientRetryAttempts = 0;
+						target.lastPromptSource = opts?.source ?? "user";
+						if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+						await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
+					});
+					if (!recovered && this.sessions.has(session.id)) {
+						throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+					}
 				})();
 				this._poisonedHistoryRecoveries.set(session.id, recovery);
 				try {
@@ -4211,11 +4219,18 @@ export class SessionManager {
 	 * - Tracks message_end with stopReason "error" so we can suppress queue draining.
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
-	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+	private handleAgentLifecycle(
+		session: SessionInfo,
+		event: any,
+		opts?: { replacementOwnedTerminal?: boolean; deferQueueDrain?: boolean },
+	): void {
 		// A coordinated replacement may keep the old bridge subscribed until its
 		// successor is validated. Fence all lifecycle side effects during that window:
 		// accepted intent belongs to the eventual canonical bridge, never this writer.
-		if (this._sessionReplacementCoordinators.has(session.id)) return;
+		// Graceful force-abort is the sole exception: it replays the canonical terminal
+		// events exactly once because the ordinary listener was fenced while Stop owned
+		// the coordinator.
+		if (this._sessionReplacementCoordinators.has(session.id) && !opts?.replacementOwnedTerminal) return;
 
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
@@ -4427,8 +4442,10 @@ export class SessionManager {
 				// Fresh budget for the one-microtask drainQueue→finishRun race on
 				// this turn boundary (see MAX_RECOVER_DRAIN_RETRIES).
 				session.recoverDrainAttempts = 0;
-				this.drainQueue(session);
-			} else {
+				// A graceful Stop replays terminal bookkeeping while replacement
+				// ownership is still held. The coordinator performs the sole drain.
+				if (!opts?.deferQueueDrain) this.drainQueue(session);
+			} else if (!opts?.deferQueueDrain) {
 				// Auto-retry transient model/streaming glitches (e.g. malformed
 				// tool-call JSON from the model's streamed input_json_delta).
 				// Matches the set of patterns the verification harness already
@@ -4774,12 +4791,19 @@ export class SessionManager {
 		return restored ?? this.sessions.get(session.id);
 	}
 
-	/** Repair an Anthropic orphan-tool-result poison and replace Pi in place. */
+	/**
+	 * Repair an Anthropic orphan-tool-result poison, then serialize its redrive
+	 * behind every lifecycle request accepted while repair was in flight. This
+	 * second coordinated operation is part of the poison single-flight: role or
+	 * restart replacement therefore commits first and the intent lands on the
+	 * final canonical bridge; Stop/terminate suppress it without deleting intent.
+	 */
 	private async _recoverPoisonedHistory(
 		session: SessionInfo,
 		boundary: "retry" | "follow-up",
+		redrive?: (target: SessionInfo) => Promise<void>,
 	): Promise<SessionInfo | undefined> {
-		return this._coordinateSessionReplacement(session.id, "poison-recovery", async (token) => {
+		const repaired = await this._coordinateSessionReplacement(session.id, "poison-recovery", async (token) => {
 			const current = this.sessions.get(session.id) ?? session;
 			let ps: PersistedSession | undefined;
 			try { ps = this.resolveStoreForSession(session.id).get(session.id); }
@@ -4825,6 +4849,15 @@ export class SessionManager {
 			}
 			return target;
 		}, { coalesceKey: "poison-recovery", drainOnRelease: false });
+		if (!repaired || !redrive) return repaired;
+
+		return this._coordinateSessionReplacement(session.id, "poison-redrive", async (token) => {
+			if (token.coordinator.terminalRequest) return undefined;
+			const target = this.sessions.get(session.id);
+			if (!target || target.status === "terminated" || target.dormant || target.lifecycleFenced) return undefined;
+			await redrive(target);
+			return target;
+		}, { coalesceKey: "poison-redrive", drainOnRelease: false });
 	}
 
 	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
@@ -4918,36 +4951,39 @@ export class SessionManager {
 			}
 			this.cancelPendingAutoRetry(session, "explicit-retry");
 			const recovery = (async () => {
-				const target = await this._recoverPoisonedHistory(session, "retry");
-				if (!target) throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
-				target.lastTurnErrored = false;
-				target.lastTurnErrorMessage = undefined;
-				target.turnHadToolCalls = false;
-				target.consecutiveErrorTurns = 0;
-				target.transientRetryAttempts = 0;
-				target.lastPromptSource = savedPromptSource;
+				const target = await this._recoverPoisonedHistory(session, "retry", async (canonical) => {
+					canonical.lastTurnErrored = false;
+					canonical.lastTurnErrorMessage = undefined;
+					canonical.turnHadToolCalls = false;
+					canonical.consecutiveErrorTurns = 0;
+					canonical.transientRetryAttempts = 0;
+					canonical.lastPromptSource = savedPromptSource;
 
-				if (hadToolCalls) {
-					await this.dispatchDirectPrompt(target,
-						"[SYSTEM: The model API returned an error while you were mid-turn. " +
-						"Your previous work has been preserved. Please continue where you left off. " +
-						"Do NOT start over — review your recent messages and resume from the exact point of interruption.]",
-					);
-					return;
-				}
-				if (savedPromptText || savedPromptImages?.length) {
-					const retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
-					if (!this.consumeRecoveredPromptDispatchRows(target)) {
-						this.consumeQueuedRetryRow(target, [retryText, savedPromptText], savedPromptImages, preserveQueueIds);
+					if (hadToolCalls) {
+						await this.dispatchDirectPrompt(canonical,
+							"[SYSTEM: The model API returned an error while you were mid-turn. " +
+							"Your previous work has been preserved. Please continue where you left off. " +
+							"Do NOT start over — review your recent messages and resume from the exact point of interruption.]",
+						);
+						return;
 					}
-					await this.dispatchDirectPrompt(target, retryText, savedPromptImages);
-					return;
+					if (savedPromptText || savedPromptImages?.length) {
+						const retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
+						if (!this.consumeRecoveredPromptDispatchRows(canonical)) {
+							this.consumeQueuedRetryRow(canonical, [retryText, savedPromptText], savedPromptImages, preserveQueueIds);
+						}
+						await this.dispatchDirectPrompt(canonical, retryText, savedPromptImages);
+						return;
+					}
+					this.consumeRecoveredPromptDispatchRows(canonical);
+					await this.dispatchDirectPrompt(canonical,
+						"[SYSTEM: The model API returned an error on your last response. " +
+						"Please review your conversation history and retry what you were doing.]",
+					);
+				});
+				if (!target && this.sessions.has(session.id)) {
+					throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
 				}
-				this.consumeRecoveredPromptDispatchRows(target);
-				await this.dispatchDirectPrompt(target,
-					"[SYSTEM: The model API returned an error on your last response. " +
-					"Please review your conversation history and retry what you were doing.]",
-				);
 			})();
 			this._poisonedHistoryRecoveries.set(sessionId, recovery);
 			try {
@@ -5494,6 +5530,15 @@ export class SessionManager {
 		opts?.mutatePs?.(ps);
 		try {
 			await this.restoreSession(ps);
+			if (token.coordinator.terminalRequest) {
+				const cancelled = this.sessions.get(id);
+				if (cancelled && cancelled !== session) {
+					try { cancelled.unsubscribe(); } catch { /* best-effort */ }
+					await cancelled.rpcClient.stop().catch(() => {});
+					this.sessions.delete(id);
+				}
+				throw new Error(`Session ${id} respawn cancelled by ${token.coordinator.terminalRequest}`);
+			}
 			if (!this._replacementTokenIsCurrent(id, token)) {
 				const stale = this.sessions.get(id);
 				if (stale && stale !== session) {
@@ -10314,19 +10359,32 @@ export class SessionManager {
 	}
 
 	async forceAbort(id: string, gracePeriodMs = 3000): Promise<void> {
+		const coordinator = this._sessionReplacementCoordinators.get(id);
 		const session = this.sessions.get(id);
-		if (!session) return;
+		if (!session && !coordinator) return;
+
+		// A Stop accepted while restore has removed SessionInfo is still a real
+		// cancellation. Mark it synchronously so the active host/sandbox restore
+		// disposes its staged bridge before commit, then serialize the public call
+		// behind that owner. This mirrors terminate's map-gap join without allowing
+		// poison redrive or queue drain after Stop.
+		if (coordinator && (
+			!session
+			|| this._poisonedHistoryRecoveries.has(id)
+			|| coordinator.active?.kind === "poison-recovery"
+			|| coordinator.active?.kind === "respawn"
+		)) coordinator.terminalRequest = "stop";
 
 		// S40: cancel any pending auto-retry timer regardless of streaming state.
 		// An abort during the post-error backoff window (status "idle") would
 		// otherwise leave the timer to fire a spurious retry on a session someone
 		// just stopped (reachable via the team-abort route). No-op when none pending.
-		this.cancelPendingAutoRetry(session, "terminated");
+		if (session) this.cancelPendingAutoRetry(session, "terminated");
 
 		// Outside a replacement, an idle abort remains a no-op. During replacement,
 		// queue behind the current owner so Stop has deterministic invocation order
 		// and can never race a staged bridge commit.
-		if (session.status !== "streaming" && !this._sessionReplacementCoordinators.has(id)) return;
+		if (session && session.status !== "streaming" && !coordinator) return;
 		await this._coordinateSessionReplacement(id, "force-abort", (token) =>
 			this._forceAbortOwned(id, gracePeriodMs, token), {
 				coalesceKey: "force-abort",
@@ -10353,17 +10411,23 @@ export class SessionManager {
 		// Result: the steered user-message echo renders but the agent process
 		// is killed before it can produce an assistant response.
 		let resolveSettled!: (v: boolean) => void;
+		const deferredTerminalEvents: any[] = [];
 		const settledPromise = new Promise<boolean>((resolve) => { resolveSettled = resolve; });
 		const settleTimer = this.clock.setTimeout(() => {
 			unsubSettle();
 			resolveSettled(false);
 		}, gracePeriodMs);
 		const unsubSettle = session.rpcClient.onEvent((event: any) => {
+			// The canonical listener is lifecycle-fenced while Stop owns the shared
+			// coordinator. Preserve its terminal sequence and replay bookkeeping once
+			// after graceful settlement; this listener never broadcasts the events.
+			if (event.type === "message_end") deferredTerminalEvents.push(event);
 			// A retryable agent_end (willRetry:true) means Pi is about to retry the
 			// attempt, not that the run stopped — treating it as settled would end
 			// the grace race early and skip force-kill while the agent is still
 			// live. Only a final (willRetry:false) agent_end settles the abort.
 			if (event.type === "agent_end" && event.willRetry !== true) {
+				deferredTerminalEvents.push(event);
 				this.clock.clearTimeout(settleTimer);
 				unsubSettle();
 				resolveSettled(true);
@@ -10383,11 +10447,16 @@ export class SessionManager {
 		const settled = await settledPromise;
 
 		if (settled) {
-			// The shared replacement fence suppresses the canonical listener's
-			// lifecycle mutations while forceAbort owns the session. Reconcile the
-			// graceful terminal event here; coordinator release performs the one drain.
-			this._reconcileAfterAbort(session);
-			broadcastStatus(session, "idle");
+			// The shared replacement fence suppressed the canonical listener. Replay
+			// the captured message_end/agent_end sequence through the same lifecycle
+			// bookkeeping exactly once. Queue draining is deferred to coordinator
+			// release so a graceful Stop cannot double-dispatch.
+			for (const event of deferredTerminalEvents) {
+				this.handleAgentLifecycle(session, event, {
+					replacementOwnedTerminal: true,
+					deferQueueDrain: true,
+				});
+			}
 			return;
 		}
 
