@@ -685,6 +685,8 @@ export interface SessionInfo {
 	lifecycleGeneration?: number;
 	/** True once this SessionInfo has been replaced or is being replaced by a restore/respawn. */
 	lifecycleFenced?: boolean;
+	/** True while one or more serialized role assignments are staging a replacement bridge. */
+	roleAssignmentStaging?: boolean;
 	/** Whether tool calls were executed during the current/last turn */
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
@@ -1245,6 +1247,8 @@ export class SessionManager {
 	private _restoreCoordinators = new Map<string, RestoreCoordinator>();
 	/** User-driven orphan-history recoveries include their redrive so duplicate Retry clicks join instead of dispatching twice. */
 	private _poisonedHistoryRecoveries = new Map<string, Promise<void>>();
+	/** Per-session role-assignment queue. The first request fences prompt dispatch; the last release drains durable intent. */
+	private _roleAssignmentCoordinators = new Map<string, { tail: Promise<void>; pending: number }>();
 	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
 	private _sessionRespawnGenerations = new Map<string, number>();
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
@@ -4076,6 +4080,12 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+		// assignRole keeps the old bridge subscribed until its replacement is fully
+		// validated so rollback remains possible. Fence any late old-bridge lifecycle
+		// frame during that window: queued user intent belongs to the replacement (or
+		// rollback bridge) and must not be drained against the bridge being replaced.
+		if (session.roleAssignmentStaging) return;
+
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
 		// lifecycle events below. The agent flushes to `.jsonl` only on
@@ -7983,14 +7993,53 @@ export class SessionManager {
 	}
 
 	/**
-	 * Assign a role to an existing session by preparing a replacement agent with
-	 * the new system prompt, switching its conversation history, then atomically
-	 * swapping bridges only after the replacement is usable.
+	 * Assign a role to an existing session. Requests for the same session are
+	 * serialized. The first request marks the canonical session as `starting`, so
+	 * prompts accepted while any replacement is staged are durably queued instead
+	 * of being dispatched to a bridge that is about to stop. The final request
+	 * releases the fence and drains that queue against the committed replacement,
+	 * or against the original bridge after a clean rollback.
 	 */
 	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
+		let coordinator = this._roleAssignmentCoordinators.get(id);
+		if (!coordinator) {
+			const session = this.sessions.get(id);
+			if (!session) return false;
+			if (session.status === "streaming") throw new Error("Cannot assign role while agent is streaming");
+
+			coordinator = { tail: Promise.resolve(), pending: 0 };
+			this._roleAssignmentCoordinators.set(id, coordinator);
+			session.roleAssignmentStaging = true;
+			broadcastStatus(session, "starting");
+		}
+
+		coordinator.pending += 1;
+		const operation = coordinator.tail.then(() => this._assignRoleStaged(id, role));
+		coordinator.tail = operation.then(() => undefined, () => undefined);
+
+		try {
+			return await operation;
+		} finally {
+			coordinator.pending -= 1;
+			if (coordinator.pending === 0 && this._roleAssignmentCoordinators.get(id) === coordinator) {
+				this._roleAssignmentCoordinators.delete(id);
+				const canonical = this.sessions.get(id);
+				if (canonical) {
+					canonical.roleAssignmentStaging = false;
+					if (canonical.status === "starting") broadcastStatus(canonical, "idle");
+					if (canonical.status === "idle" && !canonical.promptQueue.isEmpty) this.drainQueue(canonical);
+				}
+			}
+		}
+	}
+
+	/** Prepare and commit one role replacement while assignRole owns the session fence. */
+	private async _assignRoleStaged(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
-		if (session.status === "streaming") throw new Error("Cannot assign role while agent is streaming");
+		if (!session.roleAssignmentStaging) {
+			throw new Error(`Session ${id} lifecycle changed during role assignment`);
+		}
 
 		// Get the agent session file so we can restore conversation. A structured
 		// getState rejection is just as much a fallback case as a thrown RPC error;
@@ -8175,6 +8224,13 @@ export class SessionManager {
 			}
 			await this.tryAutoSelectModel(stagedSession);
 
+			// Another lifecycle replacement may have won while this bridge was being
+			// prepared. Never stop or overwrite that newer canonical session; the catch
+			// path below disposes this staged process and listener.
+			if (this.sessions.get(id) !== session || !session.roleAssignmentStaging) {
+				throw new Error(`Session ${id} lifecycle changed during role assignment`);
+			}
+
 			// Persist the metadata before the irreversible old-process stop. If the
 			// stop rejects, restore the prior durable values and retain its listener.
 			roleStore.update(id, { role: role.name, accessory: role.accessory });
@@ -8200,7 +8256,9 @@ export class SessionManager {
 		session.allowedTools = effectiveAllowedNames;
 		replacementCommitted = true;
 
-		broadcastStatus(session, "idle");
+		// assignRole owns the status fence until every concurrently queued role
+		// assignment has settled. The public coordinator releases it once and drains
+		// durable prompts only against the final committed bridge.
 
 		// Refresh messages and state for connected clients
 		try {
