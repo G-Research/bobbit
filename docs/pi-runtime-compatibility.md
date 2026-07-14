@@ -106,6 +106,60 @@ Bobbit normalizes these events before rendering and persistence decisions. The n
 
 Pinned coverage: `tests2/core/tool-result-error-normalizer.test.ts`.
 
+## Orphan tool-result persistence and recovery
+
+Anthropic rejects a request when a `tool_result` references a tool call that is not present in the immediately preceding assistant message. The identifying error is:
+
+```text
+messages.<n>.content.<n>: unexpected tool_use_id ...
+```
+
+The full provider message also identifies `tool_result` ordering and the missing corresponding previous `tool_use`. Bobbit deliberately requires that complete shape before classifying poisoned history; unrelated HTTP 400s keep their existing behavior. This corruption is permanent without repair because every subsequent turn replays the same invalid persisted history.
+
+### Pi `0.80.6` persistence limitation
+
+In the published `@earendil-works/pi-coding-agent@0.80.6`, `AgentSession._handleAgentEvent` awaits asynchronous extension message handlers before `sessionManager.appendMessage`, while event listener invocations themselves are not serialized. A later tool-result event can therefore append before—or survive an interruption without—the assistant event that introduced its call ID. Pi owns these conversation writes; Bobbit cannot atomically order Pi's internal appends. Hard interruption paths such as force-abort, agent exit, or gateway restart can expose the race, but Pi's asynchronous event persistence ordering is the root cause rather than Anthropic retry behavior or Bobbit's `agent_end.willRetry` handling.
+
+Upstream Pi issue `#1717` tracks this failure. Upstream commit `dfc779f` serializes event handling, but the serialization fix is not present in the installed `0.80.6` distribution. Bobbit's boundary sanitizer remains necessary for histories already written by `0.80.6` and as a guard around interrupted turns; a future Pi upgrade should verify the upstream fix is included rather than removing the repair based only on a version bump.
+
+### Conservative active-branch repair
+
+Pi JSONL is an append-only, parent-linked session tree. Bobbit follows the current leaf, applies the latest compaction projection, and validates only that active model-context branch. A message-level `toolResult` is retained only when its non-empty `toolCallId` is still present in the immediately preceding assistant result run. This supports a single call or parallel calls with results in any order. Consecutive unmatched results, missing/empty/non-string IDs, mismatches, duplicates, and IDs from an older assistant are removed. `isError: true` does not make a matched result invalid.
+
+Valid tool-use/result pairs, valid parallel results, errored results, incomplete assistant tool turns, synthetic compaction pairs, unrelated metadata, and inactive-branch message content are preserved. A valid transcript remains byte-identical. For a malformed active branch, line ordering and trailing-newline shape are retained; only orphan records are removed, plus the minimum `parentId` bypass on surviving descendants needed to avoid breaking the tree. This link-only repair also applies when an inactive branch shared a removed active ancestor. The transform is deterministic and idempotent.
+
+Every existing Pi rehydration boundary sanitizes before `switch_session`:
+
+- cold restore and revive-on-prompt;
+- refresh, restart, in-place respawn, role replacement, and sandbox recovery;
+- the separate force-abort hard-kill recovery path;
+- synchronous and worktree pre-existing-session setup used by continue-archived and live fork.
+
+The guard uses the session's actual filesystem realm for both host and sandbox sessions. Container transcript paths are read through the sandbox and mapped to the host sessions bind mount for guarded writes; a persisted host-absolute path remains host-side even when the session is marked sandboxed. Trusted sessions-root checks, realpath validation, regular-file checks, traversal rejection, pre-write revalidation, and final-component symlink protection remain in force. Exact legacy persisted files outside trusted roots are read-compatible only and never become sanitizer write targets.
+
+### In-place user recovery
+
+The visible **Retry** action and an ordinary follow-up both recognize this poisoned-history condition before the generic consecutive-error cap. Bobbit sanitizes, respawns the Pi bridge in place, and dispatches once against the fresh bridge. It preserves the Bobbit session identity, selected model and thinking state, valid visible history, prompt queue/envelopes, and the accepted user intent. No replacement session appears in the sidebar or route. REST and tool-driven session prompts use the same recovery classification.
+
+Retry replays the saved original prompt and images if no tools ran. If tools already ran, it sends the established continuation instruction instead of repeating side effects. A normal follow-up sends the new prompt unchanged and ahead of already parked queue entries. Concurrent duplicate Retry actions join one recovery; replacement lifecycle operations serialize with the repair so intent lands on the canonical bridge.
+
+Recovery does not become an automatic retry loop. It is user-driven, single-flight, and allows at most one sanitize/respawn/redrive for the poisoned error. Bobbit never arms the provider auto-retry timer for this signature. Even when no disk row is removed, it may respawn once because the old process can retain poisoned in-memory history after the file is already clean. If the same validation error recurs, Bobbit surfaces it and waits for a later user action rather than looping.
+
+The recovery diagnostic is concise and content-free:
+
+```text
+[session-manager] Poisoned-history repair session=<id> boundary=<retry|follow-up> repairedRecords=<count> sandboxed=<bool> project=<id>
+```
+
+It reports repair count and session context without tool IDs, tool payloads, transcript text, credentials, or provider request bodies. Path-safety refusal/failure warnings likewise do not print transcript contents. Operator steps are in [Session permanently fails with `unexpected tool_use_id`](debugging.md#session-permanently-fails-with-unexpected-tool_use_id).
+
+Pinned coverage:
+
+- `tests2/core/transcript-orphan-tool-results.test.ts` uses the affected raw Pi `0.80.6` JSONL shapes and covers structural validity, active/inactive branches, metadata, compaction, newline preservation, and idempotence.
+- `tests2/core/orphan-tool-result-recovery.test.ts` covers narrow error classification plus bounded Retry, follow-up, and REST/tool prompt recovery with identity/model/queue/intent preservation.
+- `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts` covers restore/respawn/role/force-abort/continue setup boundaries, host/sandbox filesystem realms, and path-safety behavior.
+- `tests2/browser/journeys/orphan-tool-result-recovery.journey.spec.ts` covers user-visible Retry and follow-up recovery without replacing the session or losing visible history.
+
 ## Transcript/session-tree metadata
 
 Pi session JSONL is Pi-owned, so Bobbit transcript utilities must be conservative around new entry kinds. Pi `0.80.x` can write session-tree metadata entries such as `active_tools_change`, `leaf`, and hidden `custom_message` rows. These are metadata entries, not chat messages and not Bobbit runtime headers.
