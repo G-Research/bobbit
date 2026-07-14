@@ -3278,6 +3278,9 @@ export class SessionManager {
 		}
 		let session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
+		let recoveredPoisonDuringRevive = false;
+		let revivedPoisonQueueIds: string[] | undefined;
+		let revivedPoisonPromptEnvelopes: SessionInfo["pendingSkillExpansions"];
 
 		// REVIVE-WINDOW JOIN (CS-R2 follow-up). A prompt that arrives while the
 		// session is dormant/terminated/fenced — or while an `addClient` dormant
@@ -3294,13 +3297,35 @@ export class SessionManager {
 			|| session.dormant === true
 			|| session.lifecycleFenced === true;
 		if (inReviveWindow) {
+			const poisonedDormant = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
+			if (poisonedDormant) {
+				revivedPoisonQueueIds = session.recoveredPromptDispatchQueueIds?.slice();
+				revivedPoisonPromptEnvelopes = session.pendingSkillExpansions?.slice();
+			}
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
 			if (ps && ps.agentSessionFile) {
-				// Coalesces: joins an in-flight restore or starts the single restore.
-				await this._restoreSessionCoalesced(ps);
+				// A failed poison respawn leaves the old object as a rollback capsule;
+				// revive it in place to carry clients and process-local intent forward.
+				// Other dormant restores retain the existing cold-restore path.
+				if (restoreInFlight) {
+					await this._restoreCoordinators.get(sessionId)?.promise;
+				} else if (poisonedDormant) {
+					await this._respawnAgentInPlace(session, ps, {
+						preserveSandboxRealm: session.sandboxed === true,
+					});
+				} else {
+					await this._restoreSessionCoalesced(ps);
+				}
 				const revived = this.sessions.get(sessionId);
 				if (!revived) return { status: "queued" };
 				session = revived;
+				recoveredPoisonDuringRevive = poisonedDormant;
+				if (revivedPoisonPromptEnvelopes?.length) {
+					session.pendingSkillExpansions = [
+						...revivedPoisonPromptEnvelopes,
+						...(session.pendingSkillExpansions ?? []),
+					];
+				}
 			} else if (restoreInFlight) {
 				// No restorable record of our own, but a restore is already running for
 				// this session — join it rather than acting on the stale object.
@@ -3349,6 +3374,26 @@ export class SessionManager {
 			});
 		}
 
+		// A previous poison-repair attempt may have failed after killing the old
+		// bridge and left this same session dormant. The revive above already loaded
+		// the sanitized history into a fresh process, so dispatch this follow-up
+		// directly (ahead of parked rows) rather than respawning a second time or
+		// losing the poison-specific superseding-intent behavior.
+		if (recoveredPoisonDuringRevive) {
+			if (revivedPoisonQueueIds?.length) {
+				session.recoveredPromptDispatchQueueIds = revivedPoisonQueueIds;
+				this.consumeRecoveredPromptDispatchRows(session);
+			}
+			session.lastTurnErrored = false;
+			session.lastTurnErrorMessage = undefined;
+			session.turnHadToolCalls = false;
+			session.transientRetryAttempts = 0;
+			session.lastPromptSource = opts?.source ?? "user";
+			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
+			return { status: "dispatched" };
+		}
+
 		// ERROR STATE GATING: if last turn errored, either implicitly unstick
 		// (up to MAX_CONSECUTIVE_ERROR_TURNS) or park the message in the queue.
 		if (session.lastTurnErrored) {
@@ -3373,9 +3418,27 @@ export class SessionManager {
 				}
 
 				const recovery = (async () => {
-					this.consumeRecoveredPromptDispatchRows(session);
-					const recovered = await this._recoverPoisonedHistory(session, "follow-up");
-					if (!recovered) throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+					let recovered: SessionInfo | undefined;
+					try {
+						recovered = await this._recoverPoisonedHistory(session, "follow-up");
+						if (!recovered) throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+					} catch (err) {
+						// The request has already been accepted as the user's new intent. If
+						// replacement startup fails, persist it on the rollback capsule so a
+						// later successful Retry/follow-up can drain it rather than losing it.
+						const rollback = this.sessions.get(session.id);
+						if (rollback) {
+							rollback.promptQueue.enqueue(dispatchText, {
+								images: opts?.images,
+								attachments: opts?.attachments,
+								isSteered: opts?.isSteered,
+								suppressTitleGen: opts?.suppressTitleGen,
+							});
+							this.broadcastQueue(rollback);
+						}
+						throw err;
+					}
+					this.consumeRecoveredPromptDispatchRows(recovered);
 					recovered.lastTurnErrored = false;
 					recovered.lastTurnErrorMessage = undefined;
 					recovered.turnHadToolCalls = false;
@@ -4534,18 +4597,31 @@ export class SessionManager {
 		// carry those process-local envelopes across or the restored Pi echo exposes
 		// expanded model text and loses its UI chips.
 		const pendingPromptEnvelopes = session.pendingSkillExpansions?.slice();
+		const recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds?.slice();
 		const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 		const repairedRecords = await sanitizeAgentTranscriptFile(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		console.info(
 			`[session-manager] Poisoned-history repair session=${session.id} boundary=${boundary} repairedRecords=${repairedRecords} sandboxed=${ps.sandboxed === true} project=${session.projectId ?? ps.projectId ?? "unknown"}`,
 		);
-		const restored = await this._respawnAgentInPlace(session, ps);
+		const restored = await this._respawnAgentInPlace(session, ps, {
+			preserveSandboxRealm: session.sandboxed === true,
+		});
 		const target = restored ?? this.sessions.get(session.id);
-		if (target && target !== session && pendingPromptEnvelopes?.length) {
-			target.pendingSkillExpansions = [
-				...pendingPromptEnvelopes,
-				...(target.pendingSkillExpansions ?? []),
-			];
+		if (target && target !== session) {
+			if (pendingPromptEnvelopes?.length) {
+				target.pendingSkillExpansions = [
+					...pendingPromptEnvelopes,
+					...(target.pendingSkillExpansions ?? []),
+				];
+			}
+			if (recoveredPromptDispatchQueueIds?.length) {
+				target.recoveredPromptDispatchQueueIds = [
+					...new Set([
+						...recoveredPromptDispatchQueueIds,
+						...(target.recoveredPromptDispatchQueueIds ?? []),
+					]),
+				];
+			}
 		}
 		return target;
 	}
@@ -5170,7 +5246,12 @@ export class SessionManager {
 	private async _respawnAgentInPlace(
 		session: SessionInfo,
 		ps: PersistedSession,
-		opts?: { mutatePs?: (ps: PersistedSession) => void; finalStatus?: SessionStatus },
+		opts?: {
+			mutatePs?: (ps: PersistedSession) => void;
+			finalStatus?: SessionStatus;
+			/** Fail closed rather than moving a sandbox transcript onto a host bridge. */
+			preserveSandboxRealm?: boolean;
+		},
 	): Promise<SessionInfo | undefined> {
 		return this._coalesceRestore(session.id, async (generation) => {
 			const savedClients = new Set(session.clients);
@@ -5182,13 +5263,29 @@ export class SessionManager {
 
 			this.sessions.delete(session.id);
 			(ps as any)._restartFrameOfReference = frameOfRef;
+			if (opts?.preserveSandboxRealm) (ps as any)._preserveSandboxRealm = true;
 			opts?.mutatePs?.(ps);
 			try {
 				await this.restoreSession(ps);
+			} catch (err) {
+				// The old process is deliberately dead and fenced, but its SessionInfo
+				// remains the authoritative rollback capsule for clients, visible event
+				// history, queued prompts, retry intent, model/thinking selection, and
+				// realm metadata. Keep it dormant so a later Retry/follow-up can start a
+				// fresh in-place restore without dispatching against the stale bridge.
+				this.sessions.set(session.id, session);
+				session.restoreError = err instanceof Error ? err.message : String(err);
+				for (const ws of savedClients) {
+					if ((ws as any).readyState === 1) session.clients.add(ws);
+				}
+				broadcastStatus(session, "terminated");
+				this._trackConnectedSession(session);
+				throw err;
 			} finally {
 				delete (ps as any)._restartFrameOfReference;
 				delete (ps as any)._overrideAllowedTools;
 				delete (ps as any)._overrideGrantedTools;
+				delete (ps as any)._preserveSandboxRealm;
 			}
 			const restored = this.sessions.get(session.id);
 			if (restored) {
@@ -5716,6 +5813,9 @@ export class SessionManager {
 				goalId: ps.goalId ?? ps.teamGoalId,
 			});
 			if (!restoredSandboxed) {
+				if ((ps as any)._preserveSandboxRealm) {
+					throw new Error(`Cannot respawn sandboxed session ${ps.id}: sandbox realm is unavailable`);
+				}
 				ps.sandboxed = false;
 				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
 				this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
@@ -6073,7 +6173,14 @@ export class SessionManager {
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		session.unsubscribe = unsub;
 
-		await rpcClient.start();
+		try {
+			await rpcClient.start();
+		} catch (err) {
+			// A partially started replacement must never survive a failed restore.
+			// The in-place caller will reinstall only its fenced dormant rollback.
+			try { await rpcClient.stop(); } catch { /* best-effort cleanup */ }
+			throw err;
+		}
 
 		// Resume the agent's previous session file. Persisted host paths are still
 		// readable by Bobbit; sandboxed agents receive the active mount's container

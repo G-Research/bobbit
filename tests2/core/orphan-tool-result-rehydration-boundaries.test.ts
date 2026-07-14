@@ -27,6 +27,8 @@ loadOrCreateToken();
 
 const managers: any[] = [];
 const createdFiles: string[] = [];
+const ORPHAN_ERROR =
+	"400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"messages.88.content.0: unexpected tool_use_id found in tool_result blocks: toolu_fixture. Each tool_result block must have a corresponding tool_use block in the previous message.\"}}";
 
 afterEach(() => {
 	registerRpcBridgeFactory(null);
@@ -391,6 +393,144 @@ describe("executable SessionManager rehydration boundaries", () => {
 		await manager.forceAbort(ps.id, 5);
 
 		expect(switches).toEqual([file]);
+	});
+
+	it.each([
+		{ realm: "host", sandboxed: false, timeout: undefined, failureBoundary: "start" as const, firstAction: "retry" as const, laterAction: "retry" as const },
+		{ realm: "sandbox", sandboxed: true, timeout: 60_000, failureBoundary: "switch" as const, firstAction: "follow-up" as const, laterAction: "follow-up" as const },
+	])("rolls back a failed $realm poison respawn at $failureBoundary and later recovers by $laterAction with the same session", async ({ realm, sandboxed, timeout, failureBoundary, firstAction, laterAction }) => {
+		const file = hostTranscript(`poison-rollback-${realm}`);
+		const switchTimeouts: number[] = [];
+		const failedSwitch = failingSwitchBridge("response", switchTimeouts);
+		const failedReplacement = failedSwitch.bridge;
+		const stopFailedReplacement = failedSwitch.stop;
+		if (failureBoundary === "start") {
+			failedReplacement.start = vi.fn(async () => { throw new Error("fixture replacement start failed"); });
+		}
+		const successfulPrompts: string[] = [];
+		const successfulSwitches: string[] = [];
+		const successfulReplacement = recordingBridge((sessionPath) => successfulSwitches.push(sessionPath));
+		successfulReplacement.getState = vi.fn(async () => ({
+			success: true,
+			data: { model: { provider: "anthropic", id: "claude-sonnet-4-5" } },
+		}));
+		successfulReplacement.prompt = vi.fn(async (text: string) => {
+			successfulPrompts.push(text);
+			return { success: true };
+		});
+		let replacementIndex = 0;
+		const replacementOptions: any[] = [];
+		registerRpcBridgeFactory((options: any) => {
+			replacementOptions.push({ ...options });
+			return replacementIndex++ === 0 ? failedReplacement : successfulReplacement;
+		});
+
+		const ps = persisted(`poison-rollback-${realm}`, file, {
+			title: `Visible ${realm} history`,
+			sandboxed,
+			cwd: sandboxed ? "/workspace" : tmpRoot,
+			modelProvider: "anthropic",
+			modelId: "claude-sonnet-4-5",
+		});
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		manager.resolveInitialThinkingLevel = vi.fn(() => "high");
+		if (sandboxed) {
+			manager.applySandboxWiring = vi.fn(async (options: any) => {
+				options.containerId = "container-poison-rollback";
+				options.sandboxed = true;
+				return true;
+			});
+		}
+		managers.push(manager);
+
+		const oldBridge = recordingBridge(() => { throw new Error("poisoned bridge must not switch"); });
+		oldBridge.stop = vi.fn(async () => {});
+		oldBridge.prompt = vi.fn(async () => { throw new Error("poisoned bridge must not receive work"); });
+		const client = { readyState: 1, send: vi.fn() };
+		const original = liveSession(ps.id, oldBridge, {
+			title: `Visible ${realm} history`,
+			cwd: ps.cwd,
+			sandboxed,
+			clients: new Set([client]),
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+			lastPromptText: "original user intent",
+			lastPromptSource: "user",
+			modelProvider: "anthropic",
+			modelId: "claude-sonnet-4-5",
+			thinkingLevel: "high",
+			spawnPinnedModel: "anthropic/claude-sonnet-4-5",
+			spawnPinnedThinkingLevel: "high",
+		});
+		original.promptQueue.enqueue("parked queue intent");
+		ps.messageQueue = original.promptQueue.toArray();
+		manager.sessions.set(ps.id, original);
+		vi.spyOn(console, "info").mockImplementation(() => {});
+
+		const firstRecovery = firstAction === "retry"
+			? manager.retryLastPrompt(ps.id)
+			: manager.enqueuePrompt(ps.id, "preserved failed follow-up", { source: "user" });
+		await expect(firstRecovery).rejects.toThrow(
+			failureBoundary === "start" ? "fixture replacement start failed" : "switch_session failed",
+		);
+
+		const rollback = manager.sessions.get(ps.id);
+		expect(rollback).toBe(original);
+		expect(rollback.id).toBe(ps.id);
+		expect(rollback.status).toBe("terminated");
+		expect(rollback.dormant).toBe(true);
+		expect(rollback.lifecycleFenced).toBe(true);
+		expect(rollback.clients.has(client)).toBe(true);
+		const expectedParkedIntent = firstAction === "follow-up"
+			? ["parked queue intent", "preserved failed follow-up"]
+			: ["parked queue intent"];
+		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedParkedIntent);
+		expect(rollback.lastPromptText).toBe("original user intent");
+		expect(rollback.modelId).toBe("claude-sonnet-4-5");
+		expect(rollback.thinkingLevel).toBe("high");
+		expect(rollback.sandboxed).toBe(sandboxed);
+		expect(rollback.cwd).toBe(ps.cwd);
+		expect(ps.sandboxed).toBe(sandboxed);
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
+		expect(oldBridge.stop).toHaveBeenCalledTimes(1);
+		expect(stopFailedReplacement).toHaveBeenCalledTimes(1);
+
+		if (laterAction === "retry") {
+			await expect(manager.retryLastPrompt(ps.id)).resolves.toBeUndefined();
+		} else {
+			await expect(manager.enqueuePrompt(ps.id, "later follow-up intent", { source: "user" }))
+				.resolves.toEqual({ status: "dispatched" });
+		}
+
+		const restored = manager.sessions.get(ps.id);
+		expect(restored).not.toBe(original);
+		expect(restored.id).toBe(ps.id);
+		expect(restored.title).toBe(`Visible ${realm} history`);
+		expect(restored.clients.has(client)).toBe(true);
+		expect(restored.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedParkedIntent);
+		expect(restored.spawnPinnedModel).toBe("anthropic/claude-sonnet-4-5");
+		expect(restored.spawnPinnedThinkingLevel).toBe("high");
+		expect(restored.sandboxed).toBe(sandboxed);
+		expect(restored.cwd).toBe(ps.cwd);
+		expect(successfulPrompts).toEqual([
+			laterAction === "retry" ? "original user intent" : "later follow-up intent",
+		]);
+		expect(switchTimeouts).toEqual(timeout === undefined ? [] : [timeout]);
+		expect(successfulSwitches).toEqual([
+			sandboxed ? switchSessionPathForAgent(ps) : file,
+		]);
+		if (sandboxed) {
+			expect(manager.applySandboxWiring).toHaveBeenCalledTimes(2);
+			expect(replacementOptions).toHaveLength(2);
+			expect(replacementOptions[0].cwd).toBe("/workspace");
+			expect(replacementOptions[1].cwd).toBe("/workspace");
+		}
 	});
 
 	it.each([
