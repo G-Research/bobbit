@@ -19,8 +19,11 @@
  *     onTaskUpdate worker-RPC failures seen even at two forks under concurrent
  *     lane load (#8164/#6511), and cost-balances integration over two disjoint
  *     jobs so the one-fork pole stays inside the gate wall time. Non-Windows keeps
- *     the two-fork, single-integration-job defaults. Parallelism comes from
- *     running independent lanes side by side, not from raising fork counts.
+ *     the two-fork, single-integration-job defaults. Windows also caps active
+ *     lane jobs at three: the fourth job introduced by integration sharding runs
+ *     in a second wave instead of starving every Vitest process. Parallelism
+ *     comes from running independent lanes side by side, not from raising fork
+ *     counts.
  *
  * UNIT_LANES_FORK_CAP and UNIT_LANES_INTEGRATION_SHARDS remain explicit
  * experimental overrides. A Vitest 4.x upgrade carrying the full #8297 fix is
@@ -95,6 +98,14 @@ export function resolveIntegrationShardCount({ platform = process.platform, over
 	if (override == null || String(override).trim() === "") return fallback;
 	const parsed = Number(override);
 	return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : fallback;
+}
+
+// Four concurrent Vitest processes (core + two integration shards + dom) still
+// starve Windows enough to trigger worker-RPC timeouts and false test failures.
+// Keep the one-fork/two-shard plan, but launch at most three jobs at once. Other
+// platforms retain grant-only scheduling with no additional process-count cap.
+export function defaultConcurrentLaneJobCap(platform = process.platform) {
+	return platform === "win32" ? 3 : Number.POSITIVE_INFINITY;
 }
 
 function listTestFiles(rel) {
@@ -216,20 +227,26 @@ function vitestCmd() {
  * elsewhere).
  *   - perLane      = min(perLaneCap, grant)  — never raise a single process above
  *                    the safe cap, and never ask for more forks than granted.
- *   - maxConcurrent = floor(grant / perLane) — instantaneous forks
- *                    (inFlight*perLane) never exceed the grant; clamped to ≥1 (so
- *                    the run always makes progress) and to the job count (no idle
- *                    concurrency slots). This is what turns lane wall time from
+ *   - maxConcurrent = min(floor(grant / perLane), concurrentJobCap) —
+ *                    instantaneous forks (inFlight*perLane) never exceed the
+ *                    grant; clamped to ≥1 (so the run always makes progress) and
+ *                    to the job count (no idle concurrency slots). Windows adds
+ *                    a three-job process cap; other platforms use no extra cap.
+ *                    This is what turns lane wall time from
  *                    Σ(lanes) back into max(lanes): with the SINGLE-PROCESS
  *                    throttle (grant=2) it collapses to 1 (serial); with the fair
  *                    orchestrator grant it opens back up so the lanes overlap.
  */
-export function planLaneConcurrency({ grant, perLaneCap, jobCount }) {
+export function planLaneConcurrency({ grant, perLaneCap, jobCount, concurrentJobCap = Number.POSITIVE_INFINITY }) {
 	const g = Math.max(1, Math.floor(Number(grant)) || 1);
 	const cap = Math.max(1, Math.floor(Number(perLaneCap)) || 1);
 	const jobs = Math.max(1, Math.floor(Number(jobCount)) || 1);
+	const requestedJobCap = Number(concurrentJobCap);
+	const jobCap = Number.isFinite(requestedJobCap)
+		? Math.max(1, Math.floor(requestedJobCap) || 1)
+		: jobs;
 	const perLane = Math.min(cap, g);
-	const maxConcurrent = Math.max(1, Math.min(jobs, Math.floor(g / perLane)));
+	const maxConcurrent = Math.max(1, Math.min(jobs, jobCap, Math.floor(g / perLane)));
 	return { perLane, maxConcurrent };
 }
 
@@ -454,7 +471,12 @@ async function main() {
 	// <= grant. Extra jobs queue and run in waves. This keeps us inside the
 	// reservation under concurrent goals instead of oversubscribing the box, while
 	// still overlapping the independent lanes (wall = max(lanes), not Σ lanes).
-	const { perLane, maxConcurrent } = planLaneConcurrency({ grant, perLaneCap: PER_LANE_FORK_CAP, jobCount: jobs.length });
+	const { perLane, maxConcurrent } = planLaneConcurrency({
+		grant,
+		perLaneCap: PER_LANE_FORK_CAP,
+		jobCount: jobs.length,
+		concurrentJobCap: defaultConcurrentLaneJobCap(),
+	});
 	const snap = readLedger();
 	const sigma = snap.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
 	console.log(`[unit-lanes] ledger grant=${grant} (parent=${reservation.parentRunId}, managedByParent=${reservation.managedByParent}); ledger Σ=${sigma}/${snap.totalCores}`);

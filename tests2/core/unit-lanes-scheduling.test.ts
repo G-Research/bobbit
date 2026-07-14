@@ -8,8 +8,10 @@
 // two-fork default, so Windows now defaults each lane to one fork while other
 // platforms keep two. A single one-fork integration lane then narrowly exceeded
 // the gate wall time, so Windows cost-balances its integration files over two
-// disjoint one-fork jobs; non-Windows retains the single integration job. Its wall
-// time is designed to be max(lanes), not Σ(lanes). Earlier it reserved its budget via
+// disjoint one-fork jobs, with at most three jobs active at once to avoid the
+// four-process starvation seen in gates; non-Windows retains the single integration
+// job and grant-only concurrency. Its wall time is designed to be max(lanes), not
+// Σ(lanes). Earlier it reserved its budget via
 // reserveWorkerSlots("vitest"), which returns the SINGLE-PROCESS throttle
 // STANDALONE_VITEST_CAP (=2). Feeding that (=2) into the scheduler as the TOTAL
 // budget forced perLane=2 ⇒ maxConcurrent=floor(2/2)=1 ⇒ the lanes ran SERIALLY
@@ -22,8 +24,9 @@
 //      reserveWorkerSlots("vitest") standalone is UNCHANGED at 2 (a single direct
 //      vitest process must still stay under the RPC-safe per-process cap).
 //   2. planLaneConcurrency() distributes that grant across lanes: perLane never
-//      exceeds the safe per-process cap, and maxConcurrent = floor(grant/perLane)
-//      so the lanes actually overlap.
+//      exceeds the safe per-process cap, maxConcurrent stays within the ledger
+//      grant, and Windows additionally caps active lane jobs at three so the lanes
+//      overlap without four-process starvation.
 //   3. signal/error cleanup kills every active lane process tree and releases the
 //      single ledger reservation, preventing timed-out gates from leaking either.
 import { EventEmitter } from "node:events";
@@ -139,16 +142,52 @@ describe("unit-lanes orchestrator scheduling", () => {
 		}
 	});
 
-	it("the Windows default still schedules every independent lane and integration shard concurrently", async () => {
-		const { planLaneConcurrency, defaultPerLaneForkCap, planLaneJobs } = await loadLanes();
+	it("caps the four-job Windows default at three concurrent lanes", async () => {
+		const { planLaneConcurrency, defaultConcurrentLaneJobCap, defaultPerLaneForkCap, planLaneJobs } = await loadLanes();
 		const jobs = planLaneJobs({
 			laneNames: ["core", "integration", "dom"],
 			platform: "win32",
 			integrationFiles: ["tests2/integration/a.test.ts", "tests2/integration/b.test.ts"],
 		});
 		assert.equal(jobs.length, 4, "core + two integration shards + dom");
-		const plan = planLaneConcurrency({ grant: 8, perLaneCap: defaultPerLaneForkCap("win32"), jobCount: jobs.length });
-		assert.deepEqual(plan, { perLane: 1, maxConcurrent: 4 });
+		assert.equal(defaultConcurrentLaneJobCap("win32"), 3);
+		const plan = planLaneConcurrency({
+			grant: 8,
+			perLaneCap: defaultPerLaneForkCap("win32"),
+			jobCount: jobs.length,
+			concurrentJobCap: defaultConcurrentLaneJobCap("win32"),
+		});
+		assert.deepEqual(plan, { perLane: 1, maxConcurrent: 3 });
+	});
+
+	it("preserves non-Windows grant scheduling and Windows fork/shard overrides", async () => {
+		const { planLaneConcurrency, defaultConcurrentLaneJobCap, resolvePerLaneForkCap, planLaneJobs } = await loadLanes();
+		assert.equal(defaultConcurrentLaneJobCap("linux"), Number.POSITIVE_INFINITY);
+		assert.equal(defaultConcurrentLaneJobCap("darwin"), Number.POSITIVE_INFINITY);
+		assert.deepEqual(planLaneConcurrency({
+			grant: 8,
+			perLaneCap: 2,
+			jobCount: 4,
+			concurrentJobCap: defaultConcurrentLaneJobCap("linux"),
+		}), { perLane: 2, maxConcurrent: 4 }, "non-Windows remains limited only by its ledger grant");
+
+		const jobs = planLaneJobs({
+			laneNames: ["core", "integration", "dom"],
+			platform: "win32",
+			integrationShardOverride: "3",
+			integrationFiles: [
+				"tests2/integration/a.test.ts",
+				"tests2/integration/b.test.ts",
+				"tests2/integration/c.test.ts",
+			],
+		});
+		assert.equal(jobs.length, 5, "explicit three-shard override remains effective");
+		assert.deepEqual(planLaneConcurrency({
+			grant: 8,
+			perLaneCap: resolvePerLaneForkCap({ platform: "win32", override: "2" }),
+			jobCount: jobs.length,
+			concurrentJobCap: defaultConcurrentLaneJobCap("win32"),
+		}), { perLane: 2, maxConcurrent: 3 }, "fork override is preserved while active jobs stay capped");
 	});
 
 	it("planLaneConcurrency never raises a lane above the per-process fork cap", async () => {
@@ -163,15 +202,20 @@ describe("unit-lanes orchestrator scheduling", () => {
 		}
 	});
 
-	it("planLaneConcurrency keeps instantaneous forks (maxConcurrent*perLane) within the grant", async () => {
+	it("planLaneConcurrency keeps instantaneous forks and active jobs within their caps", async () => {
 		const { planLaneConcurrency } = await loadLanes();
 		for (const grant of [1, 2, 3, 4, 6, 8, 12]) {
 			for (const cap of [1, 2, 3]) {
 				for (const jobCount of [1, 3, 5]) {
-					const { perLane, maxConcurrent } = planLaneConcurrency({ grant, perLaneCap: cap, jobCount });
-					assert.ok(maxConcurrent * perLane <= grant, `inFlight forks ${maxConcurrent * perLane} must be <= grant ${grant} (cap=${cap}, jobs=${jobCount})`);
-					assert.ok(maxConcurrent >= 1, "maxConcurrent must be >= 1 (always make progress)");
-					assert.ok(maxConcurrent <= jobCount, `maxConcurrent ${maxConcurrent} must not exceed jobCount ${jobCount}`);
+					for (const concurrentJobCap of [1, 3, Number.POSITIVE_INFINITY]) {
+						const { perLane, maxConcurrent } = planLaneConcurrency({ grant, perLaneCap: cap, jobCount, concurrentJobCap });
+						assert.ok(maxConcurrent * perLane <= grant, `inFlight forks ${maxConcurrent * perLane} must be <= grant ${grant} (cap=${cap}, jobs=${jobCount})`);
+						assert.ok(maxConcurrent >= 1, "maxConcurrent must be >= 1 (always make progress)");
+						assert.ok(maxConcurrent <= jobCount, `maxConcurrent ${maxConcurrent} must not exceed jobCount ${jobCount}`);
+						if (Number.isFinite(concurrentJobCap)) {
+							assert.ok(maxConcurrent <= concurrentJobCap, `maxConcurrent ${maxConcurrent} must not exceed job cap ${concurrentJobCap}`);
+						}
+					}
 				}
 			}
 		}
