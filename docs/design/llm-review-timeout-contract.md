@@ -2,7 +2,9 @@
 
 ## Status and scope
 
-This design covers the `llm-review` and `agent-qa` timeout/recovery work in the **Timeout contract and recovery** subgoal. It deliberately does not change command/build timeout policy and does not remove the legacy direct-review fallback; removal belongs to the separate direct-path subgoal.
+This design covers the `llm-review` and `agent-qa` timeout/recovery work in the **Timeout contract and recovery** subgoal. It deliberately does not change command/build timeout policy and originally deferred removal of the legacy direct-review fallback to a separate subgoal.
+
+> **Integration addendum — 2026-07-14.** A later parent SG2 intentionally removed the legacy direct path. The user explicitly directed this child to merge that parent and preserve the deletion alongside the timeout changes. That reconciled session-only routing supersedes this design's earlier temporary SG1 direct-path-preservation constraint; references below to retaining or testing the legacy path describe the original sequencing plan, not the integrated state.
 
 The incident behind this change involved reviewers that were still investigating when the undocumented 600-second allowance expired. The fix is not a whole-step deadline. It is a larger, explicit, repeatable allowance for each active review turn.
 
