@@ -7819,10 +7819,6 @@ export class SessionManager {
 			agentSessionFile = persisted?.agentSessionFile;
 		}
 
-		// Kill the current process
-		session.unsubscribe();
-		await session.rpcClient.stop();
-
 		// Reassemble system prompt with role instructions as separate fields
 		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 		const goalSpec = goal?.spec;
@@ -7923,8 +7919,32 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		if (!session.sandboxed) this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+
+		// Role assignment is an in-place rehydration, so the replacement must stay
+		// in the same filesystem realm as the durable transcript. In particular, a
+		// sandboxed session needs a container-backed bridge before switch_session is
+		// allowed to observe its container path. Fail closed if that realm can no
+		// longer be wired; silently launching Pi on the host would strand the
+		// container transcript and make an apparently successful role change lose
+		// model-visible history.
+		if (session.sandboxed) {
+			const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
+				projectId: session.projectId,
+				goalId: session.goalId ?? session.teamGoalId,
+			});
+			if (!sandboxApplied) {
+				throw new Error(`Cannot assign role for sandboxed session ${id}: sandbox realm is unavailable`);
+			}
+		} else {
+			this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+		}
 		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
+
+		// Do not stop the usable bridge until all replacement wiring has succeeded.
+		// This is especially important for sandbox realm failures above: the caller
+		// gets a rejection while the original session remains usable and unchanged.
+		session.unsubscribe();
+		await session.rpcClient.stop();
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		let switchingSession = true;
@@ -9965,16 +9985,18 @@ export class SessionManager {
 				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
 			};
 
-			// Apply sandbox wiring for sandboxed sessions (container spawn, token, etc.)
+			// Force-abort recovery must preserve the original filesystem realm. A
+			// sandbox transcript uses container coordinates; downgrading the replacement
+			// to a host bridge makes the later existence check miss that transcript and
+			// can drain queued intent against empty history. Fail closed instead, leaving
+			// the durable sandbox flag/path intact for a later recovery attempt.
 			if (session.sandboxed) {
 				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
 					projectId: session.projectId,
-					goalId: session.goalId,
+					goalId: session.goalId ?? session.teamGoalId,
 				});
 				if (!sandboxApplied) {
-					session.sandboxed = false;
-					this.resolveStoreForSession(id).update(id, { sandboxed: false });
-					this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
 				}
 			} else {
 				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);

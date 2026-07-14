@@ -91,6 +91,44 @@ function hostTranscript(name: string): string {
 	return file;
 }
 
+function containerTranscript(name: string): { containerFile: string; hostFile: string } {
+	const containerFile = `/home/node/.bobbit/agent/sessions/--orphan-boundaries--/${name}.jsonl`;
+	const hostFile = containerPathToHost(containerFile);
+	fs.mkdirSync(path.dirname(hostFile), { recursive: true });
+	fs.writeFileSync(hostFile, orphanTranscript(), "utf8");
+	createdFiles.push(hostFile);
+	return { containerFile, hostFile };
+}
+
+function realSandboxFixture(containerFile: string, containerId = "container-boundary"): {
+	projectConfigStore: any;
+	sandboxManager: any;
+	sandbox: any;
+} {
+	const sandbox = {
+		getContainerId: vi.fn(async () => containerId),
+		exec: vi.fn(async (args: string[]) => {
+			if (args[0] === "test" && args[1] === "-f" && args[2] === containerFile) return "";
+			if (args[0] === "cat" && args[1] === containerFile) {
+				return fs.readFileSync(containerPathToHost(containerFile), "utf8");
+			}
+			if (args[0] === "echo") return "ok";
+			throw new Error(`unexpected sandbox exec: ${args.join(" ")}`);
+		}),
+	};
+	return {
+		projectConfigStore: {
+			get: vi.fn((key: string) => key === "sandbox" ? "docker" : undefined),
+			getSandboxTokens: vi.fn(() => []),
+		},
+		sandboxManager: {
+			ensureForProject: vi.fn(async () => sandbox),
+			get: vi.fn(() => sandbox),
+		},
+		sandbox,
+	};
+}
+
 function recordingBridge(onSwitch: (sessionPath: string) => void): any {
 	return {
 		running: true,
@@ -241,6 +279,98 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(switches).toEqual([file]);
 	});
 
+	it("assignRole wires a real sandbox replacement before rehydrating container history", async () => {
+		const { containerFile, hostFile } = containerTranscript("assign-role-real-sandbox");
+		const sandboxFx = realSandboxFixture(containerFile, "container-role-boundary");
+		fs.writeFileSync(path.join(stateDir, "gateway-url"), "http://127.0.0.1:7890\n", "utf8");
+		const switches: string[] = [];
+		const replacement = recordingBridge((sessionPath) => {
+			switches.push(sessionPath);
+			assertOrphanRewritten(fs.readFileSync(hostFile, "utf8"));
+		});
+		const sendCommand = vi.spyOn(replacement, "sendCommand");
+		let replacementOptions: any;
+		registerRpcBridgeFactory((options: any) => {
+			replacementOptions = { ...options, env: { ...options.env } };
+			return replacement;
+		});
+		const manager: any = new SessionManager({ projectConfigStore: sandboxFx.projectConfigStore });
+		manager.sandboxManager = sandboxFx.sandboxManager;
+		const ps = persisted("assign-role-real-sandbox", containerFile, {
+			sandboxed: true,
+			cwd: "/workspace",
+		});
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			update: vi.fn(() => {}),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.getState = async () => ({ success: true, data: { sessionFile: containerFile } });
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			sandboxed: true,
+			cwd: "/workspace",
+		}));
+
+		await expect(manager.assignRole(ps.id, {
+			name: "boundary-role",
+			promptTemplate: "Boundary role",
+			accessory: "none",
+		})).resolves.toBe(true);
+
+		expect(sandboxFx.sandboxManager.ensureForProject).toHaveBeenCalledWith("project-boundary");
+		expect(sandboxFx.sandbox.getContainerId).toHaveBeenCalledTimes(1);
+		expect(replacementOptions).toMatchObject({
+			containerId: "container-role-boundary",
+			sandboxed: true,
+			cwd: "/workspace",
+			gatewayUrl: "http://127.0.0.1:7890",
+		});
+		expect(switches).toEqual([containerFile]);
+		expect(sendCommand).toHaveBeenCalledWith(
+			{ type: "switch_session", sessionPath: containerFile },
+			60_000,
+		);
+	});
+
+	it("assignRole leaves the original sandbox bridge usable when realm wiring is unavailable", async () => {
+		const { containerFile } = containerTranscript("assign-role-sandbox-unavailable");
+		const replacement = recordingBridge(() => { throw new Error("unavailable realm must not switch"); });
+		replacement.start = vi.fn(async () => {});
+		const ps = persisted("assign-role-sandbox-unavailable", containerFile, {
+			sandboxed: true,
+			cwd: "/workspace",
+		});
+		const manager = makeManager(ps, replacement);
+		manager.applySandboxWiring = vi.fn(async () => false);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.getState = async () => ({ success: true, data: { sessionFile: containerFile } });
+		oldBridge.stop = vi.fn(async () => {});
+		const original = liveSession(ps.id, oldBridge, {
+			sandboxed: true,
+			cwd: "/workspace",
+			unsubscribe: vi.fn(),
+		});
+		manager.sessions.set(ps.id, original);
+
+		await expect(manager.assignRole(ps.id, {
+			name: "boundary-role",
+			promptTemplate: "Boundary role",
+			accessory: "none",
+		})).rejects.toThrow("sandbox realm is unavailable");
+
+		expect(original.unsubscribe).not.toHaveBeenCalled();
+		expect(oldBridge.stop).not.toHaveBeenCalled();
+		expect(replacement.start).not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect(original.rpcClient).toBe(oldBridge);
+		expect(original.role).toBeUndefined();
+		expect(original.sandboxed).toBe(true);
+		expect(original.status).toBe("idle");
+	});
+
 	it("repairs force-abort hard recovery before the replacement process switches history", async () => {
 		const file = hostTranscript("force-abort");
 		const switches: string[] = [];
@@ -272,6 +402,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const { bridge: replacement, stop } = failingSwitchBridge(failure, timeouts);
 		const ps = persisted(`assign-role-${realm}-failure`, file, { sandboxed });
 		const manager = makeManager(ps, replacement);
+		if (sandboxed) {
+			manager.applySandboxWiring = vi.fn(async (options: any) => {
+				options.containerId = "container-assign-failure";
+				options.sandboxed = true;
+				return true;
+			});
+		}
 		manager.drainQueue = vi.fn();
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
 		oldBridge.getState = async () => ({ success: true, data: { sessionFile: file } });
@@ -300,6 +437,43 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(original.spawnPinnedThinkingLevel).toBe("high");
 		expect(original.status).toBe("terminated");
 		assertOrphanRewritten(fs.readFileSync(file, "utf8"));
+	});
+
+	it("force-abort fails closed when a sandbox replacement cannot retain the transcript realm", async () => {
+		const { containerFile, hostFile } = containerTranscript("force-abort-sandbox-downgrade");
+		const replacement = recordingBridge(() => { throw new Error("realm downgrade must not switch"); });
+		replacement.start = vi.fn(async () => {});
+		const ps = persisted("force-abort-sandbox-downgrade", containerFile, {
+			sandboxed: true,
+			cwd: "/workspace",
+		});
+		const manager = makeManager(ps, replacement);
+		manager.applySandboxWiring = vi.fn(async () => false);
+		manager.drainQueue = vi.fn();
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.getState = async () => ({ success: true, data: { sessionFile: containerFile } });
+		oldBridge.abort = async () => new Promise(() => {});
+		const original = liveSession(ps.id, oldBridge, {
+			status: "streaming",
+			streamingStartedAt: Date.now(),
+			sandboxed: true,
+			cwd: "/workspace",
+		});
+		original.promptQueue.enqueue("queued user intent");
+		manager.sessions.set(ps.id, original);
+
+		await manager.forceAbort(ps.id, 5);
+
+		expect(manager.applySandboxWiring).toHaveBeenCalledTimes(1);
+		expect(replacement.start).not.toHaveBeenCalled();
+		expect(manager.drainQueue).not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect(original.rpcClient).toBe(oldBridge);
+		expect(original.sandboxed).toBe(true);
+		expect(original.promptQueue.toArray().map((message: any) => message.text)).toEqual(["queued user intent"]);
+		expect(original.status).toBe("terminated");
+		expect(manager._testStore.update).not.toHaveBeenCalledWith(ps.id, { sandboxed: false });
+		expect(fs.readFileSync(hostFile, "utf8")).toBe(orphanTranscript());
 	});
 
 	it.each([
