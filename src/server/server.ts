@@ -5237,9 +5237,9 @@ async function handleApiRoute(
 
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
-		// §3 accept invariant — an EDIT that names an explicit but unregistered
-		// project must fail with a clear UNKNOWN_PROJECT code rather than a
-		// generic 400 from the registry, and must never fall through to a create.
+		// Endpoint defense in depth: project-proposal acceptance classifies create
+		// versus edit from `fields.projectId` before dispatch. If a mutation still
+		// targets an unregistered id, return a clear UNKNOWN_PROJECT response.
 		if (!projectRegistry.get(projectGetMatch[1])) {
 			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectGetMatch[1]}` }, 422);
 			return;
@@ -5306,8 +5306,9 @@ async function handleApiRoute(
 	const projectPromoteMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/promote$/);
 	if (projectPromoteMatch && req.method === "POST") {
 		const projectId = projectPromoteMatch[1];
-		// §3 accept invariant — promoting an explicit but unregistered project
-		// is a clear UNKNOWN_PROJECT error, not a generic 400.
+		// Endpoint defense in depth: the acceptance dispatcher selects promotion
+		// from `fields.projectId`; this endpoint still reports an unregistered id
+		// as UNKNOWN_PROJECT rather than relying on a generic registry error.
 		if (!projectRegistry.get(projectId)) {
 			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectId}` }, 422);
 			return;
@@ -5399,10 +5400,10 @@ async function handleApiRoute(
 	if (projectConfigMatch) {
 		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
 		if (!ctx) {
-			// §3 accept invariant — a config EDIT (PUT) that names an explicit
-			// but unregistered project must fail with a clear UNKNOWN_PROJECT
-			// code, never re-route into a create, and never be a generic 404.
-			// Reads keep the historical 404 shape.
+			// Endpoint defense in depth: `fields.projectId` drives create-versus-edit
+			// acceptance dispatch on the client. A config mutation that nevertheless
+			// targets an unregistered id gets UNKNOWN_PROJECT; reads keep the
+			// historical 404 shape.
 			if (req.method === "PUT") {
 				json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectConfigMatch[1]}` }, 422);
 			} else {
@@ -13376,8 +13377,9 @@ async function handleApiRoute(
 			// onto the draft, making `proposal.fields.projectId` the single
 			// source of truth for acceptance routing. When projectId is omitted
 			// this reduces to the previous behaviour byte-for-byte. `project`
-			// proposals are excluded — they may name a brand-new, not-yet-
-			// registered project (validated at the accept/mutation boundary).
+			// proposals are excluded: their client acceptance mode and dispatch are
+			// determined solely by `proposal.fields.projectId`; mutation endpoints
+			// validate any dispatched explicit target as defense in depth.
 			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;

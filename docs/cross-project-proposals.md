@@ -1,18 +1,24 @@
 # Cross-project proposals
 
-Every `propose_*` tool accepts an optional `projectId`. When omitted, a proposal
-targets the session's own project (the overwhelmingly common path, unchanged).
-When supplied, the proposal is seeded, validated, and accepted against the
-**target** project instead — so an agent in one project can propose work into a
-*different* one.
+Every `propose_*` tool accepts an optional `projectId`, but there are two
+contracts:
 
-The canonical use case is a **Headquarters** agent (server/global scope)
-proposing goals, staff, roles, tools, or project-config edits into real
+- For `propose_goal`, `propose_role`, `propose_tool`, and `propose_staff`, an
+  omitted or blank `projectId` defaults to the session's project. An explicit id
+  targets that registered project, whether it is the source project or another
+  one.
+- For `propose_project`, `fields.projectId` is the create-versus-existing
+  discriminator. Omitted or blank means **create a new project**; a non-empty id
+  means **target that registered or provisional project**. The source session's
+  project is never a fallback target.
+
+The canonical cross-project use case is a **Headquarters** agent (server/global
+scope) proposing goals, staff, roles, tools, or project-config edits into real
 projects, without needing a session inside each project. But the mechanism is
 general: any session may cross-target any registered project. There is **no
 permission gating** — if instructed, any agent may propose across projects.
 
-- Design rationale and the exact code-level contract: [design/cross-project-proposals.md](design/cross-project-proposals.md).
+- Original design rationale: [design/cross-project-proposals.md](design/cross-project-proposals.md).
 - Proposal lifecycle and the draft-file-as-source-of-truth model: [design/editable-proposals.md](design/editable-proposals.md).
 - Headquarters / server scope and the `system` vs `headquarters` distinction: [headquarters.md](headquarters.md).
 
@@ -28,9 +34,11 @@ proposal whose `projectId` differed from the session's (`PROJECT_ID_MISMATCH`,
 proposals were impossible even though the accept side already read
 `fields.projectId`.
 
-The design keeps the default path byte-for-byte identical (correctness must
-never regress for the common case) while making `proposal.fields.projectId` the
-single source of truth for where a proposal lands.
+For goal, role, tool, and staff proposals, the design keeps the default path
+unchanged while making `proposal.fields.projectId` the accepted target. Project
+proposals intentionally differ: only their own `fields.projectId` determines
+create-versus-existing intent, so accepting a draft from Headquarters cannot
+accidentally turn an omitted-id create into a protected Headquarters mutation.
 
 ## The five proposal types
 
@@ -42,7 +50,7 @@ Cross-project targeting applies to all five `propose_*` tools:
 | `propose_role` | Role config written to the target project's config store. |
 | `propose_tool` | Tool config written to the target project's config store. |
 | `propose_staff` | Staff agent created in the target project. |
-| `propose_project` | Edits an existing registered project's config, or creates a brand-new project (see [propose_project](#propose_project-edit-vs-create)). |
+| `propose_project` | Creates a new project, or targets an existing registered/provisional project (see [propose_project](#propose_project-edit-vs-create)). |
 
 ## Target resolution and validation (at seed time)
 
@@ -89,27 +97,56 @@ contract are unchanged.
 ### `propose_project`: edit vs create
 
 `propose_project` is deliberately **excluded** from the seed-time target
-resolver, because it is the one type allowed to name a brand-new, not-yet-
-registered project. Its `projectId` is never auto-injected by the tool layer
-and is never persisted into the applied config; it only routes acceptance.
-Its behaviour is decided at the accept/mutation boundary:
+resolver. The tool layer does not auto-inject a source project id, and the seed
+endpoint leaves its fields untouched. `projectId` is not applied as project
+configuration; it only expresses acceptance intent. Seeding or editing the
+proposal never registers a project; registration begins only after the user
+selects **Accept**.
 
-| `fields.projectId` | Meaning | Behaviour |
+At acceptance, the dispatcher trims and classifies the current
+`fields.projectId` without consulting the stored panel mode:
+
+| `fields.projectId` | Classification | Acceptance behaviour |
 |---|---|---|
-| absent | Create a brand-new project | Registered from `name` + `root_path` exactly as today (unchanged). `root_path` is required. |
-| present + names a **registered** project | Edit that project | Proposed config applied to that project. `name` / `root_path` describe the existing project; they do not register a new one. `root_path` may be omitted. |
-| present but **not registered** | Ambiguous intent | Rejected with `UNKNOWN_PROJECT` — never silently re-routed into a create. New projects must omit `projectId`. |
+| absent, blank, or whitespace-only | Create | A normal-session proposal registers a distinct project from `name` + `root_path`; both are required. The source project is unchanged. |
+| explicit id of a registered project | Existing registered target | Rename/config mutations address that project. `root_path` is not required and cannot select a different target. |
+| explicit id of a provisional project | Existing provisional target | Promotion and config writes address that provisional project. |
+| explicit unknown id | Invalid | Reject with `UNKNOWN_PROJECT`, issue no project mutation, and retain the editable draft. It never becomes create intent. |
 
-Enforcement lives at the server mutation boundary (the `PUT /api/projects/:id`,
-`PUT /api/projects/:id/config`, and `POST /api/projects/:id/promote` routes), so
-direct/non-UI callers get identical semantics. An explicit-but-unknown id fails
-there with a clear `422 UNKNOWN_PROJECT` rather than a generic 404. The UI
-preflights for a nicer message but never overrides the server's decision.
+This classification has no fallback to `proposal.projectId`,
+`sourceProjectId`, the proposing session's `projectId`, or a previously stored
+mode. `sourceProjectId` and session metadata record provenance only. A
+`createdProjectId` may be retained as a retry checkpoint after registration so
+a failed config write does not register the project twice; it also does not
+change intent.
+
+The provisional **Add Project** / project-assistant flow is an implementation
+strategy applied only after create intent has been established. If the source
+is a project-assistant session backed by a provisional project, acceptance may
+promote that provisional project in place, write its config, remove the
+assistant session, and refresh the project list. Source provenance is consulted
+to choose this create implementation, never to reclassify the proposal as an
+edit.
+
+Responsibility is split deliberately:
+
+- The proposal-panel accept dispatcher classifies create, existing, or invalid
+  solely from current `fields.projectId`, then chooses registration, edit, or
+  promotion.
+- The id-addressed server mutation routes (`PUT /api/projects/:id`,
+  `PUT /api/projects/:id/config`, and `POST /api/projects/:id/promote`) validate
+  the dispatched id. An unknown mutation target returns `422 UNKNOWN_PROJECT`
+  as defense in depth; these routes do not infer create intent.
+
+Acceptance errors remain visible in the panel and do not clear the proposal.
+If registration succeeds but the subsequent config write fails, the draft and
+registration checkpoint remain available for a safe retry.
 
 ## Acceptance routes to the target
 
-Accepting a cross-project draft creates or applies the entity in the target
-project, keyed off the draft's `fields.projectId`:
+For goal, role, tool, and staff, acceptance applies the entity to the project
+identified by the draft's `fields.projectId`. Project acceptance instead uses
+the create-versus-existing classification above:
 
 - **Goal** — created under the target project's worktree/branch and workflow.
 - **Role / tool / staff** — written to the target project's config store /
@@ -117,10 +154,10 @@ project, keyed off the draft's `fields.projectId`:
 - **Project** — config applied to the target (edit) or a new project registered
   (create).
 
-The UI read helpers (`resolveGoalProposalProjectId`, `proposalProjectId`, and
-the staff/role/tool/project equivalents in `src/app/proposal-panels.ts`) all
-prefer the draft's `fields.projectId` and fall back to the session only when it
-is absent — so an explicit target is honoured on accept and never clobbered.
+For goal, role, tool, and staff, the UI target helpers prefer the draft's
+`fields.projectId` and fall back to the session only when it is absent. Project
+acceptance uses the separate classifier above and never falls back to the
+session or proposal provenance.
 
 ## The "Proposing into &lt;Target Project&gt;" banner
 
@@ -133,9 +170,9 @@ user accepts it.
 - The banner shows the human-readable target **name** resolved from the
   registry, not the raw id.
 - It appears for all five proposal types.
-- For `propose_project`, the banner appears **only** for an explicit edit of an
-  already-registered project. A brand-new project proposal is not "cross-project"
-  in the target-registry sense and gets no banner.
+- For `propose_project`, the banner appears **only** for an explicit existing
+  target that differs from the source, whether that target is registered or
+  provisional. A create proposal has no registry target and gets no banner.
 - When target == proposer (the common case), the helper returns nothing and the
   panel renders exactly as today, with no extra chrome.
 
@@ -151,16 +188,21 @@ The `projectId` parameter on all five tools carries this description:
 
 This is an **advisory nudge only** — it steers agents away from setting
 `projectId` unless the user is genuinely asking for a cross-project proposal.
-It is not a boundary: correctness never depends on the agent honouring it. The
-server validates and routes based on the resolved target regardless of the
-agent's intent, and there is no permission check. The wording is kept within the
-per-parameter description budget pinned by
-`tests2/core/tool-description-budget.test.ts`.
+It is not a boundary: correctness never depends on the agent honouring it, and
+there is no permission check. For goal, role, tool, and staff, the target is
+resolved and validated at seed time. For project proposals, despite the generic
+wording, omission means create rather than "this session"; acceptance applies
+the classifier above. The wording is kept within the per-parameter description
+budget pinned by `tests2/core/tool-description-budget.test.ts`.
 
-## Default-path guarantee
+## Omitted-id guarantees
 
-When `projectId` is omitted the behaviour is byte-for-byte identical to before
-this feature: the tool stamps the session's project (mapping `system →
-headquarters`), the seed endpoint stamps the same value, uniform target
-validation is a no-op, and no banner renders. This is the overwhelmingly common
-path and was preserved exactly by design.
+For goal, role, tool, and staff, omission preserves the normal same-project
+path: the tool and seed endpoint resolve the session project (mapping `system →
+headquarters`), stamp it onto the draft, and render no cross-project banner.
+
+For project proposals, omission or blank input has the opposite and equally
+strict meaning: create. It remains create regardless of whether the source
+session belongs to Headquarters, a normal registered project, or a provisional
+project. Only the post-classification Add Project strategy may use source
+provenance to promote an already-created provisional project.

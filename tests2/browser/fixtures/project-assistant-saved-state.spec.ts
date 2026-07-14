@@ -22,8 +22,8 @@ const PROJECT_PROPOSAL_TAB_ID = "proposal:project";
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const REGISTERED_PROJECT_PROPOSAL_SELECTOR = '[data-panel="project-proposal"][data-mode="registered"]';
 
-/** Create a project-assistant session bound to an already-registered project
- *  (so `resolveProjectMode` returns "registered"). Returns the session ID. */
+/** Create a project-assistant session bound to an already-registered project.
+ *  The proposal itself still needs an explicit `fields.projectId` for edit mode. */
 async function createRegisteredProjectAssistant(projectId: string, cwd: string): Promise<string> {
 	const resp = await apiFetch("/api/sessions", {
 		method: "POST",
@@ -115,16 +115,19 @@ async function navigateAwayAndBackToSession(page: Page, sessionId: string): Prom
 async function writeRegisteredProjectProposalState(
 	page: Page,
 	sessionId: string,
+	projectId: string,
 	rootPath: string,
 ): Promise<void> {
-	await page.evaluate(({ sessionId, rootPath, projectTabId }) => {
+	await page.evaluate(({ sessionId, projectId, rootPath, projectTabId }) => {
 		const w = window as any;
 		const state = w.bobbitState;
 		if (!state) throw new Error("bobbitState missing");
 		state.activeProposals.project = {
 			sessionId,
+			sourceProjectId: projectId,
 			fields: {
 				name: "Saved State Test Project",
+				projectId,
 				root_path: rootPath,
 				build_command: "npm run build",
 				test_command: "npm test",
@@ -145,13 +148,13 @@ async function writeRegisteredProjectProposalState(
 		if (state.panelWorkspace && typeof state.panelWorkspace === "object") {
 			state.panelWorkspace.activeTabId = projectTabId;
 		}
-	}, { sessionId, rootPath, projectTabId: PROJECT_PROPOSAL_TAB_ID });
+	}, { sessionId, projectId, rootPath, projectTabId: PROJECT_PROPOSAL_TAB_ID });
 }
 
 async function injectProjectProposal(
 	page: Page,
 	sessionId: string,
-	_projectId: string,
+	projectId: string,
 	rootPath: string,
 ): Promise<void> {
 	await openProjectProposalWorkspaceTab(sessionId);
@@ -166,7 +169,7 @@ async function injectProjectProposal(
 	// "client-hydrating" branch. Surviving slot ⇒ the one-shot hydrate-clear has
 	// already fired, so this is the real precondition the panel render depends on.
 	await expect.poll(async () => {
-		await writeRegisteredProjectProposalState(page, sessionId, rootPath);
+		await writeRegisteredProjectProposalState(page, sessionId, projectId, rootPath);
 		await forceRender(page);
 
 		const clientReady = await page.evaluate(({ sessionId }) => {
