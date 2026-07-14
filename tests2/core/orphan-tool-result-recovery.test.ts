@@ -30,12 +30,19 @@ afterEach(() => {
 	}
 });
 
-function bridge(prompts: Array<{ text: string; images?: unknown }>, rejectWith?: string): any {
+function bridge(
+	prompts: Array<{ text: string; images?: unknown }>,
+	rejectWith?: string,
+	onPrompt?: () => void,
+	rejectAsThrow = false,
+): any {
 	return {
 		running: true,
 		async stop() {},
 		prompt(text: string, images?: unknown) {
 			prompts.push({ text, images });
+			onPrompt?.();
+			if (rejectWith && rejectAsThrow) return Promise.reject(new Error(rejectWith));
 			return Promise.resolve(rejectWith
 				? { success: false, error: rejectWith }
 				: { success: true });
@@ -44,7 +51,13 @@ function bridge(prompts: Array<{ text: string; images?: unknown }>, rejectWith?:
 	};
 }
 
-function harness(options?: { hadToolCalls?: boolean; queue?: string[]; rejectRedriveWith?: string }) {
+function harness(options?: {
+	hadToolCalls?: boolean;
+	queue?: string[];
+	rejectRedriveWith?: string;
+	observeTurnBeforeRedriveReject?: boolean;
+	throwRedriveRejection?: boolean;
+}) {
 	const oldPrompts: Array<{ text: string; images?: unknown }> = [];
 	const newPrompts: Array<{ text: string; images?: unknown }> = [];
 	const manager: any = new SessionManager();
@@ -106,7 +119,15 @@ function harness(options?: { hadToolCalls?: boolean; queue?: string[]; rejectRed
 		manager.sessions.delete(current.id);
 		await Promise.resolve();
 		const { pendingSkillExpansions: _discardedEnvelope, ...restoredState } = current;
-		const restored = { ...restoredState, rpcClient: bridge(newPrompts, options?.rejectRedriveWith) };
+		let restored: any;
+		restored = {
+			...restoredState,
+			rpcClient: bridge(newPrompts, options?.rejectRedriveWith, () => {
+				if (options?.observeTurnBeforeRedriveReject) {
+					manager.handleAgentLifecycle(restored, { type: "agent_start" });
+				}
+			}, options?.throwRedriveRejection),
+		};
 		manager.sessions.set(current.id, restored);
 		return restored;
 	};
@@ -209,6 +230,34 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rows[0].id]);
 		assert.equal(drain.mock.calls.length, 0, "manual recovery gate must not drain unrelated parked work");
 		assert.equal(restored.lifecycleGeneration, h.manager._currentRespawnGeneration(h.session.id));
+	});
+
+	it("does not restore or replay a durable poison follow-up after Pi observed the turn before the RPC rejection", async () => {
+		const h = harness({
+			rejectRedriveWith: "Command timed out: prompt",
+			observeTurnBeforeRedriveReject: true,
+			throwRedriveRejection: true,
+		});
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		assert.deepEqual(
+			await h.manager.enqueuePrompt(h.session.id, "accepted exactly once", { source: "user" }),
+			{ status: "dispatched" },
+		);
+
+		const restored = h.manager.sessions.get(h.session.id);
+		assert.equal(restored.agentObservedTurnVersion, 1);
+		assert.equal(restored.promptQueue.isEmpty, true);
+		assert.equal(restored.recoveredPromptDispatchQueueIds, undefined);
+		assert.equal(restored.lastTurnErrored, false);
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), ["accepted exactly once"]);
+
+		// A later successful turn boundary must not find a restored durable row and
+		// dispatch the already-accepted follow-up (including its tool effects) twice.
+		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), ["accepted exactly once"]);
 	});
 
 	it("uses a unique durable Retry row and preserves an independently queued identical prompt", async () => {

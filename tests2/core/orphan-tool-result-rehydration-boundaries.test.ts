@@ -337,6 +337,41 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager.sessions.get(ps.id)?.promptQueue.isEmpty).toBe(true);
 	});
 
+	it("keeps boot continuation dispatch fenced until promptWhenReady settles", async () => {
+		const file = hostTranscript("boot-continuation-dispatch-fence");
+		const bootEntered = deferred<void>();
+		const bootAccepted = deferred<void>();
+		const bridge = recordingBridge(() => {});
+		bridge.promptWhenReady = vi.fn(async () => {
+			bootEntered.resolve();
+			await bootAccepted.promise;
+			return { success: true };
+		});
+		bridge.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted("boot-continuation-dispatch-fence", file, { wasStreaming: true });
+		const manager = makeManager(ps, bridge);
+
+		const restore = manager._restoreSessionCoalesced(ps);
+		await bootEntered.promise;
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(true);
+
+		await expect(manager.enqueuePrompt(ps.id, "accepted while boot prompt is pending"))
+			.resolves.toEqual({ status: "queued" });
+		expect(bridge.prompt).not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)?.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["accepted while boot prompt is pending"]);
+
+		bootAccepted.resolve();
+		await restore;
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+		expect(bridge.prompt).not.toHaveBeenCalled();
+
+		const canonical = manager.sessions.get(ps.id);
+		manager.handleAgentLifecycle(canonical, { type: "agent_end", messages: [] });
+		await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+		expect(bridge.prompt).toHaveBeenCalledWith("accepted while boot prompt is pending", undefined);
+	});
+
 	it("repairs an in-place restart/respawn before the replacement process switches history", async () => {
 		const file = hostTranscript("restart-respawn");
 		const switches: string[] = [];
@@ -1023,6 +1058,51 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
+	it("joins assignRole through an in-place respawn session-map gap", async () => {
+		const file = hostTranscript("respawn-map-gap-assign-role");
+		const restartStart = deferred<void>();
+		const restartBridge = recordingBridge(() => {});
+		const roleBridge = recordingBridge(() => {});
+		restartBridge.start = vi.fn(() => restartStart.promise);
+		restartBridge.stop = vi.fn(async () => {});
+		roleBridge.stop = vi.fn(async () => {});
+		const factory = vi.fn()
+			.mockReturnValueOnce(restartBridge)
+			.mockReturnValueOnce(roleBridge);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("respawn-map-gap-assign-role", file);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.stop = vi.fn(async () => {});
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() }));
+
+		const restart = manager.restartAgent(ps.id);
+		await vi.waitFor(() => expect(restartBridge.start).toHaveBeenCalledTimes(1));
+		expect(manager.sessions.has(ps.id)).toBe(false);
+		const assignment = manager.assignRole(ps.id, {
+			name: "map-gap-role",
+			promptTemplate: "Map gap role",
+			accessory: "map-gap-accessory",
+		});
+
+		restartStart.resolve();
+		await expect(Promise.all([restart, assignment])).resolves.toEqual([undefined, true]);
+		expect(factory).toHaveBeenCalledTimes(2);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(roleBridge);
+		expect(manager.sessions.get(ps.id)?.role).toBe("map-gap-role");
+		expect(restartBridge.stop).toHaveBeenCalledTimes(1);
+		expect(roleBridge.stop).not.toHaveBeenCalled();
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
 	it.each([
 		{ realm: "host", sandboxed: false },
 		{ realm: "sandbox", sandboxed: true },
@@ -1172,6 +1252,60 @@ describe("executable SessionManager rehydration boundaries", () => {
 		await manager.forceAbort(ps.id, 5);
 
 		expect(switches).toEqual([file]);
+	});
+
+	it("suppresses hard force-abort switch replay from live events, resume buffer, and activity", async () => {
+		const file = hostTranscript("force-abort-replay-suppression");
+		let listener: ((event: any) => void) | undefined;
+		const replacement = recordingBridge(() => {});
+		replacement.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		replacement.sendCommand = vi.fn(async (command: any) => {
+			if (command?.type === "switch_session") {
+				listener?.({
+					type: "message_end",
+					message: { id: "historical-assistant", role: "assistant", content: [{ type: "text", text: "restored history" }] },
+				});
+				listener?.({ type: "agent_end", messages: [] });
+			}
+			return { success: true };
+		});
+		const ps = persisted("force-abort-replay-suppression", file, { lastActivity: 123_456 });
+		const manager = makeManager(ps, replacement);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.getState = async () => ({ success: true, data: { sessionFile: file } });
+		oldBridge.abort = async () => new Promise(() => {});
+		const original = liveSession(ps.id, oldBridge, {
+			status: "streaming",
+			streamingStartedAt: Date.now(),
+			lastActivity: ps.lastActivity,
+		});
+		const client = { readyState: 1, bufferedAmount: 0, send: vi.fn() };
+		original.clients.add(client);
+		original.eventBuffer.push({ type: "preexisting-live-event" });
+		manager.sessions.set(ps.id, original);
+
+		await manager.forceAbort(ps.id, 5);
+
+		// The synthetic live agent_end emitted by hard abort is retained/broadcast;
+		// the two switch_session replay frames receive no new live sequence identity.
+		expect(original.eventBuffer.getAll().map((entry: any) => entry.event.type))
+			.toEqual(["preexisting-live-event", "agent_end"]);
+		const emittedEventTypes = client.send.mock.calls
+			.map((call: any[]) => JSON.parse(call[0]))
+			.filter((frame: any) => frame.type === "event")
+			.map((frame: any) => frame.data.type);
+		expect(emittedEventTypes).toEqual(["agent_end"]);
+		expect(original.lastActivity).toBe(123_456);
+		expect(manager._testStore.update.mock.calls.some(([, patch]: any[]) => "lastActivity" in patch)).toBe(false);
+		expect(replacement.sendCommand).toHaveBeenCalledWith(
+			{ type: "switch_session", sessionPath: file },
+			15_000,
+		);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		assertOrphanRewritten(fs.readFileSync(file, "utf8"));
 	});
 
 	it("fails closed when hard force-abort cannot read declared durable history", async () => {

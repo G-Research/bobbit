@@ -1411,25 +1411,34 @@ export class SessionManager {
 			}
 		});
 		let resultPromise!: Promise<T>;
-		resultPromise = operationPromise.finally(() => {
+		resultPromise = operationPromise.finally(async () => {
 			if (opts?.coalesceKey && owned.coalesced.get(opts.coalesceKey) === resultPromise) {
 				owned.coalesced.delete(opts.coalesceKey);
 			}
 			owned.pending -= 1;
 			this._mergeReplacementPromptOwner(owned, this.sessions.get(sessionId));
 			if (owned.pending !== 0 || this._sessionReplacementCoordinators.get(sessionId) !== owned) return;
-			this._sessionReplacementCoordinators.delete(sessionId);
-			owned.active = undefined;
-			const canonical = this.sessions.get(sessionId);
-			if (!canonical) return;
+
+			let canonical = this.sessions.get(sessionId);
 			// Stop/terminate accepted through a transient map gap wins over startup:
 			// never make the rollback capsule idle, boot-continue, or drain intent.
-			if (owned.terminalRequest) return;
-			if (canonical.status === "starting") broadcastStatus(canonical, "idle");
-			if (owned.bootContinuationPending) {
-				this._dispatchBootContinuation(canonical);
-				return;
+			if (canonical && !owned.terminalRequest) {
+				if (canonical.status === "starting") broadcastStatus(canonical, "idle");
+				if (owned.bootContinuationPending) {
+					// Keep the coordinator installed across the cold prompt RPC. Prompts
+					// accepted while readiness/ack is pending stay on the coordinator's
+					// durable ledger instead of racing a second prompt on this bridge.
+					owned.bootContinuationPending = false;
+					await this._dispatchBootContinuation(canonical);
+					this._mergeReplacementPromptOwner(owned, this.sessions.get(sessionId));
+					if (owned.pending !== 0 || this._sessionReplacementCoordinators.get(sessionId) !== owned) return;
+					canonical = this.sessions.get(sessionId);
+				}
 			}
+
+			this._sessionReplacementCoordinators.delete(sessionId);
+			owned.active = undefined;
+			if (!canonical || owned.terminalRequest) return;
 			if (
 				owned.drainOnRelease
 				&& canonical.status === "idle"
@@ -4154,6 +4163,30 @@ export class SessionManager {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		this.markPromptDispatchStreaming(session);
+		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
+
+		const consumeDurableAcceptanceRow = () => {
+			if (!durableQueueRowId || !session.promptQueue.remove(durableQueueRowId)) return;
+			if (session.explicitRetryQueueRowId === durableQueueRowId) {
+				session.explicitRetryQueueRowId = undefined;
+			}
+			session.recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds
+				?.filter(id => id !== durableQueueRowId);
+			if (session.recoveredPromptDispatchQueueIds?.length === 0) {
+				session.recoveredPromptDispatchQueueIds = undefined;
+			}
+			this.broadcastQueue(session);
+		};
+		const acceptedBeforeAckFailure = (reason: string): boolean => {
+			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
+			if (observedTurnVersion === dispatchObservedTurnVersion) return false;
+			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
+			console.warn(`[session-manager] direct prompt dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); treating the dispatch as accepted`);
+			consumeDurableAcceptanceRow();
+			session.recoverDrainAttempts = 0;
+			return true;
+		};
 
 		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered }];
 		let recovered = false;
@@ -4166,24 +4199,16 @@ export class SessionManager {
 				: await session.rpcClient.prompt(text, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
+				if (acceptedBeforeAckFailure(reason)) return;
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 				recovered = true;
 				throw this.safeDispatchError(session, reason);
 			}
 			// The RPC accepted the intent; only now consume its durable acceptance row.
-			if (durableQueueRowId && session.promptQueue.remove(durableQueueRowId)) {
-				if (session.explicitRetryQueueRowId === durableQueueRowId) {
-					session.explicitRetryQueueRowId = undefined;
-				}
-				session.recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds
-					?.filter(id => id !== durableQueueRowId);
-				if (session.recoveredPromptDispatchQueueIds?.length === 0) {
-					session.recoveredPromptDispatchQueueIds = undefined;
-				}
-				this.broadcastQueue(session);
-			}
+			consumeDurableAcceptanceRow();
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
+			if (!recovered && acceptedBeforeAckFailure(reason)) return;
 			if (!recovered) {
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 			}
@@ -4293,12 +4318,31 @@ export class SessionManager {
 		event: any,
 		opts?: { replacementOwnedTerminal?: boolean; deferQueueDrain?: boolean },
 	): void {
+		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
+		// Record it for the current canonical generation even while a replacement
+		// coordinator suppresses ordinary lifecycle effects: poison redrive and boot
+		// continuation deliberately dispatch before that coordinator releases.
+		const observesAcceptedTurn =
+			event.type === "agent_start" ||
+			event.type === "tool_execution_start" ||
+			(event.type === "message_end" && (
+				event.message?.role === "user" ||
+				event.message?.role === "user-with-attachments" ||
+				event.message?.role === "assistant"
+			));
+		if (observesAcceptedTurn && this._sessionWriterIsCurrent(session)) {
+			session.agentObservedTurnVersion = (session.agentObservedTurnVersion ?? 0) + 1;
+			// Boot continuation may receive agent_start before its prompt RPC ack while
+			// coordinator ownership suppresses the ordinary agent_start branch below.
+			if (event.type === "agent_start") this._bootRepromptedSessions.delete(session.id);
+		}
+
 		// A coordinated replacement may keep the old bridge subscribed until its
-		// successor is validated. Fence all lifecycle side effects during that window:
-		// accepted intent belongs to the eventual canonical bridge, never this writer.
-		// Graceful force-abort is the sole exception: it replays the canonical terminal
-		// events exactly once because the ordinary listener was fenced while Stop owned
-		// the coordinator.
+		// successor is validated. Fence all other lifecycle side effects during that
+		// window: accepted intent belongs to the eventual canonical bridge, never this
+		// writer. Graceful force-abort is the sole exception: it replays the canonical
+		// terminal events exactly once because the ordinary listener was fenced while
+		// Stop owned the coordinator.
 		if (this._sessionReplacementCoordinators.has(session.id) && !opts?.replacementOwnedTerminal) return;
 
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
@@ -4332,22 +4376,6 @@ export class SessionManager {
 					);
 				}
 			}
-		}
-
-		// Inbound agent events that carry turn progress prove a just-dispatched
-		// prompt was accepted. Keep this separate from statusVersion: local Stop /
-		// abort status broadcasts must not suppress recovery for a prompt that was
-		// dequeued but rejected before acceptance.
-		if (
-			event.type === "agent_start" ||
-			event.type === "tool_execution_start" ||
-			(event.type === "message_end" && (
-				event.message?.role === "user" ||
-				event.message?.role === "user-with-attachments" ||
-				event.message?.role === "assistant"
-			))
-		) {
-			session.agentObservedTurnVersion = (session.agentObservedTurnVersion ?? 0) + 1;
 		}
 
 		// Splice this echoed user message off the shadow ledger if it was a
@@ -6177,25 +6205,38 @@ export class SessionManager {
 		}
 	}
 
-	private _dispatchBootContinuation(session: SessionInfo): void {
+	private async _dispatchBootContinuation(session: SessionInfo): Promise<void> {
 		this._bootRepromptedSessions.add(session.id);
-		session.rpcClient.promptWhenReady(
-			"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
-			"Your previous work has been preserved. Please continue where you left off. " +
-			"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
-		).then((response: any) => {
+		// The coordinator remains installed while this cold-start RPC is pending.
+		// Mark streaming as a second fence for the instant after coordinator release,
+		// including the case where agent_start arrived before the RPC acknowledgement.
+		this.markPromptDispatchStreaming(session);
+		try {
+			const response = await session.rpcClient.promptWhenReady(
+				"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
+				"Your previous work has been preserved. Please continue where you left off. " +
+				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
+			);
 			if (response?.success === false) {
 				throw new Error(response.error ?? "boot continuation dispatch rejected");
 			}
+			// Keep the boot marker until agent_start so the team boot-resume pass cannot
+			// add a second continuation after restore returns. The pre-fence observer in
+			// handleAgentLifecycle clears it even when coordinator ownership suppresses
+			// the rest of agent_start bookkeeping.
 			// Clear the durable marker only after the final canonical bridge accepts
 			// the continuation. A gateway death during provisional restore therefore
 			// rehydrates wasStreaming=true and safely tries again on the next boot.
 			if (!this._sessionWriterIsCurrent(session)) return;
 			session.restoreStartupWasStreaming = false;
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false });
-		}).catch((err: any) => {
+		} catch (err) {
+			this._bootRepromptedSessions.delete(session.id);
+			if (this._sessionWriterIsCurrent(session) && session.status === "streaming") {
+				broadcastStatus(session, "idle");
+			}
 			console.error(`[session-manager] Failed to re-prompt interrupted session ${session.id}:`, err);
-		});
+		}
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
@@ -8345,12 +8386,17 @@ export class SessionManager {
 	 * or against the original bridge after a clean rollback.
 	 */
 	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
+		const coordinator = this._sessionReplacementCoordinators.get(id);
 		const session = this.sessions.get(id);
-		if (!session) return false;
-		if (!this._sessionReplacementCoordinators.has(id) && session.status === "streaming") {
+		// In-place restore/respawn deliberately removes SessionInfo while its
+		// replacement is prepared. A role request accepted in that map gap must join
+		// the active coordinator and look up the final canonical session when its turn
+		// starts, rather than returning a transient not-found result.
+		if (!session && !coordinator) return false;
+		if (!coordinator && session?.status === "streaming") {
 			throw new Error("Cannot assign role while agent is streaming");
 		}
-		if (!this._sessionReplacementCoordinators.has(id)) broadcastStatus(session, "starting");
+		if (!coordinator && session) broadcastStatus(session, "starting");
 		return this._coordinateSessionReplacement(id, "assign-role", (token) =>
 			this._assignRoleStaged(id, role, token), { drainOnRelease: true, cancelOnTerminal: () => false });
 	}
@@ -10763,18 +10809,21 @@ export class SessionManager {
 			let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
+				// switch_session replays durable history. It restores Pi's model context,
+				// but it is not new live activity: do not rebroadcast it, append it to the
+				// resume EventBuffer, rewrite lastActivity, or run lifecycle/cost hooks.
+				// Preserve only steer-ledger reconciliation, matching cold restore.
+				if (switchingSession) {
+					this._consumeSteerEcho(session, event);
+					return;
+				}
 				if (isUserVisibleActivity(event)) {
 					session.lastActivity = this.clock.now();
 					abortStore.update(id, { lastActivity: session.lastActivity });
 				}
-
-				// Ignore lifecycle side effects while switch_session replays history;
-				// especially, a replayed agent_end must not drain queued prompts before
-				// the switch response confirms that history was accepted.
-				if (!switchingSession) this.handleAgentLifecycle(session, event);
-
+				this.handleAgentLifecycle(session, event);
 				this.emitAgentEvent(session, event);
-				if (!switchingSession) this.trackCostFromEvent(session, event);
+				this.trackCostFromEvent(session, event);
 			});
 
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
