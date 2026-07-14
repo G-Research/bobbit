@@ -350,8 +350,12 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const ps = persisted("assign-role", file);
 		const manager = makeManager(ps, replacement);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
-		oldBridge.getState = async () => ({ success: true, data: { sessionFile: file } });
-		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge));
+		// A structured getState rejection must fall back to the durable transcript,
+		// not silently launch the replacement with empty history.
+		oldBridge.getState = async () => ({ success: false, error: "fixture state unavailable" });
+		oldBridge.stop = vi.fn(async () => {});
+		const oldUnsubscribe = vi.fn();
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: oldUnsubscribe }));
 
 		const assigned = await manager.assignRole(ps.id, {
 			name: "boundary-role",
@@ -361,6 +365,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 
 		expect(assigned).toBe(true);
 		expect(switches).toEqual([file]);
+		expect(oldBridge.stop).toHaveBeenCalledTimes(1);
+		expect(oldUnsubscribe).toHaveBeenCalledTimes(1);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
 	});
 
 	it("assignRole wires a real sandbox replacement before rehydrating container history", async () => {
@@ -781,8 +788,11 @@ describe("executable SessionManager rehydration boundaries", () => {
 		manager.drainQueue = vi.fn();
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
 		oldBridge.getState = async () => ({ success: true, data: { sessionFile: file } });
+		oldBridge.stop = vi.fn(async () => {});
+		const oldUnsubscribe = vi.fn();
 		const original = liveSession(ps.id, oldBridge, {
 			sandboxed,
+			unsubscribe: oldUnsubscribe,
 			spawnPinnedModel: "fixture/previous-model",
 			spawnPinnedThinkingLevel: "high",
 		});
@@ -800,13 +810,98 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager.drainQueue).not.toHaveBeenCalled();
 		expect(manager.sessions.get(ps.id)).toBe(original);
 		expect(original.rpcClient).toBe(oldBridge);
+		expect(oldBridge.stop).not.toHaveBeenCalled();
+		expect(oldUnsubscribe).not.toHaveBeenCalled();
 		expect(original.promptQueue.toArray().map((message: any) => message.text)).toEqual(["queued user intent"]);
 		expect(original.role).toBeUndefined();
 		expect(original.spawnPinnedModel).toBe("fixture/previous-model");
 		expect(original.spawnPinnedThinkingLevel).toBe("high");
-		expect(original.status).toBe("terminated");
+		expect(original.status).toBe("idle");
 		assertOrphanRewritten(fs.readFileSync(file, "utf8"));
 	});
+
+	it("assignRole fails closed when its durable history path has disappeared", async () => {
+		const file = hostTranscript("assign-role-missing-history");
+		const replacement = recordingBridge(() => { throw new Error("missing history must not switch"); });
+		replacement.stop = vi.fn(async () => {});
+		const ps = persisted("assign-role-missing-history", file);
+		const manager = makeManager(ps, replacement);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.getState = async () => ({ success: false, error: "fixture state unavailable" });
+		oldBridge.stop = vi.fn(async () => {});
+		const oldUnsubscribe = vi.fn();
+		const original = liveSession(ps.id, oldBridge, { unsubscribe: oldUnsubscribe });
+		manager.sessions.set(ps.id, original);
+		fs.rmSync(file);
+
+		await expect(manager.assignRole(ps.id, {
+			name: "replacement-role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+		})).rejects.toThrow("persisted conversation history is unavailable");
+
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect(original.rpcClient).toBe(oldBridge);
+		expect(original.status).toBe("idle");
+		expect(oldBridge.stop).not.toHaveBeenCalled();
+		expect(oldUnsubscribe).not.toHaveBeenCalled();
+		expect(replacement.stop).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(["start", "model", "old-stop"] as const)(
+		"assignRole fails closed when replacement preparation fails at %s",
+		async (failure) => {
+			const file = hostTranscript(`assign-role-${failure}-failure`);
+			const replacement = recordingBridge(() => {});
+			replacement.stop = vi.fn(async () => {});
+			if (failure === "start") {
+				replacement.start = vi.fn(async () => { throw new Error("fixture replacement start failed"); });
+			}
+			const ps = persisted(`assign-role-${failure}-failure`, file, {
+				role: "previous-role",
+				accessory: "previous-accessory",
+			});
+			const manager = makeManager(ps, replacement);
+			if (failure === "model") {
+				manager.tryAutoSelectModel = vi.fn(async () => { throw new Error("fixture model verification failed"); });
+			}
+			const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+			oldBridge.getState = async () => ({ success: true, data: { sessionFile: file } });
+			oldBridge.stop = failure === "old-stop"
+				? vi.fn(async () => { throw new Error("fixture old stop failed"); })
+				: vi.fn(async () => {});
+			const oldUnsubscribe = vi.fn();
+			const original = liveSession(ps.id, oldBridge, {
+				role: "previous-role",
+				accessory: "previous-accessory",
+				unsubscribe: oldUnsubscribe,
+			});
+			manager.sessions.set(ps.id, original);
+
+			await expect(manager.assignRole(ps.id, {
+				name: "replacement-role",
+				promptTemplate: "Replacement role",
+				accessory: "replacement-accessory",
+			})).rejects.toThrow(
+				failure === "start"
+					? "fixture replacement start failed"
+					: failure === "model"
+						? "fixture model verification failed"
+						: "fixture old stop failed",
+			);
+
+			expect(manager.sessions.get(ps.id)).toBe(original);
+			expect(original.rpcClient).toBe(oldBridge);
+			expect(original.status).toBe("idle");
+			expect(original.role).toBe("previous-role");
+			expect(original.accessory).toBe("previous-accessory");
+			expect(oldUnsubscribe).not.toHaveBeenCalled();
+			expect(oldBridge.stop).toHaveBeenCalledTimes(failure === "old-stop" ? 1 : 0);
+			expect(replacement.stop).toHaveBeenCalledTimes(1);
+			expect(ps.role).toBe("previous-role");
+			expect(ps.accessory).toBe("previous-accessory");
+		},
+	);
 
 	it("force-abort fails closed when a sandbox replacement cannot retain the transcript realm", async () => {
 		const { containerFile, hostFile } = containerTranscript("force-abort-sandbox-downgrade");

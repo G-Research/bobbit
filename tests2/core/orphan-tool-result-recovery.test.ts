@@ -55,15 +55,16 @@ function harness(options?: { hadToolCalls?: boolean; queue?: string[] }) {
 		parentId: null,
 		message: { role: "user", content: [{ type: "text", text: "valid history" }] },
 	}) + "\n");
+	const persistedRecord: Record<string, any> = {
+		id: "session-fixture",
+		agentSessionFile: sessionFile,
+		modelProvider: "anthropic",
+		modelId: "claude-sonnet-4-5",
+		projectId: "project-fixture",
+	};
 	manager._testStore = {
-		get: (id: string) => ({
-			id,
-			agentSessionFile: sessionFile,
-			modelProvider: "anthropic",
-			modelId: "claude-sonnet-4-5",
-			projectId: "project-fixture",
-		}),
-		update() {},
+		get: () => persistedRecord,
+		update: (_id: string, updates: Record<string, unknown>) => Object.assign(persistedRecord, updates),
 	};
 	const promptQueue = new PromptQueue();
 	for (const text of options?.queue ?? []) promptQueue.enqueue(text);
@@ -107,7 +108,7 @@ function harness(options?: { hadToolCalls?: boolean; queue?: string[] }) {
 		manager.sessions.set(current.id, restored);
 		return restored;
 	};
-	return { manager, session, oldPrompts, newPrompts, respawns: () => respawns };
+	return { manager, session, persistedRecord, oldPrompts, newPrompts, respawns: () => respawns };
 }
 
 describe("Anthropic orphan tool-result poison classification", () => {
@@ -175,6 +176,38 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["already parked"]);
 		assert.equal(restored.lastPromptSource, "user");
 		assert.doesNotMatch(h.newPrompts[0].text, /previous turn failed/i);
+	});
+
+	it("durably parks every distinct concurrent follow-up when their shared recovery rejects", async () => {
+		const h = harness();
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		let rejectReplacement!: (error: Error) => void;
+		const replacement = new Promise<void>((_resolve, reject) => { rejectReplacement = reject; });
+		let respawns = 0;
+		h.manager._respawnAgentInPlace = async () => {
+			respawns++;
+			await replacement;
+		};
+
+		const first = h.manager.enqueuePrompt(h.session.id, "first accepted follow-up", { source: "user" });
+		const second = h.manager.enqueuePrompt(h.session.id, "second accepted follow-up", {
+			modelText: "expanded second follow-up",
+			source: "agent",
+		});
+		rejectReplacement(new Error("fixture shared replacement failed"));
+
+		const results = await Promise.allSettled([first, second]);
+		assert.deepEqual(results.map((result) => result.status), ["rejected", "rejected"]);
+		assert.equal(respawns, 1, "concurrent follow-ups must share one replacement attempt");
+		const rollback = h.manager.sessions.get(h.session.id);
+		const queued = rollback.promptQueue.toArray();
+		assert.deepEqual(queued.map((row: any) => row.text), [
+			"first accepted follow-up",
+			"expanded second follow-up",
+		]);
+		assert.equal(new Set(queued.map((row: any) => row.id)).size, 2, "accepted intents need distinct durable rows");
+		assert.deepEqual(h.persistedRecord.messageQueue, queued);
+		assert.equal(rollback.lastPromptSource, "agent");
 	});
 
 	it("preserves a slash-skill envelope across follow-up respawn for the live echo", async () => {

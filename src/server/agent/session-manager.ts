@@ -3271,9 +3271,45 @@ export class SessionManager {
 	}): Promise<{ status: "dispatched" | "queued" }> {
 		// An in-place poison respawn temporarily removes SessionInfo. Join before
 		// looking it up so prompts arriving in that window are not silently lost.
+		// If the shared replacement fails, this is a distinct accepted follow-up,
+		// not a duplicate Retry click: durably park it on the rollback capsule.
 		const poisonRecovery = this._poisonedHistoryRecoveries.get(sessionId);
 		if (poisonRecovery) {
-			await poisonRecovery;
+			try {
+				await poisonRecovery;
+			} catch (err) {
+				const rollback = this.sessions.get(sessionId);
+				if (rollback) {
+					rollback.lastPromptSource = opts?.source ?? "user";
+					const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
+					const hasSkillExpansions = !!opts?.skillExpansions?.length;
+					const hasFileMentions = !!opts?.fileMentions?.length;
+					if (hasSkillExpansions || hasFileMentions) {
+						appendSkillSidecarEntry(sessionId, {
+							ts: this.clock.now(),
+							modelText: dispatchText,
+							originalText: text,
+							skillExpansions: opts?.skillExpansions ?? [],
+							...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+						});
+						if (!rollback.pendingSkillExpansions) rollback.pendingSkillExpansions = [];
+						rollback.pendingSkillExpansions.push({
+							modelText: dispatchText,
+							originalText: text,
+							skillExpansions: opts?.skillExpansions ?? [],
+							...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+						});
+					}
+					rollback.promptQueue.enqueue(dispatchText, {
+						images: opts?.images,
+						attachments: opts?.attachments,
+						isSteered: opts?.isSteered,
+						suppressTitleGen: opts?.suppressTitleGen,
+					});
+					this.broadcastQueue(rollback);
+				}
+				throw err;
+			}
 			return this.enqueuePrompt(sessionId, text, opts);
 		}
 		let session = this.sessions.get(sessionId);
@@ -7947,24 +7983,26 @@ export class SessionManager {
 	}
 
 	/**
-	 * Assign a role to an existing session by killing the agent, reassembling
-	 * the system prompt with the role instructions, and respawning with
-	 * `switch_session` to preserve conversation history.
+	 * Assign a role to an existing session by preparing a replacement agent with
+	 * the new system prompt, switching its conversation history, then atomically
+	 * swapping bridges only after the replacement is usable.
 	 */
 	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (session.status === "streaming") throw new Error("Cannot assign role while agent is streaming");
 
-		// Get the agent session file so we can restore conversation
-		let agentSessionFile: string | undefined;
+		// Get the agent session file so we can restore conversation. A structured
+		// getState rejection is just as much a fallback case as a thrown RPC error;
+		// start from the durable value and replace it only with a non-empty live one.
+		const persistedBeforeRole = this.resolveStoreForSession(id).get(id);
+		let agentSessionFile = persistedBeforeRole?.agentSessionFile;
 		try {
 			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
-		} catch {
-			const persisted = this.resolveStoreForSession(id).get(id);
-			agentSessionFile = persisted?.agentSessionFile;
-		}
+			if (stateResp.success && stateResp.data?.sessionFile) {
+				agentSessionFile = stateResp.data.sessionFile;
+			}
+		} catch { /* retain the durable transcript path */ }
 
 		// Reassemble system prompt with role instructions as separate fields
 		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
@@ -8087,50 +8125,72 @@ export class SessionManager {
 		}
 		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
 
-		// Do not stop the usable bridge until all replacement wiring has succeeded.
-		// This is especially important for sandbox realm failures above: the caller
-		// gets a rejection while the original session remains usable and unchanged.
-		session.unsubscribe();
-		await session.rpcClient.stop();
-
+		// Build and fully validate the replacement while the original bridge stays
+		// subscribed and usable. Role assignment is a two-phase swap: start,
+		// rehydrate, and verify model binding first; only then stop the old process
+		// and commit the new bridge/metadata. Every preparation failure therefore
+		// fails closed without turning a healthy idle session into a dead one.
+		const oldRpcClient = session.rpcClient;
+		const oldUnsubscribe = session.unsubscribe;
 		const rpcClient = new RpcBridge(bridgeOptions);
-		let switchingSession = true;
+		let replacementCommitted = false;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
+			// switch_session replays historical events and the replacement may emit
+			// readiness frames before commit. Ignore all of them while staged so a
+			// failed assignment is process-locally invisible as well as metadata-safe.
+			if (!replacementCommitted) return;
 			if (isUserVisibleActivity(event)) {
 				session.lastActivity = this.clock.now();
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
-			// switch_session replays historical events. Do not let replayed lifecycle
-			// frames mark the replacement usable or drain its queue before the switch
-			// command itself has succeeded.
-			if (!switchingSession) this.handleAgentLifecycle(session, event);
+			this.handleAgentLifecycle(session, event);
 			this.emitAgentEvent(session, event);
-			if (!switchingSession) this.trackCostFromEvent(session, event);
+			this.trackCostFromEvent(session, event);
 		});
 
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
-		await rpcClient.start();
-
-		// Restore conversation from session file. A failed switch must leave the
-		// original SessionInfo (including its identity, clients, queue, and durable
-		// history) in place rather than installing a fresh bridge with empty history.
 		const rolePs = { ...respawnPersisted, ...session, agentSessionFile } as PersistedSession;
 		const roleFileCtx = sessionFsContextForAgentFile(rolePs, agentSessionFile);
+		const stagedSession = {
+			...session,
+			rpcClient,
+			unsubscribe: unsub,
+			spawnPinnedModel: bridgeOptions.initialModel,
+			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
+			role: role.name,
+			accessory: role.accessory,
+			allowedTools: effectiveAllowedNames,
+			// Model verification must not broadcast replacement state before commit.
+			clients: new Set<WebSocket>(),
+		} as SessionInfo;
+
 		try {
-			if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
+			await rpcClient.start();
+			if (agentSessionFile) {
+				if (!await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
+					throw new Error(`Cannot assign role for session ${id}: persisted conversation history is unavailable`);
+				}
 				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
 			}
+			await this.tryAutoSelectModel(stagedSession);
+
+			// Persist the metadata before the irreversible old-process stop. If the
+			// stop rejects, restore the prior durable values and retain its listener.
+			roleStore.update(id, { role: role.name, accessory: role.accessory });
+			try {
+				await oldRpcClient.stop();
+			} catch (err) {
+				roleStore.update(id, { role: session.role, accessory: session.accessory });
+				throw err;
+			}
 		} catch (err) {
-			switchingSession = false;
 			unsub();
 			await rpcClient.stop().catch(() => {});
-			broadcastStatus(session, "terminated");
 			throw err;
 		}
-		switchingSession = false;
 
-		// Swap in the new bridge and update metadata only after history rehydration.
+		try { oldUnsubscribe(); } catch { /* stopped old bridge; listener cleanup is best-effort */ }
 		session.rpcClient = rpcClient;
 		session.unsubscribe = unsub;
 		session.spawnPinnedModel = bridgeOptions.initialModel;
@@ -8138,15 +8198,7 @@ export class SessionManager {
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowedNames;
-
-		roleStore.update(id, { role: role.name, accessory: role.accessory });
-
-		try {
-			await this.tryAutoSelectModel(session);
-		} catch (err) {
-			await rpcClient.stop();
-			throw err;
-		}
+		replacementCommitted = true;
 
 		broadcastStatus(session, "idle");
 
