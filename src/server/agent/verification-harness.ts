@@ -353,6 +353,45 @@ export function resolveStep(
 const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
 const DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC = 1200;
 
+/** Review-agent active-turn allowance. Command/build defaults are intentionally separate. */
+export const DEFAULT_LLM_REVIEW_TIMEOUT_S = 1200;
+export const MIN_LLM_REVIEW_TIMEOUT_S = 1;
+
+/**
+ * Resolve the fresh per-active-turn allowance for review-agent steps.
+ * Explicit positive values are authoritative (including values below the
+ * default); malformed values fall back instead of becoming accidental 1s
+ * kill windows. Agent-QA's omitted default retains its component duration
+ * buffer while sharing the 1200s review floor.
+ */
+export function resolveReviewStepTimeoutSec(
+	step: Pick<VerifyStep, "type" | "timeout">,
+	qaMaxDurationMinutes = 10,
+): number {
+	if (typeof step.timeout === "number" && Number.isFinite(step.timeout) && step.timeout > 0) {
+		return Math.max(MIN_LLM_REVIEW_TIMEOUT_S, Math.floor(step.timeout));
+	}
+	if (step.type === "agent-qa") {
+		const qaMinutes = Number.isFinite(qaMaxDurationMinutes) && qaMaxDurationMinutes > 0
+			? qaMaxDurationMinutes
+			: 10;
+		return Math.max(DEFAULT_LLM_REVIEW_TIMEOUT_S, Math.floor((qaMinutes + 5) * 60));
+	}
+	return DEFAULT_LLM_REVIEW_TIMEOUT_S;
+}
+
+type VerificationTimeoutInfo = GateSignalStep extends { timeout?: infer T }
+	? NonNullable<T>
+	: { configuredSeconds: number; elapsedMs: number };
+
+type ReviewStepExecutionResult = {
+	passed: boolean;
+	output: string;
+	sessionId?: string;
+	status?: "timeout";
+	timeout?: VerificationTimeoutInfo;
+};
+
 function execOutputToString(value: unknown): string {
 	if (Buffer.isBuffer(value)) return value.toString("utf8");
 	return typeof value === "string" ? value : "";
@@ -807,7 +846,7 @@ export interface ActiveVerification {
 	steps: Array<{
 		name: string;
 		type: string;
-		status: "running" | "passed" | "failed" | "skipped" | "waiting";
+		status: NonNullable<GateSignalStep["status"]>;
 		phase?: number;
 		durationMs?: number;
 		output?: string;
@@ -851,8 +890,10 @@ export interface ActiveVerification {
 		restartRecoveryUnsupportedReason?: string;
 		/** bootEpoch of the harness that started this step (Layer 2). */
 		bootEpoch?: string;
-		/** Step timeout in seconds. */
+		/** Resolved command deadline or fresh review-agent active-turn allowance, in seconds. */
 		timeoutSec?: number;
+		/** Terminal review-agent timeout marker and timing for the turn that expired. */
+		timeout?: VerificationTimeoutInfo;
 		/** Whether the step expects a non-zero exit. */
 		expectFailure?: boolean;
 		/** Optional error-pattern regex for expectFailure matching. */
@@ -876,40 +917,44 @@ export interface ActiveVerification {
 	cancelReason?: string;
 }
 
-type TerminalGateSignalStepStatus = "passed" | "failed" | "skipped";
+type TerminalGateSignalStepStatus = "passed" | "failed" | "timeout" | "skipped";
+type PersistedGateSignalStepStatus = GateSignalStep["status"] | "timeout";
 
 type ResumedVerificationStep = {
 	name: string;
 	type: string;
 	passed: boolean;
 	skipped?: boolean;
-	status?: GateSignalStep["status"];
+	status?: PersistedGateSignalStepStatus;
 	phase?: number;
 	output: string;
 	duration_ms: number;
+	timeout?: VerificationTimeoutInfo;
 	diagnostics?: GateStepDiagnostics;
 };
 
-function terminalStatusForStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"] }): TerminalGateSignalStepStatus {
+function terminalStatusForStep(step: { passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus }): TerminalGateSignalStepStatus {
 	if (step.skipped || step.status === "skipped") return "skipped";
+	if (step.status === "timeout") return "timeout";
 	if (step.status === "passed" || step.status === "failed") return step.status;
 	return step.passed ? "passed" : "failed";
 }
 
-function persistedStatusForStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"] }): GateSignalStep["status"] {
+function persistedStatusForStep(step: { passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus }): PersistedGateSignalStepStatus {
 	if (step.skipped || step.status === "skipped") return "skipped";
 	if (step.status === "waiting" || step.status === "running") return step.status;
+	if (step.status === "timeout") return "timeout";
 	if (step.status === "passed" || step.status === "failed") return step.status;
 	return step.passed ? "passed" : "failed";
 }
 
-function isExplicitRestartInterruptedStep(step: { passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; output: string; type: string }): boolean {
+function isExplicitRestartInterruptedStep(step: { passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus; output: string; type: string }): boolean {
 	if (step.passed || step.skipped) return false;
 	if (step.type === "command") return step.status === "waiting";
 	return isRestartInterruptedStep(step);
 }
 
-function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; skipped?: boolean; status?: GateSignalStep["status"]; output: string; type: string }>): boolean {
+function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus; output: string; type: string }>): boolean {
 	const failedSteps = steps.filter(s => !s.passed && !s.skipped);
 	if (failedSteps.length === 0) return false;
 	return failedSteps.every(isExplicitRestartInterruptedStep);
@@ -1096,7 +1141,8 @@ const PROVIDER_BACKOFF_RETRY_MAX_MS = 15 * 60 * 1000;
  *
  * - `isBackoff=true` (provider rate-limit / overload): exponential growth
  *   capped at 15 min with ±20% jitter, paired with an unbounded retry loop
- *   in the caller.
+ *   in the caller. This delay is deliberately outside the per-active-turn
+ *   review allowance; never fold provider waiting into a whole-step deadline.
  * - `isBackoff=false`: legacy 2s/4s/8s schedule (`nextBackoffDelay` with no
  *   cap and no jitter), paired with the legacy 3-attempt bound in the caller.
  */
@@ -1164,6 +1210,9 @@ export function sanitizeVerificationWsEvent<T>(event: T): T {
 	return event;
 }
 
+// These fixed start-of-retry grace windows are outside the per-active-turn
+// review allowance. They only bound how long a retry turn may take to begin;
+// once streaming starts, the retry receives its full resolved allowance.
 const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
 const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
 // Reminder-path fairness (see runLlmReviewViaSession). A reviewer that went
@@ -1774,6 +1823,7 @@ export class VerificationHarness {
 			phase: result.phase ?? step.phase ?? 0,
 			durationMs: result.duration_ms,
 			output: result.output,
+			timeout: result.timeout,
 			sessionId: step.sessionId,
 		});
 		if (status === "skipped") v.steps[stepIndex].output = result.output || "Skipped — earlier phase failed";
@@ -1789,6 +1839,7 @@ export class VerificationHarness {
 			status,
 			durationMs: result.duration_ms,
 			output: result.output,
+			timeout: result.timeout,
 			phase: result.phase ?? step.phase ?? 0,
 		});
 	}
@@ -1819,6 +1870,7 @@ export class VerificationHarness {
 					phase: step.phase ?? 0,
 					output: step.output || "",
 					duration_ms: step.durationMs || 0,
+					timeout: step.timeout,
 				});
 				continue;
 			}
@@ -1890,7 +1942,8 @@ export class VerificationHarness {
 			const isTransient = step.type === "agent-qa"
 					? isTransientQaError(resumeResult?.output || "")
 					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
-			const rerunnable = isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || "");
+			const rerunnable = resumeResult?.status !== "timeout"
+				&& (isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || ""));
 			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && rerunnable) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
 				let rerunResult: typeof resumeResult | null = null;
@@ -1926,7 +1979,8 @@ export class VerificationHarness {
 
 		const firstRealFailedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
 			if (step.passed || step.skipped) return earliest;
-			if (persistedStatusForStep(step) !== "failed") return earliest;
+			const status = persistedStatusForStep(step);
+			if (status !== "failed" && status !== "timeout") return earliest;
 			if (isExplicitRestartInterruptedStep(step)) return earliest;
 			const phase = step.phase ?? 0;
 			return earliest === undefined || phase < earliest ? phase : earliest;
@@ -1990,7 +2044,7 @@ export class VerificationHarness {
 			status: persistedStatus,
 			steps: resolvedSteps.map(r => {
 				const status = persistedStatusForStep(r);
-				const stepResult: GateSignalStep = {
+				const stepResult = {
 					name: r.name,
 					type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
 					passed: r.passed,
@@ -1999,7 +2053,8 @@ export class VerificationHarness {
 					phase: r.phase ?? 0,
 					output: r.output,
 					duration_ms: r.duration_ms,
-				};
+					...(r.timeout ? { timeout: r.timeout } : {}),
+				} as GateSignalStep;
 				if (r.diagnostics) stepResult.diagnostics = r.diagnostics;
 				return stepResult;
 			}),
@@ -2039,7 +2094,7 @@ export class VerificationHarness {
 	private async _tryResumeFromSession(
 		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
-	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+	): Promise<ResumedVerificationStep | null> {
 		if (!step.sessionId) return null;
 
 		const session = this.sessionManager?.getSession(step.sessionId);
@@ -2051,6 +2106,25 @@ export class VerificationHarness {
 				duration_ms: Date.now() - step.startedAt,
 			};
 		}
+
+		const frozenStep = this._findStepDefinition(v.goalId, v.gateId, step.name);
+		const timeoutSec = typeof step.timeoutSec === "number" && Number.isFinite(step.timeoutSec) && step.timeoutSec > 0
+			? Math.max(MIN_LLM_REVIEW_TIMEOUT_S, Math.floor(step.timeoutSec))
+			: frozenStep && (frozenStep.type === "llm-review" || frozenStep.type === "agent-qa")
+				? this._resolveReviewStepTimeoutSec(v.goalId, frozenStep)
+				: DEFAULT_LLM_REVIEW_TIMEOUT_S;
+		const timeoutMs = timeoutSec * 1000;
+		step.timeoutSec = timeoutSec;
+		this._persistActive();
+		const timeoutStep = (elapsedMs: number): ResumedVerificationStep => ({
+			name: step.name,
+			type: step.type,
+			passed: false,
+			status: "timeout",
+			timeout: { configuredSeconds: timeoutSec, elapsedMs },
+			output: `${step.type === "agent-qa" ? "Agent QA" : "LLM review"} timed out after ${timeoutSec}s.`,
+			duration_ms: Date.now() - step.startedAt,
+		});
 
 		// Re-register reviewer session in team store so team_list shows it
 		if (this.teamManager) {
@@ -2081,10 +2155,7 @@ export class VerificationHarness {
 			// ordinary resumed sessions.
 			const idleResult = session.status === "idle"
 				? ({ type: "idle" as const })
-				: await Promise.race([
-					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-					this.sessionManager!.waitForIdle(step.sessionId, 180_000).then(() => ({ type: "idle" as const })),
-				]).catch(() => ({ type: "idle" as const }));
+				: await this.waitForReviewTurn(step.sessionId, resultPromise, timeoutMs);
 
 			if (idleResult.type === "result") {
 				await this.sessionManager!.waitForIdle(step.sessionId, 30_000).catch(() => {});
@@ -2095,8 +2166,9 @@ export class VerificationHarness {
 					duration_ms: Date.now() - step.startedAt,
 				};
 			}
+			if (idleResult.type === "timeout") return timeoutStep(idleResult.elapsedMs);
 
-			const recoveryResult = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, 180_000, step.name);
+			const recoveryResult = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, timeoutMs, step.name);
 			if (recoveryResult.type === "result") {
 				await this.sessionManager!.waitForIdle(step.sessionId, 30_000).catch(() => {});
 				return {
@@ -2106,6 +2178,7 @@ export class VerificationHarness {
 					duration_ms: Date.now() - step.startedAt,
 				};
 			}
+			if (recoveryResult.type === "timeout") return timeoutStep(recoveryResult.elapsedMs);
 			if (recoveryResult.type === "errored") {
 				return {
 					name: step.name, type: step.type,
@@ -2141,13 +2214,13 @@ export class VerificationHarness {
 			// `_resumeOneVerification` routes it into `_rerunLlmReviewStep`) AND a
 			// restart-interrupt marker (so resume suppression leaves the gate
 			// `pending` when the rerun context is unavailable).
+			let reminderStarted = false;
 			try {
 				await session.rpcClient.promptWhenReady(reminderPrompt, undefined);
 				// Reminder dispatch is fire-and-forget on the RPC channel; the session
-				// stays `idle` for a tick before transitioning to `streaming`. Wait for
-				// the next agent_start so the subsequent waitForIdle race doesn't
-				// resolve instantly against the still-idle status.
-				await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).catch(() => {});
+				// stays `idle` for a tick before transitioning to `streaming`. This fixed
+				// settle is outside the fresh active-turn allowance.
+				reminderStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
 			} catch (resumeErr) {
 				const msg = (resumeErr as Error)?.message || String(resumeErr);
 				console.warn(`[verification] Resume reminder for ${step.sessionId} could not reach the revived reviewer (treating as restart-interrupt): ${msg}`);
@@ -2158,10 +2231,9 @@ export class VerificationHarness {
 				};
 			}
 
-			const result2 = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(step.sessionId, 120_000).then(() => ({ type: "idle" as const })),
-			]).catch(() => ({ type: "idle" as const }));
+			const result2 = reminderStarted
+				? await this.waitForReviewTurn(step.sessionId, resultPromise, timeoutMs)
+				: ({ type: "idle" as const });
 
 			if (result2.type === "result") {
 				return {
@@ -2171,8 +2243,9 @@ export class VerificationHarness {
 					duration_ms: Date.now() - step.startedAt,
 				};
 			}
+			if (result2.type === "timeout") return timeoutStep(result2.elapsedMs);
 
-			const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, 120_000, step.name);
+			const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, timeoutMs, step.name);
 			if (postReminderRecovery.type === "result") {
 				return {
 					name: step.name, type: step.type,
@@ -2181,6 +2254,7 @@ export class VerificationHarness {
 					duration_ms: Date.now() - step.startedAt,
 				};
 			}
+			if (postReminderRecovery.type === "timeout") return timeoutStep(postReminderRecovery.elapsedMs);
 			if (postReminderRecovery.type === "errored") {
 				return {
 					name: step.name, type: step.type,
@@ -2200,9 +2274,10 @@ export class VerificationHarness {
 				const fallbackPrompt = fallbackJsonErr ? buildJsonRetryPrompt(fallbackJsonErr) : VERIFICATION_RESULT_REMINDER;
 				const fallbackKind = fallbackJsonErr ? "JSON-retry" : "generic";
 				console.log(`[verification] Restart continuation for resumed session ${step.sessionId} ended without verification_result, sending ${fallbackKind} fallback reminder...`);
+				let fallbackStarted = false;
 				try {
 					await session.rpcClient.promptWhenReady(fallbackPrompt, undefined);
-					await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).catch(() => {});
+					fallbackStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
 				} catch (resumeErr) {
 					const msg = (resumeErr as Error)?.message || String(resumeErr);
 					console.warn(`[verification] Post-continuation fallback reminder for ${step.sessionId} could not reach the revived reviewer: ${msg}`);
@@ -2213,10 +2288,9 @@ export class VerificationHarness {
 					};
 				}
 
-				const fallbackResult = await Promise.race([
-					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-					this.sessionManager!.waitForIdle(step.sessionId, 120_000).then(() => ({ type: "idle" as const })),
-				]).catch(() => ({ type: "idle" as const }));
+				const fallbackResult = fallbackStarted
+					? await this.waitForReviewTurn(step.sessionId, resultPromise, timeoutMs)
+					: ({ type: "idle" as const });
 
 				if (fallbackResult.type === "result") {
 					return {
@@ -2226,8 +2300,9 @@ export class VerificationHarness {
 						duration_ms: Date.now() - step.startedAt,
 					};
 				}
+				if (fallbackResult.type === "timeout") return timeoutStep(fallbackResult.elapsedMs);
 
-				const postFallbackRecovery = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, 120_000, step.name);
+				const postFallbackRecovery = await this.waitForReviewerErroredTurnRecovery(step.sessionId, resultPromise, timeoutMs, step.name);
 				if (postFallbackRecovery.type === "result") {
 					return {
 						name: step.name, type: step.type,
@@ -2236,6 +2311,7 @@ export class VerificationHarness {
 						duration_ms: Date.now() - step.startedAt,
 					};
 				}
+				if (postFallbackRecovery.type === "timeout") return timeoutStep(postFallbackRecovery.elapsedMs);
 				if (postFallbackRecovery.type === "errored") {
 					return {
 						name: step.name, type: step.type,
@@ -2272,7 +2348,7 @@ export class VerificationHarness {
 	 */
 	private async _rerunLlmReviewStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
-	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+	): Promise<ResumedVerificationStep | null> {
 		if (this.skipLlmReview) {
 			return { name: stepName, type: "llm-review", passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
@@ -2293,7 +2369,7 @@ export class VerificationHarness {
 		// Mirror the main verification loop: bounded 3 attempts for ordinary
 		// transient errors, unbounded retry for provider rate-limit / overload.
 		const maxBoundedAttempts = 3;
-		let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "Re-run failed." };
+		let result: ReviewStepExecutionResult = { passed: false, output: "Re-run failed." };
 		let finalAttempt = 0;
 
 		// Resolve project vars and substitute the prompt template
@@ -2319,6 +2395,7 @@ export class VerificationHarness {
 				ctx.goalSpec, ctx.allGateStates, goalId,
 				undefined, ctx.gate,
 			);
+			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
 				passed: result.passed, output: result.output,
 				attempt, maxBoundedAttempts,
@@ -2338,7 +2415,9 @@ export class VerificationHarness {
 		return {
 			name: stepName, type: "llm-review",
 			passed: result.passed,
-			output: result.passed ? result.output : appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }),
+			status: result.status,
+			timeout: result.timeout,
+			output: result.passed || result.status === "timeout" ? result.output : appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }),
 			duration_ms: Date.now() - startedAt,
 		};
 	}
@@ -2348,7 +2427,7 @@ export class VerificationHarness {
 	 */
 	private async _rerunAgentQaStep(
 		goalId: string, gateId: string, signalId: string, stepName: string,
-	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+	): Promise<ResumedVerificationStep | null> {
 		if (this.skipLlmReview) {
 			return { name: stepName, type: "agent-qa", passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", duration_ms: 0 };
 		}
@@ -2375,7 +2454,7 @@ export class VerificationHarness {
 		// overload errors still retry indefinitely with exponential backoff
 		// (cap 15 min), matching the main verification loop.
 		const maxBoundedAttempts = 2;
-		let result: { passed: boolean; output: string; sessionId?: string; artifact?: any } = { passed: false, output: "Re-run failed." };
+		let result: ReviewStepExecutionResult & { artifact?: any } = { passed: false, output: "Re-run failed." };
 		for (let attempt = 1; ; attempt++) {
 			// Check if goal completed/shelved before retrying
 			const goalCheck = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
@@ -2388,6 +2467,7 @@ export class VerificationHarness {
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
 			);
+			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
 				passed: result.passed, output: result.output,
 				attempt, maxBoundedAttempts,
@@ -2404,7 +2484,7 @@ export class VerificationHarness {
 			});
 		}
 
-		return { name: stepName, type: "agent-qa", passed: result.passed, output: result.output, duration_ms: Date.now() - startedAt };
+		return { name: stepName, type: "agent-qa", passed: result.passed, status: result.status, timeout: result.timeout, output: result.output, duration_ms: Date.now() - startedAt };
 	}
 
 	private readonly _stateDir: string;
@@ -3260,8 +3340,10 @@ export class VerificationHarness {
 			for (let i = 0; i < steps.length; i++) {
 				if (allResults[i]) continue;
 				const activeStep = active.steps[i];
-				if (!activeStep || (activeStep.status !== "passed" && activeStep.status !== "failed" && activeStep.status !== "skipped")) continue;
-				const status = activeStep.status;
+				if (!activeStep) continue;
+				const activeStatus = activeStep.status as PersistedGateSignalStepStatus;
+				if (activeStatus !== "passed" && activeStatus !== "failed" && activeStatus !== "timeout" && activeStatus !== "skipped") continue;
+				const status = activeStatus;
 				allResults[i] = {
 					name: steps[i].name,
 					type: steps[i].type as GateSignalStep["type"],
@@ -3271,8 +3353,9 @@ export class VerificationHarness {
 					phase: activeStep.phase ?? steps[i].phase ?? 0,
 					output: activeStep.output || "",
 					duration_ms: activeStep.durationMs || 0,
+					...(activeStep.timeout ? { timeout: activeStep.timeout } : {}),
 					expect: steps[i].expect,
-				};
+				} as GateSignalStep;
 			}
 			const remainingActiveSteps = activeSteps.filter(step => {
 				const index = steps.indexOf(step);
@@ -3286,7 +3369,7 @@ export class VerificationHarness {
 					if (allResults[i]) return allResults[i]!; // skipped optional step
 					const cached = cachedSteps.get(s.name)!;
 					const cachedStatus = terminalStatusForStep(cached);
-					return { ...cached, status: cachedStatus, ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? s.phase ?? 0, output: `[cached from prior signal] ${cached.output}` };
+					return { ...cached, status: cachedStatus as GateSignalStep["status"], ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? s.phase ?? 0, output: `[cached from prior signal] ${cached.output}` };
 				});
 				const allPassed = computeAllPassed(results);
 				const status = allPassed ? "passed" as const : "failed" as const;
@@ -3474,7 +3557,7 @@ export class VerificationHarness {
 						const cached = cachedSteps.get(step.name);
 						if (cached) {
 							const cachedStatus = terminalStatusForStep(cached);
-							const cachedResult: GateSignalStep = { ...cached, status: cachedStatus, ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? phase, output: `[cached from prior signal] ${cached.output}` };
+							const cachedResult: GateSignalStep = { ...cached, status: cachedStatus as GateSignalStep["status"], ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? phase, output: `[cached from prior signal] ${cached.output}` };
 							if (!active.cancelled) this.broadcastFn(signal.goalId, {
 								type: "gate_verification_step_complete",
 								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
@@ -3485,18 +3568,21 @@ export class VerificationHarness {
 							});
 							const av = this.activeVerifications.get(signal.id);
 							if (av && av.steps[index]) {
-								av.steps[index] = { ...av.steps[index], status: cachedResult.status ?? terminalStatusForStep(cachedResult), phase: cachedResult.phase ?? phase, durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
+								av.steps[index] = { ...av.steps[index], status: (cachedResult.status ?? terminalStatusForStep(cachedResult)) as NonNullable<GateSignalStep["status"]>, phase: cachedResult.phase ?? phase, durationMs: cachedResult.duration_ms || 0, output: cachedResult.output };
 								this._persistActive();
 							}
 							return { index, stepResult: cachedResult };
 						}
 
-						let result: { passed: boolean; skipped?: boolean; output: string; sessionId?: string; diagnostics?: GateStepDiagnostics } = { passed: false, output: "No verification result." };
+						let result: ReviewStepExecutionResult & { skipped?: boolean; diagnostics?: GateStepDiagnostics } = { passed: false, output: "No verification result." };
 						let artifact: GateSignalStep["artifact"];
 						const startTime = Date.now();
 
 						// Pre-generate sessionId for LLM review and agent-qa steps so we can broadcast it before the step starts
 						let stepSessionId: string | undefined;
+						const reviewTimeoutSec = step.type === "llm-review" || step.type === "agent-qa"
+							? this._resolveReviewStepTimeoutSec(signal.goalId, step)
+							: undefined;
 						if (step.type === "llm-review" || step.type === "agent-qa") {
 							const prefix = step.type === "agent-qa" ? "agent-qa" : "llm-review";
 							stepSessionId = `${prefix}-${randomUUID().slice(0, 12)}`;
@@ -3506,11 +3592,12 @@ export class VerificationHarness {
 								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
 								stepIndex: index, stepName: step.name,
 								startedAt: active.steps[index].startedAt,
-								sessionId: stepSessionId, phase,
+								sessionId: stepSessionId, timeoutSec: reviewTimeoutSec, phase,
 							});
 							const av = this.activeVerifications.get(signal.id);
 							if (av && av.steps[index]) {
 								av.steps[index].sessionId = stepSessionId;
+								av.steps[index].timeoutSec = reviewTimeoutSec;
 								this._persistActive();
 							}
 						}
@@ -3667,20 +3754,23 @@ export class VerificationHarness {
 									if (attempt > 1) {
 										const retiredSessionId = attemptSessionId;
 										attemptSessionId = `agent-qa-${randomUUID().slice(0, 12)}`;
-										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}). Prior transcript preserved.`);
+										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s). Prior transcript preserved.`);
 										active.steps[index].startedAt = Date.now();
 										if (!active.cancelled) this.broadcastFn(signal.goalId, {
 											type: "gate_verification_step_started",
 											goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
 											stepIndex: index, stepName: step.name,
 											startedAt: active.steps[index].startedAt,
-											sessionId: attemptSessionId, phase,
+											sessionId: attemptSessionId, timeoutSec: reviewTimeoutSec, phase,
 										});
 										const avRetry = this.activeVerifications.get(signal.id);
 										if (avRetry && avRetry.steps[index]) {
 											avRetry.steps[index].sessionId = attemptSessionId;
+											avRetry.steps[index].timeoutSec = reviewTimeoutSec;
 											this._persistActive();
 										}
+									} else {
+										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s).`);
 									}
 									const qaResult = await this.runAgentQaStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
@@ -3692,6 +3782,7 @@ export class VerificationHarness {
 									if (qaResult.artifact) {
 										artifact = qaResult.artifact;
 									}
+									if (qaResult.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
 										passed: qaResult.passed, output: qaResult.output,
 										attempt, maxBoundedAttempts,
@@ -3793,22 +3884,23 @@ export class VerificationHarness {
 									if (attempt > 1) {
 										const retiredSessionId = attemptSessionId;
 										attemptSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
-										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}, timeout=${step.timeout ?? 600}s). Prior transcript preserved.`);
+										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s). Prior transcript preserved.`);
 										active.steps[index].startedAt = Date.now();
 										if (!active.cancelled) this.broadcastFn(signal.goalId, {
 											type: "gate_verification_step_started",
 											goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
 											stepIndex: index, stepName: step.name,
 											startedAt: active.steps[index].startedAt,
-											sessionId: attemptSessionId, phase,
+											sessionId: attemptSessionId, timeoutSec: reviewTimeoutSec, phase,
 										});
 										const avRetry = this.activeVerifications.get(signal.id);
 										if (avRetry && avRetry.steps[index]) {
 											avRetry.steps[index].sessionId = attemptSessionId;
+											avRetry.steps[index].timeoutSec = reviewTimeoutSec;
 											this._persistActive();
 										}
 									} else {
-										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${step.timeout ?? 600}s).`);
+										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s).`);
 									}
 									result = await this.runLlmReviewStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
@@ -3817,6 +3909,7 @@ export class VerificationHarness {
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
 										gate,
 									);
+									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
 										passed: result.passed, output: result.output,
 										attempt, maxBoundedAttempts,
@@ -3829,7 +3922,7 @@ export class VerificationHarness {
 									console.log(`[verification] LLM review "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
 									await this._sleepCancellable(delayMs, () => !!active.cancelled);
 								}
-								if (!result.passed && !active.cancelled) {
+								if (!result.passed && result.status !== "timeout" && !active.cancelled) {
 									result = { ...result, output: appendLlmReviewRecoveryDiagnostics(result.output, { attempts: finalAttempt, maxBoundedAttempts }) };
 								}
 							}
@@ -3847,21 +3940,21 @@ export class VerificationHarness {
 							};
 						}
 
-						const resultStatus: TerminalGateSignalStepStatus = result.skipped ? "skipped" : result.passed ? "passed" : "failed";
+						const resultStatus: TerminalGateSignalStepStatus = result.skipped ? "skipped" : result.status === "timeout" ? "timeout" : result.passed ? "passed" : "failed";
 						if (!active.cancelled) this.broadcastFn(signal.goalId, {
 							type: "gate_verification_step_complete",
 							goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
 							stepIndex: index, stepName: step.name,
 							status: resultStatus,
 							durationMs: duration_ms, output: result.output || "",
-							sessionId: result.sessionId, phase,
+							sessionId: result.sessionId, timeout: result.timeout, phase,
 						});
 						const av = this.activeVerifications.get(signal.id);
 						if (av && av.steps[index]) {
-							av.steps[index] = { ...av.steps[index], status: resultStatus, phase, durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId };
+							av.steps[index] = { ...av.steps[index], status: resultStatus as NonNullable<GateSignalStep["status"]>, phase, durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId, timeout: result.timeout };
 							this._persistActive();
 						}
-						const stepResult: GateSignalStep = {
+						const stepResult = {
 							name: step.name,
 							type: step.type,
 							passed: result.passed,
@@ -3871,7 +3964,8 @@ export class VerificationHarness {
 							output: result.output,
 							duration_ms,
 							expect: step.expect,
-						};
+							...(result.timeout ? { timeout: result.timeout } : {}),
+						} as GateSignalStep;
 						if (artifact) stepResult.artifact = artifact;
 						if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
 						return { index, stepResult };
@@ -3977,7 +4071,7 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
-	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
+	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
 		// "reviewer" role is used when an `llm-review` step omits `role`.
@@ -3993,7 +4087,7 @@ export class VerificationHarness {
 			return { passed: false, output: `LLM review failed: '${roleName}' role not found. Available roles (inline + store): ${available}`, sessionId };
 		}
 
-		const timeoutMs = (step.timeout || 600) * 1000;
+		const timeoutMs = resolveReviewStepTimeoutSec({ type: "llm-review", timeout: step.timeout }) * 1000;
 
 		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, this.commandRunner);
 
@@ -4024,6 +4118,72 @@ export class VerificationHarness {
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
 	// import it directly without going through a class instance.
 
+	private _resolveReviewStepTimeoutSec(
+		goalId: string | undefined,
+		step: Pick<VerifyStep, "type" | "timeout" | "component">,
+	): number {
+		if (step.type !== "agent-qa") return resolveReviewStepTimeoutSec(step);
+		const componentName = step.component
+			?? (goalId ? this.resolveDefaultQaComponentName(goalId) : undefined)
+			?? "";
+		const qaMinutes = goalId
+			? (this.resolveProjectConfigStore(goalId)?.getQaMaxDurationMinutes(componentName) ?? 10)
+			: 10;
+		return resolveReviewStepTimeoutSec(step, qaMinutes);
+	}
+
+	/** Distinguish a real idle turn from expiry of its active-thinking allowance. */
+	private async waitForReviewTurn(
+		sessionId: string,
+		resultPromise: Promise<VerificationResult>,
+		timeoutMs: number,
+	): Promise<
+		| ({ type: "result" } & VerificationResult)
+		| { type: "idle" }
+		| { type: "timeout"; elapsedMs: number }
+	> {
+		const startedAt = this.clock.now();
+		try {
+			return await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+			]);
+		} catch (err) {
+			const message = (err as Error)?.message || String(err);
+			if (!/Timeout waiting for session .* to become idle/i.test(message)) throw err;
+			const latest = this.sessionManager?.getSession(sessionId);
+			const retryError = latest?.lastTurnErrored ? (latest.lastTurnErrorMessage || "") : "";
+			// Auto-retry/provider capacity waiting is outside the active allowance.
+			// Hand it to waitForReviewerErroredTurnRecovery rather than converting
+			// a 429/529 backoff into a terminal review timeout.
+			if (retryError && (latest?.pendingAutoRetryTimer || isProviderBackoffError(retryError))) {
+				return { type: "idle" };
+			}
+			return {
+				type: "timeout",
+				elapsedMs: Math.max(timeoutMs, this.clock.now() - startedAt),
+			};
+		}
+	}
+
+	private reviewTimeoutResult(
+		label: "LLM review" | "Agent QA",
+		timeoutMs: number,
+		elapsedMs: number,
+		sessionId?: string,
+	): ReviewStepExecutionResult {
+		return {
+			passed: false,
+			status: "timeout",
+			timeout: {
+				configuredSeconds: timeoutMs / 1000,
+				elapsedMs,
+			},
+			output: `${label} timed out after ${timeoutMs / 1000}s.`,
+			sessionId,
+		};
+	}
+
 	private async waitForReviewerErroredTurnRecovery(
 		sessionId: string,
 		resultPromise: Promise<VerificationResult>,
@@ -4032,6 +4192,7 @@ export class VerificationHarness {
 	): Promise<
 		| ({ type: "result" } & VerificationResult)
 		| { type: "idle" }
+		| { type: "timeout"; elapsedMs: number }
 		| { type: "errored"; output: string }
 	> {
 		let dispatchedInfrastructureRecovery = false;
@@ -4060,10 +4221,9 @@ export class VerificationHarness {
 				}
 			}
 
-			const graceMs = Math.min(
-				Math.max(timeoutMs, 1_000),
-				isProviderBackoffError(errMsg) ? REVIEWER_PROVIDER_BACKOFF_GRACE_MS : REVIEWER_ERRORED_TURN_GRACE_MS,
-			);
+			const graceMs = isProviderBackoffError(errMsg)
+				? REVIEWER_PROVIDER_BACKOFF_GRACE_MS
+				: REVIEWER_ERRORED_TURN_GRACE_MS;
 			console.log(`[verification] Reviewer ${sessionId} for "${stepName}" ended with retryable runtime error; waiting up to ${Math.round(graceMs / 1000)}s for session auto-retry to start...`);
 
 			const started = await Promise.race([
@@ -4081,19 +4241,8 @@ export class VerificationHarness {
 				return { type: "errored", output: `LLM review failed: ${latestErr}${describeProviderBackoff(latest)}` };
 			}
 
-			try {
-				const finished = await Promise.race([
-					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-					this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-				]);
-				if (finished.type === "result") return finished;
-			} catch (err: any) {
-				const latest = this.sessionManager?.getSession(sessionId);
-				return {
-					type: "errored",
-					output: `LLM review timed out after ${(timeoutMs / 1000)}s.${describeProviderBackoff(latest)}`,
-				};
-			}
+			const finished = await this.waitForReviewTurn(sessionId, resultPromise, timeoutMs);
+			if (finished.type === "result" || finished.type === "timeout") return finished;
 			// The auto-retry turn ended idle. Loop once more: if it errored, wait for
 			// the next scheduled auto-retry; if it ended cleanly without the tool,
 			// the caller will send the normal reminder.
@@ -4109,23 +4258,16 @@ export class VerificationHarness {
 		timeoutMs: number;
 	}): Promise<
 		| ({ type: "result" } & VerificationResult)
+		| { type: "timeout"; elapsedMs: number }
 		| { type: "failed"; output: string }
 	> {
 		let lastError = "process not running";
 		const sessionManager = this.sessionManager!;
-		const deadline = this.clock.now() + Math.max(1, args.timeoutMs);
-		const remainingMs = () => Math.max(0, deadline - this.clock.now());
 		let attempts = 0;
 
 		for (let attempt = 1; attempt <= MAX_VERIFIER_SAME_SESSION_RESURRECTIONS; attempt++) {
 			attempts = attempt;
-			const remainingBeforeAttempt = remainingMs();
-			if (remainingBeforeAttempt <= 0) {
-				lastError = `verification timeout budget exhausted before same-session resurrection attempt ${attempt}`;
-				break;
-			}
-
-			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history; remainingBudgetMs=${remainingBeforeAttempt}.`);
+			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history; freshAllowanceMs=${args.timeoutMs}.`);
 			try {
 				const existing = sessionManager.getSession(args.sessionId);
 				if (existing && existing.status !== "terminated" && typeof sessionManager.restartAgent === "function") {
@@ -4147,55 +4289,33 @@ export class VerificationHarness {
 					await session.rpcClient.prompt(args.prompt);
 				}
 
-				const streamingBudget = Math.min(REVIEWER_REMINDER_STREAM_SETTLE_MS, remainingMs());
-				if (streamingBudget <= 0) {
-					lastError = "verification timeout budget exhausted after same-session resurrection prompt dispatch";
-					break;
-				}
-				const started = await sessionManager.waitForStreaming(args.sessionId, streamingBudget)
+				// Readiness, restart, prompt delivery, and this fixed settle window are
+				// outside the fresh active-turn allowance.
+				const started = await sessionManager.waitForStreaming(args.sessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS)
 					.then(() => true)
 					.catch((err: any) => {
 						lastError = (err as Error)?.message || String(err);
 						return false;
 					});
 
-				const idleBudget = remainingMs();
-				if (idleBudget <= 0) {
-					lastError = "verification timeout budget exhausted waiting for resurrected verifier";
-					break;
-				}
-				try {
-					const finished = await Promise.race([
-						args.resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-						sessionManager.waitForIdle(args.sessionId, idleBudget).then(() => ({ type: "idle" as const })),
-					]);
-					if (finished.type === "result") return finished;
-				} catch (err: any) {
-					lastError = (err as Error)?.message || String(err);
-					if (isVerifierProcessDeathMessage(lastError)) continue;
+				if (!started) {
+					lastError = `${lastError}; resurrected verifier did not start streaming`;
 					break;
 				}
 
-				const recoveryBudget = remainingMs();
-				if (recoveryBudget <= 0) {
-					lastError = "verification timeout budget exhausted after resurrected verifier went idle";
-					break;
-				}
-				const recoveryResult = await this.waitForReviewerErroredTurnRecovery(args.sessionId, args.resultPromise, recoveryBudget, args.stepName);
-				if (recoveryResult.type === "result") return recoveryResult;
+				const finished = await this.waitForReviewTurn(args.sessionId, args.resultPromise, args.timeoutMs);
+				if (finished.type === "result" || finished.type === "timeout") return finished;
+
+				const recoveryResult = await this.waitForReviewerErroredTurnRecovery(args.sessionId, args.resultPromise, args.timeoutMs, args.stepName);
+				if (recoveryResult.type === "result" || recoveryResult.type === "timeout") return recoveryResult;
 				if (recoveryResult.type === "errored") {
 					lastError = recoveryResult.output;
 					if (isVerifierProcessDeathMessage(lastError)) continue;
 					break;
 				}
 
-				if (started) {
-					const lateBudget = Math.min(REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS, remainingMs());
-					if (lateBudget > 0) {
-						const late = await raceResultWithLateVerdictGrace(this.clock, args.resultPromise, lateBudget);
-						if (late.type === "result") return late;
-					}
-				}
+				const late = await raceResultWithLateVerdictGrace(this.clock, args.resultPromise, REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS);
+				if (late.type === "result") return late;
 
 				lastError = "verifier went idle without verification_result after same-session resurrection; not issuing duplicate resurrection prompts to an alive idle session";
 				break;
@@ -4223,7 +4343,7 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
-	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
+	): Promise<ReviewStepExecutionResult> {
 		// Pause-cascade backstop: race-window guard. The mainline path is
 		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
 		// can be paused between signal-accept and verifier-spawn. Refuse to
@@ -4408,22 +4528,26 @@ export class VerificationHarness {
 			// Send kickoff prompt
 			await session.rpcClient.prompt(kickoff);
 
-			// Race: tool result vs idle-without-result
-			const result = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-			]);
+			// Kickoff transport is outside the allowance. Once dispatched, distinguish
+			// a real idle turn from expiry of the full active-thinking window.
+			const result = await this.waitForReviewTurn(sessionId, resultPromise, timeoutMs);
 
 			if (result.type === "result") {
 				// Got structured result — still wait for agent to go idle (cleanup)
 				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
 				return { passed: result.verdict, output: result.summary, sessionId };
 			}
+			if (result.type === "timeout") {
+				return this.reviewTimeoutResult("LLM review", timeoutMs, result.elapsedMs, sessionId);
+			}
 
 			const recoveryResult = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
 			if (recoveryResult.type === "result") {
 				await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
 				return { passed: recoveryResult.verdict, output: recoveryResult.summary, sessionId };
+			}
+			if (recoveryResult.type === "timeout") {
+				return this.reviewTimeoutResult("LLM review", timeoutMs, recoveryResult.elapsedMs, sessionId);
 			}
 			if (recoveryResult.type === "errored") {
 				return { passed: false, output: recoveryResult.output, sessionId };
@@ -4451,19 +4575,23 @@ export class VerificationHarness {
 				// it a fair settle window; if it never starts streaming we still loop
 				// to the next reminder rather than tearing down after one nudge.
 				const started = await this.sessionManager!.waitForStreaming(sessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
-				const result2 = await Promise.race([
-					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-					this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-				]);
+				if (!started) continue;
+				const result2 = await this.waitForReviewTurn(sessionId, resultPromise, timeoutMs);
 				if (result2.type === "result") {
 					reminderOutcome = { type: "result", verdict: result2.verdict, summary: result2.summary };
 					break;
+				}
+				if (result2.type === "timeout") {
+					return this.reviewTimeoutResult("LLM review", timeoutMs, result2.elapsedMs, sessionId);
 				}
 				const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(sessionId, resultPromise, timeoutMs, step.name);
 				if (postReminderRecovery.type === "result") {
 					await this.sessionManager!.waitForIdle(sessionId, 30_000).catch(() => {});
 					reminderOutcome = { type: "result", verdict: postReminderRecovery.verdict, summary: postReminderRecovery.summary };
 					break;
+				}
+				if (postReminderRecovery.type === "timeout") {
+					return this.reviewTimeoutResult("LLM review", timeoutMs, postReminderRecovery.elapsedMs, sessionId);
 				}
 				if (postReminderRecovery.type === "errored") {
 					reminderOutcome = { type: "errored", output: postReminderRecovery.output };
@@ -4502,7 +4630,7 @@ export class VerificationHarness {
 			const isProcessDeath = isVerifierProcessDeathMessage(msg);
 			// If the underlying agent was stuck behind a provider rate-limit /
 			// overload (corp-subscription quotas, Anthropic 429/529, etc.) the
-			// generic "timed out after 600s" message buries the actual cause.
+			// generic active-turn timeout message buries the actual cause.
 			// Pull the session's last-turn error state and surface it so the
 			// reviewer output (and the team-lead notification that quotes it)
 			// names the rate limit explicitly.
@@ -4519,6 +4647,9 @@ export class VerificationHarness {
 				});
 				if (recovered.type === "result") {
 					return { passed: recovered.verdict, output: recovered.summary, sessionId };
+				}
+				if (recovered.type === "timeout") {
+					return this.reviewTimeoutResult("LLM review", timeoutMs, recovered.elapsedMs, sessionId);
 				}
 				return { passed: false, output: recovered.output, sessionId };
 			}
@@ -4615,7 +4746,7 @@ export class VerificationHarness {
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		sessionId?: string,
-	): Promise<{ passed: boolean; output: string; sessionId?: string; artifact?: { content: string; contentType: string } }> {
+	): Promise<ReviewStepExecutionResult & { artifact?: { content: string; contentType: string } }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
 		// Inline-roles-aware lookup. Same fallback chain as before: explicit
 		// step.role first, then "qa-tester" / "test-engineer" / "reviewer"
@@ -4661,8 +4792,7 @@ export class VerificationHarness {
 			?? this.resolveDefaultQaComponentName(goalId)
 			?? "";
 		const qaMinutes = pcs?.getQaMaxDurationMinutes(componentName) ?? 10;
-		const qaTimeoutMs = (qaMinutes + 5) * 60 * 1000;
-		const timeoutMs = Math.max(qaTimeoutMs, (step.timeout || 900) * 1000);
+		const timeoutMs = resolveReviewStepTimeoutSec({ type: "agent-qa", timeout: step.timeout }, qaMinutes) * 1000;
 
 		// Build kickoff message via the testable static helper. Threads the
 		// resolved `componentName` into a `[QA-TEST CONTEXT]` block when present,
@@ -4831,11 +4961,9 @@ export class VerificationHarness {
 			// Send kickoff prompt
 			await session.rpcClient.prompt(kickoff);
 
-			// Race: tool result vs idle-without-result
-			const result = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-			]);
+			// Kickoff transport is outside the allowance. Each active QA turn gets
+			// the full resolved window once the prompt has been dispatched.
+			const result = await this.waitForReviewTurn(qaSessionId, resultPromise, timeoutMs);
 
 			if (result.type === "result") {
 				// Got structured result — still wait for agent to go idle (cleanup)
@@ -4845,6 +4973,9 @@ export class VerificationHarness {
 					: undefined;
 				return { passed: result.verdict, output: result.summary, sessionId: qaSessionId, artifact };
 			}
+			if (result.type === "timeout") {
+				return this.reviewTimeoutResult("Agent QA", timeoutMs, result.elapsedMs, qaSessionId);
+			}
 
 			const initialRecovery = await this.waitForReviewerErroredTurnRecovery(qaSessionId, resultPromise, timeoutMs, step.name);
 			if (initialRecovery.type === "result") {
@@ -4853,6 +4984,9 @@ export class VerificationHarness {
 					? { content: initialRecovery.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
 					: undefined;
 				return { passed: initialRecovery.verdict, output: initialRecovery.summary, sessionId: qaSessionId, artifact };
+			}
+			if (initialRecovery.type === "timeout") {
+				return this.reviewTimeoutResult("Agent QA", timeoutMs, initialRecovery.elapsedMs, qaSessionId);
 			}
 			if (initialRecovery.type === "errored") {
 				return { passed: false, output: initialRecovery.output, sessionId: qaSessionId };
@@ -4872,14 +5006,15 @@ export class VerificationHarness {
 				console.log(`[verification][verifier-lifecycle] QA reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${qaSessionId} for "${step.name}" (${qaJsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
 				await session.rpcClient.prompt(qaReminderPrompt);
 				const started = await this.sessionManager!.waitForStreaming(qaSessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
-				const result2 = await Promise.race([
-					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-					this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-				]);
+				if (!started) continue;
+				const result2 = await this.waitForReviewTurn(qaSessionId, resultPromise, timeoutMs);
 
 				if (result2.type === "result") {
 					qaReminderOutcome = { type: "result", verdict: result2.verdict, summary: result2.summary, reportHtml: result2.reportHtml };
 					break;
+				}
+				if (result2.type === "timeout") {
+					return this.reviewTimeoutResult("Agent QA", timeoutMs, result2.elapsedMs, qaSessionId);
 				}
 
 				const postReminderRecovery = await this.waitForReviewerErroredTurnRecovery(qaSessionId, resultPromise, timeoutMs, step.name);
@@ -4887,6 +5022,9 @@ export class VerificationHarness {
 					await this.sessionManager!.waitForIdle(qaSessionId, 30_000).catch(() => {});
 					qaReminderOutcome = { type: "result", verdict: postReminderRecovery.verdict, summary: postReminderRecovery.summary, reportHtml: postReminderRecovery.reportHtml };
 					break;
+				}
+				if (postReminderRecovery.type === "timeout") {
+					return this.reviewTimeoutResult("Agent QA", timeoutMs, postReminderRecovery.elapsedMs, qaSessionId);
 				}
 				if (postReminderRecovery.type === "errored") {
 					qaReminderOutcome = { type: "errored", output: postReminderRecovery.output };
@@ -4943,6 +5081,9 @@ export class VerificationHarness {
 						: undefined;
 					return { passed: recovered.verdict, output: recovered.summary, sessionId: qaSessionId, artifact };
 				}
+				if (recovered.type === "timeout") {
+					return this.reviewTimeoutResult("Agent QA", timeoutMs, recovered.elapsedMs, qaSessionId);
+				}
 				return { passed: false, output: recovered.output, sessionId: qaSessionId };
 			}
 			const errOutput = isTimeout
@@ -4977,6 +5118,8 @@ export class VerificationHarness {
 	}
 
 	/**
+
+
 	 * Substitute namespaced variables in a template string.
 	 *
 	 * Namespaces:

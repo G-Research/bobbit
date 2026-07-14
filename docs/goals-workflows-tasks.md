@@ -265,7 +265,9 @@ The validator does **not** reject template tokens in free-form `run:` or `prompt
 
 Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, prompt, role, component, timeout, phase, description, optional toggle, and `optionalLabel`; and `human-signoff`-specific `label` and `prompt` fields.
 
-The editor validates the same user-facing constraints before save: `human-signoff` steps require a card title and prompt; named `command` steps require a component; and stale hidden fields are stripped when a step changes type so saved workflows use the canonical YAML shape.
+Timeout authoring is type-aware and leaving the field empty does not serialize a default. Command steps show the generic 300-second default and the 1200-second component `command: unit` exception. `llm-review` shows the 1200-second per-active-turn default. `agent-qa` explains that its omitted value is the greater of 1200 seconds and component `qa_max_duration_minutes + 5m`. Review-agent help also states that a positive explicit value may be shorter and that provider backoff is excluded.
+
+The editor validates the same user-facing constraints before save: `human-signoff` steps require a card title and prompt; named `command` steps require a component; review-agent timeouts are positive whole seconds with a minimum of one second; and stale hidden fields are stripped when a step changes type so saved workflows use the canonical YAML shape.
 
 #### Dependency DAG
 
@@ -426,12 +428,34 @@ Each signal is recorded in the gate's signal history with a unique ID, timestamp
 Gates can define automated verification that runs when signaled:
 
 - **Command** — runs shell commands and checks exit codes (e.g. `npm run check`). Command steps default to a 300s timeout unless the workflow sets `timeout`; component-linked `command: unit` steps default to 1200s because the full unit suite can exceed the generic shell default under contention.
-- **LLM review** — spawns a sub-agent for qualitative review against a prompt
-- **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill
+- **LLM review** — spawns a sub-agent for qualitative review against a prompt. An omitted timeout gives each active attempt, reminder, retry, restart continuation, and recovery turn a fresh 1200-second allowance.
+- **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill. Its omitted per-turn allowance is the greater of 1200 seconds and the component QA duration plus five minutes.
+- **Review-agent override** — for `llm-review` and `agent-qa`, an explicit positive `timeout` is authoritative even below 1200 seconds; the minimum is one second. Provider overload/rate-limit backoff is excluded from the active-turn allowance.
 - **Human sign-off** — parks the gate on a deferred resolver until a person approves or rejects via the UI (see [Human sign-off steps](#human-sign-off-steps))
 - **Combined** — mechanical + qualitative steps across phases
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
+
+#### Review-agent timeout semantics
+
+Review-agent `timeout` values measure **active turns**, not total verification wall time. Each from-scratch attempt, reminder, session auto-retry, restart continuation/reminder, step-level retry, and same-session process resurrection receives a fresh full resolved allowance after streaming begins. A streaming turn waits for that allowance; a genuinely idle turn without `verification_result` may enter reminder/recovery immediately.
+
+Setup, readiness, prompt transport, and provider backoff do not consume the allowance. Fixed operational waits also remain separate: 10 seconds for restart streaming settle, 15 seconds for reminder/resurrection streaming settle, 20 seconds for late-verdict arrival, and 30 seconds for successful-result terminal flush. Retryable error handling waits up to 75 seconds for an ordinary retry turn to start or 330 seconds for provider backoff; the newly streaming turn then receives its full allowance. Provider overload/rate-limit retries remain effectively unbounded under the existing cancellation rules.
+
+Only actual allowance expiry emits the durable/live machine contract:
+
+```json
+{
+  "passed": false,
+  "status": "timeout",
+  "timeout": {
+    "configuredSeconds": 1200,
+    "elapsedMs": 1200000
+  }
+}
+```
+
+`configuredSeconds` is the resolved per-active-turn allowance and `elapsedMs` is the elapsed time for the turn that expired. Total `duration_ms` may be larger after retries, reminders, recovery, or provider waits. Other failures and idle-without-result do not use the timeout marker. See [Verifier Recovery](llm-review-recovery.md) for lifecycle details.
 
 #### Active verification snapshots
 
@@ -445,12 +469,13 @@ Step `status` is explicit:
 |---|---|
 | `passed` | Step completed successfully. |
 | `failed` | Step completed unsuccessfully. |
+| `timeout` | A review-agent active turn exhausted its resolved allowance. The step and overall gate fail. |
 | `skipped` | Step was intentionally skipped, such as a disabled optional step or a later phase skipped after an earlier phase failed. |
 | `running` | Step is executing now; duration is elapsed time so far. |
 | `waiting` | Step has not started yet. This is also the API representation for "yet to run". |
 | `blocked` | Active-snapshot derived state for a not-yet-run step blocked by an earlier phase failure; terminal persisted rows use `skipped`. |
 
-For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. Terminal rows preserve explicit `status` as `passed`, `failed`, or `skipped`; `skipped: true` rows are ignored by aggregate pass calculation and should not be rendered as ordinary passes or failures.
+For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. Terminal rows preserve explicit `status` as `passed`, `failed`, `timeout`, or `skipped`; `skipped: true` rows are ignored by aggregate pass calculation and should not be rendered as ordinary passes or failures.
 
 Verification log output is bounded by default: `gate_status` and `gate_inspect section=verification` return the last 20 lines per step, not full logs. Agents that need deeper evidence should call `gate_inspect` with a targeted selection mode:
 
@@ -583,11 +608,15 @@ interface GateSignalStep {
   name: string;
   type: string;
   passed: boolean;
-  status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+  status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
   phase?: number;            // Workflow phase used for grouping and execution order
   skipped?: boolean;         // true when step was skipped (optional not enabled, or earlier phase failed)
   output: string;            // Short summary
-  duration_ms: number;
+  duration_ms: number;       // Total step elapsed time
+  timeout?: {                // Present only when a review-agent active turn expires
+    configuredSeconds: number;
+    elapsedMs: number;
+  };
   artifact?: {
     content: string;         // Full report body
     contentType: string;     // "text/markdown" | "text/html"
@@ -645,9 +674,9 @@ The `agent-qa` verification step type spawns a test-engineer agent session that 
 4. If the agent includes `report_html`, the HTML is stored as the step's artifact with `contentType: "text/html"`.
 5. If the agent goes idle without calling the tool, the harness sends a reminder prompt. If idle again, the step fails.
 
-**Timeout:** Reads `qa_max_duration_minutes` from the owning component's `config:` map (default 10) plus a 5-minute buffer for setup/teardown. The verification harness resolves the component name via the step's `component:` field, falling back to the first component with `config.qa_start_command`, then a name-match against the project. See [docs/qa-testing.md](qa-testing.md) for the full per-component config layout.
+**Timeout:** When `timeout` is omitted, the resolved active-turn allowance is the maximum of 1200 seconds and `(qa_max_duration_minutes + 5) * 60` seconds; `qa_max_duration_minutes` defaults to 10. A valid explicit workflow timeout always wins, even when shorter than the omitted default, with a one-second minimum. The harness resolves the owning component via the step's `component:` field, falling back to the first component with `config.qa_start_command`, then a name-match against the project. See [QA Testing](qa-testing.md) for the full per-component config layout.
 
-**Retry logic:** Up to 3 attempts with backoff on transient failures (same pattern as `llm-review`).
+**Retry logic:** Up to 3 attempts with backoff on transient failures (same pattern as `llm-review`). Each attempt, reminder, restart continuation, and recovery turn gets a fresh resolved active allowance; provider backoff is outside it.
 
 **Test environments:** Respects `BOBBIT_LLM_REVIEW_SKIP` — when set, `agent-qa` steps auto-pass without spawning an agent.
 
