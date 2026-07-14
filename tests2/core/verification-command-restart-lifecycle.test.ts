@@ -4,23 +4,15 @@
 // Review: unparsed import name in `node:test` import list | test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { beforeAll, test, type TestContext, onTestFinished } from "vitest";
+import { test, type TestContext, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
-import type { ActiveVerification } from "../../src/server/agent/verification-harness.js";
-
-let VerificationHarness: typeof import("../../src/server/agent/verification-harness.js").VerificationHarness;
-let killTreeByPid: typeof import("../../src/server/agent/spawn-tree.js").killTreeByPid;
-let GIT_BASH: string | null | undefined;
-
-beforeAll(async () => {
-	({ VerificationHarness } = await import("../../src/server/agent/verification-harness.js"));
-	({ killTreeByPid } = await import("../../src/server/agent/spawn-tree.js"));
-	({ GIT_BASH } = await import("../../src/server/agent/shell-util.js"));
-});
+import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
+import { killTreeByPid } from "../../src/server/agent/spawn-tree.js";
+import { GIT_BASH } from "../../src/server/agent/shell-util.js";
 
 const GOAL_ID = "goal-restart-safe-command-lifecycle";
 const GATE_ID = "implementation";
