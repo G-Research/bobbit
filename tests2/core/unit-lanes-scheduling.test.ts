@@ -3,9 +3,11 @@
 // wall-time budget instead of collapsing to a serial run.
 //
 // THE BUG THIS GUARDS AGAINST: run-unit-lanes is an orchestrator that spawns
-// MULTIPLE independent `vitest run --project ...` processes, each capped at a
-// Windows-RPC-safe per-process fork count (default 2). Its wall time is designed
-// to be max(lanes), not Σ(lanes). Earlier it reserved its budget via
+// MULTIPLE independent `vitest run --project ...` processes. Vitest 3.2 still
+// produced worker-RPC timeouts on Windows when all concurrent lanes used the old
+// two-fork default, so Windows now defaults each lane to one fork while other
+// platforms keep two. Its wall time is designed to be max(lanes), not Σ(lanes).
+// Earlier it reserved its budget via
 // reserveWorkerSlots("vitest"), which returns the SINGLE-PROCESS throttle
 // STANDALONE_VITEST_CAP (=2). Feeding that (=2) into the scheduler as the TOTAL
 // budget forced perLane=2 ⇒ maxConcurrent=floor(2/2)=1 ⇒ the lanes ran SERIALLY
@@ -20,6 +22,9 @@
 //   2. planLaneConcurrency() distributes that grant across lanes: perLane never
 //      exceeds the safe per-process cap, and maxConcurrent = floor(grant/perLane)
 //      so the lanes actually overlap.
+//   3. signal/error cleanup kills every active lane process tree and releases the
+//      single ledger reservation, preventing timed-out gates from leaking either.
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +69,24 @@ describe("unit-lanes orchestrator scheduling", () => {
 		try { rmSync(isolatedTmp, { recursive: true, force: true }); } catch { /* best-effort */ }
 	});
 
+	it("uses one fork per Windows lane by default while preserving overrides and non-Windows defaults", async () => {
+		const { defaultPerLaneForkCap, resolvePerLaneForkCap } = await loadLanes();
+		assert.equal(defaultPerLaneForkCap("win32"), 1);
+		assert.equal(defaultPerLaneForkCap("linux"), 2);
+		assert.equal(defaultPerLaneForkCap("darwin"), 2);
+		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: undefined }), 1);
+		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: "garbage" }), 1, "invalid overrides use the Windows default");
+		assert.equal(resolvePerLaneForkCap({ platform: "linux", override: "garbage" }), 2, "invalid overrides use the non-Windows default");
+		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: "3" }), 3, "an explicit override is preserved");
+		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: "0" }), 1, "explicit values remain clamped to one");
+	});
+
+	it("the Windows default still schedules independent lanes concurrently", async () => {
+		const { planLaneConcurrency, defaultPerLaneForkCap } = await loadLanes();
+		const plan = planLaneConcurrency({ grant: 8, perLaneCap: defaultPerLaneForkCap("win32"), jobCount: 3 });
+		assert.deepEqual(plan, { perLane: 1, maxConcurrent: 3 });
+	});
+
 	it("planLaneConcurrency never raises a lane above the per-process fork cap", async () => {
 		const { planLaneConcurrency } = await loadLanes();
 		for (const grant of [1, 2, 3, 4, 6, 8, 12]) {
@@ -93,13 +116,14 @@ describe("unit-lanes orchestrator scheduling", () => {
 	it("REGRESSION: the single-process throttle (grant=2) collapses lanes to serial", async () => {
 		const { planLaneConcurrency } = await loadLanes();
 		// This is exactly the old broken path: reserveWorkerSlots("vitest") returned
-		// STANDALONE_VITEST_CAP=2, perLaneCap default 2 ⇒ maxConcurrent=1 (serial).
+		// STANDALONE_VITEST_CAP=2 with the former two-fork lane default, forcing
+		// maxConcurrent=1 (serial).
 		const plan = planLaneConcurrency({ grant: 2, perLaneCap: 2, jobCount: 3 });
 		assert.equal(plan.perLane, 2);
 		assert.equal(plan.maxConcurrent, 1, "grant=2 forces serial lanes — the timeout bug");
 	});
 
-	it("FIX: the fair orchestrator grant runs the 3 lanes concurrently", async () => {
+	it("the fair orchestrator grant runs the 3 lanes concurrently with a two-fork cap", async () => {
 		const { planLaneConcurrency } = await loadLanes();
 		// The fair core grant (8 on a 24-core box) opens the scheduler back up so
 		// all three lanes overlap: perLane stays at the safe cap, maxConcurrent >= 3.
@@ -140,6 +164,106 @@ describe("unit-lanes orchestrator scheduling", () => {
 		} finally {
 			orch.release();
 		}
+	});
+
+	it("cleanup is idempotent and reaps every child tree, heartbeat, and ledger reservation", async () => {
+		const { createRunCleanup } = await loadLanes();
+		const killed: unknown[] = [];
+		const cleared: unknown[] = [];
+		let releases = 0;
+		const cleanup = createRunCleanup({
+			release: () => { releases += 1; },
+			killTree: (child: unknown) => { killed.push(child); },
+			clearTimer: (timer: unknown) => { cleared.push(timer); },
+		});
+		const first = { pid: 101 };
+		const second = { pid: 102 };
+		cleanup.track(first);
+		cleanup.track(second);
+		cleanup.untrack(first);
+		cleanup.setHeartbeat("heartbeat");
+		cleanup.cleanup();
+		cleanup.cleanup();
+		assert.deepEqual(killed, [second], "only the still-active child tree is killed");
+		assert.deepEqual(cleared, ["heartbeat"]);
+		assert.equal(releases, 1, "the ledger reservation is released exactly once");
+
+		const late = { pid: 103 };
+		cleanup.track(late);
+		assert.deepEqual(killed, [second, late], "a child tracked after cleanup is killed immediately");
+	});
+
+	it("kills Windows and POSIX lane process trees through the platform seam", async () => {
+		const { killLaneProcessTree } = await loadLanes();
+		const taskkills: unknown[][] = [];
+		const childSignals: string[] = [];
+		killLaneProcessTree({ pid: 4242, kill: (signal: string) => childSignals.push(signal) }, {
+			platform: "win32",
+			spawnSyncImpl: (...args: unknown[]) => { taskkills.push(args); },
+		});
+		assert.equal(taskkills.length, 1);
+		assert.equal(taskkills[0][0], "taskkill.exe");
+		assert.deepEqual(taskkills[0][1], ["/PID", "4242", "/T", "/F"]);
+		assert.deepEqual(childSignals, ["SIGKILL"], "the root kill is a fallback after taskkill /T");
+
+		const groupKills: unknown[][] = [];
+		killLaneProcessTree({ pid: 5252 }, {
+			platform: "linux",
+			killImpl: (...args: unknown[]) => { groupKills.push(args); },
+		});
+		assert.deepEqual(groupKills, [[-5252, "SIGKILL"]], "POSIX kills the detached process group");
+	});
+
+	it("signal, exception, rejection, and exit handlers always reap children and release the ledger", async () => {
+		const { createRunCleanup, installRunTerminationHandlers } = await loadLanes();
+		const cases = [
+			{ event: "SIGINT", payload: undefined, exitCode: 130 },
+			{ event: "SIGTERM", payload: undefined, exitCode: 143 },
+			{ event: "SIGHUP", payload: undefined, exitCode: 129 },
+			{ event: "uncaughtException", payload: new Error("boom"), exitCode: 1 },
+			{ event: "unhandledRejection", payload: new Error("rejected"), exitCode: 1 },
+		] as const;
+		for (const testCase of cases) {
+			const target = new EventEmitter() as EventEmitter & { exit(code: number): void; exitCodes: number[] };
+			target.exitCodes = [];
+			target.exit = (code: number) => { target.exitCodes.push(code); };
+			const killed: unknown[] = [];
+			let releases = 0;
+			const cleanup = createRunCleanup({
+				release: () => { releases += 1; },
+				killTree: (child: unknown) => { killed.push(child); },
+			});
+			const child = { pid: 6000 + testCase.exitCode };
+			cleanup.track(child);
+			const reported: unknown[][] = [];
+			const uninstall = installRunTerminationHandlers(cleanup, {
+				processTarget: target,
+				reportError: (...args: unknown[]) => { reported.push(args); },
+			});
+			if (testCase.payload === undefined) target.emit(testCase.event);
+			else target.emit(testCase.event, testCase.payload);
+			assert.deepEqual(killed, [child], `${testCase.event} must kill the child tree`);
+			assert.equal(releases, 1, `${testCase.event} must release the ledger`);
+			assert.deepEqual(target.exitCodes, [testCase.exitCode]);
+			assert.equal(reported.length, testCase.payload === undefined ? 0 : 1);
+			uninstall();
+		}
+
+		const target = new EventEmitter() as EventEmitter & { exit(code: number): void };
+		target.exit = () => { throw new Error("exit must not be called by the exit hook"); };
+		const killed: unknown[] = [];
+		let releases = 0;
+		const cleanup = createRunCleanup({
+			release: () => { releases += 1; },
+			killTree: (child: unknown) => { killed.push(child); },
+		});
+		const child = { pid: 7000 };
+		cleanup.track(child);
+		const uninstall = installRunTerminationHandlers(cleanup, { processTarget: target });
+		target.emit("exit", 1);
+		assert.deepEqual(killed, [child]);
+		assert.equal(releases, 1);
+		uninstall();
 	});
 
 	it("reserveVitestLaneBudget REUSES a parent grant (preserves run-v2 ledger behavior)", async () => {

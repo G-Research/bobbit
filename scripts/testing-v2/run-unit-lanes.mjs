@@ -15,14 +15,14 @@
  *   - it has an isolated module registry, so the node<->happy-dom environment
  *     bleed that forces `groupOrder`/single-fork hacks in the shared run does not
  *     apply across lanes;
- *   - it keeps its OWN 2-fork pool (VITEST_MAX_FORKS=2), so no single process ever
- *     exceeds the Windows-safe fork count that trips the Vitest 3.2 onTaskUpdate
- *     RPC bug (#8164/#6511). Parallelism comes from running lanes side by side
- *     (2 forks x 3 lanes = 6 forks total), NOT from raising per-process forks.
+ *   - Windows defaults each lane to one fork, avoiding the Vitest 3.2
+ *     onTaskUpdate worker-RPC failures seen even at two forks under concurrent
+ *     lane load (#8164/#6511). Non-Windows keeps the two-fork default. Parallelism
+ *     comes from running independent lanes side by side, not from raising the
+ *     per-process fork count.
  *
- * This deliberately does NOT touch the RPC bug or raise the per-process cap — it
- * is the SAFE parallelism lever. Raising forks-per-process is a separate, larger
- * change (Vitest 4.x upgrade for the full #8297 fix).
+ * UNIT_LANES_FORK_CAP remains an explicit experimental override. A Vitest 4.x
+ * upgrade carrying the full #8297 fix is the larger alternative.
  *
  * Concurrent full vitest runs are an anticipated mode (see
  * docs/testing-v2/concurrency-proof.md and the retry bridge in vitest.config.ts),
@@ -31,7 +31,7 @@
  * Usage:
  *   node scripts/testing-v2/run-unit-lanes.mjs [--lane core|integration|dom] [--forks N] [--list]
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { dirname, join, resolve } from "node:path";
@@ -43,17 +43,24 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const LOG_DIR = join(REPO_ROOT, ".profiles", "unit-lanes");
 
-// RPC-safety cap: no single vitest process may exceed this many forks or it
-// risks the Vitest 3.2 onTaskUpdate/onUnhandledError 60s-RPC-timeout bug
-// (#8164/#6511) under load. Lane parallelism buys throughput by running MULTIPLE
-// 2-fork processes, never by raising a single process past this.
-// Per-lane fork cap. Default 2 (Windows-RPC-safe under v3). Overridable via
-// UNIT_LANES_FORK_CAP for experiments (e.g. testing whether a single lane's
-// smaller onTaskUpdate backlog tolerates more forks than the full suite).
-// A non-numeric override must NOT poison the scheduler: NaN would make
-// maxConcurrent NaN and stall the run (no lane ever starts), so fall back to 2.
-const _forkCap = Number(process.env.UNIT_LANES_FORK_CAP || "2");
-const PER_LANE_FORK_CAP = Number.isFinite(_forkCap) ? Math.max(1, Math.floor(_forkCap)) : 2;
+// Vitest 3.2's worker RPC is unstable on Windows when concurrent lanes each use
+// two forks, even though two forks is safe for a standalone process. Default
+// Windows lanes to one fork while preserving the existing two-fork default on
+// other platforms. UNIT_LANES_FORK_CAP remains an explicit override. Invalid
+// overrides fall back to the platform default instead of poisoning scheduler
+// math with NaN (which would stall every lane).
+export function defaultPerLaneForkCap(platform = process.platform) {
+	return platform === "win32" ? 1 : 2;
+}
+
+export function resolvePerLaneForkCap({ platform = process.platform, override = process.env.UNIT_LANES_FORK_CAP } = {}) {
+	const fallback = defaultPerLaneForkCap(platform);
+	if (override == null || String(override).trim() === "") return fallback;
+	const parsed = Number(override);
+	return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : fallback;
+}
+
+const PER_LANE_FORK_CAP = resolvePerLaneForkCap();
 
 // Heartbeat cadence for the live progress line. Clamp to >=1s and reject
 // non-numeric/zero/negative values so a bad override can't flood the console
@@ -72,15 +79,13 @@ const FAIL_LINE_RE = /(^|\s)(FAIL|×|✗)\s|AssertionError|Unhandled (Error|Reje
 // which is a transport artifact under load, NOT a test result.
 const WORKER_RPC_TIMEOUT_RE = /\[vitest-(worker|api)\]: Timeout calling "(onTaskUpdate|onUnhandledError|onCollected|fetch|transform|resolveId)"/;
 
-// integration (~600s of work) is the pole. At 2 forks it is a ~478s single lane.
-// It CAN be cost-balance-sharded across N concurrent 2-fork processes, but
-// MEASUREMENT SHOWS DIMINISHING-THEN-NEGATIVE RETURNS on this box: at 3 shards
-// (=> 5 concurrent jobs / 10 forks) the total only improved 478s->429s because
-// core became the pole, per-lane times got WORSE from contention, and dom
-// re-triggered the very Vitest RPC timeout bug (onUnhandledError) under CPU
-// starvation. The safe validated sweet spot is 1 (the 3-lane config: 6 forks,
-// all-green). Raise UNIT_LANES_INTEGRATION_SHARDS only with the RPC fix in place
-// (Vitest 4.x) or after cutting integration's real per-test work.
+// integration (~600s of work) is the pole. Historical two-fork profiling put it
+// at ~478s as a single lane. Cost-balanced sharding showed diminishing, then
+// negative returns: at 3 shards the total only improved 478s->429s while extra
+// contention re-triggered the Vitest RPC timeout bug. Keep one integration job;
+// each job uses the platform-aware lane cap above. Raise
+// UNIT_LANES_INTEGRATION_SHARDS only with the RPC fix in place (Vitest 4.x) or
+// after cutting integration's real per-test work.
 const INTEGRATION_SHARDS = Math.max(1, Number(process.env.UNIT_LANES_INTEGRATION_SHARDS || "1"));
 
 function listTestFiles(rel) {
@@ -161,7 +166,8 @@ function vitestCmd() {
  * Pure scheduling math (pinned by tests2/core/unit-lanes-scheduling.test.ts).
  *
  * The orchestrator holds ONE fair vitest grant and distributes it across lanes,
- * each its OWN process capped at `perLaneCap` forks (Windows-RPC-safe; default 2).
+ * each its OWN process capped at `perLaneCap` forks (default 1 on Windows, 2
+ * elsewhere).
  *   - perLane      = min(perLaneCap, grant)  — never raise a single process above
  *                    the safe cap, and never ask for more forks than granted.
  *   - maxConcurrent = floor(grant / perLane) — instantaneous forks
@@ -181,7 +187,93 @@ export function planLaneConcurrency({ grant, perLaneCap, jobCount }) {
 	return { perLane, maxConcurrent };
 }
 
-function runLane(name, projects, forks, files, parentRunId, stats) {
+// Kill the complete lane process tree. Windows needs taskkill /T because killing
+// the npx.cmd shell alone leaves Vitest workers alive. POSIX lanes are detached
+// process-group leaders, so a negative pid reaches every descendant.
+export function killLaneProcessTree(child, {
+	platform = process.platform,
+	spawnSyncImpl = spawnSync,
+	killImpl = process.kill.bind(process),
+} = {}) {
+	const pid = Number(child?.pid);
+	if (!Number.isFinite(pid) || pid <= 0) return;
+	if (platform === "win32") {
+		try {
+			spawnSyncImpl("taskkill.exe", ["/PID", String(Math.floor(pid)), "/T", "/F"], {
+			stdio: "ignore",
+			windowsHide: true,
+			timeout: 5_000,
+		});
+		} catch { /* best-effort fallback below */ }
+		try { child.kill?.("SIGKILL"); } catch { /* already exited */ }
+		return;
+	}
+	try { killImpl(-Math.floor(pid), "SIGKILL"); }
+	catch { try { child.kill?.("SIGKILL"); } catch { /* already exited */ } }
+}
+
+// Owns the active lane registry, heartbeat and ledger reservation as one
+// idempotent cleanup unit. Signal/error handlers and normal completion use the
+// same path, preventing either child trees or ledger slots from leaking.
+export function createRunCleanup({ release, killTree = killLaneProcessTree, clearTimer = clearInterval }) {
+	const children = new Set();
+	let heartbeat;
+	let cleaned = false;
+	return {
+		track(child) {
+			if (cleaned) killTree(child);
+			else children.add(child);
+			return child;
+		},
+		untrack(child) { children.delete(child); },
+		setHeartbeat(timer) {
+			if (heartbeat && heartbeat !== timer) clearTimer(heartbeat);
+			heartbeat = timer;
+			if (cleaned && heartbeat) {
+				clearTimer(heartbeat);
+				heartbeat = undefined;
+			}
+		},
+		cleanup() {
+			if (cleaned) return;
+			cleaned = true;
+			if (heartbeat) {
+				clearTimer(heartbeat);
+				heartbeat = undefined;
+			}
+			for (const child of children) {
+				try { killTree(child); } catch { /* cleanup must continue */ }
+			}
+			children.clear();
+			try { release(); } catch { /* ledger also self-heals */ }
+		},
+	};
+}
+
+export function installRunTerminationHandlers(cleanup, {
+	processTarget = process,
+	reportError = (label, error) => console.error(`[unit-lanes] ${label}:`, error),
+} = {}) {
+	const terminate = (code, label, error) => {
+		if (error !== undefined) reportError(label, error);
+		cleanup.cleanup();
+		processTarget.exit(code);
+	};
+	const handlers = new Map([
+		["SIGINT", () => terminate(130, "interrupted")],
+		["SIGTERM", () => terminate(143, "terminated")],
+		["SIGHUP", () => terminate(129, "hangup")],
+		["uncaughtException", (error) => terminate(1, "uncaught exception", error)],
+		["unhandledRejection", (error) => terminate(1, "unhandled rejection", error)],
+		["exit", () => cleanup.cleanup()],
+	]);
+	for (const [event, handler] of handlers) processTarget.once(event, handler);
+	return () => {
+		for (const [event, handler] of handlers) processTarget.removeListener(event, handler);
+	};
+}
+
+function runLane(name, projects, forks, files, parentRunId, stats, cleanup) {
 	const startWall = performance.now();
 	mkdirSync(LOG_DIR, { recursive: true });
 	const logPath = join(LOG_DIR, `${name}.log`);
@@ -202,7 +294,20 @@ function runLane(name, projects, forks, files, parentRunId, stats) {
 			env: { ...process.env, BOBBIT_V2_LEDGER_PARENT: parentRunId, BOBBIT_V2_SLOTS_VITEST: String(forks) },
 			stdio: ["ignore", "pipe", "pipe"],
 			shell: process.platform === "win32",
+			// POSIX process groups make whole-tree termination reliable. Windows uses
+			// taskkill /T against the shell pid tracked below.
+			detached: process.platform !== "win32",
+			windowsHide: true,
 		});
+		cleanup.track(child);
+		let settled = false;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			cleanup.untrack(child);
+			out.end();
+			resolveRun(result);
+		};
 		const handleLine = (raw, isErr) => {
 			out.write(raw + "\n");
 			// Strip ANSI so detection works whether or not vitest emitted color.
@@ -261,12 +366,12 @@ function runLane(name, projects, forks, files, parentRunId, stats) {
 				console.log(`⚠ [${name}] all ${passedN} tests PASSED, but ${st.rpcTimeouts} [vitest-worker] RPC timeout(s) under load — known CPU-starvation infra flake (docs/testing-strategy.md); treating lane as PASS.`);
 			}
 			console.log(`▸ [${name}] ${c === 0 ? "PASS" : "FAIL"} — ${st.files} files, ${passedN} tests, ${realFailed} failed${st.rpcTimeouts ? `, ${st.rpcTimeouts} rpc-timeout` : ""} in ${(st.wallMs / 1000).toFixed(1)}s`);
-			resolveRun({ name, projects, code: c, signal, wallMs: st.wallMs, logPath, infraFlake: st.infraFlake, rpcTimeouts: st.rpcTimeouts });
+			finish({ name, projects, code: c, signal, wallMs: st.wallMs, logPath, infraFlake: st.infraFlake, rpcTimeouts: st.rpcTimeouts });
 		});
 		child.on("error", (error) => {
 			st.done = true;
 			st.wallMs = Math.round(performance.now() - startWall);
-			resolveRun({ name, projects, code: 1, error: String(error), wallMs: st.wallMs, logPath });
+			finish({ name, projects, code: 1, error: String(error), wallMs: st.wallMs, logPath });
 		});
 	});
 }
@@ -276,7 +381,7 @@ async function main() {
 	const laneNames = args.lanes ?? Object.keys(LANES);
 
 	// Expand the integration lane into cost-balanced file shards (each its own
-	// 2-fork process). The fake project stays whole (single-fork by config).
+	// lane-capped process). The fake project stays whole (single-fork by config).
 	const jobs = [];
 	for (const n of laneNames) {
 		if (n === "integration" && INTEGRATION_SHARDS > 1) {
@@ -290,7 +395,7 @@ async function main() {
 
 	if (args.list) {
 		console.log(JSON.stringify(jobs.map((j) => ({ name: j.name, projects: j.projects, files: j.files?.length ?? "all" })), null, 2));
-		return;
+		return 0;
 	}
 
 	// Reserve ONCE for the whole unit run. reserveVitestLaneBudget() returns the
@@ -302,6 +407,9 @@ async function main() {
 	// release. Either way this is the ONLY ledger entry for the run; each spawned lane
 	// re-uses this grant via the parent-grant env with its own per-lane fork cap.
 	const reservation = reserveVitestLaneBudget();
+	const cleanup = createRunCleanup({ release: reservation.release });
+	const uninstallTerminationHandlers = installRunTerminationHandlers(cleanup);
+	try {
 	const grant = Math.max(1, reservation.workerSlots || 1);
 	// Distribute the grant across lanes: at most floor(grant/perLane) lanes run
 	// CONCURRENTLY (each `perLane` forks), so instantaneous forks = inFlight*perLane
@@ -333,6 +441,7 @@ async function main() {
 		const totF = jobs.reduce((a, j) => a + stats[j.name].failedTests, 0);
 		console.log(`[unit-lanes +${el}s] ${totT} tests${totF ? `, ${totF} FAILED` : ""} | ${parts.join("  |  ")}`);
 	}, HEARTBEAT_MS);
+	cleanup.setHeartbeat(heartbeat);
 	if (typeof heartbeat.unref === "function") heartbeat.unref();
 
 	const results = [];
@@ -345,7 +454,7 @@ async function main() {
 		}
 		stats[j.name].started = true;
 		console.log(`▸ [${j.name}] started (${perLane} forks): ${j.projects.join(", ")}${j.files ? ` · ${j.files.length} files` : ""}`);
-		return runLane(j.name, j.projects, perLane, j.files, reservation.parentRunId, stats);
+		return runLane(j.name, j.projects, perLane, j.files, reservation.parentRunId, stats, cleanup);
 	};
 	while (queue.length || active.size) {
 		while (queue.length && active.size < maxConcurrent) {
@@ -355,8 +464,7 @@ async function main() {
 		}
 		if (active.size) await Promise.race(active);
 	}
-	clearInterval(heartbeat);
-	reservation.release();
+	cleanup.cleanup();
 	const totalWallMs = Math.round(performance.now() - startWall);
 
 	console.log("\n[unit-lanes] results:");
@@ -395,12 +503,18 @@ async function main() {
 
 	if (realFailedLanes.length) console.error(`\n[unit-lanes] FAIL — lane(s): ${realFailedLanes.map((r) => r.name).join(", ")}`);
 	else console.log(`\n[unit-lanes] PASS — ${grandPassed} tests, 0 real failures${grandRpc ? ` (${grandRpc} worker-RPC timeout(s) tolerated as infra flake)` : ""}`);
-	process.exit(realFailedLanes.length ? 1 : 0);
+	return realFailedLanes.length ? 1 : 0;
+	} finally {
+		cleanup.cleanup();
+		uninstallTerminationHandlers();
+	}
 }
 
 // Only run when invoked directly (`node run-unit-lanes.mjs`), so tests can import
 // the pure `planLaneConcurrency` helper without triggering a full unit run.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-	main().catch((e) => { console.error("[unit-lanes] fatal:", e); process.exit(1); });
+	main()
+		.then((code) => { process.exitCode = code; })
+		.catch((e) => { console.error("[unit-lanes] fatal:", e); process.exitCode = 1; });
 }
