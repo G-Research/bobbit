@@ -157,14 +157,21 @@ function recordingBridge(onSwitch: (sessionPath: string) => void): any {
 function failingSwitchBridge(
 	failure: "response" | "exception",
 	timeouts: number[],
-): { bridge: any; stop: ReturnType<typeof vi.fn> } {
+): {
+	bridge: any;
+	stop: ReturnType<typeof vi.fn>;
+	unsubscribe: ReturnType<typeof vi.fn>;
+	hasListener: () => boolean;
+	emit: (event: any) => void;
+} {
 	const bridge = recordingBridge(() => {});
 	const stop = vi.fn(async () => {});
 	let listener: ((event: any) => void) | undefined;
+	const unsubscribe = vi.fn(() => { listener = undefined; });
 	bridge.stop = stop;
 	bridge.onEvent = vi.fn((nextListener: (event: any) => void) => {
 		listener = nextListener;
-		return () => { listener = undefined; };
+		return unsubscribe;
 	});
 	bridge.sendCommand = vi.fn(async (command: any, timeoutMs?: number) => {
 		if (command?.type !== "switch_session") return { success: true };
@@ -173,7 +180,13 @@ function failingSwitchBridge(
 		if (failure === "exception") throw new Error("fixture switch timeout");
 		return { success: false, error: "fixture switch rejected" };
 	});
-	return { bridge, stop };
+	return {
+		bridge,
+		stop,
+		unsubscribe,
+		hasListener: () => listener !== undefined,
+		emit: (event: any) => listener?.(event),
+	};
 }
 
 function persisted(id: string, agentSessionFile: string, overrides: Record<string, any> = {}): any {
@@ -396,12 +409,12 @@ describe("executable SessionManager rehydration boundaries", () => {
 	});
 
 	it.each([
-		{ realm: "host", sandboxed: false, timeout: undefined, failureBoundary: "start" as const, firstAction: "retry" as const, laterAction: "retry" as const },
-		{ realm: "sandbox", sandboxed: true, timeout: 60_000, failureBoundary: "switch" as const, firstAction: "follow-up" as const, laterAction: "follow-up" as const },
-	])("rolls back a failed $realm poison respawn at $failureBoundary and later recovers by $laterAction with the same session", async ({ realm, sandboxed, timeout, failureBoundary, firstAction, laterAction }) => {
+		{ realm: "host", sandboxed: false, timeout: undefined, failureBoundary: "start" as const, switchFailure: "response" as const, firstAction: "retry" as const, laterAction: "retry" as const },
+		{ realm: "sandbox", sandboxed: true, timeout: 60_000, failureBoundary: "switch" as const, switchFailure: "exception" as const, firstAction: "follow-up" as const, laterAction: "follow-up" as const },
+	])("rolls back a failed $realm poison respawn at $failureBoundary and later recovers by $laterAction with the same session", async ({ realm, sandboxed, timeout, failureBoundary, switchFailure, firstAction, laterAction }) => {
 		const file = hostTranscript(`poison-rollback-${realm}`);
 		const switchTimeouts: number[] = [];
-		const failedSwitch = failingSwitchBridge("response", switchTimeouts);
+		const failedSwitch = failingSwitchBridge(switchFailure, switchTimeouts);
 		const failedReplacement = failedSwitch.bridge;
 		const stopFailedReplacement = failedSwitch.stop;
 		if (failureBoundary === "start") {
@@ -477,7 +490,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 			? manager.retryLastPrompt(ps.id)
 			: manager.enqueuePrompt(ps.id, "preserved failed follow-up", { source: "user" });
 		await expect(firstRecovery).rejects.toThrow(
-			failureBoundary === "start" ? "fixture replacement start failed" : "switch_session failed",
+			failureBoundary === "start"
+				? "fixture replacement start failed"
+				: (switchFailure === "exception" ? "fixture switch timeout" : "switch_session failed"),
 		);
 
 		const rollback = manager.sessions.get(ps.id);
@@ -500,6 +515,12 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(oldBridge.prompt).not.toHaveBeenCalled();
 		expect(oldBridge.stop).toHaveBeenCalledTimes(1);
 		expect(stopFailedReplacement).toHaveBeenCalledTimes(1);
+		if (failureBoundary === "switch") {
+			expect(failedSwitch.unsubscribe).toHaveBeenCalledTimes(1);
+			expect(failedSwitch.hasListener()).toBe(false);
+			failedSwitch.emit({ type: "agent_end", messages: [] });
+			expect(manager.sessions.get(ps.id)).toBe(rollback);
+		}
 
 		if (laterAction === "retry") {
 			await expect(manager.retryLastPrompt(ps.id)).resolves.toBeUndefined();
@@ -531,6 +552,135 @@ describe("executable SessionManager rehydration boundaries", () => {
 			expect(replacementOptions[0].cwd).toBe("/workspace");
 			expect(replacementOptions[1].cwd).toBe("/workspace");
 		}
+	});
+
+	it("keeps a failed sandbox poison rollback intact across addClient reconnect until one later Retry", async () => {
+		const file = hostTranscript("poison-rollback-sandbox-reconnect");
+		const successfulPrompts: string[] = [];
+		const replacement = recordingBridge(() => {});
+		replacement.getState = vi.fn(async () => ({
+			success: true,
+			data: { model: { provider: "anthropic", id: "claude-sonnet-4-5" } },
+		}));
+		replacement.prompt = vi.fn(async (text: string) => {
+			successfulPrompts.push(text);
+			return { success: true };
+		});
+		const factory = vi.fn(() => replacement);
+		registerRpcBridgeFactory(factory);
+
+		const ps = persisted("poison-rollback-sandbox-reconnect", file, {
+			title: "Visible sandbox reconnect history",
+			sandboxed: true,
+			cwd: "/workspace",
+			modelProvider: "anthropic",
+			modelId: "claude-sonnet-4-5",
+			allowedTools: ["read"],
+		});
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		let sandboxAvailable = false;
+		manager.applySandboxWiring = vi.fn(async (options: any) => {
+			if (!sandboxAvailable) return false;
+			options.containerId = "container-poison-reconnect";
+			options.sandboxed = true;
+			return true;
+		});
+		manager.resolveInitialThinkingLevel = vi.fn(() => "high");
+		managers.push(manager);
+
+		const oldPrompts: string[] = [];
+		const oldBridge = recordingBridge(() => { throw new Error("poisoned bridge must not switch"); });
+		oldBridge.stop = vi.fn(async () => {});
+		oldBridge.prompt = vi.fn(async (text: string) => {
+			oldPrompts.push(text);
+			throw new Error("poisoned bridge must not receive work");
+		});
+		const originalClient = { readyState: 1, send: vi.fn() };
+		const reconnectClient = { readyState: 1, send: vi.fn() };
+		const original = liveSession(ps.id, oldBridge, {
+			title: ps.title,
+			cwd: ps.cwd,
+			sandboxed: true,
+			clients: new Set([originalClient]),
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+			lastPromptText: "original sandbox retry intent",
+			lastPromptSource: "user",
+			turnHadToolCalls: false,
+			modelProvider: "anthropic",
+			modelId: "claude-sonnet-4-5",
+			spawnPinnedModel: "anthropic/claude-sonnet-4-5",
+			spawnPinnedThinkingLevel: "high",
+			allowedTools: ["read"],
+			sessionOnlyGrantedTools: ["grep"],
+			oneTimeGrantedTools: ["bash"],
+			pendingSkillExpansions: [{
+				modelText: "expanded retry intent",
+				originalText: "/fixture retry intent",
+				skillExpansions: [],
+			}],
+		});
+		original.promptQueue.enqueue("parked sandbox intent");
+		ps.messageQueue = original.promptQueue.toArray();
+		original.eventBuffer.push({ type: "message_end", message: { role: "assistant", content: "visible history" } });
+		const rollbackBuffer = original.eventBuffer;
+		const rollbackLastSeq = rollbackBuffer.lastSeq;
+		manager.sessions.set(ps.id, original);
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await expect(manager.retryLastPrompt(ps.id)).rejects.toThrow("sandbox realm is unavailable");
+		const rollback = manager.sessions.get(ps.id);
+		expect(rollback).toBe(original);
+		expect(rollback.status).toBe("terminated");
+		expect(manager.applySandboxWiring).toHaveBeenCalledTimes(1);
+		expect(factory).not.toHaveBeenCalled();
+
+		expect(manager.addClient(ps.id, reconnectClient)).toBe(true);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(manager.sessions.get(ps.id)).toBe(rollback);
+		expect(rollback.clients.has(originalClient)).toBe(true);
+		expect(rollback.clients.has(reconnectClient)).toBe(true);
+		expect(rollback.eventBuffer).toBe(rollbackBuffer);
+		expect(rollback.eventBuffer.lastSeq).toBe(rollbackLastSeq);
+		expect(rollback.lastPromptText).toBe("original sandbox retry intent");
+		expect(rollback.turnHadToolCalls).toBe(false);
+		expect(rollback.pendingSkillExpansions).toHaveLength(1);
+		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual(["parked sandbox intent"]);
+		expect(rollback.sessionOnlyGrantedTools).toEqual(["grep"]);
+		expect(rollback.oneTimeGrantedTools).toEqual(["bash"]);
+		expect(ps.sandboxed).toBe(true);
+		expect(manager.applySandboxWiring).toHaveBeenCalledTimes(1);
+		expect(manager._testStore.update).not.toHaveBeenCalledWith(ps.id, { sandboxed: false });
+
+		sandboxAvailable = true;
+		await expect(manager.retryLastPrompt(ps.id)).resolves.toBeUndefined();
+
+		const restored = manager.sessions.get(ps.id);
+		expect(restored).not.toBe(original);
+		expect(restored.id).toBe(ps.id);
+		expect(restored.title).toBe("Visible sandbox reconnect history");
+		expect(restored.sandboxed).toBe(true);
+		expect(restored.clients.has(originalClient)).toBe(true);
+		expect(restored.clients.has(reconnectClient)).toBe(true);
+		expect(restored.eventBuffer.lastSeq).toBeGreaterThanOrEqual(rollbackLastSeq);
+		expect(restored.spawnPinnedModel).toBe("anthropic/claude-sonnet-4-5");
+		expect(restored.spawnPinnedThinkingLevel).toBe("high");
+		expect(restored.sessionOnlyGrantedTools).toEqual(["grep"]);
+		expect(restored.oneTimeGrantedTools).toEqual(["bash"]);
+		expect(restored.pendingSkillExpansions).toHaveLength(1);
+		expect(restored.promptQueue.toArray().map((message: any) => message.text)).toEqual(["parked sandbox intent"]);
+		expect(successfulPrompts).toEqual(["original sandbox retry intent"]);
+		expect(oldPrompts).toEqual([]);
+		expect(factory).toHaveBeenCalledTimes(1);
+		expect(manager.applySandboxWiring).toHaveBeenCalledTimes(2);
+		expect(ps.sandboxed).toBe(true);
 	});
 
 	it.each([

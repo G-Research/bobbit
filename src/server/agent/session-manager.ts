@@ -4598,6 +4598,9 @@ export class SessionManager {
 		// expanded model text and loses its UI chips.
 		const pendingPromptEnvelopes = session.pendingSkillExpansions?.slice();
 		const recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds?.slice();
+		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools?.slice();
+		const savedOneTimeGrantedTools = session.oneTimeGrantedTools?.slice();
+		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 		const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 		const repairedRecords = await sanitizeAgentTranscriptFile(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		console.info(
@@ -4605,9 +4608,15 @@ export class SessionManager {
 		);
 		const restored = await this._respawnAgentInPlace(session, ps, {
 			preserveSandboxRealm: session.sandboxed === true,
+			mutatePs: p => {
+				if (overrideAllowedTools !== undefined) (p as any)._overrideAllowedTools = overrideAllowedTools;
+				if (savedSessionOnlyGrantedTools !== undefined) (p as any)._overrideGrantedTools = savedSessionOnlyGrantedTools;
+			},
 		});
 		const target = restored ?? this.sessions.get(session.id);
 		if (target && target !== session) {
+			if (savedSessionOnlyGrantedTools) target.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
+			if (savedOneTimeGrantedTools) target.oneTimeGrantedTools = savedOneTimeGrantedTools;
 			if (pendingPromptEnvelopes?.length) {
 				target.pendingSkillExpansions = [
 					...pendingPromptEnvelopes,
@@ -6185,26 +6194,37 @@ export class SessionManager {
 		// Resume the agent's previous session file. Persisted host paths are still
 		// readable by Bobbit; sandboxed agents receive the active mount's container
 		// path when the host path maps to the active sessions mount.
-		trustPersistedAgentSessionFile(ps.agentSessionFile);
-		const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-		const switchSessionPath = switchSessionPathForAgent(ps);
-		// Un-poison the persisted transcript before the agent rehydrates it
-		// (best-effort, non-fatal).
-		await sanitizeAgentTranscriptFile(
-			transcriptFileCtx,
-			ps.agentSessionFile,
-			this.sandboxManager,
-		);
-		const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
-		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: switchSessionPath },
-			switchTimeout,
-		);
-		restoring = false;
-		if (!switchResp.success) {
-			await rpcClient.stop();
-			throw new Error(`switch_session failed: ${switchResp.error}`);
+		try {
+			trustPersistedAgentSessionFile(ps.agentSessionFile);
+			const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+			const switchSessionPath = switchSessionPathForAgent(ps);
+			// Un-poison the persisted transcript before the agent rehydrates it
+			// (best-effort, non-fatal).
+			await sanitizeAgentTranscriptFile(
+				transcriptFileCtx,
+				ps.agentSessionFile,
+				this.sandboxManager,
+			);
+			const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
+			const switchResp = await rpcClient.sendCommand(
+				{ type: "switch_session", sessionPath: switchSessionPath },
+				switchTimeout,
+			);
+			if (!switchResp.success) {
+				throw new Error(`switch_session failed: ${switchResp.error}`);
+			}
+		} catch (err) {
+			// A thrown/timed-out switch is just as terminal as an explicit failure
+			// response. Detach its listener and fence the replacement before stopping
+			// it so replayed/late Pi events cannot mutate queues, status, or persisted
+			// intent after the rollback capsule becomes canonical again.
+			restoring = false;
+			try { unsub(); } catch { /* best-effort listener cleanup */ }
+			this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
+			try { await rpcClient.stop(); } catch { /* best-effort process cleanup */ }
+			throw err;
 		}
+		restoring = false;
 
 		try {
 			await this.tryAutoSelectModel(session);
@@ -9933,25 +9953,35 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) return false;
 
-		// If session is dormant (failed restore), try to revive it
+		// If session is dormant (failed restore), try to revive it. A poisoned-history
+		// rollback is different: its fenced SessionInfo is the only process-local
+		// capsule for retry intent, prompt envelopes, grants, clients, and the prior
+		// event frame of reference. A reconnect is not user intent to retry, so keep
+		// that capsule attached and let the next explicit Retry/follow-up use the
+		// poison-aware in-place respawn (including the sandbox fail-closed guard).
 		if (session.status === "terminated") {
-			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && ps.agentSessionFile) {
-				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
-				this._restoreSessionCoalesced(ps)
-					.then(() => {
-						console.log(`[session-manager] Revived dormant session: "${session.title}" (${sessionId})`);
-						// restoreSession replaces the map entry — add client to the canonical one.
-						const revived = this.sessions.get(sessionId);
-						if (revived && (ws as any).readyState === 1) {
-							revived.clients.add(ws);
-							this._trackConnectedSession(revived);
-						}
-					})
-					.catch((err) => {
-						console.error(`[session-manager] Failed to revive session ${sessionId}:`, err);
-					});
-				return true; // optimistically accept the client
+			const poisonedRollback = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
+			if (!poisonedRollback) {
+				const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
+				if (ps && ps.agentSessionFile) {
+					console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
+					this._restoreSessionCoalesced(ps)
+						.then(() => {
+							console.log(`[session-manager] Revived dormant session: "${session.title}" (${sessionId})`);
+							// restoreSession replaces the map entry — add client to the canonical one.
+							const revived = this.sessions.get(sessionId);
+							if (revived && (ws as any).readyState === 1) {
+								revived.clients.add(ws);
+								this._trackConnectedSession(revived);
+							}
+						})
+						.catch((err) => {
+							console.error(`[session-manager] Failed to revive session ${sessionId}:`, err);
+						});
+					return true; // optimistically accept the client
+				}
+			} else {
+				console.log(`[session-manager] Client reconnected to poisoned-history rollback session=${sessionId}; awaiting Retry/follow-up`);
 			}
 		}
 
