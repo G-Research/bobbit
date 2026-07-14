@@ -431,6 +431,50 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager.sessions.get(ps.id)?.promptQueue.isEmpty).toBe(true);
 	});
 
+	it.each([
+		{ label: "generic errored", error: "fixture provider failure" },
+		{ label: "poisoned-history", error: ORPHAN_ERROR },
+	])("fences a $label follow-up before error recovery while assignRole stages", async ({ error }) => {
+		const file = hostTranscript(`assign-role-error-fence-${error === ORPHAN_ERROR ? "poison" : "generic"}`);
+		const startGate = deferred<void>();
+		const replacement = recordingBridge(() => {});
+		replacement.start = vi.fn(() => startGate.promise);
+		replacement.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted(`assign-role-error-fence-${error === ORPHAN_ERROR ? "poison" : "generic"}`, file);
+		const manager = makeManager(ps, replacement);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.prompt = vi.fn(async () => ({ success: true }));
+		oldBridge.stop = vi.fn(async () => {});
+		const original = liveSession(ps.id, oldBridge, {
+			unsubscribe: vi.fn(),
+			lastTurnErrored: true,
+			lastTurnErrorMessage: error,
+			consecutiveErrorTurns: 3,
+		});
+		manager.sessions.set(ps.id, original);
+		const poisonRecovery = vi.spyOn(manager, "_recoverPoisonedHistory");
+
+		const assignment = manager.assignRole(ps.id, {
+			name: "replacement-role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+		});
+		await vi.waitFor(() => expect(replacement.start).toHaveBeenCalledTimes(1));
+
+		await expect(manager.enqueuePrompt(ps.id, "fenced errored intent"))
+			.resolves.toEqual({ status: "queued" });
+		expect(poisonRecovery).not.toHaveBeenCalled();
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
+		expect(original.promptQueue.toArray().map((row: any) => row.text)).toEqual(["fenced errored intent"]);
+
+		startGate.resolve();
+		await expect(assignment).resolves.toBe(true);
+		expect(replacement.prompt).toHaveBeenCalledTimes(1);
+		expect(replacement.prompt).toHaveBeenCalledWith("fenced errored intent", undefined);
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
 	it("rolls staged prompts back durably and dispatches them on the original bridge after assignment failure", async () => {
 		const file = hostTranscript("assign-role-staging-rollback");
 		const startGate = deferred<void>();
@@ -539,7 +583,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(canonical.rpcClient).toBe(secondReplacement);
 		expect(canonical.role).toBe("second-role");
 		expect(canonical.accessory).toBe("second-accessory");
-		expect(canonical.roleAssignmentStaging).toBe(false);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 		expect(firstReplacement.stop).toHaveBeenCalledTimes(1);
 		expect(firstUnsubscribe).toHaveBeenCalledTimes(1);
 		expect(secondReplacement.stop).not.toHaveBeenCalled();
@@ -548,7 +592,135 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(firstReplacement.prompt).not.toHaveBeenCalled();
 		expect(secondReplacement.prompt).toHaveBeenCalledTimes(1);
 		expect(secondReplacement.prompt).toHaveBeenCalledWith("intent waits for final role", undefined);
-		expect(manager._roleAssignmentCoordinators.has(ps.id)).toBe(false);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
+	it("serializes assignRole then restart across the old-stop await and commits only the restart bridge", async () => {
+		const file = hostTranscript("assign-role-vs-restart");
+		const oldStopGate = deferred<void>();
+		const roleReplacement = recordingBridge(() => {});
+		const restartReplacement = recordingBridge(() => {});
+		roleReplacement.start = vi.fn(async () => {});
+		restartReplacement.start = vi.fn(async () => {});
+		roleReplacement.stop = vi.fn(async () => {});
+		restartReplacement.stop = vi.fn(async () => {});
+		roleReplacement.prompt = vi.fn(async () => ({ success: true }));
+		restartReplacement.prompt = vi.fn(async () => ({ success: true }));
+		const roleUnsubscribe = vi.fn();
+		const restartUnsubscribe = vi.fn();
+		roleReplacement.onEvent = vi.fn(() => roleUnsubscribe);
+		restartReplacement.onEvent = vi.fn(() => restartUnsubscribe);
+		const factory = vi.fn()
+			.mockReturnValueOnce(roleReplacement)
+			.mockReturnValueOnce(restartReplacement);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("assign-role-vs-restart", file);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.stop = vi.fn(() => oldStopGate.promise);
+		oldBridge.prompt = vi.fn(async () => ({ success: true }));
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() }));
+
+		const assignment = manager.assignRole(ps.id, {
+			name: "race-role",
+			promptTemplate: "Race role",
+			accessory: "race-accessory",
+		});
+		await vi.waitFor(() => expect(oldBridge.stop).toHaveBeenCalledTimes(1));
+		const restart = manager.restartAgent(ps.id);
+		await expect(manager.enqueuePrompt(ps.id, "intent survives role restart race"))
+			.resolves.toEqual({ status: "queued" });
+		expect(restartReplacement.start).not.toHaveBeenCalled();
+
+		oldStopGate.resolve();
+		await expect(Promise.all([assignment, restart])).resolves.toEqual([true, undefined]);
+
+		const canonical = manager.sessions.get(ps.id);
+		expect(factory).toHaveBeenCalledTimes(2);
+		expect(canonical.rpcClient).toBe(restartReplacement);
+		expect(roleReplacement.stop).toHaveBeenCalledTimes(1);
+		expect(roleUnsubscribe).toHaveBeenCalledTimes(1);
+		expect(restartReplacement.stop).not.toHaveBeenCalled();
+		expect(restartUnsubscribe).not.toHaveBeenCalled();
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
+		expect(roleReplacement.prompt).not.toHaveBeenCalled();
+		expect(restartReplacement.prompt).toHaveBeenCalledTimes(1);
+		expect(restartReplacement.prompt).toHaveBeenCalledWith("intent survives role restart race", undefined);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
+	it("serializes forceAbort then assignRole and drains only on the final role bridge", async () => {
+		const file = hostTranscript("force-abort-vs-role");
+		const forceStartGate = deferred<void>();
+		const forceReplacement = recordingBridge(() => {});
+		const roleReplacement = recordingBridge(() => {});
+		forceReplacement.start = vi.fn(() => forceStartGate.promise);
+		roleReplacement.start = vi.fn(async () => {});
+		forceReplacement.stop = vi.fn(async () => {});
+		roleReplacement.stop = vi.fn(async () => {});
+		forceReplacement.prompt = vi.fn(async () => ({ success: true }));
+		roleReplacement.prompt = vi.fn(async () => ({ success: true }));
+		const forceUnsubscribe = vi.fn();
+		const roleUnsubscribe = vi.fn();
+		forceReplacement.onEvent = vi.fn(() => forceUnsubscribe);
+		roleReplacement.onEvent = vi.fn(() => roleUnsubscribe);
+		const factory = vi.fn()
+			.mockReturnValueOnce(forceReplacement)
+			.mockReturnValueOnce(roleReplacement);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("force-abort-vs-role", file);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.abort = vi.fn(() => new Promise(() => {}));
+		oldBridge.getState = vi.fn(async () => ({ success: true, data: { sessionFile: file } }));
+		oldBridge.stop = vi.fn(async () => {});
+		oldBridge.prompt = vi.fn(async () => ({ success: true }));
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			status: "streaming",
+			streamingStartedAt: Date.now(),
+			unsubscribe: vi.fn(),
+		}));
+
+		const abort = manager.forceAbort(ps.id, 5);
+		await vi.waitFor(() => expect(forceReplacement.start).toHaveBeenCalledTimes(1));
+		const assignment = manager.assignRole(ps.id, {
+			name: "post-abort-role",
+			promptTemplate: "Post-abort role",
+			accessory: "post-abort-accessory",
+		});
+		await expect(manager.enqueuePrompt(ps.id, "intent waits for abort and role"))
+			.resolves.toEqual({ status: "queued" });
+		expect(roleReplacement.start).not.toHaveBeenCalled();
+
+		forceStartGate.resolve();
+		await expect(Promise.all([abort, assignment])).resolves.toEqual([undefined, true]);
+
+		const canonical = manager.sessions.get(ps.id);
+		expect(factory).toHaveBeenCalledTimes(2);
+		expect(canonical.rpcClient).toBe(roleReplacement);
+		expect(forceReplacement.stop).toHaveBeenCalledTimes(1);
+		expect(forceUnsubscribe).toHaveBeenCalledTimes(1);
+		expect(roleReplacement.stop).not.toHaveBeenCalled();
+		expect(roleUnsubscribe).not.toHaveBeenCalled();
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
+		expect(forceReplacement.prompt).not.toHaveBeenCalled();
+		expect(roleReplacement.prompt).toHaveBeenCalledTimes(1);
+		expect(roleReplacement.prompt).toHaveBeenCalledWith("intent waits for abort and role", undefined);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
 	it("assignRole wires a real sandbox replacement before rehydrating container history", async () => {

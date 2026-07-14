@@ -97,7 +97,7 @@ function harness(options?: { hadToolCalls?: boolean; queue?: string[] }) {
 	};
 	manager.sessions.set(session.id, session);
 	let respawns = 0;
-	manager._respawnAgentInPlace = async (current: any) => {
+	manager._respawnAgentInPlaceOwned = async (_id: string, current: any) => {
 		respawns++;
 		// Match the real helper's temporary SessionInfo gap and fresh SessionInfo.
 		// In particular, restore does not copy process-local pending prompt envelopes.
@@ -184,7 +184,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		let rejectReplacement!: (error: Error) => void;
 		const replacement = new Promise<void>((_resolve, reject) => { rejectReplacement = reject; });
 		let respawns = 0;
-		h.manager._respawnAgentInPlace = async () => {
+		h.manager._respawnAgentInPlaceOwned = async () => {
 			respawns++;
 			await replacement;
 		};
@@ -197,7 +197,8 @@ describe("SessionManager poisoned-history recovery", () => {
 		rejectReplacement(new Error("fixture shared replacement failed"));
 
 		const results = await Promise.allSettled([first, second]);
-		assert.deepEqual(results.map((result) => result.status), ["rejected", "rejected"]);
+		assert.deepEqual(results.map((result) => result.status), ["rejected", "fulfilled"]);
+		assert.deepEqual(results[1], { status: "fulfilled", value: { status: "queued" } });
 		assert.equal(respawns, 1, "concurrent follow-ups must share one replacement attempt");
 		const rollback = h.manager.sessions.get(h.session.id);
 		const queued = rollback.promptQueue.toArray();

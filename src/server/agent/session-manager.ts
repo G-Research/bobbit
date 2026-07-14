@@ -685,8 +685,6 @@ export interface SessionInfo {
 	lifecycleGeneration?: number;
 	/** True once this SessionInfo has been replaced or is being replaced by a restore/respawn. */
 	lifecycleFenced?: boolean;
-	/** True while one or more serialized role assignments are staging a replacement bridge. */
-	roleAssignmentStaging?: boolean;
 	/** Whether tool calls were executed during the current/last turn */
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
@@ -1124,9 +1122,19 @@ export interface SessionManagerOptions {
 	stateDir?: string;
 }
 
-type RestoreCoordinator = {
+type SessionReplacementToken = {
+	coordinator: SessionReplacementCoordinator;
 	generation: number;
-	promise: Promise<SessionInfo | undefined>;
+	kind: string;
+};
+
+type SessionReplacementCoordinator = {
+	tail: Promise<void>;
+	pending: number;
+	active?: SessionReplacementToken;
+	promptOwner?: SessionInfo;
+	coalesced: Map<string, Promise<unknown>>;
+	drainOnRelease: boolean;
 };
 
 type IdleWaiter = {
@@ -1243,12 +1251,15 @@ export class SessionManager {
 	 *  See docs/design/unify-session-status.md §3.4. */
 	private _statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	private static readonly STATUS_HEARTBEAT_INTERVAL_MS = 15_000;
-	/** Per-session restore/respawn mutex. Concurrent revive triggers join this promise instead of replacing each other. */
-	private _restoreCoordinators = new Map<string, RestoreCoordinator>();
+	/**
+	 * Single per-session replacement owner. Restore/respawn, role assignment,
+	 * force-abort recovery, and termination all serialize here. Its presence is
+	 * also the prompt-dispatch fence: accepted intent is durably queued on
+	 * `promptOwner` until the final replacement commits or rolls back.
+	 */
+	private _sessionReplacementCoordinators = new Map<string, SessionReplacementCoordinator>();
 	/** User-driven orphan-history recoveries include their redrive so duplicate Retry clicks join instead of dispatching twice. */
 	private _poisonedHistoryRecoveries = new Map<string, Promise<void>>();
-	/** Per-session role-assignment queue. The first request fences prompt dispatch; the last release drains durable intent. */
-	private _roleAssignmentCoordinators = new Map<string, { tail: Promise<void>; pending: number }>();
 	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
 	private _sessionRespawnGenerations = new Map<string, number>();
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
@@ -1296,49 +1307,109 @@ export class SessionManager {
 		this._untrackConnectedSession(session);
 	}
 
-	private _coalesceRestore(
-		sessionId: string,
-		restore: (generation: number) => Promise<SessionInfo | undefined>,
-	): Promise<SessionInfo | undefined> {
-		const inFlight = this._restoreCoordinators.get(sessionId);
-		if (inFlight) return inFlight.promise;
+	private _replacementTokenIsCurrent(sessionId: string, token: SessionReplacementToken): boolean {
+		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		return coordinator === token.coordinator
+			&& coordinator.active === token
+			&& this._currentRespawnGeneration(sessionId) === token.generation;
+	}
 
-		const generation = this._nextRespawnGeneration(sessionId);
-		const promise = (async () => restore(generation))()
-			.finally(() => {
-				const current = this._restoreCoordinators.get(sessionId);
-				if (current?.generation === generation) this._restoreCoordinators.delete(sessionId);
-			});
-		this._restoreCoordinators.set(sessionId, { generation, promise });
-		return promise;
+	private _mergeReplacementPromptOwner(coordinator: SessionReplacementCoordinator, canonical: SessionInfo | undefined): void {
+		const owner = coordinator.promptOwner;
+		if (!owner || !canonical || owner === canonical) {
+			if (canonical) coordinator.promptOwner = canonical;
+			return;
+		}
+		const canonicalRows = canonical.promptQueue.toArray();
+		const knownIds = new Set(canonicalRows.map(row => row.id));
+		const missing = owner.promptQueue.toArray().filter(row => !knownIds.has(row.id));
+		if (missing.length > 0) {
+			canonical.promptQueue = new PromptQueue([...canonicalRows, ...missing]);
+			this.broadcastQueue(canonical);
+		}
+		if (owner.pendingSkillExpansions?.length) {
+			const existing = canonical.pendingSkillExpansions ?? [];
+			const signatures = new Set(existing.map(entry => JSON.stringify(entry)));
+			canonical.pendingSkillExpansions = [
+				...existing,
+				...owner.pendingSkillExpansions.filter(entry => !signatures.has(JSON.stringify(entry))),
+			];
+		}
+		canonical.lastPromptSource = owner.lastPromptSource ?? canonical.lastPromptSource;
+		coordinator.promptOwner = canonical;
+	}
+
+	private _coordinateSessionReplacement<T>(
+		sessionId: string,
+		kind: string,
+		operation: (token: SessionReplacementToken) => Promise<T>,
+		opts?: { coalesceKey?: string; drainOnRelease?: boolean },
+	): Promise<T> {
+		let coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		if (!coordinator) {
+			coordinator = {
+				tail: Promise.resolve(),
+				pending: 0,
+				promptOwner: this.sessions.get(sessionId),
+				coalesced: new Map(),
+				drainOnRelease: false,
+			};
+			this._sessionReplacementCoordinators.set(sessionId, coordinator);
+		}
+		if (opts?.coalesceKey) {
+			const existing = coordinator.coalesced.get(opts.coalesceKey);
+			if (existing) return existing as Promise<T>;
+		}
+
+		coordinator.pending += 1;
+		coordinator.drainOnRelease ||= opts?.drainOnRelease === true;
+		const owned = coordinator;
+		const operationPromise = owned.tail.then(async () => {
+			const token: SessionReplacementToken = {
+				coordinator: owned,
+				generation: this._nextRespawnGeneration(sessionId),
+				kind,
+			};
+			owned.active = token;
+			const result = await operation(token);
+			if (!this._replacementTokenIsCurrent(sessionId, token)) {
+				throw new Error(`Session ${sessionId} ${kind} replacement was superseded`);
+			}
+			return result;
+		});
+		let resultPromise!: Promise<T>;
+		resultPromise = operationPromise.finally(() => {
+			if (opts?.coalesceKey && owned.coalesced.get(opts.coalesceKey) === resultPromise) {
+				owned.coalesced.delete(opts.coalesceKey);
+			}
+			owned.pending -= 1;
+			this._mergeReplacementPromptOwner(owned, this.sessions.get(sessionId));
+			if (owned.pending !== 0 || this._sessionReplacementCoordinators.get(sessionId) !== owned) return;
+			this._sessionReplacementCoordinators.delete(sessionId);
+			owned.active = undefined;
+			const canonical = this.sessions.get(sessionId);
+			if (!canonical) return;
+			if (canonical.status === "starting") broadcastStatus(canonical, "idle");
+			if (
+				owned.drainOnRelease
+				&& canonical.status === "idle"
+				&& !canonical.isCompacting
+				&& !this._bootRepromptedSessions.has(sessionId)
+				&& !canonical.promptQueue.isEmpty
+			) this.drainQueue(canonical);
+		});
+		owned.tail = resultPromise.then(() => undefined, () => undefined);
+		if (opts?.coalesceKey) owned.coalesced.set(opts.coalesceKey, resultPromise);
+		return resultPromise;
 	}
 
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
-		return this._coalesceRestore(ps.id, async (generation) => {
+		return this._coordinateSessionReplacement(ps.id, "restore", async (token) => {
 			await this.restoreSession(ps);
 			const restored = this.sessions.get(ps.id);
-			if (restored) {
-				restored.lifecycleGeneration = generation;
-				// CS-R2 follow-up (narrow CS-R7): restoreSession() re-seeds the prompt
-				// queue from `ps.messageQueue` and broadcasts idle WITHOUT draining, so
-				// a prompt persisted in the queue — or enqueued during the revive window
-				// — would sit undispatched (doc-04 F7 shape). Drain once here against the
-				// canonical revived object. `drainQueue` itself no-ops unless this is the
-				// current writer (`_sessionWriterIsCurrent`); we additionally gate on idle
-				// + not-compacting + no pending boot-reprompt so we never race the
-				// mid-turn boot-resume nudge. This is intentionally a single drain, not a
-				// broad drain-on-every-idle-transition hook.
-				if (
-					restored.status === "idle" &&
-					!restored.isCompacting &&
-					!this._bootRepromptedSessions.has(ps.id) &&
-					!restored.promptQueue.isEmpty
-				) {
-					this.drainQueue(restored);
-				}
-			}
+			if (restored) restored.lifecycleGeneration = token.generation;
 			return restored;
-		});
+		}, { coalesceKey: "rehydrate", drainOnRelease: true });
 	}
 
 	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
@@ -3221,6 +3292,51 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, updates);
 	}
 
+	private _queuePromptBehindReplacement(sessionId: string, text: string, opts?: {
+		images?: Array<{ type: "image"; data: string; mimeType: string }>;
+		attachments?: unknown[];
+		isSteered?: boolean;
+		modelText?: string;
+		skillExpansions?: SkillExpansion[];
+		fileMentions?: FileMention[];
+		source?: PromptSource;
+		suppressTitleGen?: boolean;
+	}): { status: "queued" } | undefined {
+		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		if (!coordinator) return undefined;
+		const session = this.sessions.get(sessionId) ?? coordinator.promptOwner;
+		if (!session) return { status: "queued" };
+		coordinator.promptOwner ??= session;
+		session.lastPromptSource = opts?.source ?? "user";
+		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
+		const hasSkillExpansions = !!opts?.skillExpansions?.length;
+		const hasFileMentions = !!opts?.fileMentions?.length;
+		if (hasSkillExpansions || hasFileMentions) {
+			appendSkillSidecarEntry(sessionId, {
+				ts: this.clock.now(),
+				modelText: dispatchText,
+				originalText: text,
+				skillExpansions: opts?.skillExpansions ?? [],
+				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+			});
+			if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
+			session.pendingSkillExpansions.push({
+				modelText: dispatchText,
+				originalText: text,
+				skillExpansions: opts?.skillExpansions ?? [],
+				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+			});
+		}
+		session.promptQueue.enqueue(dispatchText, {
+			images: opts?.images,
+			attachments: opts?.attachments,
+			isSteered: opts?.isSteered,
+			suppressTitleGen: opts?.suppressTitleGen,
+		});
+		this.broadcastQueue(session);
+		return { status: "queued" };
+	}
+
 	/**
 	 * dead-bridge auto-revive — Auto-revive a dead RPC bridge before dispatching a brand-new
 	 * prompt. Used ONLY at the two new-prompt sites in `enqueuePrompt` (the
@@ -3273,6 +3389,13 @@ export class SessionManager {
 		 *  mark the session titleGenerated, so the next real prompt still names it. */
 		suppressTitleGen?: boolean;
 	}): Promise<{ status: "dispatched" | "queued" }> {
+		// Replacement ownership is the first dispatch fence — before poison/error
+		// classification, revive logic, or any RPC. Every prompt accepted while a
+		// bridge is staged is persisted exactly once and released only after the
+		// final coordinated replacement commits or rolls back.
+		const staged = this._queuePromptBehindReplacement(sessionId, text, opts);
+		if (staged) return staged;
+
 		// An in-place poison respawn temporarily removes SessionInfo. Join before
 		// looking it up so prompts arriving in that window are not silently lost.
 		// If the shared replacement fails, this is a distinct accepted follow-up,
@@ -3333,7 +3456,8 @@ export class SessionManager {
 		// F7 stranded-prompt shape). Instead, JOIN the coalesced restore (it starts
 		// one or joins the in-flight one), then re-read the canonical revived session
 		// and dispatch against it via the normal path below.
-		const restoreInFlight = this._restoreCoordinators.has(sessionId);
+		const restoreCoordinator = this._sessionReplacementCoordinators.get(sessionId);
+		const restoreInFlight = !!restoreCoordinator;
 		const inReviveWindow = restoreInFlight
 			|| session.status === "terminated"
 			|| session.dormant === true
@@ -3352,11 +3476,12 @@ export class SessionManager {
 				// revive it in place to carry clients and process-local intent forward.
 				// Other dormant restores retain the existing cold-restore path.
 				if (restoreInFlight) {
-					await this._restoreCoordinators.get(sessionId)?.promise;
+					await restoreCoordinator?.tail;
 				} else if (poisonedDormant) {
 					const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 					await this._respawnAgentInPlace(session, ps, {
 						preserveSandboxRealm: session.sandboxed === true,
+						deferQueueDrain: true,
 						mutatePs: p => {
 							if (overrideAllowedTools !== undefined) (p as any)._overrideAllowedTools = overrideAllowedTools;
 							if (revivedSessionOnlyGrantedTools !== undefined) (p as any)._overrideGrantedTools = revivedSessionOnlyGrantedTools;
@@ -3382,9 +3507,9 @@ export class SessionManager {
 					];
 				}
 			} else if (restoreInFlight) {
-				// No restorable record of our own, but a restore is already running for
+				// No restorable record of our own, but a replacement is already running for
 				// this session — join it rather than acting on the stale object.
-				await this._restoreCoordinators.get(sessionId)?.promise;
+				await restoreCoordinator?.tail;
 				const revived = this.sessions.get(sessionId);
 				if (!revived) return { status: "queued" };
 				session = revived;
@@ -3472,27 +3597,21 @@ export class SessionManager {
 					return this.enqueuePrompt(sessionId, text, opts);
 				}
 
+				// Persist the initiating follow-up before replacement starts. Prompts that
+				// arrive behind it use the coordinator's entry fence, preserving acceptance
+				// order even if startup fails. On success only this exact row is removed and
+				// dispatched ahead of older parked work.
+				const accepted = session.promptQueue.enqueue(dispatchText, {
+					images: opts?.images,
+					attachments: opts?.attachments,
+					isSteered: opts?.isSteered,
+					suppressTitleGen: opts?.suppressTitleGen,
+				});
+				this.broadcastQueue(session);
 				const recovery = (async () => {
-					let recovered: SessionInfo | undefined;
-					try {
-						recovered = await this._recoverPoisonedHistory(session, "follow-up");
-						if (!recovered) throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
-					} catch (err) {
-						// The request has already been accepted as the user's new intent. If
-						// replacement startup fails, persist it on the rollback capsule so a
-						// later successful Retry/follow-up can drain it rather than losing it.
-						const rollback = this.sessions.get(session.id);
-						if (rollback) {
-							rollback.promptQueue.enqueue(dispatchText, {
-								images: opts?.images,
-								attachments: opts?.attachments,
-								isSteered: opts?.isSteered,
-								suppressTitleGen: opts?.suppressTitleGen,
-							});
-							this.broadcastQueue(rollback);
-						}
-						throw err;
-					}
+					const recovered = await this._recoverPoisonedHistory(session, "follow-up");
+					if (!recovered) throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+					if (recovered.promptQueue.remove(accepted.id)) this.broadcastQueue(recovered);
 					this.consumeRecoveredPromptDispatchRows(recovered);
 					recovered.lastTurnErrored = false;
 					recovered.lastTurnErrorMessage = undefined;
@@ -4080,11 +4199,10 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
-		// assignRole keeps the old bridge subscribed until its replacement is fully
-		// validated so rollback remains possible. Fence any late old-bridge lifecycle
-		// frame during that window: queued user intent belongs to the replacement (or
-		// rollback bridge) and must not be drained against the bridge being replaced.
-		if (session.roleAssignmentStaging) return;
+		// A coordinated replacement may keep the old bridge subscribed until its
+		// successor is validated. Fence all lifecycle side effects during that window:
+		// accepted intent belongs to the eventual canonical bridge, never this writer.
+		if (this._sessionReplacementCoordinators.has(session.id)) return;
 
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
@@ -4639,7 +4757,7 @@ export class SessionManager {
 		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
 		catch { ps = undefined; }
 		if (!ps?.agentSessionFile) return undefined;
-		const restored = await this._respawnAgentInPlace(session, ps);
+		const restored = await this._respawnAgentInPlace(session, ps, { deferQueueDrain: true });
 		return restored ?? this.sessions.get(session.id);
 	}
 
@@ -4648,52 +4766,52 @@ export class SessionManager {
 		session: SessionInfo,
 		boundary: "retry" | "follow-up",
 	): Promise<SessionInfo | undefined> {
-		let ps: PersistedSession | undefined;
-		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
-		catch { ps = undefined; }
-		if (!ps?.agentSessionFile) return undefined;
+		return this._coordinateSessionReplacement(session.id, "poison-recovery", async (token) => {
+			const current = this.sessions.get(session.id) ?? session;
+			let ps: PersistedSession | undefined;
+			try { ps = this.resolveStoreForSession(session.id).get(session.id); }
+			catch { ps = undefined; }
+			if (!ps?.agentSessionFile) return undefined;
 
-		// Follow-up prompts register their skill/file-mention echo envelope before
-		// error-state gating. A real in-place respawn builds a fresh SessionInfo, so
-		// carry those process-local envelopes across or the restored Pi echo exposes
-		// expanded model text and loses its UI chips.
-		const pendingPromptEnvelopes = session.pendingSkillExpansions?.slice();
-		const recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds?.slice();
-		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools?.slice();
-		const savedOneTimeGrantedTools = session.oneTimeGrantedTools?.slice();
-		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
-		const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-		const repairedRecords = await sanitizeAgentTranscriptFile(fileCtx, ps.agentSessionFile, this.sandboxManager);
-		console.info(
-			`[session-manager] Poisoned-history repair session=${session.id} boundary=${boundary} repairedRecords=${repairedRecords} sandboxed=${ps.sandboxed === true} project=${session.projectId ?? ps.projectId ?? "unknown"}`,
-		);
-		const restored = await this._respawnAgentInPlace(session, ps, {
-			preserveSandboxRealm: session.sandboxed === true,
-			mutatePs: p => {
-				if (overrideAllowedTools !== undefined) (p as any)._overrideAllowedTools = overrideAllowedTools;
-				if (savedSessionOnlyGrantedTools !== undefined) (p as any)._overrideGrantedTools = savedSessionOnlyGrantedTools;
-			},
-		});
-		const target = restored ?? this.sessions.get(session.id);
-		if (target && target !== session) {
-			if (savedSessionOnlyGrantedTools) target.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
-			if (savedOneTimeGrantedTools) target.oneTimeGrantedTools = savedOneTimeGrantedTools;
-			if (pendingPromptEnvelopes?.length) {
-				target.pendingSkillExpansions = [
-					...pendingPromptEnvelopes,
-					...(target.pendingSkillExpansions ?? []),
-				];
+			const pendingPromptEnvelopes = current.pendingSkillExpansions?.slice();
+			const recoveredPromptDispatchQueueIds = current.recoveredPromptDispatchQueueIds?.slice();
+			const savedSessionOnlyGrantedTools = current.sessionOnlyGrantedTools?.slice();
+			const savedOneTimeGrantedTools = current.oneTimeGrantedTools?.slice();
+			const overrideAllowedTools = this.recomputeAllowedToolsForRestart(current, ps);
+			const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+			const repairedRecords = await sanitizeAgentTranscriptFile(fileCtx, ps.agentSessionFile, this.sandboxManager);
+			console.info(
+				`[session-manager] Poisoned-history repair session=${session.id} boundary=${boundary} repairedRecords=${repairedRecords} sandboxed=${ps.sandboxed === true} project=${current.projectId ?? ps.projectId ?? "unknown"}`,
+			);
+			const restored = await this._respawnAgentInPlaceOwned(session.id, current, ps, {
+				preserveSandboxRealm: current.sandboxed === true,
+				deferQueueDrain: true,
+				mutatePs: p => {
+					if (overrideAllowedTools !== undefined) (p as any)._overrideAllowedTools = overrideAllowedTools;
+					if (savedSessionOnlyGrantedTools !== undefined) (p as any)._overrideGrantedTools = savedSessionOnlyGrantedTools;
+				},
+			}, token);
+			const target = restored ?? this.sessions.get(session.id);
+			if (target && target !== current) {
+				if (savedSessionOnlyGrantedTools) target.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
+				if (savedOneTimeGrantedTools) target.oneTimeGrantedTools = savedOneTimeGrantedTools;
+				if (pendingPromptEnvelopes?.length) {
+					target.pendingSkillExpansions = [
+						...pendingPromptEnvelopes,
+						...(target.pendingSkillExpansions ?? []),
+					];
+				}
+				if (recoveredPromptDispatchQueueIds?.length) {
+					target.recoveredPromptDispatchQueueIds = [
+						...new Set([
+							...recoveredPromptDispatchQueueIds,
+							...(target.recoveredPromptDispatchQueueIds ?? []),
+						]),
+					];
+				}
 			}
-			if (recoveredPromptDispatchQueueIds?.length) {
-				target.recoveredPromptDispatchQueueIds = [
-					...new Set([
-						...recoveredPromptDispatchQueueIds,
-						...(target.recoveredPromptDispatchQueueIds ?? []),
-					]),
-				];
-			}
-		}
-		return target;
+			return target;
+		}, { coalesceKey: "poison-recovery", drainOnRelease: false });
 	}
 
 	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
@@ -5321,53 +5439,81 @@ export class SessionManager {
 			finalStatus?: SessionStatus;
 			/** Fail closed rather than moving a sandbox transcript onto a host bridge. */
 			preserveSandboxRealm?: boolean;
+			/** Poison redrive must dispatch its superseding intent before parked rows. */
+			deferQueueDrain?: boolean;
 		},
 	): Promise<SessionInfo | undefined> {
-		return this._coalesceRestore(session.id, async (generation) => {
-			const savedClients = new Set(session.clients);
-			// Snapshot AFTER unsubscribe so no in-flight event races past lastSeq.
-			session.unsubscribe();
-			const frameOfRef = this._snapshotStreamingFrameOfReference(session);
-			this._fenceReplacedSession(session, generation);
-			try { await session.rpcClient.stop(); } catch { /* already dead */ }
+		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
+			this._respawnAgentInPlaceOwned(session.id, session, ps, opts, token), {
+				coalesceKey: "rehydrate",
+				drainOnRelease: opts?.deferQueueDrain !== true,
+			});
+	}
 
-			this.sessions.delete(session.id);
-			(ps as any)._restartFrameOfReference = frameOfRef;
-			if (opts?.preserveSandboxRealm) (ps as any)._preserveSandboxRealm = true;
-			opts?.mutatePs?.(ps);
-			try {
-				await this.restoreSession(ps);
-			} catch (err) {
-				// The old process is deliberately dead and fenced, but its SessionInfo
-				// remains the authoritative rollback capsule for clients, visible event
-				// history, queued prompts, retry intent, model/thinking selection, and
-				// realm metadata. Keep it dormant so a later Retry/follow-up can start a
-				// fresh in-place restore without dispatching against the stale bridge.
-				this.sessions.set(session.id, session);
-				session.restoreError = err instanceof Error ? err.message : String(err);
-				for (const ws of savedClients) {
-					if ((ws as any).readyState === 1) session.clients.add(ws);
+	private async _respawnAgentInPlaceOwned(
+		id: string,
+		requestedSession: SessionInfo,
+		requestedPs: PersistedSession,
+		opts: {
+			mutatePs?: (ps: PersistedSession) => void;
+			finalStatus?: SessionStatus;
+			preserveSandboxRealm?: boolean;
+			deferQueueDrain?: boolean;
+		} | undefined,
+		token: SessionReplacementToken,
+	): Promise<SessionInfo | undefined> {
+		// A role/restart queued ahead of us may already have replaced the object.
+		// Resolve canonical ownership only when this serialized operation starts.
+		const session = this.sessions.get(id) ?? requestedSession;
+		const ps = this.resolveStoreForId(id)?.get(id) ?? requestedPs;
+		const savedClients = new Set(session.clients);
+		session.unsubscribe();
+		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
+		this._fenceReplacedSession(session, token.generation);
+		try { await session.rpcClient.stop(); } catch { /* already dead */ }
+		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+			throw new Error(`Session ${id} respawn replacement was superseded after old bridge stop`);
+		}
+
+		this.sessions.delete(id);
+		(ps as any)._restartFrameOfReference = frameOfRef;
+		if (opts?.preserveSandboxRealm) (ps as any)._preserveSandboxRealm = true;
+		opts?.mutatePs?.(ps);
+		try {
+			await this.restoreSession(ps);
+			if (!this._replacementTokenIsCurrent(id, token)) {
+				const stale = this.sessions.get(id);
+				if (stale && stale !== session) {
+					try { stale.unsubscribe(); } catch { /* best-effort */ }
+					await stale.rpcClient.stop().catch(() => {});
 				}
-				broadcastStatus(session, "terminated");
-				this._trackConnectedSession(session);
-				throw err;
-			} finally {
-				delete (ps as any)._restartFrameOfReference;
-				delete (ps as any)._overrideAllowedTools;
-				delete (ps as any)._overrideGrantedTools;
-				delete (ps as any)._preserveSandboxRealm;
+				throw new Error(`Session ${id} respawn replacement was superseded during restore`);
 			}
-			const restored = this.sessions.get(session.id);
-			if (restored) {
-				restored.lifecycleGeneration = generation;
-				for (const ws of savedClients) {
-					if ((ws as any).readyState === 1) restored.clients.add(ws);
-				}
-				broadcastStatus(restored, opts?.finalStatus ?? "idle");
-				this._trackConnectedSession(restored);
+		} catch (err) {
+			this.sessions.set(id, session);
+			session.restoreError = err instanceof Error ? err.message : String(err);
+			for (const ws of savedClients) {
+				if ((ws as any).readyState === 1) session.clients.add(ws);
 			}
-			return restored;
-		});
+			broadcastStatus(session, "terminated");
+			this._trackConnectedSession(session);
+			throw err;
+		} finally {
+			delete (ps as any)._restartFrameOfReference;
+			delete (ps as any)._overrideAllowedTools;
+			delete (ps as any)._overrideGrantedTools;
+			delete (ps as any)._preserveSandboxRealm;
+		}
+		const restored = this.sessions.get(id);
+		if (restored) {
+			restored.lifecycleGeneration = token.generation;
+			for (const ws of savedClients) {
+				if ((ws as any).readyState === 1) restored.clients.add(ws);
+			}
+			broadcastStatus(restored, opts?.finalStatus ?? "idle");
+			this._trackConnectedSession(restored);
+		}
+		return restored;
 	}
 
 	/**
@@ -8001,45 +8147,31 @@ export class SessionManager {
 	 * or against the original bridge after a clean rollback.
 	 */
 	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
-		let coordinator = this._roleAssignmentCoordinators.get(id);
-		if (!coordinator) {
-			const session = this.sessions.get(id);
-			if (!session) return false;
-			if (session.status === "streaming") throw new Error("Cannot assign role while agent is streaming");
-
-			coordinator = { tail: Promise.resolve(), pending: 0 };
-			this._roleAssignmentCoordinators.set(id, coordinator);
-			session.roleAssignmentStaging = true;
-			broadcastStatus(session, "starting");
-		}
-
-		coordinator.pending += 1;
-		const operation = coordinator.tail.then(() => this._assignRoleStaged(id, role));
-		coordinator.tail = operation.then(() => undefined, () => undefined);
-
-		try {
-			return await operation;
-		} finally {
-			coordinator.pending -= 1;
-			if (coordinator.pending === 0 && this._roleAssignmentCoordinators.get(id) === coordinator) {
-				this._roleAssignmentCoordinators.delete(id);
-				const canonical = this.sessions.get(id);
-				if (canonical) {
-					canonical.roleAssignmentStaging = false;
-					if (canonical.status === "starting") broadcastStatus(canonical, "idle");
-					if (canonical.status === "idle" && !canonical.promptQueue.isEmpty) this.drainQueue(canonical);
-				}
-			}
-		}
-	}
-
-	/** Prepare and commit one role replacement while assignRole owns the session fence. */
-	private async _assignRoleStaged(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
-		if (!session.roleAssignmentStaging) {
-			throw new Error(`Session ${id} lifecycle changed during role assignment`);
+		if (!this._sessionReplacementCoordinators.has(id) && session.status === "streaming") {
+			throw new Error("Cannot assign role while agent is streaming");
 		}
+		if (!this._sessionReplacementCoordinators.has(id)) broadcastStatus(session, "starting");
+		return this._coordinateSessionReplacement(id, "assign-role", (token) =>
+			this._assignRoleStaged(id, role, token), { drainOnRelease: true });
+	}
+
+	/** Prepare and commit one role replacement while the shared lifecycle coordinator owns the session. */
+	private async _assignRoleStaged(
+		id: string,
+		role: { name: string; promptTemplate: string; accessory: string },
+		token: SessionReplacementToken,
+	): Promise<boolean> {
+		const session = this.sessions.get(id);
+		if (!session) return false;
+		if (!this._replacementTokenIsCurrent(id, token)) {
+			throw new Error(`Session ${id} role replacement was superseded before staging`);
+		}
+		// Role assignment swaps the bridge on the same SessionInfo. Advance its
+		// writer generation now so both commit and rollback remain canonical when
+		// the coordinator releases queued intent.
+		session.lifecycleGeneration = token.generation;
 
 		// Get the agent session file so we can restore conversation. A structured
 		// getState rejection is just as much a fallback case as a thrown RPC error;
@@ -8227,8 +8359,8 @@ export class SessionManager {
 			// Another lifecycle replacement may have won while this bridge was being
 			// prepared. Never stop or overwrite that newer canonical session; the catch
 			// path below disposes this staged process and listener.
-			if (this.sessions.get(id) !== session || !session.roleAssignmentStaging) {
-				throw new Error(`Session ${id} lifecycle changed during role assignment`);
+			if (this.sessions.get(id) !== session || !this._replacementTokenIsCurrent(id, token)) {
+				throw new Error(`Session ${id} role replacement was superseded before old bridge stop`);
 			}
 
 			// Persist the metadata before the irreversible old-process stop. If the
@@ -8239,6 +8371,13 @@ export class SessionManager {
 			} catch (err) {
 				roleStore.update(id, { role: session.role, accessory: session.accessory });
 				throw err;
+			}
+			// The old stop is the irreversible await in the two-phase swap. Revalidate
+			// both identity and ownership afterwards; a stale staged bridge is disposed
+			// by the catch path and can never overwrite a newer canonical process.
+			if (this.sessions.get(id) !== session || !this._replacementTokenIsCurrent(id, token)) {
+				roleStore.update(id, { role: session.role, accessory: session.accessory });
+				throw new Error(`Session ${id} role replacement was superseded after old bridge stop`);
 			}
 		} catch (err) {
 			unsub();
@@ -8565,8 +8704,17 @@ export class SessionManager {
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
+		if (!this.sessions.has(id)) return false;
+		return this._coordinateSessionReplacement(id, "terminate", (token) =>
+			this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
+	}
+
+	private async _terminateSessionOwned(id: string, token: SessionReplacementToken): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
+		if (!this._replacementTokenIsCurrent(id, token)) {
+			throw new Error(`Session ${id} termination was superseded before start`);
+		}
 
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id);
@@ -8614,6 +8762,9 @@ export class SessionManager {
 
 		session.unsubscribe();
 		await session.rpcClient.stop();
+		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+			throw new Error(`Session ${id} termination was superseded after bridge stop`);
+		}
 		broadcastStatus(session, "terminated");
 
 		// Clean up background processes (abort any in-flight waits first so
@@ -10161,8 +10312,27 @@ export class SessionManager {
 		// just stopped (reachable via the team-abort route). No-op when none pending.
 		this.cancelPendingAutoRetry(session, "terminated");
 
-		// If not streaming, nothing more to abort
-		if (session.status !== "streaming") return;
+		// Outside a replacement, an idle abort remains a no-op. During replacement,
+		// queue behind the current owner so Stop has deterministic invocation order
+		// and can never race a staged bridge commit.
+		if (session.status !== "streaming" && !this._sessionReplacementCoordinators.has(id)) return;
+		await this._coordinateSessionReplacement(id, "force-abort", (token) =>
+			this._forceAbortOwned(id, gracePeriodMs, token), {
+				coalesceKey: "force-abort",
+				drainOnRelease: true,
+			});
+	}
+
+	private async _forceAbortOwned(id: string, gracePeriodMs: number, token: SessionReplacementToken): Promise<void> {
+		const session = this.sessions.get(id);
+		if (!session || session.status !== "streaming") return;
+		if (!this._replacementTokenIsCurrent(id, token)) {
+			throw new Error(`Session ${id} force-abort was superseded before start`);
+		}
+		// Graceful abort keeps the same SessionInfo/bridge, so advance its writer
+		// generation before the fence suppresses lifecycle events. Coordinator
+		// release can then drain reconciled intent against this canonical writer.
+		session.lifecycleGeneration = token.generation;
 
 		// Broadcast aborting status so UI shows feedback during grace period
 		broadcastStatus(session, "aborting");
@@ -10206,7 +10376,14 @@ export class SessionManager {
 
 		const settled = await settledPromise;
 
-		if (settled) return;
+		if (settled) {
+			// The shared replacement fence suppresses the canonical listener's
+			// lifecycle mutations while forceAbort owns the session. Reconcile the
+			// graceful terminal event here; coordinator release performs the one drain.
+			this._reconcileAfterAbort(session);
+			broadcastStatus(session, "idle");
+			return;
+		}
 
 		// Graceful abort didn't work — force kill and restart the agent
 		console.log(`[session-manager] Force-aborting session ${id} — killing agent process`);
@@ -10241,9 +10418,11 @@ export class SessionManager {
 
 		// Restart the agent process
 		try {
-			await this._coalesceRestore(id, async (generation) => {
-				session.lifecycleGeneration = generation;
-				const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+			if (!this._replacementTokenIsCurrent(id, token)) {
+				throw new Error(`Session ${id} force-abort recovery was superseded before replacement start`);
+			}
+			session.lifecycleGeneration = token.generation;
+			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -10354,7 +10533,13 @@ export class SessionManager {
 			});
 
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
-			await rpcClient.start();
+			try {
+				await rpcClient.start();
+			} catch (err) {
+				unsub();
+				await rpcClient.stop().catch(() => {});
+				throw err;
+			}
 
 			// Resume session if we have the session file. Never install or drain a
 			// replacement process unless it accepted the sanitized durable history.
@@ -10371,6 +10556,11 @@ export class SessionManager {
 				throw err;
 			}
 			switchingSession = false;
+			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+				unsub();
+				await rpcClient.stop().catch(() => {});
+				throw new Error(`Session ${id} force-abort replacement was superseded after rehydration`);
+			}
 
 			// Swap in the new bridge only after history rehydration.
 			session.rpcClient = rpcClient;
@@ -10381,19 +10571,23 @@ export class SessionManager {
 			try {
 				await this.tryAutoSelectModel(session);
 			} catch (err) {
-				await rpcClient.stop();
+				unsub();
+				await rpcClient.stop().catch(() => {});
 				throw err;
+			}
+			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session || session.rpcClient !== rpcClient) {
+				unsub();
+				await rpcClient.stop().catch(() => {});
+				throw new Error(`Session ${id} force-abort replacement was superseded during model verification`);
 			}
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
 
-				// Drain any queued messages (steered first, then normal). Fresh
-				// retry budget — the old process (and its busy guard) is gone.
-				session.recoverDrainAttempts = 0;
-				this.drainQueue(session);
-				return session;
-			});
+			// Fresh retry budget — the old process (and its busy guard) is gone.
+			// The shared coordinator performs the one queue drain after every queued
+			// lifecycle replacement has settled, never against an intermediate bridge.
+			session.recoverDrainAttempts = 0;
 		} catch (err) {
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
 			broadcastStatus(session, "terminated");
