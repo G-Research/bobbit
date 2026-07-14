@@ -252,12 +252,11 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 
 	test("STALE MODE (PR #1005 P1): a project slot re-evaluates mode when a LATER revision adds a cross-project target", async ({ page }) => {
 		// Regression pin for the slot-update recompute fix in
-		// src/app/session-manager.ts (~line 2015). A project proposal slot that is
-		// FIRST created without an explicit fields.projectId derives its mode from
-		// the source session (default project → "registered"). If a LATER revision
-		// adds a cross-project target, the slot must RE-EVALUATE the mode from the
-		// new fields — the buggy code kept the sticky `prev.mode`, so an accept took
-		// the stale branch (a provisional target was left unpromoted).
+		// src/app/session-manager.ts. A project proposal slot FIRST created without
+		// an explicit fields.projectId is create intent, regardless of its source
+		// session. If a LATER revision adds a cross-project target, the slot must
+		// RE-EVALUATE the mode from the new fields — the buggy code kept the sticky
+		// `prev.mode`, so an accept took the stale create branch.
 		await openApp(page);
 		await createSessionViaUI(page);
 		await ensureUnifiedProposalReady(page);
@@ -271,7 +270,7 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 			s.projects.push({ id, name: "Provisional Target", provisional: true });
 		}, provisionalTargetId);
 
-		// Rev 1: NO projectId → mode derives from the source (default) session.
+		// Rev 1: NO projectId → create mode, independent of the source session.
 		await driveUnifiedProposal(page, "project", {
 			name: "same-project-first",
 			test_command: "npm test",
@@ -281,11 +280,11 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
 				return s?.activeProposals?.project?.mode ?? null;
 			}), { timeout: 10_000 })
-			.toBe("registered");
+			.toBe("create");
 
 		// Rev 2 (later revision): ADD an explicit provisional cross-project target.
-		// The recompute must flip the mode registered → provisional. With the stale
-		// `prev.mode` code this stayed "registered".
+		// The recompute must flip the mode create → provisional. With the stale
+		// `prev.mode` code this stayed "create".
 		await driveUnifiedProposal(page, "project", {
 			name: "same-project-first",
 			test_command: "npm test",

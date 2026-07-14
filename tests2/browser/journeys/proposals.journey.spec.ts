@@ -622,6 +622,8 @@ test.describe("Journey: Goal Proposal — Sub-goals prefill", () => {
 test.describe("Journey: Editable Project Proposal", () => {
 	test("edit_proposal updates the slot live; Apply (accept-label) persists edited value", async ({ page }) => {
 		test.setTimeout(90_000);
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
 		await openApp(page);
 		await createSessionViaUI(page);
 
@@ -638,7 +640,34 @@ test.describe("Journey: Editable Project Proposal", () => {
 		const panel = page.locator('[data-panel="project-proposal"]').first();
 		await expect(panel).toBeVisible({ timeout: 15_000 });
 
-		// Surgical edit → slot flips live to "echo new" with no re-emit.
+		// This is an existing-project edit journey: make the target explicit and
+		// replace the mock's legacy nonexistent /tmp path with the harness temp root.
+		// The server edit keeps the persisted draft and browser slot in sync.
+		const sessionId = await page.evaluate(() => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return s?.selectedSessionId as string | undefined;
+		});
+		expect(sessionId).toBeTruthy();
+		const targetEdit = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
+			method: "POST",
+			body: JSON.stringify({
+				old_text: "root_path: /tmp/editable",
+				new_text: `root_path: ${JSON.stringify(nonGitCwd())}\nprojectId: ${projectId}`,
+			}),
+		});
+		const targetEditText = await targetEdit.text();
+		expect(targetEdit.status, `explicit project target edit failed: ${targetEditText}`).toBe(200);
+		await page.waitForFunction(
+			(id) => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return s?.activeProposals?.project?.fields?.projectId === id
+					&& s?.activeProposals?.project?.mode === "registered";
+			},
+			projectId,
+			{ timeout: 15_000 },
+		);
+
+		// Surgical edit → slot flips live to "echo new" with no propose_project re-emit.
 		await sendMessage(page, "EDITABLE_PROPOSAL_EDIT");
 		await page.waitForFunction(
 			() => {
@@ -670,6 +699,8 @@ test.describe("Journey: Editable Project Proposal", () => {
 			{ timeout: 15_000 },
 		);
 		await expect(panel).toBeHidden({ timeout: 10_000 });
+		const config = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
+		expect(config.build_command).toBe("echo new");
 	});
 
 	// Ported from project-assistant.spec.ts (audit: proposals/project-assistant
