@@ -7,6 +7,13 @@ import type { GateStepDiagnostics } from "../gate-diagnostics.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
+export interface VerificationTimeoutInfo {
+	/** Resolved per-turn review allowance. */
+	configuredSeconds: number;
+	/** Elapsed time for the specific active turn that exhausted its allowance. */
+	elapsedMs: number;
+}
+
 export interface GateSignalStep {
 	name: string;
 	type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
@@ -27,9 +34,11 @@ export interface GateSignalStep {
 	 * completed rows. Set on initial enumeration by
 	 * `VerificationHarness.beginVerification()` so the gate-store signal
 	 * carries useful progress information from the moment it is recorded,
-	 * then preserved as `passed`/`failed`/`skipped` for historical rendering.
+	 * then preserved as `passed`/`failed`/`timeout`/`skipped` for historical rendering.
 	 */
-	status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+	status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+	/** Present only when a review turn exhausted its configured allowance. */
+	timeout?: VerificationTimeoutInfo;
 	/** Optional phase number, mirrored from the workflow VerifyStep for ordering. */
 	phase?: number;
 }
@@ -136,6 +145,52 @@ export class GateStore {
 			}
 		}
 		this.save();
+	}
+
+	/**
+	 * Reconcile persisted gate state after replacing a goal's workflow snapshot.
+	 * Existing gates retain their exact state unless explicitly marked modified.
+	 */
+	reconcileGatesForGoal(
+		goalId: string,
+		nextGateIds: Iterable<string>,
+		modifiedGateIds: Iterable<string> = [],
+	): void {
+		const remainingGateIds = new Set(nextGateIds);
+		const modifiedIds = new Set(modifiedGateIds);
+		const now = Date.now();
+		let changed = false;
+
+		for (const [key, gate] of this.gates) {
+			if (gate.goalId !== goalId) continue;
+
+			if (!remainingGateIds.has(gate.gateId)) {
+				this.gates.delete(key);
+				changed = true;
+				continue;
+			}
+
+			remainingGateIds.delete(gate.gateId);
+			if (modifiedIds.has(gate.gateId)) {
+				gate.status = "pending";
+				gate.verificationCacheInvalidatedAt = now;
+				gate.updatedAt = now;
+				changed = true;
+			}
+		}
+
+		for (const gateId of remainingGateIds) {
+			this.gates.set(compositeKey(goalId, gateId), {
+				gateId,
+				goalId,
+				status: "pending",
+				signals: [],
+				updatedAt: now,
+			});
+			changed = true;
+		}
+
+		if (changed) this.save();
 	}
 
 	getGate(goalId: string, gateId: string): GateState | undefined {

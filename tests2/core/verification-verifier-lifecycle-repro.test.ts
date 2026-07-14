@@ -345,11 +345,11 @@ describe("verifier lifecycle reproductions", () => {
 			`${MARKER}: once same-session resurrection succeeds and the verifier is alive-but-idle without verification_result, recovery must not issue fake resurrection attempts 2/3. calls=${JSON.stringify(calls)} result=${JSON.stringify(result)}`,
 		);
 		assert.deepEqual(createdIds, [sessionId], `${MARKER}: idle-after-resurrection recovery must not create a blank replacement session with the same id`);
-		assert.deepEqual(streamingWaitTimeouts, [15_000], `${MARKER}: resurrection streaming grace should be bounded and counted against the shared verifier timeout budget`);
+		assert.deepEqual(streamingWaitTimeouts, [15_000], `${MARKER}: resurrection streaming settle should remain a fixed operational window outside the active-turn allowance`);
 		assert.deepEqual(
 			idleWaitTimeouts,
-			[60_000, 45_000],
-			`${MARKER}: recovery must wait only for the remaining shared timeout budget after streaming grace, not the full step timeout on every resurrection attempt. calls=${JSON.stringify(calls)}`,
+			[60_000, 60_000],
+			`${MARKER}: a same-session resurrection receives a fresh full active-turn allowance after its fixed streaming settle; prior waits must not decrement it. calls=${JSON.stringify(calls)}`,
 		);
 		assert.equal(result.passed, false, `${MARKER}: idle-without-result after successful same-session resurrection should fail clearly instead of looping as process death`);
 		assert.match(result.output, /idle without verification_result|not issuing duplicate resurrection/i, `${MARKER}: failure diagnostics should explain idle-without-result after resurrection. output=${result.output}`);

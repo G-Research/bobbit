@@ -1,4 +1,5 @@
 import type { InboxEntry } from "../agent/inbox-store.js";
+import type { VerificationTimeoutInfo } from "../agent/gate-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
@@ -239,9 +240,9 @@ export type ServerMessage =
 	| { type: "gate_signal_received"; goalId: string; gateId: string; signalId: string }
 	| { type: "gate_verification_started"; goalId: string; gateId: string; signalId: string; startedAt?: number; steps?: Array<{ name: string; type: string; phase?: number }>; seq?: number }
 	| { type: "gate_verification_phase_started"; goalId: string; gateId: string; signalId: string; phase: number; stepIndices: number[]; seq?: number }
-	| { type: "gate_verification_step_started"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; startedAt?: number; sessionId?: string; phase?: number; seq?: number }
+	| { type: "gate_verification_step_started"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; startedAt?: number; sessionId?: string; timeoutSec?: number; phase?: number; seq?: number }
 	| { type: "gate_verification_step_output"; goalId: string; gateId: string; signalId: string; stepIndex: number; stream: "stdout" | "stderr"; text: string; ts: number; seq?: number }
-	| { type: "gate_verification_step_complete"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; status: "passed" | "failed" | "skipped"; durationMs: number; output: string; sessionId?: string; phase?: number; seq?: number }
+	| { type: "gate_verification_step_complete"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; status: "passed" | "failed" | "timeout" | "skipped"; durationMs: number; output: string; sessionId?: string; timeout?: VerificationTimeoutInfo; phase?: number; seq?: number }
 	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: string; seq?: number }
 	| { type: "gate_status_changed"; goalId: string; gateId: string; status: string }
 	| { type: "gate_reset"; goalId: string; gateId: string; affectedGateIds: string[]; changedGateIds: string[]; unchangedGateIds: string[] }
