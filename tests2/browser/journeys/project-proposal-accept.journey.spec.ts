@@ -33,8 +33,8 @@ test.describe.configure({ retries: 0 });
 const PROJECT_PROPOSAL_TAB_ID = "proposal:project";
 const PANEL_SELECTOR = '[data-panel="project-proposal"]';
 
-type ProposalMode = "registered" | "provisional";
-type ResolvedProposalMode = ProposalMode | "create" | "invalid";
+type ProposalMode = "registered" | "create";
+type ResolvedProposalMode = ProposalMode | "provisional" | "invalid";
 type ProjectRecord = {
 	id: string;
 	name: string;
@@ -186,13 +186,14 @@ async function injectProjectProposal(page: Page, opts: {
 			if (!state) throw new Error("bobbitState missing");
 
 			const session = state.gatewaySessions?.find((s: any) => s.id === sessionId);
+			const isProvisionalSource = mode === "create";
 			if (session) {
 				session.projectId = projectId;
-				session.assistantType = mode === "provisional" ? "project" : null;
+				session.assistantType = isProvisionalSource ? "project" : null;
 			} else {
 				state.gatewaySessions = [
 					...(Array.isArray(state.gatewaySessions) ? state.gatewaySessions : []),
-					{ id: sessionId, projectId, assistantType: mode === "provisional" ? "project" : null, status: "idle" },
+					{ id: sessionId, projectId, assistantType: isProvisionalSource ? "project" : null, status: "idle" },
 				];
 			}
 
@@ -201,22 +202,22 @@ async function injectProjectProposal(page: Page, opts: {
 			if (existing) {
 				existing.name = projectName;
 				existing.rootPath = rootPath;
-				existing.provisional = mode === "provisional";
+				existing.provisional = isProvisionalSource;
 			} else {
-				projects.push({ id: projectId, name: projectName, rootPath, provisional: mode === "provisional" });
+				projects.push({ id: projectId, name: projectName, rootPath, provisional: isProvisionalSource });
 				state.projects = projects;
 			}
 
 			state.activeProposals.project = {
 				sessionId,
-				// Project proposals pin their target project id at creation time so
-				// accept promotes/writes the intended project even after a background
-				// refreshSessions() poll mutates the session→project link. Mirror that
-				// real data model here instead of relying solely on the mutable
-				// session list (which the 5s poll would revert to the base project id).
-				projectId,
+				// Source provenance is separate from semantic intent. Registered edit
+				// fixtures carry an explicit fields.projectId; provisional fixtures are
+				// create intent and rely on current sourceProjectId + assistant metadata
+				// to exercise promotion in place.
+				sourceProjectId: projectId,
 				fields: {
 					name: projectName,
+					...(mode === "registered" ? { projectId } : {}),
 					root_path: rootPath,
 					build_command: "echo project proposal accept build",
 					test_command: "echo project proposal accept test",
@@ -295,9 +296,9 @@ async function setupProvisionalProposal(page: Page): Promise<{
 		projectId,
 		projectName: "Provisional Accept Repro",
 		rootPath: baseProject.rootPath,
-		mode: "provisional",
+		mode: "create",
 	});
-	const panel = page.locator(`${PANEL_SELECTOR}[data-mode="provisional"]`).first();
+	const panel = page.locator(`${PANEL_SELECTOR}[data-mode="create"]`).first();
 	const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
 	await expect(panel.locator('[data-testid="accept-label"]')).toContainText("Accept Project", { timeout: 10_000 });
 	await expect(button).toBeEnabled({ timeout: 10_000 });
@@ -615,7 +616,7 @@ test.describe("Journey: real project proposal acceptance", () => {
 				timeout: 15_000,
 				message: "successful provisional acceptance should remove the assistant session",
 			}).toBe(true);
-			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toMatch(/^#\/landing/);
+			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe("#/");
 			await expect.poll(() => page.evaluate((id) => (window as any).bobbitState?.projects?.some((project: any) => project.id === id && !project.provisional), provisionalProjectId), {
 				timeout: 10_000,
 				message: "promoted project should remain in the refreshed sidebar state",
@@ -688,7 +689,7 @@ test.describe("Journey: project proposal accept/apply no-op regression", () => {
 			page.getByText(/Config write failed|Failed to (write|save|apply).*config|Project proposal accept failed/i).first(),
 			"PROJECT_PROPOSAL_ACCEPT_FAILURE_BUG: provisional config failure must show a clear connection error",
 		).toBeVisible({ timeout: 10_000 });
-		await expectProjectProposalStillActionable(page, "provisional");
+		await expectProjectProposalStillActionable(page, "create");
 	});
 
 	test("registered Apply Changes success clears the proposal panel", async ({ page }) => {
