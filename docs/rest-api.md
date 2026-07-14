@@ -324,6 +324,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, projectId?, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. `projectId: "headquarters"` is valid; with `worktree: false`, a Headquarters goal can run data-only with no branch/worktree. See [Hierarchical goal metadata](design/goal-metadata.md). |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
+| `PUT` | `/api/goals/:id/workflow` | Replace the goal's complete frozen workflow snapshot, validate it, and reconcile gate state. See [Goal workflow replacement](#goal-workflow-replacement). |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
@@ -333,6 +334,37 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+
+### Goal workflow replacement
+
+`PUT /api/goals/:id/workflow` replaces an existing goal's **entire frozen workflow snapshot**. This is a general workflow mutation endpoint, not a timeout-specific patch: callers send the complete workflow definition and may change its name, description, gates, dependencies, gate metadata, or verification steps. The workflow id is immutable. If the body includes `id`, it must equal the current snapshot id; the server preserves the snapshot's `id`, `createdAt`, and `hidden` fields and stamps a new `updatedAt`.
+
+The body uses the same workflow shape and full-definition validator as project workflow authoring. It must be a plain object with a non-empty `name` and `gates` array. Validation covers gate and step shape, unique gate ids, dependency references and cycles, component/command references, subgoal dependencies, and finite positive-integer `timeout` values. Replacement is atomic: validation and conflict checks happen before either the goal or gate store is changed.
+
+On success, the server persists and returns the normalized workflow snapshot, broadcasts `goal_state_changed`, and reconciles stored gates:
+
+- unchanged gate definitions keep their status, signal history, and cache state;
+- changed gate definitions are reset to `pending` and their verification cache is invalidated, while their signal history remains available for audit;
+- removed gates and their stored state are deleted;
+- newly added gates start as `pending` with empty signal history.
+
+Gate array order is presentation-only for conflict detection. Reordering otherwise-identical gates does not reset them. Changes inside a gate, including its dependencies or `verify` array, count as a gate modification.
+
+To avoid orphaning a live verifier, changing or removing a gate whose verification is currently running returns:
+
+```json
+{
+  "error": "Workflow cannot modify or remove gates with active verifications",
+  "code": "WORKFLOW_ACTIVE_VERIFICATION",
+  "gateIds": ["review"]
+}
+```
+
+The status is `409`, and neither store is mutated. An unrelated gate may still be changed while another gate is verifying. The conflict read and subsequent persistence run without an asynchronous gap, so a new verification cannot interleave after the guard.
+
+Other errors are `400` for a non-object body, a goal without a workflow, an id change, or any workflow validation failure; and `404` for an unknown goal or missing project context.
+
+This endpoint changes only the active goal snapshot. Project workflow endpoints remain the source for future goals; see [Changing a timed-out review allowance](goals-workflows-tasks.md#changing-a-timed-out-review-allowance) for the UI's current/future/both scope behavior.
 
 ### Git commit lists and commit-scoped diffs
 
