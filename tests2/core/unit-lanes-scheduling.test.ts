@@ -6,8 +6,10 @@
 // MULTIPLE independent `vitest run --project ...` processes. Vitest 3.2 still
 // produced worker-RPC timeouts on Windows when all concurrent lanes used the old
 // two-fork default, so Windows now defaults each lane to one fork while other
-// platforms keep two. Its wall time is designed to be max(lanes), not Σ(lanes).
-// Earlier it reserved its budget via
+// platforms keep two. A single one-fork integration lane then narrowly exceeded
+// the gate wall time, so Windows cost-balances its integration files over two
+// disjoint one-fork jobs; non-Windows retains the single integration job. Its wall
+// time is designed to be max(lanes), not Σ(lanes). Earlier it reserved its budget via
 // reserveWorkerSlots("vitest"), which returns the SINGLE-PROCESS throttle
 // STANDALONE_VITEST_CAP (=2). Feeding that (=2) into the scheduler as the TOTAL
 // budget forced perLane=2 ⇒ maxConcurrent=floor(2/2)=1 ⇒ the lanes ran SERIALLY
@@ -81,10 +83,72 @@ describe("unit-lanes orchestrator scheduling", () => {
 		assert.equal(resolvePerLaneForkCap({ platform: "win32", override: "0" }), 1, "explicit values remain clamped to one");
 	});
 
-	it("the Windows default still schedules independent lanes concurrently", async () => {
-		const { planLaneConcurrency, defaultPerLaneForkCap } = await loadLanes();
-		const plan = planLaneConcurrency({ grant: 8, perLaneCap: defaultPerLaneForkCap("win32"), jobCount: 3 });
-		assert.deepEqual(plan, { perLane: 1, maxConcurrent: 3 });
+	it("defaults Windows integration to two shards while preserving overrides and non-Windows behavior", async () => {
+		const { defaultIntegrationShardCount, resolveIntegrationShardCount } = await loadLanes();
+		assert.equal(defaultIntegrationShardCount("win32"), 2);
+		assert.equal(defaultIntegrationShardCount("linux"), 1);
+		assert.equal(defaultIntegrationShardCount("darwin"), 1);
+		assert.equal(resolveIntegrationShardCount({ platform: "win32", override: undefined }), 2);
+		assert.equal(resolveIntegrationShardCount({ platform: "win32", override: "" }), 2);
+		assert.equal(resolveIntegrationShardCount({ platform: "win32", override: "garbage" }), 2, "invalid overrides use the Windows default");
+		assert.equal(resolveIntegrationShardCount({ platform: "linux", override: "garbage" }), 1, "invalid overrides use the non-Windows default");
+		assert.equal(resolveIntegrationShardCount({ platform: "win32", override: "3" }), 3, "an explicit override is preserved");
+		assert.equal(resolveIntegrationShardCount({ platform: "win32", override: "0" }), 1, "explicit values remain clamped to one");
+	});
+
+	it("cost-balances Windows integration into disjoint shards with exact file and project coverage", async () => {
+		const { planLaneJobs } = await loadLanes();
+		const files = [
+			"tests2/integration/real-heavy.test.ts",
+			"tests2/integration/fake-heavy.test.ts",
+			"tests2/integration/real-light.test.ts",
+			"tests2/integration/fake-light.test.ts",
+		];
+		const costs = new Map([
+			[files[0], 8_000],
+			[files[1], 7_000],
+			[files[2], 5_000],
+			[files[3], 6_000],
+		]);
+		const jobs = planLaneJobs({
+			laneNames: ["integration"],
+			platform: "win32",
+			integrationShardOverride: undefined,
+			integrationFiles: files,
+			integrationCosts: costs,
+		});
+		assert.deepEqual(jobs.map((job: any) => job.name), ["integration-1", "integration-2"]);
+		for (const job of jobs) {
+			assert.deepEqual(job.projects, ["v2-integration", "v2-integration-fake"], "both disjoint unit integration projects remain selected");
+		}
+		const selected = jobs.flatMap((job: any) => job.files);
+		assert.deepEqual([...selected].sort(), [...files].sort(), "the shard union must preserve every integration file");
+		assert.equal(new Set(selected).size, files.length, "no integration file may be selected by more than one shard");
+		assert.deepEqual(jobs.map((job: any) => job.files.reduce((sum: number, file: string) => sum + costs.get(file)!, 0)), [13_000, 13_000], "shards are balanced by recorded cost, not merely file count");
+	});
+
+	it("keeps non-Windows and explicit one-shard integration runs unfiltered", async () => {
+		const { planLaneJobs } = await loadLanes();
+		const files = ["tests2/integration/a.test.ts", "tests2/integration/b.test.ts"];
+		for (const options of [
+			{ platform: "linux", integrationShardOverride: undefined },
+			{ platform: "win32", integrationShardOverride: "1" },
+		]) {
+			const jobs = planLaneJobs({ laneNames: ["integration"], integrationFiles: files, ...options });
+			assert.deepEqual(jobs, [{ name: "integration", projects: ["v2-integration", "v2-integration-fake"], files: undefined }]);
+		}
+	});
+
+	it("the Windows default still schedules every independent lane and integration shard concurrently", async () => {
+		const { planLaneConcurrency, defaultPerLaneForkCap, planLaneJobs } = await loadLanes();
+		const jobs = planLaneJobs({
+			laneNames: ["core", "integration", "dom"],
+			platform: "win32",
+			integrationFiles: ["tests2/integration/a.test.ts", "tests2/integration/b.test.ts"],
+		});
+		assert.equal(jobs.length, 4, "core + two integration shards + dom");
+		const plan = planLaneConcurrency({ grant: 8, perLaneCap: defaultPerLaneForkCap("win32"), jobCount: jobs.length });
+		assert.deepEqual(plan, { perLane: 1, maxConcurrent: 4 });
 	});
 
 	it("planLaneConcurrency never raises a lane above the per-process fork cap", async () => {

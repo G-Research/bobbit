@@ -17,12 +17,14 @@
  *     apply across lanes;
  *   - Windows defaults each lane to one fork, avoiding the Vitest 3.2
  *     onTaskUpdate worker-RPC failures seen even at two forks under concurrent
- *     lane load (#8164/#6511). Non-Windows keeps the two-fork default. Parallelism
- *     comes from running independent lanes side by side, not from raising the
- *     per-process fork count.
+ *     lane load (#8164/#6511), and cost-balances integration over two disjoint
+ *     jobs so the one-fork pole stays inside the gate wall time. Non-Windows keeps
+ *     the two-fork, single-integration-job defaults. Parallelism comes from
+ *     running independent lanes side by side, not from raising fork counts.
  *
- * UNIT_LANES_FORK_CAP remains an explicit experimental override. A Vitest 4.x
- * upgrade carrying the full #8297 fix is the larger alternative.
+ * UNIT_LANES_FORK_CAP and UNIT_LANES_INTEGRATION_SHARDS remain explicit
+ * experimental overrides. A Vitest 4.x upgrade carrying the full #8297 fix is
+ * the larger alternative.
  *
  * Concurrent full vitest runs are an anticipated mode (see
  * docs/testing-v2/concurrency-proof.md and the retry bridge in vitest.config.ts),
@@ -34,7 +36,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { reserveVitestLaneBudget, readLedger } from "./ledger.mjs";
@@ -79,14 +81,21 @@ const FAIL_LINE_RE = /(^|\s)(FAIL|×|✗)\s|AssertionError|Unhandled (Error|Reje
 // which is a transport artifact under load, NOT a test result.
 const WORKER_RPC_TIMEOUT_RE = /\[vitest-(worker|api)\]: Timeout calling "(onTaskUpdate|onUnhandledError|onCollected|fetch|transform|resolveId)"/;
 
-// integration (~600s of work) is the pole. Historical two-fork profiling put it
-// at ~478s as a single lane. Cost-balanced sharding showed diminishing, then
-// negative returns: at 3 shards the total only improved 478s->429s while extra
-// contention re-triggered the Vitest RPC timeout bug. Keep one integration job;
-// each job uses the platform-aware lane cap above. Raise
-// UNIT_LANES_INTEGRATION_SHARDS only with the RPC fix in place (Vitest 4.x) or
-// after cutting integration's real per-test work.
-const INTEGRATION_SHARDS = Math.max(1, Number(process.env.UNIT_LANES_INTEGRATION_SHARDS || "1"));
+// With Windows lanes reduced to one fork, integration became the pole and missed
+// the outer gate by a small margin despite completing tests successfully. Split
+// it into two cost-balanced processes by default on Windows; the fair grant keeps
+// both one-fork shards within the existing budget. Non-Windows retains its proven
+// single integration job, and the env override remains available for experiments.
+export function defaultIntegrationShardCount(platform = process.platform) {
+	return platform === "win32" ? 2 : 1;
+}
+
+export function resolveIntegrationShardCount({ platform = process.platform, override = process.env.UNIT_LANES_INTEGRATION_SHARDS } = {}) {
+	const fallback = defaultIntegrationShardCount(platform);
+	if (override == null || String(override).trim() === "") return fallback;
+	const parsed = Number(override);
+	return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : fallback;
+}
 
 function listTestFiles(rel) {
 	const root = join(REPO_ROOT, rel);
@@ -95,7 +104,7 @@ function listTestFiles(rel) {
 		for (const e of readdirSync(d, { withFileTypes: true })) {
 			const p = join(d, e.name);
 			if (e.isDirectory()) walk(p);
-			else if (/\.test\.ts$/.test(e.name)) out.push(p.split(/[\\/]/).join("/"));
+			else if (/\.test\.ts$/.test(e.name)) out.push(relative(REPO_ROOT, p).split(/[\\/]/).join("/"));
 		}
 	};
 	walk(root);
@@ -125,10 +134,17 @@ function costMap() {
 }
 
 // Greedy longest-processing-time bin packing into `shards` balanced groups.
-function shardByCost(files, shards) {
-	const cost = costMap();
-	const weighted = files.map((f) => ({ f, w: cost.get(f) ?? 1000 })).sort((a, b) => b.w - a.w);
-	const bins = Array.from({ length: shards }, () => ({ files: [], w: 0 }));
+// File paths are repo-relative so profile keys and Vitest CLI filters use the
+// same canonical shape. Stable path tie-breaking makes the plan deterministic.
+export function shardByCost(files, shards, cost = costMap()) {
+	const count = Math.max(1, Math.floor(Number(shards)) || 1);
+	const weighted = [...files]
+		.map((f) => {
+			const recorded = Number(cost.get(f));
+			return { f, w: Number.isFinite(recorded) && recorded >= 0 ? recorded : 1000 };
+		})
+		.sort((a, b) => (b.w - a.w) || a.f.localeCompare(b.f));
+	const bins = Array.from({ length: count }, () => ({ files: [], w: 0 }));
 	for (const item of weighted) {
 		const bin = bins.reduce((a, b) => (b.w < a.w ? b : a));
 		bin.files.push(item.f);
@@ -146,6 +162,36 @@ const LANES = {
 	integration: ["v2-integration", "v2-integration-fake"],
 	dom: ["v2-dom", "v2-dom-isolated"],
 };
+
+// Pure job planning seam. Shard file lists are disjoint; selecting both unit
+// integration projects for every shard is safe because their config include/
+// exclude sets are disjoint, so each explicit file executes in exactly one
+// project and exactly one shard. A one-shard run remains unfiltered and therefore
+// byte-for-byte equivalent to the prior non-Windows command.
+export function planLaneJobs({
+	laneNames = Object.keys(LANES),
+	platform = process.platform,
+	integrationShardOverride = process.env.UNIT_LANES_INTEGRATION_SHARDS,
+	integrationFiles,
+	integrationCosts,
+} = {}) {
+	const integrationShards = resolveIntegrationShardCount({ platform, override: integrationShardOverride });
+	const jobs = [];
+	for (const name of laneNames) {
+		if (name === "integration" && integrationShards > 1) {
+			const files = integrationFiles ?? listTestFiles("tests2/integration");
+			const shards = shardByCost(files, integrationShards, integrationCosts ?? costMap());
+			shards.forEach((shard, index) => jobs.push({
+				name: `integration-${index + 1}`,
+				projects: [...LANES.integration],
+				files: shard.files,
+			}));
+		} else {
+			jobs.push({ name, projects: [...(LANES[name] || [])], files: undefined });
+		}
+	}
+	return jobs;
+}
 
 function parseArgs(argv) {
 	const out = { lanes: null, forks: "2", list: false };
@@ -380,18 +426,10 @@ async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const laneNames = args.lanes ?? Object.keys(LANES);
 
-	// Expand the integration lane into cost-balanced file shards (each its own
-	// lane-capped process). The fake project stays whole (single-fork by config).
-	const jobs = [];
-	for (const n of laneNames) {
-		if (n === "integration" && INTEGRATION_SHARDS > 1) {
-			const files = listTestFiles("tests2/integration");
-			const shards = shardByCost(files, INTEGRATION_SHARDS);
-			shards.forEach((s, i) => jobs.push({ name: `integration-${i + 1}`, projects: ["v2-integration", "v2-integration-fake"], files: s.files }));
-		} else {
-			jobs.push({ name: n, projects: LANES[n] || [], files: undefined });
-		}
-	}
+	// Windows expands integration into two cost-balanced, disjoint one-fork jobs
+	// by default. Explicit shard/fork overrides and non-Windows defaults flow
+	// through the same planner without changing coverage or failure accounting.
+	const jobs = planLaneJobs({ laneNames });
 
 	if (args.list) {
 		console.log(JSON.stringify(jobs.map((j) => ({ name: j.name, projects: j.projects, files: j.files?.length ?? "all" })), null, 2));
