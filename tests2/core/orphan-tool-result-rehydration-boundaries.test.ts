@@ -434,6 +434,113 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
+	it("does not release-drain a queued follow-up after the boot continuation ends in error before acknowledgement", async () => {
+		const file = hostTranscript("boot-continuation-error-before-ack");
+		const bootEntered = deferred<void>();
+		const bootAccepted = deferred<void>();
+		let listener: ((event: any) => void) | undefined;
+		const bridge = recordingBridge(() => {});
+		bridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		bridge.promptWhenReady = vi.fn(async () => {
+			bootEntered.resolve();
+			await bootAccepted.promise;
+			return { success: true };
+		});
+		bridge.prompt = vi.fn(async () => ({ success: true }));
+		const ps = persisted("boot-continuation-error-before-ack", file, { wasStreaming: true });
+		const manager = makeManager(ps, bridge);
+
+		const restore = manager._restoreSessionCoalesced(ps);
+		await bootEntered.promise;
+		await expect(manager.enqueuePrompt(ps.id, "recoverable follow-up after failed continuation"))
+			.resolves.toEqual({ status: "queued" });
+
+		listener?.({ type: "agent_start" });
+		listener?.({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "continuation failed" }],
+				stopReason: "error",
+				errorMessage: "fixture terminal provider error",
+			},
+		});
+		listener?.({ type: "agent_end", messages: [] });
+		bootAccepted.resolve();
+		await restore;
+
+		const canonical = manager.sessions.get(ps.id);
+		expect(bridge.prompt).not.toHaveBeenCalled();
+		expect(canonical?.status).toBe("idle");
+		expect(canonical?.lastTurnErrored).toBe(true);
+		expect(canonical?.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["recoverable follow-up after failed continuation"]);
+		expect(manager._testStore.update).toHaveBeenCalledWith(
+			ps.id,
+			expect.objectContaining({
+				messageQueue: [expect.objectContaining({ text: "recoverable follow-up after failed continuation" })],
+			}),
+		);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
+	it("re-arms an unobserved failed boot continuation on the queued assignRole replacement", async () => {
+		const file = hostTranscript("boot-continuation-rearmed-after-role");
+		const bootEntered = deferred<void>();
+		const rejectBoot = deferred<void>();
+		const restoreBridge = recordingBridge(() => {});
+		const roleBridge = recordingBridge(() => {});
+		restoreBridge.promptWhenReady = vi.fn(async () => {
+			bootEntered.resolve();
+			await rejectBoot.promise;
+			throw new Error("fixture boot continuation rejection");
+		});
+		roleBridge.promptWhenReady = vi.fn(async () => ({ success: true }));
+		roleBridge.prompt = vi.fn(async () => ({ success: true }));
+		const factory = vi.fn()
+			.mockReturnValueOnce(restoreBridge)
+			.mockReturnValueOnce(roleBridge);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("boot-continuation-rearmed-after-role", file, { wasStreaming: true });
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const restore = manager._restoreSessionCoalesced(ps);
+		await bootEntered.promise;
+		const assignment = manager.assignRole(ps.id, {
+			name: "replacement-role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+		});
+		rejectBoot.resolve();
+
+		await expect(Promise.all([restore, assignment])).resolves.toEqual([
+			expect.objectContaining({ id: ps.id }),
+			true,
+		]);
+		expect(factory).toHaveBeenCalledTimes(2);
+		expect(restoreBridge.promptWhenReady).toHaveBeenCalledTimes(1);
+		expect(roleBridge.promptWhenReady).toHaveBeenCalledTimes(1);
+		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(expect.stringMatching(/server restarted while you were mid-turn/i));
+		expect(roleBridge.prompt).not.toHaveBeenCalled();
+		const canonical = manager.sessions.get(ps.id);
+		expect(canonical?.rpcClient).toBe(roleBridge);
+		expect(canonical?.restoreStartupWasStreaming).toBe(false);
+		expect(ps.wasStreaming).toBe(false);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
 	it("repairs an in-place restart/respawn before the replacement process switches history", async () => {
 		const file = hostTranscript("restart-respawn");
 		const switches: string[] = [];
@@ -532,7 +639,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 	it.each([
 		{ label: "generic errored", error: "fixture provider failure" },
 		{ label: "poisoned-history", error: ORPHAN_ERROR },
-	])("fences a $label follow-up before error recovery while assignRole stages", async ({ error }) => {
+	])("keeps a $label follow-up error-gated after assignRole staging", async ({ error }) => {
 		const file = hostTranscript(`assign-role-error-fence-${error === ORPHAN_ERROR ? "poison" : "generic"}`);
 		const startGate = deferred<void>();
 		const replacement = recordingBridge(() => {});
@@ -567,9 +674,12 @@ describe("executable SessionManager rehydration boundaries", () => {
 
 		startGate.resolve();
 		await expect(assignment).resolves.toBe(true);
-		expect(replacement.prompt).toHaveBeenCalledTimes(1);
-		expect(replacement.prompt).toHaveBeenCalledWith("fenced errored intent", undefined);
+		expect(replacement.prompt).not.toHaveBeenCalled();
 		expect(oldBridge.prompt).not.toHaveBeenCalled();
+		const canonical = manager.sessions.get(ps.id);
+		expect(canonical.lastTurnErrored).toBe(true);
+		expect(canonical.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["fenced errored intent"]);
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
@@ -866,6 +976,61 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(poisonBridge);
 		expect(manager.sessions.get(ps.id)?.role).toBeUndefined();
 		expect(manager.sessions.get(ps.id)?.status).toBe("streaming");
+	});
+
+	it("does not release-drain a rejected poison redrive after assignRole requests a drain", async () => {
+		const file = hostTranscript("poison-redrive-rejection-vs-role-drain");
+		const oldStopGate = deferred<void>();
+		const poisonBridge = recordingBridge(() => {});
+		const roleBridge = recordingBridge(() => {});
+		poisonBridge.prompt = vi.fn(async () => ({ success: true }));
+		roleBridge.prompt = vi.fn(async () => ({ success: false, error: ORPHAN_ERROR }));
+		const factory = vi.fn().mockReturnValueOnce(poisonBridge).mockReturnValueOnce(roleBridge);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("poison-redrive-rejection-vs-role-drain", file);
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => {});
+		oldBridge.stop = vi.fn(() => oldStopGate.promise);
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: ORPHAN_ERROR,
+		}));
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		const followUp = manager.enqueuePrompt(ps.id, "recoverable rejected redrive");
+		await vi.waitFor(() => expect(oldBridge.stop).toHaveBeenCalledTimes(1));
+		const assignment = manager.assignRole(ps.id, {
+			name: "redrive-role",
+			promptTemplate: "Redrive role",
+			accessory: "redrive-accessory",
+		});
+		oldStopGate.resolve();
+
+		await expect(assignment).resolves.toBe(true);
+		await expect(followUp).rejects.toThrow(/unexpected tool_use_id/i);
+		const canonical = manager.sessions.get(ps.id);
+		expect(factory).toHaveBeenCalledTimes(2);
+		expect(poisonBridge.prompt).not.toHaveBeenCalled();
+		expect(roleBridge.prompt).toHaveBeenCalledTimes(1);
+		expect(canonical?.status).toBe("idle");
+		expect(canonical?.lastTurnErrored).toBe(true);
+		expect(canonical?.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["recoverable rejected redrive"]);
+		expect(manager._testStore.update).toHaveBeenCalledWith(
+			ps.id,
+			expect.objectContaining({
+				messageQueue: [expect.objectContaining({ text: "recoverable rejected redrive" })],
+			}),
+		);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
 	it("redrives poisoned follow-up only after a queued assignRole commits", async () => {

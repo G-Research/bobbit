@@ -1429,7 +1429,15 @@ export class SessionManager {
 					// accepted while readiness/ack is pending stay on the coordinator's
 					// durable ledger instead of racing a second prompt on this bridge.
 					owned.bootContinuationPending = false;
-					await this._dispatchBootContinuation(canonical);
+					const accepted = await this._dispatchBootContinuation(canonical);
+					// An unobserved rejection did not consume the durable interrupted-turn
+					// marker. If another replacement joined while the RPC was pending, carry
+					// that intent through its queued lifecycle and retry only on the final
+					// canonical bridge. With no join, the persisted wasStreaming marker stays
+					// authoritative for the next gateway restore as before.
+					if (!accepted && canonical.restoreStartupWasStreaming === true) {
+						owned.bootContinuationPending = true;
+					}
 					this._mergeReplacementPromptOwner(owned, this.sessions.get(sessionId));
 					if (owned.pending !== 0 || this._sessionReplacementCoordinators.get(sessionId) !== owned) return;
 					canonical = this.sessions.get(sessionId);
@@ -1442,6 +1450,10 @@ export class SessionManager {
 			if (
 				owned.drainOnRelease
 				&& canonical.status === "idle"
+				// Sticky drain intent from an earlier successful replacement must not
+				// override a later canonical turn error or manual-recovery rejection.
+				// The durable rows remain queued until explicit Retry/fresh user intent.
+				&& !canonical.lastTurnErrored
 				&& !canonical.isCompacting
 				&& !this._bootRepromptedSessions.has(sessionId)
 				&& !canonical.promptQueue.isEmpty
@@ -6214,7 +6226,7 @@ export class SessionManager {
 		}
 	}
 
-	private async _dispatchBootContinuation(session: SessionInfo): Promise<void> {
+	private async _dispatchBootContinuation(session: SessionInfo): Promise<boolean> {
 		this._bootRepromptedSessions.add(session.id);
 		// The coordinator remains installed while this cold-start RPC is pending.
 		// Mark streaming as a second fence for the instant after coordinator release,
@@ -6243,7 +6255,7 @@ export class SessionManager {
 			// Clear the durable marker only after the final canonical bridge accepts
 			// the continuation. A gateway death during provisional restore therefore
 			// rehydrates wasStreaming=true and safely tries again on the next boot.
-			markAccepted();
+			return markAccepted();
 		} catch (err) {
 			// A terminal event proves Pi accepted and completed the continuation even
 			// when the command acknowledgement subsequently rejects or times out. Keep
@@ -6255,13 +6267,14 @@ export class SessionManager {
 				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 				console.warn(`[session-manager] Boot continuation for ${session.id} reported ${safeReason} after agent observed the turn; treating the dispatch as accepted`);
-				return;
+				return true;
 			}
 			this._bootRepromptedSessions.delete(session.id);
 			if (this._sessionWriterIsCurrent(session) && session.status === "streaming") {
 				broadcastStatus(session, "idle");
 			}
 			console.error(`[session-manager] Failed to re-prompt interrupted session ${session.id}:`, err);
+			return false;
 		}
 	}
 
