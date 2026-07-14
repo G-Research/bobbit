@@ -233,11 +233,23 @@
     },
     {
       "path": "tests2/core/ledger-lease-bridge-interop.test.ts",
-      "reason": "Protocol-compatibility pin: tests/e2e/ledger-lease-bridge.mjs (Playwright-safe lease client) and scripts/testing-v2/ledger.mjs share the same on-disk lease protocol so the global concurrency caps hold across the browser + vitest tiers; also pins the standalone vitest cap below parent-ledger grants."
+      "reason": "Protocol-compatibility pin: tests/e2e/ledger-lease-bridge.mjs (Playwright-safe lease client) and scripts/testing-v2/ledger.mjs share the same on-disk lease protocol so global concurrency caps hold across browser + Vitest tiers; also pins Vitest 4 standalone runs to the same full ledger-governed cap as parent grants."
     },
     {
       "path": "tests2/core/unit-lanes-scheduling.test.ts",
-      "reason": "Pins the unit-lanes ORCHESTRATOR scheduling contract so `npm run test:unit` (run-unit-lanes.mjs) completes within the gate wall-time budget: ledger.reserveVitestLaneBudget() grants the fair core budget (not the single-process STANDALONE_VITEST_CAP throttle, which is left unchanged at 2), and planLaneConcurrency() distributes it so lanes overlap (maxConcurrent=floor(grant/perLane)) without ever raising a single vitest process above the Windows-RPC-safe per-process fork cap. Guards against the serial-lane gate timeout regression."
+      "reason": "Pins the Vitest 4 unit-lane scheduling contract: on a 24-core box, three staggered concurrent `npm run test:unit` suites each reserve eight ledger-governed workers with no suite queue; planLaneWorkers() fully distributes each grant as core=3, integration=4, DOM=1 so all lanes start immediately, while smaller grants never oversubscribe. Also pins direct Vitest to the same ledger cap and parent-grant reuse without double registration."
+    },
+    {
+      "path": "tests2/core/windows-process-profile.test.ts",
+      "reason": "Pins the Windows unit child-process profiler's redacted aggregation contract: completed/incomplete children, per-executable cost, and peak concurrency are derived from per-process JSONL without retaining arguments or environment values."
+    },
+    {
+      "path": "tests2/core/server-prebundle-cache.test.ts",
+      "reason": "Pins content-addressed server-test prebundle cache invalidation and fail-closed artifact validation so changed source, stale keys, missing maps, or truncated bundles can never be silently reused."
+    },
+    {
+      "path": "tests2/integration/server-prebundle-runtime.test.ts",
+      "reason": "Integration parity canary: the content-addressed server runtime bundle exposes the real stateful server namespaces and successfully boots the normal fenced integration gateway/API surface."
     },
     {
       "path": "tests2/integration/gateway-fixture-leak.test.ts",

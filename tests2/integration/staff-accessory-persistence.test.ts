@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, defaultProject } from "./_e2e/e2e-setup.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 const CREATE_ACCESSORY = "wizard-hat";
 const STALE_SESSION_ACCESSORY = "bandana";
@@ -124,7 +125,7 @@ test.describe("Staff accessory persistence", () => {
 			const { pcm, ctx } = projectContext(gateway, staff.projectId!);
 			ctx.staffStore.update(staff.id, { currentSessionId: null });
 
-			const { StaffManager } = await import("../../src/server/agent/staff-manager.js");
+			const { StaffManager } = (await loadServerTestRuntime()).staffManager;
 			const staffManager = new StaffManager(pcm);
 			recreatedSessionId = await staffManager.ensureSessionForStaff(staff.id, gateway.sessionManager);
 			expect(recreatedSessionId, "ensureSessionForStaff should recreate a permanent session when currentSessionId is missing").toBeTruthy();

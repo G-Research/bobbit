@@ -20,13 +20,11 @@ import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { setProjectRoot, getProjectRoot, resetAgentDirStateForTests } from "../../../src/server/bobbit-dir.js";
-import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
-import { loadOrCreateToken } from "../../../src/server/auth/token.js";
 import type { GatewayDeps } from "../../../src/server/gateway-deps.js";
 import { createManualClock } from "../../harness/clock.js";
 import { createFencedCommandRunner } from "../../harness/fenced-command-runner.js";
 import { createFencedFetch } from "../../harness/fenced-fetch.js";
+import { loadServerTestRuntime } from "../../harness/server-runtime.js";
 
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..", "..");
@@ -87,6 +85,12 @@ async function makeDeps(): Promise<GatewayDeps> {
  * mutating and restores both on shutdown().
  */
 export async function startCustomGateway(opts: CustomGatewayOptions): Promise<CustomGatewayHandle> {
+	const runtime = await loadServerTestRuntime();
+	const { setProjectRoot, getProjectRoot, resetAgentDirStateForTests } = runtime.bobbitDir;
+	const { scaffoldBobbitDir } = runtime.scaffold;
+	const { loadOrCreateToken } = runtime.authToken;
+	const { createGateway } = runtime.server;
+	const { configureAigwRuntimeFlags } = runtime.aigwManager;
 	const serverRoot = realpathSync(opts.serverRoot);
 	const usesOverride = opts.headquartersDir !== undefined;
 	const headquartersDir = usesOverride ? opts.headquartersDir! : resolve(serverRoot, ".bobbit", "headquarters");
@@ -112,8 +116,6 @@ export async function startCustomGateway(opts: CustomGatewayOptions): Promise<Cu
 	setProjectRoot(serverRoot);
 
 	const deps = await makeDeps();
-	const { createGateway } = await import("../../../src/server/server.js");
-	const { configureAigwRuntimeFlags } = await import("../../../src/server/agent/aigw-manager.js");
 
 	opts.preBoot?.({ serverRoot, headquartersDir, agentDir });
 	scaffoldBobbitDir(serverRoot);

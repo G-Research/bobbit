@@ -20,6 +20,10 @@ function makeWorkflowId(): string {
 	return `gate-inspect-slicing-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function removeTree(dir: string): void {
+	fs.rmSync(dir, { recursive: true, force: true, maxRetries: process.platform === "win32" ? 10 : 0, retryDelay: 100 });
+}
+
 function contentLines(count: number, prefix = "content-line"): string {
 	return Array.from({ length: count }, (_, i) => `${prefix}-${i + 1}`).join("\n");
 }
@@ -449,7 +453,7 @@ test.describe("gate inspect slicing", () => {
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTree(cwd);
 		}
 	});
 
@@ -535,7 +539,7 @@ test.describe("gate inspect slicing", () => {
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTree(cwd);
 		}
 	});
 
@@ -582,7 +586,7 @@ test.describe("gate inspect slicing", () => {
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTree(cwd);
 		}
 	});
 

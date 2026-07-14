@@ -1,4 +1,5 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -90,7 +91,7 @@ test.describe("AI Gateway title-generator User-Agent", () => {
 		const previousSkipTitleGen = process.env.BOBBIT_SKIP_TITLE_GEN;
 		delete process.env.BOBBIT_SKIP_TITLE_GEN;
 		try {
-			const { generateGoalSummaryTitle } = await import("../../src/server/agent/title-generator.js");
+			const { generateGoalSummaryTitle } = (await loadServerTestRuntime()).titleGenerator;
 			const title = await generateGoalSummaryTitle("Add AI Gateway user agent", {
 				namingModel: "aigw/us.anthropic.claude-haiku-4-5",
 				aigwUrl: mock.url,

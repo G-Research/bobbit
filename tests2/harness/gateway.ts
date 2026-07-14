@@ -24,14 +24,6 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type WebSocket from "ws";
 
-import { getAgentDirState, initializeAgentDirRuntime, setProjectRoot } from "../../src/server/bobbit-dir.js";
-import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
-import { loadOrCreateToken } from "../../src/server/auth/token.js";
-// createGateway (+ configureAigwRuntimeFlags) pull the WHOLE src/server graph.
-// They are imported DYNAMICALLY inside boot() while holding the gateway-boot
-// lease, so the heavy per-fork transform of that graph is serialised by the
-// global concurrency budget too (not just the runtime boot). See the lease pool
-// in scripts/testing-v2/ledger.mjs.
 import type { GatewayDeps } from "../../src/server/gateway-deps.js";
 import { acquireGatewayBootLease } from "../../scripts/testing-v2/ledger.mjs";
 import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../tests/e2e/seed-workflows.js";
@@ -39,6 +31,7 @@ import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
 import { createFencedFetch } from "./fenced-fetch.js";
 import { createFakeVerificationCommandRunner } from "./fake-verification-command-runner.js";
+import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
 
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
@@ -235,6 +228,18 @@ async function boot(): Promise<BootedGateway> {
 	mkdirSync(projectConfigDir, { recursive: true });
 	writeFileSync(join(projectConfigDir, "project.yaml"), yaml);
 
+	// The integration lane prepares one content-addressed server bundle before
+	// workers start. Import it while holding the existing boot lease so even a
+	// source-mode diagnostic run retains bounded startup concurrency.
+	const bootLease = await acquireGatewayBootLease();
+	const runtime = await loadServerTestRuntime();
+	const { getAgentDirState, initializeAgentDirRuntime, setProjectRoot } = runtime.bobbitDir;
+	const { scaffoldBobbitDir } = runtime.scaffold;
+	const { loadOrCreateToken } = runtime.authToken;
+	const { createGateway } = runtime.server;
+	const { configureAigwRuntimeFlags } = runtime.aigwManager;
+	console.log(`[tests2/gateway] fork ${process.pid}: server runtime=${serverRuntimeMode()}`);
+
 	setProjectRoot(bobbitDir);
 	scaffoldBobbitDir(bobbitDir);
 	const token = loadOrCreateToken();
@@ -244,16 +249,6 @@ async function boot(): Promise<BootedGateway> {
 		if (mockBridge.shouldUseInProcessMock(opts.cliPath)) return new mockBridge.InProcessMockBridge(opts);
 		return null;
 	};
-
-	// GLOBAL CONCURRENCY BUDGET: serialise the CPU-heavy gateway boot (src/server
-	// graph transform on first import per fork + migration + subsystem init) so
-	// that N concurrent test:v2 runs never fire a cluster of simultaneous boots
-	// that spike CPU and starve timing-sensitive integration tests. Held ONLY for
-	// the boot; released the instant gw.start() resolves. Fail-open (never blocks
-	// a boot indefinitely). See docs/testing-v2/concurrency-proof.md.
-	const bootLease = await acquireGatewayBootLease();
-	const { createGateway } = await import("../../src/server/server.js");
-	const { configureAigwRuntimeFlags } = await import("../../src/server/agent/aigw-manager.js");
 
 	const clock = createManualClock();
 	// Command-STEP executor seam: default is the real durable spawn path (same as

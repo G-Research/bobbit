@@ -18,11 +18,12 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, deleteSession, defaultProjectId, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 let serverModule: any;
 
 test.beforeAll(async () => {
-	serverModule = await import("../../src/server/server.js");
+	serverModule = (await loadServerTestRuntime()).server;
 	expect(typeof serverModule.__getGitStatusInvocationCount).toBe("function");
 	expect(typeof serverModule.__resetGitStatusInvocationCount).toBe("function");
 	expect(typeof serverModule.__setGitStatusFake).toBe("function");

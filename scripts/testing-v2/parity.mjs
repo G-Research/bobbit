@@ -200,7 +200,7 @@ function runVitestCoverage() {
 			stdio: "inherit",
 			cwd: REPO_ROOT,
 			shell: isWin,
-			env: { ...process.env, VITEST_MAX_FORKS: "3" },
+			env: { ...process.env, VITEST_MAX_WORKERS: "3" },
 		},
 	);
 	return result.status ?? 1;
