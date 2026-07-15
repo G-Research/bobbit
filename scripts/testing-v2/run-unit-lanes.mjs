@@ -34,7 +34,10 @@ import { ensureServerTestPrebundle } from "./server-prebundle.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
-const LOG_DIR = join(REPO_ROOT, ".profiles", "unit-lanes");
+// Concurrent complete-suite runs must not overwrite one another's lane evidence.
+const LOG_DIR = process.env.BOBBIT_UNIT_LANES_LOG_DIR
+	? resolve(REPO_ROOT, process.env.BOBBIT_UNIT_LANES_LOG_DIR)
+	: join(REPO_ROOT, ".profiles", "unit-lanes");
 
 // Heartbeat cadence for the live progress line. Clamp to >=1s and reject
 // non-numeric/zero/negative values so a bad override can't flood the console

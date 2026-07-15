@@ -44,8 +44,6 @@ let templateCommitted: string | undefined;
 let templateOrigin: string | undefined;
 type RemoteFixture = { root: string; repo: string; origin: string };
 type PoolFixture = RemoteFixture & { poolBranch: string; poolWorktree: string };
-let poolFixtures: PoolFixture[] = [];
-let pushFixture: RemoteFixture | undefined;
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
 	const { stdout } = await execFile("git", [...args], { cwd, windowsHide: true });
@@ -66,7 +64,7 @@ async function createRepositoryTemplates(): Promise<void> {
 		"-c", "core.autocrlf=false",
 		"commit", "-m", "initial",
 	]);
-	await git(templateRoot, ["clone", "--bare", "--shared", templateCommitted, templateOrigin]);
+	await git(templateRoot, ["clone", "--bare", "--local", templateCommitted, templateOrigin]);
 }
 
 async function makeRemoteBackedRepo(): Promise<RemoteFixture> {
@@ -75,10 +73,12 @@ async function makeRemoteBackedRepo(): Promise<RemoteFixture> {
 	const repo = path.join(root, "repo");
 	const origin = path.join(root, "origin.git");
 
-	// Both templates remain immutable. Every case receives independent refs,
-	// worktree metadata, and a real local bare remote while sharing object storage.
-	await git(root, ["clone", "--bare", "--shared", templateOrigin, origin]);
-	await git(root, ["clone", "--shared", origin, repo]);
+	// Every attempt receives independent refs, worktree metadata, and a real local
+	// bare remote. Local clones may hardlink immutable objects, but unlike
+	// `--shared` they do not create alternates paths that become invalid when a
+	// failed Vitest attempt removes its fixture before retrying.
+	await git(root, ["clone", "--bare", "--local", templateOrigin, origin]);
+	await git(root, ["clone", "--local", origin, repo]);
 	return { root, repo, origin };
 }
 
@@ -161,13 +161,6 @@ describe("goal/session branch push safety regressions", () => {
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
 		await createRepositoryTemplates();
-		[poolFixtures, pushFixture] = await Promise.all([
-			Promise.all([
-				makePoolFixture("pool/_pool-upstream"),
-				makePoolFixture("pool/_pool-local-only"),
-			]),
-			makeRemoteBackedRepo(),
-		]);
 	});
 
 	afterAll(() => {
@@ -175,15 +168,12 @@ describe("goal/session branch push safety regressions", () => {
 		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
 		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
 		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
-		for (const fixture of poolFixtures) {
-			if (fs.existsSync(fixture.root)) cleanup(fixture.root);
-		}
-		if (pushFixture && fs.existsSync(pushFixture.root)) cleanup(pushFixture.root);
 		if (templateRoot) cleanup(templateRoot);
 	});
 
 	it("claiming a pool branch must not preserve an inherited origin/master upstream", async () => {
-		const { root, repo, poolBranch, poolWorktree } = poolFixtures[0]!;
+		// Build inside the test so every Vitest retry owns a fresh real-Git fixture.
+		const { root, repo, poolBranch, poolWorktree } = await makePoolFixture("pool/_pool-upstream");
 		const { runner: commandRunner } = recordingRealCommandRunner();
 		let pool: WorktreePool | undefined;
 		try {
@@ -207,7 +197,8 @@ describe("goal/session branch push safety regressions", () => {
 	});
 
 	it("claimed pool branch stays local-only even when push is enabled", async () => {
-		const { root, repo, origin, poolBranch, poolWorktree } = poolFixtures[1]!;
+		// Build inside the test so a failed attempt cannot poison later retries.
+		const { root, repo, origin, poolBranch, poolWorktree } = await makePoolFixture("pool/_pool-local-only");
 		const { runner: commandRunner } = recordingRealCommandRunner();
 		const testNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 		let pool: WorktreePool | undefined;
@@ -243,8 +234,7 @@ describe("goal/session branch push safety regressions", () => {
 
 	it("canonical ready-to-merge push must not update origin/master from a goal branch", async () => {
 		const template = branchPushStep(readyToMergeGate().verify);
-		assert.ok(pushFixture, "push fixture must be initialized");
-		const { root, repo, origin } = pushFixture;
+		const { root, repo, origin } = await makeRemoteBackedRepo();
 		try {
 			const masterBefore = (await refs(root, origin, ["refs/heads/master"])).get("refs/heads/master")?.sha;
 			assert.ok(masterBefore, "fixture must create origin/master");
