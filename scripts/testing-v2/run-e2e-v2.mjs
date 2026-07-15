@@ -43,7 +43,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { execFileSync } from "node:child_process";
 import { createCpuSampler } from "./assert-budget.mjs";
-import { integrationE2eFiles } from "./integration-e2e-files.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -202,29 +201,16 @@ async function runGroupC(specs) {
 	});
 }
 
-// Group I — heavy REAL-FIDELITY vitest integration specs relocated out of the
-// fast `unit` gate (see integrationE2eFiles in vitest.config.ts). Run here via
-// the dedicated v2-integration-e2e vitest project. External-free like the rest.
-async function runGroupIntegration() {
-	return run(npmCmd(), ["run", "test:e2e:integration"], {
-		env: { ...EXTERNAL_FREE_ENV },
-		label: "I/integration-e2e",
-	});
-}
-
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const { A, B, C, excluded } = classifyDaily();
 
-	// Group I is not classified from the daily bucket — it is the fixed
-	// v2-integration-e2e vitest project (heavy integration specs relocated out of
-	// the unit gate; the file list is the shared integrationE2eFiles module).
 	if (args.list) {
-		console.log(JSON.stringify({ A, B, C, I: integrationE2eFiles, excluded }, null, 2));
+		console.log(JSON.stringify({ A, B, C, excluded }, null, 2));
 		return;
 	}
 
-	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length} I(integration)=${integrationE2eFiles.length}`);
+	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length}`);
 	console.log(`[e2e-v2] excluded: manual-integration=${excluded.manualIntegration.length}${excluded.missing.length ? `, MISSING=${excluded.missing.length} (${excluded.missing.join(", ")})` : ""}`);
 
 	const docker = dockerAvailable();
@@ -241,7 +227,6 @@ async function main() {
 	if (!only || only === "A") results.push(await runGroupA(A));
 	if (!only || only === "B") results.push(await runGroupB(B));
 	if (!only || only === "C") results.push(await runGroupC(C));
-	if (!only || only === "I") results.push(await runGroupIntegration());
 
 	const sample = sampler.stop();
 	const wallMs = Math.round(performance.now() - startWall);
@@ -257,7 +242,7 @@ async function main() {
 		peakProcesses: sample.peakProcesses,
 		docker,
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
-		counts: { A: A.length, B: B.length, C: C.length, I: integrationE2eFiles.length },
+		counts: { A: A.length, B: B.length, C: C.length },
 		excluded,
 		createdAt: new Date().toISOString(),
 	};

@@ -25,6 +25,7 @@ process.env.BOBBIT_HUMAN_SIGNOFF_SKIP ??= "1";
 
 import { mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import {
 	afterAll as vAfterAll,
 	afterEach as vAfterEach,
@@ -34,7 +35,7 @@ import {
 	it as vIt,
 	expect as vExpect,
 } from "vitest";
-import { type EntityCounts, type GatewayFixture } from "../../harness/gateway.js";
+import { exportGatewayApiProfileForTests, exportProductionProfileForTests, type EntityCounts, type GatewayFixture } from "../../harness/gateway.js";
 import { assertNoLeaks, snapshotEntities } from "../../harness/leak-detector.js";
 import { createScope, type TestScope } from "../../harness/scope.js";
 import { currentScope, ensureGateway, gatewaySync, setScope } from "./runtime.js";
@@ -171,9 +172,13 @@ interface CleanupSnapshot {
 
 export interface CleanupStats {
 	snapshots: number;
+	snapshotCalls: number;
+	snapshotMs: number;
 	sweeps: number;
 	skippedSweeps: number;
 	uncertainSweeps: number;
+	cleanupCalls: number;
+	cleanupMs: number;
 	defaultResets: number;
 	defaultRestores: number;
 	deletedSessions: number;
@@ -184,6 +189,7 @@ export interface CleanupStats {
 interface IntegrationHarnessState {
 	generation: number;
 	stats: CleanupStats;
+	profileExports: number;
 }
 
 const HARNESS_STATE_KEY = Symbol.for("bobbit.tests2.integrationHarnessState");
@@ -193,9 +199,13 @@ type HarnessGlobal = typeof globalThis & { [key: symbol]: IntegrationHarnessStat
 function emptyCleanupStats(): CleanupStats {
 	return {
 		snapshots: 0,
+		snapshotCalls: 0,
+		snapshotMs: 0,
 		sweeps: 0,
 		skippedSweeps: 0,
 		uncertainSweeps: 0,
+		cleanupCalls: 0,
+		cleanupMs: 0,
 		defaultResets: 0,
 		defaultRestores: 0,
 		deletedSessions: 0,
@@ -208,7 +218,7 @@ function harnessState(): IntegrationHarnessState {
 	const global = globalThis as HarnessGlobal;
 	let state = global[HARNESS_STATE_KEY];
 	if (!state) {
-		state = { generation: 0, stats: emptyCleanupStats() };
+		state = { generation: 0, stats: emptyCleanupStats(), profileExports: 0 };
 		global[HARNESS_STATE_KEY] = state;
 	}
 	return state;
@@ -234,7 +244,8 @@ function profileCleanupStatsPath(): string | undefined {
 	const dir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
 	if (!dir) return undefined;
 	const worker = process.env.VITEST_WORKER_ID || process.env.VITEST_POOL_ID || "worker";
-	return join(dir, `integration-harness-cleanup-${process.pid}-${worker}.json`);
+	const sequence = String(++harnessState().profileExports).padStart(4, "0");
+	return join(dir, `integration-harness-cleanup-${process.pid}-${worker}-${sequence}.json`);
 }
 
 export function exportIntegrationHarnessCleanupStatsForProfile(): string | undefined {
@@ -246,12 +257,17 @@ export function exportIntegrationHarnessCleanupStatsForProfile(): string | undef
 		pid: process.pid,
 		vitestWorkerId: process.env.VITEST_WORKER_ID ?? null,
 		vitestPoolId: process.env.VITEST_POOL_ID ?? null,
+		profileSequence: harnessState().profileExports,
 		cleanupStats: integrationHarnessCleanupStats(),
 	};
 	mkdirSync(process.env.BOBBIT_V2_HOOK_PROFILE_DIR!, { recursive: true });
 	const tmpPath = `${outPath}.tmp-${process.pid}`;
 	writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`);
 	renameSync(tmpPath, outPath);
+	try {
+		exportProductionProfileForTests();
+		exportGatewayApiProfileForTests();
+	} catch { /* profiling must never affect cleanup */ }
 	return outPath;
 }
 
@@ -354,17 +370,23 @@ function defaultProjectFingerprint(gw: GatewayFixture): string {
 }
 
 function snapshotCleanupState(gw: GatewayFixture): CleanupSnapshot {
+	const startedAt = performance.now();
 	incStat("snapshots");
-	const ids = snapshotIds(gw);
-	let counts: EntityCounts;
-	try { counts = gw.countEntities(); }
-	catch { counts = { sessions: ids.sessions.size, goals: ids.goals.size, projects: ids.projects.size }; }
-	return {
-		ids,
-		counts,
-		defaultProjectFingerprint: defaultProjectFingerprint(gw),
-		generation: harnessState().generation,
-	};
+	incStat("snapshotCalls");
+	try {
+		const ids = snapshotIds(gw);
+		let counts: EntityCounts;
+		try { counts = gw.countEntities(); }
+		catch { counts = { sessions: ids.sessions.size, goals: ids.goals.size, projects: ids.projects.size }; }
+		return {
+			ids,
+			counts,
+			defaultProjectFingerprint: defaultProjectFingerprint(gw),
+			generation: harnessState().generation,
+		};
+	} finally {
+		incStat("snapshotMs", performance.now() - startedAt);
+	}
 }
 
 function fingerprintUncertain(value: string): boolean {
@@ -395,45 +417,51 @@ function defaultProjectNeedsHealing(now: CleanupSnapshot, baseline: CleanupSnaps
 }
 
 async function cleanupTo(gw: GatewayFixture, baseline: CleanupSnapshot, opts: { final?: boolean } = {}): Promise<void> {
-	const now = snapshotCleanupState(gw);
-	const needed = cleanupNeeded(gw, baseline, now);
-	if (!opts.final && !needed) {
-		incStat("skippedSweeps");
-		return;
-	}
-	incStat("sweeps");
-	if (fingerprintUncertain(now.defaultProjectFingerprint) || fingerprintUncertain(baseline.defaultProjectFingerprint)) incStat("uncertainSweeps");
-	for (const id of now.ids.sessions) if (!baseline.ids.sessions.has(id)) {
-		const resp = await gw.api(`/api/sessions/${id}?purge=true`, { method: "DELETE" }).catch(() => undefined);
-		if (!resp || resp.ok || resp.status === 404) incStat("deletedSessions");
-		bumpGeneration();
-	}
-	for (const id of now.ids.goals) if (!baseline.ids.goals.has(id)) {
-		const resp = await gw.api(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => undefined);
-		if (!resp || resp.ok || resp.status === 404) incStat("deletedGoals");
-		bumpGeneration();
-	}
-	for (const id of now.ids.projects) if (!baseline.ids.projects.has(id) && id !== gw.defaultProjectId) {
-		const resp = await gw.api(`/api/projects/${id}`, { method: "DELETE" }).catch(() => undefined);
-		if (!resp || resp.ok || resp.status === 404) incStat("deletedProjects");
-		bumpGeneration();
-	}
-	// Heal the default project only when the cleanup snapshot proves it changed:
-	//   - MISSING (a test deleted it) → re-register + reseed via restoreDefaultProject().
-	//   - PRESENT but its seeded workflows/component config were mutated in place by a
-	//     fork-mate (e.g. inline-workflow-goal-flow.test.ts REPLACES the default
-	//     project.yaml workflows) → resetDefaultProjectBaseline() restores the seeded
-	//     baseline. Proven no-op tests skip this expensive branch entirely.
-	// Neither path touches ctx.workflowStore, so workflows a test registered via
-	// POST /api/workflows (a separate store) are preserved.
-	if (!hasVisibleDefaultProject(gw)) {
-		await gw.restoreDefaultProject();
-		incStat("defaultRestores");
-		bumpGeneration();
-	} else if (defaultProjectNeedsHealing(now, baseline)) {
-		await gw.resetDefaultProjectBaseline();
-		incStat("defaultResets");
-		bumpGeneration();
+	const startedAt = performance.now();
+	incStat("cleanupCalls");
+	try {
+		const now = snapshotCleanupState(gw);
+		const needed = cleanupNeeded(gw, baseline, now);
+		if (!opts.final && !needed) {
+			incStat("skippedSweeps");
+			return;
+		}
+		incStat("sweeps");
+		if (fingerprintUncertain(now.defaultProjectFingerprint) || fingerprintUncertain(baseline.defaultProjectFingerprint)) incStat("uncertainSweeps");
+		for (const id of now.ids.sessions) if (!baseline.ids.sessions.has(id)) {
+			const resp = await gw.api(`/api/sessions/${id}?purge=true`, { method: "DELETE" }).catch(() => undefined);
+			if (!resp || resp.ok || resp.status === 404) incStat("deletedSessions");
+			bumpGeneration();
+		}
+		for (const id of now.ids.goals) if (!baseline.ids.goals.has(id)) {
+			const resp = await gw.api(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => undefined);
+			if (!resp || resp.ok || resp.status === 404) incStat("deletedGoals");
+			bumpGeneration();
+		}
+		for (const id of now.ids.projects) if (!baseline.ids.projects.has(id) && id !== gw.defaultProjectId) {
+			const resp = await gw.api(`/api/projects/${id}`, { method: "DELETE" }).catch(() => undefined);
+			if (!resp || resp.ok || resp.status === 404) incStat("deletedProjects");
+			bumpGeneration();
+		}
+		// Heal the default project only when the cleanup snapshot proves it changed:
+		//   - MISSING (a test deleted it) → re-register + reseed via restoreDefaultProject().
+		//   - PRESENT but its seeded workflows/component config were mutated in place by a
+		//     fork-mate (e.g. inline-workflow-goal-flow.test.ts REPLACES the default
+		//     project.yaml workflows) → resetDefaultProjectBaseline() restores the seeded
+		//     baseline. Proven no-op tests skip this expensive branch entirely.
+		// Neither path touches ctx.workflowStore, so workflows a test registered via
+		// POST /api/workflows (a separate store) are preserved.
+		if (!hasVisibleDefaultProject(gw)) {
+			await gw.restoreDefaultProject();
+			incStat("defaultRestores");
+			bumpGeneration();
+		} else if (defaultProjectNeedsHealing(now, baseline)) {
+			await gw.resetDefaultProjectBaseline();
+			incStat("defaultResets");
+			bumpGeneration();
+		}
+	} finally {
+		incStat("cleanupMs", performance.now() - startedAt);
 	}
 }
 

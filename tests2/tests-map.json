@@ -244,6 +244,14 @@
       "reason": "Pins the Windows unit child-process profiler's redacted aggregation contract: completed/incomplete children, per-executable cost, and peak concurrency are derived from per-process JSONL without retaining arguments or environment values."
     },
     {
+      "path": "tests2/core/in-process-mock-guard-cache.test.ts",
+      "reason": "Runtime isolation canary: two sessions activate one content-addressed guard module, then later and concurrent permission callbacks retain distinct session grant paths and bearer tokens."
+    },
+    {
+      "path": "tests2/core/pi-extension-discovery-backend.test.ts",
+      "reason": "Additive deterministic backend-contract coverage retained separately so the merge-base real child-process, TypeScript loader, containment, timeout, and filesystem security declarations remain unchanged in pi-extension-discovery.test.ts."
+    },
+    {
       "path": "tests2/core/server-prebundle-cache.test.ts",
       "reason": "Pins content-addressed server-test prebundle cache invalidation and fail-closed artifact validation so changed source, stale keys, missing maps, or truncated bundles can never be silently reused."
     },

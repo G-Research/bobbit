@@ -21,6 +21,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { createHash } from "node:crypto";
 import { Document as FlexDocument } from "flexsearch";
 import { profileAsync } from "../agent/profiling.js";
 import { highlight } from "./snippet.js";
@@ -96,6 +97,8 @@ const SOURCE_ID_TO_TYPE: Record<Indexable["sourceId"], SearchResult["type"]> = {
 
 const META_FILE = "meta.json";
 const INDEX_SUBDIR = "index";
+export const FLEX_EXPORT_BUNDLE_FILE = "__index__.json";
+export const FLEX_EXPORT_BUNDLE_VERSION = 1;
 const FLUSH_DEBOUNCE_MS = 500;
 
 // ── Doc shape ────────────────────────────────────────────────────────
@@ -183,7 +186,9 @@ export class FlexSearchStore {
 	private _saveTimer: NodeJS.Timeout | null = null;
 	private _flushInFlight: Promise<void> | null = null;
 	private _flushAgain = false;
+	private _dirty = false;
 	private _closed = false;
+	private _atomicRename = atomicRename;
 
 	private constructor(dataDir: string) {
 		this.dataDir = dataDir;
@@ -512,6 +517,7 @@ export class FlexSearchStore {
 
 	private _scheduleSave(): void {
 		if (this._closed) return;
+		this._dirty = true;
 		if (this._saveTimer) return;
 		this._saveTimer = setTimeout(() => {
 			this._saveTimer = null;
@@ -530,15 +536,32 @@ export class FlexSearchStore {
 		if (this._flushInFlight) {
 			this._flushAgain = true;
 			await this._flushInFlight;
-			if (!this._flushAgain) return;
+			if (!this._dirty) {
+				this._flushAgain = false;
+				return;
+			}
+		}
+		if (!this._dirty) {
+			this._flushAgain = false;
+			return;
 		}
 		this._flushAgain = false;
+		this._dirty = false;
+		let failed = false;
 		const task = this._doFlush().catch((err) => {
+			// Preserve the write obligation for a later debounce/explicit flush,
+			// but never recurse immediately on a persistent write failure.
+			failed = true;
+			this._dirty = true;
 			console.error("[search] flex flush error:", err);
 		});
 		this._flushInFlight = task;
 		try { await task; } finally { this._flushInFlight = null; }
-		if (this._flushAgain) {
+		if (failed) {
+			this._flushAgain = false;
+			return;
+		}
+		if (this._flushAgain || this._dirty) {
 			this._flushAgain = false;
 			await this._flushNow();
 		}
@@ -573,13 +596,17 @@ export class FlexSearchStore {
 		const docsFinal = path.join(dir, `${docsKey}.json`);
 		const docsTmp = `${docsFinal}.tmp`;
 		const serialisedDocs = JSON.stringify(Array.from(this._docs.values()));
+		const docsHash = createHash("sha256").update(serialisedDocs).digest("hex");
 		await fs.promises.writeFile(docsTmp, serialisedDocs, "utf-8");
-		await atomicRename(docsTmp, docsFinal);
+		await this._atomicRename(docsTmp, docsFinal);
 		written.push(`${docsKey}.json`);
 
-		await this._idx.export(async (key: string, data: unknown) => {
+		const exportEntries: Array<[string, unknown]> = [];
+		await (this._idx.export as unknown as (
+			callback: (key: string, data: unknown) => Promise<void>,
+		) => Promise<void>)(async (key: string, data: unknown) => {
 			if (data === undefined || data === null) return;
-			let payloadData: unknown = data;
+			let payloadData: unknown = typeof data === "string" ? safeParse(data) : data;
 			// FlexSearch exports the tag context as `[field, valueMapOrNull]`
 			// pairs; an empty/partially-empty index yields `null` values that
 			// crash `Document.import` on reload (`null.length`). Strip the
@@ -591,16 +618,17 @@ export class FlexSearchStore {
 				if (sanitised === null) return;
 				payloadData = sanitised;
 			}
-			const safeKey = sanitiseKey(key);
-			const final = path.join(dir, `${safeKey}.json`);
-			const tmp = `${final}.tmp`;
-			const payload = typeof payloadData === "string" ? payloadData : JSON.stringify(payloadData);
-			await fs.promises.writeFile(tmp, payload, "utf-8");
-			await atomicRename(tmp, final);
-			written.push(`${safeKey}.json`);
+			exportEntries.push([key, payloadData]);
 		});
 
-		// Sweep stale export-key files.
+		const bundleFinal = path.join(dir, FLEX_EXPORT_BUNDLE_FILE);
+		const bundleTmp = `${bundleFinal}.tmp`;
+		const bundle = JSON.stringify({ version: FLEX_EXPORT_BUNDLE_VERSION, docsHash, exports: exportEntries });
+		await fs.promises.writeFile(bundleTmp, bundle, "utf-8");
+		await this._atomicRename(bundleTmp, bundleFinal);
+		written.push(FLEX_EXPORT_BUNDLE_FILE);
+
+		// Sweep stale legacy export-key files after both bundle files are durable.
 		const present = new Set(written);
 		let entries: string[] = [];
 		try { entries = await fs.promises.readdir(dir); } catch { /* empty */ }
@@ -622,8 +650,10 @@ export class FlexSearchStore {
 		// First, reload our mirror docs map (source of truth for
 		// `count()`, `list()`, `deleteWhere`).
 		const docsFile = path.join(dir, "__docs__.json");
+		let loadedDocsHash: string | undefined;
 		try {
 			const raw = await fs.promises.readFile(docsFile, "utf-8");
+			loadedDocsHash = createHash("sha256").update(raw).digest("hex");
 			const parsed = JSON.parse(raw) as FlexDoc[];
 			for (const d of parsed) {
 				if (d && typeof d.id === "string") this._docs.set(d.id, d);
@@ -634,51 +664,65 @@ export class FlexSearchStore {
 		}
 		await yieldToLoop();
 
-		// Then replay FlexSearch's own per-key exports. Yield the loop
-		// between files — each import is a synchronous CPU-bound tree
-		// rebuild, and with a ~100MB map.json file it stalls the event
-		// loop for multiple seconds. Yielding lets REST/WS requests slip
-		// through during startup.
+		// Replay either the versioned single-file export bundle or the legacy
+		// per-key files. The mirror remains a separate atomic recovery source.
 		let importFailures = 0;
 		let importSuccesses = 0;
-		for (const file of entries) {
-			if (!file.endsWith(".json")) continue;
-			if (file.endsWith(".tmp")) continue;
-			if (file === "__docs__.json") continue;
-			const key = unsanitiseKey(file.slice(0, -".json".length));
+		const importEntry = async (key: string, data: unknown, source: string): Promise<void> => {
 			try {
-				const raw = await fs.promises.readFile(path.join(dir, file), "utf-8");
-				const data = safeParse(raw);
 				if (isTagKey(key)) {
-					// Classify the tag export so a genuinely corrupt payload still
-					// forces rebuild-from-mirror. Only the KNOWN empty-tag shape
-					// (an array of `[field, null]` pairs that sanitises to empty)
-					// is a clean no-op — those `null` values would otherwise crash
-					// `Document.import` on reload. Malformed / unparseable /
-					// unrecognized payloads must count as importFailures so the
-					// rebuild-from-`__docs__.json` recovery still fires.
 					const tag = classifyTagImport(data);
-					if (tag.kind === "invalid") {
-						importFailures++;
-						console.warn(`[search] Skipping corrupt index file ${file}: unrecognized tag payload`);
-						await yieldToLoop();
-						continue;
-					}
-					if (tag.kind === "import") {
-						this._idx.import(key, tag.entries as never);
-					}
-					// "empty" — known FlexSearch empty-tag shape; clean no-op.
-					importSuccesses++;
-					await yieldToLoop();
-					continue;
+					if (tag.kind === "invalid") throw new Error("unrecognized tag payload");
+					if (tag.kind === "import") this._idx.import(key, tag.entries as never);
+				} else {
+					this._idx.import(key, data as never);
 				}
-				this._idx.import(key, data as never);
 				importSuccesses++;
 			} catch (err) {
 				importFailures++;
-				console.warn(`[search] Skipping corrupt index file ${file}:`, err);
+				console.warn(`[search] Skipping corrupt index export ${source}:`, err);
 			}
 			await yieldToLoop();
+		};
+
+		if (entries.includes(FLEX_EXPORT_BUNDLE_FILE)) {
+			try {
+				const raw = await fs.promises.readFile(path.join(dir, FLEX_EXPORT_BUNDLE_FILE), "utf-8");
+				const bundle = JSON.parse(raw) as { version?: unknown; docsHash?: unknown; exports?: unknown };
+				if (bundle.version !== FLEX_EXPORT_BUNDLE_VERSION
+					|| typeof bundle.docsHash !== "string"
+					|| bundle.docsHash !== loadedDocsHash
+					|| !Array.isArray(bundle.exports)) {
+					throw new Error("unsupported, partial, or mirror-mismatched FlexSearch export bundle");
+				}
+				for (const entry of bundle.exports) {
+					if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") {
+						importFailures++;
+						console.warn("[search] Skipping malformed entry in FlexSearch export bundle");
+						continue;
+					}
+					await importEntry(entry[0], entry[1], `${FLEX_EXPORT_BUNDLE_FILE}:${entry[0]}`);
+				}
+			} catch (err) {
+				importFailures++;
+				console.warn(`[search] Skipping corrupt index export ${FLEX_EXPORT_BUNDLE_FILE}:`, err);
+			}
+		} else {
+			// Backward-compatible legacy reader. The next dirty flush migrates these
+			// files into the versioned bundle and sweeps the old per-key exports.
+			const legacyFiles = entries
+				.filter((file) => file.endsWith(".json") && !file.endsWith(".tmp") && file !== "__docs__.json")
+				.sort((a, b) => legacyImportOrder(a) - legacyImportOrder(b) || a.localeCompare(b));
+			for (const file of legacyFiles) {
+				const key = unsanitiseKey(file.slice(0, -".json".length));
+				try {
+					const raw = await fs.promises.readFile(path.join(dir, file), "utf-8");
+					await importEntry(key, safeParse(raw), file);
+				} catch (err) {
+					importFailures++;
+					console.warn(`[search] Skipping corrupt index export ${file}:`, err);
+				}
+			}
 		}
 
 		// If the replay files were all present and parsed cleanly, trust
@@ -692,14 +736,15 @@ export class FlexSearchStore {
 		// with that incomplete state — search filters would degrade
 		// without any further warning. Drop the partial index entirely
 		// and rebuild from `__docs__.json`, which is our source of truth.
-		if (importFailures > 0 && this._docs.size > 0) {
+		if ((importFailures > 0 || importSuccesses === 0) && this._docs.size > 0) {
+			this._dirty = true;
 			console.warn(
-				`[search] Rebuilding in-memory index from mirror (${this._docs.size} docs) — ${importFailures} export file(s) failed to import (${importSuccesses} succeeded); partial state discarded`,
+				`[search] Rebuilding in-memory index from mirror (${this._docs.size} docs) — ${importFailures} export entry(s) failed to import (${importSuccesses} succeeded); partial state discarded`,
 			);
 			this._idx = FlexSearchStore._newIndex();
 			let n = 0;
 			for (const d of this._docs.values()) {
-				try { (this._idx.update as unknown as (id: string, d: unknown) => void)(d.id, d); } catch { /* non-fatal */ }
+				try { (this._idx.add as unknown as (id: string, d: unknown) => void)(d.id, d); } catch { /* non-fatal */ }
 				// Yield every 500 docs so the event loop isn't monopolized
 				// during a worst-case rebuild.
 				if (++n % 500 === 0) await yieldToLoop();
@@ -845,10 +890,14 @@ export function classifyTagImport(data: unknown): TagImportClassification {
 	return populated.length > 0 ? { kind: "import", entries: populated } : { kind: "empty" };
 }
 
-// FlexSearch export keys may include characters awkward for filenames
-// (slashes, colons). Round-trip via URL-encoding.
-function sanitiseKey(key: string): string {
-	return encodeURIComponent(key);
+// Legacy FlexSearch per-key files must replay maps before registries/tags/docs.
+function legacyImportOrder(file: string): number {
+	const key = unsanitiseKey(file.slice(0, -".json".length));
+	if (key.endsWith(".map")) return 0;
+	if (key.endsWith(".reg")) return 1;
+	if (key.endsWith(".tag")) return 2;
+	if (key.endsWith(".doc")) return 3;
+	return 4;
 }
 function unsanitiseKey(key: string): string {
 	try { return decodeURIComponent(key); } catch { return key; }

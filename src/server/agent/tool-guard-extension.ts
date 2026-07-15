@@ -23,13 +23,13 @@ export interface ToolPolicyEntry {
 /**
  * Generate the TypeScript source for a tool_call guard extension.
  *
- * @param sessionId - The session ID (used to POST grant requests to the gateway)
+ * @param _sessionId - Retained for API compatibility; runtime identity comes from the gateway-owned BOBBIT_SESSION_ID env so identical policies can share one immutable extension.
  * @param policies - Map of tool name → { policy, group } for all tools with 'ask' policy
  * @param grantedTools - Tools already granted (pre-populated grant set)
  * @returns TypeScript source string for the extension
  */
 export function generateToolGuardExtension(
-	sessionId: string,
+	_sessionId: string,
 	policies: Record<string, ToolPolicyEntry>,
 	grantedTools: string[],
 ): string {
@@ -71,11 +71,13 @@ export default function(pi) {
   const grantedTools = new Set(${JSON.stringify(grantedTools)});
   const grantedToolsLower = new Set(${JSON.stringify(grantedTools.map((name) => name.toLowerCase()))});
 
-  // Read gateway URL and auth token (same pattern as MCP proxy extensions)
+  // Gateway-owned process state is captured per activation. Keeping it out of
+  // generated source makes policy-identical guards content-addressable without
+  // sharing identity, credentials, or the per-activation grant set below.
   const bobbitDir = process.env.BOBBIT_DIR || path.join(os.homedir(), ".bobbit");
-  const gwUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8").trim();
-  const token = process.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8").trim();
-  const sessionId = ${JSON.stringify(sessionId)};
+  const gatewayUrlFromEnv = process.env.BOBBIT_GATEWAY_URL;
+  const tokenFromEnv = process.env.BOBBIT_TOKEN;
+  const sessionId = process.env.BOBBIT_SESSION_ID;
 
   pi.on("tool_call", async (event) => {
     const toolName = event.toolName || event.tool;
@@ -101,13 +103,22 @@ export default function(pi) {
       return undefined;
     }
 
-    // Tool has 'ask' policy and is not yet granted — request permission via gateway
+    // Tool has 'ask' policy and is not yet granted — request permission via gateway.
+    // Missing identity fails closed rather than sending an unscoped request.
+    if (!sessionId) {
+      return { block: true, reason: "Tool permission check unavailable: missing BOBBIT_SESSION_ID" };
+    }
     const entry = askPolicy.entry;
-    const body = JSON.stringify({ toolName, toolGroup: entry.group });
-    const url = new URL(gwUrl + "/api/sessions/" + sessionId + "/tool-grant-request");
-    const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
 
     try {
+      // Credentials are needed only for an ask-policy request. Loading them
+      // lazily keeps never-only guards active in credential-less fixtures and
+      // still fails closed when an ask guard cannot reach its gateway state.
+      const gwUrl = gatewayUrlFromEnv || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8").trim();
+      const token = tokenFromEnv || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8").trim();
+      const body = JSON.stringify({ toolName, toolGroup: entry.group });
+      const url = new URL(gwUrl + "/api/sessions/" + sessionId + "/tool-grant-request");
+      const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
       const result = await new Promise((resolve, reject) => {
         const req = mod.request(url, {
           method: "POST",

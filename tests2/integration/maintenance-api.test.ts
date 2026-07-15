@@ -8,10 +8,42 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, apiFetch, createSession, deleteSession, defaultProjectId, registerProject } from "./_e2e/e2e-setup.js";
+import { readE2EToken, apiFetch as gatewayApiFetch, createSession, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
 
-test.beforeAll(() => {
+let maintenanceGateway: any;
+let maintenanceProjectId: string;
+let maintenanceProjectContext: any;
+let immutableRepoFixtureRoot: string;
+let immutableBareRepoPath: string;
+
+/** Buffer every real HTTP response before returning it so fixture teardown cannot race an open body. */
+async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const response = await gatewayApiFetch(path, opts);
+	const body = await response.arrayBuffer();
+	return new Response(response.status === 204 || response.status === 205 || response.status === 304 ? null : body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers: response.headers,
+	});
+}
+
+test.beforeAll(({ gateway }) => {
 	readE2EToken();
+	maintenanceGateway = gateway;
+	maintenanceProjectId = gateway.defaultProjectId;
+	maintenanceProjectContext = gateway.projectContextManager.getOrCreate(maintenanceProjectId);
+	if (!maintenanceProjectId || !maintenanceProjectContext) throw new Error("maintenance fixture requires the stable default project context");
+
+	immutableRepoFixtureRoot = mkdtempSync(join(tmpdir(), "bobbit-e2e-maintenance-repo-fixture-"));
+	const sourcePath = join(immutableRepoFixtureRoot, "source");
+	immutableBareRepoPath = join(immutableRepoFixtureRoot, "source.git");
+	initFreshGitRepo(sourcePath);
+	execFileSync("git", ["clone", "--bare", sourcePath, immutableBareRepoPath], { stdio: "ignore" });
+	rmSync(sourcePath, { recursive: true, force: true });
+});
+
+test.afterAll(() => {
+	rmSync(immutableRepoFixtureRoot, { recursive: true, force: true });
 });
 
 type SeededSession = {
@@ -255,7 +287,7 @@ function listedWorktreePaths(repoPath: string): string[] {
 		.map(match => normalizeTestPath(match[1]));
 }
 
-function initGitRepo(path: string): void {
+function initFreshGitRepo(path: string): void {
 	mkdirSync(path, { recursive: true });
 	git(path, ["init"]);
 	git(path, ["config", "user.email", "e2e@example.invalid"]);
@@ -265,19 +297,45 @@ function initGitRepo(path: string): void {
 	git(path, ["commit", "-m", "init"]);
 }
 
+/** Clone the suite's immutable bare seed while keeping refs/worktree metadata private to the test. */
+function initGitRepo(path: string): void {
+	mkdirSync(dirname(path), { recursive: true });
+	execFileSync("git", ["clone", "--shared", immutableBareRepoPath, path], { stdio: "ignore" });
+}
+
 function tryRemoveWorktree(repoPath: string, worktreePath: string): void {
 	try { execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath, stdio: "ignore" }); } catch { /* best effort */ }
 }
 
-function tryDeleteBranch(repoPath: string, branch: string): void {
-	try { execFileSync("git", ["branch", "-D", branch], { cwd: repoPath, stdio: "ignore" }); } catch { /* best effort */ }
+function tryDeleteBranches(repoPath: string, branches: string[]): void {
+	if (branches.length === 0) return;
+	try { execFileSync("git", ["branch", "-D", ...branches], { cwd: repoPath, stdio: "ignore" }); } catch { /* best effort */ }
 }
 
-async function seedArchivedSession(gateway: any, overrides: Partial<any> & { id?: string; title?: string; baseDir?: string } = {}): Promise<SeededSession> {
-	const projectId = await defaultProjectId();
-	expect(projectId).toBeTruthy();
-	const ctx = gateway.projectContextManager.getOrCreate(projectId!);
-	expect(ctx).toBeTruthy();
+function tryDeleteBranch(repoPath: string, branch: string): void {
+	tryDeleteBranches(repoPath, [branch]);
+}
+
+type ArchivedSessionOverrides = Partial<any> & { id?: string; title?: string; baseDir?: string };
+
+/** Run real SessionStore mutations while coalescing their durable snapshot into one write. */
+function batchSessionStoreMutations(ctx: any, mutate: (store: any) => void): void {
+	const store = ctx.sessionStore as any;
+	const saveNow = store.saveNow;
+	if (typeof saveNow !== "function") {
+		mutate(store);
+		return;
+	}
+	store.saveNow = () => {};
+	try {
+		mutate(store);
+	} finally {
+		store.saveNow = saveNow;
+		saveNow.call(store);
+	}
+}
+
+function buildArchivedSession(overrides: ArchivedSessionOverrides = {}): SeededSession {
 	const now = Date.now();
 	const baseDir = overrides.baseDir ?? mkdtempSync(join(tmpdir(), "bobbit-e2e-archived-wt-session-"));
 	const id = overrides.id ?? `archived-wt-${now}-${Math.random().toString(36).slice(2, 8)}`;
@@ -295,12 +353,34 @@ async function seedArchivedSession(gateway: any, overrides: Partial<any> & { id?
 		lastActivity: now - 500,
 		archived: true,
 		archivedAt: now,
-		projectId,
+		projectId: maintenanceProjectId,
 		...overrides,
 	};
 	delete session.baseDir;
-	ctx.sessionStore.put(session);
-	return { ctx, session, projectId: projectId! };
+	return { ctx: maintenanceProjectContext, session, projectId: maintenanceProjectId };
+}
+
+function seedArchivedSessions(gateway: any, overrides: ArchivedSessionOverrides[]): SeededSession[] {
+	if (gateway !== maintenanceGateway || gateway.defaultProjectId !== maintenanceProjectId) {
+		throw new Error("maintenance fixture gateway/default project identity changed during the suite");
+	}
+	const seeded = overrides.map(buildArchivedSession);
+	batchSessionStoreMutations(maintenanceProjectContext, store => {
+		for (const seed of seeded) store.put(seed.session);
+	});
+	return seeded;
+}
+
+async function seedArchivedSession(gateway: any, overrides: ArchivedSessionOverrides = {}): Promise<SeededSession> {
+	return seedArchivedSessions(gateway, [overrides])[0];
+}
+
+function removeSeededSessions(seeded: SeededSession[], extraSessionIds: Array<string | undefined> = []): void {
+	const ids = [...seeded.map(seed => seed.session.id), ...extraSessionIds.filter((id): id is string => !!id)];
+	if (ids.length === 0) return;
+	batchSessionStoreMutations(maintenanceProjectContext, store => {
+		for (const id of ids) store.remove(id);
+	});
 }
 
 function findArchivedSession(scan: any, sessionId: string): any | undefined {
@@ -571,14 +651,16 @@ test.describe("archived session worktree maintenance", () => {
 			git(repoPath, ["branch", missingBranch, "HEAD"]);
 			mkdirSync(stalePath, { recursive: true });
 
-			const removable = await seedArchivedSession(gateway, { baseDir, title: "V2 removable archived worktree", cwd: removablePath, repoPath, worktreePath: removablePath, branch: removableBranch });
-			const noPath = await seedArchivedSession(gateway, { baseDir, title: "V2 missing worktree path", cwd: join(baseDir, "no-path"), repoPath, worktreePath: undefined });
-			const missingRepo = await seedArchivedSession(gateway, { baseDir, title: "V2 missing repo path", cwd: join(baseDir, "missing-repo"), repoPath: undefined, worktreePath: join(baseDir, "missing-repo") });
-			const sandbox = await seedArchivedSession(gateway, { baseDir, title: "V2 sandbox path", cwd: "/workspace-wt/session/v2-sandbox", repoPath, worktreePath: "/workspace-wt/session/v2-sandbox", branch: "v2-sandbox", sandboxed: true });
-			const delegate = await seedArchivedSession(gateway, { baseDir, title: "V2 delegate shared worktree", cwd: join(baseDir, "delegate"), repoPath, worktreePath: join(baseDir, "delegate"), branch: undefined, delegateOf: "parent-session-id" });
-			const alreadyCleaned = await seedArchivedSession(gateway, { baseDir, title: "V2 already cleaned", cwd: missingPath, repoPath, worktreePath: missingPath, branch: missingBranch });
-			const stale = await seedArchivedSession(gateway, { baseDir, title: "V2 stale path", cwd: stalePath, repoPath, worktreePath: stalePath, branch: staleBranch });
-			const liveReferenced = await seedArchivedSession(gateway, { baseDir, title: "V2 live referenced", cwd: liveReferencedPath, repoPath, worktreePath: liveReferencedPath, branch: liveBranch });
+			const [removable, noPath, missingRepo, sandbox, delegate, alreadyCleaned, stale, liveReferenced] = seedArchivedSessions(gateway, [
+				{ baseDir, title: "V2 removable archived worktree", cwd: removablePath, repoPath, worktreePath: removablePath, branch: removableBranch },
+				{ baseDir, title: "V2 missing worktree path", cwd: join(baseDir, "no-path"), repoPath, worktreePath: undefined },
+				{ baseDir, title: "V2 missing repo path", cwd: join(baseDir, "missing-repo"), repoPath: undefined, worktreePath: join(baseDir, "missing-repo") },
+				{ baseDir, title: "V2 sandbox path", cwd: "/workspace-wt/session/v2-sandbox", repoPath, worktreePath: "/workspace-wt/session/v2-sandbox", branch: "v2-sandbox", sandboxed: true },
+				{ baseDir, title: "V2 delegate shared worktree", cwd: join(baseDir, "delegate"), repoPath, worktreePath: join(baseDir, "delegate"), branch: undefined, delegateOf: "parent-session-id" },
+				{ baseDir, title: "V2 already cleaned", cwd: missingPath, repoPath, worktreePath: missingPath, branch: missingBranch },
+				{ baseDir, title: "V2 stale path", cwd: stalePath, repoPath, worktreePath: stalePath, branch: staleBranch },
+				{ baseDir, title: "V2 live referenced", cwd: liveReferencedPath, repoPath, worktreePath: liveReferencedPath, branch: liveBranch },
+			]);
 			seeded.push(removable, noPath, missingRepo, sandbox, delegate, alreadyCleaned, stale, liveReferenced);
 			liveSessionId = `live-v2-guard-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 			removable.ctx.sessionStore.put({
@@ -637,11 +719,10 @@ test.describe("archived session worktree maintenance", () => {
 			expect(findArchivedWorktreeItem(defaultScan, alreadyCleaned.session.id)).toBeUndefined();
 			expect(defaultScan.counts.alreadyCleaned).toBeGreaterThanOrEqual(1);
 		} finally {
-			if (liveSessionId && seeded[0]) seeded[0].ctx.sessionStore.remove(liveSessionId);
-			for (const seed of seeded) seed.ctx.sessionStore.remove(seed.session.id);
+			removeSeededSessions(seeded, [liveSessionId]);
 			tryRemoveWorktree(repoPath, removablePath);
 			tryRemoveWorktree(repoPath, liveReferencedPath);
-			for (const branch of [removableBranch, liveBranch, staleBranch, missingBranch]) tryDeleteBranch(repoPath, branch);
+			tryDeleteBranches(repoPath, [removableBranch, liveBranch, staleBranch, missingBranch]);
 			rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
@@ -917,22 +998,24 @@ test.describe("archived session worktree maintenance", () => {
 		try {
 			initGitRepo(repoPath);
 			git(repoPath, ["worktree", "add", "-b", branch, removablePath, "HEAD"]);
-			removable = await seedArchivedSession(gateway, {
-				baseDir,
-				title: "Archived removable with shared branch",
-				cwd: removablePath,
-				repoPath,
-				worktreePath: removablePath,
-				branch,
-			});
-			archivedReference = await seedArchivedSession(gateway, {
-				baseDir,
-				title: "Archived already cleaned branch reference",
-				cwd: alreadyCleanedPath,
-				repoPath,
-				worktreePath: alreadyCleanedPath,
-				branch,
-			});
+			[removable, archivedReference] = seedArchivedSessions(gateway, [
+				{
+					baseDir,
+					title: "Archived removable with shared branch",
+					cwd: removablePath,
+					repoPath,
+					worktreePath: removablePath,
+					branch,
+				},
+				{
+					baseDir,
+					title: "Archived already cleaned branch reference",
+					cwd: alreadyCleanedPath,
+					repoPath,
+					worktreePath: alreadyCleanedPath,
+					branch,
+				},
+			]);
 
 			const before = await getArchivedWorktreeScan("?includeAlreadyCleaned=1");
 			const candidate = findArchivedWorktreeItem(before, removable.session.id);
@@ -959,8 +1042,7 @@ test.describe("archived session worktree maintenance", () => {
 			}));
 			expect(branchExists(repoPath, branch)).toBe(true);
 		} finally {
-			if (removable) removable.ctx.sessionStore.remove(removable.session.id);
-			if (archivedReference) archivedReference.ctx.sessionStore.remove(archivedReference.session.id);
+			removeSeededSessions([removable, archivedReference].filter((seed): seed is SeededSession => !!seed));
 			tryRemoveWorktree(repoPath, removablePath);
 			tryDeleteBranch(repoPath, branch);
 			rmSync(baseDir, { recursive: true, force: true });
@@ -1194,11 +1276,13 @@ test.describe("archived session worktree maintenance", () => {
 			git(repoPath, ["branch", alreadyBranch, "HEAD"]);
 			mkdirSync(stalePath, { recursive: true });
 
-			const removable = await seedArchivedSession(gateway, { baseDir, title: "All removable", cwd: removablePath, repoPath, worktreePath: removablePath, branch: removableBranch });
-			const liveReferenced = await seedArchivedSession(gateway, { baseDir, title: "All live referenced", cwd: liveReferencedPath, repoPath, worktreePath: liveReferencedPath, branch: liveBranch });
-			const sandbox = await seedArchivedSession(gateway, { baseDir, title: "All sandbox", cwd: "/workspace-wt/session/all-sandbox", repoPath, worktreePath: "/workspace-wt/session/all-sandbox", branch: "all-sandbox", sandboxed: true });
-			const stale = await seedArchivedSession(gateway, { baseDir, title: "All stale", cwd: stalePath, repoPath, worktreePath: stalePath, branch: staleBranch });
-			const alreadyCleaned = await seedArchivedSession(gateway, { baseDir, title: "All already cleaned", cwd: alreadyCleanedPath, repoPath, worktreePath: alreadyCleanedPath, branch: alreadyBranch });
+			const [removable, liveReferenced, sandbox, stale, alreadyCleaned] = seedArchivedSessions(gateway, [
+				{ baseDir, title: "All removable", cwd: removablePath, repoPath, worktreePath: removablePath, branch: removableBranch },
+				{ baseDir, title: "All live referenced", cwd: liveReferencedPath, repoPath, worktreePath: liveReferencedPath, branch: liveBranch },
+				{ baseDir, title: "All sandbox", cwd: "/workspace-wt/session/all-sandbox", repoPath, worktreePath: "/workspace-wt/session/all-sandbox", branch: "all-sandbox", sandboxed: true },
+				{ baseDir, title: "All stale", cwd: stalePath, repoPath, worktreePath: stalePath, branch: staleBranch },
+				{ baseDir, title: "All already cleaned", cwd: alreadyCleanedPath, repoPath, worktreePath: alreadyCleanedPath, branch: alreadyBranch },
+			]);
 			seeded.push(removable, liveReferenced, sandbox, stale, alreadyCleaned);
 			liveSessionId = `live-all-guard-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 			removable.ctx.sessionStore.put({
@@ -1257,11 +1341,10 @@ test.describe("archived session worktree maintenance", () => {
 			expect(findArchivedWorktreeItem(after, sandbox.session.id)).toMatchObject({ status: "skipped", reason: "sandbox-container-path" });
 			expect(findArchivedWorktreeItem(after, stale.session.id)).toMatchObject({ status: "skipped", reason: "stale-worktree-directory" });
 		} finally {
-			if (liveSessionId && seeded[0]) seeded[0].ctx.sessionStore.remove(liveSessionId);
-			for (const seed of seeded) seed.ctx.sessionStore.remove(seed.session.id);
+			removeSeededSessions(seeded, [liveSessionId]);
 			tryRemoveWorktree(repoPath, removablePath);
 			tryRemoveWorktree(repoPath, liveReferencedPath);
-			for (const branch of [removableBranch, liveBranch, staleBranch, alreadyBranch]) tryDeleteBranch(repoPath, branch);
+			tryDeleteBranches(repoPath, [removableBranch, liveBranch, staleBranch, alreadyBranch]);
 			rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
@@ -1442,8 +1525,7 @@ test.describe("archived session worktree maintenance", () => {
 				willDeleteBranch: false,
 			});
 		} finally {
-			if (liveSessionId && seeded) seeded.ctx.sessionStore.remove(liveSessionId);
-			if (seeded) seeded.ctx.sessionStore.remove(seeded.session.id);
+			removeSeededSessions(seeded ? [seeded] : [], [liveSessionId]);
 			rmSync(baseDir, { recursive: true, force: true });
 		}
 	});

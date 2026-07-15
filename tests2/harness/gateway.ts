@@ -21,6 +21,7 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type WebSocket from "ws";
 
@@ -36,6 +37,39 @@ import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
 const MOCK_AGENT = resolve(REPO_ROOT, "tests", "e2e", "mock-agent.mjs");
+const apiProfileRecords: Array<{ method: string; path: string; status: number; durationMs: number; endedAt: number }> = [];
+let apiProfileExitRegistered = false;
+let apiProfileExportSequence = 0;
+let productionProfileSnapshot: (() => unknown) | undefined;
+export function exportProductionProfileForTests(dir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR): string | undefined {
+	if (!dir || !productionProfileSnapshot) return undefined;
+	mkdirSync(dir, { recursive: true });
+	const sequence = String(apiProfileExportSequence + 1).padStart(4, "0");
+	const outPath = join(dir, `production-profile-${process.pid}-${sequence}.json`);
+	writeFileSync(outPath, `${JSON.stringify(productionProfileSnapshot(), null, 2)}\n`);
+	return outPath;
+}
+export function exportGatewayApiProfileForTests(dir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR): string | undefined {
+	if (!dir) return undefined;
+	mkdirSync(dir, { recursive: true });
+	const sequence = String(++apiProfileExportSequence).padStart(4, "0");
+	const outPath = join(dir, `gateway-api-${process.pid}-${sequence}.json`);
+	writeFileSync(outPath, `${JSON.stringify({ sequence: apiProfileExportSequence, records: apiProfileRecords }, null, 2)}\n`);
+	return outPath;
+}
+export function recordProfiledApiCall(method: string, path: string, status: number, durationMs: number): void {
+	const dir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
+	if (!dir) return;
+	apiProfileRecords.push({ method, path: path.split("?", 1)[0], status, durationMs, endedAt: Date.now() });
+	if (apiProfileExitRegistered) return;
+	apiProfileExitRegistered = true;
+	process.once("exit", () => {
+		try {
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, `gateway-api-${process.pid}.json`), `${JSON.stringify(apiProfileRecords, null, 2)}\n`);
+		} catch { /* profiling must never affect test behavior */ }
+	});
+}
 // Src-booted gateway: __dirname resolves builtins to non-existent src paths, so
 // point the builtin config + packs at the repo-root source trees (dist-relative
 // defaults only exist after a build). Production/legacy dist-boot leave these
@@ -233,6 +267,7 @@ async function boot(): Promise<BootedGateway> {
 	// source-mode diagnostic run retains bounded startup concurrency.
 	const bootLease = await acquireGatewayBootLease();
 	const runtime = await loadServerTestRuntime();
+	productionProfileSnapshot = runtime.profiling.snapshot;
 	const { getAgentDirState, initializeAgentDirRuntime, setProjectRoot } = runtime.bobbitDir;
 	const { scaffoldBobbitDir } = runtime.scaffold;
 	const { loadOrCreateToken } = runtime.authToken;
@@ -349,7 +384,15 @@ async function boot(): Promise<BootedGateway> {
 			const headers = new Headers(init?.headers);
 			headers.set("Authorization", `Bearer ${token}`);
 			if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-			return fetch(`${baseURL}${path}`, { ...init, headers });
+			const startedAt = performance.now();
+			try {
+				const response = await fetch(`${baseURL}${path}`, { ...init, headers });
+				recordProfiledApiCall(init?.method ?? "GET", path, response.status, performance.now() - startedAt);
+				return response;
+			} catch (error) {
+				recordProfiledApiCall(init?.method ?? "GET", path, 0, performance.now() - startedAt);
+				throw error;
+			}
 		},
 		async apiJson<T = any>(path: string, init?: RequestInit): Promise<T> {
 			const resp = await this.api(path, init);

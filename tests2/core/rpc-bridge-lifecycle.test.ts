@@ -6,77 +6,85 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
-import path from "node:path";
 
 import { RpcBridge } from "../../src/server/agent/rpc-bridge.ts";
 
-function writeCrashOnPromptCli(): { dir: string; file: string } {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-rpc-crash-"));
-	const file = path.join(dir, "crash-on-prompt.mjs");
+function writeCrashOnPromptCli(): string {
+	const file = `${os.tmpdir()}/bobbit-rpc-crash-${process.pid}.mjs`;
 	fs.writeFileSync(file, `
 process.stdin.setEncoding("utf8");
 let received = "";
-process.stdin.on("data", (chunk) => {
+function onData(chunk) {
   received += chunk;
-  if (received.includes("\\n")) {
-    process.stderr.write("synthetic pi child crash after pending prompt\\n");
-    setTimeout(() => process.exit(17), 10);
-  }
-});
-setInterval(() => {}, 1000);
-`, "utf-8");
-	return { dir, file };
+  const newline = received.indexOf("\\n");
+  if (newline < 0) return;
+  const command = JSON.parse(received.slice(0, newline));
+  if (command.type !== "prompt" || !command.id) process.exit(2);
+  process.stdin.off("data", onData);
+  process.stdin.pause();
+  process.stdin.destroy();
+  process.exitCode = 17;
+  process.stderr.end("synthetic pi child crash after pending prompt\\n");
 }
-
-function timeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-	let timer: ReturnType<typeof setTimeout>;
-	const deadline = new Promise<never>((_, reject) => {
-		timer = setTimeout(() => reject(new Error(message)), ms);
-	});
-	return Promise.race([promise, deadline]).finally(() => clearTimeout(timer!));
+process.stdin.on("data", onData);
+process.stdout.end('{"type":"fixture_ready"}\\n');
+`, "utf-8");
+	return file;
 }
 
 describe("RpcBridge lifecycle", () => {
 	it("rejects a pending prompt exactly once when the Pi child exits unexpectedly", async () => {
-		const cli = writeCrashOnPromptCli();
-		const bridge = new RpcBridge({ cliPath: cli.file });
+		const cliFile = writeCrashOnPromptCli();
+		const bridge = new RpcBridge({ cliPath: cliFile });
 		let processExitEvents = 0;
+		let resolveReady!: () => void;
+		let rejectReady!: (error: Error) => void;
+		const ready = new Promise<void>((resolve, reject) => {
+			resolveReady = resolve;
+			rejectReady = reject;
+		});
+		let resolveProcessExit!: (event: any) => void;
+		const processExit = new Promise<any>((resolve) => {
+			resolveProcessExit = resolve;
+		});
 		const unsubscribe = bridge.onEvent((event) => {
-			if (event?.type === "process_exit") processExitEvents++;
+			if (event?.type === "fixture_ready") resolveReady();
+			if (event?.type === "process_exit") {
+				processExitEvents++;
+				rejectReady(new Error("synthetic Pi child exited before its readiness handshake"));
+				resolveProcessExit(event);
+			}
 		});
 
-		await bridge.start();
+		try {
+			await Promise.all([bridge.start(), ready]);
 
-		let rejectionCount = 0;
-		const result = await timeout(
-			bridge.prompt("trigger crash").then(
+			let rejectionCount = 0;
+			const promptResult = bridge.prompt("trigger crash").then(
 				(value) => ({ ok: true as const, value }),
 				(error) => {
 					rejectionCount++;
 					return { ok: false as const, error };
 				},
-			),
-			2000,
-			"pending prompt did not reject after child process exit",
-		);
+			);
+			const [result, exitEvent] = await Promise.all([promptResult, processExit]);
 
-		assert.equal(result.ok, false, "prompt should reject when the child exits before replying");
-		assert.match(String(result.error?.message || result.error), /Agent process exited with code 17/);
-		assert.match(String(result.error?.message || result.error), /synthetic pi child crash/);
-		assert.equal(rejectionCount, 1, "pending prompt promise must reject exactly once");
+			assert.equal(result.ok, false, "prompt should reject when the child exits before replying");
+			assert.match(String(result.error?.message || result.error), /Agent process exited with code 17/);
+			assert.match(String(result.error?.message || result.error), /synthetic pi child crash/);
+			assert.equal(exitEvent.code, 17, "process_exit should carry the real child exit code");
+			assert.equal(rejectionCount, 1, "pending prompt promise must reject exactly once");
+			assert.equal(processExitEvents, 1, "process_exit event should be emitted exactly once");
+			assert.equal(bridge.running, false, "bridge should clear its process after exit");
 
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		assert.equal(processExitEvents, 1, "process_exit event should be emitted exactly once");
-		assert.equal(bridge.running, false, "bridge should clear its process after exit");
-
-		try {
-			await timeout(bridge.stop(), 500, "first stop() hung after child exit");
-			await timeout(bridge.stop(), 500, "second stop() hung after child exit");
+			await bridge.stop();
+			await bridge.stop();
 			assert.equal(rejectionCount, 1, "idempotent stop cleanup must not re-reject the prompt");
 			assert.equal(processExitEvents, 1, "idempotent stop cleanup must not emit duplicate process_exit events");
 		} finally {
 			unsubscribe();
-			fs.rmSync(cli.dir, { recursive: true, force: true });
+			await bridge.stop();
+			fs.rmSync(cliFile, { force: true });
 		}
 	});
 });

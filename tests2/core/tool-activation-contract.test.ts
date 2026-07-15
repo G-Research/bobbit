@@ -23,7 +23,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-const { computeToolActivationArgs } = await import("../../src/server/agent/tool-activation.ts");
+const { computeToolActivationArgs, tagAllowedTools } = await import("../../src/server/agent/tool-activation.ts");
 import type { ToolProvider } from "../../src/server/agent/tool-manager.ts";
 import type { EffectiveTool } from "../../src/server/agent/tool-activation.ts";
 
@@ -62,6 +62,22 @@ function extensionPaths(args: string[]): string[] {
 	}
 	return out;
 }
+
+describe("allowlist provider snapshot", () => {
+	it("classifies a logical allowlist with one provider read", () => {
+		let reads = 0;
+		const providers = representativeProviders();
+		const tm = {
+			getToolProviders: () => { reads += 1; return providers; },
+		} as any;
+		assert.deepEqual(tagAllowedTools(["read", "web_fetch", "mcp_mock"], tm), [
+			{ kind: "yaml", name: "read" },
+			{ kind: "yaml", name: "web_fetch" },
+			{ kind: "mcp", name: "mcp_mock" },
+		]);
+		assert.equal(reads, 1);
+	});
+});
 
 describe("computeToolActivationArgs — post-fdfee7c5 activation contract", () => {
 	it("emits --no-builtin-tools and --no-extensions for the canonical representative tool set", () => {

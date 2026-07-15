@@ -3,9 +3,10 @@
  * Audits the current unit inventory against the branch merge base.
  *
  * Performance work may add tests or rearrange them between unit sub-projects,
- * but it must not remove a merge-base unit file or add a merge-base unit file
- * to the e2e exclusion list. Static declaration names are reported as a review
- * aid; parameterised tests can collect more than one runtime test per call.
+ * but every merge-base core/DOM/integration file—including the twelve files
+ * formerly relocated to E2E—must remain in the unit gate. Static declaration
+ * names are reported as a review aid; parameterised tests can collect more than
+ * one runtime test per call.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -19,6 +20,8 @@ const valueAfter = (flag) => {
 };
 const upstream = valueAfter("--upstream") ?? "origin/master";
 const outputPath = valueAfter("--json");
+const semanticMapPath = path.join("scripts", "testing-v2", "unit-declaration-semantic-map.json");
+const semanticMappings = JSON.parse(fs.readFileSync(semanticMapPath, "utf-8"));
 const mergeBase = execFileSync("git", ["merge-base", "HEAD", upstream], { encoding: "utf-8" }).trim();
 
 function gitText(gitArgs) {
@@ -58,27 +61,22 @@ function staticTestNames(source, file) {
 }
 
 const baseE2eSource = gitText(["show", `${mergeBase}:scripts/testing-v2/integration-e2e-files.mjs`]);
-const currentE2eSource = fs.readFileSync("scripts/testing-v2/integration-e2e-files.mjs", "utf-8");
-const baseE2e = e2ePaths(baseE2eSource);
-const currentE2e = e2ePaths(currentE2eSource);
-const baseFiles = gitText(["ls-tree", "-r", "--name-only", mergeBase, "--", "tests2/core", "tests2/dom", "tests2/integration"])
+const formerlyRelocatedE2e = e2ePaths(baseE2eSource);
+const requiredUnitFiles = gitText(["ls-tree", "-r", "--name-only", mergeBase, "--", "tests2/core", "tests2/dom", "tests2/integration"])
 	.trim().split(/\r?\n/).filter((file) => /\.test\.ts$/.test(file));
-const baseUnit = baseFiles.filter((file) => !baseE2e.includes(file));
-const currentFiles = [
+const currentUnit = [
 	...currentTestFiles("tests2/core"),
 	...currentTestFiles("tests2/dom"),
 	...currentTestFiles("tests2/integration"),
 ];
-const currentUnit = currentFiles.filter((file) => !currentE2e.includes(file));
-const missingFiles = baseUnit.filter((file) => !currentUnit.includes(file));
-const addedFiles = currentUnit.filter((file) => !baseUnit.includes(file));
-const addedE2eExclusions = currentE2e.filter((file) => !baseE2e.includes(file));
-const removedE2eExclusions = baseE2e.filter((file) => !currentE2e.includes(file));
+const missingFiles = requiredUnitFiles.filter((file) => !currentUnit.includes(file));
+const addedFiles = currentUnit.filter((file) => !requiredUnitFiles.includes(file));
+const restoredFormerE2eFiles = formerlyRelocatedE2e.filter((file) => currentUnit.includes(file));
 
 let baseDeclarations = 0;
 let currentDeclarations = 0;
-const missingDeclarationNames = [];
-for (const file of baseUnit) {
+const missingDeclarations = [];
+for (const file of requiredUnitFiles) {
 	const baseNames = staticTestNames(gitText(["show", `${mergeBase}:${file}`]), file);
 	baseDeclarations += baseNames.length;
 	if (!fs.existsSync(file)) continue;
@@ -88,28 +86,76 @@ for (const file of baseUnit) {
 	for (const name of baseNames) {
 		const index = unmatched.indexOf(name);
 		if (index >= 0) unmatched.splice(index, 1);
-		else missingDeclarationNames.push(`${file} :: ${name}`);
+		else missingDeclarations.push({ file, name });
 	}
 }
 let allCurrentDeclarations = 0;
-for (const file of currentUnit) allCurrentDeclarations += staticTestNames(fs.readFileSync(file, "utf-8"), file).length;
+const currentNamesByFile = new Map();
+for (const file of currentUnit) {
+	const names = staticTestNames(fs.readFileSync(file, "utf-8"), file);
+	currentNamesByFile.set(file, names);
+	allCurrentDeclarations += names.length;
+}
+
+const declarationKey = (file, name) => `${file}\0${name}`;
+const missingKeys = new Set(missingDeclarations.map(({ file, name }) => declarationKey(file, name)));
+const mappingByBase = new Map();
+const invalidSemanticMappings = [];
+for (const mapping of semanticMappings) {
+	const key = declarationKey(mapping.baseFile, mapping.baseName);
+	if (mappingByBase.has(key)) {
+		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — duplicate mapping`);
+		continue;
+	}
+	mappingByBase.set(key, mapping);
+	if (!missingKeys.has(key)) {
+		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — stale mapping; base declaration is not missing`);
+	}
+	if (!mapping.rationale?.trim()) {
+		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — missing rationale`);
+	}
+	if (!Array.isArray(mapping.current) || mapping.current.length === 0) {
+		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — no current semantic owner`);
+		continue;
+	}
+	for (const target of mapping.current) {
+		if (!currentNamesByFile.get(target.file)?.includes(target.name)) {
+			invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — target not found: ${target.file} :: ${target.name}`);
+		}
+	}
+}
+const mappedDeclarations = missingDeclarations.filter(({ file, name }) => mappingByBase.has(declarationKey(file, name)));
+const unmappedDeclarations = missingDeclarations.filter(({ file, name }) => !mappingByBase.has(declarationKey(file, name)));
+const declarationSemanticsPreserved = unmappedDeclarations.length === 0 && invalidSemanticMappings.length === 0;
 
 const report = {
 	mergeBase,
 	upstream,
-	baseUnitFiles: baseUnit.length,
+	requiredMergeBaseUnitFiles: requiredUnitFiles.length,
 	currentUnitFiles: currentUnit.length,
-	missingBaseUnitFiles: missingFiles,
+	missingRequiredUnitFiles: missingFiles,
 	addedUnitFiles: addedFiles,
-	baseE2eExclusions: baseE2e.length,
-	currentE2eExclusions: currentE2e.length,
-	addedE2eExclusions,
-	removedE2eExclusions,
+	formerlyRelocatedE2eFiles: formerlyRelocatedE2e.length,
+	restoredFormerE2eFiles: restoredFormerE2eFiles.length,
+	currentE2eExclusions: 0,
 	baseStaticTestDeclarations: baseDeclarations,
 	currentStaticDeclarationsInBaseFiles: currentDeclarations,
 	allCurrentStaticTestDeclarations: allCurrentDeclarations,
-	missingBaseStaticDeclarationNames: missingDeclarationNames,
-	inventoryPreserved: missingFiles.length === 0 && addedE2eExclusions.length === 0,
+	missingBaseStaticDeclarationNames: missingDeclarations.map(({ file, name }) => `${file} :: ${name}`),
+	mappedBaseStaticDeclarations: mappedDeclarations.map(({ file, name }) => {
+		const mapping = mappingByBase.get(declarationKey(file, name));
+		return {
+			base: `${file} :: ${name}`,
+			current: mapping.current.map((target) => `${target.file} :: ${target.name}`),
+			rationale: mapping.rationale,
+		};
+	}),
+	unmappedBaseStaticDeclarationNames: unmappedDeclarations.map(({ file, name }) => `${file} :: ${name}`),
+	invalidSemanticMappings,
+	declarationSemanticsPreserved,
+	inventoryPreserved: missingFiles.length === 0
+		&& restoredFormerE2eFiles.length === formerlyRelocatedE2e.length
+		&& declarationSemanticsPreserved,
 };
 
 const json = `${JSON.stringify(report, null, 2)}\n`;

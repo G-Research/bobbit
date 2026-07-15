@@ -30,3 +30,4 @@ export * as slashSkills from "../../src/server/skills/slash-skills.js";
 export * as skillManifest from "../../src/server/skills/skill-manifest.js";
 export * as staffManager from "../../src/server/agent/staff-manager.js";
 export * as compactionSidecar from "../../src/server/agent/compaction-sidecar.js";
+export * as profiling from "../../src/server/agent/profiling.js";

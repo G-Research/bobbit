@@ -79,21 +79,48 @@ function parseToolRegistration(args) {
 	return { name, description, inputSchema, handler };
 }
 
-async function importExtensionModule(filePath) {
-	if (!/\.tsx?$/i.test(filePath)) return import(pathToFileURL(filePath).href);
-	const ts = await import("typescript");
-	const source = fs.readFileSync(filePath, "utf-8");
-	const transpiled = ts.transpileModule(source, {
-		compilerOptions: { module: ts.ModuleKind.ES2020, target: ts.ScriptTarget.ES2020 },
-		fileName: filePath,
-	});
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mock-pi-ext-"));
-	const out = path.join(dir, path.basename(filePath).replace(/\.tsx?$/i, ".mjs"));
-	fs.writeFileSync(out, transpiled.outputText, "utf-8");
-	return import(pathToFileURL(out).href);
+const extensionModuleCache = new Map();
+const extensionModuleLoadCounts = new Map();
+
+/** Test-only observability for the immutable extension-module cache. */
+export function __inProcessMockExtensionCacheStats(filePath) {
+	const prefix = `${filePath}:`;
+	const keys = [...extensionModuleCache.keys()].filter((key) => key.startsWith(prefix));
+	return {
+		entries: keys.length,
+		loads: keys.reduce((total, key) => total + (extensionModuleLoadCounts.get(key) || 0), 0),
+	};
 }
 
-async function loadMockPiExtensions(args = []) {
+async function importExtensionModule(filePath) {
+	const stat = fs.statSync(filePath);
+	const key = `${filePath}:${stat.size}:${stat.mtimeMs}`;
+	let loaded = extensionModuleCache.get(key);
+	if (loaded) return loaded;
+	loaded = (async () => {
+		if (!/\.tsx?$/i.test(filePath)) return import(pathToFileURL(filePath).href);
+		const ts = await import("typescript");
+		const source = fs.readFileSync(filePath, "utf-8");
+		const transpiled = ts.transpileModule(source, {
+			compilerOptions: { module: ts.ModuleKind.ES2020, target: ts.ScriptTarget.ES2020 },
+			fileName: filePath,
+		});
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mock-pi-ext-"));
+		const out = path.join(dir, path.basename(filePath).replace(/\.tsx?$/i, ".mjs"));
+		fs.writeFileSync(out, transpiled.outputText, "utf-8");
+		return import(pathToFileURL(out).href);
+	})();
+	extensionModuleCache.set(key, loaded);
+	extensionModuleLoadCounts.set(key, (extensionModuleLoadCounts.get(key) || 0) + 1);
+	try { return await loaded; }
+	catch (error) {
+		extensionModuleCache.delete(key);
+		extensionModuleLoadCounts.delete(key);
+		throw error;
+	}
+}
+
+async function loadMockPiExtensions(args = [], env = {}) {
 	const tools = new Map();
 	const toolCallHandlers = [];
 	const pi = {
@@ -116,7 +143,27 @@ async function loadMockPiExtensions(args = []) {
 		try {
 			const mod = await importExtensionModule(extensionPath);
 			const activate = typeof mod.default === "function" ? mod.default : mod.default?.default;
-			if (typeof activate === "function") await activate(pi);
+			if (typeof activate === "function") {
+				// Generated guards capture gateway-owned child env during synchronous
+				// activation. Mirror only those values, then restore process-global state
+				// before independent in-process sessions execute.
+				const activationEnvKeys = ["BOBBIT_DIR", "BOBBIT_GATEWAY_URL", "BOBBIT_TOKEN", "BOBBIT_SESSION_ID"];
+				const previousEnv = new Map(activationEnvKeys.map((key) => [key, process.env[key]]));
+				let activationResult;
+				try {
+					for (const key of activationEnvKeys) {
+						if (env[key] === undefined) delete process.env[key];
+						else process.env[key] = env[key];
+					}
+					activationResult = activate(pi);
+				} finally {
+					for (const [key, value] of previousEnv) {
+						if (value === undefined) delete process.env[key];
+						else process.env[key] = value;
+					}
+				}
+				if (activationResult && typeof activationResult.then === "function") await activationResult;
+			}
 		} catch (err) {
 			// The real pi runtime reports extension-load failures without killing the
 			// gateway. Mirror that behaviour for the mock: tests assert diagnostics via
@@ -147,7 +194,7 @@ export class InProcessMockBridge {
 		// not argv, so we pass cwd directly via opts.
 		const env = { ...process.env, ...(this.options.env || {}) };
 		const argModel = lastModelArg(this.options.args);
-		const mockPi = await loadMockPiExtensions(this.options.args);
+		const mockPi = await loadMockPiExtensions(this.options.args, env);
 		this._agent = new MockAgentCore({
 			cwd: this.options.cwd || process.cwd(),
 			env,

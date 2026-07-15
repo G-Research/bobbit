@@ -31,6 +31,7 @@ export interface ServerTestRuntime {
 	skillManifest: typeof import("../../src/server/skills/skill-manifest.js");
 	staffManager: typeof import("../../src/server/agent/staff-manager.js");
 	compactionSidecar: typeof import("../../src/server/agent/compaction-sidecar.js");
+	profiling: typeof import("../../src/server/agent/profiling.js");
 }
 
 let runtimePromise: Promise<ServerTestRuntime> | undefined;

@@ -2,30 +2,59 @@
 // Source: tests/pi-extension-discovery.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import {
-	discoverPiExtensionTools,
-	discoverPiExtensionToolsSync,
-	PI_EXTENSION_DISCOVERY_RESULT_MARKER,
-	type PiExtensionDiscoveryBackend,
-	type PiExtensionDiscoveryProbeRequest,
-	type PiExtensionDiscoveryProbeResult,
+	discoverPiExtensionTools as discoverPiExtensionToolsReal,
+	discoverPiExtensionToolsSync as discoverPiExtensionToolsSyncReal,
+	type DiscoverPiExtensionToolsOptions,
 } from "../../src/server/agent/pi-extension-discovery.js";
 import {
 	computePiExtensionDiscoveryCacheKey,
 	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
 	PI_EXTENSION_DISCOVERY_HASH_LIMITS,
-	loadPiExtensionContributionsWithDiscovery,
 	loadPiExtensionContributionsWithDiscoverySync,
 } from "../../src/server/agent/pi-extension-contributions.js";
 
-function tempDir(prefix = "bobbit-pi-ext-discovery-"): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+let suiteRoot: string;
+let sourceRoot: string;
+let sharedProbeCwd: string;
+let tempId = 0;
+beforeAll(() => {
+	suiteRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-discovery-suite-"));
+	sourceRoot = path.join(suiteRoot, "pi-extensions", "test-pack");
+	sharedProbeCwd = path.join(suiteRoot, "probe-runtime");
+	fs.mkdirSync(sourceRoot, { recursive: true });
+	fs.mkdirSync(sharedProbeCwd, { recursive: true });
+});
+afterAll(() => { fs.rmSync(suiteRoot, { recursive: true, force: true }); });
+
+function discoverPiExtensionTools(entryPath: string, opts: DiscoverPiExtensionToolsOptions) {
+	return discoverPiExtensionToolsReal(entryPath, { cwd: sharedProbeCwd, ...opts });
 }
+
+function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPiExtensionToolsOptions) {
+	return discoverPiExtensionToolsSyncReal(entryPath, { cwd: sharedProbeCwd, ...opts });
+}
+
+function tempDir(prefix = "bobbit-pi-ext-discovery-"): string {
+	const dir = path.join(sourceRoot, `${prefix}${++tempId}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+function outsideTempDir(): string {
+	const dir = path.join(suiteRoot, "outside", String(++tempId));
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+// Per-case source trees remain isolated and are reclaimed in one suite pass.
+function cleanupTempDir(_dir: string): void {}
 
 function write(file: string, text: string): string {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -33,238 +62,395 @@ function write(file: string, text: string): string {
 	return file;
 }
 
-function probeResult(overrides: Partial<PiExtensionDiscoveryProbeResult> = {}): PiExtensionDiscoveryProbeResult {
-	return { stdout: "", stderr: "", exitCode: 0, timedOut: false, ...overrides };
-}
-
-function marked(payload: unknown, prefix = ""): PiExtensionDiscoveryProbeResult {
-	return probeResult({ stdout: `${prefix}${PI_EXTENSION_DISCOVERY_RESULT_MARKER}${JSON.stringify(payload)}\n` });
-}
-
-function backend(
-	result: PiExtensionDiscoveryProbeResult | ((request: PiExtensionDiscoveryProbeRequest) => PiExtensionDiscoveryProbeResult),
-	calls: PiExtensionDiscoveryProbeRequest[] = [],
-): PiExtensionDiscoveryBackend {
-	const invoke = (request: PiExtensionDiscoveryProbeRequest): PiExtensionDiscoveryProbeResult => {
-		calls.push(request);
-		return typeof result === "function" ? result(request) : result;
-	};
-	return { run: async (request) => invoke(request), runSync: invoke };
-}
-
-function okBackend(tools: unknown[], calls: PiExtensionDiscoveryProbeRequest[] = []): PiExtensionDiscoveryBackend {
-	return backend(marked({ status: "ok", tools }), calls);
-}
-
-function failedBackend(code: string, message = `${code} detail`): PiExtensionDiscoveryBackend {
-	return backend(marked({ status: "failed", code, message }));
-}
-
-function manifest(piExtensions: string[]): any {
-	return { schema: 2, name: "pack", contents: { piExtensions } };
+function symlinkOrSkip(target: string, link: string, type: fs.symlink.Type): boolean {
+	try {
+		fs.symlinkSync(target, link, type);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 describe("pi extension discovery", () => {
-	it("skips executable probing before trust and does not invoke the backend", async () => {
+	it("skips executable probing before trust and does not import extension code", async () => {
 		const dir = tempDir();
 		try {
 			const marker = path.join(dir, "executed.txt").replace(/\\/g, "\\\\");
-			const entry = write(path.join(dir, "extension.mjs"), `import fs from "node:fs"; fs.writeFileSync("${marker}", "ran");`);
-			const calls: PiExtensionDiscoveryProbeRequest[] = [];
-			const result = await discoverPiExtensionTools(entry, {
-				trustAccepted: false,
-				backend: okBackend([{ name: "should_not_run" }], calls),
-			});
+			const entry = write(path.join(dir, "extension.mjs"), `import fs from "node:fs"; fs.writeFileSync("${marker}", "ran"); export default function (pi) { pi.registerTool({ name: "should_not_run" }); }`);
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: false });
 			assert.equal(result.status, "skipped");
-			assert.deepEqual(result.tools, []);
-			assert.equal(calls.length, 0);
+			assert.equal(result.tools.length, 0);
 			assert.equal(fs.existsSync(path.join(dir, "executed.txt")), false);
 			assert.ok(result.cacheKey);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
-	it("parses and normalizes backend output deterministically", async () => {
+	it("records tools from common pi registration APIs in a trusted child process", async () => {
 		const dir = tempDir();
 		try {
-			const entry = write(path.join(dir, "extension.mjs"), "export default function () {}\n");
-			const calls: PiExtensionDiscoveryProbeRequest[] = [];
-			const result = await discoverPiExtensionTools(entry, {
-				trustAccepted: true,
-				timeoutMs: 321,
-				cwd: dir,
-				backend: backend(marked({
-					status: "ok",
-					tools: [
-						{ name: " object_tool ", description: " object desc ", inputSchema: { type: "object" } },
-						{ name: "object_tool", description: "duplicate" },
-						{ name: "string_tool", description: "", inputSchema: [] },
-						{ id: "ignored" },
-						null,
-					],
-				}, "extension noise\n"), calls),
-			});
-			assert.equal(result.status, "ok");
-			assert.deepEqual(result.tools, [
-				{ name: "object_tool", description: "object desc", inputSchema: { type: "object" } },
-				{ name: "string_tool" },
-			]);
-			assert.equal(calls.length, 1);
-			assert.equal(calls[0]?.entryPath, entry);
-			assert.equal(calls[0]?.timeoutMs, 321);
-			assert.equal(calls[0]?.cwd, dir);
+			const entry = write(path.join(dir, "extension.mjs"), `
+export default async function (pi) {
+  pi.registerTool({ name: "object_tool", description: "object desc", inputSchema: { type: "object", properties: { value: { type: "string" } } } });
+  pi.tool("string_tool", { description: "string desc", schema: { type: "object" } }, async () => {});
+  pi.tools.register({ name: "nested_tool", parameters: { type: "object", properties: {} } });
+}
+`);
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+			assert.equal(result.status, "ok", result.diagnostic?.message);
+			assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["nested_tool", "object_tool", "string_tool"]);
+			assert.equal(result.tools.find((tool) => tool.name === "object_tool")?.description, "object desc");
+			assert.deepEqual(result.tools.find((tool) => tool.name === "string_tool")?.inputSchema, { type: "object" });
 			assert.ok(result.cacheKey);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
-	it("uses the injected sync backend without creating a probe process", () => {
-		const dir = tempDir();
-		try {
-			const entry = write(path.join(dir, "extension.ts"), "export default function (pi: any) { pi.registerTool({ name: 'not_executed' }); }\n");
-			const calls: PiExtensionDiscoveryProbeRequest[] = [];
-			const result = discoverPiExtensionToolsSync(entry, {
-				trustAccepted: true,
-				backend: okBackend([{ name: "sync_tool", description: "from backend" }], calls),
-			});
-			assert.equal(result.status, "ok");
-			assert.deepEqual(result.tools, [{ name: "sync_tool", description: "from backend" }]);
-			assert.equal(calls.length, 1);
-			assert.equal(calls[0]?.entryPath, entry);
-		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("threads the injected backend through async and sync contribution loaders", async () => {
+	it("sync contribution discovery preserves static rows without executing untrusted extension code", () => {
 		const dir = tempDir();
 		try {
 			const packRoot = path.join(dir, "pack");
-			write(path.join(packRoot, "pi-extensions", "demo", "extension.js"), "throw new Error('must not execute in unit');\n");
-			const asyncCalls: PiExtensionDiscoveryProbeRequest[] = [];
-			const [asyncRow] = await loadPiExtensionContributionsWithDiscovery(packRoot, manifest(["demo"]), {
-				trustAccepted: true,
-				discoveryBackend: okBackend([{ name: "async_tool" }], asyncCalls),
-			});
-			assert.equal(asyncRow.discovery.status, "ok");
-			assert.deepEqual(asyncRow.discovery.tools, [{ name: "async_tool" }]);
-			assert.equal(asyncCalls.length, 1);
-
-			const syncCalls: PiExtensionDiscoveryProbeRequest[] = [];
-			const [syncRow] = loadPiExtensionContributionsWithDiscoverySync(packRoot, manifest(["demo"]), {
-				trustAccepted: true,
-				discoveryBackend: okBackend([{ name: "sync_tool" }], syncCalls),
-			});
-			assert.equal(syncRow.discovery.status, "ok");
-			assert.deepEqual(syncRow.discovery.tools, [{ name: "sync_tool" }]);
-			assert.equal(syncCalls.length, 1);
+			const marker = path.join(packRoot, "executed.txt").replace(/\\/g, "\\\\");
+			write(path.join(packRoot, "pi-extensions", "demo", "extension.js"), `import fs from "node:fs"; fs.writeFileSync("${marker}", "ran"); export default function (pi) { pi.registerTool({ name: "should_not_run" }); }`);
+			const rows = loadPiExtensionContributionsWithDiscoverySync(packRoot, { schema: 2, name: "pack", contents: { piExtensions: ["demo"] } } as any, { trustAccepted: false });
+			assert.equal(rows.length, 1);
+			assert.equal(rows[0].discovery.status, "skipped");
+			assert.equal(rows[0].discovery.diagnostic?.code, "trust_required");
+			assert.equal(fs.existsSync(path.join(packRoot, "executed.txt")), false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
-	it("preserves static rows without invoking an untrusted discovery backend", () => {
+	it("records tools synchronously for session-start resolver cache misses", () => {
 		const dir = tempDir();
 		try {
-			const packRoot = path.join(dir, "pack");
-			write(path.join(packRoot, "pi-extensions", "demo", "extension.js"), "throw new Error('must not execute');\n");
-			const calls: PiExtensionDiscoveryProbeRequest[] = [];
-			const [row] = loadPiExtensionContributionsWithDiscoverySync(packRoot, manifest(["demo"]), {
-				trustAccepted: false,
-				discoveryBackend: okBackend([{ name: "should_not_run" }], calls),
-			});
-			assert.equal(row.discovery.status, "skipped");
-			assert.equal(row.discovery.diagnostic?.code, "trust_required");
-			assert.equal(calls.length, 0);
+			const entry = write(path.join(dir, "extension.mjs"), "export default function (pi) { pi.registerTool({ name: 'sync_tool' }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "ok", result.diagnostic?.message);
+			assert.deepEqual(result.tools.map((tool) => tool.name), ["sync_tool"]);
+			assert.ok(result.cacheKey);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
-	it("maps backend security decisions without executing hostile fixtures", async () => {
+	it("transpiles trusted TypeScript extension entries without relying on a Node TS loader", () => {
 		const dir = tempDir();
 		try {
-			const entry = write(path.join(dir, "extension.mjs"), "export default function () {}\n");
-			for (const code of ["PROBE_FS_READ_DENIED", "PROBE_FS_WRITE_DENIED", "PROBE_FS_API_DENIED", "PROBE_CONFINEMENT_DENIED"]) {
-				const result = await discoverPiExtensionTools(entry, {
-					trustAccepted: true,
-					backend: failedBackend(code, `${code}\nsecret detail`),
-				});
-				assert.equal(result.status, "failed", code);
-				assert.equal(result.diagnostic?.status, "discovery-failed", code);
-				assert.equal(result.diagnostic?.code, code);
-				assert.equal(result.diagnostic?.message, `${code} secret detail`);
-			}
+			write(path.join(dir, "helper.ts"), "export const toolName: string = 'ts_tool';\n");
+			const entry = write(path.join(dir, "extension.ts"), "import { toolName } from './helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName, description: 'from ts' }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "ok", result.diagnostic?.message);
+			assert.deepEqual(result.tools.map((tool) => tool.name), ["ts_tool"]);
+			assert.equal(result.tools[0]?.description, "from ts");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
-	it("maps timeout, unsettled-await, invalid-output, and backend exceptions", async () => {
+	it("bundles trusted TypeScript entries that use local CommonJS require", () => {
 		const dir = tempDir();
 		try {
-			const entry = write(path.join(dir, "extension.mjs"), "export default function () {}\n");
-			const timedOut = await discoverPiExtensionTools(entry, {
-				trustAccepted: true,
-				timeoutMs: 77,
-				backend: backend(probeResult({ timedOut: true })),
-			});
-			assert.equal(timedOut.diagnostic?.code, "probe_timeout");
-			assert.match(timedOut.diagnostic?.message ?? "", /77ms/);
-
-			const unsettled = discoverPiExtensionToolsSync(entry, {
-				trustAccepted: true,
-				backend: backend(probeResult({ stderr: "Warning: unsettled top-level await" })),
-			});
-			assert.equal(unsettled.diagnostic?.code, "probe_timeout");
-
-			const invalid = discoverPiExtensionToolsSync(entry, {
-				trustAccepted: true,
-				backend: backend(probeResult({ stderr: "bad\n\toutput" , exitCode: 2 })),
-			});
-			assert.equal(invalid.diagnostic?.code, "probe_invalid_output");
-			assert.match(invalid.diagnostic?.message ?? "", /bad output/);
-
-			const throwing: PiExtensionDiscoveryBackend = {
-				run: async () => { throw new Error("backend exploded\nwith detail"); },
-				runSync: () => { throw new Error("backend exploded\nwith detail"); },
-			};
-			const thrown = await discoverPiExtensionTools(entry, { trustAccepted: true, backend: throwing });
-			assert.equal(thrown.diagnostic?.code, "probe_build_failed");
-			assert.equal(thrown.diagnostic?.message, "backend exploded with detail");
+			write(path.join(dir, "helper.js"), "module.exports = { toolName: 'local_cjs_tool' };\n");
+			const entry = write(path.join(dir, "extension.ts"), "const { toolName } = require('./helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "ok", result.diagnostic?.message);
+			assert.deepEqual(result.tools.map((tool) => tool.name), ["local_cjs_tool"]);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
-	it("reports missing entries before invoking the backend", async () => {
+	it("rejects TypeScript imports that resolve outside the extension source root", () => {
 		const dir = tempDir();
 		try {
-			const calls: PiExtensionDiscoveryProbeRequest[] = [];
-			const result = await discoverPiExtensionTools(path.join(dir, "missing.mjs"), {
-				trustAccepted: true,
-				backend: okBackend([], calls),
-			});
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			const outsideHelper = write(path.join(dir, "outside", "helper.ts"), "export const toolName = 'outside_tool';\n");
+			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from '../../outside/helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
 			assert.equal(result.status, "failed");
-			assert.equal(result.diagnostic?.code, "entry_not_found");
-			assert.equal(calls.length, 0);
+			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
+
+			const absoluteSpecifier = outsideHelper.split(path.sep).join(path.posix.sep);
+			const absoluteEntry = write(path.join(extensionRoot, "absolute.ts"), `import { toolName } from ${JSON.stringify(absoluteSpecifier)};\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n`);
+			const absoluteResult = discoverPiExtensionToolsSync(absoluteEntry, { trustAccepted: true });
+			assert.equal(absoluteResult.status, "failed");
+			assert.equal(absoluteResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
-	it("does not write generated probe metadata when using the injected backend", async () => {
+	it("rejects TypeScript symlink imports that escape the extension source root", () => {
 		const dir = tempDir();
 		try {
-			const entry = write(path.join(dir, "extension.mjs"), "export default function () {}\n");
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			const outsideHelper = write(path.join(dir, "outside", "helper.ts"), "export const toolName = 'symlink_tool';\n");
+			fs.mkdirSync(extensionRoot, { recursive: true });
+			try {
+				fs.symlinkSync(outsideHelper, path.join(extensionRoot, "linked-helper.ts"), "file");
+			} catch {
+				return;
+			}
+			const entry = write(path.join(extensionRoot, "extension.ts"), "import { toolName } from './linked-helper.ts';\nexport default function (pi: any): void { pi.registerTool({ name: toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("rejects TypeScript CommonJS require forms that resolve outside the extension source root", () => {
+		const dir = tempDir();
+		try {
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			write(path.join(dir, "outside", "data.json"), JSON.stringify({ toolName: "outside_json_tool" }));
+			write(path.join(dir, "outside", "helper.js"), "module.exports = { toolName: 'outside_js_tool' };\n");
+
+			const jsonEntry = write(path.join(extensionRoot, "json-require.ts"), "const data = require('../../outside/data.json');\nexport default function (pi: any): void { pi.registerTool({ name: data.toolName }); }\n");
+			const jsonResult = discoverPiExtensionToolsSync(jsonEntry, { trustAccepted: true });
+			assert.equal(jsonResult.status, "failed");
+			assert.equal(jsonResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
+
+			const jsEntry = write(path.join(extensionRoot, "js-require.ts"), "const helper = require('../../outside/helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helper.toolName }); }\n");
+			const jsResult = discoverPiExtensionToolsSync(jsEntry, { trustAccepted: true });
+			assert.equal(jsResult.status, "failed");
+			assert.equal(jsResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
+
+			const resolveEntry = write(path.join(extensionRoot, "resolve-require.ts"), "const helperPath = require.resolve('../../outside/helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helperPath }); }\n");
+			const resolveResult = discoverPiExtensionToolsSync(resolveEntry, { trustAccepted: true });
+			assert.equal(resolveResult.status, "failed");
+			assert.equal(resolveResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("rejects TypeScript CommonJS bare package require outside the extension source root", () => {
+		const dir = tempDir();
+		try {
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			write(path.join(dir, "node_modules", "leaky-package", "index.js"), "module.exports = { toolName: 'leaky_package_tool' };\n");
+			const entry = write(path.join(extensionRoot, "extension.ts"), "const pkg = require('leaky-package');\nexport default function (pi: any): void { pi.registerTool({ name: pkg.toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("rejects TypeScript CommonJS symlink targets that escape the extension source root", () => {
+		const dir = tempDir();
+		try {
+			const extensionRoot = path.join(dir, "pi-extensions", "demo");
+			const outsideHelper = write(path.join(dir, "outside", "helper.js"), "module.exports = { toolName: 'symlink_cjs_tool' };\n");
+			fs.mkdirSync(extensionRoot, { recursive: true });
+			try {
+				fs.symlinkSync(outsideHelper, path.join(extensionRoot, "linked-helper.js"), "file");
+			} catch {
+				return;
+			}
+			const entry = write(path.join(extensionRoot, "extension.ts"), "const helper = require('./linked-helper.js');\nexport default function (pi: any): void { pi.registerTool({ name: helper.toolName }); }\n");
+			const result = discoverPiExtensionToolsSync(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
+		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("confines trusted probes to read-only source access", async () => {
+		const dir = tempDir();
+		const outside = tempDir("bobbit-pi-ext-outside-");
+		try {
+			const inPack = path.join(dir, "inside.txt").replace(/\\/g, "\\\\");
+			const outPack = path.join(outside, "outside.txt").replace(/\\/g, "\\\\");
+			const entry = write(path.join(dir, "extension.mjs"), `import fs from "node:fs"; export default function () { fs.writeFileSync("${inPack}", "x"); fs.writeFileSync("${outPack}", "x"); }\n`);
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
+			assert.equal(fs.existsSync(path.join(dir, "inside.txt")), false);
+			assert.equal(fs.existsSync(path.join(outside, "outside.txt")), false);
+
+			const promisesTarget = path.join(dir, "promises.txt").replace(/\\/g, "\\\\");
+			const promisesEntry = write(path.join(dir, "extension-promises.mjs"), `import { writeFile } from "node:fs/promises"; export default async function () { await writeFile("${promisesTarget}", "x"); }\n`);
+			const promisesResult = await discoverPiExtensionTools(promisesEntry, { trustAccepted: true });
+			assert.equal(promisesResult.status, "failed");
+			assert.equal(promisesResult.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
+			assert.equal(fs.existsSync(path.join(dir, "promises.txt")), false);
+		} finally {
+			cleanupTempDir(dir);
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("denies filesystem read APIs from following symlinks outside allowed roots", async () => {
+		const dir = tempDir();
+		const outside = outsideTempDir();
+		try {
+			const secret = write(path.join(outside, "secret.txt"), "leaked_secret_tool");
+			const outsideDir = path.join(outside, "outside-dir");
+			write(path.join(outsideDir, "tool-name.txt"), "leaked_dir_tool");
+			const fileLink = path.join(dir, "leak.txt");
+			const dirLink = path.join(dir, "linked-dir");
+			const hasFileSymlink = symlinkOrSkip(secret, fileLink, "file");
+			const hasDirSymlink = symlinkOrSkip(outsideDir, dirLink, process.platform === "win32" ? "junction" : "dir");
+			let ran = 0;
+
+			const cases: Array<[string, string, boolean]> = [
+				["readFileSync", `import fs from "node:fs"; export default function (pi) { pi.registerTool({ name: fs.readFileSync(${JSON.stringify(fileLink)}, "utf8") }); }\n`, hasFileSymlink],
+				["statSync", `import fs from "node:fs"; export default function (pi) { fs.statSync(${JSON.stringify(fileLink)}); pi.registerTool({ name: "stat_tool" }); }\n`, hasFileSymlink],
+				["realpathSync", `import fs from "node:fs"; export default function (pi) { fs.realpathSync(${JSON.stringify(fileLink)}); pi.registerTool({ name: "realpath_tool" }); }\n`, hasFileSymlink],
+				["createReadStream", `import fs from "node:fs"; export default async function (pi) { const text = await new Promise((resolve, reject) => { let data = ""; const stream = fs.createReadStream(${JSON.stringify(fileLink)}, { encoding: "utf8" }); stream.on("data", (chunk) => { data += chunk; }); stream.on("error", reject); stream.on("end", () => resolve(data)); }); pi.registerTool({ name: text }); }\n`, hasFileSymlink],
+				["promises.readFile", `import fsp from "node:fs/promises"; export default async function (pi) { pi.registerTool({ name: await fsp.readFile(${JSON.stringify(fileLink)}, "utf8") }); }\n`, hasFileSymlink],
+				["promises.stat", `import fsp from "node:fs/promises"; export default async function (pi) { await fsp.stat(${JSON.stringify(fileLink)}); pi.registerTool({ name: "promises_stat_tool" }); }\n`, hasFileSymlink],
+				["promises.realpath", `import fsp from "node:fs/promises"; export default async function (pi) { await fsp.realpath(${JSON.stringify(fileLink)}); pi.registerTool({ name: "promises_realpath_tool" }); }\n`, hasFileSymlink],
+				["promises.open", `import fsp from "node:fs/promises"; export default async function (pi) { const handle = await fsp.open(${JSON.stringify(fileLink)}, "r"); try { pi.registerTool({ name: await handle.readFile({ encoding: "utf8" }) }); } finally { await handle.close(); } }\n`, hasFileSymlink],
+				["readdirSync", `import fs from "node:fs"; export default function (pi) { pi.registerTool({ name: fs.readdirSync(${JSON.stringify(dirLink)})[0] }); }\n`, hasDirSymlink],
+				["promises.readdir", `import fsp from "node:fs/promises"; export default async function (pi) { const entries = await fsp.readdir(${JSON.stringify(dirLink)}); pi.registerTool({ name: entries[0] }); }\n`, hasDirSymlink],
+			];
+
+			for (const [name, source, enabled] of cases) {
+				if (!enabled) continue;
+				ran++;
+				const entry = write(path.join(dir, `${name}.mjs`), source);
+				const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+				assert.equal(result.status, "failed", name);
+				assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED", name);
+			}
+			if (ran === 0) return;
+		} finally {
+			cleanupTempDir(dir);
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("denies filesystem copy APIs that could stage outside files into allowed roots", async () => {
+		const dir = tempDir();
+		const outside = outsideTempDir();
+		const probeCwd = tempDir("bobbit-pi-ext-probe-cwd-");
+		try {
+			const secret = write(path.join(outside, "secret.txt"), "leaked_secret_tool");
+			const copiedSync = path.join(dir, "copied-sync.txt");
+			const syncEntry = write(path.join(dir, "copy-sync.mjs"), `import fs from "node:fs"; export default function (pi) { fs.cpSync(${JSON.stringify(secret)}, ${JSON.stringify(copiedSync)}); pi.registerTool({ name: fs.readFileSync(${JSON.stringify(copiedSync)}, "utf8") }); }\n`);
+			const syncResult = await discoverPiExtensionTools(syncEntry, { trustAccepted: true });
+			assert.equal(syncResult.status, "failed");
+			assert.equal(syncResult.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
+			assert.equal(fs.existsSync(copiedSync), false);
+
+			const copiedAsync = path.join(probeCwd, "copied-async.txt");
+			const asyncEntry = write(path.join(dir, "copy-async.mjs"), `import fsp from "node:fs/promises"; export default async function (pi) { await fsp.cp(${JSON.stringify(secret)}, ${JSON.stringify(copiedAsync)}); pi.registerTool({ name: await fsp.readFile(${JSON.stringify(copiedAsync)}, "utf8") }); }\n`);
+			const asyncResult = await discoverPiExtensionTools(asyncEntry, { trustAccepted: true, cwd: probeCwd });
+			assert.equal(asyncResult.status, "failed");
+			assert.equal(asyncResult.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
+			assert.equal(fs.existsSync(copiedAsync), false);
+		} finally {
+			cleanupTempDir(dir);
+			fs.rmSync(outside, { recursive: true, force: true });
+			fs.rmSync(probeCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("denies unlisted filesystem APIs by default", async () => {
+		const dir = tempDir();
+		try {
+			const entry = write(path.join(dir, "watch.mjs"), `import fs from "node:fs"; export default function () { fs.watch(${JSON.stringify(dir)}, () => {}); }\n`);
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_FS_API_DENIED");
+		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("blocks network and child-process modules during trusted probes", async () => {
+		const dir = tempDir();
+		try {
+			const childEntry = write(path.join(dir, "child.mjs"), `import "node:child_process"; export default function () {}\n`);
+			const childResult = await discoverPiExtensionTools(childEntry, { trustAccepted: true });
+			assert.equal(childResult.status, "failed");
+			assert.equal(childResult.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
+
+			const httpEntry = write(path.join(dir, "http.mjs"), `import http from "node:http"; export default function () { http.get("http://127.0.0.1/"); }\n`);
+			const httpResult = await discoverPiExtensionTools(httpEntry, { trustAccepted: true });
+			assert.equal(httpResult.status, "failed");
+			assert.equal(httpResult.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
+
+			const undiciEntry = write(path.join(dir, "undici.mjs"), `import "undici"; export default function () {}\n`);
+			const undiciResult = await discoverPiExtensionTools(undiciEntry, { trustAccepted: true });
+			assert.equal(undiciResult.status, "failed");
+			assert.equal(undiciResult.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
+		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("blocks global fetch during trusted probes without sending a request", async () => {
+		const dir = tempDir();
+		let requests = 0;
+		const server = createServer((_req, res) => {
+			requests++;
+			res.end("ok");
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const address = server.address();
+			assert.ok(address && typeof address === "object");
+			const entry = write(path.join(dir, "fetch.mjs"), `export default async function () { await globalThis.fetch("http://127.0.0.1:${address.port}/leak"); }\n`);
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
+			assert.equal(requests, 0);
+		} finally {
+			await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("reports syntax and missing dependency failures without throwing", async () => {
+		const dir = tempDir();
+		try {
+			const badSyntax = write(path.join(dir, "bad-syntax.mjs"), "export default function () {\n");
+			const syntaxResult = await discoverPiExtensionTools(badSyntax, { trustAccepted: true });
+			assert.equal(syntaxResult.status, "failed");
+			assert.equal(syntaxResult.diagnostic?.status, "discovery-failed");
+
+			const missingDep = write(path.join(dir, "missing-dep.mjs"), "import 'definitely-not-a-real-package-for-bobbit-test'; export default function () {}\n");
+			const missingResult = await discoverPiExtensionTools(missingDep, { trustAccepted: true });
+			assert.equal(missingResult.status, "failed");
+			assert.match(missingResult.diagnostic?.message ?? "", /package|module|Cannot find/i);
+		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("bounds probing time and returns a timeout diagnostic", async () => {
+		const dir = tempDir();
+		try {
+			const entry = write(path.join(dir, "hang.mjs"), "await new Promise(() => {}); export default function () {}\n");
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true, timeoutMs: 100 });
+			assert.equal(result.status, "failed");
+			assert.equal(result.diagnostic?.code, "probe_timeout");
+		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("does not write generated probe metadata into the extension source tree", async () => {
+		const dir = tempDir();
+		try {
+			const entry = write(path.join(dir, "extension.mjs"), "export default function (pi) { pi.registerTool({ name: 'clean_probe' }); }\n");
 			const before = fs.readdirSync(dir).sort();
-			const result = await discoverPiExtensionTools(entry, { trustAccepted: true, backend: okBackend([{ name: "clean_probe" }]) });
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
 			assert.equal(result.status, "ok");
 			assert.deepEqual(fs.readdirSync(dir).sort(), before);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -280,22 +466,31 @@ describe("pi extension discovery", () => {
 			assert.ok(second);
 			assert.notEqual(first, second);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
-	it("keeps production discovery hash defaults and bounds file count", () => {
+	it("defaults the discovery cache key file-count limit to 1000", () => {
+		// Production default must stay exactly 1000; the injection seam below relies on this.
 		assert.equal(PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFiles, 1000);
+	});
+
+	it("bounds discovery cache key file count", () => {
 		const dir = tempDir();
 		try {
+			// Exercise the same `hash_file_count_limit` invariant via a narrow test-only
+			// limit-injection seam so we can trip it with a handful of files instead of
+			// materializing 1001+ files (slow/flaky on Windows under full unit-lane load).
 			const maxFiles = 3;
 			const entry = write(path.join(dir, "extension.mjs"), "export default function () {}\n");
-			for (let i = 0; i < maxFiles + 1; i++) write(path.join(dir, `helper-${i}.js`), `export const value${i} = ${i};\n`);
+			for (let i = 0; i < maxFiles + 1; i++) {
+				write(path.join(dir, `helper-${i}.js`), `export const value${i} = ${i};\n`);
+			}
 			const result = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry, { hashLimits: { maxFiles } });
 			assert.equal(result.cacheKey, undefined);
 			assert.equal(result.diagnostic?.code, "hash_file_count_limit");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -306,31 +501,29 @@ describe("pi extension discovery", () => {
 			let nested = dir;
 			for (let i = 0; i < PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxDepth + 1; i++) nested = path.join(nested, `d${i}`);
 			write(path.join(nested, "too-deep.js"), "export const deep = true;\n");
-			assert.equal(computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry).diagnostic?.code, "hash_depth_limit");
+			const depthResult = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry);
+			assert.equal(depthResult.diagnostic?.code, "hash_depth_limit");
 
 			fs.rmSync(path.join(dir, "d0"), { recursive: true, force: true });
 			write(path.join(dir, "large.js"), "x".repeat(PI_EXTENSION_DISCOVERY_HASH_LIMITS.maxFileBytes + 1));
-			assert.equal(computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry).diagnostic?.code, "hash_file_size_limit");
+			const sizeResult = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry);
+			assert.equal(sizeResult.diagnostic?.code, "hash_file_size_limit");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
 	it("preserves extension-level visibility when discovery fails", async () => {
 		const dir = tempDir();
 		try {
-			const packRoot = path.join(dir, "pack");
-			write(path.join(packRoot, "pi-extensions", "demo", "extension.js"), "export default function () {}\n");
-			const [row] = await loadPiExtensionContributionsWithDiscovery(packRoot, manifest(["demo"]), {
-				trustAccepted: true,
-				discoveryBackend: failedBackend("probe_failed", "activation boom"),
-			});
-			assert.equal(row.discovery.status, "failed");
-			assert.equal(row.discovery.tools.length, 0);
-			assert.equal(row.diagnostic.status, "discovery-failed");
-			assert.match(row.diagnostic.message, /activation boom/);
+			const entry = write(path.join(dir, "throws.mjs"), "export default function () { throw new Error('activation boom'); }\n");
+			const result = await discoverPiExtensionTools(entry, { trustAccepted: true });
+			assert.equal(result.status, "failed");
+			assert.equal(result.tools.length, 0);
+			assert.equal(result.diagnostic?.status, "discovery-failed");
+			assert.match(result.diagnostic?.message ?? "", /activation boom/);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 });

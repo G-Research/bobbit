@@ -8,7 +8,7 @@
  * splitting pure scenario permutations here materially increases suite time.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, base, registerProject as registerProjectShared } from "./_e2e/e2e-setup.js";
+import { apiFetch, readE2EToken, base, registerProject as registerProjectShared } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,7 +17,12 @@ import { execFileSync } from "node:child_process";
 let token: string;
 let templateRepo = "";
 let nameCounter = 0;
+let gitProjectId = "";
+let multiProjectId = "";
+let warningProjectId = "";
+let warningRoot = "";
 const cleanupRoots: string[] = [];
+const cleanupProjectIds: string[] = [];
 
 const headers = () => ({
 	Authorization: `Bearer ${token}`,
@@ -73,7 +78,8 @@ function fakeOriginRef(repo: string, branch: string, sha?: string): void {
 async function registerProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<string> {
 	// Delegate to the shared helper which canonicalizes rootPath (handles the
 	// macOS /var → /private/var tmpdir symlink) and sets acceptCanonical:true.
-	const proj = await registerProjectShared({ name: `${name}-${++nameCounter}`, rootPath, components });
+	const proj = await registerProjectShared({ name: `${name}-${++nameCounter}`, rootPath, components, seedWorkflows: false });
+	cleanupProjectIds.push(proj.id);
 	return proj.id;
 }
 
@@ -98,12 +104,50 @@ function expectBaseRefUnset(config: any): void {
 	expect(config.base_ref === undefined || config.base_ref === "").toBe(true);
 }
 
-test.beforeAll(() => {
+test.beforeAll(async () => {
 	token = readE2EToken();
 	templateRepo = createTemplateRepo();
+
+	const gitRoot = fixtureRepo("shared-git", { originDevelop: true });
+	gitProjectId = await registerProject("baseref-git", gitRoot);
+
+	const multiRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-"));
+	cleanupRoots.push(multiRoot);
+	const repoA = path.join(multiRoot, "api");
+	const repoB = path.join(multiRoot, "web");
+	const repoC = path.join(multiRoot, "shared");
+	copyTemplateRepo(repoA);
+	copyTemplateRepo(repoB);
+	copyTemplateRepo(repoC);
+	fakeOriginRef(repoA, "develop");
+	multiProjectId = await registerProject(
+		"baseref-multi",
+		multiRoot,
+		[
+			{ name: "api", repo: "api" },
+			{ name: "web", repo: "web" },
+			{ name: "shared", repo: "shared" },
+		],
+	);
+
+	warningRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-warning-"));
+	cleanupRoots.push(warningRoot);
+	fs.mkdirSync(path.join(warningRoot, "docs"), { recursive: true });
+	warningProjectId = await registerProject("baseref-warning", warningRoot, [{ name: "docs", repo: "docs" }]);
 });
 
-test.afterAll(() => {
+test.afterEach(({ gateway }) => {
+	// The first two cases share the same immutable git graph. Restore only the
+	// config keys they mutate so each test starts from an explicit clean state.
+	const store = gateway.projectContextManager.getOrCreate(gitProjectId)?.projectConfigStore;
+	store?.remove("base_ref");
+	store?.remove("sandbox");
+});
+
+test.afterAll(async () => {
+	for (const id of cleanupProjectIds.splice(0).reverse()) {
+		await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+	}
 	for (const root of cleanupRoots) cleanupDir(root);
 	if (templateRepo) cleanupDir(templateRepo);
 });
@@ -114,39 +158,33 @@ test.describe.configure({ mode: "serial" });
 
 test.describe("base_ref API validation", () => {
 	test("persists remote refs, clears empty values, and accepts local/whitespace refs", async () => {
-		const root = fixtureRepo("rt", { originDevelop: true });
-		const id = await registerProject("baseref-rt", root);
-
-		const remoteSet = await put(id, { base_ref: "origin/develop" });
+		const remoteSet = await put(gitProjectId, { base_ref: "origin/develop" });
 		expect(remoteSet.status, JSON.stringify(remoteSet.json)).toBe(200);
-		expect((await get(id)).base_ref).toBe("origin/develop");
+		expect((await get(gitProjectId)).base_ref).toBe("origin/develop");
 
-		const emptyClear = await put(id, { base_ref: "" });
+		const emptyClear = await put(gitProjectId, { base_ref: "" });
 		expect(emptyClear.status, JSON.stringify(emptyClear.json)).toBe(200);
-		expectBaseRefUnset(await get(id));
+		expectBaseRefUnset(await get(gitProjectId));
 
-		const localSet = await put(id, { base_ref: "develop" });
+		const localSet = await put(gitProjectId, { base_ref: "develop" });
 		expect(localSet.status, JSON.stringify(localSet.json)).toBe(200);
-		expect((await get(id)).base_ref).toBe("develop");
+		expect((await get(gitProjectId)).base_ref).toBe("develop");
 
-		const whitespaceUnset = await put(id, { base_ref: "   " });
+		const whitespaceUnset = await put(gitProjectId, { base_ref: "   " });
 		expect(whitespaceUnset.status, JSON.stringify(whitespaceUnset.json)).toBe(200);
 	});
 
 	test("rejects git-backed tag refs and sandboxed local refs with route error strings", async () => {
-		const root = fixtureRepo("reject");
-		const id = await registerProject("baseref-reject", root);
-
-		const tag = await put(id, { base_ref: "v1.2.3" });
+		const tag = await put(gitProjectId, { base_ref: "v1.2.3" });
 		expect(tag.status).toBe(400);
 		expect(tag.json).toEqual({
 			field: "base_ref",
 			error: "base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: v1.2.3",
 		});
 
-		const sandbox = await put(id, { sandbox: "docker" });
+		const sandbox = await put(gitProjectId, { sandbox: "docker" });
 		expect(sandbox.status, JSON.stringify(sandbox.json)).toBe(200);
-		const local = await put(id, { base_ref: "master" });
+		const local = await put(gitProjectId, { base_ref: "master" });
 		expect(local.status).toBe(400);
 		expect(local.json).toEqual({
 			field: "base_ref",
@@ -155,27 +193,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("multi-repo: missing ref in subset of components returns 400 with structured details[]", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-"));
-		cleanupRoots.push(root);
-		const repoA = path.join(root, "api");
-		const repoB = path.join(root, "web");
-		const repoC = path.join(root, "shared");
-		copyTemplateRepo(repoA);
-		copyTemplateRepo(repoB);
-		copyTemplateRepo(repoC);
-		fakeOriginRef(repoA, "develop");
-
-		const id = await registerProject(
-			"baseref-multi",
-			root,
-			[
-				{ name: "api", repo: "api" },
-				{ name: "web", repo: "web" },
-				{ name: "shared", repo: "shared" },
-			],
-		);
-
-		const r = await put(id, { base_ref: "origin/develop" });
+		const r = await put(multiProjectId, { base_ref: "origin/develop" });
 		expect(r.status).toBe(400);
 		expect(r.json.field).toBe("base_ref");
 		expect(r.json.error).toBe("base_ref 'origin/develop' is not present in 2 of 3 component repos");
@@ -189,18 +207,13 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("non-git component paths skip validation unless base_ref is present, then return warnings", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-warning-"));
-		cleanupRoots.push(root);
-		fs.mkdirSync(path.join(root, "docs"), { recursive: true });
-		const id = await registerProject("baseref-warning", root, [{ name: "docs", repo: "docs" }]);
-
-		const skip = await put(id, { build_command: "echo build" });
+		const skip = await put(warningProjectId, { build_command: "echo build" });
 		expect(skip.status, JSON.stringify(skip.json)).toBe(200);
 
-		const warn = await put(id, { base_ref: "origin/develop" });
+		const warn = await put(warningProjectId, { base_ref: "origin/develop" });
 		expect(warn.status, JSON.stringify(warn.json)).toBe(200);
 		expect(warn.json.warnings).toEqual([
-			`base_ref validation skipped for component 'docs': not a git repo at ${path.join(root, "docs")}`,
+			`base_ref validation skipped for component 'docs': not a git repo at ${path.join(warningRoot, "docs")}`,
 		]);
 	});
 });

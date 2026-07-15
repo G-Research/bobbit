@@ -32,8 +32,24 @@ const { discoverSlashSkills, discoverSlashSkillsResolved, scanSkillDir, scanComm
 type AnyEntry = any;
 
 let TMP: string;
-beforeAll(() => { TMP = fs.mkdtempSync(path.join(os.tmpdir(), "pack-mvp-")); });
+let EMPTY_GLOBAL: string;
+let fixtureId = 0;
+beforeAll(() => {
+	TMP = fs.mkdtempSync(path.join(os.tmpdir(), "pack-mvp-"));
+	EMPTY_GLOBAL = path.join(TMP, "empty-global");
+	fs.mkdirSync(EMPTY_GLOBAL, { recursive: true });
+});
 afterAll(() => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+function fixtureDir(name: string): string {
+	const dir = path.join(TMP, `${name}-${++fixtureId}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+function isolatedSkillContext(cwd: string) {
+	return { serverBase: cwd, globalUserBase: EMPTY_GLOBAL, projectBase: cwd };
+}
 
 function w(file: string, content: string) {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -271,7 +287,7 @@ describe("#5 legacy → unified A/B equivalence", () => {
 	});
 
 	it("skills: discoverSlashSkills order == legacy merge order", () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ab-skills-"));
+		const cwd = fixtureDir("ab-skills");
 		// same-named skill in a low and a high legacy dir; high (project .claude/skills) must win.
 		w(path.join(cwd, ".bobbit", "skills", "dup", "SKILL.md"), skillMd("dup", "FROM-BOBBIT-PROJECT"));
 		w(path.join(cwd, ".claude", "skills", "dup", "SKILL.md"), skillMd("dup", "FROM-CLAUDE-PROJECT"));
@@ -292,7 +308,6 @@ describe("#5 legacy → unified A/B equivalence", () => {
 		const legacyDup = byName.get("dup")!;
 		assert.equal(dup.content, legacyDup.content);
 		assert.equal(dup.source, legacyDup.source);
-		fs.rmSync(cwd, { recursive: true, force: true });
 	});
 });
 
@@ -300,19 +315,18 @@ describe("#5 legacy → unified A/B equivalence", () => {
 
 describe("#6 disabled_config_directories enforcement", () => {
 	it("present-AND-disabled skill dir is omitted; present-but-not-disabled still resolves", () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "disabled-"));
+		const cwd = fixtureDir("disabled");
 		w(path.join(cwd, ".claude", "skills", "zz-disable-me", "SKILL.md"), skillMd("zz-disable-me"));
 
 		// not disabled ⇒ resolves
-		const before = discoverSlashSkills(cwd, { get: () => undefined });
+		const before = discoverSlashSkills(cwd, { get: () => undefined }, isolatedSkillContext(cwd));
 		assert.ok(before.some(s => s.name === "zz-disable-me"), "should resolve when not disabled");
 
 		// disabled ⇒ omitted
 		const disabledPath = path.resolve(path.join(cwd, ".claude", "skills"));
 		const store = { get: (k: string) => (k === "disabled_config_directories" ? JSON.stringify([disabledPath]) : undefined) };
-		const after = discoverSlashSkills(cwd, store);
+		const after = discoverSlashSkills(cwd, store, isolatedSkillContext(cwd));
 		assert.ok(!after.some(s => s.name === "zz-disable-me"), "disabled dir must be omitted from resolution");
-		fs.rmSync(cwd, { recursive: true, force: true });
 	});
 });
 
@@ -327,7 +341,7 @@ describe("finding #1 — legacy/user skill dirs outrank market packs", () => {
 	}
 
 	it("a project market-pack skill does NOT shadow same-named custom / .claude/commands / .claude/skills skills", () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "f1-skill-"));
+		const cwd = fixtureDir("f1-skill");
 		const customDir = path.join(cwd, "custom-skills");
 		// Each legacy/user skill dir defines a skill the market pack ALSO ships.
 		w(path.join(cwd, ".claude", "skills", "dup", "SKILL.md"), skillMd("dup", "FROM-CLAUDE-SKILLS"));
@@ -337,7 +351,7 @@ describe("finding #1 — legacy/user skill dirs outrank market packs", () => {
 		marketSkillPack(cwd, "mkt", [["dup", "FROM-MARKET"], ["custdup", "FROM-MARKET"], ["cmddup", "FROM-MARKET"], ["mktonly", "FROM-MARKET"]]);
 
 		const store = { get: (k: string) => (k === "config_directories" ? JSON.stringify([{ path: customDir, types: ["skills"] }]) : undefined) };
-		const skills = discoverSlashSkills(cwd, store);
+		const skills = discoverSlashSkills(cwd, store, isolatedSkillContext(cwd));
 		const get = (n: string) => skills.find((s) => s.name === n)!;
 		assert.ok(get("dup").content.includes("FROM-CLAUDE-SKILLS"), ".claude/skills (project legacy) must beat a market pack");
 		assert.ok(get("custdup").content.includes("FROM-CUSTOM"), "custom config_directories must beat a market pack");
@@ -346,7 +360,6 @@ describe("finding #1 — legacy/user skill dirs outrank market packs", () => {
 		assert.ok(get("mktonly").content.includes("FROM-MARKET"), "market-only skill must still resolve");
 		assert.equal(get("mktonly").originPackName, "mkt");
 		assert.equal(get("mktonly").originPackId, "market:project:mkt");
-		fs.rmSync(cwd, { recursive: true, force: true });
 	});
 });
 
@@ -426,7 +439,7 @@ describe("finding #3 — server-scope skill pack resolves for a non-default proj
 	}
 
 	it("a server-scope market skill resolves when serverBase != project root, tagged with its pack", () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "f3-srv-skill-"));
+		const root = fixtureDir("f3-srv-skill");
 		const serverBase = path.join(root, "server-cwd");
 		const projectBase = path.join(root, "some-other-project"); // root != server cwd
 		const globalUserBase = path.join(root, "gu-empty");
@@ -453,7 +466,5 @@ describe("finding #3 — server-scope skill pack resolves for a non-default proj
 		const unwired = discoverSlashSkills(projectBase);
 		assert.equal(unwired.find((s) => s.name === "srv-scope-skill"), undefined,
 			"without serverBase wiring the server-scope skill must not resolve (proves the wiring is load-bearing)");
-
-		fs.rmSync(root, { recursive: true, force: true });
 	});
 });

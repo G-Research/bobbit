@@ -1,0 +1,87 @@
+[
+  {
+    "baseFile": "tests2/core/ledger-lease-bridge-interop.test.ts",
+    "baseName": "caps standalone vitest below parent-ledger grants",
+    "current": [
+      {
+        "file": "tests2/core/ledger-lease-bridge-interop.test.ts",
+        "name": "gives standalone Vitest the same ledger-governed cap as parent grants"
+      }
+    ],
+    "rationale": "The standalone cap assertion was deliberately strengthened for the no-queue scheduler: standalone Vitest now receives the same ledger-governed cap as an orchestrated parent rather than the obsolete single-process throttle. The replacement still asserts the base declaration's ledger cap boundary while pinning the updated invariant."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "planLaneConcurrency never raises a lane above the per-process fork cap",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "never oversubscribes a grant and queues only when fewer workers than jobs exist"
+      }
+    ],
+    "rationale": "The replacement checks every planned job allocation against the grant and therefore retains the per-process/no-oversubscription bound under the six-job scheduler."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "planLaneConcurrency keeps instantaneous forks (maxConcurrent*perLane) within the grant",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "never oversubscribes a grant and queues only when fewer workers than jobs exist"
+      }
+    ],
+    "rationale": "The replacement directly sums active job workers and asserts the total never exceeds the ledger grant, preserving the instantaneous-fork invariant for the current heterogeneous lane plan."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "REGRESSION: the single-process throttle (grant=2) collapses lanes to serial",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "never oversubscribes a grant and queues only when fewer workers than jobs exist"
+      }
+    ],
+    "rationale": "The obsolete fixed three-lane reproduction became the low-grant branch of the generalized scheduler test, which still proves constrained grants queue jobs rather than oversubscribing."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "FIX: the fair orchestrator grant runs the 3 lanes concurrently",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "allocates eight workers across core, fidelity, three integration shards, and DOM"
+      },
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "grants three staggered standalone unit suites eight workers each with no queue"
+      }
+    ],
+    "rationale": "The original three-lane fairness proof is superseded by the exact six-job topology plus the three-suite 24-core no-queue assertion; together they preserve and strengthen immediate concurrent start."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "reserveVitestLaneBudget grants the FAIR core budget, not the single-process throttle",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "gives direct Vitest the same ledger-governed cap as the lane orchestrator"
+      },
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "grants three staggered standalone unit suites eight workers each with no queue"
+      }
+    ],
+    "rationale": "The replacement asserts both the exact eight-worker fair reservation and parity between direct Vitest and the lane orchestrator, excluding the former single-process throttle."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "reserveVitestLaneBudget REUSES a parent grant (preserves run-v2 ledger behavior)",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "reuses a parent grant without registering a second ledger entry"
+      }
+    ],
+    "rationale": "This is a direct semantic rename: the current assertion still proves parent grant reuse and explicitly checks that no duplicate ledger reservation is registered."
+  }
+]

@@ -4,7 +4,7 @@
 // Review: unparsed import name in `node:test` import list | test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { test, type TestContext, onTestFinished } from "vitest";
+import { afterAll, beforeAll, test, type TestContext, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -18,29 +18,80 @@ const GOAL_ID = "goal-restart-safe-command-lifecycle";
 const GATE_ID = "implementation";
 const MARKER = "RESTART_SAFE_COMMAND_LIFECYCLE";
 
+// Every child still starts as a fresh real OS process. Keeping its authored code
+// in one immutable file avoids rebuilding equivalent `node -e` programs in each
+// lifecycle and lets the OS reuse the same cached script bytes under contention.
+const IMMUTABLE_COMMAND_SCRIPT = [
+	"const fs = require('node:fs');",
+	"const [mode, ...args] = process.argv.slice(2);",
+	"if (mode === 'idle') setTimeout(() => {}, 30000);",
+	"else if (mode === 'exit-after-delay') setTimeout(() => process.exit(0), Number(args[0]));",
+	"else if (mode === 'holder') { fs.writeFileSync(args[0], String(process.pid)); setInterval(() => {}, 1000); }",
+	"else if (mode === 'retained-exit') {",
+	"  const [outFile, exitFile, delay, marker] = args;",
+	"  setTimeout(() => { fs.appendFileSync(outFile, marker + '\\n'); fs.writeFileSync(exitFile, '0\\n'); process.exit(0); }, Number(delay));",
+	"}",
+	"else if (mode === 'write-file') { fs.writeFileSync(args[0], args[1]); if (args[2]) console.log(args[2]); }",
+	"else if (mode === 'gate-probe') {",
+	"  const [releaseFile, startedFile] = args;",
+	"  console.log('gate-signal-probe:started');",
+	"  fs.writeFileSync(startedFile, 'started');",
+	"  const timer = setInterval(() => {",
+	"    if (fs.existsSync(releaseFile)) { clearInterval(timer); console.log('gate-signal-probe:after-restart'); process.exit(0); }",
+	"  }, 25);",
+	"}",
+	"else { throw new Error('unknown lifecycle fixture mode: ' + mode); }",
+].join("\n");
+
+const COMMAND_STEP_TEMPLATE = Object.freeze({
+	type: "command",
+	status: "running",
+	phase: 0,
+	timeoutSec: 10,
+});
+const ACTIVE_VERIFICATION_TEMPLATE = Object.freeze({
+	goalId: GOAL_ID,
+	gateId: GATE_ID,
+	overallStatus: "running",
+	currentPhase: 0,
+});
+const ROLE_STORE_ADAPTER = Object.freeze({ get: () => undefined, getAll: () => [] });
+
+let suiteRoot = "";
+let lifecycleRoot = "";
+let immutableCommandFile = "";
+let lifecycleSequence = 0;
+const childClosePromises = new WeakMap<ChildProcess, Promise<void>>();
+
+beforeAll(() => {
+	suiteRoot = makeTmpDir("verif-command-lifecycle-");
+	lifecycleRoot = path.join(suiteRoot, "lifecycles");
+	immutableCommandFile = path.join(suiteRoot, "fixture-command.js");
+	fs.mkdirSync(lifecycleRoot, { recursive: true });
+	fs.writeFileSync(immutableCommandFile, IMMUTABLE_COMMAND_SCRIPT);
+});
+
+afterAll(async () => {
+	await fs.promises.rm(suiteRoot, {
+		recursive: true,
+		force: true,
+		maxRetries: process.platform === "win32" ? 10 : 3,
+		retryDelay: 100,
+	});
+});
+
 type GateStoreCall =
 	| { kind: "updateSignalVerification"; signalId: string; update: any }
 	| { kind: "updateGateStatus"; goalId: string; gateId: string; status: string };
 
-function removeTreeBestEffort(root: string): void {
-	try {
-		fs.rmSync(root, { recursive: true, force: true, maxRetries: process.platform === "win32" ? 10 : 3, retryDelay: 100 });
-	} catch {
-		// Some Windows process handles can outlive test assertions briefly. The
-		// lifecycle tests explicitly kill their children; defer one final cleanup
-		// attempt so teardown does not fail while the OS is releasing handles.
-		setTimeout(() => {
-			try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch { /* best-effort */ }
-		}, 250).unref?.();
-	}
+function makeLifecycleStateDir(): string {
+	const stateDir = path.join(lifecycleRoot, String(++lifecycleSequence).padStart(2, "0"), "state");
+	fs.mkdirSync(stateDir, { recursive: true });
+	return stateDir;
 }
 
 function makeHarness(_t: TestContext) {
-	const root = makeTmpDir("verif-command-lifecycle-");
-	const stateDir = path.join(root, "state");
-	fs.mkdirSync(stateDir, { recursive: true });
-	onTestFinished(() => removeTreeBestEffort(root));
-	return makeHarnessForStateDir(stateDir);
+	return makeHarnessForStateDir(makeLifecycleStateDir());
 }
 
 function makeHarnessForStateDir(stateDir: string) {
@@ -57,13 +108,11 @@ function makeHarnessForStateDir(stateDir: string) {
 		getGate: () => undefined,
 		getGatesForGoal: () => [],
 	} as any;
-	const roleStore = { get: () => undefined, getAll: () => [] } as any;
-
 	const harness = new VerificationHarness(
 		stateDir,
 		gateStore,
 		(goalId, event) => broadcasts.push({ goalId, event }),
-		roleStore,
+		ROLE_STORE_ADAPTER as any,
 		undefined,
 		undefined,
 		undefined,
@@ -112,12 +161,13 @@ function deferred<T = void>() {
 	return { promise, resolve, reject };
 }
 
-function spawnNode(script: string): ChildProcess & { pid: number } {
-	const child = spawn(process.execPath, ["-e", script], {
+function spawnFixtureChild(mode: string, args: readonly string[] = []): ChildProcess & { pid: number } {
+	const child = spawn(process.execPath, [immutableCommandFile, mode, ...args], {
 		stdio: "ignore",
 		windowsHide: true,
 	}) as ChildProcess & { pid?: number };
 	assert.ok(child.pid, `${MARKER}: failed to start child process for lifecycle test`);
+	childClosePromises.set(child, new Promise<void>((resolve) => child.once("close", () => resolve())));
 	return child as ChildProcess & { pid: number };
 }
 
@@ -162,9 +212,12 @@ function killPidBestEffort(pid: number): void {
 }
 
 async function cleanupChild(child: ChildProcess): Promise<void> {
-	if (child.exitCode !== null || child.signalCode !== null) return;
-	try { child.kill("SIGKILL"); } catch { /* already gone */ }
-	await waitForExit(child, 1_000);
+	if (child.exitCode === null && child.signalCode === null) {
+		try { child.kill("SIGKILL"); } catch { /* already gone */ }
+	}
+	const closePromise = childClosePromises.get(child);
+	if (closePromise) await closePromise;
+	child.removeAllListeners();
 }
 
 function sleep(ms: number): Promise<void> {
@@ -186,14 +239,56 @@ async function waitForCondition<T>(label: string, predicate: () => T | undefined
 	assert.fail(`${MARKER}: timed out waiting for ${label}${lastError instanceof Error ? ` (${lastError.message})` : ""}`);
 }
 
-function writeIdentityFile(file: string, pid: number, nonce: string): void {
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, `${pid}\n${nonce}\n`);
+function writeFixtureFiles(root: string, files: Readonly<Record<string, string>>): void {
+	fs.mkdirSync(root, { recursive: true });
+	for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(root, name), content);
 }
 
-function writeHeartbeatFile(file: string, pid: number, nonce: string): void {
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, JSON.stringify({ pid, nonce, ts: Math.floor(Date.now() / 1000) }) + "\n");
+function diagnosticFixture(
+	stateDir: string,
+	signalId: string,
+	contents: { out?: string; err?: string; exit?: string } = {},
+) {
+	const diagDir = path.join(stateDir, "verifications", signalId);
+	const outFile = path.join(diagDir, "stdout.log");
+	const errFile = path.join(diagDir, "stderr.log");
+	const exitFile = path.join(diagDir, "exit.txt");
+	const pidFile = path.join(diagDir, "process.pid");
+	const heartbeatFile = path.join(diagDir, "heartbeat.json");
+	const files: Record<string, string> = {};
+	if (contents.out !== undefined) files["stdout.log"] = contents.out;
+	if (contents.err !== undefined) files["stderr.log"] = contents.err;
+	if (contents.exit !== undefined) files["exit.txt"] = contents.exit;
+	writeFixtureFiles(diagDir, files);
+	return { diagDir, outFile, errFile, exitFile, pidFile, heartbeatFile };
+}
+
+function writeIdentityFile(file: string, pid: number, nonce: string): void {
+	writeFixtureFiles(path.dirname(file), { [path.basename(file)]: `${pid}\n${nonce}\n` });
+}
+
+function writeIdentityEvidence(pidFile: string, heartbeatFile: string, pid: number, nonce: string): void {
+	if (path.dirname(pidFile) !== path.dirname(heartbeatFile)) throw new Error("identity fixture files must share a directory");
+	writeFixtureFiles(path.dirname(pidFile), {
+		[path.basename(pidFile)]: `${pid}\n${nonce}\n`,
+		[path.basename(heartbeatFile)]: JSON.stringify({ pid, nonce, ts: Math.floor(Date.now() / 1000) }) + "\n",
+	});
+}
+
+function scheduleIdentityEvidence(
+	pidFile: string,
+	heartbeatFile: string,
+	pid: number,
+	nonce: string,
+	delayMs: number,
+): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(() => {
+			try { writeIdentityEvidence(pidFile, heartbeatFile, pid, nonce); }
+			catch { /* test cleanup may have run */ }
+			resolve();
+		}, delayMs);
+	});
 }
 
 function loadActiveVerifications(stateDir: string): any[] {
@@ -210,9 +305,12 @@ function clearKillRetryTimers(harness: any): void {
 	timers?.clear?.();
 }
 
-function nodeShellCommand(script: string): string {
-	const b64 = Buffer.from(script, "utf8").toString("base64");
-	return `"${process.execPath}" -e "eval(Buffer.from('${b64}','base64').toString())"`;
+function shellQuotedPath(value: string): string {
+	return `"${value.replace(/\\/g, "/").replace(/"/g, '\\"')}"`;
+}
+
+function fixtureShellCommand(mode: string, args: readonly string[] = []): string {
+	return [process.execPath, immutableCommandFile, mode, ...args].map(shellQuotedPath).join(" ");
 }
 
 function commandStepFixture(args: {
@@ -230,14 +328,12 @@ function commandStepFixture(args: {
 	processStartToken?: string;
 }): any {
 	return {
+		...COMMAND_STEP_TEMPLATE,
 		name: args.name,
-		type: "command",
-		status: "running",
-		phase: 0,
 		startedAt: args.startedAt,
 		startTimeMs: args.startedAt,
 		pid: args.pid,
-		timeoutSec: args.timeoutSec ?? 10,
+		timeoutSec: args.timeoutSec ?? COMMAND_STEP_TEMPLATE.timeoutSec,
 		outFile: args.outFile,
 		errFile: args.errFile,
 		exitFile: args.exitFile,
@@ -253,12 +349,9 @@ function commandStepFixture(args: {
 
 function activeVerification(signalId: string, steps: any[], startedAt = Date.now()): ActiveVerification | any {
 	return {
-		goalId: GOAL_ID,
-		gateId: GATE_ID,
+		...ACTIVE_VERIFICATION_TEMPLATE,
 		signalId,
-		overallStatus: "running",
 		startedAt,
-		currentPhase: 0,
 		steps,
 	};
 }
@@ -272,15 +365,9 @@ test("command step settles from process exit when inherited stdio delays close",
 	const workDir = path.join(stateDir, "stdio-close-delay-work");
 	fs.mkdirSync(workDir, { recursive: true });
 	const holderPidFile = path.join(workDir, "stdio-holder.pid");
-	const holderScriptFile = path.join(workDir, "stdio-holder.js");
-	fs.writeFileSync(holderScriptFile, [
-		"const fs = require('node:fs');",
-		`fs.writeFileSync(${JSON.stringify(holderPidFile)}, String(process.pid));`,
-		"setInterval(() => {}, 1000);",
-	].join("\n"));
-	const nodeExe = process.execPath.replace(/\\/g, "/");
 	const shellQuote = (value: string) => `'${value.replace(/\\/g, "/").replace(/'/g, `'\"'\"'`)}'`;
-	const command = `"${nodeExe}" ${shellQuote(holderScriptFile)} & __bobbit_i=0; while [ ! -s ${shellQuote(holderPidFile)} ] && [ "$__bobbit_i" -lt 500 ]; do __bobbit_i=$((__bobbit_i + 1)); sleep 0.02; done; echo stdio-close-delay-parent-exiting; exit 0`;
+	const holderCommand = fixtureShellCommand("holder", [holderPidFile]);
+	const command = `${holderCommand} & __bobbit_i=0; while [ ! -s ${shellQuote(holderPidFile)} ] && [ "$__bobbit_i" -lt 500 ]; do __bobbit_i=$((__bobbit_i + 1)); sleep 0.02; done; echo stdio-close-delay-parent-exiting; exit 0`;
 
 	let holderPid = 0;
 	const stepPromise = (harness as any).runCommandStep(command, workDir, 30, false, undefined, undefined, undefined);
@@ -308,13 +395,13 @@ test("command step settles from process exit when inherited stdio delays close",
 	} finally {
 		killPidBestEffort(holderPid);
 		await waitForPidExit(holderPid, 5_000);
-		await Promise.race([stepPromise.catch(() => undefined), sleep(2_000)]);
+		await stepPromise.catch(() => undefined);
 	}
 });
 
 test("resume does not trust or kill an alive PID when the pidfile identity does not match", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
-	const child = spawnNode("setTimeout(() => {}, 30000)");
+	const child = spawnFixtureChild("idle");
 	try {
 		const startedAt = Date.now();
 		const pidFile = path.join(stateDir, "identity", "foreign.pid");
@@ -356,17 +443,13 @@ test("resume does not trust or kill an alive PID when the pidfile identity does 
 
 test("alive resumed command that dies without durable status remains restart-interrupted and pending", async (t) => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarness(t);
-	const child = spawnNode("setTimeout(() => process.exit(0), 80)");
+	const child = spawnFixtureChild("exit-after-delay", ["80"]);
 	try {
 		const startedAt = Date.now();
-		const diagDir = path.join(stateDir, "verifications", "sig-dies-without-status");
-		fs.mkdirSync(diagDir, { recursive: true });
-		const outFile = path.join(diagDir, "stdout.log");
-		const errFile = path.join(diagDir, "stderr.log");
-		const exitFile = path.join(diagDir, "exit.txt");
-		const pidFile = path.join(diagDir, "process.pid");
-		fs.writeFileSync(outFile, "probe:started\n");
-		fs.writeFileSync(errFile, "");
+		const { outFile, errFile, exitFile, pidFile } = diagnosticFixture(stateDir, "sig-dies-without-status", {
+			out: "probe:started\n",
+			err: "",
+		});
 		writeIdentityFile(pidFile, child.pid, "matching-nonce");
 
 		persistActive(stateDir, activeVerification("sig-dies-without-status", [commandStepFixture({
@@ -413,17 +496,13 @@ test("alive resumed command that dies without durable status remains restart-int
 
 test("timeout after restart kills a process only when matching identity is verified", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
-	const child = spawnNode("setTimeout(() => {}, 30000)");
+	const child = spawnFixtureChild("idle");
 	try {
 		const startedAt = Date.now() - 2_000;
-		const diagDir = path.join(stateDir, "verifications", "sig-timeout-verified");
-		fs.mkdirSync(diagDir, { recursive: true });
-		const outFile = path.join(diagDir, "stdout.log");
-		const errFile = path.join(diagDir, "stderr.log");
-		const exitFile = path.join(diagDir, "exit.txt");
-		const pidFile = path.join(diagDir, "process.pid");
-		fs.writeFileSync(outFile, "probe:still-running-after-deadline\n");
-		fs.writeFileSync(errFile, "");
+		const { outFile, errFile, exitFile, pidFile } = diagnosticFixture(stateDir, "sig-timeout-verified", {
+			out: "probe:still-running-after-deadline\n",
+			err: "",
+		});
 		writeIdentityFile(pidFile, child.pid, "verified-nonce");
 
 		persistActive(stateDir, activeVerification("sig-timeout-verified", [commandStepFixture({
@@ -461,16 +540,13 @@ test("timeout after restart kills a process only when matching identity is verif
 test("cancel cleanup without restart-safe identity remains durable and unverifiable", async (t) => {
 	const { stateDir, harness } = makeHarness(t);
 	onTestFinished(() => clearKillRetryTimers(harness));
-	const child = spawnNode("setTimeout(() => {}, 30000)");
+	const child = spawnFixtureChild("idle");
 	try {
 		const startedAt = Date.now();
-		const diagDir = path.join(stateDir, "verifications", "sig-unsupported-cancel");
-		fs.mkdirSync(diagDir, { recursive: true });
-		const outFile = path.join(diagDir, "stdout.log");
-		const errFile = path.join(diagDir, "stderr.log");
-		const exitFile = path.join(diagDir, "exit.txt");
-		fs.writeFileSync(outFile, "attached:still-running\n");
-		fs.writeFileSync(errFile, "");
+		const { outFile, errFile, exitFile } = diagnosticFixture(stateDir, "sig-unsupported-cancel", {
+			out: "attached:still-running\n",
+			err: "",
+		});
 
 		const verification = activeVerification("sig-unsupported-cancel", [commandStepFixture({
 			name: "Unsupported attached cancellation",
@@ -506,17 +582,13 @@ test("cancel cleanup without restart-safe identity remains durable and unverifia
 test("timeout resume keeps cleanup pending when the kill cannot be verified", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
 	onTestFinished(() => clearKillRetryTimers(harness));
-	const child = spawnNode("setTimeout(() => {}, 30000)");
+	const child = spawnFixtureChild("idle");
 	try {
 		const startedAt = Date.now() - 2_000;
-		const diagDir = path.join(stateDir, "verifications", "sig-timeout-unverified-kill");
-		fs.mkdirSync(diagDir, { recursive: true });
-		const outFile = path.join(diagDir, "stdout.log");
-		const errFile = path.join(diagDir, "stderr.log");
-		const exitFile = path.join(diagDir, "exit.txt");
-		const pidFile = path.join(diagDir, "process.pid");
-		fs.writeFileSync(outFile, "timeout:still-running\n");
-		fs.writeFileSync(errFile, "");
+		const { outFile, errFile, exitFile, pidFile } = diagnosticFixture(stateDir, "sig-timeout-unverified-kill", {
+			out: "timeout:still-running\n",
+			err: "",
+		});
 		writeIdentityFile(pidFile, child.pid, "timeout-pending-nonce");
 
 		persistActive(stateDir, activeVerification("sig-timeout-unverified-kill", [commandStepFixture({
@@ -605,18 +677,13 @@ test("cancelled or superseded resumed verification cannot update gate state afte
 
 test("restart cancellation hydrates persisted active state and retries until command identity appears", async (t) => {
 	const { stateDir, harness } = makeHarness(t);
-	const child = spawnNode("setTimeout(() => {}, 30000)");
+	const child = spawnFixtureChild("idle");
 	try {
 		const startedAt = Date.now();
-		const diagDir = path.join(stateDir, "verifications", "sig-cancel-late-identity");
-		fs.mkdirSync(diagDir, { recursive: true });
-		const outFile = path.join(diagDir, "stdout.log");
-		const errFile = path.join(diagDir, "stderr.log");
-		const exitFile = path.join(diagDir, "exit.txt");
-		const pidFile = path.join(diagDir, "process.pid");
-		const heartbeatFile = path.join(diagDir, "heartbeat.json");
-		fs.writeFileSync(outFile, "cancel:started\n");
-		fs.writeFileSync(errFile, "");
+		const { outFile, errFile, exitFile, pidFile, heartbeatFile } = diagnosticFixture(stateDir, "sig-cancel-late-identity", {
+			out: "cancel:started\n",
+			err: "",
+		});
 
 		persistActive(stateDir, activeVerification("sig-cancel-late-identity", [commandStepFixture({
 			name: "Late identity cancellation",
@@ -631,14 +698,10 @@ test("restart cancellation hydrates persisted active state and retries until com
 			heartbeatFile,
 		})], startedAt));
 
-		setTimeout(() => {
-			try {
-				writeIdentityFile(pidFile, child.pid, "cancel-late-nonce");
-				writeHeartbeatFile(heartbeatFile, child.pid, "cancel-late-nonce");
-			} catch { /* test cleanup may have run */ }
-		}, 50);
+		const identityWrite = scheduleIdentityEvidence(pidFile, heartbeatFile, child.pid, "cancel-late-nonce", 50);
 
 		await harness.cancelStaleVerificationsForGates(GOAL_ID, [GATE_ID]);
+		await identityWrite;
 		const exited = await waitForExit(child, 1_000);
 		assert.equal(
 			exited,
@@ -652,24 +715,15 @@ test("restart cancellation hydrates persisted active state and retries until com
 });
 
 test("cancelled persisted command kill intent is processed on resume before active file cleanup", async () => {
-	const root = makeTmpDir("verif-command-cancel-resume-");
-	const stateDir = path.join(root, "state");
-	fs.mkdirSync(stateDir, { recursive: true });
-	onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
-	const child = spawnNode("setTimeout(() => {}, 30000)");
+	const stateDir = makeLifecycleStateDir();
+	const child = spawnFixtureChild("idle");
 	try {
 		const startedAt = Date.now();
-		const diagDir = path.join(stateDir, "verifications", "sig-cancelled-resume");
-		fs.mkdirSync(diagDir, { recursive: true });
-		const outFile = path.join(diagDir, "stdout.log");
-		const errFile = path.join(diagDir, "stderr.log");
-		const exitFile = path.join(diagDir, "exit.txt");
-		const pidFile = path.join(diagDir, "process.pid");
-		const heartbeatFile = path.join(diagDir, "heartbeat.json");
-		fs.writeFileSync(outFile, "cancelled-before-restart\n");
-		fs.writeFileSync(errFile, "");
-		writeIdentityFile(pidFile, child.pid, "cancelled-resume-nonce");
-		writeHeartbeatFile(heartbeatFile, child.pid, "cancelled-resume-nonce");
+		const { outFile, errFile, exitFile, pidFile, heartbeatFile } = diagnosticFixture(stateDir, "sig-cancelled-resume", {
+			out: "cancelled-before-restart\n",
+			err: "",
+		});
+		writeIdentityEvidence(pidFile, heartbeatFile, child.pid, "cancelled-resume-nonce");
 		const verification = activeVerification("sig-cancelled-resume", [commandStepFixture({
 			name: "Cancelled command survives restart",
 			startedAt,
@@ -701,14 +755,11 @@ test("cancelled persisted command kill intent is processed on resume before acti
 test("resumed command success delegates remaining waiting phases to normal verification", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
 	const startedAt = Date.now() - 500;
-	const diagDir = path.join(stateDir, "verifications", "sig-resume-continue");
-	fs.mkdirSync(diagDir, { recursive: true });
-	const outFile = path.join(diagDir, "stdout.log");
-	const errFile = path.join(diagDir, "stderr.log");
-	const exitFile = path.join(diagDir, "exit.txt");
-	fs.writeFileSync(outFile, "recovered command passed\n");
-	fs.writeFileSync(errFile, "");
-	fs.writeFileSync(exitFile, "0\n");
+	const { outFile, errFile, exitFile } = diagnosticFixture(stateDir, "sig-resume-continue", {
+		out: "recovered command passed\n",
+		err: "",
+		exit: "0\n",
+	});
 	const verification = activeVerification("sig-resume-continue", [
 		commandStepFixture({ name: "Recovered command", startedAt, outFile, errFile, exitFile }),
 		{ name: "Downstream review", type: "llm-review", status: "waiting", phase: 1, startedAt },
@@ -746,14 +797,14 @@ test("normal verification preserves recovered phase results and runs only downst
 				type: "command",
 				phase: 0,
 				timeout: 30,
-				run: nodeShellCommand(`require('fs').writeFileSync(${JSON.stringify(shouldNotRunFile)}, 'reran')`),
+				run: fixtureShellCommand("write-file", [shouldNotRunFile, "reran"]),
 			},
 			{
 				name: "Downstream command",
 				type: "command",
 				phase: 1,
 				timeout: 30,
-				run: nodeShellCommand(`require('fs').writeFileSync(${JSON.stringify(downstreamFile)}, 'ran'); console.log('downstream:ran')`),
+				run: fixtureShellCommand("write-file", [downstreamFile, "ran", "downstream:ran"]),
 			},
 		],
 	} as any;
@@ -790,14 +841,11 @@ test("normal verification preserves recovered phase results and runs only downst
 test("mixed same-phase real failure and restart interruption notifies only the real failed step", async (t) => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarness(t);
 	const startedAt = Date.now() - 1_000;
-	const diagDir = path.join(stateDir, "verifications", "sig-mixed-same-phase");
-	fs.mkdirSync(diagDir, { recursive: true });
-	const outFile = path.join(diagDir, "real-failure.out.log");
-	const errFile = path.join(diagDir, "real-failure.err.log");
-	const exitFile = path.join(diagDir, "real-failure.exit");
-	fs.writeFileSync(outFile, "real failure after restart\n");
-	fs.writeFileSync(errFile, "");
-	fs.writeFileSync(exitFile, "7\n");
+	const { outFile, errFile, exitFile } = diagnosticFixture(stateDir, "sig-mixed-same-phase", {
+		out: "real failure after restart\n",
+		err: "",
+		exit: "7\n",
+	});
 
 	persistActive(stateDir, activeVerification("sig-mixed-same-phase", [
 		commandStepFixture({
@@ -869,26 +917,12 @@ test("container or attached command fallback interruption is guarded as retryabl
 test("resume waits for a pidfile that appears shortly after restart before declaring interruption", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
 	const startedAt = Date.now();
-	const diagDir = path.join(stateDir, "verifications", "sig-late-pidfile");
-	fs.mkdirSync(diagDir, { recursive: true });
-	const outFile = path.join(diagDir, "stdout.log");
-	const errFile = path.join(diagDir, "stderr.log");
-	const exitFile = path.join(diagDir, "exit.txt");
-	const pidFile = path.join(diagDir, "process.pid");
-	const heartbeatFile = path.join(diagDir, "heartbeat.json");
-	fs.writeFileSync(outFile, "probe:started\n");
-	fs.writeFileSync(errFile, "");
+	const { outFile, errFile, exitFile, pidFile, heartbeatFile } = diagnosticFixture(stateDir, "sig-late-pidfile", {
+		out: "probe:started\n",
+		err: "",
+	});
 
-	const child = spawnNode([
-		"const fs = require('fs');",
-		`const out = ${JSON.stringify(outFile)};`,
-		`const exitFile = ${JSON.stringify(exitFile)};`,
-		"setTimeout(() => {",
-		"  fs.appendFileSync(out, 'probe:after-late-pidfile\\n');",
-		"  fs.writeFileSync(exitFile, '0\\n');",
-		"  process.exit(0);",
-		"}, 160);",
-	].join("\n"));
+	const child = spawnFixtureChild("retained-exit", [outFile, exitFile, "160", "probe:after-late-pidfile"]);
 	try {
 		persistActive(stateDir, activeVerification("sig-late-pidfile", [commandStepFixture({
 			name: "Late pidfile command",
@@ -903,14 +937,10 @@ test("resume waits for a pidfile that appears shortly after restart before decla
 			heartbeatFile,
 		})], startedAt));
 
-		setTimeout(() => {
-			try {
-				writeIdentityFile(pidFile, child.pid, "late-pidfile-nonce");
-				writeHeartbeatFile(heartbeatFile, child.pid, "late-pidfile-nonce");
-			} catch { /* test cleanup may have run */ }
-		}, 25);
+		const identityWrite = scheduleIdentityEvidence(pidFile, heartbeatFile, child.pid, "late-pidfile-nonce", 25);
 
 		await harness.resumeInterruptedVerifications();
+		await identityWrite;
 		const update = latestSignalUpdate(gateStoreCalls);
 		const step = stepByName(update, "Late pidfile command");
 
@@ -928,20 +958,14 @@ test("resume waits for a pidfile that appears shortly after restart before decla
 
 test("stale pidfile nonce without start token or fresh heartbeat is not trusted or killed", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
-	const child = spawnNode("setTimeout(() => {}, 30000)");
+	const child = spawnFixtureChild("idle");
 	try {
 		const startedAt = Date.now() - 2_000;
-		const diagDir = path.join(stateDir, "verifications", "sig-stale-pidfile");
-		fs.mkdirSync(diagDir, { recursive: true });
-		const outFile = path.join(diagDir, "stdout.log");
-		const errFile = path.join(diagDir, "stderr.log");
-		const exitFile = path.join(diagDir, "exit.txt");
-		const pidFile = path.join(diagDir, "process.pid");
-		const heartbeatFile = path.join(diagDir, "heartbeat.json");
-		fs.writeFileSync(outFile, "stale identity should not be enough\n");
-		fs.writeFileSync(errFile, "");
-		writeIdentityFile(pidFile, child.pid, "stale-nonce");
-		writeHeartbeatFile(heartbeatFile, child.pid, "stale-nonce");
+		const { outFile, errFile, exitFile, pidFile, heartbeatFile } = diagnosticFixture(stateDir, "sig-stale-pidfile", {
+			out: "stale identity should not be enough\n",
+			err: "",
+		});
+		writeIdentityEvidence(pidFile, heartbeatFile, child.pid, "stale-nonce");
 		const old = new Date(Date.now() - 30_000);
 		fs.utimesSync(pidFile, old, old);
 		fs.utimesSync(heartbeatFile, old, old);
@@ -984,15 +1008,12 @@ test("stale pidfile nonce without start token or fresh heartbeat is not trusted 
 test("resume finalization reads only bounded retained log tails for large stdout and stderr", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
 	const startedAt = Date.now() - 1_000;
-	const diagDir = path.join(stateDir, "verifications", "sig-large-retained-output");
-	fs.mkdirSync(diagDir, { recursive: true });
-	const outFile = path.join(diagDir, "stdout.log");
-	const errFile = path.join(diagDir, "stderr.log");
-	const exitFile = path.join(diagDir, "exit.txt");
 	const hugePrefix = `HEAD_STDOUT_SENTINEL\n${"x".repeat(1_200_000)}\n`;
-	fs.writeFileSync(outFile, `${hugePrefix}TAIL_STDOUT_SENTINEL\n`);
-	fs.writeFileSync(errFile, "STDERR_TAIL_SENTINEL\n");
-	fs.writeFileSync(exitFile, "7\n");
+	const { outFile, errFile, exitFile } = diagnosticFixture(stateDir, "sig-large-retained-output", {
+		out: `${hugePrefix}TAIL_STDOUT_SENTINEL\n`,
+		err: "STDERR_TAIL_SENTINEL\n",
+		exit: "7\n",
+	});
 
 	let wholeLogReads = 0;
 	const originalReadFileSync = fs.readFileSync;
@@ -1033,14 +1054,11 @@ test("resume finalization reads only bounded retained log tails for large stdout
 test("real command failure mentioning restart is still notified while no-verdict rows are omitted", async (t) => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarness(t);
 	const startedAt = Date.now() - 1_000;
-	const diagDir = path.join(stateDir, "verifications", "sig-real-failure-mentions-restart");
-	fs.mkdirSync(diagDir, { recursive: true });
-	const outFile = path.join(diagDir, "stdout.log");
-	const errFile = path.join(diagDir, "stderr.log");
-	const exitFile = path.join(diagDir, "exit.txt");
-	fs.writeFileSync(outFile, "application log: Step was interrupted by server restart while exercising retry UI\nassertion failed after restart\n");
-	fs.writeFileSync(errFile, "");
-	fs.writeFileSync(exitFile, "7\n");
+	const { outFile, errFile, exitFile } = diagnosticFixture(stateDir, "sig-real-failure-mentions-restart", {
+		out: "application log: Step was interrupted by server restart while exercising retry UI\nassertion failed after restart\n",
+		err: "",
+		exit: "7\n",
+	});
 
 	persistActive(stateDir, activeVerification("sig-real-failure-mentions-restart", [
 		commandStepFixture({
@@ -1076,20 +1094,7 @@ test("gate-signal command verification can be resumed by a fresh harness and rec
 	fs.mkdirSync(workDir, { recursive: true });
 	const releaseFile = path.join(workDir, "release.txt");
 	const startedFile = path.join(workDir, "started.txt");
-	const command = nodeShellCommand([
-		"const fs = require('fs');",
-		`const releaseFile = ${JSON.stringify(releaseFile)};`,
-		`const startedFile = ${JSON.stringify(startedFile)};`,
-		"console.log('gate-signal-probe:started');",
-		"fs.writeFileSync(startedFile, 'started');",
-		"const timer = setInterval(() => {",
-		"  if (fs.existsSync(releaseFile)) {",
-		"    clearInterval(timer);",
-		"    console.log('gate-signal-probe:after-restart');",
-		"    process.exit(0);",
-		"  }",
-		"}, 25);",
-	].join("\n"));
+	const command = fixtureShellCommand("gate-probe", [releaseFile, startedFile]);
 	const gate = {
 		id: GATE_ID,
 		name: "Implementation",
@@ -1140,25 +1145,12 @@ test("gate-signal command verification can be resumed by a fresh harness and rec
 test("resume can finalize from a durable exit file produced by a surviving command", async (t) => {
 	const { stateDir, harness, gateStoreCalls } = makeHarness(t);
 	const startedAt = Date.now();
-	const diagDir = path.join(stateDir, "verifications", "sig-durable-exit-smoke");
-	fs.mkdirSync(diagDir, { recursive: true });
-	const outFile = path.join(diagDir, "stdout.log");
-	const errFile = path.join(diagDir, "stderr.log");
-	const exitFile = path.join(diagDir, "exit.txt");
-	const pidFile = path.join(diagDir, "process.pid");
-	fs.writeFileSync(outFile, "probe:started\n");
-	fs.writeFileSync(errFile, "");
+	const { outFile, errFile, exitFile, pidFile } = diagnosticFixture(stateDir, "sig-durable-exit-smoke", {
+		out: "probe:started\n",
+		err: "",
+	});
 
-	const child = spawnNode([
-		"const fs = require('fs');",
-		`const out = ${JSON.stringify(outFile)};`,
-		`const exitFile = ${JSON.stringify(exitFile)};`,
-		"setTimeout(() => {",
-		"  fs.appendFileSync(out, 'probe:after-restart\\n');",
-		"  fs.writeFileSync(exitFile, '0\\n');",
-		"  process.exit(0);",
-		"}, 120);",
-	].join("\n"));
+	const child = spawnFixtureChild("retained-exit", [outFile, exitFile, "120", "probe:after-restart"]);
 	try {
 		writeIdentityFile(pidFile, child.pid, "smoke-nonce");
 		persistActive(stateDir, activeVerification("sig-durable-exit-smoke", [commandStepFixture({

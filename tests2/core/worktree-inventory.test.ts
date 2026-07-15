@@ -8,10 +8,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { WorktreeInventoryService, classifyPoolReclaimCandidate, isContainerInternalWorktreePath } from "../../src/server/agent/worktree-inventory.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
-function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?: any[]; archivedSessions?: any[]; goals?: any[]; teams?: any[]; staff?: any[]; components?: any[] }) {
+function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?: any[]; archivedSessions?: any[]; goals?: any[]; teams?: any[]; staff?: any[]; components?: any[]; filesystem?: MemFs | typeof fs }) {
 	return {
 		project: { id: "p1", name: "Project", rootPath },
+		_inventoryFs: opts?.filesystem,
 		projectConfigStore: {
 			get: (key: string) => key === "worktree_root" ? opts?.worktreeRoot : undefined,
 			getComponents: () => opts?.components ?? [],
@@ -33,56 +35,71 @@ function makeService(ctx: any, porcelain: string | ((repoPath: string, args: rea
 		} as any,
 		execGit: async (repoPath, args) => args[0] === "worktree" ? (typeof porcelain === "function" ? porcelain(repoPath, args) : porcelain) : "",
 		clock: () => 1,
+		fs: ctx._inventoryFs,
 	});
 }
 
-function tmpProject() {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "wt-inventory-"));
+let virtualProjectId = 0;
+function tmpProject(realFilesystem = false) {
+	if (realFilesystem) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "wt-inventory-"));
+		const repo = path.join(root, "repo");
+		fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+		return { root, repo, filesystem: fs, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+	}
+	const filesystem = createMemFs();
+	const rawReaddir = filesystem.readdirSync.bind(filesystem);
+	filesystem.readdirSync = ((dir: fs.PathLike, opts?: { withFileTypes?: boolean }) => {
+		const names = rawReaddir(dir) as string[];
+		if (!opts?.withFileTypes) return names;
+		return names.map(name => ({ name, isDirectory: () => filesystem.dirs.has(path.resolve(String(dir), name)) }));
+	}) as typeof filesystem.readdirSync;
+	const root = path.resolve(os.tmpdir(), `wt-inventory-mem-${++virtualProjectId}`);
 	const repo = path.join(root, "repo");
-	fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
-	return { root, repo };
+	filesystem.mkdirSync(path.join(repo, ".git"), { recursive: true });
+	return { root, repo, filesystem, cleanup: () => {} };
 }
 
 describe("worktree inventory classifier", () => {
 	it("protects a live referenced worktree", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const wt = path.join(root, "repo-wt", "session-live");
-			fs.mkdirSync(wt, { recursive: true });
-			const ctx = makeCtx(repo, { liveSessions: [{ id: "s1", title: "Live", cwd: wt, worktreePath: wt, repoPath: repo, branch: "session/live" }] });
+			filesystem.mkdirSync(wt, { recursive: true });
+			const ctx = makeCtx(repo, { filesystem, liveSessions: [{ id: "s1", title: "Live", cwd: wt, worktreePath: wt, repoPath: repo, branch: "session/live" }] });
 			const service = makeService(ctx, `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/live\n`);
 			const report = await service.scan();
 			const item = report.items.find(i => i.path === wt)!;
 			assert.equal(item.classification, "protected-in-use");
 			assert.equal(item.reason, "referenced-by-live-session");
 			assert.equal(item.actionable, false);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("maps archived-session owned git worktrees to ready cleanup rows", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const wt = path.join(root, "repo-wt", "session-arch");
-			fs.mkdirSync(wt, { recursive: true });
+			filesystem.mkdirSync(wt, { recursive: true });
 			const archived = { id: "a1", title: "Archived", projectId: "p1", repoPath: repo, worktreePath: wt, branch: "session/arch", archived: true };
-			const service = makeService(makeCtx(repo, { archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/arch\n`);
+			const service = makeService(makeCtx(repo, { filesystem, archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/arch\n`);
 			const report = await service.scan();
 			const item = report.items.find(i => i.legacy?.archivedSession?.sessionId === "a1")!;
 			assert.equal(item.classification, "archived-owned");
 			assert.equal(item.disposition, "ready-to-clean");
 			assert.equal(item.defaultSelected, true);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("scans archived session repo paths even when they are outside configured project repos", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const archivedRepo = path.join(root, "archived-repo");
-			fs.mkdirSync(path.join(archivedRepo, ".git"), { recursive: true });
+			filesystem.mkdirSync(path.join(archivedRepo, ".git"), { recursive: true });
 			const wt = path.join(root, "archived-repo-wt", "session-arch");
-			fs.mkdirSync(wt, { recursive: true });
+			filesystem.mkdirSync(wt, { recursive: true });
 			const archived = { id: "a1", title: "Archived", projectId: "p1", repoPath: archivedRepo, worktreePath: wt, branch: "session/arch", archived: true };
-			const service = makeService(makeCtx(repo, { archivedSessions: [archived] }), (repoPath) => repoPath === archivedRepo ? `worktree ${archivedRepo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/arch\n` : `worktree ${repo}\nbranch refs/heads/master\n`);
+			const service = makeService(makeCtx(repo, { filesystem, archivedSessions: [archived] }), (repoPath) => repoPath === archivedRepo ? `worktree ${archivedRepo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/arch\n` : `worktree ${repo}\nbranch refs/heads/master\n`);
 			const report = await service.scan();
 			const item = report.items.find(i => i.legacy?.archivedSession?.sessionId === "a1")!;
 			assert.equal(item.repoPath, archivedRepo);
@@ -91,30 +108,30 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.actionable, true);
 			const legacy = await service.legacyArchivedSessionWorktrees();
 			assert.equal(legacy.items.find(candidate => candidate.sessionId === "a1")?.status, "removable");
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("keeps already-cleaned archived rows non-destructive even when the branch still exists", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const missingWt = path.join(root, "repo-wt", "missing-session-arch");
 			const archived = { id: "a1", title: "Archived", projectId: "p1", repoPath: repo, worktreePath: missingWt, branch: "session/arch", archived: true };
-			const service = makeService(makeCtx(repo, { archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n`);
+			const service = makeService(makeCtx(repo, { filesystem, archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n`);
 			const report = await service.scan();
 			const item = report.items.find(i => i.legacy?.archivedSession?.sessionId === "a1")!;
 			assert.equal(item.classification, "already-cleaned");
 			assert.equal(item.willDeleteBranch, false);
 			const legacy = await service.legacyArchivedSessionWorktrees(true);
 			assert.equal(legacy.items.find(candidate => candidate.sessionId === "a1")?.willDeleteBranch, false);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("preserves archived delegate shared-worktree disposition through the legacy adapter", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const wt = path.join(root, "repo-wt", "delegate-shared");
 			const archived = { id: "delegate1", title: "Archived delegate", projectId: "p1", repoPath: repo, worktreePath: wt, delegateOf: "parent", archived: true };
-			const service = makeService(makeCtx(repo, { archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n`);
+			const service = makeService(makeCtx(repo, { filesystem, archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n`);
 			const report = await service.scan();
 			const inventoryItem = report.items.find(candidate => candidate.legacy?.archivedSession?.sessionId === "delegate1")!;
 			assert.equal(inventoryItem.classification, "protected-in-use");
@@ -126,58 +143,58 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.disposition, "ineligible");
 			assert.equal(item.reasonCategory, "shared-delegate");
 			assert.equal(item.actionable, false);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("keeps archived worktree cleanup actionable while blocking branch deletion for live references", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const wt = path.join(root, "repo-wt", "session-arch-shared-branch");
-			fs.mkdirSync(wt, { recursive: true });
+			filesystem.mkdirSync(wt, { recursive: true });
 			const archived = { id: "a1", title: "Archived", projectId: "p1", repoPath: repo, worktreePath: wt, branch: "session/shared", archived: true };
 			const live = { id: "live", title: "Live", cwd: repo, repoPath: repo, branch: "session/shared" };
-			const service = makeService(makeCtx(repo, { liveSessions: [live], archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/shared\n`);
+			const service = makeService(makeCtx(repo, { filesystem, liveSessions: [live], archivedSessions: [archived] }), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/shared\n`);
 			const report = await service.scan();
 			const item = report.items.find(candidate => candidate.legacy?.archivedSession?.sessionId === "a1")!;
 			assert.equal(item.classification, "archived-owned");
 			assert.equal(item.actionable, true);
 			assert.equal(item.willDeleteBranch, false);
 			assert.equal(item.branchDeleteBlockedReason, "branch-referenced-by-live-record");
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("reports unowned session git worktrees through the legacy adapter", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const wt = path.join(root, "repo-wt", "session-orphan");
-			fs.mkdirSync(wt, { recursive: true });
-			const service = makeService(makeCtx(repo), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/orphan\n`);
+			filesystem.mkdirSync(wt, { recursive: true });
+			const service = makeService(makeCtx(repo, { filesystem }), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/orphan\n`);
 			const legacy = await service.legacyOrphanedWorktrees();
 			assert.deepEqual(legacy.worktrees, [{ path: wt, branch: "session/orphan", repoPath: repo }]);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("honors configured worktree_root and keeps filesystem-only directories non-actionable", async () => {
-		const { root, repo } = tmpProject();
+		const { repo, filesystem, cleanup } = tmpProject();
 		try {
 			const stale = path.join(repo, ".custom-wt", "session-stale");
-			fs.mkdirSync(stale, { recursive: true });
-			const service = makeService(makeCtx(repo, { worktreeRoot: ".custom-wt" }), `worktree ${repo}\nbranch refs/heads/master\n`);
+			filesystem.mkdirSync(stale, { recursive: true });
+			const service = makeService(makeCtx(repo, { filesystem, worktreeRoot: ".custom-wt" }), `worktree ${repo}\nbranch refs/heads/master\n`);
 			const report = await service.scan();
 			const item = report.items.find(i => i.path === stale)!;
 			assert.equal(item.classification, "stale-filesystem-only");
 			assert.equal(item.actionable, false);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("scans the actual git root for nested single-repo projects", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject(true);
 		try {
 			const nestedProjectRoot = path.join(repo, "packages", "app");
-			fs.mkdirSync(nestedProjectRoot, { recursive: true });
+			filesystem.mkdirSync(nestedProjectRoot, { recursive: true });
 			const wt = path.join(root, "repo-wt", "session-nested");
-			fs.mkdirSync(wt, { recursive: true });
-			const service = makeService(makeCtx(nestedProjectRoot), (repoPath) => {
+			filesystem.mkdirSync(wt, { recursive: true });
+			const service = makeService(makeCtx(nestedProjectRoot, { filesystem }), (repoPath) => {
 				assert.equal(repoPath, repo);
 				return `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/nested\n`;
 			});
@@ -186,22 +203,22 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.repoPath, repo);
 			assert.equal(item.worktreeRoot, path.join(root, "repo-wt"));
 			assert.equal(item.classification, "unowned-git-worktree");
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("protects durable multi-repo team-agent component worktrees", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const apiRepo = path.join(repo, "api");
 			const webRepo = path.join(repo, "web");
-			fs.mkdirSync(path.join(apiRepo, ".git"), { recursive: true });
-			fs.mkdirSync(path.join(webRepo, ".git"), { recursive: true });
+			filesystem.mkdirSync(path.join(apiRepo, ".git"), { recursive: true });
+			filesystem.mkdirSync(path.join(webRepo, ".git"), { recursive: true });
 			const container = path.join(root, "repo-wt", "session-team-agent");
 			const apiWt = path.join(container, "api");
-			fs.mkdirSync(apiWt, { recursive: true });
+			filesystem.mkdirSync(apiWt, { recursive: true });
 			const components = [{ name: "api", repo: "api" }, { name: "web", repo: "web" }];
 			const teams = [{ id: "team1", agents: [{ sessionId: "agent1", branch: "session/team-agent", worktreePath: container }] }];
-			const service = makeService(makeCtx(repo, { components, teams }), (repoPath) => repoPath === apiRepo
+			const service = makeService(makeCtx(repo, { filesystem, components, teams }), (repoPath) => repoPath === apiRepo
 				? `worktree ${apiRepo}\nbranch refs/heads/master\n\nworktree ${apiWt}\nbranch refs/heads/session/team-agent\n`
 				: `worktree ${repoPath}\nbranch refs/heads/master\n`);
 			const report = await service.scan();
@@ -209,7 +226,7 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.classification, "protected-in-use");
 			assert.equal(item.reason, "referenced-by-live-team");
 			assert.equal(item.actionable, false);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("keeps pool candidates diagnostic and guards container paths", async () => {
@@ -220,37 +237,37 @@ describe("worktree inventory classifier", () => {
 		assert.equal(active.eligible, false);
 		assert.equal(active.reason, "referenced-by-live-session");
 
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const wt = path.join(root, "repo-wt", "pool-_pool-a");
-			fs.mkdirSync(wt, { recursive: true });
+			filesystem.mkdirSync(wt, { recursive: true });
 			const pools = new Map([["p1", { snapshotEntries: () => ({ entries: [{ branchName: "pool/_pool-a", worktreePath: wt, createdAt: 1 }], target: 1, filling: false }) }]]);
-			const service = makeService(makeCtx(repo), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/pool/_pool-a\n`, pools);
+			const service = makeService(makeCtx(repo, { filesystem }), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/pool/_pool-a\n`, pools);
 			const report = await service.scan();
 			const item = report.items.find(i => i.path === wt)!;
 			assert.equal(item.classification, "pool-entry");
 			assert.equal(item.defaultSelected, false);
 			assert.equal(report.counts.poolEntries, 1);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 
 	it("classifies multi-repo pool entries as pool-entry instead of branch-referenced live records", async () => {
-		const { root, repo } = tmpProject();
+		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const apiRepo = path.join(repo, "packages", "api");
-			fs.mkdirSync(path.join(apiRepo, ".git"), { recursive: true });
+			filesystem.mkdirSync(path.join(apiRepo, ".git"), { recursive: true });
 			const container = path.join(root, "repo-wt", "pool-_pool-multi");
 			const apiWt = path.join(container, "packages", "api");
-			fs.mkdirSync(apiWt, { recursive: true });
+			filesystem.mkdirSync(apiWt, { recursive: true });
 			const components = [{ name: "api", repo: "packages/api" }];
 			const pools = new Map([["p1", { snapshotEntries: () => ({ entries: [{ branchName: "pool/_pool-multi", worktreePath: container, worktrees: [{ repo: "packages/api", repoPath: apiRepo, worktreePath: apiWt }], createdAt: 1 }], target: 1, filling: false }) }]]);
-			const service = makeService(makeCtx(repo, { components }), `worktree ${apiRepo}\nbranch refs/heads/master\n\nworktree ${apiWt}\nbranch refs/heads/pool/_pool-multi\n`, pools);
+			const service = makeService(makeCtx(repo, { filesystem, components }), `worktree ${apiRepo}\nbranch refs/heads/master\n\nworktree ${apiWt}\nbranch refs/heads/pool/_pool-multi\n`, pools);
 			const report = await service.scan();
 			const item = report.items.find(i => i.path === apiWt)!;
 			assert.equal(item.classification, "pool-entry");
 			assert.equal(item.reason, "safe-pool-entry");
 			assert.equal(item.defaultSelected, false);
 			assert.equal(report.counts.poolEntries, 1);
-		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		} finally { cleanup(); }
 	});
 });

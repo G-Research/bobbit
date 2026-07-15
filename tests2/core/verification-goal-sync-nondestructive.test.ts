@@ -19,17 +19,44 @@
 //   - "local up-to-date ... unchanged" => PASSES
 // After the ancestry-aware fix, all four PASS.
 
-import { test } from "vitest";
+import { afterAll, beforeAll, test } from "vitest";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile as execFileCb, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { inspect } from "node:util";
+import { inspect, promisify } from "node:util";
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
 
+const execFileAsync = promisify(execFileCb);
 const GOAL_BRANCH = "goal/nondestructive-sync";
+type PublishedFixture = { root: string; repoDir: string; remoteDir: string; goalBranch: string; shaA: string };
+let templateRoot: string;
+let templateRemoteDir: string;
+let templateShaA: string;
+let repoFixtures: PublishedFixture[] = [];
+
+beforeAll(async () => {
+	templateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verif-nondestructive-sync-template-"));
+	templateRemoteDir = path.join(templateRoot, "remote.git");
+	const seedDir = path.join(templateRoot, "seed");
+	execFileSync("git", ["init", "--bare", templateRemoteDir], { stdio: "ignore" });
+	gitQuiet(templateRemoteDir, ["symbolic-ref", "HEAD", "refs/heads/master"]);
+	execFileSync("git", ["init", seedDir], { stdio: "ignore" });
+	gitQuiet(seedDir, ["checkout", "-B", "master"]);
+	writeAndCommit(seedDir, "README.md", "published master\n", "Initial commit");
+	gitQuiet(seedDir, ["checkout", "-b", GOAL_BRANCH]);
+	templateShaA = writeAndCommit(seedDir, "feature.txt", "commit A\n", "commit A");
+	gitQuiet(seedDir, ["remote", "add", "origin", templateRemoteDir]);
+	gitQuiet(seedDir, ["push", "origin", "master", GOAL_BRANCH]);
+	repoFixtures = await Promise.all(Array.from({ length: 5 }, () => makePublishedGoalBranchRepo()));
+});
+
+afterAll(() => {
+	for (const fixture of repoFixtures) fs.rmSync(fixture.root, { recursive: true, force: true });
+	fs.rmSync(templateRoot, { recursive: true, force: true });
+});
 
 function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -66,26 +93,19 @@ function makeTempStateDir(): string {
  * create + PUBLISH the goal branch at commit A. The returned `repoDir` has the
  * goal branch checked out at A, and `origin/<goalBranch>` also points at A.
  */
-function makePublishedGoalBranchRepo(): { root: string; repoDir: string; remoteDir: string; goalBranch: string; shaA: string } {
+async function makePublishedGoalBranchRepo(): Promise<PublishedFixture> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-nondestructive-sync-"));
 	const remoteDir = path.join(root, "remote.git");
-	const seedDir = path.join(root, "seed");
 	const repoDir = path.join(root, "repo");
 
-	execFileSync("git", ["init", "--bare", remoteDir], { stdio: "ignore" });
-	gitQuiet(remoteDir, ["symbolic-ref", "HEAD", "refs/heads/master"]);
-
-	execFileSync("git", ["init", seedDir], { stdio: "ignore" });
-	gitQuiet(seedDir, ["checkout", "-B", "master"]);
-	writeAndCommit(seedDir, "README.md", "published master\n", "Initial commit");
-	gitQuiet(seedDir, ["remote", "add", "origin", remoteDir]);
-	gitQuiet(seedDir, ["push", "-u", "origin", "master"]);
-
-	execFileSync("git", ["clone", remoteDir, repoDir], { stdio: "ignore" });
-	gitQuiet(repoDir, ["checkout", "-b", GOAL_BRANCH]);
-	const shaA = writeAndCommit(repoDir, "feature.txt", "commit A\n", "commit A");
-	// Publish the goal branch so ls-remote --heads sees it (branch is now PUBLISHED).
-	gitQuiet(repoDir, ["push", "-u", "origin", GOAL_BRANCH]);
+	// Clone a real independent bare remote from the immutable published template.
+	// Refs remain per-test mutable while immutable Git objects may be hard-linked.
+	await execFileAsync("git", ["clone", "--bare", "--local", templateRemoteDir, remoteDir], { windowsHide: true });
+	await execFileAsync("git", ["symbolic-ref", "HEAD", "refs/heads/master"], { cwd: remoteDir, windowsHide: true });
+	await execFileAsync("git", ["clone", remoteDir, repoDir], { windowsHide: true });
+	await execFileAsync("git", ["checkout", GOAL_BRANCH], { cwd: repoDir, windowsHide: true });
+	const shaA = git(repoDir, ["rev-parse", "HEAD"]);
+	assert.equal(shaA, templateShaA, "fixture precondition: cloned goal branch must start at commit A");
 	assert.doesNotThrow(
 		() => execFileSync("git", ["ls-remote", "--exit-code", "--heads", "origin", GOAL_BRANCH], { cwd: repoDir, stdio: "pipe" }),
 		"fixture precondition: goal branch must be published to origin",
@@ -234,7 +254,7 @@ async function runVerificationCapturingWarnings(
 }
 
 test("local-ahead goal worktree: un-pushed local commit B is NOT discarded by pre-verification sync", async () => {
-	const { root, repoDir, goalBranch, shaA } = makePublishedGoalBranchRepo();
+	const { root, repoDir, goalBranch, shaA } = repoFixtures[0]!;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
 		// Add a LOCAL-ONLY commit B on top of the published A (worktree now AHEAD of origin).
@@ -254,7 +274,7 @@ test("local-ahead goal worktree: un-pushed local commit B is NOT discarded by pr
 });
 
 test("local-behind goal worktree: sync fast-forwards HEAD to origin tip (published-work behaviour preserved)", async () => {
-	const { root, repoDir, remoteDir, goalBranch, shaA } = makePublishedGoalBranchRepo();
+	const { root, repoDir, remoteDir, goalBranch, shaA } = repoFixtures[1]!;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
 		// Advance origin ahead with commit C; local worktree stays at A (behind, nothing unique).
@@ -279,7 +299,7 @@ test("local-behind goal worktree: sync fast-forwards HEAD to origin tip (publish
 });
 
 test("diverged goal worktree: sync keeps local commit B and surfaces a warning (no hard reset)", async () => {
-	const { root, repoDir, remoteDir, goalBranch, shaA } = makePublishedGoalBranchRepo();
+	const { root, repoDir, remoteDir, goalBranch, shaA } = repoFixtures[2]!;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
 		// Local commit B on top of A (not pushed).
@@ -307,7 +327,7 @@ test("diverged goal worktree: sync keeps local commit B and surfaces a warning (
 });
 
 test("local-behind fast-forward does NOT execute repo-local git hooks (reset --hard, not merge --ff-only)", async () => {
-	const { root, repoDir, remoteDir, goalBranch, shaA } = makePublishedGoalBranchRepo();
+	const { root, repoDir, remoteDir, goalBranch, shaA } = repoFixtures[3]!;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
 		// Install an executable post-merge hook that writes a sentinel. `git merge
@@ -343,7 +363,7 @@ test("local-behind fast-forward does NOT execute repo-local git hooks (reset --h
 });
 
 test("up-to-date goal worktree: sync leaves HEAD unchanged when local == origin", async () => {
-	const { root, repoDir, goalBranch, shaA } = makePublishedGoalBranchRepo();
+	const { root, repoDir, goalBranch, shaA } = repoFixtures[4]!;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
 		// Local HEAD == origin/<goalBranch> == A.

@@ -71,7 +71,7 @@ if (outDir && profileDepth < 3) {
 	const wrapAsync = (name, commandIndex = 0) => {
 		const original = childProcess[name];
 		if (typeof original !== "function") return;
-		childProcess[name] = function profiledAsync(...args) {
+		const profiledAsync = function (...args) {
 			const finish = begin(name, args[commandIndex]);
 			const timeoutMs = configuredTimeout(args);
 			let child;
@@ -83,6 +83,21 @@ if (outDir && profileDepth < 3) {
 			child?.once?.("close", (code, signal) => settle({ outcome: signal && timeoutMs > 0 ? "timeout" : code === 0 ? "ok" : "failed", exitCode: code, signal: signal ?? undefined }));
 			return child;
 		};
+		// exec/execFile expose a custom promisifier that returns { stdout, stderr }.
+		// Preserve it: dropping the symbol changes promisify(execFile)'s return shape
+		// and makes profiling alter the code under test.
+		const customPromisify = Symbol.for("nodejs.util.promisify.custom");
+		if (original[customPromisify]) {
+			profiledAsync[customPromisify] = function (...args) {
+				return new Promise((resolve, reject) => {
+					profiledAsync.call(this, ...args, (error, stdout, stderr) => {
+						if (error) reject(error);
+						else resolve({ stdout, stderr });
+					});
+				});
+			};
+		}
+		childProcess[name] = profiledAsync;
 	};
 	const wrapSync = (name, commandIndex = 0) => {
 		const original = childProcess[name];

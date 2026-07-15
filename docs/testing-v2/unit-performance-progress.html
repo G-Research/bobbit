@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Windows Unit Suite — Progress & Trajectory</title>
+<style>
+:root{--chart-1:oklch(.58 .19 255);--chart-2:oklch(.65 .17 65);--chart-3:oklch(.58 .17 145);--positive:oklch(.6 .17 145);--negative:oklch(.58 .2 25);--warning:oklch(.68 .16 75);--info:oklch(.62 .15 250)}
+*{box-sizing:border-box} body{margin:0;background:var(--background);color:var(--foreground);font:14px/1.5 system-ui,sans-serif} main{max-width:1120px;margin:auto;padding:32px 24px 56px} h1{font-size:30px;line-height:1.15;margin:0 0 6px} h2{font-size:17px;margin:0 0 14px}.sub,.note,th{color:var(--muted-foreground)}.sub{margin-bottom:26px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{background:var(--card);color:var(--card-foreground);border:1px solid var(--border);border-radius:12px;padding:17px}.metric{font-size:27px;font-weight:750;letter-spacing:-.04em}.label{font-size:12px;color:var(--muted-foreground)}.status{display:inline-flex;align-items:center;gap:7px;font-weight:650}.dot{width:9px;height:9px;border-radius:50%;background:var(--warning)}.good .dot{background:var(--positive)}.bad .dot{background:var(--negative)}section{margin-top:28px}.chart{height:290px;padding:18px}.chart svg{width:100%;height:100%;overflow:visible}.axis{stroke:var(--border);stroke-width:1}.target{stroke:var(--warning);stroke-width:2;stroke-dasharray:6 6}.series{fill:none;stroke:var(--chart-1);stroke-width:4;stroke-linecap:round;stroke-linejoin:round}.point{fill:var(--chart-1);stroke:var(--card);stroke-width:3}.svgtext{fill:var(--muted-foreground);font:12px system-ui,sans-serif}.targettext{fill:var(--warning);font:600 12px system-ui,sans-serif}.table-wrap{overflow:auto;border:1px solid var(--border);border-radius:12px}table{width:100%;border-collapse:collapse;background:var(--card)}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--border);white-space:nowrap}th{font-size:11px;text-transform:uppercase;letter-spacing:.05em}tr:last-child td{border-bottom:0}.bar{width:150px;height:8px;background:var(--muted);border-radius:8px;overflow:hidden}.bar>i{display:block;height:100%;background:var(--chart-2);border-radius:8px}.callout{border-left:4px solid var(--chart-3);background:color-mix(in oklch,var(--chart-3) 10%,var(--card));padding:14px 16px;border-radius:8px}.checks{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.check{display:flex;justify-content:space-between;gap:16px;background:var(--card);border:1px solid var(--border);padding:12px 14px;border-radius:9px}.pending{color:var(--warning);font-weight:650}.passed{color:var(--positive);font-weight:650}.footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--muted-foreground)}@media(max-width:760px){.grid{grid-template-columns:repeat(2,1fr)}.checks{grid-template-columns:1fr}.chart{height:240px}main{padding:22px 14px}}
+</style>
+</head>
+<body><main>
+<h1>Windows Unit Suite — Progress & Trajectory</h1>
+<div class="sub">Retained-boundary optimization · updated 15 July 2026 · merge-base inventory preserved</div>
+<div class="grid">
+ <div class="card"><div class="metric">350.12s</div><div class="label">Latest guarded representative panel</div></div>
+ <div class="card"><div class="metric">347.81s</div><div class="label">Core-fidelity critical lane</div></div>
+ <div class="card"><div class="metric">880 / 880</div><div class="label">Merge-base unit files preserved</div></div>
+ <div class="card"><div class="status"><span class="dot"></span>Stretch target open</div><div class="label">47.81s above the original 300s target</div></div>
+</div>
+<section class="card chart"><h2>Validated broad-run trajectory</h2>
+<svg viewBox="0 0 900 230" role="img" aria-label="Broad suite time declined from 1097.61 seconds to 350.12 seconds; target is 300 seconds">
+ <line class="axis" x1="55" y1="190" x2="875" y2="190"/><line class="axis" x1="55" y1="20" x2="55" y2="190"/>
+ <line class="target" x1="55" y1="148" x2="875" y2="148"/><text class="targettext" x="760" y="141">300s stretch target</text>
+ <polyline class="series" points="80,30 250,110 420,133 590,136 760,138 850,140"/>
+ <circle class="point" cx="80" cy="30" r="6"/><circle class="point" cx="250" cy="110" r="6"/><circle class="point" cx="420" cy="133" r="6"/><circle class="point" cx="590" cy="136" r="6"/><circle class="point" cx="760" cy="138" r="6"/><circle class="point" cx="850" cy="140" r="6"/>
+ <text class="svgtext" x="58" y="16">1097.61s</text><text class="svgtext" x="220" y="102">508.4s*</text><text class="svgtext" x="390" y="125">363.37s</text><text class="svgtext" x="555" y="128">362.03s</text><text class="svgtext" x="725" y="130">350.12s</text>
+ <text class="svgtext" x="55" y="214">Vitest 3</text><text class="svgtext" x="215" y="214">scope diagnostic</text><text class="svgtext" x="386" y="214">unprofiled</text><text class="svgtext" x="555" y="214">legacy format</text><text class="svgtext" x="735" y="214">bundle</text>
+</svg><div class="note">* Diagnostic-only run; excluded from acceptance because guard activation and test failures were present.</div></section>
+<section><h2>FlexSearch persistence evidence</h2><div class="table-wrap"><table>
+<thead><tr><th>Measure</th><th>Legacy per-key files</th><th>Versioned bundle</th><th>Change</th></tr></thead>
+<tbody>
+<tr><td>Writes</td><td>2,796 / 430 flushes</td><td>950 / 483 flushes</td><td><div class="bar"><i style="width:30.3%"></i></div>69.7% less fan-out</td></tr>
+<tr><td>Atomic renames</td><td>2,795 / 430 flushes</td><td>950 / 483 flushes</td><td>69.7% less fan-out</td></tr>
+<tr><td>Mean profiled flush</td><td>502ms</td><td>243ms</td><td>51.7% lower</td></tr>
+<tr><td>Representative wall</td><td>362.03s</td><td>350.12s</td><td>12.03s lower</td></tr>
+<tr><td>Core fidelity</td><td>359.87s</td><td>347.81s</td><td>12.06s lower</td></tr>
+</tbody></table></div></section>
+<section><div class="callout"><strong>Boundary retained.</strong> Real on-disk persistence remains. The index now uses one atomic, versioned export bundle beside an independently atomic docs mirror. Legacy reads, corruption/partial recovery, mirror-generation mismatch detection, bounded failure/later retry, and concurrent-mutation follow-up are asserted deterministically.</div></section>
+<section><h2>Final sequential validation</h2><div class="checks" id="validation-results">
+ <div class="check"><code>npm run check</code><span class="pending">Pending</span></div>
+ <div class="check"><code>npm run test:unit</code><span class="pending">Pending · must be &lt;400s</span></div>
+ <div class="check"><code>npm run test:browser</code><span class="pending">Pending</span></div>
+ <div class="check"><code>npm run test:e2e</code><span class="pending">Pending</span></div>
+</div></section>
+<section><h2>Trajectory</h2><div class="table-wrap"><table><tbody>
+<tr><td>Landing threshold</td><td>&lt;400s complete unit run, then all four commands green in &lt;600s total</td></tr>
+<tr><td>Original stretch target</td><td>&lt;300s complete unit run; still open, no assertion or boundary reduction authorized</td></tr>
+<tr><td>Ownership</td><td>All 880 merge-base files, twelve restored integration owners, zero E2E exclusions, and validated declaration mappings</td></tr>
+<tr><td>Current posture</td><td>Stop new optimization fronts; stabilize, validate, commit the proven retained-boundary set</td></tr>
+</tbody></table></div></section>
+<div class="footer">Evidence sources: guarded three-shard/one-worker panels, production profile exports, unit inventory audit, and deterministic persistence recovery suites.</div>
+</main></body></html>
