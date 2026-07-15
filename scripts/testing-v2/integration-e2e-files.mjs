@@ -8,19 +8,15 @@
 //   - scripts/testing-v2/run-e2e-v2.mjs → Group I runs them in the e2e stage and
 //     reports a numeric count.
 //
-// Keeping the list here (not duplicated) means the e2e runner's counts can never
-// drift from what the config actually runs.
+// This list is intentionally identical to the merge-base inventory. Performance
+// work must not add files here: optimize unit setup/fixtures instead of changing
+// the tier that owns an existing test.
 export const integrationE2eFiles = [
 	"tests2/integration/team-lead-child-authz.test.ts",
 	"tests2/integration/orchestrate-restart.test.ts",
 	"tests2/integration/continue-archived.test.ts",
 	"tests2/integration/continue-archived-assistant.test.ts",
 	"tests2/integration/multi-repo-flow-api.test.ts",
-	"tests2/integration/multi-repo-goal.test.ts",
-	"tests2/integration/maintenance-api.test.ts",
-	"tests2/integration/gate-inspect-slicing.test.ts",
-	"tests2/integration/staff-patch-reassign.test.ts",
-	"tests2/integration/verification-restart-resignal.test.ts",
 	"tests2/integration/steer-gateway-restart.test.ts",
 	"tests2/integration/team-wait-semantics.test.ts",
 	"tests2/integration/team-delegate.test.ts",

@@ -92,6 +92,10 @@ async function assertBundleParity(bundlePath, repoRoot) {
 	if (typeof loaded?.server?.createGateway !== "function") {
 		throw new Error("[server-prebundle] boot parity failed: server.createGateway is missing");
 	}
+	if (typeof loaded?.gatewayDeps?.realCommandRunner?.execFile !== "function"
+		|| loaded.gatewayDeps.realCommandRunner !== loaded.server.realCommandRunner) {
+		throw new Error("[server-prebundle] dependency parity failed: shared gatewayDeps.realCommandRunner is missing or duplicated");
+	}
 	if (!readFileSync(bundlePath, "utf8").includes("createRequire(import.meta.url)")) {
 		throw new Error("[server-prebundle] import.meta.url rewrite corrupted a generated child-module source string");
 	}

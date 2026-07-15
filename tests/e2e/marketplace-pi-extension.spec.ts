@@ -186,7 +186,7 @@ test.describe("marketplace pi extensions", () => {
 		for (const dir of projectsToRemove.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});
 
-	test("install + default enable passes extension args, exposes provenance, and the fixture tool can be used", async ({ gateway }) => {
+	test("real discovery-process canary: install + default enable passes extension args, exposes provenance, and the fixture tool can be used", async ({ gateway }) => {
 		await installPack(DEMO_SOURCE, DEMO_PACK, "server");
 		await setPiExtensionsDisabled(DEMO_PACK, []);
 

@@ -55,7 +55,7 @@ const WORKER_RPC_TIMEOUT_RE = /\[vitest-(worker|api)\]: Timeout calling "(onTask
 // Integration carries the most work. Optional cost-balanced sharding remains an
 // experimental lever, but the default weighted worker allocation already gives
 // the unsharded integration lane half of an eight-worker suite grant.
-const INTEGRATION_SHARDS = Math.max(1, Number(process.env.UNIT_LANES_INTEGRATION_SHARDS || "1"));
+const INTEGRATION_SHARDS = Math.max(1, Number(process.env.UNIT_LANES_INTEGRATION_SHARDS || "3"));
 
 function listTestFiles(rel) {
 	const root = join(REPO_ROOT, rel);
@@ -111,9 +111,10 @@ function shardByCost(files, shards) {
 // cliSelectsProject("v2-core") path (no broad-core sharding — one unsharded
 // project), while heavy/isolated ride along as their own sequenced sub-projects.
 const LANES = {
-	core: { projects: ["v2-core", "v2-core-heavy", "v2-core-isolated"], weight: 3 },
-	integration: { projects: ["v2-integration", "v2-integration-fake"], weight: 4 },
-	dom: { projects: ["v2-dom"], weight: 1 },
+	core: { projects: ["v2-core", "v2-core-heavy", "v2-core-isolated"], weight: 2 },
+	"core-fidelity": { projects: ["v2-core-fidelity"], weight: 1 },
+	integration: { projects: ["v2-integration", "v2-integration-source", "v2-integration-isolated", "v2-integration-command", "v2-integration-fake"], weight: 3 },
+	dom: { projects: ["v2-dom"], weight: 2 },
 };
 
 function parseArgs(argv) {
@@ -184,9 +185,7 @@ function runLane(name, projects, workers, files, parentRunId, stats, serverPrebu
 				...process.env,
 				BOBBIT_V2_LEDGER_PARENT: parentRunId,
 				BOBBIT_V2_SLOTS_VITEST: String(workers),
-				...(serverPrebundle && projects.some((project) => project.startsWith("v2-integration"))
-					? { BOBBIT_V2_SERVER_PREBUNDLE: serverPrebundle }
-					: {}),
+				...(serverPrebundle ? { BOBBIT_V2_SERVER_PREBUNDLE: serverPrebundle } : {}),
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		});

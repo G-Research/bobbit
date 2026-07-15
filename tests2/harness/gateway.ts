@@ -260,7 +260,7 @@ async function boot(): Promise<BootedGateway> {
 	const useFakeCommandStep = (globalThis as { __BOBBIT_V2_FAKE_CMD_STEP__?: boolean }).__BOBBIT_V2_FAKE_CMD_STEP__ === true;
 	const deps: GatewayDeps = {
 		clock,
-		commandRunner: createFencedCommandRunner(),
+		commandRunner: createFencedCommandRunner(runtime.gatewayDeps.realCommandRunner),
 		fetchImpl: createFencedFetch(),
 		agentBridgeFactory,
 		...(useFakeCommandStep ? { commandStepRunner: createFakeVerificationCommandRunner() } : {}),

@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { defineConfig } from "vitest/config";
 import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
@@ -94,7 +94,34 @@ const heavyCoreFiles = [
 // effects), bg/sandbox command suites, and gate-verification (legacy
 // createTestGateway fixture outside this fake-DI seam).
 // See docs/testing-v2/gateway-cost-feasibility.md.
+const sourceIntegrationFiles = [
+	// These are source-module/store tests, not gateway journeys. Keep them in one
+	// dedicated source worker so broad SessionManager/VerificationHarness imports
+	// do not duplicate the prebundled gateway graph in every integration worker.
+	"tests2/integration/cost-tracker-real-fs.test.ts",
+	"tests2/integration/direct-agent-admin-token.test.ts",
+	"tests2/integration/session-store-real-fs.test.ts",
+	"tests2/integration/verification-review-timeout-payload.test.ts",
+];
+
+const isolatedIntegrationFiles = [
+	// These suites mutate gateway-wide singleton/lifecycle state. Give each a
+	// dedicated unit fork so sibling teardown cannot reset active HTTP connections.
+	"tests2/integration/maintenance-api.test.ts",
+	"tests2/integration/preview-mount-route.test.ts",
+];
+
+const realCommandIntegrationFiles = [
+	// Retained-output/artifact assertions require the durable OS command runner,
+	// but get a dedicated unit fork so they cannot contend with sibling gateways.
+	"tests2/integration/gate-inspect-slicing.test.ts",
+];
+
 const fakeCommandStepFiles = [
+	// API/state assertions use the deterministic command-step backend. The real
+	// process runner's cancellation, artifact and restart contracts remain pinned
+	// in core verification-command-* tests.
+	"tests2/integration/cancel-verification.test.ts",
 	"tests2/integration/gate-bypass-api.test.ts",
 	"tests2/integration/gate-reset-api.test.ts",
 	"tests2/integration/gate-resign-cancel.test.ts",
@@ -157,11 +184,44 @@ function cliSelectsFile(file: string): boolean {
 	});
 }
 
+// Process-fidelity tests stay in the complete unit inventory but use one isolated
+// fork. This prevents concurrent cmd/git/Node/Chromium launches from starving the
+// ordinary unit workers (and one another) on Windows. High-level decision tests
+// should prefer injected runners; this project owns the remaining OS canaries.
+const processFidelityCoreFiles = listTestFilesUnder("tests2/core").filter((file) => {
+	const source = readFileSync(file, "utf-8");
+	return /node:child_process|\bplaywright\b/.test(source);
+});
+const ioFidelityCoreFiles = [
+	"tests2/core/agent-dir-migration.test.ts",
+	"tests2/core/bg-process-persistence.test.ts",
+	"tests2/core/continue-archived-clone.test.ts",
+	"tests2/core/extension-host-pack-store.test.ts",
+	"tests2/core/google-code-assist.test.ts",
+	"tests2/core/headquarters-state-migration.test.ts",
+	"tests2/core/marketplace-install.test.ts",
+	"tests2/core/pack-pi-extensions-loader.test.ts",
+	"tests2/core/preview-mount.test.ts",
+	"tests2/core/project-preflight.test.ts",
+	"tests2/core/project-registry-provisional-dedupe.test.ts",
+	"tests2/core/rpc-bridge-gateway-env.test.ts",
+	"tests2/core/sandbox-codex-auth.test.ts",
+	"tests2/core/sandbox-google-auth.test.ts",
+].filter((file) => !processFidelityCoreFiles.includes(file));
 // Keep targeted legacy invocations such as `--project v2-core tests2/core/foo.test.ts`
-// working while unfiltered broad runs still hand heavy files to v2-core-heavy.
+// working while unfiltered broad runs hand special files to their unit sub-projects.
 const explicitV2CoreHeavyFiles = cliSelectsProject("v2-core") ? heavyCoreFiles.filter(cliSelectsFile) : [];
+const explicitProcessFidelityFiles = cliSelectsProject("v2-core") ? processFidelityCoreFiles.filter(cliSelectsFile) : [];
+const explicitIoFidelityFiles = cliSelectsProject("v2-core") ? ioFidelityCoreFiles.filter(cliSelectsFile) : [];
+const unitProcessFidelityFiles = processFidelityCoreFiles.filter((file) => !explicitProcessFidelityFiles.includes(file));
+const unitIoFidelityFiles = ioFidelityCoreFiles.filter((file) => !explicitIoFidelityFiles.includes(file));
+const unitFidelityCoreFiles = [...new Set([...unitProcessFidelityFiles, ...unitIoFidelityFiles])];
+const unitHeavyCoreFiles = heavyCoreFiles.filter((file) => !unitFidelityCoreFiles.includes(file));
 const broadCoreFiles = listTestFilesUnder("tests2/core").filter(
-	(file) => (!heavyCoreFiles.includes(file) || explicitV2CoreHeavyFiles.includes(file)) && !singleForkFiles.includes(file),
+	(file) => (!heavyCoreFiles.includes(file) || explicitV2CoreHeavyFiles.includes(file))
+		&& (!processFidelityCoreFiles.includes(file) || explicitProcessFidelityFiles.includes(file))
+		&& (!ioFidelityCoreFiles.includes(file) || explicitIoFidelityFiles.includes(file))
+		&& !singleForkFiles.includes(file),
 );
 // Vitest 4's pool rewrite removes the birpc timeout/backlog failure that required
 // sequential Windows core shards. Keep one broad project on every platform.
@@ -224,6 +284,20 @@ export default defineConfig({
 					include,
 				},
 			})),
+			{
+				test: {
+					...shared,
+					name: "v2-core-fidelity",
+					sequence: { groupOrder: 0 },
+					environment: "node",
+					pool: "forks" as const,
+					isolate: true,
+					// Two workers overlap process and filesystem canaries without the
+					// severe Windows Defender thrash observed with three or more.
+					maxWorkers: Math.min(2, MAX_WORKERS),
+					include: unitFidelityCoreFiles,
+				},
+			},
 			// Heavy core files: single sequenced fork, no module isolation needed. This
 			// prevents a minutes-long git/worktree file from holding a broad v2-core
 			// worker pool open after all other files have reported.
@@ -241,7 +315,7 @@ export default defineConfig({
 					// doesn't turn a legitimately-long git test into a spurious timeout.
 					testTimeout: 120_000,
 					hookTimeout: 120_000,
-					include: heavyCoreFiles,
+					include: unitHeavyCoreFiles,
 				},
 			},
 			// singleFork: files that genuinely cannot share a fork even with env-guard.
@@ -264,9 +338,10 @@ export default defineConfig({
 					name: "v2-dom",
 					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 2 },
 					environment: "happy-dom",
-					// Vitest 4 keeps globals more faithfully when isolate:false. DOM tests
-					// intentionally replace window/localStorage/customElements, so give each
-					// file a fresh environment instead of leaking those mutations forward.
+					// Reuse a bounded worker-thread pool instead of spawning one fork process
+					// per isolated DOM file. isolate:true still gives every file a fresh
+					// happy-dom environment and module graph, preventing global/storage leaks.
+					pool: "threads" as const,
 					isolate: true,
 					include: ["tests2/dom/**/*.test.ts"],
 				},
@@ -281,9 +356,48 @@ export default defineConfig({
 					// The fake-command-step specs run in the dedicated fake project below;
 					// the heavy real-fidelity specs run in the e2e-tier project (relocated
 					// out of the fast unit gate).
-					exclude: [...fakeCommandStepFiles, ...integrationE2eFiles],
+					exclude: [...fakeCommandStepFiles, ...realCommandIntegrationFiles, ...sourceIntegrationFiles, ...isolatedIntegrationFiles, ...integrationE2eFiles],
 					// Integration tests each boot a real gateway + verification harness;
 					// under concurrent load they can take >30 s, so override the default.
+					testTimeout: 60_000,
+					hookTimeout: 90_000,
+				},
+			},
+			{
+				test: {
+					...shared,
+					name: "v2-integration-source",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 4 },
+					environment: "node",
+					include: sourceIntegrationFiles,
+					pool: "forks" as const,
+					maxWorkers: 1,
+				},
+			},
+			{
+				test: {
+					...shared,
+					name: "v2-integration-isolated",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 5 },
+					environment: "node",
+					include: isolatedIntegrationFiles,
+					pool: "forks" as const,
+					isolate: true,
+					maxWorkers: 1,
+					testTimeout: 60_000,
+					hookTimeout: 90_000,
+				},
+			},
+			{
+				test: {
+					...shared,
+					name: "v2-integration-command",
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 6 },
+					environment: "node",
+					include: realCommandIntegrationFiles,
+					pool: "forks" as const,
+					isolate: true,
+					maxWorkers: 1,
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
 				},
@@ -297,7 +411,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-integration-fake",
-					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 4 },
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 7 },
 					environment: "node",
 					setupFiles: ["tests2/integration/_e2e/fake-cmd-setup.ts"],
 					include: [...fakeCommandStepFiles],
@@ -319,7 +433,7 @@ export default defineConfig({
 				test: {
 					...shared,
 					name: "v2-integration-e2e",
-					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 6 },
+					sequence: { groupOrder: CORE_FOLLOWUP_GROUP_ORDER + 8 },
 					environment: "node",
 					include: [...integrationE2eFiles],
 					testTimeout: 60_000,

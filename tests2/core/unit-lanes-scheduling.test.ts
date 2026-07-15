@@ -25,9 +25,12 @@ async function loadLanes() {
 }
 
 const jobs = [
-	{ name: "core", weight: 3 },
-	{ name: "integration", weight: 4 },
-	{ name: "dom", weight: 1 },
+	{ name: "core", weight: 2 },
+	{ name: "core-fidelity", weight: 1 },
+	{ name: "integration-1", weight: 1 },
+	{ name: "integration-2", weight: 1 },
+	{ name: "integration-3", weight: 1 },
+	{ name: "dom", weight: 2 },
 ];
 
 describe("unit-lanes orchestrator scheduling", () => {
@@ -48,15 +51,15 @@ describe("unit-lanes orchestrator scheduling", () => {
 		try { rmSync(isolatedTmp, { recursive: true, force: true }); } catch { /* best-effort */ }
 	});
 
-	it("allocates the normal eight-worker grant as core=3, integration=4, dom=1", async () => {
+	it("allocates eight workers across core, fidelity, three integration shards, and DOM", async () => {
 		const { planLaneWorkers } = await loadLanes();
 		const plan = planLaneWorkers({ grant: 8, jobs });
-		assert.deepEqual(plan.workers, { core: 3, integration: 4, dom: 1 });
-		assert.equal(plan.maxConcurrent, 3, "all three lanes must start immediately");
+		assert.deepEqual(plan.workers, { core: 2, "core-fidelity": 1, "integration-1": 1, "integration-2": 1, "integration-3": 1, dom: 2 });
+		assert.equal(plan.maxConcurrent, 6, "all six unit jobs must start immediately");
 		assert.equal(plan.used, 8, "the full reservation must do useful work");
 	});
 
-	it("never oversubscribes a grant and queues only when fewer than three workers exist", async () => {
+	it("never oversubscribes a grant and queues only when fewer workers than jobs exist", async () => {
 		const { planLaneWorkers } = await loadLanes();
 		for (const grant of [1, 2, 3, 4, 6, 8, 12]) {
 			const plan = planLaneWorkers({ grant, jobs });
@@ -84,7 +87,7 @@ describe("unit-lanes orchestrator scheduling", () => {
 
 			const { planLaneWorkers } = await loadLanes();
 			for (const reservation of reservations) {
-				assert.equal(planLaneWorkers({ grant: reservation.workerSlots, jobs }).maxConcurrent, 3);
+				assert.equal(planLaneWorkers({ grant: reservation.workerSlots, jobs }).maxConcurrent, 6);
 			}
 		} finally {
 			for (const reservation of reservations.reverse()) reservation.release();

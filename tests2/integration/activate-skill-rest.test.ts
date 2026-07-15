@@ -62,15 +62,13 @@ test.describe.serial("activate_skill REST endpoint", () => {
 			seedWorkflows: false,
 		});
 		projectId = project.id;
-	});
-
-	test.beforeEach(async () => {
+		// Endpoint cases are stateless reads of the same skill catalogue. Reuse one
+		// worktree-free session instead of provisioning/deleting six agent records.
 		sessionId = await createSession({ cwd: projectRoot, projectId });
 	});
-	test.afterEach(async () => {
-		if (sessionId) { await deleteSession(sessionId); sessionId = ""; }
-	});
+
 	test.afterAll(async () => {
+		if (sessionId) await deleteSession(sessionId).catch(() => {});
 		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 	});
 

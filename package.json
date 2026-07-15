@@ -39,6 +39,7 @@
     "test:v2:browser-chaos": "node scripts/testing-v2/browser-chaos.mjs",
     "test:v2:profile-hooks": "node scripts/testing-v2/profile-hooks.mjs",
     "test:v2:profile-windows": "node scripts/testing-v2/profile-windows-unit.mjs",
+    "test:unit:inventory": "node scripts/testing-v2/unit-inventory-audit.mjs",
     "test:unit": "npm run test:v2:core:lanes",
     "test:browser": "npm run test:v2:browser",
     "test:bundle": "node scripts/testing-v2/run-bundle-check.mjs",

@@ -12,15 +12,39 @@ import {
 	type PiExtensionToolInfo,
 } from "./pi-extension-contributions.js";
 
+export interface PiExtensionDiscoveryProbeRequest {
+	entryPath: string;
+	timeoutMs: number;
+	cwd?: string;
+}
+
+export interface PiExtensionDiscoveryProbeResult {
+	stdout: string;
+	stderr: string;
+	exitCode: number | null;
+	timedOut: boolean;
+}
+
+/**
+ * Injectable executable-discovery boundary. Unit tests use an in-memory backend;
+ * production defaults to the real, confined Node child-process backend below.
+ */
+export interface PiExtensionDiscoveryBackend {
+	run(request: PiExtensionDiscoveryProbeRequest): Promise<PiExtensionDiscoveryProbeResult>;
+	runSync(request: PiExtensionDiscoveryProbeRequest): PiExtensionDiscoveryProbeResult;
+}
+
 export interface DiscoverPiExtensionToolsOptions {
 	timeoutMs?: number;
 	cwd?: string;
 	trustAccepted: boolean;
+	backend?: PiExtensionDiscoveryBackend;
 }
 
 const DEFAULT_TIMEOUT_MS = 3000;
 const MAX_OUTPUT_BYTES = 128 * 1024;
-const RESULT_MARKER = "__BOBBIT_PI_EXTENSION_DISCOVERY_RESULT__";
+export const PI_EXTENSION_DISCOVERY_RESULT_MARKER = "__BOBBIT_PI_EXTENSION_DISCOVERY_RESULT__";
+const RESULT_MARKER = PI_EXTENSION_DISCOVERY_RESULT_MARKER;
 const DENIED_PROBE_IMPORTS = ["child_process", "cluster", "dgram", "dns", "http", "http2", "https", "inspector", "net", "repl", "tls", "undici", "worker_threads"] as const;
 const require = createRequire(import.meta.url);
 
@@ -575,85 +599,101 @@ try {
 `;
 }
 
-export async function discoverPiExtensionTools(entryPath: string, opts: DiscoverPiExtensionToolsOptions): Promise<PiExtensionDiscoveryResult> {
-	const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
-	if (cache.diagnostic) return failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey);
-	const cacheKey = cache.cacheKey;
-	if (!opts.trustAccepted) return skipped(cacheKey);
-	const st = (() => {
-		try { return fs.statSync(entryPath); } catch { return null; }
-	})();
-	if (!st?.isFile()) return failed("entry_not_found", `Pi extension entry does not exist or is not a file: ${entryPath}`, cacheKey);
+function interpretProbeResult(
+	result: PiExtensionDiscoveryProbeResult,
+	timeoutMs: number,
+	cacheKey?: string,
+): PiExtensionDiscoveryResult {
+	if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${timeoutMs}ms.`, cacheKey);
+	const parsed = parseProbeResult(result.stdout);
+	if (!parsed) {
+		if (isUnsettledTopLevelAwaitOutput(result.stderr || result.stdout)) return failed("probe_timeout", `Pi extension discovery timed out after ${timeoutMs}ms.`, cacheKey);
+		const stderr = sanitizeMessage(result.stderr || result.stdout || `probe exited with code ${result.exitCode ?? "unknown"}`);
+		return failed("probe_invalid_output", `Pi extension discovery did not return a valid result: ${stderr}`, cacheKey);
+	}
+	if (parsed.status === "failed") return failed(parsed.code || "probe_failed", parsed.message, cacheKey);
+	return ok(parsed.tools, cacheKey);
+}
 
-	const tempRoot = opts.cwd ?? fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-probe-"));
-	let createdTemp = !opts.cwd;
+function backendFailure(err: unknown, cacheKey?: string): PiExtensionDiscoveryResult {
+	if (err instanceof ProbePreparationError) return failed(err.code, sanitizeMessage(err.message), cacheKey);
+	return failed("probe_build_failed", sanitizeMessage(err), cacheKey);
+}
+
+function realProbeRequest(request: PiExtensionDiscoveryProbeRequest, sync: true): PiExtensionDiscoveryProbeResult;
+function realProbeRequest(request: PiExtensionDiscoveryProbeRequest, sync: false): Promise<PiExtensionDiscoveryProbeResult>;
+function realProbeRequest(request: PiExtensionDiscoveryProbeRequest, sync: boolean): PiExtensionDiscoveryProbeResult | Promise<PiExtensionDiscoveryProbeResult> {
+	const tempRoot = request.cwd ?? fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-probe-"));
+	const createdTemp = !request.cwd;
+	let asyncCleanupAttached = false;
 	try {
 		fs.mkdirSync(tempRoot, { recursive: true });
 		const probePath = path.join(tempRoot, "probe.mjs");
 		fs.writeFileSync(probePath, probeScript(), "utf-8");
-		const confinement = writeProbeConfinementFiles(tempRoot, entryPath);
-		let preparedEntryPath: string;
-		try {
-			preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
-		} catch (err) {
-			if (err instanceof ProbePreparationError) return failed(err.code, sanitizeMessage(err.message), cacheKey);
-			return failed("probe_build_failed", sanitizeMessage(err), cacheKey);
-		}
-		const result = await runProbe(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, confinement);
-		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
-		const parsed = parseProbeResult(result.stdout);
-		if (!parsed) {
-			if (isUnsettledTopLevelAwaitOutput(result.stderr || result.stdout)) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
-			const stderr = sanitizeMessage(result.stderr || result.stdout || `probe exited with code ${result.exitCode ?? "unknown"}`);
-			return failed("probe_invalid_output", `Pi extension discovery did not return a valid result: ${stderr}`, cacheKey);
-		}
-		if (parsed.status === "failed") return failed(parsed.code || "probe_failed", parsed.message, cacheKey);
-		return ok(parsed.tools, cacheKey);
+		const confinement = writeProbeConfinementFiles(tempRoot, request.entryPath);
+		const preparedEntryPath = prepareProbeEntry(request.entryPath, tempRoot);
+		if (sync) return runProbeSync(probePath, preparedEntryPath, tempRoot, request.timeoutMs, confinement);
+		const pending = runProbe(probePath, preparedEntryPath, tempRoot, request.timeoutMs, confinement);
+		asyncCleanupAttached = true;
+		return pending.finally(() => {
+				if (createdTemp) {
+					try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+				}
+			});
 	} finally {
-		if (createdTemp) {
+		// Async cleanup is attached only after all synchronous preparation succeeds.
+		if (createdTemp && !asyncCleanupAttached) {
 			try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 		}
 	}
 }
 
-export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPiExtensionToolsOptions): PiExtensionDiscoveryResult {
+export const realPiExtensionDiscoveryBackend: PiExtensionDiscoveryBackend = {
+	run: (request) => realProbeRequest(request, false),
+	runSync: (request) => realProbeRequest(request, true),
+};
+
+function discoveryRequest(entryPath: string, opts: DiscoverPiExtensionToolsOptions): PiExtensionDiscoveryProbeRequest {
+	return {
+		entryPath,
+		timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+		...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+	};
+}
+
+function discoveryPreflight(entryPath: string, opts: DiscoverPiExtensionToolsOptions): { cacheKey?: string; result?: PiExtensionDiscoveryResult } {
 	const cache = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entryPath);
-	if (cache.diagnostic) return failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey);
+	if (cache.diagnostic) return { cacheKey: cache.cacheKey, result: failed(cache.diagnostic.code, cache.diagnostic.message, cache.cacheKey) };
 	const cacheKey = cache.cacheKey;
-	if (!opts.trustAccepted) return skipped(cacheKey);
+	if (!opts.trustAccepted) return { cacheKey, result: skipped(cacheKey) };
 	const st = (() => {
 		try { return fs.statSync(entryPath); } catch { return null; }
 	})();
-	if (!st?.isFile()) return failed("entry_not_found", `Pi extension entry does not exist or is not a file: ${entryPath}`, cacheKey);
+	if (!st?.isFile()) return { cacheKey, result: failed("entry_not_found", `Pi extension entry does not exist or is not a file: ${entryPath}`, cacheKey) };
+	return { cacheKey };
+}
 
-	const tempRoot = opts.cwd ?? fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-probe-"));
-	let createdTemp = !opts.cwd;
+export async function discoverPiExtensionTools(entryPath: string, opts: DiscoverPiExtensionToolsOptions): Promise<PiExtensionDiscoveryResult> {
+	const preflight = discoveryPreflight(entryPath, opts);
+	if (preflight.result) return preflight.result;
+	const request = discoveryRequest(entryPath, opts);
 	try {
-		fs.mkdirSync(tempRoot, { recursive: true });
-		const probePath = path.join(tempRoot, "probe.mjs");
-		fs.writeFileSync(probePath, probeScript(), "utf-8");
-		const confinement = writeProbeConfinementFiles(tempRoot, entryPath);
-		let preparedEntryPath: string;
-		try {
-			preparedEntryPath = prepareProbeEntry(entryPath, tempRoot);
-		} catch (err) {
-			if (err instanceof ProbePreparationError) return failed(err.code, sanitizeMessage(err.message), cacheKey);
-			return failed("probe_build_failed", sanitizeMessage(err), cacheKey);
-		}
-		const result = runProbeSync(probePath, preparedEntryPath, tempRoot, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, confinement);
-		if (result.timedOut) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
-		const parsed = parseProbeResult(result.stdout);
-		if (!parsed) {
-			if (isUnsettledTopLevelAwaitOutput(result.stderr || result.stdout)) return failed("probe_timeout", `Pi extension discovery timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`, cacheKey);
-			const stderr = sanitizeMessage(result.stderr || result.stdout || `probe exited with code ${result.exitCode ?? "unknown"}`);
-			return failed("probe_invalid_output", `Pi extension discovery did not return a valid result: ${stderr}`, cacheKey);
-		}
-		if (parsed.status === "failed") return failed(parsed.code || "probe_failed", parsed.message, cacheKey);
-		return ok(parsed.tools, cacheKey);
-	} finally {
-		if (createdTemp) {
-			try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
-		}
+		const result = await (opts.backend ?? realPiExtensionDiscoveryBackend).run(request);
+		return interpretProbeResult(result, request.timeoutMs, preflight.cacheKey);
+	} catch (err) {
+		return backendFailure(err, preflight.cacheKey);
+	}
+}
+
+export function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPiExtensionToolsOptions): PiExtensionDiscoveryResult {
+	const preflight = discoveryPreflight(entryPath, opts);
+	if (preflight.result) return preflight.result;
+	const request = discoveryRequest(entryPath, opts);
+	try {
+		const result = (opts.backend ?? realPiExtensionDiscoveryBackend).runSync(request);
+		return interpretProbeResult(result, request.timeoutMs, preflight.cacheKey);
+	} catch (err) {
+		return backendFailure(err, preflight.cacheKey);
 	}
 }
 

@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 
 export interface ServerTestRuntime {
 	server: typeof import("../../src/server/server.js");
+	gatewayDeps: typeof import("../../src/server/gateway-deps.js");
 	aigwManager: typeof import("../../src/server/agent/aigw-manager.js");
 	bobbitDir: typeof import("../../src/server/bobbit-dir.js");
 	scaffold: typeof import("../../src/server/scaffold.js");

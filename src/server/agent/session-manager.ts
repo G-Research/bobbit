@@ -1936,8 +1936,8 @@ export class SessionManager {
 		}
 
 		try {
-			if (await isGitRepo(cwd)) {
-				const repoRoot = await getRepoRoot(cwd);
+			if (await isGitRepo(cwd, this.commandRunner)) {
+				const repoRoot = await getRepoRoot(cwd, this.commandRunner);
 				const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
 				if (repoOffset) return repoOffset;
 			}
@@ -1950,8 +1950,8 @@ export class SessionManager {
 			const projectRoot = project?.rootPath;
 			if (projectRoot) {
 				try {
-					if (await isGitRepo(projectRoot)) {
-						const repoRoot = await getRepoRoot(projectRoot);
+					if (await isGitRepo(projectRoot, this.commandRunner)) {
+						const repoRoot = await getRepoRoot(projectRoot, this.commandRunner);
 						const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
 						if (repoOffset) return repoOffset;
 					}

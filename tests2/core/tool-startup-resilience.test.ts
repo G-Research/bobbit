@@ -2,7 +2,7 @@
 // Source: tests/tool-startup-resilience.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { afterEach, describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,10 +11,23 @@ import path from "node:path";
 import { parseToolsDir } from "../../src/server/agent/builtin-config.ts";
 import { computeToolActivationArgs, type EffectiveTool } from "../../src/server/agent/tool-activation.ts";
 import { ToolManager, __resetToolScanCache } from "../../src/server/agent/tool-manager.ts";
+import { __setToolModuleLoadProbeForTesting, preflightConfigExtensionFile } from "../../src/server/agent/tool-extension-preflight.ts";
 
 const roots: string[] = [];
 
+beforeEach(() => {
+	// These ToolManager tests own fallback/diagnostic/cascade decisions. Model
+	// module-load outcomes deterministically instead of launching a fresh Node +
+	// TypeScript loader for every fixture; the real probe has one canary below.
+	__setToolModuleLoadProbeForTesting((extensionPath) => {
+		const source = fs.readFileSync(extensionPath, "utf-8");
+		const thrown = source.match(/^\s*throw new Error\(['\"]([^'\"]+)/m)?.[1];
+		return thrown ? `module load failed: ${thrown}` : undefined;
+	});
+});
+
 afterEach(() => {
+	__setToolModuleLoadProbeForTesting(undefined);
 	__resetToolScanCache();
 	for (const root of roots.splice(0)) {
 		try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -98,6 +111,15 @@ function makeAgentFixture(): {
 }
 
 describe("tool startup resilience", () => {
+	it("real module-load probe accepts a valid TypeScript extension", () => {
+		const root = tempRoot();
+		const groupDir = "agent";
+		const extension = "extension.ts";
+		writeFile(path.join(root, groupDir, extension), "export default function extension() { return {}; }\n");
+		__setToolModuleLoadProbeForTesting(undefined);
+		assert.equal(preflightConfigExtensionFile({ toolName: "canary", groupDir, baseDir: root, extension }), undefined);
+	});
+
 	it("rejects a broken active config agent override and falls back to bundled session_prompt", () => {
 		const fixture = makeAgentFixture();
 		writeTool(fixture.configToolsDir, "agent", "session_prompt.yaml", {

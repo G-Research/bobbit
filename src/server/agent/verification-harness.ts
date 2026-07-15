@@ -2618,11 +2618,11 @@ export class VerificationHarness {
 	private async resolveVerificationBaseBranch(goalId: string, cwd: string, fallback?: string): Promise<string> {
 		return this.resolveConfiguredBaseBranch(goalId)
 			|| fallback
-			|| (await detectPrimaryBranch(cwd).catch(() => "master"));
+			|| (await detectPrimaryBranch(cwd, this.commandRunner).catch(() => "master"));
 	}
 
 	private async resolveLegacyMasterBranch(cwd: string): Promise<string> {
-		return detectPrimaryBranch(cwd).catch(() => "master");
+		return detectPrimaryBranch(cwd, this.commandRunner).catch(() => "master");
 	}
 
 	/**

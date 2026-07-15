@@ -118,8 +118,15 @@ test("__doFlush while OPEN still writes (genuine path not suppressed)", async ()
 	const store = await FlexSearchStore.open({ dataDir: dir });
 	try {
 		await store.upsert([doc({ id: "a", text: "hello world" })]);
+		// Disable the separately-covered debounce before calling the unsafe private
+		// primitive directly. Under loaded Windows runs the timer can otherwise fire
+		// between upsert and this line, producing two writers for the same `.tmp`
+		// path — a race production avoids by funnelling writes through _flushNow.
+		const internals = store as unknown as { _saveTimer: ReturnType<typeof setTimeout> | null; __doFlush(): Promise<void> };
+		if (internals._saveTimer) clearTimeout(internals._saveTimer);
+		internals._saveTimer = null;
 		// Directly flush while open — must produce the persisted docs file.
-		await (store as unknown as { __doFlush(): Promise<void> }).__doFlush();
+		await internals.__doFlush();
 		expect(fs.existsSync(path.join(dir, "index", "__docs__.json"))).toBe(true);
 	} finally {
 		await store.close();

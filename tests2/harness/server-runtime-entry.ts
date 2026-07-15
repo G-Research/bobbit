@@ -2,6 +2,7 @@
 // preserve module identity for stateful server singletons shared by the gateway
 // fixture and identity-sensitive integration tests.
 export * as server from "../../src/server/server.js";
+export * as gatewayDeps from "../../src/server/gateway-deps.js";
 export * as aigwManager from "../../src/server/agent/aigw-manager.js";
 export * as bobbitDir from "../../src/server/bobbit-dir.js";
 export * as scaffold from "../../src/server/scaffold.js";

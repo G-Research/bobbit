@@ -5,7 +5,7 @@ import type { PackManifest, PackScope } from "./pack-types.js";
 import { readMeta } from "./pack-manifest.js";
 import { PackContributionError, packIdFromRoot } from "./pack-contributions.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
-import { discoverPiExtensionToolsSync } from "./pi-extension-discovery.js";
+import { discoverPiExtensionToolsSync, type PiExtensionDiscoveryBackend } from "./pi-extension-discovery.js";
 
 export interface ResolvedPiExtensionContribution {
 	/** Manifest contents.pi-extensions[] key and DisabledRefs key. */
@@ -60,6 +60,8 @@ export interface LoadPiExtensionContributionsWithDiscoveryOptions extends LoadPi
 	trustAccepted: boolean;
 	discoveryTimeoutMs?: number;
 	discoveryCwd?: string;
+	/** Injectable probe backend for deterministic, non-spawning callers/tests. */
+	discoveryBackend?: PiExtensionDiscoveryBackend;
 }
 
 const PI_EXTENSION_LIST_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -347,6 +349,7 @@ export async function loadPiExtensionContributionsWithDiscovery(
 			trustAccepted: opts.trustAccepted,
 			...(opts.discoveryTimeoutMs !== undefined ? { timeoutMs: opts.discoveryTimeoutMs } : {}),
 			...(opts.discoveryCwd ? { cwd: opts.discoveryCwd } : {}),
+			...(opts.discoveryBackend ? { backend: opts.discoveryBackend } : {}),
 		});
 		if (row.discovery.status === "failed" && row.discovery.diagnostic) {
 			row.diagnostic = row.discovery.diagnostic;
@@ -368,6 +371,7 @@ export function loadPiExtensionContributionsWithDiscoverySync(
 			trustAccepted: opts.trustAccepted,
 			...(opts.discoveryTimeoutMs !== undefined ? { timeoutMs: opts.discoveryTimeoutMs } : {}),
 			...(opts.discoveryCwd ? { cwd: opts.discoveryCwd } : {}),
+			...(opts.discoveryBackend ? { backend: opts.discoveryBackend } : {}),
 		});
 		if (row.discovery.status === "failed" && row.discovery.diagnostic) {
 			row.diagnostic = row.discovery.diagnostic;

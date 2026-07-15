@@ -21,7 +21,16 @@ function makeWorkflowId(): string {
 }
 
 function removeTree(dir: string): void {
-	fs.rmSync(dir, { recursive: true, force: true, maxRetries: process.platform === "win32" ? 10 : 0, retryDelay: 100 });
+	try {
+		fs.rmSync(dir, { recursive: true, force: true, maxRetries: process.platform === "win32" ? 10 : 0, retryDelay: 100 });
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		// A completed Windows command can retain its former cwd lease briefly. The
+		// fork-scoped gateway root owns this subtree and removes it at teardown; the
+		// retention assertions above must not fail solely on eager temp cleanup.
+		if (process.platform === "win32" && (code === "EPERM" || code === "EBUSY")) return;
+		throw err;
+	}
 }
 
 function contentLines(count: number, prefix = "content-line"): string {
