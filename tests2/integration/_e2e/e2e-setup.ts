@@ -18,6 +18,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import WebSocket from "ws";
+import { performance } from "node:perf_hooks";
+import { recordProfiledApiCall } from "../../harness/gateway.js";
 import { currentScope, ensureGateway, gatewaySync } from "./runtime.js";
 
 export { ensureGateway };
@@ -353,11 +355,14 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 	})));
 	const maxRetries = 4;
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
+		const startedAt = performance.now();
 		try {
 			const resp = await fetch(`${base()}${finalPath}`, { ...injected, headers: authedHeaders });
+			recordProfiledApiCall(method, finalPath, resp.status, performance.now() - startedAt);
 			await maybeAutoSeedWorkflows(path, method, injected.body as unknown, resp);
 			return resp;
 		} catch (err: unknown) {
+			recordProfiledApiCall(method, finalPath, 0, performance.now() - startedAt);
 			const msg = err instanceof Error
 				? [err.message, (err as any).cause?.message, (err as any).cause?.code].filter(Boolean).join(" ")
 				: String(err);
@@ -372,12 +377,19 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 export async function rawApiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	await ensureGateway();
 	const method = (opts.method || "GET").toUpperCase();
-	const resp = await fetch(`${base()}${path}`, {
-		...opts,
-		headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}`, ...(opts.headers as Record<string, string> || {}) },
-	});
-	await maybeAutoSeedWorkflows(path, method, opts.body as unknown, resp);
-	return resp;
+	const startedAt = performance.now();
+	try {
+		const resp = await fetch(`${base()}${path}`, {
+			...opts,
+			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}`, ...(opts.headers as Record<string, string> || {}) },
+		});
+		recordProfiledApiCall(method, path, resp.status, performance.now() - startedAt);
+		await maybeAutoSeedWorkflows(path, method, opts.body as unknown, resp);
+		return resp;
+	} catch (error) {
+		recordProfiledApiCall(method, path, 0, performance.now() - startedAt);
+		throw error;
+	}
 }
 
 // ---------------------------------------------------------------------------

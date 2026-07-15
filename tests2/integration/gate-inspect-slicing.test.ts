@@ -20,6 +20,19 @@ function makeWorkflowId(): string {
 	return `gate-inspect-slicing-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function removeTree(dir: string): void {
+	try {
+		fs.rmSync(dir, { recursive: true, force: true, maxRetries: process.platform === "win32" ? 10 : 0, retryDelay: 100 });
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		// A completed Windows command can retain its former cwd lease briefly. The
+		// fork-scoped gateway root owns this subtree and removes it at teardown; the
+		// retention assertions above must not fail solely on eager temp cleanup.
+		if (process.platform === "win32" && (code === "EPERM" || code === "EBUSY")) return;
+		throw err;
+	}
+}
+
 function contentLines(count: number, prefix = "content-line"): string {
 	return Array.from({ length: count }, (_, i) => `${prefix}-${i + 1}`).join("\n");
 }
@@ -449,7 +462,7 @@ test.describe("gate inspect slicing", () => {
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTree(cwd);
 		}
 	});
 
@@ -535,7 +548,7 @@ test.describe("gate inspect slicing", () => {
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTree(cwd);
 		}
 	});
 
@@ -582,7 +595,7 @@ test.describe("gate inspect slicing", () => {
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTree(cwd);
 		}
 	});
 

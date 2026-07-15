@@ -7,7 +7,7 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
-import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -145,33 +145,31 @@ test.describe("commit file diff API", () => {
 		}
 	});
 
-	test("goal commits include changed files and commit-scoped git-diff", async () => {
+	test("goal commits include changed files and commit-scoped git-diff", async ({ gateway }) => {
 		const root = fixtureRepo("goal");
+		const goalTargetSha = commitTargetChanges(root, "base\ngoal commit scoped marker\n");
 		const project = await registerProject({ name: `commit-diff-goal-${Date.now()}`, rootPath: root, seedWorkflows: false });
 		let goalId: string | undefined;
 		try {
+			// Commit-route coverage does not depend on asynchronous worktree
+			// provisioning. Create a no-worktree goal, then attach the already-real
+			// Git fixture through the harness store seam. This preserves the goal
+			// route's real Git behavior without an unrelated readiness timeout whose
+			// cleanup could delete the repo while provisioning was still running.
 			const goal = await createGoal({
 				title: "Commit file diff API goal",
 				cwd: root,
-				worktree: true,
+				worktree: false,
 				autoStartTeam: false,
 				projectId: project.id,
 			});
 			goalId = String(goal.id);
-			const readyGoal = await pollUntil(async () => {
-				const resp = await apiFetch(`/api/goals/${goalId}`);
-				if (resp.status !== 200) return null;
-				const body = await resp.json();
-				return body.setupStatus === "ready"
-					&& typeof body.cwd === "string"
-					&& typeof body.branch === "string"
-					&& typeof body.worktreePath === "string"
-					&& fs.existsSync(body.cwd)
-					? body
-					: null;
-			}, { timeoutMs: 15_000, label: "goal worktree ready" });
-			const goalCwd = readyGoal.cwd;
-			const goalTargetSha = commitTargetChanges(goalCwd, "base\ngoal commit scoped marker\n");
+			const goalStore = gateway.projectContextManager.getOrCreate(project.id)?.goalStore;
+			expect(goalStore?.update(goalId, {
+				branch: "master",
+				worktreePath: root,
+				setupStatus: "ready",
+			})).toBe(true);
 
 			await expectTargetCommitSummary(`/api/goals/${goalId}`, goalTargetSha);
 			await expectCommitDiff(`/api/goals/${goalId}`, goalTargetSha, "tracked.txt", "goal commit scoped marker");

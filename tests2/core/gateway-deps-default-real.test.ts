@@ -1,67 +1,45 @@
-import os from "node:os";
-import path from "node:path";
-import fs from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
-import { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "../../src/server/gateway-deps.js";
-import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, type RpcBridgeFactory } from "../../src/server/agent/rpc-bridge.js";
-
-import { guardProcessEnv } from "./helpers/env-guard.js";
-guardProcessEnv();
-
-const previousBobbitDir = process.env.BOBBIT_DIR;
-
-function setTempBobbitDir(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gateway-deps-"));
-	process.env.BOBBIT_DIR = dir;
-	return dir;
-}
-
-afterEach(() => {
-	if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
-	else process.env.BOBBIT_DIR = previousBobbitDir;
-	registerRpcBridgeFactory(null);
-});
+import { describe, expect, it } from "vitest";
+import type { RpcBridgeFactory } from "../../src/server/agent/rpc-bridge.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 describe("GatewayDeps default-real wiring", () => {
-	it("resolves real deps when no deps are provided", () => {
-		const deps = resolveGatewayDeps();
-		expect(deps.clock).toBe(realClock);
-		expect(deps.commandRunner).toBe(realCommandRunner);
-		expect(deps.fetchImpl).toBe(realFetch);
-		expect(deps.fsImpl).toBe(realFs);
-		expect(deps.agentBridgeFactory).toBe(defaultRpcBridgeFactory);
+	it("resolves real deps when no deps are provided", async () => {
+		const { gatewayDeps } = await loadServerTestRuntime();
+		const deps = gatewayDeps.resolveGatewayDeps();
+		expect(deps.clock).toBe(gatewayDeps.realClock);
+		expect(deps.commandRunner).toBe(gatewayDeps.realCommandRunner);
+		expect(deps.fetchImpl).toBe(gatewayDeps.realFetch);
+		expect(deps.fsImpl).toBe(gatewayDeps.realFs);
+		expect(deps.agentBridgeFactory).toBe(gatewayDeps.defaultRpcBridgeFactory);
 	});
 
 	it("honors the deprecated registerRpcBridgeFactory alias when no explicit dep is provided", async () => {
-		const { createGateway } = await import("../../src/server/server.js");
-		const dir = setTempBobbitDir();
+		const { rpcBridge, server } = await loadServerTestRuntime();
 		const aliasFactory: RpcBridgeFactory = () => null;
-		registerRpcBridgeFactory(aliasFactory);
-		const gateway = createGateway({ host: "127.0.0.1", port: 0, authToken: "token", defaultCwd: dir });
+		rpcBridge.registerRpcBridgeFactory(aliasFactory);
 		try {
-			expect(gateway.deps.agentBridgeFactory).toBe(aliasFactory);
-			expect(getRegisteredRpcBridgeFactory()).toBe(aliasFactory);
+			const installed = server.installGatewayBridgeDeps();
+			expect(installed.gatewayDeps.agentBridgeFactory).toBe(aliasFactory);
+			expect(rpcBridge.getRegisteredRpcBridgeFactory()).toBe(aliasFactory);
+			installed.restoreExplicitRpcBridgeFactory();
 		} finally {
-			await gateway.shutdown();
+			rpcBridge.registerRpcBridgeFactory(null);
 		}
 	});
 
 	it("explicit agentBridgeFactory overrides the alias and is restored on shutdown", async () => {
-		const { createGateway } = await import("../../src/server/server.js");
-		const dir = setTempBobbitDir();
+		const { rpcBridge, server } = await loadServerTestRuntime();
 		const aliasFactory: RpcBridgeFactory = () => null;
 		const explicitFactory: RpcBridgeFactory = () => null;
-		registerRpcBridgeFactory(aliasFactory);
-		const gateway = createGateway(
-			{ host: "127.0.0.1", port: 0, authToken: "token", defaultCwd: dir },
-			{ agentBridgeFactory: explicitFactory },
-		);
+		rpcBridge.registerRpcBridgeFactory(aliasFactory);
 		try {
-			expect(gateway.deps.agentBridgeFactory).toBe(explicitFactory);
-			expect(getRegisteredRpcBridgeFactory()).toBe(explicitFactory);
+			const installed = server.installGatewayBridgeDeps({ agentBridgeFactory: explicitFactory });
+			expect(installed.gatewayDeps.agentBridgeFactory).toBe(explicitFactory);
+			expect(rpcBridge.getRegisteredRpcBridgeFactory()).toBe(explicitFactory);
+			installed.restoreExplicitRpcBridgeFactory();
+			expect(rpcBridge.getRegisteredRpcBridgeFactory()).toBe(aliasFactory);
 		} finally {
-			await gateway.shutdown();
+			rpcBridge.registerRpcBridgeFactory(null);
 		}
-		expect(getRegisteredRpcBridgeFactory()).toBe(aliasFactory);
 	});
 });

@@ -23,7 +23,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { finished } from "node:stream/promises";
+import type { ChildProcess } from "node:child_process";
 import type { GateSignal } from "../../src/server/agent/gate-store.ts";
+import type { VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.ts";
+import type { TrackedChild } from "../../src/server/agent/spawn-tree.ts";
 
 // Isolated temp dir for harness persistence
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-sandbox-test-"));
@@ -31,7 +35,40 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
-const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
+const { realVerificationCommandRunner } = await import("../../src/server/agent/verification-command-runner.ts");
+
+const HOST_CWD = os.tmpdir();
+const HOST_MARKER_COMMAND = "echo host-shell-test-marker";
+const DOCKER_MARKER_COMMAND = "echo docker-test";
+const STREAM_MARKER_COMMAND = "echo streamed-marker";
+
+// This suite owns the real attached host-spawn and live-pipe boundary, while
+// restart durability has dedicated coverage. Selecting attached mode avoids
+// the durable wrapper's temp files and polling without faking the child, its
+// output, or spawnTracked's timeout/cancellation/exit behavior.
+const pendingHostChildren = new Set<Promise<void>>();
+const realAttachedHostRunner = Object.freeze({
+	nonDurable: true,
+	spawn(spec: VerificationCommandSpawnSpec): TrackedChild {
+		const tracked = realVerificationCommandRunner.spawn(spec);
+		const child = tracked.child as ChildProcess;
+		const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+		const streams = [child.stdout, child.stderr]
+			.filter((stream): stream is NonNullable<typeof stream> => stream != null)
+			.map(stream => finished(stream, { cleanup: true }));
+		const complete = Promise.all([closed, ...streams]).then(() => undefined);
+		pendingHostChildren.add(complete);
+		void complete.then(
+			() => pendingHostChildren.delete(complete),
+			() => pendingHostChildren.delete(complete),
+		);
+		return tracked;
+	},
+});
+
+async function awaitHostChildren(): Promise<void> {
+	await Promise.all([...pendingHostChildren]);
+}
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -150,10 +187,15 @@ function createHarness(opts: {
 		undefined, // projectConfigStore
 		pcm as any,
 		undefined, // configCascade
-		{ commandStepRunner: createFakeVerificationCommandRunner() },
+		{ commandStepRunner: realAttachedHostRunner },
 	);
-
 	return { harness, broadcastCalls, pcm };
+}
+
+async function runCommandStep(harness: InstanceType<typeof VerificationHarness>, ...args: any[]) {
+	const result = await (harness as any).runCommandStep(...args);
+	await awaitHostChildren();
+	return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,9 +205,9 @@ function createHarness(opts: {
 describe("runCommandStep spawn behavior", () => {
 	it("runs on host shell when no containerId is provided", async () => {
 		const { harness } = createHarness();
-		const result = await (harness as any).runCommandStep(
-			"echo host-shell-test-marker",
-			os.tmpdir(),
+		const result = await runCommandStep(harness,
+			HOST_MARKER_COMMAND,
+			HOST_CWD,
 			10,
 			false,
 			undefined,
@@ -182,8 +224,8 @@ describe("runCommandStep spawn behavior", () => {
 	it("spawns docker exec when containerId is provided", async () => {
 		const { harness } = createHarness();
 		const result = await (harness as any).runCommandStep(
-			"echo docker-test",
-			os.tmpdir(),
+			DOCKER_MARKER_COMMAND,
+			HOST_CWD,
 			10,
 			false,
 			undefined,
@@ -205,9 +247,9 @@ describe("runCommandStep spawn behavior", () => {
 			signalId: "sig-1",
 			stepIndex: 0,
 		};
-		const result = await (harness as any).runCommandStep(
-			"echo streamed-marker",
-			os.tmpdir(),
+		const result = await runCommandStep(harness,
+			STREAM_MARKER_COMMAND,
+			HOST_CWD,
 			10,
 			false,
 			streamCtx,
@@ -398,6 +440,7 @@ describe("container resolution in verifyGateSignal", () => {
 
 // Cleanup
 import { afterAll } from "vitest";
-afterAll(() => {
+afterAll(async () => {
+	await awaitHostChildren();
 	fs.rmSync(TEST_DIR, { recursive: true, force: true });
 });

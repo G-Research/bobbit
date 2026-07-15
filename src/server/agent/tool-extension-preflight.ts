@@ -261,7 +261,10 @@ function moduleLoadPreflightScript(extensionPath: string): string {
 	return `await import(${JSON.stringify(pathToFileURL(extensionPath).href)});`;
 }
 
-function moduleLoadFailure(extensionPath: string): string | undefined {
+export type ToolModuleLoadProbe = (extensionPath: string) => string | undefined;
+let moduleLoadProbeForTesting: ToolModuleLoadProbe | undefined;
+
+function realModuleLoadFailure(extensionPath: string): string | undefined {
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(extensionPath);
@@ -303,6 +306,16 @@ function moduleLoadFailure(extensionPath: string): string | undefined {
 	}
 	moduleLoadCache.set(extensionPath, { fingerprint, error });
 	return error;
+}
+
+function moduleLoadFailure(extensionPath: string): string | undefined {
+	return (moduleLoadProbeForTesting ?? realModuleLoadFailure)(extensionPath);
+}
+
+/** Unit fixture seam; production always executes the confined child-process probe. */
+export function __setToolModuleLoadProbeForTesting(probe: ToolModuleLoadProbe | undefined): void {
+	moduleLoadProbeForTesting = probe;
+	moduleLoadCache.clear();
 }
 
 function makeDiagnostic(input: { toolName: string; groupDir: string }, extensionPath: string, code: ToolExtensionDiagnostic["code"], message: string): ToolExtensionDiagnostic {

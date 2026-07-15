@@ -8,7 +8,6 @@ import { readE2EToken, base, registerProject } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 let token: string;
 
@@ -17,22 +16,17 @@ const headers = () => ({
 	"Content-Type": "application/json",
 });
 
-function gitInit(dir: string): void {
+function componentDir(dir: string): void {
 	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
 	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: dir });
 }
 
 test.beforeAll(() => { token = readE2EToken(); });
 
 test("multi-repo: POST /api/projects with components + workflows persists structured fields", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-"));
-	gitInit(path.join(root, "api"));
-	gitInit(path.join(root, "web"));
+	componentDir(path.join(root, "api"));
+	componentDir(path.join(root, "web"));
 	fs.mkdirSync(path.join(root, "shared"));  // data-only
 
 	const project = await registerProject({
@@ -64,7 +58,7 @@ test("multi-repo: POST /api/projects with components + workflows persists struct
 
 test("single-repo POST without components fills default [{name, repo: '.'}]", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sr-"));
-	gitInit(root);
+	componentDir(root);
 
 	const projName = `sr-${Date.now()}`;
 	const project = await registerProject({ name: projName, rootPath: root });
@@ -83,7 +77,7 @@ test("single-repo POST without components fills default [{name, repo: '.'}]", as
 
 test("PUT /api/projects/:id/config with bad workflow step → 400", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-bad-"));
-	gitInit(path.join(root, "api"));
+	componentDir(path.join(root, "api"));
 
 	const project = await registerProject({
 		name: `bad-${Date.now()}`,
@@ -114,8 +108,8 @@ test("PUT /api/projects/:id/config with bad workflow step → 400", async () => 
 
 test("PUT /api/projects/:id/config adds a new component", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-upd-"));
-	gitInit(path.join(root, "api"));
-	gitInit(path.join(root, "web"));
+	componentDir(path.join(root, "api"));
+	componentDir(path.join(root, "web"));
 
 	const project = await registerProject({
 		name: `upd-${Date.now()}`,

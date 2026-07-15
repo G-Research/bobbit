@@ -20,13 +20,11 @@ import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { setProjectRoot, getProjectRoot, resetAgentDirStateForTests } from "../../../src/server/bobbit-dir.js";
-import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
-import { loadOrCreateToken } from "../../../src/server/auth/token.js";
-import type { GatewayDeps } from "../../../src/server/gateway-deps.js";
+import type { CommandRunner, GatewayDeps } from "../../../src/server/gateway-deps.js";
 import { createManualClock } from "../../harness/clock.js";
 import { createFencedCommandRunner } from "../../harness/fenced-command-runner.js";
 import { createFencedFetch } from "../../harness/fenced-fetch.js";
+import { loadServerTestRuntime } from "../../harness/server-runtime.js";
 
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..", "..");
@@ -68,7 +66,7 @@ export interface CustomGatewayOptions {
 	preBoot?: (ctx: { serverRoot: string; headquartersDir: string; agentDir: string }) => void;
 }
 
-async function makeDeps(): Promise<GatewayDeps> {
+async function makeDeps(realCommandRunner: CommandRunner): Promise<GatewayDeps> {
 	const mockBridge: any = await import(MOCK_BRIDGE_SPECIFIER);
 	const agentBridgeFactory: GatewayDeps["agentBridgeFactory"] = (opts: any) => {
 		if (mockBridge.shouldUseInProcessMock(opts.cliPath)) return new mockBridge.InProcessMockBridge(opts);
@@ -76,7 +74,7 @@ async function makeDeps(): Promise<GatewayDeps> {
 	};
 	return {
 		clock: createManualClock(),
-		commandRunner: createFencedCommandRunner(),
+		commandRunner: createFencedCommandRunner(realCommandRunner),
 		fetchImpl: createFencedFetch(),
 		agentBridgeFactory,
 	};
@@ -94,9 +92,14 @@ export async function startCustomGateway(opts: CustomGatewayOptions): Promise<Cu
 
 	const savedEnv = new Map<string, string | undefined>();
 	for (const key of ENV_KEYS) savedEnv.set(key, process.env[key]);
-	const previousProjectRoot = getProjectRoot();
+	const restoreEnv = (): void => {
+		for (const key of ENV_KEYS) {
+			const prev = savedEnv.get(key);
+			if (prev === undefined) delete process.env[key];
+			else process.env[key] = prev;
+		}
+	};
 
-	resetAgentDirStateForTests?.();
 	if (usesOverride) process.env.BOBBIT_DIR = headquartersDir;
 	else delete process.env.BOBBIT_DIR;
 	// Isolate live server secrets so they never land in the real OS home dir.
@@ -109,11 +112,22 @@ export async function startCustomGateway(opts: CustomGatewayOptions): Promise<Cu
 	mkdirSync(serverRoot, { recursive: true });
 	mkdirSync(agentDir, { recursive: true });
 
+	// The bundle evaluates environment-derived server defaults at import time, so
+	// load it only after this dedicated gateway's real runtime env is configured.
+	let runtime: Awaited<ReturnType<typeof loadServerTestRuntime>>;
+	try { runtime = await loadServerTestRuntime(); }
+	catch (error) { restoreEnv(); throw error; }
+	const { setProjectRoot, getProjectRoot, resetAgentDirStateForTests } = runtime.bobbitDir;
+	const { scaffoldBobbitDir } = runtime.scaffold;
+	const { loadOrCreateToken } = runtime.authToken;
+	const { createGateway } = runtime.server;
+	const { configureAigwRuntimeFlags } = runtime.aigwManager;
+	const previousProjectRoot = getProjectRoot();
+
+	resetAgentDirStateForTests?.();
 	setProjectRoot(serverRoot);
 
-	const deps = await makeDeps();
-	const { createGateway } = await import("../../../src/server/server.js");
-	const { configureAigwRuntimeFlags } = await import("../../../src/server/agent/aigw-manager.js");
+	const deps = await makeDeps(runtime.gatewayDeps.realCommandRunner);
 
 	opts.preBoot?.({ serverRoot, headquartersDir, agentDir });
 	scaffoldBobbitDir(serverRoot);
@@ -171,11 +185,7 @@ export async function startCustomGateway(opts: CustomGatewayOptions): Promise<Cu
 			finally {
 				resetAgentDirStateForTests?.();
 				setProjectRoot(previousProjectRoot);
-				for (const key of ENV_KEYS) {
-					const prev = savedEnv.get(key);
-					if (prev === undefined) delete process.env[key];
-					else process.env[key] = prev;
-				}
+				restoreEnv();
 			}
 		},
 	};

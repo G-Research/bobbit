@@ -10,26 +10,18 @@
  * lanes that could overlap.
  *
  * WHAT: spawn the lanes as SEPARATE concurrent `vitest run --project ...`
- * processes. Wall becomes max(lanes) instead of sum(lanes). Because each lane is
- * its own OS process:
- *   - it has an isolated module registry, so the node<->happy-dom environment
- *     bleed that forces `groupOrder`/single-fork hacks in the shared run does not
- *     apply across lanes;
- *   - it keeps its OWN 2-fork pool (VITEST_MAX_FORKS=2), so no single process ever
- *     exceeds the Windows-safe fork count that trips the Vitest 3.2 onTaskUpdate
- *     RPC bug (#8164/#6511). Parallelism comes from running lanes side by side
- *     (2 forks x 3 lanes = 6 forks total), NOT from raising per-process forks.
+ * processes. Wall becomes max(lanes) instead of sum(lanes). Each lane has an
+ * isolated module registry, so node<->happy-dom environment bleed cannot cross
+ * lane boundaries. Vitest 4 removes the worker-RPC timeout that previously capped
+ * every lane at two workers; the orchestrator now distributes the full ledger
+ * grant across all lanes in proportion to measured work.
  *
- * This deliberately does NOT touch the RPC bug or raise the per-process cap — it
- * is the SAFE parallelism lever. Raising forks-per-process is a separate, larger
- * change (Vitest 4.x upgrade for the full #8297 fix).
- *
- * Concurrent full vitest runs are an anticipated mode (see
- * docs/testing-v2/concurrency-proof.md and the retry bridge in vitest.config.ts),
- * so running lanes concurrently is within the harness's designed envelope.
+ * Concurrent full Vitest runs are an anticipated mode (see
+ * docs/testing-v2/concurrency-proof.md). The ledger keeps their worker total
+ * bounded; failures remain visible because Vitest retries are disabled.
  *
  * Usage:
- *   node scripts/testing-v2/run-unit-lanes.mjs [--lane core|integration|dom] [--forks N] [--list]
+ *   node scripts/testing-v2/run-unit-lanes.mjs [--lane core|integration|dom] [--list]
  */
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
@@ -38,22 +30,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { reserveVitestLaneBudget, readLedger } from "./ledger.mjs";
+import { ensureServerTestPrebundle } from "./server-prebundle.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
-const LOG_DIR = join(REPO_ROOT, ".profiles", "unit-lanes");
-
-// RPC-safety cap: no single vitest process may exceed this many forks or it
-// risks the Vitest 3.2 onTaskUpdate/onUnhandledError 60s-RPC-timeout bug
-// (#8164/#6511) under load. Lane parallelism buys throughput by running MULTIPLE
-// 2-fork processes, never by raising a single process past this.
-// Per-lane fork cap. Default 2 (Windows-RPC-safe under v3). Overridable via
-// UNIT_LANES_FORK_CAP for experiments (e.g. testing whether a single lane's
-// smaller onTaskUpdate backlog tolerates more forks than the full suite).
-// A non-numeric override must NOT poison the scheduler: NaN would make
-// maxConcurrent NaN and stall the run (no lane ever starts), so fall back to 2.
-const _forkCap = Number(process.env.UNIT_LANES_FORK_CAP || "2");
-const PER_LANE_FORK_CAP = Number.isFinite(_forkCap) ? Math.max(1, Math.floor(_forkCap)) : 2;
+// Concurrent complete-suite runs must not overwrite one another's lane evidence.
+const LOG_DIR = process.env.BOBBIT_UNIT_LANES_LOG_DIR
+	? resolve(REPO_ROOT, process.env.BOBBIT_UNIT_LANES_LOG_DIR)
+	: join(REPO_ROOT, ".profiles", "unit-lanes");
 
 // Heartbeat cadence for the live progress line. Clamp to >=1s and reject
 // non-numeric/zero/negative values so a bad override can't flood the console
@@ -67,21 +51,14 @@ const HEARTBEAT_MS = Number.isFinite(_heartbeatMs) ? Math.max(1000, Math.floor(_
 const FILE_LINE_RE = /(tests2\/[^\s]+\.(?:test|spec)\.ts)\b[^\n]*\((\d+)\s+tests?(?:\s*\|\s*(\d+)\s+failed)?[^)]*\)/;
 // Lines worth surfacing to the console live (failures + the final tallies).
 const FAIL_LINE_RE = /(^|\s)(FAIL|×|✗)\s|AssertionError|Unhandled (Error|Rejection)/;
-// The [vitest-worker] birpc timeout signature — the documented CPU-starvation
-// reporter-RPC flake (onTaskUpdate/onUnhandledError/fetch/transform/resolveId),
-// which is a transport artifact under load, NOT a test result.
+// This signature should be impossible on Vitest 4. Keep it diagnostic: if it
+// ever reappears, the lane fails normally rather than being downgraded to pass.
 const WORKER_RPC_TIMEOUT_RE = /\[vitest-(worker|api)\]: Timeout calling "(onTaskUpdate|onUnhandledError|onCollected|fetch|transform|resolveId)"/;
 
-// integration (~600s of work) is the pole. At 2 forks it is a ~478s single lane.
-// It CAN be cost-balance-sharded across N concurrent 2-fork processes, but
-// MEASUREMENT SHOWS DIMINISHING-THEN-NEGATIVE RETURNS on this box: at 3 shards
-// (=> 5 concurrent jobs / 10 forks) the total only improved 478s->429s because
-// core became the pole, per-lane times got WORSE from contention, and dom
-// re-triggered the very Vitest RPC timeout bug (onUnhandledError) under CPU
-// starvation. The safe validated sweet spot is 1 (the 3-lane config: 6 forks,
-// all-green). Raise UNIT_LANES_INTEGRATION_SHARDS only with the RPC fix in place
-// (Vitest 4.x) or after cutting integration's real per-test work.
-const INTEGRATION_SHARDS = Math.max(1, Number(process.env.UNIT_LANES_INTEGRATION_SHARDS || "1"));
+// Integration carries the most work. Optional cost-balanced sharding remains an
+// experimental lever, but the default weighted worker allocation already gives
+// the unsharded integration lane half of an eight-worker suite grant.
+const INTEGRATION_SHARDS = Math.max(1, Number(process.env.UNIT_LANES_INTEGRATION_SHARDS || "3"));
 
 function listTestFiles(rel) {
 	const root = join(REPO_ROOT, rel);
@@ -137,51 +114,59 @@ function shardByCost(files, shards) {
 // cliSelectsProject("v2-core") path (no broad-core sharding — one unsharded
 // project), while heavy/isolated ride along as their own sequenced sub-projects.
 const LANES = {
-	core: ["v2-core", "v2-core-heavy", "v2-core-isolated"],
-	integration: ["v2-integration", "v2-integration-fake"],
-	dom: ["v2-dom", "v2-dom-isolated"],
+	core: { projects: ["v2-core", "v2-core-heavy", "v2-core-isolated"], weight: 2 },
+	"core-fidelity": { projects: ["v2-core-fidelity"], weight: 1 },
+	integration: { projects: ["v2-integration", "v2-integration-source", "v2-integration-isolated", "v2-integration-command", "v2-integration-fake"], weight: 3 },
+	dom: { projects: ["v2-dom"], weight: 2 },
 };
 
 function parseArgs(argv) {
-	const out = { lanes: null, forks: "2", list: false };
+	const out = { lanes: null, list: false };
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === "--lane") out.lanes = [String(argv[++i] || "").toLowerCase()];
-		else if (a === "--forks") out.forks = String(argv[++i] || "2");
 		else if (a === "--list") out.list = true;
 	}
 	return out;
 }
 
-function vitestCmd() {
-	return process.platform === "win32" ? "npx.cmd" : "npx";
-}
+const VITEST_CLI = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
 
 /**
- * Pure scheduling math (pinned by tests2/core/unit-lanes-scheduling.test.ts).
- *
- * The orchestrator holds ONE fair vitest grant and distributes it across lanes,
- * each its OWN process capped at `perLaneCap` forks (Windows-RPC-safe; default 2).
- *   - perLane      = min(perLaneCap, grant)  — never raise a single process above
- *                    the safe cap, and never ask for more forks than granted.
- *   - maxConcurrent = floor(grant / perLane) — instantaneous forks
- *                    (inFlight*perLane) never exceed the grant; clamped to ≥1 (so
- *                    the run always makes progress) and to the job count (no idle
- *                    concurrency slots). This is what turns lane wall time from
- *                    Σ(lanes) back into max(lanes): with the SINGLE-PROCESS
- *                    throttle (grant=2) it collapses to 1 (serial); with the fair
- *                    orchestrator grant it opens back up so the lanes overlap.
+ * Allocate a suite's ledger grant across weighted lanes. Every lane receives one
+ * worker first; remaining workers go to the lane with the lowest
+ * allocated/weight ratio. With the normal 24-core / three-suite grant of eight,
+ * core:integration:dom weights 3:4:1 produce 3+4+1 workers and all lanes start
+ * immediately. If a grant is smaller than the job count, one-worker lanes run in
+ * waves, which is the only mathematically possible fallback.
  */
-export function planLaneConcurrency({ grant, perLaneCap, jobCount }) {
-	const g = Math.max(1, Math.floor(Number(grant)) || 1);
-	const cap = Math.max(1, Math.floor(Number(perLaneCap)) || 1);
-	const jobs = Math.max(1, Math.floor(Number(jobCount)) || 1);
-	const perLane = Math.min(cap, g);
-	const maxConcurrent = Math.max(1, Math.min(jobs, Math.floor(g / perLane)));
-	return { perLane, maxConcurrent };
+export function planLaneWorkers({ grant, jobs }) {
+	const budget = Math.max(1, Math.floor(Number(grant)) || 1);
+	const normalized = jobs.map((job, index) => ({
+		name: String(job.name),
+		weight: Math.max(Number(job.weight) || 1, Number.EPSILON),
+		index,
+	}));
+	if (normalized.length === 0) return { workers: {}, maxConcurrent: 0, used: 0 };
+
+	const workers = Object.fromEntries(normalized.map((job) => [job.name, 1]));
+	if (budget < normalized.length) {
+		return { workers, maxConcurrent: budget, used: budget };
+	}
+	let remaining = budget - normalized.length;
+	while (remaining > 0) {
+		const next = normalized.reduce((best, job) => {
+			const ratio = workers[job.name] / job.weight;
+			const bestRatio = workers[best.name] / best.weight;
+			return ratio < bestRatio || (ratio === bestRatio && job.index < best.index) ? job : best;
+		});
+		workers[next.name] += 1;
+		remaining -= 1;
+	}
+	return { workers, maxConcurrent: normalized.length, used: budget };
 }
 
-function runLane(name, projects, forks, files, parentRunId, stats) {
+function runLane(name, projects, workers, files, parentRunId, stats, serverPrebundle) {
 	const startWall = performance.now();
 	mkdirSync(LOG_DIR, { recursive: true });
 	const logPath = join(LOG_DIR, `${name}.log`);
@@ -191,29 +176,33 @@ function runLane(name, projects, forks, files, parentRunId, stats) {
 	// "(N tests[ | M failed])"), which we parse for live counts + surface failures
 	// immediately. Full detail still lands in the per-lane log.
 	const projectArgs = projects.flatMap((p) => ["--project", p]);
-	const args = ["vitest", "run", "--config", "vitest.config.ts", "--silent=passed-only", ...projectArgs, ...(files || [])];
+	const args = [VITEST_CLI, "run", "--config", "vitest.config.ts", "--silent=passed-only", ...projectArgs, ...(files || [])];
 	return new Promise((resolveRun) => {
-		const child = spawn(vitestCmd(), args, {
+		const child = spawn(process.execPath, args, {
 			cwd: REPO_ROOT,
 			// LEDGER-NATIVE: the orchestrator holds ONE reservation for the whole unit
 			// run; each lane REUSES that grant via the parent-grant env (the same seam
 			// run-v2 uses), so the config's reserveWorkerSlots() takes the managed,
 			// no-op-release path and never registers a second ledger entry.
-			env: { ...process.env, BOBBIT_V2_LEDGER_PARENT: parentRunId, BOBBIT_V2_SLOTS_VITEST: String(forks) },
+			env: {
+				...process.env,
+				BOBBIT_V2_LEDGER_PARENT: parentRunId,
+				BOBBIT_V2_SLOTS_VITEST: String(workers),
+				...(serverPrebundle ? { BOBBIT_V2_SERVER_PREBUNDLE: serverPrebundle } : {}),
+			},
 			stdio: ["ignore", "pipe", "pipe"],
-			shell: process.platform === "win32",
 		});
 		const handleLine = (raw, isErr) => {
 			out.write(raw + "\n");
 			// Strip ANSI so detection works whether or not vitest emitted color.
 			const line = raw.replace(/\x1b\[[0-9;]*m/g, "");
-			// Count [vitest-worker] birpc timeouts (onTaskUpdate/onUnhandledError/fetch/
-			// transform/resolveId) — the documented CPU-starvation reporter-RPC flake,
-			// NOT a test result.
+			// Count any unexpected regression of the removed Vitest 3 birpc timeout.
 			if (WORKER_RPC_TIMEOUT_RE.test(line)) st.rpcTimeouts += 1;
-			// Capture vitest's authoritative final tally ("Tests N passed | M failed").
-			// This survives per-file RPC timeouts, so it's more trustworthy than the
-			// exit code (which the unhandled RPC-timeout errors pollute).
+			// Capture Vitest's authoritative final tally ("Tests N passed | M failed").
+			if (/^\s*Test Files\s+\d/.test(line) && /(passed|failed)/.test(line)) {
+				const f = /(\d+)\s+failed/.exec(line);
+				st.summaryFailedSuites = f ? Number(f[1]) : 0;
+			}
 			if (/^\s*Tests\s+\d/.test(line) && /(passed|failed)/.test(line)) {
 				const f = /(\d+)\s+failed/.exec(line);
 				const p = /(\d+)\s+passed/.exec(line);
@@ -247,21 +236,8 @@ function runLane(name, projects, forks, files, parentRunId, stats) {
 			const rawCode = code ?? (signal ? 1 : 0);
 			const realFailed = st.summarySeen ? st.summaryFailed : st.failedTests;
 			const passedN = st.summarySeen ? st.summaryPassed : st.tests;
-			// KNOWN infra flake (docs/testing-strategy.md, docs/testing-v2/concurrency-proof.md):
-			// under N-way CPU starvation a worker's event loop stalls >60s and the birpc
-			// onTaskUpdate/fetch call times out, exiting the run NONZERO even though every
-			// test passed. We downgrade to PASS only when ALL of: vitest printed its final
-			// tally, that tally shows 0 failed tests, and >=1 [vitest-worker] RPC timeout
-			// occurred. Any real failed test (summaryFailed>0), a missing tally, or a
-			// nonzero exit WITHOUT an RPC timeout (some other unhandled error) still FAILS
-			// — so this never masks a genuine regression.
-			st.infraFlake = rawCode !== 0 && realFailed === 0 && st.summarySeen && st.rpcTimeouts > 0;
-			const c = st.infraFlake ? 0 : rawCode;
-			if (st.infraFlake) {
-				console.log(`⚠ [${name}] all ${passedN} tests PASSED, but ${st.rpcTimeouts} [vitest-worker] RPC timeout(s) under load — known CPU-starvation infra flake (docs/testing-strategy.md); treating lane as PASS.`);
-			}
-			console.log(`▸ [${name}] ${c === 0 ? "PASS" : "FAIL"} — ${st.files} files, ${passedN} tests, ${realFailed} failed${st.rpcTimeouts ? `, ${st.rpcTimeouts} rpc-timeout` : ""} in ${(st.wallMs / 1000).toFixed(1)}s`);
-			resolveRun({ name, projects, code: c, signal, wallMs: st.wallMs, logPath, infraFlake: st.infraFlake, rpcTimeouts: st.rpcTimeouts });
+			console.log(`▸ [${name}] ${rawCode === 0 ? "PASS" : "FAIL"} — ${st.files} files, ${passedN} tests, ${realFailed} failed${st.rpcTimeouts ? `, ${st.rpcTimeouts} unexpected rpc-timeout` : ""} in ${(st.wallMs / 1000).toFixed(1)}s`);
+			resolveRun({ name, projects, code: rawCode, signal, wallMs: st.wallMs, logPath, rpcTimeouts: st.rpcTimeouts });
 		});
 		child.on("error", (error) => {
 			st.done = true;
@@ -275,16 +251,16 @@ async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const laneNames = args.lanes ?? Object.keys(LANES);
 
-	// Expand the integration lane into cost-balanced file shards (each its own
-	// 2-fork process). The fake project stays whole (single-fork by config).
+	// Expand the integration lane into optional cost-balanced file shards.
 	const jobs = [];
 	for (const n of laneNames) {
+		const lane = LANES[n];
 		if (n === "integration" && INTEGRATION_SHARDS > 1) {
 			const files = listTestFiles("tests2/integration");
 			const shards = shardByCost(files, INTEGRATION_SHARDS);
-			shards.forEach((s, i) => jobs.push({ name: `integration-${i + 1}`, projects: ["v2-integration", "v2-integration-fake"], files: s.files }));
+			shards.forEach((s, i) => jobs.push({ name: `integration-${i + 1}`, projects: lane.projects, files: s.files, weight: lane.weight / shards.length }));
 		} else {
-			jobs.push({ name: n, projects: LANES[n] || [], files: undefined });
+			jobs.push({ name: n, projects: lane?.projects || [], files: undefined, weight: lane?.weight || 1 });
 		}
 	}
 
@@ -293,31 +269,27 @@ async function main() {
 		return;
 	}
 
-	// Reserve ONCE for the whole unit run. reserveVitestLaneBudget() returns the
-	// ledger's fair CORE grant W (an ORCHESTRATOR budget, capped at VITEST_CAP — NOT
-	// the single-process STANDALONE_VITEST_CAP throttle, which would collapse lane
-	// parallelism to maxConcurrent=1 and serialise the lanes past the gate wall-time
-	// budget). W shrinks as concurrent goals appear via pending/committed accounting,
-	// OR — when spawned under run-v2 — is the pre-committed parent grant with a no-op
-	// release. Either way this is the ONLY ledger entry for the run; each spawned lane
-	// re-uses this grant via the parent-grant env with its own per-lane fork cap.
+	let serverPrebundle;
+	if (jobs.some((job) => job.projects.some((project) => project.startsWith("v2-integration")))) {
+		const prebundle = await ensureServerTestPrebundle();
+		serverPrebundle = prebundle.bundlePath;
+		console.log(`[unit-lanes] server prebundle ${prebundle.cacheHit ? "cache hit" : "built"}: ${prebundle.key}`);
+	}
+
+	// Reserve once for the whole unit run. Each child lane reuses this reservation;
+	// no lane creates a second ledger entry.
 	const reservation = reserveVitestLaneBudget();
 	const grant = Math.max(1, reservation.workerSlots || 1);
-	// Distribute the grant across lanes: at most floor(grant/perLane) lanes run
-	// CONCURRENTLY (each `perLane` forks), so instantaneous forks = inFlight*perLane
-	// <= grant. Extra jobs queue and run in waves. This keeps us inside the
-	// reservation under concurrent goals instead of oversubscribing the box, while
-	// still overlapping the independent lanes (wall = max(lanes), not Σ lanes).
-	const { perLane, maxConcurrent } = planLaneConcurrency({ grant, perLaneCap: PER_LANE_FORK_CAP, jobCount: jobs.length });
+	const plan = planLaneWorkers({ grant, jobs });
 	const snap = readLedger();
 	const sigma = snap.reservations.reduce((s, r) => s + (r.workerSlots || 0), 0);
 	console.log(`[unit-lanes] ledger grant=${grant} (parent=${reservation.parentRunId}, managedByParent=${reservation.managedByParent}); ledger Σ=${sigma}/${snap.totalCores}`);
-	console.log(`[unit-lanes] ${jobs.length} job(s), perLane=${perLane} forks, maxConcurrent=${maxConcurrent} (waves if jobs>maxConcurrent): ${jobs.map((j) => j.name).join(", ")}`);
+	console.log(`[unit-lanes] ${jobs.length} job(s), maxConcurrent=${plan.maxConcurrent}: ${jobs.map((j) => `${j.name}=${plan.workers[j.name]}w`).join(", ")}`);
 
 	const startWall = performance.now();
 	// Live per-lane counters (updated by runLane as the reporter emits file lines).
 	const stats = {};
-	for (const j of jobs) stats[j.name] = { files: 0, tests: 0, failedTests: 0, failedFiles: [], failNotes: [], rpcTimeouts: 0, summarySeen: false, summaryFailed: 0, summaryPassed: 0, infraFlake: false, done: false, started: false, wallMs: 0 };
+	for (const j of jobs) stats[j.name] = { files: 0, tests: 0, failedTests: 0, failedFiles: [], failNotes: [], rpcTimeouts: 0, summarySeen: false, summaryFailed: 0, summaryFailedSuites: 0, summaryPassed: 0, done: false, started: false, wallMs: 0 };
 
 	// Heartbeat: a compact progress line so the run is never silent and early
 	// feedback (counts + failures-so-far) is visible while work is in flight.
@@ -344,11 +316,12 @@ async function main() {
 			return Promise.resolve({ name: j.name, projects: [], code: 1, wallMs: 0, error: "unknown lane" });
 		}
 		stats[j.name].started = true;
-		console.log(`▸ [${j.name}] started (${perLane} forks): ${j.projects.join(", ")}${j.files ? ` · ${j.files.length} files` : ""}`);
-		return runLane(j.name, j.projects, perLane, j.files, reservation.parentRunId, stats);
+		const workers = plan.workers[j.name];
+		console.log(`▸ [${j.name}] started (${workers} workers): ${j.projects.join(", ")}${j.files ? ` · ${j.files.length} files` : ""}`);
+		return runLane(j.name, j.projects, workers, j.files, reservation.parentRunId, stats, serverPrebundle);
 	};
 	while (queue.length || active.size) {
-		while (queue.length && active.size < maxConcurrent) {
+		while (queue.length && active.size < plan.maxConcurrent) {
 			const j = queue.shift();
 			const p = launch(j).then((r) => { active.delete(p); results.push(r); return r; });
 			active.add(p);
@@ -369,37 +342,28 @@ async function main() {
 	const grandPassed = jobs.reduce((a, j) => a + (stats[j.name].summarySeen ? stats[j.name].summaryPassed : stats[j.name].tests), 0);
 	const grandFailed = jobs.reduce((a, j) => a + (stats[j.name].summarySeen ? stats[j.name].summaryFailed : stats[j.name].failedTests), 0);
 	const grandRpc = jobs.reduce((a, j) => a + stats[j.name].rpcTimeouts, 0);
-	console.log(`\n[unit-lanes] ${grandPassed} tests passed, ${grandFailed} failed across ${jobs.length} lane(s)${grandRpc ? ` · ${grandRpc} worker-RPC timeout(s) under load` : ""}`);
+	console.log(`\n[unit-lanes] ${grandPassed} tests passed, ${grandFailed} failed across ${jobs.length} lane(s)${grandRpc ? ` · ${grandRpc} UNEXPECTED worker-RPC timeout(s)` : ""}`);
 	console.log(`[unit-lanes] total wall ${(totalWallMs / 1000).toFixed(1)}s (slowest lane ${(slowest / 1000).toFixed(1)}s; serial-sum would be ${(serialSum / 1000).toFixed(1)}s)`);
 
-	// Real failures = lanes that failed AFTER the infra-flake downgrade.
 	const realFailedLanes = results.filter((r) => r.code !== 0);
 	if (realFailedLanes.length) {
 		console.error(`\n[unit-lanes] FAILURES:`);
 		for (const r of realFailedLanes) {
 			const s = stats[r.name];
-			console.error(`  ${r.name}: ${s.summaryFailed || s.failedTests} failed test(s) in ${new Set(s.failedFiles).size} file(s)`);
+			console.error(`  ${r.name}: ${s.summaryFailed || s.failedTests} failed test(s), ${s.summaryFailedSuites || new Set(s.failedFiles).size} failed suite(s)`);
 			for (const f of [...new Set(s.failedFiles)]) console.error(`    ✗ ${f}`);
 			for (const note of s.failNotes.slice(0, 20)) console.error(`      ${note}`);
 			console.error(`    (full detail: ${join(LOG_DIR, `${r.name}.log`)})`);
 		}
 	}
 
-	// Infra-flake lanes: all tests passed, downgraded from a nonzero exit caused
-	// only by worker-RPC timeouts. Surfaced loudly but do NOT fail the gate.
-	const flakeLanes = results.filter((r) => r.infraFlake);
-	if (flakeLanes.length) {
-		console.warn(`\n[unit-lanes] ⚠ INFRA-FLAKE (passed, not gating): ${flakeLanes.map((r) => `${r.name} (${r.rpcTimeouts} RPC timeout${r.rpcTimeouts === 1 ? "" : "s"})`).join(", ")}`);
-		console.warn(`    Known CPU-starvation reporter-RPC timeout under N-way load — see docs/testing-strategy.md. All tests passed; re-run on a quiet box to confirm.`);
-	}
-
 	if (realFailedLanes.length) console.error(`\n[unit-lanes] FAIL — lane(s): ${realFailedLanes.map((r) => r.name).join(", ")}`);
-	else console.log(`\n[unit-lanes] PASS — ${grandPassed} tests, 0 real failures${grandRpc ? ` (${grandRpc} worker-RPC timeout(s) tolerated as infra flake)` : ""}`);
+	else console.log(`\n[unit-lanes] PASS — ${grandPassed} tests, 0 real failures`);
 	process.exit(realFailedLanes.length ? 1 : 0);
 }
 
 // Only run when invoked directly (`node run-unit-lanes.mjs`), so tests can import
-// the pure `planLaneConcurrency` helper without triggering a full unit run.
+// the pure `planLaneWorkers` helper without triggering a full unit run.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
 	main().catch((e) => { console.error("[unit-lanes] fatal:", e); process.exit(1); });

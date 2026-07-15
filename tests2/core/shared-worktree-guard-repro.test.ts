@@ -25,13 +25,31 @@ import { promisify } from "node:util";
 process.env.BOBBIT_TEST_NO_PUSH = "1";
 process.env.BOBBIT_SKIP_NPM_CI = "1";
 
+// SessionManager is the single import root for this production module graph: it
+// already imports SessionStore, GoalManager/GoalStore, session-setup, and
+// system-prompt. Load it once during collection, then resolve the exact exports
+// from Vitest's warm module graph instead of amplifying those transforms inside
+// a 60-second beforeAll hook. BOBBIT_DIR must be isolated before any server
+// module loads because several transitive singletons derive state from it.
+const importStateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-import-state-"));
+process.env.BOBBIT_DIR = importStateRoot;
+const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const [
+	{ SessionStore },
+	{ GoalManager },
+	{ GoalStore },
+	{ handleSetupFailure },
+	{ initPromptDirs },
+] = await Promise.all([
+	import("../../src/server/agent/session-store.ts"),
+	import("../../src/server/agent/goal-manager.ts"),
+	import("../../src/server/agent/goal-store.ts"),
+	import("../../src/server/agent/session-setup.ts"),
+	import("../../src/server/agent/system-prompt.ts"),
+]);
+initPromptDirs(importStateRoot);
+
 const execFile = promisify(execFileCb);
-let SessionManager: any;
-let SessionStore: any;
-let GoalManager: any;
-let GoalStore: any;
-let handleSetupFailure: any;
-let initPromptDirs: (stateDir: string) => void;
 
 type TestRepo = { repo: string; tmp: string };
 
@@ -149,12 +167,6 @@ function cleanupManager(manager: any): void {
 
 describe("shared worktree guard reproductions", () => {
 	beforeAll(async () => {
-		({ SessionManager } = await import("../../src/server/agent/session-manager.ts"));
-		({ SessionStore } = await import("../../src/server/agent/session-store.ts"));
-		({ GoalManager } = await import("../../src/server/agent/goal-manager.ts"));
-		({ GoalStore } = await import("../../src/server/agent/goal-store.ts"));
-		({ handleSetupFailure } = await import("../../src/server/agent/session-setup.ts"));
-		({ initPromptDirs } = await import("../../src/server/agent/system-prompt.ts"));
 		realRepoTemplate = await createRepoTemplate();
 	});
 
@@ -173,9 +185,13 @@ describe("shared worktree guard reproductions", () => {
 	});
 
 	afterAll(async () => {
-		if (realRepoTemplate) {
-			await removeTempDirWithRetries(realRepoTemplate.tmp);
-			realRepoTemplate = undefined;
+		try {
+			if (realRepoTemplate) {
+				await removeTempDirWithRetries(realRepoTemplate.tmp);
+				realRepoTemplate = undefined;
+			}
+		} finally {
+			await removeTempDirWithRetries(importStateRoot);
 		}
 	});
 

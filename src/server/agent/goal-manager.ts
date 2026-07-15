@@ -363,7 +363,7 @@ export class GoalManager {
 			const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
 			const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
 			const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
-			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef });
+			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
 			if (support.supported) repoPath = support.repoPath;
 		}
 

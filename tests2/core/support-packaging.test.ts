@@ -29,7 +29,7 @@ describe("support packaging — package.json files", () => {
 });
 
 describe("support packaging — npm pack contents", () => {
-	it("npm pack --dry-run --json lists docs/ and src/ entries", () => {
+	it.skipIf(process.env.BOBBIT_ASSERT_BUNDLE !== "1")("npm pack --dry-run --json lists docs/ and src/ entries", () => {
 		const isWin = process.platform === "win32";
 		const npm = isWin ? "npm.cmd" : "npm";
 		const stdout = execFileSync(npm, ["pack", "--dry-run", "--json"], {

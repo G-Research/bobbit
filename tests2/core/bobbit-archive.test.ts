@@ -5,16 +5,75 @@
 /**
  * Unit tests for archiveProjectBobbitDir() — see docs/design/robust-add-project.md.
  */
-import { test } from "vitest";
+import { afterEach, beforeEach, test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { archiveProjectBobbitDir, ArchiveError, GATEWAY_OWNED_FILES, isPreserved } from "../../src/server/agent/bobbit-archive.js";
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+
+const REAL_FS_CANARY = "EXDEV from fs.renameSync triggers copy+unlink fallback";
+const PATCHED_FS_METHODS = ["existsSync", "statSync", "readdirSync", "mkdirSync", "writeFileSync", "readFileSync", "lstatSync", "renameSync", "rmSync", "copyFileSync"] as const;
+let activeMemFs: MemFs | undefined;
+let memRootId = 0;
+let originalFsMethods: Partial<Record<(typeof PATCHED_FS_METHODS)[number], (...args: any[]) => any>> = {};
+
+function createArchiveMemFs(): MemFs {
+	const mem = createMemFs();
+	mem.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+		const source = path.resolve(String(from));
+		const target = path.resolve(String(to));
+		if (mem.files.has(source)) {
+			const value = mem.files.get(source)!;
+			mem.files.delete(source);
+			mem.mkdirSync(path.dirname(target), { recursive: true });
+			mem.files.set(target, value);
+			return;
+		}
+		if (!mem.dirs.has(source)) throw Object.assign(new Error(`ENOENT: rename '${source}'`), { code: "ENOENT" });
+		mem.mkdirSync(path.dirname(target), { recursive: true });
+		const sourcePrefix = source + path.sep;
+		for (const [file, value] of [...mem.files]) {
+			if (!file.startsWith(sourcePrefix)) continue;
+			mem.files.delete(file);
+			mem.files.set(target + file.slice(source.length), value);
+		}
+		for (const dir of [...mem.dirs].sort((a, b) => a.length - b.length)) {
+			if (dir !== source && !dir.startsWith(sourcePrefix)) continue;
+			mem.dirs.delete(dir);
+			mem.dirs.add(target + dir.slice(source.length));
+		}
+	}) as typeof mem.renameSync;
+	const stat = mem.statSync.bind(mem);
+	(mem as any).lstatSync = (file: fs.PathLike) => Object.assign(stat(file), { isSymbolicLink: () => false });
+	return mem;
+}
+
+beforeEach((ctx) => {
+	if (ctx.task.name === REAL_FS_CANARY) return;
+	activeMemFs = createArchiveMemFs();
+	originalFsMethods = {};
+	for (const method of PATCHED_FS_METHODS) {
+		originalFsMethods[method] = (fs as any)[method];
+		(fs as any)[method] = (activeMemFs as any)[method].bind(activeMemFs);
+	}
+});
+
+afterEach(() => {
+	for (const method of PATCHED_FS_METHODS) {
+		if (originalFsMethods[method]) (fs as any)[method] = originalFsMethods[method];
+	}
+	originalFsMethods = {};
+	activeMemFs = undefined;
+});
 
 function mkTmp(prefix = "bobbit-archive-"): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	if (!activeMemFs) return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const root = path.resolve(os.tmpdir(), `${prefix}mem-${++memRootId}`);
+	fs.mkdirSync(root, { recursive: true });
+	return root;
 }
 
 function seedMixedBobbit(root: string) {

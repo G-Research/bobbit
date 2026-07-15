@@ -2,13 +2,17 @@
 // Source: tests/pi-extension-discovery.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { discoverPiExtensionTools, discoverPiExtensionToolsSync } from "../../src/server/agent/pi-extension-discovery.js";
+import {
+	discoverPiExtensionTools as discoverPiExtensionToolsReal,
+	discoverPiExtensionToolsSync as discoverPiExtensionToolsSyncReal,
+	type DiscoverPiExtensionToolsOptions,
+} from "../../src/server/agent/pi-extension-discovery.js";
 import {
 	computePiExtensionDiscoveryCacheKey,
 	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
@@ -16,9 +20,41 @@ import {
 	loadPiExtensionContributionsWithDiscoverySync,
 } from "../../src/server/agent/pi-extension-contributions.js";
 
-function tempDir(prefix = "bobbit-pi-ext-discovery-"): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+let suiteRoot: string;
+let sourceRoot: string;
+let sharedProbeCwd: string;
+let tempId = 0;
+beforeAll(() => {
+	suiteRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-discovery-suite-"));
+	sourceRoot = path.join(suiteRoot, "pi-extensions", "test-pack");
+	sharedProbeCwd = path.join(suiteRoot, "probe-runtime");
+	fs.mkdirSync(sourceRoot, { recursive: true });
+	fs.mkdirSync(sharedProbeCwd, { recursive: true });
+});
+afterAll(() => { fs.rmSync(suiteRoot, { recursive: true, force: true }); });
+
+function discoverPiExtensionTools(entryPath: string, opts: DiscoverPiExtensionToolsOptions) {
+	return discoverPiExtensionToolsReal(entryPath, { cwd: sharedProbeCwd, ...opts });
 }
+
+function discoverPiExtensionToolsSync(entryPath: string, opts: DiscoverPiExtensionToolsOptions) {
+	return discoverPiExtensionToolsSyncReal(entryPath, { cwd: sharedProbeCwd, ...opts });
+}
+
+function tempDir(prefix = "bobbit-pi-ext-discovery-"): string {
+	const dir = path.join(sourceRoot, `${prefix}${++tempId}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+function outsideTempDir(): string {
+	const dir = path.join(suiteRoot, "outside", String(++tempId));
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+// Per-case source trees remain isolated and are reclaimed in one suite pass.
+function cleanupTempDir(_dir: string): void {}
 
 function write(file: string, text: string): string {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -47,7 +83,7 @@ describe("pi extension discovery", () => {
 			assert.equal(fs.existsSync(path.join(dir, "executed.txt")), false);
 			assert.ok(result.cacheKey);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -68,7 +104,7 @@ export default async function (pi) {
 			assert.deepEqual(result.tools.find((tool) => tool.name === "string_tool")?.inputSchema, { type: "object" });
 			assert.ok(result.cacheKey);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -84,7 +120,7 @@ export default async function (pi) {
 			assert.equal(rows[0].discovery.diagnostic?.code, "trust_required");
 			assert.equal(fs.existsSync(path.join(packRoot, "executed.txt")), false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -97,7 +133,7 @@ export default async function (pi) {
 			assert.deepEqual(result.tools.map((tool) => tool.name), ["sync_tool"]);
 			assert.ok(result.cacheKey);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -111,7 +147,7 @@ export default async function (pi) {
 			assert.deepEqual(result.tools.map((tool) => tool.name), ["ts_tool"]);
 			assert.equal(result.tools[0]?.description, "from ts");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -124,7 +160,7 @@ export default async function (pi) {
 			assert.equal(result.status, "ok", result.diagnostic?.message);
 			assert.deepEqual(result.tools.map((tool) => tool.name), ["local_cjs_tool"]);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -144,7 +180,7 @@ export default async function (pi) {
 			assert.equal(absoluteResult.status, "failed");
 			assert.equal(absoluteResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -164,7 +200,7 @@ export default async function (pi) {
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -190,7 +226,7 @@ export default async function (pi) {
 			assert.equal(resolveResult.status, "failed");
 			assert.equal(resolveResult.diagnostic?.code, "PROBE_FS_READ_DENIED");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -204,7 +240,7 @@ export default async function (pi) {
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -224,7 +260,7 @@ export default async function (pi) {
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "PROBE_FS_READ_DENIED");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -248,14 +284,14 @@ export default async function (pi) {
 			assert.equal(promisesResult.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
 			assert.equal(fs.existsSync(path.join(dir, "promises.txt")), false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 			fs.rmSync(outside, { recursive: true, force: true });
 		}
 	});
 
 	it("denies filesystem read APIs from following symlinks outside allowed roots", async () => {
 		const dir = tempDir();
-		const outside = tempDir("bobbit-pi-ext-outside-");
+		const outside = outsideTempDir();
 		try {
 			const secret = write(path.join(outside, "secret.txt"), "leaked_secret_tool");
 			const outsideDir = path.join(outside, "outside-dir");
@@ -289,14 +325,14 @@ export default async function (pi) {
 			}
 			if (ran === 0) return;
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 			fs.rmSync(outside, { recursive: true, force: true });
 		}
 	});
 
 	it("denies filesystem copy APIs that could stage outside files into allowed roots", async () => {
 		const dir = tempDir();
-		const outside = tempDir("bobbit-pi-ext-outside-");
+		const outside = outsideTempDir();
 		const probeCwd = tempDir("bobbit-pi-ext-probe-cwd-");
 		try {
 			const secret = write(path.join(outside, "secret.txt"), "leaked_secret_tool");
@@ -314,7 +350,7 @@ export default async function (pi) {
 			assert.equal(asyncResult.diagnostic?.code, "PROBE_FS_WRITE_DENIED");
 			assert.equal(fs.existsSync(copiedAsync), false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 			fs.rmSync(outside, { recursive: true, force: true });
 			fs.rmSync(probeCwd, { recursive: true, force: true });
 		}
@@ -328,7 +364,7 @@ export default async function (pi) {
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "PROBE_FS_API_DENIED");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -350,7 +386,7 @@ export default async function (pi) {
 			assert.equal(undiciResult.status, "failed");
 			assert.equal(undiciResult.diagnostic?.code, "PROBE_CONFINEMENT_DENIED");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -372,7 +408,7 @@ export default async function (pi) {
 			assert.equal(requests, 0);
 		} finally {
 			await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -389,7 +425,7 @@ export default async function (pi) {
 			assert.equal(missingResult.status, "failed");
 			assert.match(missingResult.diagnostic?.message ?? "", /package|module|Cannot find/i);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -401,7 +437,7 @@ export default async function (pi) {
 			assert.equal(result.status, "failed");
 			assert.equal(result.diagnostic?.code, "probe_timeout");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -414,7 +450,7 @@ export default async function (pi) {
 			assert.equal(result.status, "ok");
 			assert.deepEqual(fs.readdirSync(dir).sort(), before);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -430,7 +466,7 @@ export default async function (pi) {
 			assert.ok(second);
 			assert.notEqual(first, second);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -454,7 +490,7 @@ export default async function (pi) {
 			assert.equal(result.cacheKey, undefined);
 			assert.equal(result.diagnostic?.code, "hash_file_count_limit");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -473,7 +509,7 @@ export default async function (pi) {
 			const sizeResult = computePiExtensionDiscoveryCacheKeyWithDiagnostics(entry);
 			assert.equal(sizeResult.diagnostic?.code, "hash_file_size_limit");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 
@@ -487,7 +523,7 @@ export default async function (pi) {
 			assert.equal(result.diagnostic?.status, "discovery-failed");
 			assert.match(result.diagnostic?.message ?? "", /activation boom/);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			cleanupTempDir(dir);
 		}
 	});
 });

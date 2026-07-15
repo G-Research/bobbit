@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 
@@ -177,7 +178,7 @@ test.describe("PR walkthrough REST API", () => {
 	// gates fire BEFORE any gh invocation: bad request, unknown job, untrusted host,
 	// and confirm-required — none of which reach gh.
 	test("bearer-gated public submit-review enforces jobId + trust + confirm before any gh call", async () => {
-		const { getPackStore } = await import("../../src/server/extension-host/pack-store.js");
+		const { getPackStore } = (await loadServerTestRuntime()).packStore;
 		const PACK_ID = "pr-walkthrough";
 		const store = getPackStore();
 		const prUrl = "https://github.com/acme/widgets/pull/42";

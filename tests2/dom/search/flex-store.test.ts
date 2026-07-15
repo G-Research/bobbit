@@ -18,6 +18,7 @@ import { expect, test } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	FLEX_EXPORT_BUNDLE_FILE,
 	FlexSearchStore,
 	extractIdentifierTokens,
 	recencyMultiplier,
@@ -246,13 +247,14 @@ test("partial import failure rebuilds index from mirror; tag filters survive", a
 	]);
 	await seed.close();
 
-	// Corrupt one of the per-key export files (tag index is the realistic
-	// failure mode — it's structurally distinct from the doc/reg/map
-	// files). Leaves `__docs__.json` and the others intact.
-	const indexDir = path.join(dir, "index");
-	const tagFile = fs.readdirSync(indexDir).find((f) => /\.tag\.json$/.test(f));
-	expect(tagFile, "expected a *.tag.json export to corrupt").toBeTruthy();
-	fs.writeFileSync(path.join(indexDir, tagFile!), '[["source_id",[["goals",null]]]]');
+	// Corrupt one tag entry inside the versioned export bundle while leaving
+	// the atomic docs mirror and all other export entries intact.
+	const bundlePath = path.join(dir, "index", FLEX_EXPORT_BUNDLE_FILE);
+	const bundle = JSON.parse(fs.readFileSync(bundlePath, "utf8")) as { exports: Array<[string, unknown]> };
+	const tagEntry = bundle.exports.find(([key]) => key.endsWith(".tag"));
+	expect(tagEntry, "expected a tag export entry to corrupt").toBeTruthy();
+	tagEntry![1] = { malformed: true };
+	fs.writeFileSync(bundlePath, JSON.stringify(bundle));
 
 	const store = await FlexSearchStore.open({ dataDir: dir });
 	try {

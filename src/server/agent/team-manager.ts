@@ -366,7 +366,7 @@ export class TeamManager {
 			const dir = stateDir ?? bobbitStateDir();
 			this.localStore = new TeamStore(dir);
 			// Non-PCM test path: create a local GoalManager from the same stateDir
-			this._localGoalManager = new GoalManager(new GoalStore(dir));
+			this._localGoalManager = new GoalManager(new GoalStore(dir), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock });
 		}
 		this.restoreTeams();
 		this.startStuckSweep();

@@ -6,11 +6,20 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Creating and Defender-scanning a new top-level OS temp root for every case is
+// disproportionately expensive on Windows. Keep case isolation through unique
+// child directories while paying top-level creation/deletion only once.
+const suiteRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-hq-migration-suite-"));
+let tmpSequence = 0;
+afterAll(() => {
+	try { fs.rmSync(suiteRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
+});
 
 const { migrateLegacyHeadquartersDirectory, migrateToPerProjectState } = await import("../../src/server/agent/state-migration.ts");
 const { serverSecretsDir } = await import("../../src/server/bobbit-dir.ts");
@@ -39,8 +48,10 @@ if (!process.env.BOBBIT_SECRETS_DIR) {
 	process.env.BOBBIT_SECRETS_DIR = tmpRoot("bobbit-hq-secrets-file-");
 }
 
-function tmpRoot(prefix = "bobbit-hq-migration-"): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+function tmpRoot(prefix = "case-"): string {
+	const dir = path.join(suiteRoot, `${prefix}${++tmpSequence}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
 }
 
 function writeJson(filePath: string, value: unknown): void {

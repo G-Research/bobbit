@@ -23,6 +23,7 @@ async function createStaff(name: string) {
 			systemPrompt: "Inbox test agent.",
 			cwd: project.rootPath,
 			projectId: project.id,
+			worktree: false,
 		}),
 	});
 	expect(res.status).toBe(201);

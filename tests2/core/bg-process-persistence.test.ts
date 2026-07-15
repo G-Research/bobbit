@@ -11,15 +11,25 @@
  * log/status/spool/pid files are real files in an isolated temp state dir —
  * never the real `.bobbit/`.
  */
-import { describe, it, vi, afterEach } from "vitest";
-// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
-afterEach(() => { vi.useRealTimers(); });
+import { afterAll, describe, it, vi, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Keep every case on real isolated filesystem paths, but avoid paying for a new
+// top-level OS temp root (and its Defender scan) on every harness construction.
+const suiteRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bg-suite-"));
+let fixtureSequence = 0;
+function fixtureDir(label: string): string {
+	const dir = path.join(suiteRoot, `${label}-${++fixtureSequence}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+afterAll(() => {
+	try { fs.rmSync(suiteRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
+});
 
 import {
 	BgProcessManager,
@@ -37,13 +47,26 @@ import {
 import { BgProcessStore } from "../../src/server/agent/bg-process-store.ts";
 import { runBgRunner } from "../../src/server/agent/bg-runner.ts";
 
+const activeManagers: BgProcessManager[] = [];
+const activeSessions: string[] = [];
+afterEach(() => {
+	for (const mgr of activeManagers) {
+		for (const sessionId of activeSessions) mgr.cleanup(sessionId);
+	}
+	activeManagers.length = 0;
+	activeSessions.length = 0;
+	// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
+	vi.useRealTimers();
+});
+
 const MAX_LOG_BYTES = 512 * 1024;
 
 // ── fakes ─────────────────────────────────────────────────────────────────
 
+let nextFakePid = 10000;
 function makeFakeChild(): any {
 	const c = new EventEmitter() as any;
-	c.pid = 10000 + Math.floor(Math.random() * 50000);
+	c.pid = nextFakePid++;
 	c.stdout = Object.assign(new EventEmitter(), { destroy() {} });
 	c.stderr = Object.assign(new EventEmitter(), { destroy() {} });
 	c.kill = () => true;
@@ -63,7 +86,7 @@ interface Harness {
 }
 
 function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string }): Harness {
-	const stateDir = opts?.stateDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bg-"));
+	const stateDir = opts?.stateDir ?? fixtureDir("harness");
 	let store = new BgProcessStore(stateDir);
 	const specs: TailerSpec[] = [];
 	const tailerFactory: TailerFactory = (spec) => {
@@ -90,6 +113,7 @@ function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string }): Harnes
 		tailerFactory,
 		env,
 	);
+	activeManagers.push(mgr);
 
 	const h: Harness = {
 		stateDir,
@@ -104,7 +128,12 @@ function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string }): Harnes
 	return h;
 }
 
-function freshSession() { return `s-${randomUUID()}`; }
+let sessionSequence = 0;
+function freshSession() {
+	const sessionId = `s-${++sessionSequence}`;
+	activeSessions.push(sessionId);
+	return sessionId;
+}
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
@@ -334,13 +363,16 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 	});
 
 	it("Fix MEDIUM: ALIVE host process whose pidfile is NOT yet written → RE-ATTACHES (not unrecoverable)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const h = makeHarness({ env: { isHostPidAlive: () => true } });
 		const S = freshSession();
 		const rec = seedRunningHostRecord(h, S);
 		// Persisted right after spawn; the gateway crashed in the create→pidfile window,
 		// so the process is still running with a valid persisted processPid but NO pidfile.
 		fs.writeFileSync(rec.outSpool, "still-running\n");
-		await h.mgr.restoreSession(S);
+		const restoring = h.mgr.restoreSession(S);
+		await vi.advanceTimersByTimeAsync(100);
+		await restoring;
 		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
 		assert.equal(p.status, "running", "re-attached the still-running process, NOT marked unrecoverable");
 		const logs = h.mgr.getLogs(S, rec.id)!;
@@ -351,13 +383,16 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 	});
 
 	it("Fix MEDIUM: ALIVE host process, pidfile written late mid-retry → RE-ATTACHES with matching nonce", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const h = makeHarness({ env: { isHostPidAlive: () => true } });
 		const S = freshSession();
 		const rec = seedRunningHostRecord(h, S);
 		fs.writeFileSync(rec.outSpool, "live\n");
 		// The wrapper writes the pidfile shortly after restore begins (within the retry window).
 		setTimeout(() => { try { fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n"); } catch { /* ignore */ } }, 25);
-		await h.mgr.restoreSession(S);
+		const restoring = h.mgr.restoreSession(S);
+		await vi.advanceTimersByTimeAsync(40);
+		await restoring;
 		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
 		assert.equal(p.status, "running", "re-attached after the pidfile appeared mid-retry");
 		h.mgr.cleanup(S);
@@ -742,7 +777,9 @@ describe("BgProcessManager — disk caps", () => {
 		const info = h.mgr.create(S, "chatty.sh", h.stateDir);
 		const spec = h.specs[0];
 		let off = 0;
-		// Feed ~2MB across both streams without exiting.
+		// Feed ~2MB across both streams without exiting. The repeated incremental
+		// updates are part of the cap/persistence protocol, not interchangeable with
+		// one bulk chunk.
 		for (let i = 0; i < 8000; i++) {
 			const line = `line-${i}-${"x".repeat(200)}\n`;
 			off += line.length;
@@ -780,7 +817,7 @@ describe("BgProcessManager — disk caps", () => {
 describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 	it("rebases offset to 0 when spool shrinks below it (no stall)", () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
+		const dir = fixtureDir("poll");
 		const file = path.join(dir, "x.spool");
 		fs.writeFileSync(file, "short\n"); // 6 bytes
 		const chunks: string[] = [];
@@ -793,7 +830,7 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 
 	it("copytruncates the spool once consumed and over cap", () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
+		const dir = fixtureDir("poll");
 		const file = path.join(dir, "x.spool");
 		fs.writeFileSync(file, "z".repeat(MAX_LOG_BYTES + 1000));
 		const tailer = new PollTailer(file, "stdout", () => {});
@@ -805,7 +842,7 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 
 	it("Fix 2: a delta larger than the cap reads only the last cap bytes (bounded allocation)", () => {
 		vi.useFakeTimers({ toFake: ["setInterval"] });
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
+		const dir = fixtureDir("poll");
 		const file = path.join(dir, "x.spool");
 		const head = Buffer.alloc(1000, 0x41); // 'A' — older bytes beyond the window
 		const tail = Buffer.alloc(MAX_LOG_BYTES, 0x42); // 'B' — the last cap bytes
@@ -870,7 +907,7 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 
 describe("bg-runner helper — bounded ring + real exit code", () => {
 	it("trims spools to ≤ maxBytes and writes the real exit code + pid/nonce", () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-runner-"));
+		const dir = fixtureDir("runner");
 		const child = new EventEmitter() as any;
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
@@ -892,7 +929,7 @@ describe("bg-runner helper — bounded ring + real exit code", () => {
 	});
 
 	it("Fix 1: trims an oversize spool to ≤ maxBytes on child exit (before the status write)", () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-runner-"));
+		const dir = fixtureDir("runner");
 		const child = new EventEmitter() as any;
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();

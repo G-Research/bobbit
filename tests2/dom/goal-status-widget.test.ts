@@ -9,14 +9,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { syncCustomElements } from "./_setup/custom-elements.js";
 
-// Under vitest pool:forks + isolate:false each test file runs in its OWN
-// happy-dom window while the module graph is cached across files — so a
-// component's @customElement define (and lit's template parsing) only happen in
-// the FIRST importing file's window. The shared _setup/custom-elements bridge
-// records every define and syncCustomElements() replays them into both this
-// window and lit-html's pinned window, so we can reuse the single shared lit
-// instance. session-manager is imported first to initialize the pack-panels ⇄
-// session-manager cycle before the widget's app/* imports hit it as a TDZ error.
+// The custom-elements bridge keeps explicit registration deterministic. Import
+// session-manager first to initialize the pack-panels ⇄ session-manager cycle
+// before the widget's app/* imports hit it as a TDZ error.
 let state: typeof import("../../src/app/state.js").state;
 
 beforeAll(async () => {

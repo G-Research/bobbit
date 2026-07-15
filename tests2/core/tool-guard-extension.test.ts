@@ -77,8 +77,10 @@ async function withGrantServer(
 	const address = server.address() as AddressInfo;
 	const previousGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
 	const previousToken = process.env.BOBBIT_TOKEN;
+	const previousSessionId = process.env.BOBBIT_SESSION_ID;
 	process.env.BOBBIT_GATEWAY_URL = `http://127.0.0.1:${address.port}`;
 	process.env.BOBBIT_TOKEN = "test-token";
+	process.env.BOBBIT_SESSION_ID = "tool-guard-test-session";
 	try {
 		await run(() => requests);
 	} finally {
@@ -86,6 +88,8 @@ async function withGrantServer(
 		else process.env.BOBBIT_GATEWAY_URL = previousGatewayUrl;
 		if (previousToken === undefined) delete process.env.BOBBIT_TOKEN;
 		else process.env.BOBBIT_TOKEN = previousToken;
+		if (previousSessionId === undefined) delete process.env.BOBBIT_SESSION_ID;
+		else process.env.BOBBIT_SESSION_ID = previousSessionId;
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
 }
@@ -212,6 +216,13 @@ describe("generateToolGuardExtension", () => {
 			}
 		});
 	}
+
+	it("uses gateway-owned runtime session identity instead of embedding it in shared source", () => {
+		const source = generateToolGuardExtension("must-not-be-embedded", { bash: { policy: "ask", group: "shell" } }, []);
+		assert.equal(source.includes("must-not-be-embedded"), false);
+		assert.ok(source.includes("process.env.BOBBIT_SESSION_ID"));
+		assert.ok(source.includes("missing BOBBIT_SESSION_ID"));
+	});
 
 	it("does not cache one-time grant responses in the active guard", async () => {
 		const guard = await importGeneratedGuard(

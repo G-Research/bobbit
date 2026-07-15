@@ -1303,24 +1303,33 @@ describe("TeamManager", () => {
 			rootPath: string;
 			publishedOriginPath: string;
 			unpublishedOriginPath: string;
+			publishedRepoPath: string;
+			unpublishedRepoPath: string;
 		}
 
 		interface GitFixture {
-			rootPath: string;
 			repoPath: string;
 			originPath: string;
 		}
 
 		let gitTemplate: RealGitTemplate | undefined;
-		const activeGitFixtures: GitFixture[] = [];
 
 		function runGit(args: string[], cwd?: string): string {
 			return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
 		}
 
-		function configureGitUser(repo: string): void {
-			runGit(["config", "user.email", "test@test.com"], repo);
-			runGit(["config", "user.name", "Test"], repo);
+		function listedWorktreePaths(repoPath: string): string[] {
+			return runGit(["worktree", "list", "--porcelain"], repoPath)
+				.split(/\r?\n/)
+				.filter((line) => line.startsWith("worktree "))
+				.map((line) => path.resolve(line.slice("worktree ".length)));
+		}
+
+		function assertRegisteredWorktree(repoPath: string, worktreePath: string): void {
+			assert.ok(
+				listedWorktreePaths(repoPath).includes(path.resolve(worktreePath)),
+				`${worktreePath} should remain registered in git worktree list`,
+			);
 		}
 
 		function createRealGitTemplate(): RealGitTemplate {
@@ -1328,70 +1337,54 @@ describe("TeamManager", () => {
 			const seedPath = path.join(rootPath, "seed");
 			const unpublishedOriginPath = path.join(rootPath, "unpublished-origin.git");
 			const publishedOriginPath = path.join(rootPath, "published-origin.git");
+			const publishedRepoPath = path.join(rootPath, "published-repo");
+			const unpublishedRepoPath = path.join(rootPath, "unpublished-repo");
+			const commitArgs = (message: string) => [
+				"-c", "user.email=test@test.com",
+				"-c", "user.name=Test",
+				"commit", "-m", message,
+			];
 
 			fs.mkdirSync(seedPath);
-			runGit(["init"], seedPath);
-			configureGitUser(seedPath);
+			runGit(["init", "--initial-branch=master"], seedPath);
 			fs.writeFileSync(path.join(seedPath, "README.md"), "# test\n");
 			runGit(["add", "README.md"], seedPath);
-			runGit(["commit", "-m", "init"], seedPath);
-			runGit(["branch", "-M", "master"], seedPath);
+			runGit(commitArgs("init"), seedPath);
 
-			// The unpublished origin intentionally has only master. Per-test clones create
-			// their goal branch locally so local-ref-first worktree creation is observable.
+			// This immutable origin intentionally has only master. Its shared checkout
+			// creates feat/test locally so local-ref-first selection stays real.
 			runGit(["clone", "--bare", seedPath, unpublishedOriginPath]);
 
 			runGit(["checkout", "-b", "feat/test"], seedPath);
-			fs.writeFileSync(path.join(seedPath, "GOAL_BRANCH.txt"), "local goal branch\n");
+			fs.writeFileSync(path.join(seedPath, "GOAL_BRANCH.txt"), "published goal branch\n");
 			runGit(["add", "GOAL_BRANCH.txt"], seedPath);
-			runGit(["commit", "-m", "goal branch"], seedPath);
+			runGit(commitArgs("published goal branch"), seedPath);
 			runGit(["clone", "--bare", seedPath, publishedOriginPath]);
-			return { rootPath, publishedOriginPath, unpublishedOriginPath };
-		}
 
-		function cleanupGitFixture(fixture: GitFixture | undefined): void {
-			if (!fixture) return;
-			if (fs.existsSync(fixture.repoPath)) {
-				try {
-					const output = runGit(["worktree", "list", "--porcelain"], fixture.repoPath);
-					const worktreePaths = output
-						.split(/\r?\n/)
-						.filter((line) => line.startsWith("worktree "))
-						.map((line) => line.slice("worktree ".length))
-						.filter((worktreePath) => path.resolve(worktreePath) !== path.resolve(fixture.repoPath));
-					for (const worktreePath of worktreePaths.reverse()) {
-						fs.rmSync(worktreePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-					}
-				} catch {
-					// Best effort; the enclosing fixture root removal is the final cleanup guard.
-				}
-				try { runGit(["worktree", "prune"], fixture.repoPath); } catch { /* ignore */ }
-			}
-			fs.rmSync(fixture.rootPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+			// Reuse protocol repositories for the whole file. Production still creates
+			// every member worktree; retaining them until afterAll removes per-test Git
+			// teardown from the 30-second lifecycle budget under process contention.
+			runGit(["clone", "--local", "--branch", "feat/test", publishedOriginPath, publishedRepoPath]);
+			runGit(["clone", "--local", unpublishedOriginPath, unpublishedRepoPath]);
+			runGit(["checkout", "-b", "feat/test"], unpublishedRepoPath);
+			fs.writeFileSync(path.join(unpublishedRepoPath, "GOAL_BRANCH.txt"), "local goal branch\n");
+			runGit(["add", "GOAL_BRANCH.txt"], unpublishedRepoPath);
+			runGit(commitArgs("local goal branch"), unpublishedRepoPath);
+
+			return {
+				rootPath,
+				publishedOriginPath,
+				unpublishedOriginPath,
+				publishedRepoPath,
+				unpublishedRepoPath,
+			};
 		}
 
 		function createGitFixture(opts: { publishGoalBranch?: boolean } = {}): GitFixture {
 			if (!gitTemplate) throw new Error("real git template not initialized");
-			const publishGoalBranch = opts.publishGoalBranch ?? true;
-			const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-team-fixture-"));
-			const repoPath = path.join(rootPath, "repo");
-			const originPath = publishGoalBranch ? gitTemplate.publishedOriginPath : gitTemplate.unpublishedOriginPath;
-			const cloneArgs = publishGoalBranch
-				? ["clone", "--local", "--branch", "feat/test", originPath, repoPath]
-				: ["clone", "--local", originPath, repoPath];
-			runGit(cloneArgs);
-			configureGitUser(repoPath);
-
-			if (!publishGoalBranch) {
-				runGit(["checkout", "-b", "feat/test"], repoPath);
-				fs.writeFileSync(path.join(repoPath, "GOAL_BRANCH.txt"), "local goal branch\n");
-				runGit(["add", "GOAL_BRANCH.txt"], repoPath);
-				runGit(["commit", "-m", "local goal branch"], repoPath);
-			}
-
-			const fixture = { rootPath, repoPath, originPath };
-			activeGitFixtures.push(fixture);
-			return fixture;
+			return (opts.publishGoalBranch ?? true)
+				? { repoPath: gitTemplate.publishedRepoPath, originPath: gitTemplate.publishedOriginPath }
+				: { repoPath: gitTemplate.unpublishedRepoPath, originPath: gitTemplate.unpublishedOriginPath };
 		}
 
 		function createRepoTeam(fixture: GitFixture, overrides: Partial<MockGoal> = {}) {
@@ -1412,19 +1405,24 @@ describe("TeamManager", () => {
 			gitTemplate = createRealGitTemplate();
 		});
 
-		afterEach(() => {
-			for (const fixture of activeGitFixtures.splice(0).reverse()) {
-				cleanupGitFixture(fixture);
-			}
-		});
-
 		afterAll(() => {
 			if (gitTemplate) {
-				fs.rmSync(gitTemplate.rootPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+				const rootPath = gitTemplate.rootPath;
+				fs.rmSync(rootPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+				assert.equal(fs.existsSync(rootPath), false, "shared Git fixture root should be removed exactly");
 				gitTemplate = undefined;
 			}
 		});
 
+		// Real-Git protocol ownership matrix (one lifecycle per row; no generic canary):
+		// - create/session: production worktree add, inherited files, branch, and session cwd
+		// - unpublished base: local feat/test propagation plus local-only member branch
+		// - sandbox base: local-ref selection passed to the container worktree boundary
+		// - provisioning: hook dispatch only after the real member worktree is registered
+		// - dismiss: session/tracking cleanup while the registered worktree is preserved
+		// - complete: all-worker cleanup while team state and registered worktree survive
+		// - persistence: real HEAD SHA survives the TeamStore reload boundary
+		// - multi-member: three independently registered branches and worktree paths
 		it("should create a worktree and session for a coder role", async () => {
 			const fixture = createGitFixture();
 			const { sm, team } = createRepoTeam(fixture);
@@ -1437,6 +1435,7 @@ describe("TeamManager", () => {
 			assert.ok(fs.existsSync(result.worktreePath), `worktree should exist at ${result.worktreePath}`);
 			assert.ok(fs.existsSync(path.join(result.worktreePath, "README.md")), "README.md should exist in worktree");
 			assert.ok(fs.existsSync(path.join(result.worktreePath, "GOAL_BRANCH.txt")), "goal branch content should exist in worktree");
+			assertRegisteredWorktree(fixture.repoPath, result.worktreePath);
 
 			const agents = team.listAgents("goal-1");
 			assert.equal(agents.length, 1);
@@ -1446,6 +1445,8 @@ describe("TeamManager", () => {
 
 			const session = sm.getSession(result.sessionId);
 			assert.ok(session, "session should exist");
+			assert.equal(session.cwd, result.worktreePath, "session cwd should be the production-created worktree");
+			assert.equal(session.worktreePath, result.worktreePath, "session metadata should retain the member worktree");
 			assert.equal(session.rpcClient.prompt.mock.calls.length, 1);
 		});
 
@@ -1478,6 +1479,11 @@ describe("TeamManager", () => {
 				fs.existsSync(path.join(result.worktreePath!, "GOAL_BRANCH.txt")),
 				"member worktree should start from the unpublished local goal branch",
 			);
+			const [memberHead, goalHead] = runGit(["rev-parse", "HEAD", "feat/test"], result.worktreePath)
+				.trim()
+				.split(/\r?\n/);
+			assert.equal(memberHead, goalHead, "member worktree HEAD should equal the unpublished local goal branch HEAD");
+			assertRegisteredWorktree(fixture.repoPath, result.worktreePath!);
 			assert.equal(sm.getSession(result.sessionId)?.worktreePushPolicy, "local-only");
 			assert.throws(
 				() => runGit(["show-ref", "--verify", "--quiet", `refs/heads/${agent.branch}`], fixture.originPath),
@@ -1505,6 +1511,7 @@ describe("TeamManager", () => {
 			});
 
 			await team.startTeam(goalId);
+			const worktreesBeforeSpawn = listedWorktreePaths(fixture.repoPath);
 			const result = await team.spawnRole(goalId, "coder", "Implement in sandbox from local branch");
 			const session = sm.getSession(result.sessionId);
 			assert.ok(session, "member session should exist");
@@ -1512,11 +1519,20 @@ describe("TeamManager", () => {
 			assert.notEqual(session.createOpts.sandboxBaseBranch, "origin/feat/test");
 			assert.match(session.createOpts.sandboxBranch, /^goal\/12345678\/coder-[0-9a-f]{4}$/);
 			assert.equal(session.worktreePushPolicy, "local-only");
+			assert.deepEqual(
+				listedWorktreePaths(fixture.repoPath),
+				worktreesBeforeSpawn,
+				"sandbox path should delegate worktree creation instead of creating a host worktree",
+			);
 		});
 
 		it("dispatches the goalProvisioned hook for the member worktree (finding 1)", async () => {
 			const fixture = createGitFixture();
 			const { sm, team } = createRepoTeam(fixture);
+			sm.dispatchGoalProvisionedForWorktree = vi.fn(async (arg: any) => {
+				assert.ok(fs.existsSync(arg.worktreePath), "hook must run after the member worktree exists");
+				assertRegisteredWorktree(fixture.repoPath, arg.worktreePath);
+			});
 
 			await team.startTeam("goal-1");
 			const result = await team.spawnRole("goal-1", "coder", "Implement feature X");
@@ -1540,6 +1556,7 @@ describe("TeamManager", () => {
 			await team.startTeam("goal-1");
 			const result = await team.spawnRole("goal-1", "tester", "Run test suite");
 			assert.ok(fs.existsSync(result.worktreePath!));
+			assertRegisteredWorktree(fixture.repoPath, result.worktreePath!);
 
 			const dismissed = await team.dismissRole(result.sessionId);
 			assert.deepEqual(
@@ -1547,13 +1564,14 @@ describe("TeamManager", () => {
 				{ ok: true, status: "dismissed", sessionId: result.sessionId, retryable: false },
 			);
 			assert.ok(fs.existsSync(result.worktreePath!), "worktree should be preserved after dismissal");
+			assertRegisteredWorktree(fixture.repoPath, result.worktreePath!);
 			assert.equal(team.listAgents("goal-1").length, 0);
 			assert.equal(sm._sessions.has(result.sessionId), false);
 		});
 
 		it("should handle completeTeam with real worktrees", async () => {
 			const fixture = createGitFixture();
-			const { goal, team } = createRepoTeam(fixture);
+			const { goal, sm, team } = createRepoTeam(fixture);
 
 			await team.startTeam("goal-1");
 			const result = await team.spawnRole("goal-1", "coder", "Code stuff");
@@ -1561,13 +1579,16 @@ describe("TeamManager", () => {
 
 			await team.completeTeam("goal-1");
 			assert.ok(fs.existsSync(result.worktreePath!), "worktree should be preserved after completeTeam");
+			assertRegisteredWorktree(fixture.repoPath, result.worktreePath!);
+			assert.equal(sm._sessions.has(result.sessionId), false, "completeTeam should terminate the role session");
+			assert.equal(team.listAgents("goal-1").length, 0, "completeTeam should clear tracked role agents");
 			assert.equal(goal.state, "complete");
 			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
 		});
 
 		it("should persist baseSha in TeamAgent across state", async () => {
 			const fixture = createGitFixture();
-			const { team } = createRepoTeam(fixture);
+			const { sm, team } = createRepoTeam(fixture);
 
 			await team.startTeam("goal-1");
 			const result = await team.spawnRole("goal-1", "coder", "Persist test");
@@ -1577,28 +1598,54 @@ describe("TeamManager", () => {
 
 			const actualSha = runGit(["rev-parse", "HEAD"], result.worktreePath).trim();
 			assert.equal(agent.baseSha, actualSha, "baseSha should match the actual HEAD SHA");
+
+			const restoredTeam = new TeamManager(sm, DEFAULT_CONFIG);
+			const restoredAgent = restoredTeam.findAgentBySessionId(result.sessionId);
+			assert.equal(restoredAgent?.baseSha, actualSha, "real Git baseSha should survive TeamStore reload");
 		});
 
-		it("should create distinct worktrees for coder, reviewer, and tester", async () => {
-			const fixture = createGitFixture();
-			const { team } = createRepoTeam(fixture);
-
-			await team.startTeam("goal-1");
-			const roles = ["coder", "reviewer", "tester"];
+		describe("distinct multi-role worktrees", () => {
+			const roles = ["coder", "reviewer", "tester"] as const;
+			let fixture: GitFixture;
+			let team: ReturnType<typeof createRepoTeam>["team"];
 			const results: { sessionId: string; worktreePath?: string }[] = [];
 
-			for (const role of roles) {
+			beforeAll(async () => {
+				fixture = createGitFixture();
+				({ team } = createRepoTeam(fixture));
+				await team.startTeam("goal-1");
+			});
+
+			afterAll(async () => {
+				for (const result of results) await team.dismissRole(result.sessionId);
+			});
+
+			async function spawnMember(role: typeof roles[number]): Promise<void> {
 				const result = await team.spawnRole("goal-1", role, `${role} task`);
 				results.push(result);
 				assert.ok(fs.existsSync(result.worktreePath!), `worktree for ${role} should exist`);
 			}
 
-			assert.equal(team.listAgents("goal-1").length, 3);
-			assert.equal(new Set(results.map((result) => result.worktreePath)).size, roles.length);
+			it("creates the coder worktree", async () => {
+				await spawnMember("coder");
+			});
 
-			for (const result of results) {
-				await team.dismissRole(result.sessionId);
-			}
+			it("creates the reviewer worktree", async () => {
+				await spawnMember("reviewer");
+			});
+
+			it("creates the tester worktree", async () => {
+				await spawnMember("tester");
+			});
+
+			it("should create distinct worktrees for coder, reviewer, and tester", () => {
+				assert.equal(team.listAgents("goal-1").length, roles.length);
+				assert.equal(new Set(results.map((result) => result.worktreePath)).size, roles.length);
+				const registeredPaths = new Set(listedWorktreePaths(fixture.repoPath));
+				for (const result of results) {
+					assert.ok(registeredPaths.has(path.resolve(result.worktreePath!)), `${result.worktreePath} should be registered`);
+				}
+			});
 		});
 
 		it("should enforce concurrency limit without real git", async () => {

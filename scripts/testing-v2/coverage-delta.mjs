@@ -168,7 +168,7 @@ function runVitestCoverage() {
 	const result = spawnSync(
 		vitestBin,
 		["run", "--config", join(REPO_ROOT, "vitest.config.ts"), ...projectArgs, "--coverage"],
-		{ stdio: "inherit", cwd: REPO_ROOT, shell: isWin, env: { ...process.env, VITEST_MAX_FORKS: process.env.VITEST_MAX_FORKS || "3" } },
+		{ stdio: "inherit", cwd: REPO_ROOT, shell: isWin, env: { ...process.env, VITEST_MAX_WORKERS: process.env.VITEST_MAX_WORKERS || "3" } },
 	);
 	return result.status ?? 1;
 }

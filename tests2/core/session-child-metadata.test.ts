@@ -48,6 +48,6 @@ describe("child session metadata wiring", () => {
 		// bobbit.disabledTools). Restore reads `Array.isArray(...) ? ... : undefined`.
 		assert.match(managerSrc, /const persistedAllowedTools = Array\.isArray\(ps\.allowedTools\) \? ps\.allowedTools : undefined;/, "restoreSession must read persisted allowedTools without a .length > 0 gate so `[]` survives as no-tools");
 		assert.doesNotMatch(managerSrc, /Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0 \? ps\.allowedTools : undefined/, "restoreSession must NOT gate persisted allowedTools on length > 0 (empty `[]` must be preserved)");
-		assert.match(managerSrc, /persistedAllowedTools\.map\(n => tagAllowedTool\(n, this\.toolManager\)\)/, "restoreSession must prefer persisted allowedTools before role defaults");
+		assert.match(managerSrc, /tagAllowedTools\(persistedAllowedTools, this\.toolManager\)/, "restoreSession must prefer persisted allowedTools before role defaults and classify one allowlist from one provider snapshot");
 	});
 });

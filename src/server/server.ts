@@ -405,6 +405,7 @@ async function detectedRefExistsInAllComponents(
 	rootPath: string,
 	comps: Array<{ repo: string }>,
 	ref: string,
+	commandRunner: CommandRunner = realCommandRunner,
 ): Promise<boolean> {
 	try {
 		const seen = new Set<string>();
@@ -413,9 +414,9 @@ async function detectedRefExistsInAllComponents(
 			if (seen.has(c.repo)) continue;
 			seen.add(c.repo);
 			const repoPath = path.join(rootPath, c.repo);
-			if (!(await isGitRepo(repoPath).catch(() => false))) continue;
+			if (!(await isGitRepo(repoPath, commandRunner).catch(() => false))) continue;
 			checked++;
-			if (!(await refExistsInRepo(repoPath, ref))) return false;
+			if (!(await refExistsInRepo(repoPath, ref, commandRunner))) return false;
 		}
 		return checked > 0;
 	} catch {
@@ -423,13 +424,13 @@ async function detectedRefExistsInAllComponents(
 	}
 }
 
-async function resolveBaseRefDetectRepoPath(rootPath: string, comps: Array<{ repo: string }>): Promise<string | null> {
+async function resolveBaseRefDetectRepoPath(rootPath: string, comps: Array<{ repo: string }>, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
 	const isMultiRepo = comps.some(c => c.repo !== ".");
 	const primaryRepoPath = isMultiRepo
 		? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 		: rootPath;
-	if (!(await isGitRepo(primaryRepoPath).catch(() => false))) return null;
-	return isMultiRepo ? primaryRepoPath : await getRepoRoot(primaryRepoPath);
+	if (!(await isGitRepo(primaryRepoPath, commandRunner).catch(() => false))) return null;
+	return isMultiRepo ? primaryRepoPath : await getRepoRoot(primaryRepoPath, commandRunner);
 }
 
 function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
@@ -1629,37 +1630,60 @@ async function getCommitChangedFiles(cwd: string, sha: string, containerId?: str
 	return parseCommitChangedFiles(out);
 }
 
-function parseCommitLogWithShortstat(output: string): CommitInfo[] {
-	const lines = output.split("\n");
+function parseCommitLogWithFiles(output: string): CommitInfo[] {
 	const commits: CommitInfo[] = [];
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		if (!line.includes(COMMIT_LOG_SEPARATOR)) continue;
-		const parts = line.split(COMMIT_LOG_SEPARATOR);
-		if (parts.length < 5) continue;
-		const [sha, shortSha, message, author, timestamp] = parts;
-		let filesChanged = 0, insertions = 0, deletions = 0;
-		for (let j = i + 1; j < lines.length && !lines[j].includes(COMMIT_LOG_SEPARATOR); j++) {
-			const statLine = lines[j].trim();
-			if (!statLine.includes("changed")) continue;
-			const fm = statLine.match(/(\d+) file/);
-			const im = statLine.match(/(\d+) insertion/);
-			const dm = statLine.match(/(\d+) deletion/);
-			if (fm) filesChanged = parseInt(fm[1], 10);
-			if (im) insertions = parseInt(im[1], 10);
-			if (dm) deletions = parseInt(dm[1], 10);
-			break;
+	for (const record of output.split("\x1e")) {
+		const lines = record.split(/\r?\n/).filter(Boolean);
+		const metadata = lines.shift();
+		if (!metadata) continue;
+		const [sha, shortSha, message, author, timestamp] = metadata.split(COMMIT_LOG_SEPARATOR);
+		if (!sha || !shortSha || timestamp === undefined) continue;
+
+		const files: CommitChangedFile[] = [];
+		let insertions = 0;
+		let deletions = 0;
+		for (const line of lines) {
+			if (line.startsWith(":")) {
+				const [rawMetadata, ...paths] = line.split("\t");
+				const rawStatus = rawMetadata.trim().split(/\s+/).at(-1) ?? "";
+				const status = rawStatus.startsWith("R") ? "R" : rawStatus;
+				if (status === "R" && paths[0] && paths[1]) {
+					files.push({ path: paths[1], oldPath: paths[0], status, statusLabel: statusLabelForCommitFile(status) });
+				} else if (paths[0]) {
+					files.push({ path: paths[0], status, statusLabel: statusLabelForCommitFile(status) });
+				}
+				continue;
+			}
+			const numstat = line.match(/^(\d+|-)\t(\d+|-)\t/);
+			if (numstat) {
+				if (numstat[1] !== "-") insertions += Number(numstat[1]);
+				if (numstat[2] !== "-") deletions += Number(numstat[2]);
+			}
 		}
-		commits.push({ sha, shortSha, message, author, timestamp, filesChanged, insertions, deletions, files: [] });
+		commits.push({ sha, shortSha, message, author, timestamp, filesChanged: files.length, insertions, deletions, files });
 	}
 	return commits;
 }
 
-async function attachCommitFiles(commits: CommitInfo[], cwd: string, containerId?: string): Promise<CommitInfo[]> {
-	return Promise.all(commits.map(async commit => ({
-		...commit,
-		files: await getCommitChangedFiles(cwd, commit.sha, containerId),
-	})));
+async function getCommitsWithFiles(
+	cwd: string,
+	rangeArgs: string[],
+	timeout = 5000,
+	containerId?: string,
+): Promise<CommitInfo[]> {
+	// One real Git process returns metadata, statuses, renames, and numstat for
+	// the whole page. The former N-commit fan-out launched `cat-file` + `show`
+	// concurrently per commit; under full-suite contention one child could exceed
+	// its timeout and turn an otherwise valid commits response into HTTP 500.
+	const output = await execGitArgs([
+		"log",
+		`--format=%x1e${COMMIT_LOG_FORMAT}`,
+		"--raw",
+		"--numstat",
+		"--find-renames",
+		...rangeArgs,
+	], cwd, timeout, containerId);
+	return parseCommitLogWithFiles(output);
 }
 
 /**
@@ -1822,6 +1846,26 @@ export interface GatewayConfig {
 	builtinPacksDir?: string;
 }
 
+export function installGatewayBridgeDeps(deps?: GatewayDeps) {
+	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
+	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
+	if (deps?.agentBridgeFactory) registerRpcBridgeFactory(deps.agentBridgeFactory);
+	const registeredRpcBridgeFactory = getRegisteredRpcBridgeFactory();
+	const gatewayDeps = resolveGatewayDeps({
+		...deps,
+		agentBridgeFactory: deps?.agentBridgeFactory ?? registeredRpcBridgeFactory ?? undefined,
+	});
+	let restored = false;
+	return {
+		gatewayDeps,
+		restoreExplicitRpcBridgeFactory(): void {
+			if (!hasExplicitAgentBridgeFactory || restored) return;
+			restored = true;
+			registerRpcBridgeFactory(previousRpcBridgeFactory);
+		},
+	};
+}
+
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Construction checkpoint timer — createGateway runs fully synchronously
 	// before start(), and earlier profiling showed ~19s of unattributed time
@@ -1835,16 +1879,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		__ckLast = now;
 		if (delta >= SLOW_PHASE_MS) bootLog(`[boot] ctor ${label} +${delta}ms (@${now - __ckT0}ms)`);
 	};
-	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
-	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
-	if (deps?.agentBridgeFactory) {
-		registerRpcBridgeFactory(deps.agentBridgeFactory);
-	}
-	const registeredRpcBridgeFactory = getRegisteredRpcBridgeFactory();
-	const gatewayDeps = resolveGatewayDeps({
-		...deps,
-		agentBridgeFactory: deps?.agentBridgeFactory ?? registeredRpcBridgeFactory ?? undefined,
-	});
+	const { gatewayDeps, restoreExplicitRpcBridgeFactory } = installGatewayBridgeDeps(deps);
 	serverCommandRunner = gatewayDeps.commandRunner;
 	const envRuntimeFlags = resolveLegacyTestRuntimeFlags();
 	const gatewayRuntimeFlags = {
@@ -1876,12 +1911,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	};
 	configureProfilingRuntime({ e2eProfile: gatewayRuntimeFlags.e2eProfile, e2eProfileFlushMs: gatewayRuntimeFlags.e2eProfileFlushMs });
 	configureAigwRuntimeFlags({ skipAigwDiscovery: gatewayRuntimeFlags.skipAigwDiscovery, testNoExternal: gatewayRuntimeFlags.testNoExternal, e2e: gatewayRuntimeFlags.e2e });
-	let rpcBridgeFactoryRestored = false;
-	const restoreExplicitRpcBridgeFactory = () => {
-		if (!hasExplicitAgentBridgeFactory || rpcBridgeFactoryRestored) return;
-		rpcBridgeFactoryRestored = true;
-		registerRpcBridgeFactory(previousRpcBridgeFactory);
-	};
 
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
@@ -2473,7 +2502,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 	});
 
-	const staffManager = new StaffManager(projectContextManager, { remotePolicy: remoteGitPolicy, worktreeSetupRuntime });
+	const staffManager = new StaffManager(projectContextManager, { commandRunner: gatewayDeps.commandRunner, remotePolicy: remoteGitPolicy, worktreeSetupRuntime });
 	sessionManager.setStaffManager(staffManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
@@ -3279,12 +3308,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					}
 				}
 
-				const isRepo = await isGitRepo(projectDir);
+				const isRepo = await isGitRepo(projectDir, serverCommandRunner);
 				if (!isRepo) {
 					console.log(`[sandbox] Project ${projectId} is not a git repo — sandbox disabled (worktrees require git)`);
 					return null;
 				}
-				const repoPath = await getRepoRoot(projectDir);
+				const repoPath = await getRepoRoot(projectDir, serverCommandRunner);
 
 				// Resolve the clone source for the container. Resolving via
 				// `resolveSandboxCloneSource` guarantees we NEVER hand git a raw host
@@ -3500,8 +3529,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							const components = ctx.projectConfigStore.getComponents();
 							const isMultiRepoProject = components.some(c => c.repo !== ".");
 							let sweepRootPath = ctx.project.rootPath;
-							if (!isMultiRepoProject && await isGitRepo(ctx.project.rootPath).catch(() => false)) {
-								sweepRootPath = await getRepoRoot(ctx.project.rootPath);
+							if (!isMultiRepoProject && await isGitRepo(ctx.project.rootPath, serverCommandRunner).catch(() => false)) {
+								sweepRootPath = await getRepoRoot(ctx.project.rootPath, serverCommandRunner);
 							}
 							sweepProjects.push({
 								id: ctx.project.id,
@@ -3591,10 +3620,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								for (const c of components) {
 									if (c.repo === "." || seen.has(c.repo)) continue;
 									seen.add(c.repo);
-									if (!(await isGitRepo(path.join(repoPath, c.repo)))) { poolReady = false; break; }
+									if (!(await isGitRepo(path.join(repoPath, c.repo), serverCommandRunner))) { poolReady = false; break; }
 								}
 							} else {
-								poolReady = await isGitRepo(repoPath);
+								poolReady = await isGitRepo(repoPath, serverCommandRunner);
 							}
 							if (poolReady) {
 								const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
@@ -3602,7 +3631,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								const pcs = ctx.projectConfigStore;
 								// Single-repo: resolve nested rootPath to the actual git toplevel so
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
-								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
+								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath, serverCommandRunner);
 								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
 								bootLog(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
@@ -5137,7 +5166,7 @@ async function handleApiRoute(
 					const isMultiRepo = comps.some(c => c.repo !== ".");
 					const primaryRepoPath = isMultiRepo
 						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
-						: await getRepoRoot(body.rootPath);
+						: await getRepoRoot(body.rootPath, serverCommandRunner);
 					const detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 					// Only pin when the detected ref is grammar-valid AND present in
 					// every component repo — otherwise a manual save would reject it
@@ -5145,7 +5174,7 @@ async function handleApiRoute(
 					if (
 						detected
 						&& isValidBaseRefBranchGrammar(detected)
-						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
+						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected, serverCommandRunner))
 					) {
 						cfg.set("base_ref", detected);
 					}
@@ -5167,10 +5196,10 @@ async function handleApiRoute(
 						for (const c of components) {
 							if (c.repo === "." || seen.has(c.repo)) continue;
 							seen.add(c.repo);
-							if (!(await isGitRepo(path.join(body.rootPath, c.repo)))) { poolReady = false; break; }
+							if (!(await isGitRepo(path.join(body.rootPath, c.repo), serverCommandRunner))) { poolReady = false; break; }
 						}
 					} else {
-						poolReady = await isGitRepo(body.rootPath);
+						poolReady = await isGitRepo(body.rootPath, serverCommandRunner);
 					}
 					if (poolReady) {
 						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
@@ -5178,7 +5207,7 @@ async function handleApiRoute(
 						const pcs = newCtx?.projectConfigStore;
 						// Single-repo: resolve nested rootPath to the actual git toplevel so
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
-						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
+						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath, serverCommandRunner);
 						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined, project.rootPath);
 					}
 				} catch { /* best-effort */ }
@@ -5329,14 +5358,14 @@ async function handleApiRoute(
 					const isMultiRepo = comps.some(c => c.repo !== ".");
 					const primaryRepoPath = isMultiRepo
 						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
-						: await getRepoRoot(rootPath);
+						: await getRepoRoot(rootPath, serverCommandRunner);
 					const detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 					// Pin only if the detected ref exists in every component repo
 					// (mirrors save-time validation). See POST /api/projects above.
 					if (
 						detected
 						&& isValidBaseRefBranchGrammar(detected)
-						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected))
+						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected, serverCommandRunner))
 					) {
 						cfg.set("base_ref", detected);
 					}
@@ -5369,13 +5398,13 @@ async function handleApiRoute(
 		try {
 			const cfg = ctx.projectConfigStore;
 			const comps = cfg.getComponents();
-			const primaryRepoPath = await resolveBaseRefDetectRepoPath(rootPath, comps);
+			const primaryRepoPath = await resolveBaseRefDetectRepoPath(rootPath, comps, serverCommandRunner);
 			if (!primaryRepoPath) {
 				const parsed = parseBaseRef(cfg.get("base_ref") || "");
 				json({ resolved: parsed.ref || "", detected: null });
 				return;
 			}
-			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
+			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"), serverCommandRunner)).ref;
 			// `detected` must be SAVEABLE — null it out unless it passes the same
 			// checks add-time pinning applies (grammar + cross-component existence).
 			// The Settings "Detect from remote" button fills this value, so a
@@ -5384,7 +5413,7 @@ async function handleApiRoute(
 			if (
 				detected
 				&& (!isValidBaseRefBranchGrammar(detected)
-					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected)))
+					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected, serverCommandRunner)))
 			) {
 				detected = null;
 			}
@@ -5519,7 +5548,7 @@ async function handleApiRoute(
 					let tagDetected = false;
 					for (const c of componentsToCheck) {
 						const repoPath = path.join(ctx.project.rootPath, c.repo);
-						const gitRepoCheck = await isGitRepo(repoPath).catch(() => false);
+						const gitRepoCheck = await isGitRepo(repoPath, serverCommandRunner).catch(() => false);
 						if (!gitRepoCheck) {
 							baseRefWarnings.push(baseRefSkippedRepoWarning(c.name, repoPath));
 							continue;
@@ -6634,7 +6663,7 @@ async function handleApiRoute(
 				// (staff-manager.ts) and goal path (goal-manager.ts).
 				const components = projCtx?.projectConfigStore.getComponents() ?? [];
 				const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
-				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd, undefined, { configuredBaseRef });
+				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd, undefined, { configuredBaseRef, commandRunner: serverCommandRunner });
 				if (support.supported && support.repoPath) {
 					worktreeOpts = { repoPath: support.repoPath };
 				}
@@ -11732,8 +11761,7 @@ async function handleApiRoute(
 				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], goal.cwd);
-			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), goal.cwd);
+			const commits = await getCommitsWithFiles(goal.cwd, rangeSpec.split(" ").filter(Boolean));
 			json({ commits });
 		} catch (e: any) {
 			json({ error: "Failed to read git log", detail: e.message }, 500);
@@ -12424,7 +12452,7 @@ async function handleApiRoute(
 		if (newWorktree) {
 			sessionCwd = projCwd;
 			try {
-				if (await isGitRepo(projCwd)) worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+				if (await isGitRepo(projCwd, serverCommandRunner)) worktreeOpts = { repoPath: await getRepoRoot(projCwd, serverCommandRunner) };
 			} catch { /* not a git repo — plain project-root session */ }
 		} else {
 			// Prefer the source's own cwd when it has no worktree so a standalone
@@ -12972,7 +13000,7 @@ async function handleApiRoute(
 			const projCtx = projectContextManager.getOrCreate(ps.projectId);
 			const components = projCtx?.projectConfigStore.getComponents() ?? [];
 			const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
-			const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef });
+			const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef, commandRunner: serverCommandRunner });
 			if (!support.supported || !support.repoPath) {
 				json({
 					error: "failed to resolve current project repository for fresh continue worktree creation: project does not currently support git worktrees",
@@ -14212,8 +14240,7 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], cwd, 10000, cid);
-			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), cwd, cid);
+			const commits = await getCommitsWithFiles(cwd, rangeSpec.split(" ").filter(Boolean), 10000, cid);
 
 			json({ commits });
 		} catch (e: any) {

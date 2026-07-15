@@ -3,12 +3,15 @@
 // Bucket: v2-core | Method: codemod | Classification: clean
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, it } from "vitest";
 
+import type { CommandRunner, ExecFileResult } from "../../src/server/gateway-deps.ts";
 import { synthesiseWalkthroughCards, validateSynthesisedCards, type WalkthroughParsedFile } from "../../src/server/pr-walkthrough/card-synthesis.ts";
 import { normalizeGithubResolvedWalkthrough, resolveWalkthroughForTesting, setPrWalkthroughSynthesisAdapterForTesting } from "../../src/server/pr-walkthrough/routes.ts";
 import { WALKTHROUGH_STORE_SCHEMA_VERSION, WalkthroughStore } from "../../src/server/pr-walkthrough/walkthrough-store.ts";
@@ -176,13 +179,14 @@ describe("PR walkthrough card synthesis", () => {
 	});
 
 	it("normal route deps use the configured model-backed synthesis adapter", async () => {
-		const repo = makeGitRepo("model");
+		const repo = makeRepoFixture("model");
 		let completionCalls = 0;
 		const result = await resolveWalkthroughForTesting({ cwd: repo.cwd, baseSha: repo.baseSha, headSha: repo.headSha }, {
 			defaultCwd: "/repo",
 			readBody: async () => ({}),
 			preferencesStore: { get: key => key === "default.reviewModel" ? "test/model" : undefined },
 			getAvailableModels: async () => [{ provider: "test", id: "model", name: "Model", api: "openai-completions", baseUrl: "http://127.0.0.1", contextWindow: 128_000, maxTokens: 4096, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, authenticated: true }],
+			commandRunner: walkthroughGitRunner(),
 			completeModelText: async (_model, _prefs, args) => {
 				completionCalls += 1;
 				const input = JSON.parse(args.userPrompt) as { diffBlockIds: string[] };
@@ -230,13 +234,18 @@ describe("PR walkthrough card synthesis", () => {
 	});
 
 	it("resolver uses session cwd before default cwd", async () => {
-		const defaultRepo = makeGitRepo("default");
-		const sessionRepo = makeGitRepo("session");
+		const defaultRepo = makeRepoFixture("default");
+		const sessionRepo = makeRepoFixture("session");
+		const calls: string[] = [];
 		const result = await resolveWalkthroughForTesting({ sessionId: "s1", baseSha: sessionRepo.baseSha, headSha: sessionRepo.headSha }, {
 			defaultCwd: defaultRepo.cwd,
 			readBody: async () => ({}),
 			resolveSessionCwd: sessionId => sessionId === "s1" ? sessionRepo.cwd : undefined,
+			commandRunner: walkthroughGitRunner(calls),
 		});
+
+		assert.ok(calls.length > 0);
+		assert.ok(calls.every(cwd => cwd === sessionRepo.cwd), "all resolver Git probes must use the session cwd");
 
 		assert.equal(result.changeset.baseSha, sessionRepo.baseSha);
 		assert.ok(result.cards.flatMap(card => card.diffBlocks).some(diffBlock => diffBlock.filePath === "session.txt"));
@@ -338,22 +347,63 @@ function makeTempDir(): string {
 	return dir;
 }
 
-function makeGitRepo(label: string): { cwd: string; baseSha: string; headSha: string } {
+function makeRepoFixture(label: string): { cwd: string; baseSha: string; headSha: string } {
 	const cwd = makeTempDir();
-	git(cwd, ["init"]);
-	git(cwd, ["config", "user.name", "Bobbit Test"]);
-	git(cwd, ["config", "user.email", "bobbit-test@example.test"]);
-	fs.writeFileSync(path.join(cwd, `${label}.txt`), "base\n", "utf-8");
-	git(cwd, ["add", "."]);
-	git(cwd, ["commit", "-m", "base"]);
-	const baseSha = git(cwd, ["rev-parse", "HEAD"]);
-	fs.writeFileSync(path.join(cwd, `${label}.txt`), "base\nhead\n", "utf-8");
-	git(cwd, ["add", "."]);
-	git(cwd, ["commit", "-m", "head"]);
-	const headSha = git(cwd, ["rev-parse", "HEAD"]);
-	return { cwd, baseSha, headSha };
+	fs.writeFileSync(path.join(cwd, ".walkthrough-label"), label, "utf-8");
+	return { cwd, baseSha: "a".repeat(40), headSha: "b".repeat(40) };
 }
 
-function git(cwd: string, args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+/**
+ * Resolver/card tests own cwd selection and synthesis, not git.exe fidelity.
+ * pr-walkthrough-local-resolver.test.ts separately pins the complete Git command
+ * protocol, so this deterministic runner preserves every resolver assertion
+ * without launching 35-40 synchronous Windows processes.
+ */
+function walkthroughDiff(label: string): string {
+	return [
+		`diff --git a/${label}.txt b/${label}.txt`,
+		"index 1111111..2222222 100644",
+		`--- a/${label}.txt`,
+		`+++ b/${label}.txt`,
+		"@@ -1 +1,2 @@",
+		" base",
+		"+head",
+		"",
+	].join("\n");
+}
+
+function walkthroughGitRunner(calls: string[] = []): CommandRunner {
+	return {
+		async execFile(file, args, options): Promise<ExecFileResult> {
+			assert.equal(file, "git");
+			const cwd = String(options?.cwd ?? "");
+			calls.push(cwd);
+			const label = fs.readFileSync(path.join(cwd, ".walkthrough-label"), "utf-8");
+			if (args[0] === "rev-parse") {
+				return { stdout: String(args.at(-1)).startsWith("a") ? `${"a".repeat(40)}\n` : `${"b".repeat(40)}\n`, stderr: "" };
+			}
+			if (args[0] === "diff" && args.includes("--name-status")) return { stdout: `M\t${label}.txt\n`, stderr: "" };
+			if (args[0] === "diff" && args.includes("--shortstat")) return { stdout: " 1 file changed, 1 insertion(+)\n", stderr: "" };
+			if (args[0] === "diff") return { stdout: walkthroughDiff(label), stderr: "" };
+			throw new Error(`unexpected git command: ${args.join(" ")}`);
+		},
+		spawn(file, args, options) {
+			assert.equal(file, "git");
+			assert.ok(args.includes("diff"));
+			const cwd = String(options?.cwd ?? "");
+			calls.push(cwd);
+			const label = fs.readFileSync(path.join(cwd, ".walkthrough-label"), "utf-8");
+			const child = new EventEmitter() as ChildProcess;
+			const stdout = new PassThrough();
+			const stderr = new PassThrough();
+			Object.assign(child, { stdout, stderr, killed: false, kill: () => true });
+			queueMicrotask(() => {
+				stdout.end(walkthroughDiff(label));
+				stderr.end();
+				child.emit("close", 0, null);
+			});
+			return child;
+		},
+		execFileSync() { throw new Error("unexpected sync command"); },
+	};
 }

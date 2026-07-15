@@ -25,7 +25,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -43,13 +42,10 @@ const SYSTEM_PROJECT_ID = "system";
 
 const cleanupRoots: string[] = [];
 
-function gitRepo(prefix: string): string {
+function projectDir(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-xproj-${prefix}-`));
 	cleanupRoots.push(dir);
 	fs.writeFileSync(path.join(dir, "README.md"), "# cross-project target\n");
-	execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
-	execFileSync("git", ["-c", "user.email=e2e@bobbit.ai", "-c", "user.name=e2e", "add", "."], { cwd: dir, stdio: "pipe" });
-	execFileSync("git", ["-c", "user.email=e2e@bobbit.ai", "-c", "user.name=e2e", "commit", "-m", "init"], { cwd: dir, stdio: "pipe" });
 	try { return fs.realpathSync(dir); } catch { return dir; }
 }
 
@@ -97,7 +93,7 @@ test.describe("cross-project proposal seed @smoke", () => {
 		defaultPid = (await defaultProjectId())!;
 		const project = await registerProject({
 			name: `xproj-target-${Date.now()}`,
-			rootPath: gitRepo("target"),
+			rootPath: projectDir("target"),
 			seedWorkflows: false,
 		});
 		targetProjectId = project.id;
@@ -373,7 +369,7 @@ test.describe("team-lead parent inject vs cross-project target (PR #1005) @smoke
 		// the parent-inject guard alone.
 		const project = await registerProject({
 			name: `xproj-inject-target-${Date.now()}`,
-			rootPath: gitRepo("inject-target"),
+			rootPath: projectDir("inject-target"),
 			seedWorkflows: false,
 		});
 		injectTargetProjectId = project.id;

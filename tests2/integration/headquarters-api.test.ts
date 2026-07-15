@@ -4,7 +4,7 @@
 // The resolver-level coverage is already in tests2/core/headquarters-config-alias +
 // headquarters-state-migration; this file ports the runtime API/persistence/
 // system-write behaviours against a dedicated src-booted gateway (DI deps).
-import { describe, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -137,15 +137,24 @@ async function createSession(gw: CustomGatewayHandle, projectId: string): Promis
 	return created.body;
 }
 
+let sharedSameRoot: CustomGatewayHandle | undefined;
+
 async function withSameRoot(fn: (gw: CustomGatewayHandle) => Promise<void>, prefix: string, showHeadquarters = true): Promise<void> {
-	const serverRoot = tmpDir(prefix);
-	const gw = await startCustomGateway({ serverRoot, preBoot: seedSameRoot(showHeadquarters) });
-	try {
-		await fn(gw);
-	} finally {
-		try { await gw.shutdown(); } finally { rmBestEffort(serverRoot); }
-	}
+	// These API matrices are read-only apart from creating scoped sessions, which
+	// does not affect project/config assertions. Reuse one dedicated gateway rather
+	// than paying three identical Windows boot/scaffold/config scans.
+	sharedSameRoot ??= await startCustomGateway({ serverRoot: tmpDir(prefix), preBoot: seedSameRoot(showHeadquarters) });
+	await fn(sharedSameRoot);
 }
+
+afterAll(async () => {
+	if (!sharedSameRoot) return;
+	const root = sharedSameRoot.serverRoot;
+	try { await sharedSameRoot.shutdown(); } finally {
+		rmBestEffort(root);
+		sharedSameRoot = undefined;
+	}
+});
 
 describe("Headquarters same-root split API", () => {
 	it("startup preserves a same-root normal project instead of promoting it to Headquarters", async () => {

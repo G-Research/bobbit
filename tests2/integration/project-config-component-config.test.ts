@@ -10,26 +10,16 @@
  *      true iff some component has a non-empty `config.qa_start_command`.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch } from "./_e2e/e2e-setup.js";
+import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-async function registerTmpProject(name: string): Promise<{ id: string; cleanup: () => void }> {
-	const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-"));
-	const res = await apiFetch("/api/projects", {
-		method: "POST",
-		body: JSON.stringify({ name, rootPath: dir }),
-	});
-	expect(res.status).toBe(201);
-	const proj = await res.json();
-	return {
-		id: proj.id,
-		cleanup: () => {
-			apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
-			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-		},
-	};
+let sharedProjectId = "";
+let sharedProjectDir = "";
+
+function sharedProjectFixture(): { id: string; cleanup: () => void } {
+	return { id: sharedProjectId, cleanup: () => { /* reset by the suite afterEach */ } };
 }
 
 const LEGACY_QA_KEYS = [
@@ -43,8 +33,35 @@ const LEGACY_QA_KEYS = [
 ] as const;
 
 test.describe("Component config map (REST API)", () => {
+	test.beforeAll(async () => {
+		sharedProjectDir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-shared-"));
+		const project = await registerProject({
+			name: `comp-cfg-shared-${Date.now()}`,
+			rootPath: sharedProjectDir,
+			components: [{ name: "web", repo: "." }],
+			seedWorkflows: false,
+		});
+		sharedProjectId = project.id;
+	});
+
+	test.afterEach(({ gateway }) => {
+		// Config cases share one registered project but never each other's mutable
+		// component state. This harness-exposed store seam persists the clean baseline.
+		const store = gateway.projectContextManager.getOrCreate(sharedProjectId)?.projectConfigStore;
+		if (!store) return;
+		// Per-test projects previously guaranteed an empty flat config. Restore that
+		// exact baseline as well as components so build_command cannot leak forward.
+		for (const key of Object.keys(store.getAll())) store.remove(key);
+		store.setComponents([{ name: "web", repo: "." }]);
+	});
+
+	test.afterAll(async () => {
+		await apiFetch(`/api/projects/${sharedProjectId}`, { method: "DELETE" }).catch(() => {});
+		try { rmSync(sharedProjectDir, { recursive: true, force: true }); } catch { /* ignore */ }
+	});
+
 	test("PUT structured components[].config round-trips through GET", async () => {
-		const { id, cleanup } = await registerTmpProject(`comp-cfg-${Date.now()}`);
+		const { id, cleanup } = sharedProjectFixture();
 		try {
 			const components = [
 				{
@@ -79,7 +96,7 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("PUT rejects all seven legacy top-level qa_* keys with migration message", async () => {
-		const { id, cleanup } = await registerTmpProject(`comp-cfg-reject-${Date.now()}`);
+		const { id, cleanup } = sharedProjectFixture();
 		try {
 			for (const key of LEGACY_QA_KEYS) {
 				// Use a value type that would otherwise be valid (object for
@@ -104,7 +121,7 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("GET /qa-testing-config returns { configured: boolean } based on any component's config.qa_start_command", async () => {
-		const { id, cleanup } = await registerTmpProject(`comp-cfg-qa-${Date.now()}`);
+		const { id, cleanup } = sharedProjectFixture();
 		try {
 			// Initially nothing configured.
 			let res = await apiFetch(`/api/projects/${id}/qa-testing-config`);
@@ -183,6 +200,7 @@ test.describe("Component config map (REST API)", () => {
 					name: `comp-cfg-post-${Date.now()}`,
 					rootPath: dir,
 					components,
+					__e2e_seed_skip__: true,
 				}),
 			});
 			expect(res.status).toBe(201);
@@ -200,7 +218,7 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("PUT with legacy flat build_command preserves existing components[0].config", async () => {
-		const { id, cleanup } = await registerTmpProject(`comp-cfg-legacy-flat-${Date.now()}`);
+		const { id, cleanup } = sharedProjectFixture();
 		try {
 			// Seed structured components with QA config.
 			const seedConfig = {
@@ -233,7 +251,7 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("PUT rejects components[].config with non-string values", async () => {
-		const { id, cleanup } = await registerTmpProject(`comp-cfg-nonstring-${Date.now()}`);
+		const { id, cleanup } = sharedProjectFixture();
 		try {
 			const res = await apiFetch(`/api/projects/${id}/config`, {
 				method: "PUT",
@@ -251,7 +269,7 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("PUT rejects components[].config with empty key", async () => {
-		const { id, cleanup } = await registerTmpProject(`comp-cfg-emptykey-${Date.now()}`);
+		const { id, cleanup } = sharedProjectFixture();
 		try {
 			const res = await apiFetch(`/api/projects/${id}/config`, {
 				method: "PUT",
@@ -268,7 +286,7 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("PUT rejects components[].config with > 100 entries", async () => {
-		const { id, cleanup } = await registerTmpProject(`comp-cfg-toomany-${Date.now()}`);
+		const { id, cleanup } = sharedProjectFixture();
 		try {
 			const cfg: Record<string, string> = {};
 			for (let i = 0; i <= 100; i++) cfg[`k${i}`] = String(i);
@@ -328,7 +346,7 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("GET /api/projects/:id/config strips legacy top-level qa_* keys", async () => {
-		const { id, cleanup } = await registerTmpProject(`comp-cfg-strip-${Date.now()}`);
+		const { id, cleanup } = sharedProjectFixture();
 		try {
 			// Set components.config (legitimate path).
 			const putRes = await apiFetch(`/api/projects/${id}/config`, {

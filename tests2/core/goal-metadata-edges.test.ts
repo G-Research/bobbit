@@ -190,6 +190,17 @@ describe("writeToolGuardExtension — disabled tools forced to never", () => {
 		const code = fs.readFileSync(withDisable!, "utf-8");
 		assert.ok(code.includes("write"), "guard source should reference the disabled tool");
 	});
+
+	it("reuses one immutable guard for different sessions with identical policy", () => {
+		const first = writeToolGuardExtension("session-a", tm(), undefined, undefined, undefined, [], new Set(["write"]));
+		const second = writeToolGuardExtension("session-b", tm(), undefined, undefined, undefined, [], new Set(["write"]));
+		assert.ok(first);
+		assert.equal(second, first);
+		const code = fs.readFileSync(first!, "utf-8");
+		assert.equal(code.includes("session-a"), false);
+		assert.equal(code.includes("session-b"), false);
+		assert.ok(code.includes("process.env.BOBBIT_SESSION_ID"));
+	});
 });
 
 // ── 2. system-prompt: section ordering ──────────────────────────────────────

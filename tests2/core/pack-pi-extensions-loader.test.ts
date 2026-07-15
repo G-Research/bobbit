@@ -10,6 +10,10 @@ import path from "node:path";
 import type { PackManifest } from "../../src/server/agent/pack-types.js";
 import { PackContributionError } from "../../src/server/agent/pack-contributions.js";
 import {
+	PI_EXTENSION_DISCOVERY_RESULT_MARKER,
+	type PiExtensionDiscoveryBackend,
+} from "../../src/server/agent/pi-extension-discovery.js";
+import {
 	isSafePiExtensionListName,
 	loadPiExtensionContributions,
 	loadPiExtensionContributionsWithDiscovery,
@@ -33,6 +37,16 @@ function manifest(piExtensions: string[]): PackManifest {
 function write(file: string, text = "export default function () {}\n"): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, text, "utf-8");
+}
+
+function discoveryBackend(tools: Array<{ name: string }>): PiExtensionDiscoveryBackend {
+	const result = {
+		stdout: `${PI_EXTENSION_DISCOVERY_RESULT_MARKER}${JSON.stringify({ status: "ok", tools })}\n`,
+		stderr: "",
+		exitCode: 0,
+		timedOut: false,
+	};
+	return { run: async () => result, runSync: () => result };
 }
 
 describe("pi extension contribution loader", () => {
@@ -123,7 +137,10 @@ describe("pi extension contribution loader", () => {
 		const pack = tempPack();
 		try {
 			write(path.join(pack, "pi-extensions", "demo.mjs"), "export default function (pi) { pi.registerTool({ name: 'demo_tool' }); }\n");
-			const [row] = await loadPiExtensionContributionsWithDiscovery(pack, manifest(["demo"]), { trustAccepted: true });
+			const [row] = await loadPiExtensionContributionsWithDiscovery(pack, manifest(["demo"]), {
+				trustAccepted: true,
+				discoveryBackend: discoveryBackend([{ name: "demo_tool" }]),
+			});
 			assert.equal(row.diagnostic.status, "ok");
 			assert.equal(row.discovery.status, "ok");
 			assert.deepEqual(row.discovery.tools.map((tool) => tool.name), ["demo_tool"]);
