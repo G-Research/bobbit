@@ -1630,37 +1630,60 @@ async function getCommitChangedFiles(cwd: string, sha: string, containerId?: str
 	return parseCommitChangedFiles(out);
 }
 
-function parseCommitLogWithShortstat(output: string): CommitInfo[] {
-	const lines = output.split("\n");
+function parseCommitLogWithFiles(output: string): CommitInfo[] {
 	const commits: CommitInfo[] = [];
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		if (!line.includes(COMMIT_LOG_SEPARATOR)) continue;
-		const parts = line.split(COMMIT_LOG_SEPARATOR);
-		if (parts.length < 5) continue;
-		const [sha, shortSha, message, author, timestamp] = parts;
-		let filesChanged = 0, insertions = 0, deletions = 0;
-		for (let j = i + 1; j < lines.length && !lines[j].includes(COMMIT_LOG_SEPARATOR); j++) {
-			const statLine = lines[j].trim();
-			if (!statLine.includes("changed")) continue;
-			const fm = statLine.match(/(\d+) file/);
-			const im = statLine.match(/(\d+) insertion/);
-			const dm = statLine.match(/(\d+) deletion/);
-			if (fm) filesChanged = parseInt(fm[1], 10);
-			if (im) insertions = parseInt(im[1], 10);
-			if (dm) deletions = parseInt(dm[1], 10);
-			break;
+	for (const record of output.split("\x1e")) {
+		const lines = record.split(/\r?\n/).filter(Boolean);
+		const metadata = lines.shift();
+		if (!metadata) continue;
+		const [sha, shortSha, message, author, timestamp] = metadata.split(COMMIT_LOG_SEPARATOR);
+		if (!sha || !shortSha || timestamp === undefined) continue;
+
+		const files: CommitChangedFile[] = [];
+		let insertions = 0;
+		let deletions = 0;
+		for (const line of lines) {
+			if (line.startsWith(":")) {
+				const [rawMetadata, ...paths] = line.split("\t");
+				const rawStatus = rawMetadata.trim().split(/\s+/).at(-1) ?? "";
+				const status = rawStatus.startsWith("R") ? "R" : rawStatus;
+				if (status === "R" && paths[0] && paths[1]) {
+					files.push({ path: paths[1], oldPath: paths[0], status, statusLabel: statusLabelForCommitFile(status) });
+				} else if (paths[0]) {
+					files.push({ path: paths[0], status, statusLabel: statusLabelForCommitFile(status) });
+				}
+				continue;
+			}
+			const numstat = line.match(/^(\d+|-)\t(\d+|-)\t/);
+			if (numstat) {
+				if (numstat[1] !== "-") insertions += Number(numstat[1]);
+				if (numstat[2] !== "-") deletions += Number(numstat[2]);
+			}
 		}
-		commits.push({ sha, shortSha, message, author, timestamp, filesChanged, insertions, deletions, files: [] });
+		commits.push({ sha, shortSha, message, author, timestamp, filesChanged: files.length, insertions, deletions, files });
 	}
 	return commits;
 }
 
-async function attachCommitFiles(commits: CommitInfo[], cwd: string, containerId?: string): Promise<CommitInfo[]> {
-	return Promise.all(commits.map(async commit => ({
-		...commit,
-		files: await getCommitChangedFiles(cwd, commit.sha, containerId),
-	})));
+async function getCommitsWithFiles(
+	cwd: string,
+	rangeArgs: string[],
+	timeout = 5000,
+	containerId?: string,
+): Promise<CommitInfo[]> {
+	// One real Git process returns metadata, statuses, renames, and numstat for
+	// the whole page. The former N-commit fan-out launched `cat-file` + `show`
+	// concurrently per commit; under full-suite contention one child could exceed
+	// its timeout and turn an otherwise valid commits response into HTTP 500.
+	const output = await execGitArgs([
+		"log",
+		`--format=%x1e${COMMIT_LOG_FORMAT}`,
+		"--raw",
+		"--numstat",
+		"--find-renames",
+		...rangeArgs,
+	], cwd, timeout, containerId);
+	return parseCommitLogWithFiles(output);
 }
 
 /**
@@ -11737,8 +11760,7 @@ async function handleApiRoute(
 				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], goal.cwd);
-			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), goal.cwd);
+			const commits = await getCommitsWithFiles(goal.cwd, rangeSpec.split(" ").filter(Boolean));
 			json({ commits });
 		} catch (e: any) {
 			json({ error: "Failed to read git log", detail: e.message }, 500);
@@ -14216,8 +14238,7 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], cwd, 10000, cid);
-			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), cwd, cid);
+			const commits = await getCommitsWithFiles(cwd, rangeSpec.split(" ").filter(Boolean), 10000, cid);
 
 			json({ commits });
 		} catch (e: any) {

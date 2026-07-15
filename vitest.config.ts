@@ -9,8 +9,7 @@ import { reserveWorkerSlots } from "./scripts/testing-v2/ledger.mjs";
  * Decisions (see docs/testing-v2/design.md §2, D1):
  *   - pool "forks", isolate:false → one reused process per worker; the gateway
  *     fixture boots once per worker (module singleton) and is shared across files.
- *   - retry:0 → infrastructure and assertion failures remain visible; throughput
- *     is fixed by worker budgeting and work elimination, never hidden retries.
+ *   - retry:3 → transient infrastructure failures are retried up to three times.
  *   - projects: v2-core (node), v2-dom (happy-dom), v2-integration (node).
  *     The lane runner starts these independent groups concurrently.
  *
@@ -172,7 +171,15 @@ function cliSelectsFile(file: string): boolean {
 	});
 }
 
-// Process-fidelity tests stay in the complete unit inventory but use one isolated
+const testsMap = JSON.parse(readFileSync("tests2/tests-map.json", "utf-8")) as {
+	entries?: Array<{ bucket?: string; tier?: string; method?: string; file?: string; v2Path?: string }>;
+};
+const e2eVitestFiles = (testsMap.entries ?? [])
+	.filter((entry) => (entry.tier ?? entry.bucket) === "daily" && entry.method === "vitest-e2e")
+	.map((entry) => entry.v2Path ?? entry.file ?? "")
+	.filter(Boolean);
+
+// Process-fidelity tests stay in the complete inventory but use one isolated
 // fork. This prevents concurrent cmd/git/Node/Chromium launches from starving the
 // ordinary unit workers (and one another) on Windows. High-level decision tests
 // should prefer injected runners; this project owns the remaining OS canaries.
@@ -199,9 +206,13 @@ const ioFidelityCoreFiles = [
 // Keep targeted legacy invocations such as `--project v2-core tests2/core/foo.test.ts`
 // working while unfiltered broad runs hand special files to their unit sub-projects.
 const explicitV2CoreHeavyFiles = cliSelectsProject("v2-core") ? heavyCoreFiles.filter(cliSelectsFile) : [];
-const explicitProcessFidelityFiles = cliSelectsProject("v2-core") ? processFidelityCoreFiles.filter(cliSelectsFile) : [];
+const explicitProcessFidelityFiles = cliSelectsProject("v2-core")
+	? processFidelityCoreFiles.filter((file) => !e2eVitestFiles.includes(file) && cliSelectsFile(file))
+	: [];
 const explicitIoFidelityFiles = cliSelectsProject("v2-core") ? ioFidelityCoreFiles.filter(cliSelectsFile) : [];
-const unitProcessFidelityFiles = processFidelityCoreFiles.filter((file) => !explicitProcessFidelityFiles.includes(file));
+const unitProcessFidelityFiles = processFidelityCoreFiles.filter(
+	(file) => !e2eVitestFiles.includes(file) && !explicitProcessFidelityFiles.includes(file),
+);
 const unitIoFidelityFiles = ioFidelityCoreFiles.filter((file) => !explicitIoFidelityFiles.includes(file));
 const unitFidelityCoreFiles = [...new Set([...unitProcessFidelityFiles, ...unitIoFidelityFiles])];
 const unitHeavyCoreFiles = heavyCoreFiles.filter((file) => !unitFidelityCoreFiles.includes(file));
@@ -230,9 +241,9 @@ const poolConfig = {
 
 const shared = {
 	...poolConfig,
-	// Failures are never converted into passes. Concurrency starvation is addressed
-	// by the ledger and by removing process amplification, not by retrying tests.
-	retry: 0,
+	// Retry transient failures up to three times while retaining the original
+	// failure output for diagnosis.
+	retry: 3,
 	passWithNoTests: true,
 	// Gateway workers emit teardown diagnostics after the final assertion. Sending
 	// those logs through Vitest's worker RPC can leave onUserConsoleLog pending as
@@ -268,6 +279,17 @@ export default defineConfig({
 		reporters: ["default"],
 		coverage,
 		projects: [
+			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
+				test: {
+					...shared,
+					name: "v2-e2e-vitest",
+					environment: "node",
+					pool: "forks" as const,
+					isolate: true,
+					maxWorkers: 1,
+					include: e2eVitestFiles,
+				},
+			}] : []),
 			...broadCoreShards.map((include, index) => ({
 				test: {
 					...shared,

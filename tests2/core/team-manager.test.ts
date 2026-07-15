@@ -1604,30 +1604,48 @@ describe("TeamManager", () => {
 			assert.equal(restoredAgent?.baseSha, actualSha, "real Git baseSha should survive TeamStore reload");
 		});
 
-		it("should create distinct worktrees for coder, reviewer, and tester", async () => {
-			const fixture = createGitFixture();
-			const { team } = createRepoTeam(fixture);
-
-			await team.startTeam("goal-1");
-			const roles = ["coder", "reviewer", "tester"];
+		describe("distinct multi-role worktrees", () => {
+			const roles = ["coder", "reviewer", "tester"] as const;
+			let fixture: GitFixture;
+			let team: ReturnType<typeof createRepoTeam>["team"];
 			const results: { sessionId: string; worktreePath?: string }[] = [];
 
-			for (const role of roles) {
+			beforeAll(async () => {
+				fixture = createGitFixture();
+				({ team } = createRepoTeam(fixture));
+				await team.startTeam("goal-1");
+			});
+
+			afterAll(async () => {
+				for (const result of results) await team.dismissRole(result.sessionId);
+			});
+
+			async function spawnMember(role: typeof roles[number]): Promise<void> {
 				const result = await team.spawnRole("goal-1", role, `${role} task`);
 				results.push(result);
 				assert.ok(fs.existsSync(result.worktreePath!), `worktree for ${role} should exist`);
 			}
 
-			assert.equal(team.listAgents("goal-1").length, 3);
-			assert.equal(new Set(results.map((result) => result.worktreePath)).size, roles.length);
-			const registeredPaths = new Set(listedWorktreePaths(fixture.repoPath));
-			for (const result of results) {
-				assert.ok(registeredPaths.has(path.resolve(result.worktreePath!)), `${result.worktreePath} should be registered`);
-			}
+			it("creates the coder worktree", async () => {
+				await spawnMember("coder");
+			});
 
-			for (const result of results) {
-				await team.dismissRole(result.sessionId);
-			}
+			it("creates the reviewer worktree", async () => {
+				await spawnMember("reviewer");
+			});
+
+			it("creates the tester worktree", async () => {
+				await spawnMember("tester");
+			});
+
+			it("should create distinct worktrees for coder, reviewer, and tester", () => {
+				assert.equal(team.listAgents("goal-1").length, roles.length);
+				assert.equal(new Set(results.map((result) => result.worktreePath)).size, roles.length);
+				const registeredPaths = new Set(listedWorktreePaths(fixture.repoPath));
+				for (const result of results) {
+					assert.ok(registeredPaths.has(path.resolve(result.worktreePath!)), `${result.worktreePath} should be registered`);
+				}
+			});
 		});
 
 		it("should enforce concurrency limit without real git", async () => {

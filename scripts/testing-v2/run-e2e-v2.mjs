@@ -12,7 +12,7 @@
  * Everything else in that bucket runs here at retries:3 (a TEMPORARY
  * concurrency bridge — see docs/testing-strategy.md "Concurrency & budgets" and
  * the Group B/C notes below; Group A uses node:test's --test-force-exit and has
- * no retry knob wired here), in three groups
+ * no retry knob wired here), in four groups
  * derived mechanically from tests-map.json (so this is reusable, not
  * hand-assembled — it tracks the map, not a frozen list):
  *
@@ -24,6 +24,8 @@
  *   Group C — adapter browser specs: the geometry/journey specs migrated into
  *             tests2/browser/e2e/. Run via playwright-v2 config, project
  *             `browser-v2-e2e` (retries:3 inherited from the v2 config).
+ *   Group D — Vitest real-fidelity suites explicitly classified `vitest-e2e`;
+ *             run in the isolated `v2-e2e-vitest` project.
  *
  * External-service-free guarantee: every group runs with BOBBIT_TEST_NO_EXTERNAL
  * / BOBBIT_TEST_NO_REMOTE set (fail-closed on non-loopback fetch + no real git
@@ -34,7 +36,7 @@
  * head-to-head methodology, and reported per group + total.
  *
  * Usage:
- *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C] [--list] [--json <path>]
+ *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C|D] [--list] [--json <path>]
  */
 import { spawn } from "node:child_process";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -66,11 +68,18 @@ function classifyDaily() {
 	const A = []; // node relocate .test.ts
 	const B = []; // playwright e2e relocate .spec.ts
 	const C = []; // adapter browser specs -> tests2/browser/e2e/<basename>
+	const D = []; // isolated Vitest real-fidelity suites
 	const excluded = { manualIntegration: [], missing: [] };
 	for (const e of daily) {
 		const f = e.file;
 		if (f.startsWith("tests/manual-integration/")) {
 			excluded.manualIntegration.push(f);
+			continue;
+		}
+		if (e.method === "vitest-e2e") {
+			const dest = e.v2Path || f;
+			if (existsSync(join(REPO_ROOT, dest))) D.push(dest.replace(/\\/g, "/"));
+			else excluded.missing.push(dest.replace(/\\/g, "/"));
 			continue;
 		}
 		if (e.method === "adapter") {
@@ -86,7 +95,7 @@ function classifyDaily() {
 		else excluded.missing.push(f); // unexpected shape
 	}
 	// De-dupe Group C (multiple map entries can map to the same physical spec).
-	return { A: [...new Set(A)], B: [...new Set(B)], C: [...new Set(C)], excluded };
+	return { A: [...new Set(A)], B: [...new Set(B)], C: [...new Set(C)], D: [...new Set(D)], excluded };
 }
 
 function dockerAvailable() {
@@ -201,16 +210,36 @@ async function runGroupC(specs) {
 	});
 }
 
+async function runGroupD(specs) {
+	if (specs.length === 0) return { label: "D/vitest", code: 0, wallMs: 0, skipped: true };
+	const vitestCli = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
+	return run(process.execPath, [
+		vitestCli,
+		"run",
+		"--config", "vitest.config.ts",
+		"--project", "v2-e2e-vitest",
+		"--silent=passed-only",
+	], {
+		env: {
+			...EXTERNAL_FREE_ENV,
+			BOBBIT_V2_E2E_VITEST: "1",
+			VITEST_MAX_WORKERS: "1",
+		},
+		label: "D/vitest-real-fidelity",
+		shell: false,
+	});
+}
+
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const { A, B, C, excluded } = classifyDaily();
+	const { A, B, C, D, excluded } = classifyDaily();
 
 	if (args.list) {
-		console.log(JSON.stringify({ A, B, C, excluded }, null, 2));
+		console.log(JSON.stringify({ A, B, C, D, excluded }, null, 2));
 		return;
 	}
 
-	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length}`);
+	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length} D(vitest)=${D.length}`);
 	console.log(`[e2e-v2] excluded: manual-integration=${excluded.manualIntegration.length}${excluded.missing.length ? `, MISSING=${excluded.missing.length} (${excluded.missing.join(", ")})` : ""}`);
 
 	const docker = dockerAvailable();
@@ -227,6 +256,7 @@ async function main() {
 	if (!only || only === "A") results.push(await runGroupA(A));
 	if (!only || only === "B") results.push(await runGroupB(B));
 	if (!only || only === "C") results.push(await runGroupC(C));
+	if (!only || only === "D") results.push(await runGroupD(D));
 
 	const sample = sampler.stop();
 	const wallMs = Math.round(performance.now() - startWall);
@@ -242,7 +272,7 @@ async function main() {
 		peakProcesses: sample.peakProcesses,
 		docker,
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
-		counts: { A: A.length, B: B.length, C: C.length },
+		counts: { A: A.length, B: B.length, C: C.length, D: D.length },
 		excluded,
 		createdAt: new Date().toISOString(),
 	};

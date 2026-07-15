@@ -22,6 +22,12 @@ const upstream = valueAfter("--upstream") ?? "origin/master";
 const outputPath = valueAfter("--json");
 const semanticMapPath = path.join("scripts", "testing-v2", "unit-declaration-semantic-map.json");
 const semanticMappings = JSON.parse(fs.readFileSync(semanticMapPath, "utf-8"));
+const testsMap = JSON.parse(fs.readFileSync(path.join("tests2", "tests-map.json"), "utf-8"));
+const currentE2eVitestFiles = (testsMap.entries ?? [])
+	.filter((entry) => (entry.tier ?? entry.bucket) === "daily" && entry.method === "vitest-e2e")
+	.map((entry) => entry.v2Path ?? entry.file)
+	.filter(Boolean)
+	.sort();
 const mergeBase = execFileSync("git", ["merge-base", "HEAD", upstream], { encoding: "utf-8" }).trim();
 
 function gitText(gitArgs) {
@@ -137,7 +143,8 @@ const report = {
 	addedUnitFiles: addedFiles,
 	formerlyRelocatedE2eFiles: formerlyRelocatedE2e.length,
 	restoredFormerE2eFiles: restoredFormerE2eFiles.length,
-	currentE2eExclusions: 0,
+	currentE2eExclusions: currentE2eVitestFiles.length,
+	currentE2eVitestFiles,
 	baseStaticTestDeclarations: baseDeclarations,
 	currentStaticDeclarationsInBaseFiles: currentDeclarations,
 	allCurrentStaticTestDeclarations: allCurrentDeclarations,

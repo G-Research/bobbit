@@ -7097,10 +7097,10 @@
     },
     {
       "file": "tests/pi-extension-discovery.test.ts",
-      "bucket": "v2-core",
-      "method": "codemod",
+      "bucket": "daily",
+      "method": "vitest-e2e",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "Real child-process, loader, filesystem and confinement probes run in the E2E tier so fixed production probe timeouts are not distorted by unit-lane contention.",
       "migrated": true,
       "v2Path": "tests2/core/pi-extension-discovery.test.ts"
     },

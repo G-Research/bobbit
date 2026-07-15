@@ -19,7 +19,7 @@
 //   - "local up-to-date ... unchanged" => PASSES
 // After the ancestry-aware fix, all four PASS.
 
-import { afterAll, beforeAll, test } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, test } from "vitest";
 import assert from "node:assert/strict";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -35,7 +35,10 @@ type PublishedFixture = { root: string; repoDir: string; remoteDir: string; goal
 let templateRoot: string;
 let templateRemoteDir: string;
 let templateShaA: string;
-let repoFixtures: PublishedFixture[] = [];
+let repoFixture: PublishedFixture;
+let preparedShaB: string | undefined;
+let preparedShaC: string | undefined;
+let preparedHookSentinel: string | undefined;
 
 beforeAll(async () => {
 	templateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verif-nondestructive-sync-template-"));
@@ -50,11 +53,41 @@ beforeAll(async () => {
 	templateShaA = writeAndCommit(seedDir, "feature.txt", "commit A\n", "commit A");
 	gitQuiet(seedDir, ["remote", "add", "origin", templateRemoteDir]);
 	gitQuiet(seedDir, ["push", "origin", "master", GOAL_BRANCH]);
-	repoFixtures = await Promise.all(Array.from({ length: 5 }, () => makePublishedGoalBranchRepo()));
+});
+
+beforeEach(async ({ task }) => {
+	// Keep real repository/scenario construction outside each test's 30-second
+	// assertion budget. Aggregating all fixtures in beforeAll exceeded its hook
+	// budget, while leaving the pusher clone inside a test exceeded its test
+	// budget under the complete Windows topology.
+	repoFixture = await makePublishedGoalBranchRepo();
+	preparedShaB = undefined;
+	preparedShaC = undefined;
+	preparedHookSentinel = undefined;
+
+	if (task.name.startsWith("local-ahead goal worktree")) {
+		preparedShaB = writeAndCommit(repoFixture.repoDir, "feature.txt", "commit A\ncommit B (local only)\n", "commit B local only");
+	} else if (task.name.startsWith("local-behind goal worktree")) {
+		preparedShaC = pushExtraOriginCommit(repoFixture.root, repoFixture.remoteDir, repoFixture.goalBranch, "feature.txt", "commit A\ncommit C (origin)\n", "commit C on origin");
+	} else if (task.name.startsWith("diverged goal worktree")) {
+		preparedShaB = writeAndCommit(repoFixture.repoDir, "local.txt", "local commit B\n", "commit B local only");
+		preparedShaC = pushExtraOriginCommit(repoFixture.root, repoFixture.remoteDir, repoFixture.goalBranch, "origin.txt", "origin commit C\n", "commit C on origin");
+	} else if (task.name.startsWith("local-behind fast-forward")) {
+		const hooksDir = path.join(repoFixture.repoDir, ".git", "hooks");
+		fs.mkdirSync(hooksDir, { recursive: true });
+		const hookPath = path.join(hooksDir, "post-merge");
+		preparedHookSentinel = path.join(repoFixture.root, "post-merge-hook-sentinel.txt");
+		fs.writeFileSync(hookPath, `#!/bin/sh\necho ran > "${preparedHookSentinel.replace(/\\/g, "/")}"\n`);
+		fs.chmodSync(hookPath, 0o755);
+		preparedShaC = pushExtraOriginCommit(repoFixture.root, repoFixture.remoteDir, repoFixture.goalBranch, "feature.txt", "commit A\ncommit C (origin)\n", "commit C on origin");
+	}
+});
+
+afterEach(() => {
+	fs.rmSync(repoFixture.root, { recursive: true, force: true });
 });
 
 afterAll(() => {
-	for (const fixture of repoFixtures) fs.rmSync(fixture.root, { recursive: true, force: true });
 	fs.rmSync(templateRoot, { recursive: true, force: true });
 });
 
@@ -254,11 +287,11 @@ async function runVerificationCapturingWarnings(
 }
 
 test("local-ahead goal worktree: un-pushed local commit B is NOT discarded by pre-verification sync", async () => {
-	const { root, repoDir, goalBranch, shaA } = repoFixtures[0]!;
+	const { repoDir, goalBranch, shaA } = repoFixture;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
-		// Add a LOCAL-ONLY commit B on top of the published A (worktree now AHEAD of origin).
-		const shaB = writeAndCommit(repoDir, "feature.txt", "commit A\ncommit B (local only)\n", "commit B local only");
+		// A LOCAL-ONLY commit B was prepared on top of published A.
+		const shaB = preparedShaB!;
 		assert.notEqual(shaB, shaA, "fixture precondition: B must differ from A");
 
 		const { head } = await runVerificationCapturingWarnings(harness, signal, repoDir, goalBranch);
@@ -269,16 +302,16 @@ test("local-ahead goal worktree: un-pushed local commit B is NOT discarded by pr
 			`NONDESTRUCTIVE_SYNC_REPRO: local-ahead commit B was discarded by pre-verification reset (HEAD=${head} expected ${shaB}, origin tip A=${shaA})`,
 		);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		// Per-test repository cleanup is owned by afterEach.
 	}
 });
 
 test("local-behind goal worktree: sync fast-forwards HEAD to origin tip (published-work behaviour preserved)", async () => {
-	const { root, repoDir, remoteDir, goalBranch, shaA } = repoFixtures[1]!;
+	const { repoDir, goalBranch, shaA } = repoFixture;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
-		// Advance origin ahead with commit C; local worktree stays at A (behind, nothing unique).
-		const shaC = pushExtraOriginCommit(root, remoteDir, goalBranch, "feature.txt", "commit A\ncommit C (origin)\n", "commit C on origin");
+		// Origin was prepared one commit ahead while local remains at A.
+		const shaC = preparedShaC!;
 		assert.equal(git(repoDir, ["rev-parse", "HEAD"]), shaA, "fixture precondition: local still at A before sync");
 
 		const { head, warnings } = await runVerificationCapturingWarnings(harness, signal, repoDir, goalBranch);
@@ -294,18 +327,17 @@ test("local-behind goal worktree: sync fast-forwards HEAD to origin tip (publish
 			`local-behind fast-forward must not emit divergence/sync-failure warnings:\n${warnings}`,
 		);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		// Per-test repository cleanup is owned by afterEach.
 	}
 });
 
 test("diverged goal worktree: sync keeps local commit B and surfaces a warning (no hard reset)", async () => {
-	const { root, repoDir, remoteDir, goalBranch, shaA } = repoFixtures[2]!;
+	const { repoDir, goalBranch, shaA } = repoFixture;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
-		// Local commit B on top of A (not pushed).
-		const shaB = writeAndCommit(repoDir, "local.txt", "local commit B\n", "commit B local only");
-		// Origin advances to a DIFFERENT commit C on top of A → local and origin have diverged.
-		const shaC = pushExtraOriginCommit(root, remoteDir, goalBranch, "origin.txt", "origin commit C\n", "commit C on origin");
+		// Local B and a different origin C were prepared on top of A.
+		const shaB = preparedShaB!;
+		const shaC = preparedShaC!;
 		assert.notEqual(shaB, shaC, "fixture precondition: B and C must differ");
 		assert.notEqual(shaB, shaA, "fixture precondition: B must differ from A");
 
@@ -322,27 +354,18 @@ test("diverged goal worktree: sync keeps local commit B and surfaces a warning (
 			`diverged sync must surface a visible warning that local commits were kept (diverged-kept-local); warnings:\n${warnings}`,
 		);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		// Per-test repository cleanup is owned by afterEach.
 	}
 });
 
 test("local-behind fast-forward does NOT execute repo-local git hooks (reset --hard, not merge --ff-only)", async () => {
-	const { root, repoDir, remoteDir, goalBranch, shaA } = repoFixtures[3]!;
+	const { repoDir, goalBranch, shaA } = repoFixture;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
-		// Install an executable post-merge hook that writes a sentinel. `git merge
-		// --ff-only` would run this hook (local code-execution vector); `git reset
-		// --hard` must NOT. On Windows the hook runs under Git Bash via the shebang.
-		const hooksDir = path.join(repoDir, ".git", "hooks");
-		fs.mkdirSync(hooksDir, { recursive: true });
-		const hookPath = path.join(hooksDir, "post-merge");
-		const sentinelPath = path.join(root, "post-merge-hook-sentinel.txt");
-		const sentinelForShell = sentinelPath.replace(/\\/g, "/");
-		fs.writeFileSync(hookPath, `#!/bin/sh\necho ran > "${sentinelForShell}"\n`);
-		fs.chmodSync(hookPath, 0o755);
-
-		// Advance origin ahead with commit C; local stays at A (behind → fast-forward).
-		const shaC = pushExtraOriginCommit(root, remoteDir, goalBranch, "feature.txt", "commit A\ncommit C (origin)\n", "commit C on origin");
+		// An executable post-merge hook and origin commit C were prepared. A
+		// merge would write the sentinel; reset --hard must not.
+		const sentinelPath = preparedHookSentinel!;
+		const shaC = preparedShaC!;
 		assert.equal(git(repoDir, ["rev-parse", "HEAD"]), shaA, "fixture precondition: local still at A before sync");
 
 		const { head } = await runVerificationCapturingWarnings(harness, signal, repoDir, goalBranch);
@@ -358,12 +381,12 @@ test("local-behind fast-forward does NOT execute repo-local git hooks (reset --h
 			`SYNC_RAN_GIT_HOOK: pre-verification fast-forward executed a repo-local post-merge hook (sentinel written at ${sentinelPath}) — sync must use "git reset --hard", which does not run hooks`,
 		);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		// Per-test repository cleanup is owned by afterEach.
 	}
 });
 
 test("up-to-date goal worktree: sync leaves HEAD unchanged when local == origin", async () => {
-	const { root, repoDir, goalBranch, shaA } = repoFixtures[4]!;
+	const { repoDir, goalBranch, shaA } = repoFixture;
 	const { harness, signal } = makeHarnessFixture("origin/master");
 	try {
 		// Local HEAD == origin/<goalBranch> == A.
@@ -378,6 +401,6 @@ test("up-to-date goal worktree: sync leaves HEAD unchanged when local == origin"
 			`up-to-date sync must not emit divergence/sync-failure warnings:\n${warnings}`,
 		);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		// Per-test repository cleanup is owned by afterEach.
 	}
 });

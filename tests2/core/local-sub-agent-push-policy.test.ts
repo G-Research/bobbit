@@ -218,22 +218,36 @@ describe("host worktree push policy", () => {
 		}
 	});
 
-	it("worktree pool claim freshens without publishing the claimed branch", async () => {
-		const { root, repo, origin } = await makeRemoteBackedRepo();
-		const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
-		delete process.env.BOBBIT_TEST_NO_PUSH;
-		let pool: WorktreePool | undefined;
-		try {
-			const poolBranch = "pool/_pool-local-only-policy";
-			const targetBranch = "session/pool-local-only";
-			const poolWorktree = path.join(root, "repo-wt", "pool-_pool-local-only-policy");
-			await git(repo, ["worktree", "add", "-b", poolBranch, poolWorktree, "origin/master"]);
+	describe("worktree pool local-only claim", () => {
+		let root: string;
+		let origin: string;
+		let pool: WorktreePool;
+		let commands: string[];
+		let originalNoPush: string | undefined;
 
-			const { commands, runner } = recordingRealGitRunner();
-			pool = new WorktreePool({ repoPath: repo, targetSize: 0, commandRunner: runner });
+		beforeAll(async () => {
+			const fixture = await makeRemoteBackedRepo();
+			({ root, origin } = fixture);
+			originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+			delete process.env.BOBBIT_TEST_NO_PUSH;
+			const poolBranch = "pool/_pool-local-only-policy";
+			const poolWorktree = path.join(root, "repo-wt", "pool-_pool-local-only-policy");
+			await git(fixture.repo, ["worktree", "add", "-b", poolBranch, poolWorktree, "origin/master"]);
+			const recorded = recordingRealGitRunner();
+			commands = recorded.commands;
+			pool = new WorktreePool({ repoPath: fixture.repo, targetSize: 0, commandRunner: recorded.runner });
 			pool.registerExternalEntry(poolBranch, poolWorktree);
 			commands.length = 0;
+		});
 
+		afterAll(async () => {
+			restoreEnv("BOBBIT_TEST_NO_PUSH", originalNoPush);
+			await pool?.stop();
+			if (root && fs.existsSync(root)) cleanup(root);
+		});
+
+		it("worktree pool claim freshens without publishing the claimed branch", async () => {
+			const targetBranch = "session/pool-local-only";
 			const claim = await pool.claim(targetBranch);
 			await pool.stop();
 
@@ -245,11 +259,7 @@ describe("host worktree push policy", () => {
 				!commands.includes(`branch --set-upstream-to=origin/${targetBranch} ${targetBranch}`),
 				`pool claim/freshen must not set upstream to origin/${targetBranch}; commands:\n${commands.join("\n")}`,
 			);
-		} finally {
-			restoreEnv("BOBBIT_TEST_NO_PUSH", originalNoPush);
-			await pool?.stop();
-			cleanup(root);
-		}
+		});
 	});
 
 	it("createWorktreeSet passes through publish policy and skipPush remains local-only", async () => {

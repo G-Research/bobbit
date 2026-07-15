@@ -1153,6 +1153,17 @@ test("resume can finalize from a durable exit file produced by a surviving comma
 	const child = spawnFixtureChild("retained-exit", [outFile, exitFile, "120", "probe:after-restart"]);
 	try {
 		writeIdentityFile(pidFile, child.pid, "smoke-nonce");
+		// This case owns the already-durable-exit recovery branch. Waiting for the
+		// real child to finish before resume prevents machine scheduling delay from
+		// consuming the command's two-second runtime budget; live-command waiting is
+		// covered independently by the gate-signal restart test above.
+		if (child.exitCode === null) {
+			await new Promise<void>((resolve, reject) => {
+				child.once("exit", () => resolve());
+				child.once("error", reject);
+			});
+		}
+		assert.equal(fs.existsSync(exitFile), true, `${MARKER}: fixture child must durably publish its exit code before recovery.`);
 		persistActive(stateDir, activeVerification("sig-durable-exit-smoke", [commandStepFixture({
 			name: "Durable exit smoke",
 			startedAt,
