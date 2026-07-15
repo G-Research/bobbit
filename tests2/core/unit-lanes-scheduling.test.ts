@@ -59,6 +59,19 @@ describe("unit-lanes orchestrator scheduling", () => {
 		assert.equal(plan.used, 8, "the full reservation must do useful work");
 	});
 
+	it("keeps concurrent orchestrator logs in independent run directories", async () => {
+		const { resolveUnitLaneLogDir } = await loadLanes();
+		const repoRoot = join(isolatedTmp, "repo");
+		const first = resolveUnitLaneLogDir({ repoRoot, runToken: "101-1000" });
+		const second = resolveUnitLaneLogDir({ repoRoot, runToken: "202-1000" });
+		assert.notEqual(first, second);
+		assert.equal(first, join(repoRoot, ".profiles", "unit-lanes", "run-101-1000"));
+		assert.equal(
+			resolveUnitLaneLogDir({ repoRoot, override: "custom-logs", runToken: "ignored" }),
+			join(repoRoot, "custom-logs"),
+		);
+	});
+
 	it("never oversubscribes a grant and queues only when fewer workers than jobs exist", async () => {
 		const { planLaneWorkers } = await loadLanes();
 		for (const grant of [1, 2, 3, 4, 6, 8, 12]) {
