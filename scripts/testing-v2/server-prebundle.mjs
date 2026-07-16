@@ -141,9 +141,8 @@ function graphDigest(manifest) {
 	})).digest("hex");
 }
 
-export function validateServerPrebundle(dir, key) {
+export function validateServerPrebundleManifest(manifest, key, readArtifact) {
 	try {
-		const manifest = readManifest(dir);
 		if (manifest.schema !== BUNDLE_SCHEMA || manifest.key !== key) return false;
 		if (typeof manifest.runtime !== "string" || !manifest.entries || !manifest.files) return false;
 		if (typeof manifest.entries["tests2/harness/server-runtime-entry.ts"] !== "string") return false;
@@ -160,16 +159,24 @@ export function validateServerPrebundle(dir, key) {
 		}
 
 		for (const [relativeFile, metadata] of Object.entries(manifest.files)) {
-			if (!metadata || typeof metadata.sha256 !== "string" || typeof metadata.bytes !== "number") return false;
-			const artifact = join(dir, ...relativeFile.split("/"));
-			if (!existsSync(artifact) || statSync(artifact).size !== metadata.bytes) return false;
-			if (metadata.bytes < 0 || fileDigest(artifact) !== metadata.sha256) return false;
-			if (/\.mjs$/.test(relativeFile)) {
-				const mapFile = `${relativeFile}.map`;
-				if (!manifest.files[mapFile]) return false;
-			}
+			if (!metadata || typeof metadata.sha256 !== "string" || typeof metadata.bytes !== "number" || metadata.bytes < 0) return false;
+			const artifact = readArtifact(relativeFile);
+			if (!artifact || artifact.bytes !== metadata.bytes || artifact.sha256 !== metadata.sha256) return false;
+			if (/\.mjs$/.test(relativeFile) && !manifest.files[`${relativeFile}.map`]) return false;
 		}
 		return true;
+	} catch {
+		return false;
+	}
+}
+
+export function validateServerPrebundle(dir, key) {
+	try {
+		return validateServerPrebundleManifest(readManifest(dir), key, (relativeFile) => {
+			const artifact = join(dir, ...relativeFile.split("/"));
+			if (!existsSync(artifact)) return undefined;
+			return { bytes: statSync(artifact).size, sha256: fileDigest(artifact) };
+		});
 	} catch {
 		return false;
 	}

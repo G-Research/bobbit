@@ -1,50 +1,66 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+	existsSync,
 	mkdtempSync,
 	mkdirSync,
 	readFileSync,
 	readdirSync,
 	renameSync,
 	rmSync,
-	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import {
 	computeServerPrebundleKey,
 	ensureServerTestPrebundle,
 	serverPrebundleResolver,
 	validateServerPrebundle,
+	validateServerPrebundleManifest,
 } from "../../scripts/testing-v2/server-prebundle.mjs";
 
-const sha256 = (file: string): string => createHash("sha256").update(readFileSync(file)).digest("hex");
-const graphSha256 = (manifest: Record<string, unknown>): string => createHash("sha256").update(JSON.stringify({
+const BASE_SERVER = "export { sharedValue as value } from '../shared/value.js';\n";
+const BASE_SHARED = "import { foundationValue } from '../foundation/value.js';\nexport const sharedValue = foundationValue;\n";
+const BASE_FOUNDATION = "export const foundationValue = 1;\n";
+const BASE_UI = "export const unrelated = 1;\n";
+
+const sha256 = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
+const graphSha256 = (manifest: Record<string, unknown>): string => sha256(JSON.stringify({
 	runtime: manifest.runtime,
 	entries: manifest.entries,
 	files: manifest.files,
-})).digest("hex");
+}));
 
-function fakeRepo(): string {
-	const root = mkdtempSync(join(tmpdir(), "bobbit-prebundle-key-"));
+type ArtifactFixture = {
+	manifest: Record<string, any>;
+	contents: Record<string, string>;
+};
+
+function writeFakeRepo(root: string): void {
 	mkdirSync(join(root, "src", "server"), { recursive: true });
 	mkdirSync(join(root, "src", "shared"), { recursive: true });
 	mkdirSync(join(root, "src", "foundation"), { recursive: true });
 	mkdirSync(join(root, "src", "ui"), { recursive: true });
 	mkdirSync(join(root, "tests2", "harness"), { recursive: true });
-	writeFileSync(join(root, "src", "server", "server.ts"), "export { sharedValue as value } from '../shared/value.js';\n");
-	writeFileSync(join(root, "src", "shared", "value.ts"), "import { foundationValue } from '../foundation/value.js';\nexport const sharedValue = foundationValue;\n");
-	writeFileSync(join(root, "src", "foundation", "value.ts"), "export const foundationValue = 1;\n");
-	writeFileSync(join(root, "src", "ui", "unrelated.ts"), "export const unrelated = 1;\n");
+	writeFileSync(join(root, "src", "server", "server.ts"), BASE_SERVER);
+	writeFileSync(join(root, "src", "shared", "value.ts"), BASE_SHARED);
+	writeFileSync(join(root, "src", "foundation", "value.ts"), BASE_FOUNDATION);
+	writeFileSync(join(root, "src", "ui", "unrelated.ts"), BASE_UI);
 	writeFileSync(join(root, "tests2", "harness", "server-runtime-entry.ts"), "export * as server from '../../src/server/server.js';\n");
 	writeFileSync(join(root, "tsconfig.server.json"), "{}\n");
 	writeFileSync(join(root, "package-lock.json"), "{}\n");
-	return root;
 }
 
-function writeSchema3Artifact(dir: string, key = "key") {
+function resetFakeRepo(root: string): void {
+	writeFileSync(join(root, "src", "server", "server.ts"), BASE_SERVER);
+	writeFileSync(join(root, "src", "shared", "value.ts"), BASE_SHARED);
+	writeFileSync(join(root, "src", "foundation", "value.ts"), BASE_FOUNDATION);
+	writeFileSync(join(root, "src", "ui", "unrelated.ts"), BASE_UI);
+}
+
+function schema3Fixture(key: string): ArtifactFixture {
 	const contents: Record<string, string> = {
 		"entries/runtime.mjs": "r".repeat(2048),
 		"entries/server.mjs": "e".repeat(256),
@@ -53,20 +69,15 @@ function writeSchema3Artifact(dir: string, key = "key") {
 		"entries/server.mjs.map": "{\"version\":3,\"sources\":[\"server.ts\"]}\n",
 		"chunks/shared.mjs.map": "{\"version\":3,\"sources\":[\"shared.ts\"]}\n",
 	};
-	for (const [relativeFile, content] of Object.entries(contents)) {
-		const file = join(dir, ...relativeFile.split("/"));
-		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, content);
-	}
 	const entries = {
 		"tests2/harness/server-runtime-entry.ts": "entries/runtime.mjs",
 		"src/server/server.ts": "entries/server.mjs",
 	};
-	const files = Object.fromEntries(Object.keys(contents).sort().map((relativeFile) => {
-		const file = join(dir, ...relativeFile.split("/"));
-		return [relativeFile, { bytes: statSync(file).size, sha256: sha256(file) }];
-	}));
-	const manifest: Record<string, unknown> = {
+	const files = Object.fromEntries(Object.keys(contents).sort().map((relativeFile) => [
+		relativeFile,
+		{ bytes: Buffer.byteLength(contents[relativeFile]), sha256: sha256(contents[relativeFile]) },
+	]));
+	const manifest: Record<string, any> = {
 		schema: 3,
 		key,
 		runtime: entries["tests2/harness/server-runtime-entry.ts"],
@@ -76,114 +87,123 @@ function writeSchema3Artifact(dir: string, key = "key") {
 		fileCount: Object.keys(files).length,
 	};
 	manifest.graphSha256 = graphSha256(manifest);
-	writeFileSync(join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 	return { manifest, contents };
 }
 
-function rewriteManifest(dir: string, update: (manifest: Record<string, any>) => void): void {
-	const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
-	update(manifest);
-	manifest.graphSha256 = graphSha256(manifest);
-	writeFileSync(join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+function writeArtifact(dir: string, fixture: ArtifactFixture): void {
+	for (const [relativeFile, content] of Object.entries(fixture.contents)) {
+		const file = join(dir, ...relativeFile.split("/"));
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, content);
+	}
+	writeFileSync(join(dir, "manifest.json"), `${JSON.stringify(fixture.manifest, null, 2)}\n`);
 }
 
-function corruptWithoutResizing(file: string): void {
-	const bytes = readFileSync(file);
-	bytes[0] ^= 0xff;
-	writeFileSync(file, bytes);
-}
-
-describe("server test prebundle cache", () => {
-	it("changes the content key when server source changes", () => {
-		const root = fakeRepo();
-		try {
-			const before = computeServerPrebundleKey(root);
-			writeFileSync(join(root, "src", "server", "server.ts"), "export const value = 2;\n");
-			const after = computeServerPrebundleKey(root);
-			assert.notEqual(after, before);
-		} finally { rmSync(root, { recursive: true, force: true }); }
+function validatesFixture(fixture: ArtifactFixture, key = fixture.manifest.key): boolean {
+	return validateServerPrebundleManifest(fixture.manifest, key, (relativeFile: string) => {
+		const content = fixture.contents[relativeFile];
+		return content === undefined
+			? undefined
+			: { bytes: Buffer.byteLength(content), sha256: sha256(content) };
 	});
+}
 
-	it("invalidates the key and existing cache when a bundled shared source changes", () => {
-		const root = fakeRepo();
-		const cacheRoot = mkdtempSync(join(tmpdir(), "bobbit-prebundle-shared-key-"));
+function cloneFixture(fixture: ArtifactFixture): ArtifactFixture {
+	return structuredClone(fixture);
+}
+
+function refreshGraph(fixture: ArtifactFixture): void {
+	fixture.manifest.graphSha256 = graphSha256(fixture.manifest);
+}
+
+let workspace: string;
+let repoRoot: string;
+let cacheRoot: string;
+let artifactDir: string;
+let key: string;
+let fixture: ArtifactFixture;
+
+beforeAll(() => {
+	workspace = mkdtempSync(join(tmpdir(), "bobbit-prebundle-cache-"));
+	repoRoot = join(workspace, "repo");
+	cacheRoot = join(workspace, "cache");
+	artifactDir = join(workspace, "artifact");
+	writeFakeRepo(repoRoot);
+	key = computeServerPrebundleKey(repoRoot);
+	fixture = schema3Fixture(key);
+	writeArtifact(artifactDir, fixture);
+	mkdirSync(cacheRoot);
+});
+
+afterAll(() => {
+	rmSync(workspace, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+});
+
+describe.sequential("server test prebundle cache", () => {
+	it("keys the exact bundled source closure by content", () => {
 		try {
-			const before = computeServerPrebundleKey(root);
-			const cached = join(cacheRoot, before);
-			writeSchema3Artifact(cached, before);
-			assert.equal(validateServerPrebundle(cached, before), true);
+			const baseline = computeServerPrebundleKey(repoRoot);
 
-			writeFileSync(join(root, "src", "shared", "value.ts"), "import { foundationValue } from '../foundation/value.js';\nexport const sharedValue = foundationValue + 1;\n");
-			const afterShared = computeServerPrebundleKey(root);
-			assert.notEqual(afterShared, before, "bundled src/shared changes must produce a new cache key");
-			assert.equal(validateServerPrebundle(cached, afterShared), false, "the old artifact must not validate for the new source graph");
+			writeFileSync(join(repoRoot, "src", "server", "server.ts"), "export const value = 2;\n");
+			assert.notEqual(computeServerPrebundleKey(repoRoot), baseline, "server source changes must change the key");
+			writeFileSync(join(repoRoot, "src", "server", "server.ts"), BASE_SERVER);
 
-			writeFileSync(join(root, "src", "foundation", "value.ts"), "export const foundationValue = 2;\n");
-			const afterTransitive = computeServerPrebundleKey(root);
+			writeFileSync(join(repoRoot, "src", "shared", "value.ts"), "import { foundationValue } from '../foundation/value.js';\nexport const sharedValue = foundationValue + 1;\n");
+			const afterShared = computeServerPrebundleKey(repoRoot);
+			assert.notEqual(afterShared, baseline, "bundled src/shared changes must produce a new cache key");
+
+			writeFileSync(join(repoRoot, "src", "foundation", "value.ts"), "export const foundationValue = 2;\n");
+			const afterTransitive = computeServerPrebundleKey(repoRoot);
 			assert.notEqual(afterTransitive, afterShared, "transitive repo source families must be part of the key");
 
-			writeFileSync(join(root, "src", "ui", "unrelated.ts"), "export const unrelated = 2;\n");
-			assert.equal(computeServerPrebundleKey(root), afterTransitive, "unrelated source families must not balloon the content key");
+			writeFileSync(join(repoRoot, "src", "ui", "unrelated.ts"), "export const unrelated = 2;\n");
+			assert.equal(computeServerPrebundleKey(repoRoot), afterTransitive, "unrelated source families must not balloon the content key");
 		} finally {
-			rmSync(root, { recursive: true, force: true });
-			rmSync(cacheRoot, { recursive: true, force: true });
+			resetFakeRepo(repoRoot);
 		}
 	});
 
 	it("requires a complete schema 3 entry graph with source maps and hashes", () => {
-		const root = mkdtempSync(join(tmpdir(), "bobbit-prebundle-schema3-"));
-		try {
-			assert.equal(validateServerPrebundle(root, "key"), false, "missing artifacts must not be reused");
-			writeSchema3Artifact(root);
-			assert.equal(validateServerPrebundle(root, "key"), true);
-			assert.equal(validateServerPrebundle(root, "stale-key"), false, "stale keys must not be reused");
+		assert.equal(validateServerPrebundle(join(workspace, "missing"), key), false, "missing artifacts must not be reused");
+		assert.equal(validatesFixture(fixture), true);
+		assert.equal(validatesFixture(fixture, "stale-key"), false, "stale keys must not be reused");
 
-			writeFileSync(join(root, "entries", "runtime.mjs"), "x");
-			rewriteManifest(root, (manifest) => {
-				manifest.files["entries/runtime.mjs"] = {
-					bytes: 1,
-					sha256: sha256(join(root, "entries", "runtime.mjs")),
-				};
-			});
-			assert.equal(validateServerPrebundle(root, "key"), false, "truncated runtime entries must not be reused");
+		const truncated = cloneFixture(fixture);
+		truncated.contents[truncated.manifest.runtime] = "x";
+		truncated.manifest.files[truncated.manifest.runtime] = { bytes: 1, sha256: sha256("x") };
+		refreshGraph(truncated);
+		assert.equal(validatesFixture(truncated), false, "truncated runtime entries must not be reused");
 
-			writeSchema3Artifact(root);
-			rewriteManifest(root, (manifest) => { manifest.schema = 2; });
-			assert.equal(validateServerPrebundle(root, "key"), false, "schema 2 artifacts must not be reused");
+		const oldSchema = cloneFixture(fixture);
+		oldSchema.manifest.schema = 2;
+		assert.equal(validatesFixture(oldSchema), false, "schema 2 artifacts must not be reused");
 
-			writeSchema3Artifact(root);
-			rewriteManifest(root, (manifest) => {
-				delete manifest.files["entries/server.mjs.map"];
-				manifest.fileCount = Object.keys(manifest.files).length;
-			});
-			assert.equal(validateServerPrebundle(root, "key"), false, "every emitted entry must declare its source map");
+		const missingMap = cloneFixture(fixture);
+		delete missingMap.manifest.files["entries/server.mjs.map"];
+		missingMap.manifest.fileCount = Object.keys(missingMap.manifest.files).length;
+		refreshGraph(missingMap);
+		assert.equal(validatesFixture(missingMap), false, "every emitted entry must declare its source map");
 
-			writeSchema3Artifact(root);
-			rewriteManifest(root, (manifest) => { delete manifest.files["entries/server.mjs"].sha256; });
-			assert.equal(validateServerPrebundle(root, "key"), false, "every emitted file must declare its hash");
-		} finally { rmSync(root, { recursive: true, force: true }); }
+		const missingHash = cloneFixture(fixture);
+		delete missingHash.manifest.files["entries/server.mjs"].sha256;
+		refreshGraph(missingHash);
+		assert.equal(validatesFixture(missingHash), false, "every emitted file must declare its hash");
 	});
 
 	it("rejects corrupted entry, chunk, and source-map artifacts", () => {
 		for (const relativeFile of ["entries/server.mjs", "chunks/shared.mjs", "chunks/shared.mjs.map"]) {
-			const root = mkdtempSync(join(tmpdir(), "bobbit-prebundle-corrupt-"));
-			try {
-				writeSchema3Artifact(root);
-				corruptWithoutResizing(join(root, ...relativeFile.split("/")));
-				assert.equal(validateServerPrebundle(root, "key"), false, `${relativeFile} hash corruption must be rejected`);
-			} finally { rmSync(root, { recursive: true, force: true }); }
+			const corrupted = cloneFixture(fixture);
+			corrupted.contents[relativeFile] = `!${corrupted.contents[relativeFile].slice(1)}`;
+			assert.equal(validatesFixture(corrupted), false, `${relativeFile} hash corruption must be rejected`);
 		}
 	});
-});
 
-describe("server test prebundle split graph", () => {
 	it("lets concurrent consumers reuse one atomically published cache", async () => {
-		const repoRoot = fakeRepo();
-		const cacheRoot = mkdtempSync(join(tmpdir(), "bobbit-prebundle-concurrent-"));
-		const key = computeServerPrebundleKey(repoRoot);
-		const lockDir = join(cacheRoot, `.lock-${key}`);
-		mkdirSync(lockDir);
-		try {
+		const finalDir = join(cacheRoot, key);
+		let results;
+		if (!existsSync(finalDir)) {
+			const lockDir = join(cacheRoot, `.lock-${key}`);
+			mkdirSync(lockDir);
 			const consumers = Promise.all([
 				ensureServerTestPrebundle({ repoRoot, cacheRoot }),
 				ensureServerTestPrebundle({ repoRoot, cacheRoot }),
@@ -191,57 +211,51 @@ describe("server test prebundle split graph", () => {
 			await new Promise<void>((resolve, reject) => {
 				setTimeout(() => {
 					try {
-						const publicationDir = join(cacheRoot, `.publisher-${key}`);
-						writeSchema3Artifact(publicationDir, key);
-						renameSync(publicationDir, join(cacheRoot, key));
+						renameSync(artifactDir, finalDir);
+						artifactDir = finalDir;
 						rmSync(lockDir, { recursive: true, force: true });
 						resolve();
 					} catch (error) { reject(error); }
 				}, 10);
 			});
-			const results = await consumers;
-			assert.deepEqual(results.map((result) => result.cacheHit), [true, true]);
-			assert.equal(results[0].key, results[1].key);
-			assert.equal(results[0].bundlePath, results[1].bundlePath);
-			assert.equal(validateServerPrebundle(results[0].cacheDir, key), true);
-			assert.equal(readdirSync(cacheRoot).some((name) => name.startsWith(".tmp-") || name.startsWith(".lock-")), false);
-		} finally {
-			rmSync(repoRoot, { recursive: true, force: true });
-			rmSync(cacheRoot, { recursive: true, force: true });
+			results = await consumers;
+		} else {
+			results = await Promise.all([
+				ensureServerTestPrebundle({ repoRoot, cacheRoot }),
+				ensureServerTestPrebundle({ repoRoot, cacheRoot }),
+			]);
 		}
+		assert.deepEqual(results.map((result) => result.cacheHit), [true, true]);
+		assert.equal(results[0].key, results[1].key);
+		assert.equal(results[0].bundlePath, results[1].bundlePath);
+		assert.equal(validateServerPrebundle(results[0].cacheDir, key), true);
+		assert.equal(readdirSync(cacheRoot).some((name) => name.startsWith(".tmp-") || name.startsWith(".lock-")), false);
 	});
 
 	it("records each entry, shared chunk, source map, byte count, and SHA-256", () => {
-		const root = mkdtempSync(join(tmpdir(), "bobbit-prebundle-manifest-"));
-		try {
-			const { manifest } = writeSchema3Artifact(root);
-			const entries = manifest.entries as Record<string, string>;
-			const files = manifest.files as Record<string, { bytes: number; sha256: string }>;
-			assert.equal(manifest.schema, 3);
-			assert.equal(manifest.runtime, entries["tests2/harness/server-runtime-entry.ts"]);
-			assert.equal(typeof entries["src/server/server.ts"], "string");
-			assert.equal(manifest.entryCount, Object.keys(entries).length);
-			assert.equal(manifest.fileCount, Object.keys(files).length);
-			assert.equal(manifest.graphSha256, graphSha256(manifest));
-			for (const [relativeFile, metadata] of Object.entries(files)) {
-				const file = join(root, ...relativeFile.split("/"));
-				assert.equal(metadata.bytes, statSync(file).size, `${relativeFile} byte count`);
-				assert.equal(metadata.sha256, sha256(file), `${relativeFile} SHA-256`);
-				if (relativeFile.endsWith(".mjs")) assert.ok(files[`${relativeFile}.map`], `${relativeFile} source map`);
-			}
-			assert.ok(Object.keys(files).some((file) => file.startsWith("chunks/") && file.endsWith(".mjs")));
-		} finally { rmSync(root, { recursive: true, force: true }); }
+		const { manifest, contents } = fixture;
+		const entries = manifest.entries as Record<string, string>;
+		const files = manifest.files as Record<string, { bytes: number; sha256: string }>;
+		assert.equal(manifest.schema, 3);
+		assert.equal(manifest.runtime, entries["tests2/harness/server-runtime-entry.ts"]);
+		assert.equal(typeof entries["src/server/server.ts"], "string");
+		assert.equal(manifest.entryCount, Object.keys(entries).length);
+		assert.equal(manifest.fileCount, Object.keys(files).length);
+		assert.equal(manifest.graphSha256, graphSha256(manifest));
+		for (const [relativeFile, metadata] of Object.entries(files)) {
+			assert.equal(metadata.bytes, Buffer.byteLength(contents[relativeFile]), `${relativeFile} byte count`);
+			assert.equal(metadata.sha256, sha256(contents[relativeFile]), `${relativeFile} SHA-256`);
+			if (relativeFile.endsWith(".mjs")) assert.ok(files[`${relativeFile}.map`], `${relativeFile} source map`);
+		}
+		assert.ok(Object.keys(files).some((file) => file.startsWith("chunks/") && file.endsWith(".mjs")));
 	});
 
 	it("normalizes case, slashes, and a .js request to the Windows .ts manifest entry", () => {
-		const root = mkdtempSync(join(tmpdir(), "bobbit-prebundle-resolver-"));
-		try {
-			writeSchema3Artifact(root);
-			const plugin = serverPrebundleResolver(join(root, "manifest.json"), { repoRoot: String.raw`C:\Users\Case\Repo` });
-			const resolved = plugin.resolveId(String.raw`c:\USERS\CASE\REPO\SRC\SERVER\SERVER.js`, undefined);
-			assert.ok(resolved && typeof resolved === "object");
-			assert.equal(resolved.external, true);
-			assert.match(resolved.id, /\/entries\/server\.mjs$/i);
-		} finally { rmSync(root, { recursive: true, force: true }); }
+		assert.equal(readFileSync(join(artifactDir, "manifest.json"), "utf8").length > 0, true);
+		const plugin = serverPrebundleResolver(join(artifactDir, "manifest.json"), { repoRoot: String.raw`C:\Users\Case\Repo` });
+		const resolved = plugin.resolveId(String.raw`c:\USERS\CASE\REPO\SRC\SERVER\SERVER.js`, undefined);
+		assert.ok(resolved && typeof resolved === "object");
+		assert.equal(resolved.external, true);
+		assert.match(resolved.id, /\/entries\/server\.mjs$/i);
 	});
 });
