@@ -22,11 +22,13 @@ async function createGoalWithNoPrBranch(gateway: any): Promise<QuietPrGoal> {
 		spec: "Route fixture for quiet optional PR status probes with no matching GitHub PR.",
 	});
 	const branch = "feature/no-pr";
-	const goalStore = gateway.sessionManager.getGoalStoreForProject(goal.projectId);
+	const projectId = typeof goal.projectId === "string" ? goal.projectId : undefined;
+	if (!projectId) throw new Error(`goal ${goal.id} did not resolve a project`);
+	const goalStore = gateway.sessionManager.getGoalStoreForProject(projectId);
 	// PR-status routing only requires branch/worktree metadata and an existing cwd.
 	// Seed that decision boundary directly; worktree provisioning has dedicated tests.
 	goalStore.update(goal.id, { branch, cwd, repoPath: cwd, worktreePath: cwd, setupStatus: "ready" });
-	return { id: goal.id, branch, cwd, worktreePath: cwd, projectId: goal.projectId };
+	return { id: goal.id, branch, cwd, worktreePath: cwd, projectId };
 }
 
 test.describe("quiet optional PR status probes", () => {

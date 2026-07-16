@@ -4,7 +4,6 @@
  * Browser stories keep UI behavior coverage; these persistence/worktree
  * assertions do not need a spawned browser gateway.
  */
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,8 +16,33 @@ import {
 	waitForSessionStatus,
 } from "./_e2e/e2e-setup.js";
 
-function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf8", windowsHide: true }).trim();
+async function withWorktreeDecisionSeam<T>(gateway: any, repoRoot: string, run: (capture: { cwd?: string; options?: any }) => Promise<T>): Promise<T> {
+	const sessionManager = gateway.sessionManager;
+	const runner = sessionManager.commandRunner;
+	const originalExecFile = runner.execFile;
+	const originalCreateSession = sessionManager.createSession;
+	const originalGetSessionStore = sessionManager.getSessionStore;
+	const capture: { cwd?: string; options?: any } = {};
+	runner.execFile = async (command: string, args: readonly string[]) => {
+		if (command !== "git") throw new Error(`unexpected command: ${command}`);
+		if (args.join(" ") === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
+		if (args.join(" ") === "rev-parse --show-toplevel") return { stdout: `${repoRoot}\n`, stderr: "" };
+		if (args.join(" ") === "rev-parse --verify HEAD") return { stdout: `${"d".repeat(40)}\n`, stderr: "" };
+		throw new Error(`unexpected git command: ${args.join(" ")}`);
+	};
+	sessionManager.createSession = async (cwd: string, _args: unknown, _goalId: unknown, _assistantType: unknown, options: any) => {
+		capture.cwd = cwd;
+		capture.options = options;
+		return { id: "session-worktree-decision", cwd, status: "preparing", projectId: options.projectId };
+	};
+	sessionManager.getSessionStore = () => ({ update: () => true });
+	try {
+		return await run(capture);
+	} finally {
+		runner.execFile = originalExecFile;
+		sessionManager.createSession = originalCreateSession;
+		sessionManager.getSessionStore = originalGetSessionStore;
+	}
 }
 
 function removeTree(root: string): void {
@@ -30,18 +54,12 @@ test.describe("Session story API invariants", () => {
 	let repoRoot = "";
 	let projectId = "";
 	let sessionId = "";
-	let sessionWorktree = "";
 
 	test.beforeAll(async () => {
-		// One immutable source graph serves both stories. The session still goes
-		// through the production HTTP → worktree → agent setup pipeline; sharing its
-		// completed lifecycle avoids starting and immediately tearing down a second
-		// agent while metadata persistence is still in flight under suite load.
+		// A plain project root is enough for persistence. The worktree-selection
+		// story injects the repository probe at the route boundary below.
 		repoRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-session-story-")));
-		git(repoRoot, "init", "--quiet", "--initial-branch=master");
 		fs.writeFileSync(path.join(repoRoot, "README.md"), "# Session story fixture\n");
-		git(repoRoot, "add", "README.md");
-		git(repoRoot, "-c", "user.email=e2e@bobbit.ai", "-c", "user.name=e2e", "commit", "--quiet", "-m", "immutable seed");
 
 		const project = await registerProject({
 			name: `session-story-${Date.now()}`,
@@ -59,7 +77,6 @@ test.describe("Session story API invariants", () => {
 				const deleted = await apiFetch(`/api/sessions/${sessionId}?purge=true`, { method: "DELETE" });
 				expect(deleted.ok, "session purge must succeed").toBe(true);
 			}
-			if (sessionWorktree) expect(fs.existsSync(sessionWorktree), "session worktree must be removed on termination").toBe(false);
 			if (sessionId) {
 				const resp = await apiFetch(`/api/sessions/${sessionId}`);
 				expect(resp.status, "terminated session must leave the live-session API").toBe(404);
@@ -71,20 +88,18 @@ test.describe("Session story API invariants", () => {
 		}
 	});
 
-	test("S-08: session in git repo gets a worktree", async () => {
-		const resp = await apiFetch(`/api/sessions/${sessionId}`);
-		expect(resp.ok).toBe(true);
-		const data = await resp.json();
-
-		expect(data.status).toBe("idle");
-		expect(data.worktreePath).toBeTruthy();
-		expect(typeof data.worktreePath).toBe("string");
-		expect(data.branch).toBe(`session/${sessionId.slice(0, 8)}`);
-		sessionWorktree = fs.realpathSync(data.worktreePath);
-		expect(fs.statSync(path.join(sessionWorktree, ".git")).isFile()).toBe(true);
-		expect(fs.realpathSync(git(sessionWorktree, "rev-parse", "--show-toplevel"))).toBe(sessionWorktree);
-		const registeredWorktrees = git(repoRoot, "worktree", "list", "--porcelain").replace(/\\/g, "/");
-		expect(registeredWorktrees).toContain(sessionWorktree.replace(/\\/g, "/"));
+	test("S-08: session in a detected repository selects worktree provisioning", async ({ gateway }) => {
+		await withWorktreeDecisionSeam(gateway, repoRoot, async (capture) => {
+			const resp = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: repoRoot, projectId, worktree: true }),
+			});
+			expect(resp.status, await resp.clone().text()).toBe(201);
+			const data = await resp.json();
+			expect(data.projectId).toBe(projectId);
+			expect(capture.cwd).toBe(repoRoot);
+			expect(capture.options?.worktreeOpts).toEqual({ repoPath: repoRoot });
+		});
 	});
 
 	test("S-09/S-10: renamed title and session properties persist", async () => {
