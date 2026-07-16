@@ -220,30 +220,6 @@ export async function withProposalSessionSnapshot<T>(
 	}
 }
 
-/** Scope a preference mutation through the in-memory store, with exact reset. */
-export async function withProposalPreferenceSnapshot<T>(
-	gateway: any,
-	key: string,
-	value: unknown,
-	run: () => Promise<T>,
-): Promise<T> {
-	const store = gateway.sessionManager.preferencesStore;
-	if (!store) throw new Error("proposal fixture could not resolve preferences store");
-	const all = store.getAll();
-	const present = Object.prototype.hasOwnProperty.call(all, key);
-	const original = all[key];
-	if (!present || original !== value) store.set(key, value);
-	try {
-		return await run();
-	} finally {
-		if (present) {
-			if (store.get(key) !== original) store.set(key, original);
-		} else if (store.get(key) !== undefined) {
-			store.remove(key);
-		}
-	}
-}
-
 /** Seed the minimal parent record needed by proposal parent-injection policy. */
 export function createProposalParent(
 	gateway: any,

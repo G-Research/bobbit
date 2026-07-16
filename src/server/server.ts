@@ -586,7 +586,7 @@ import {
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
-import { validateGoalInlineWorkflow } from "./proposals/proposal-types.js";
+import { prepareGoalProposalSeed } from "./proposals/goal-proposal-seed.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -13414,50 +13414,14 @@ async function handleApiRoute(
 				}
 				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
 			}
+			// Resolve workflow membership from the stamped TARGET project, then run
+			// parent injection and validation through the state-independent core.
 			if (proposalType === "goal") {
-				const sess = sessionManager.getSession(sessionId);
-				if (sess?.role === "team-lead" && sess.teamGoalId) {
-					const existingParent = enrichedArgs.parentGoalId;
-					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
-						const parent = getGoalAcrossProjects(sess.teamGoalId);
-						// Only auto-inject the team-lead's goal as parent when the
-						// proposal targets the SAME project as that parent. §1 above
-						// stamps the resolved TARGET project onto enrichedArgs.projectId;
-						// for a cross-project goal proposal the parent belongs to the
-						// SOURCE project, so injecting it would make accept fail with
-						// PARENT_CROSS_PROJECT. Cross-project goals must stay top-level
-						// in the target project. Same-project / no-explicit-target path
-						// is preserved byte-for-byte.
-						const targetProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-							? enrichedArgs.projectId.trim()
-							: undefined;
-						const sameProjectParent = !!parent && (!targetProjectId || parent.projectId === targetProjectId);
-						const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
-						const canSpawnImplicitChild = !!parent && sameProjectParent && checkCanSpawnChild(
-							parent,
-							prefs,
-							(id) => getGoalAcrossProjects(id),
-						).ok;
-						if (canSpawnImplicitChild) {
-							enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
-						}
-					}
-				}
-			}
-			// Validate workflow + optional steps for goal proposals BEFORE persisting,
-			// so a stale/hallucinated workflow never produces a broken draft. Skipped
-			// when the session has no resolvable project or the project has zero
-			// workflows (empty-state behaviour preserved).
-			if (proposalType === "goal") {
-				// §2 Resolve workflows against the RESOLVED TARGET project
-				// (enrichedArgs.projectId, stamped by §1 above), not the session's
-				// project. A goal targeting project X must validate against X's
-				// registered workflows. Fall back to the session's project only if
-				// the target is somehow absent (defensive; §1 always stamps it).
+				const liveSession = sessionManager.getSession(sessionId);
 				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
 					? enrichedArgs.projectId.trim()
 					: undefined)
-					?? (sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId))?.projectId;
+					?? (liveSession ?? sessionManager.getPersistedSession(sessionId))?.projectId;
 				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
 				if (projectId) {
 					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
@@ -13466,8 +13430,14 @@ async function handleApiRoute(
 						if (ctx) workflows = ctx.workflowStore.getAll();
 					}
 				}
-				const wfErr = validateGoalProposalWorkflow(enrichedArgs, workflows);
-				if (wfErr) { json(wfErr, 400); return; }
+				const prepared = prepareGoalProposalSeed(enrichedArgs, {
+					session: liveSession,
+					workflows,
+					getGoal: (id) => getGoalAcrossProjects(id),
+					getPreference: (key) => preferencesStore.get(key),
+				});
+				if (!prepared.ok) { json(prepared.body, prepared.status); return; }
+				enrichedArgs = prepared.args;
 			}
 			try {
 				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
@@ -16694,96 +16664,6 @@ async function handleApiRoute(
 	}
 
 	json({ error: "Not found" }, 404);
-}
-
-/**
- * Validate a goal proposal's `workflow` / `inlineWorkflow` / `options` args.
- * Returns a structured error object to send as 400, or null if valid. Pure —
- * caller resolves the workflow list (see seed handler).
- *
- * Rules (see docs/design — Validate goal workflow):
- * - A structurally valid `inlineWorkflow` is a bespoke snapshot and takes
- *   precedence over any `workflow` id. It satisfies the project workflow
- *   requirement and `options` are validated against the inline snapshot.
- * - A malformed `inlineWorkflow` fails structurally before project-workflow
- *   validation so it never degrades into MISSING_WORKFLOW/UNKNOWN_WORKFLOW.
- * - Without `inlineWorkflow`, zero project workflows ⇒ no validation.
- * - Without `inlineWorkflow`, empty/omitted `workflow` ⇒ MISSING_WORKFLOW when
- *   workflows are available.
- * - Without `inlineWorkflow`, an explicit `workflow` not among the configured
- *   ids ⇒ UNKNOWN_WORKFLOW.
- * - `options` are comma-separated optional-step names matched ONLY by canonical
- *   `verify[].name` where `optional: true`. The runtime (verification-logic.ts)
- *   and UI both key on step.name, so accepting optionalLabel/label would be a
- *   false-success path that later fails to enable the step.
- */
-function validateGoalProposalWorkflow(
-	args: Record<string, unknown>,
-	workflows: Workflow[],
-): { ok: false; code: string; message: string; availableWorkflows?: { id: string; name: string }[]; validOptionalSteps?: string[] } | null {
-	const inlineWorkflow = args.inlineWorkflow;
-	if (inlineWorkflow !== undefined && inlineWorkflow !== null) {
-		const inlineErr = validateGoalInlineWorkflow(inlineWorkflow);
-		if (inlineErr) return inlineErr;
-		return validateGoalProposalOptions(args, inlineWorkflow as Workflow);
-	}
-
-	if (workflows.length === 0) return null;
-
-	const wfArg = typeof args.workflow === "string" ? args.workflow.trim() : "";
-	const available = workflows.map(w => ({ id: w.id, name: w.name }));
-	const availableIds = available.map(w => w.id).join(", ");
-
-	// 1. Workflow id is required when this session has resolvable workflows.
-	if (!wfArg) {
-		return {
-			ok: false,
-			code: "MISSING_WORKFLOW",
-			message: `Workflow is required for this project. Re-call propose_goal with one of these workflow IDs: ${availableIds}.`,
-			availableWorkflows: available,
-		};
-	}
-
-	// 2. Unknown explicit workflow id.
-	const chosen = workflows.find(w => w.id === wfArg);
-	if (!chosen) {
-		return {
-			ok: false,
-			code: "UNKNOWN_WORKFLOW",
-			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${availableIds}. Re-call propose_goal with one of these IDs.`,
-			availableWorkflows: available,
-		};
-	}
-
-	// 3. Validate optional-step names against the chosen explicit workflow.
-	return validateGoalProposalOptions(args, chosen);
-}
-
-function validateGoalProposalOptions(
-	args: Record<string, unknown>,
-	workflow: Workflow,
-): { ok: false; code: "UNKNOWN_OPTIONAL_STEP"; message: string; validOptionalSteps: string[] } | null {
-	const optsArg = typeof args.options === "string" ? args.options : "";
-	const requested = optsArg.split(",").map(s => s.trim()).filter(Boolean);
-	if (requested.length === 0) return null;
-
-	const validNames = new Set<string>();
-	for (const g of workflow.gates) {
-		for (const s of (g.verify ?? [])) {
-			// Only the canonical step.name is a valid enable key (runtime + UI both
-			// match on name); accepting optionalLabel/label would be a false success.
-			if (s.optional === true) validNames.add(s.name);
-		}
-	}
-	const validList = [...validNames];
-	const unknown = requested.filter(n => !validNames.has(n));
-	if (unknown.length === 0) return null;
-	return {
-		ok: false,
-		code: "UNKNOWN_OPTIONAL_STEP",
-		message: `Unknown optional step(s) [${unknown.join(", ")}] for workflow "${workflow.id}". Valid optional steps: ${validList.length ? validList.join(", ") : "(none)"}.`,
-		validOptionalSteps: validList,
-	};
 }
 
 /** Return a gate plus every transitive dependent in workflow-DAG order. */
