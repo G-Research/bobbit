@@ -171,3 +171,33 @@ Transform plus import consumed 125.94s of the 813.14s summed phase time (15.49%)
 No file exceeded the 15s tier-1 budget. The slowest file, `preview-token-cost`, completed in 14.035s.
 
 The remaining failures point to a shared-helper prebundle identity/runner issue in the maintenance suites and a token-reader state leak in `tool-guard-extension`. Fixes for both issues have been launched.
+
+## Solo attempt 5
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 5 | One Vitest process / 3 workers | 283.60s | **FAIL** | `.profiles/testing-v2/fast-gate-run5.log` | 4 failed files, 886 passed, 4 skipped; 7 failed tests, 7,582 passed, 22 skipped |
+
+The run remained below the 300s wall-time target, but failed these files:
+
+- `gate-signal-reminder`
+- `pr-walkthrough-api`
+- `sidebar-actions-fork-github-link`
+- `maintenance-api-archived-selectors`
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 27.86s |
+| Setup | 63.11s |
+| Import | 100.75s |
+| Tests | 533.76s |
+| Environment | 84.63s |
+| **Summed** | **810.11s** |
+
+Transform plus import consumed 128.61s of the 810.11s summed phase time (15.88%), above the 15% target.
+
+One file exceeded the 15s tier-1 budget: `project-isolation` completed in 16.283s.
+
+The failures indicate shared route-visible `CommandRunner` seam ownership across prebundled helper facades. Fixes for that ownership issue have been launched, along with work on `project-isolation` and the final module-tax reduction.
