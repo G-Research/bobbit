@@ -165,7 +165,7 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		// subdirectory-worktree contract is implemented. Keep only the directory
 		// shape needed to register its project; constructing a Git repository here
 		// would add subprocess cost without executing or covering Git behavior.
-		repoDir = join(tmpdir(), `bobbit-e2e-subrepo-${Date.now()}`);
+		repoDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-subrepo-"));
 		subdirPath = join(repoDir, "packages", "my-app");
 		mkdirSync(subdirPath, { recursive: true });
 		writeFileSync(join(subdirPath, "package.json"), JSON.stringify({ name: "my-app" }));
@@ -179,6 +179,11 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		expect(resp.status).toBe(201);
 		const project = await resp.json();
 		projectId = project.id;
+	});
+
+	test.afterAll(async () => {
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		if (repoDir) rmSync(repoDir, { recursive: true, force: true });
 	});
 
 	// TODO: subdirectory worktree CWD offset is not implemented.
