@@ -56,11 +56,66 @@ function serverSourceFiles(repoRoot) {
 	return walkFiles(join(repoRoot, "src", "server"), /\.(?:ts|js)$/);
 }
 
+const BUNDLED_SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
+const BUNDLED_IMPORT_RE = /(?:\b(?:import|export)\s+(?:[^"'`;]*?\s+from\s*)?|\brequire\s*\(|\bimport\s*\()\s*(["'`])([^"'`]+)\1/gms;
+
+function resolveBundledSource(specifier, importer, repoRoot) {
+	if (!specifier.startsWith(".")) return undefined;
+	const unresolved = resolve(dirname(importer), specifier.replace(/[?#].*$/, ""));
+	const extension = extname(unresolved);
+	const candidates = [unresolved];
+	if (extension) {
+		const stem = unresolved.slice(0, -extension.length);
+		if (extension === ".js" || extension === ".jsx") candidates.push(`${stem}.ts`, `${stem}.tsx`);
+		else if (extension === ".mjs") candidates.push(`${stem}.mts`);
+		else if (extension === ".cjs") candidates.push(`${stem}.cts`);
+	} else {
+		for (const candidateExtension of BUNDLED_SOURCE_EXTENSIONS) candidates.push(`${unresolved}${candidateExtension}`);
+		for (const candidateExtension of BUNDLED_SOURCE_EXTENSIONS) candidates.push(join(unresolved, `index${candidateExtension}`));
+	}
+	for (const candidate of candidates) {
+		const repoRelative = relative(repoRoot, candidate);
+		if (repoRelative.startsWith("..") || isAbsolute(repoRelative)) continue;
+		try {
+			if (statSync(candidate).isFile()) return candidate;
+		} catch (error) {
+			if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Follow only repo-local imports that esbuild can bundle. This keeps the key
+ * complete when server modules reach into src/shared (or a future source
+ * family) without invalidating the cache for unrelated UI and test sources.
+ */
+function bundledRepoSourceFiles(repoRoot, roots) {
+	const pending = [...roots];
+	const discovered = new Map();
+	while (pending.length > 0) {
+		const file = pending.pop();
+		const key = normalizeServerSourcePath(relative(repoRoot, file));
+		if (discovered.has(key)) continue;
+		discovered.set(key, file);
+		if (extname(file) === ".json") continue;
+		const source = readFileSync(file, "utf8");
+		BUNDLED_IMPORT_RE.lastIndex = 0;
+		for (const match of source.matchAll(BUNDLED_IMPORT_RE)) {
+			const dependency = resolveBundledSource(match[2], file, repoRoot);
+			if (dependency) pending.push(dependency);
+		}
+	}
+	return [...discovered.entries()]
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([, file]) => file);
+}
+
 export function computeServerPrebundleKey(repoRoot = REPO_ROOT) {
 	const hash = createHash("sha256");
+	const runtimeEntry = join(repoRoot, "tests2", "harness", "server-runtime-entry.ts");
 	const files = [
-		...walkFiles(join(repoRoot, "src", "server")),
-		join(repoRoot, "tests2", "harness", "server-runtime-entry.ts"),
+		...bundledRepoSourceFiles(repoRoot, [runtimeEntry, ...serverSourceFiles(repoRoot)]),
 		join(repoRoot, "tsconfig.server.json"),
 		join(repoRoot, "package-lock.json"),
 		fileURLToPath(import.meta.url),
