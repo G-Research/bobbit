@@ -1,8 +1,8 @@
 /**
  * Tier-1 gateway fixture for Test Suite v2 (vitest).
  *
- * Boots ONE real gateway per vitest fork, imported directly from `src/`
- * (never `dist/`), mirroring the durable parts of tests/e2e/in-process-harness.ts
+ * Boots ONE real gateway per vitest fork from the content-addressed `src/server`
+ * runtime bundle (never `dist/`), mirroring the durable parts of tests/e2e/in-process-harness.ts
  * while eliminating every `BOBBIT_TEST_*` / `BOBBIT_SKIP_*` env flag. All
  * configuration flows through explicit `GatewayConfig` options + `GatewayDeps`:
  *
@@ -26,7 +26,6 @@ import { fileURLToPath } from "node:url";
 import type WebSocket from "ws";
 
 import type { GatewayDeps } from "../../src/server/gateway-deps.js";
-import { acquireGatewayBootLease } from "../../scripts/testing-v2/ledger.mjs";
 import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../tests/e2e/seed-workflows.js";
 import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
@@ -262,10 +261,8 @@ async function boot(): Promise<BootedGateway> {
 	mkdirSync(projectConfigDir, { recursive: true });
 	writeFileSync(join(projectConfigDir, "project.yaml"), yaml);
 
-	// The integration lane prepares one content-addressed server bundle before
-	// workers start. Import it while holding the existing boot lease so even a
-	// source-mode diagnostic run retains bounded startup concurrency.
-	const bootLease = await acquireGatewayBootLease();
+	// Vitest prepares one content-addressed server bundle before workers start;
+	// each fork loads that already-published runtime through the worker cache.
 	const runtime = await loadServerTestRuntime();
 	productionProfileSnapshot = runtime.profiling.snapshot;
 	const { getAgentDirState, initializeAgentDirRuntime, setProjectRoot } = runtime.bobbitDir;
@@ -326,15 +323,7 @@ async function boot(): Promise<BootedGateway> {
 	// createGateway seeds these from env (all false here); override before start().
 	configureAigwRuntimeFlags({ skipAigwDiscovery: true, testNoExternal: true, e2e: true });
 
-	let port: number;
-	try {
-		port = await gw.start();
-	} finally {
-		// Boot's CPU burst is over once start() settles — free the lease so the
-		// next queued fork/run can boot. The remaining setup (HTTP project
-		// registration + workflow seeding) is gateway-bound, not a CPU burst.
-		bootLease.release();
-	}
+	const port = await gw.start();
 	const baseURL = `http://127.0.0.1:${port}`;
 	const wsBase = `ws://127.0.0.1:${port}`;
 	writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
@@ -512,6 +501,5 @@ export async function getGateway(): Promise<GatewayFixture> {
 /** Best-effort synchronous cleanup for a stray temp dir left by a crashed run. */
 export function sweepStaleTempDirs(): void {
 	if (!existsSync(TMP_ROOT)) return;
-	// Intentionally conservative: only remove obviously-orphaned fork dirs whose
-	// owning pid is gone. Left as a no-op sweep hook for the ledger/daily lane.
+	// Cleanup is intentionally limited to the current fork's shutdown/exit hooks.
 }
