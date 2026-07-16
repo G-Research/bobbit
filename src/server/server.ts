@@ -9926,6 +9926,25 @@ async function handleApiRoute(
 
 	// ── AI Gateway ──
 
+	/**
+	 * Complete the observable side effects of an already-committed AIGW models
+	 * publication. Cache invalidation and client notification are independent of
+	 * Docker remount recovery: a remount failure must not make the durable config
+	 * mutation look rolled back or leave the UI/caches on the previous models.
+	 */
+	async function finalizeAigwPublication(): Promise<{ remountPending: boolean }> {
+		invalidateModelCache();
+		sessionManager.invalidateAigwModelCache();
+		broadcastPreferencesChanged();
+		try {
+			await sandboxManager?.refreshAgentModelMounts();
+			return { remountPending: false };
+		} catch (error: any) {
+			console.error("[aigw] Models/configuration committed; sandbox remount is pending normal recovery:", error?.message || error);
+			return { remountPending: true };
+		}
+	}
+
 	// GET /api/aigw/status — check if aigw is configured
 	if (url.pathname === "/api/aigw/status" && req.method === "GET") {
 		const aigwUrl = getAigwUrl(preferencesStore);
@@ -9952,11 +9971,8 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(body.url, preferencesStore);
-			await sandboxManager?.refreshAgentModelMounts();
-			invalidateModelCache();
-			sessionManager.invalidateAigwModelCache();
-			broadcastPreferencesChanged();
-			json({ ok: true, models });
+			const remount = await finalizeAigwPublication();
+			json({ ok: true, models, ...(remount.remountPending ? { remountPending: true } : {}) });
 		} catch (err: any) {
 			jsonError(502, err, { error: `Failed to configure AI Gateway: ${err.message}` });
 		}
@@ -9966,11 +9982,8 @@ async function handleApiRoute(
 	// DELETE /api/aigw/configure — remove aigw config
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
 		removeAigw(preferencesStore);
-		await sandboxManager?.refreshAgentModelMounts();
-		invalidateModelCache();
-		sessionManager.invalidateAigwModelCache();
-		broadcastPreferencesChanged();
-		json({ ok: true });
+		const remount = await finalizeAigwPublication();
+		json({ ok: true, ...(remount.remountPending ? { remountPending: true } : {}) });
 		return;
 	}
 
@@ -9999,11 +10012,8 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(aigwUrl, preferencesStore);
-			await sandboxManager?.refreshAgentModelMounts();
-			invalidateModelCache();
-			sessionManager.invalidateAigwModelCache();
-			broadcastPreferencesChanged();
-			json({ models });
+			const remount = await finalizeAigwPublication();
+			json({ models, ...(remount.remountPending ? { remountPending: true } : {}) });
 		} catch (err: any) {
 			jsonError(502, err);
 		}
