@@ -238,3 +238,32 @@ Two files exceeded the 15s tier-1 budget:
 | `pi-extension-discovery` | 15.337s |
 
 The remaining failures indicate direct shared seams and registry identities that bypass the new dispatcher. Fixes have been launched alongside final budget and module-ratio work.
+
+## Solo attempt 7
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 7 | One Vitest process / 3 workers | 294.48s | **FAIL** | `.profiles/testing-v2/fast-gate-run7.log` | 3 failed files, 887 passed, 4 skipped; 5 failed tests, 7,584 passed, 22 skipped |
+
+The run remained below the 300s wall-time target, but failed these files:
+
+- `sidebar-actions-fork-github-link`
+- `maintenance-api-archived-scan`
+- `maintenance-api-archived-selectors`
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 25.42s |
+| Setup | 63.89s |
+| Import | 103.21s |
+| Tests | 547.06s |
+| Environment | 94.22s |
+| **Summed** | **833.80s** |
+
+Transform plus import consumed 128.63s. This is 15.43% of the 833.80s summed phase time. Against the fixed three-worker capacity of 883.44s (`3 × 294.48s`), it is 14.56%, below the 15% capacity target.
+
+One file exceeded the 15s tier-1 budget: `headquarters-server-scope-guards` completed in 17.636s.
+
+The main maintenance suite, archived cleanup and guard suites, and all failures from earlier attempts passed. Only the final maintenance owner facades and sidebar dispatcher scope remain; fixes have been launched.
