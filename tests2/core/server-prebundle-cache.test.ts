@@ -30,8 +30,14 @@ const graphSha256 = (manifest: Record<string, unknown>): string => createHash("s
 function fakeRepo(): string {
 	const root = mkdtempSync(join(tmpdir(), "bobbit-prebundle-key-"));
 	mkdirSync(join(root, "src", "server"), { recursive: true });
+	mkdirSync(join(root, "src", "shared"), { recursive: true });
+	mkdirSync(join(root, "src", "foundation"), { recursive: true });
+	mkdirSync(join(root, "src", "ui"), { recursive: true });
 	mkdirSync(join(root, "tests2", "harness"), { recursive: true });
-	writeFileSync(join(root, "src", "server", "server.ts"), "export const value = 1;\n");
+	writeFileSync(join(root, "src", "server", "server.ts"), "export { sharedValue as value } from '../shared/value.js';\n");
+	writeFileSync(join(root, "src", "shared", "value.ts"), "import { foundationValue } from '../foundation/value.js';\nexport const sharedValue = foundationValue;\n");
+	writeFileSync(join(root, "src", "foundation", "value.ts"), "export const foundationValue = 1;\n");
+	writeFileSync(join(root, "src", "ui", "unrelated.ts"), "export const unrelated = 1;\n");
 	writeFileSync(join(root, "tests2", "harness", "server-runtime-entry.ts"), "export * as server from '../../src/server/server.js';\n");
 	writeFileSync(join(root, "tsconfig.server.json"), "{}\n");
 	writeFileSync(join(root, "package-lock.json"), "{}\n");
@@ -96,6 +102,32 @@ describe("server test prebundle cache", () => {
 			const after = computeServerPrebundleKey(root);
 			assert.notEqual(after, before);
 		} finally { rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("invalidates the key and existing cache when a bundled shared source changes", () => {
+		const root = fakeRepo();
+		const cacheRoot = mkdtempSync(join(tmpdir(), "bobbit-prebundle-shared-key-"));
+		try {
+			const before = computeServerPrebundleKey(root);
+			const cached = join(cacheRoot, before);
+			writeSchema3Artifact(cached, before);
+			assert.equal(validateServerPrebundle(cached, before), true);
+
+			writeFileSync(join(root, "src", "shared", "value.ts"), "import { foundationValue } from '../foundation/value.js';\nexport const sharedValue = foundationValue + 1;\n");
+			const afterShared = computeServerPrebundleKey(root);
+			assert.notEqual(afterShared, before, "bundled src/shared changes must produce a new cache key");
+			assert.equal(validateServerPrebundle(cached, afterShared), false, "the old artifact must not validate for the new source graph");
+
+			writeFileSync(join(root, "src", "foundation", "value.ts"), "export const foundationValue = 2;\n");
+			const afterTransitive = computeServerPrebundleKey(root);
+			assert.notEqual(afterTransitive, afterShared, "transitive repo source families must be part of the key");
+
+			writeFileSync(join(root, "src", "ui", "unrelated.ts"), "export const unrelated = 2;\n");
+			assert.equal(computeServerPrebundleKey(root), afterTransitive, "unrelated source families must not balloon the content key");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			rmSync(cacheRoot, { recursive: true, force: true });
+		}
 	});
 
 	it("requires a complete schema 3 entry graph with source maps and hashes", () => {
