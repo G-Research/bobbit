@@ -462,3 +462,26 @@ Phase totals:
 One file exceeded the 15s tier-1 budget: `preview-mount-route` completed in 15.287s.
 
 The proposal, gate-status, story, PR, and validation isolations all passed. The final three fixes have been launched.
+
+## Solo attempt 16
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 16 | One Vitest process / 3 workers | 281.58s | **FAIL** | `.profiles/testing-v2/fast-gate-run16.log` | 1 failed file, 889 passed, 4 skipped; 7,587 passed tests, 24 skipped; zero failed test bodies |
+
+The run remained below the 300s wall-time target. The sole failure was `gate-resign-cancel`: its `beforeAll` found the shared workflows `flow-alpha` and `flow-beta` instead of the expected `general` workflow.
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 26.22s |
+| Setup | 65.97s |
+| Import | 103.36s |
+| Tests | 506.40s |
+| Environment | 90.96s |
+| **Summed** | **792.91s** |
+
+No file exceeded the 15s tier-1 budget. The slowest file completed in 12.717s.
+
+All previously isolated gate reminder/status, proposal, maintenance, and preview tests passed. Isolation of the `gate-resign-cancel` suite has been launched.
