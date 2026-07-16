@@ -39,10 +39,39 @@ async function registerProject(name: string, rootPath: string) {
 	return res.json();
 }
 
-/** Delete a project via API (best-effort). */
-async function deleteProject(id: string) {
-	await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+let primaryDir = "";
+let secondaryDir = "";
+let primaryProject: { id: string };
+let secondaryProject: { id: string };
+
+function resetProjectRoles(gateway: any, projectId: string): void {
+	const store = gateway.projectContextManager.getOrCreate(projectId)?.roleStore;
+	for (const role of store?.getAllLocal() ?? []) store.remove(role.name);
 }
+
+function resetSharedProjects(gateway: any): void {
+	if (primaryProject) resetProjectRoles(gateway, primaryProject.id);
+	if (secondaryProject) resetProjectRoles(gateway, secondaryProject.id);
+}
+
+test.beforeAll(async () => {
+	primaryDir = createProjectDir();
+	secondaryDir = createProjectDir();
+	primaryProject = await registerProject("cascade-shared-primary", primaryDir);
+	secondaryProject = await registerProject("cascade-shared-secondary", secondaryDir);
+});
+
+test.beforeEach(({ gateway }) => resetSharedProjects(gateway));
+test.afterEach(({ gateway }) => resetSharedProjects(gateway));
+
+test.afterAll(async () => {
+	for (const project of [secondaryProject, primaryProject]) {
+		if (project) await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+	}
+	for (const dir of [secondaryDir, primaryDir]) {
+		if (dir) rmSync(dir, { recursive: true, force: true });
+	}
+});
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -107,180 +136,103 @@ test.describe("Config Cascade API", () => {
 	});
 
 	test("project-scoped role resolution returns inherited items", async () => {
-		const tmpDir = createProjectDir();
-		const proj = await registerProject("cascade-test-inherit", tmpDir);
-
-		try {
-			// Project has empty config — should inherit from server/builtins
-			const res = await apiFetch(`/api/roles?projectId=${proj.id}`);
-			expect(res.ok).toBe(true);
-			const data = await res.json();
-			expect(data.roles.length).toBeGreaterThan(0);
-			// All roles should be builtin or server (project config is empty)
-			for (const r of data.roles) {
-				expect(["builtin", "server"]).toContain(r.origin);
-			}
-		} finally {
-			await deleteProject(proj.id);
-			rmSync(tmpDir, { recursive: true, force: true });
+		// Project has empty config — should inherit from server/builtins.
+		const res = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		expect(res.ok).toBe(true);
+		const data = await res.json();
+		expect(data.roles.length).toBeGreaterThan(0);
+		for (const r of data.roles) {
+			expect(["builtin", "server"]).toContain(r.origin);
 		}
 	});
 
 	test("customize role at project level sets origin to 'project'", async () => {
-		const tmpDir = createProjectDir();
-		const proj = await registerProject("cascade-test-customize", tmpDir);
+		const before = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		const coder = (await before.json()).roles.find((r: any) => r.name === "coder");
+		expect(coder).toBeDefined();
+		expect(["builtin", "server"]).toContain(coder.origin);
 
-		try {
-			// Find a role that exists (e.g. "coder")
-			const before = await apiFetch(`/api/roles?projectId=${proj.id}`);
-			const beforeData = await before.json();
-			const coder = beforeData.roles.find((r: any) => r.name === "coder");
-			expect(coder).toBeDefined();
-			const initialOrigin = coder.origin;
-			expect(["builtin", "server"]).toContain(initialOrigin);
+		const customizeRes = await apiFetch(
+			`/api/roles/coder/customize?scope=project&projectId=${primaryProject.id}`,
+			{ method: "POST" },
+		);
+		expect(customizeRes.status).toBe(201);
 
-			// Customize at project level
-			const customizeRes = await apiFetch(
-				`/api/roles/coder/customize?scope=project&projectId=${proj.id}`,
-				{ method: "POST" },
-			);
-			expect(customizeRes.status).toBe(201);
-
-			// Verify origin changed to "project"
-			const after = await apiFetch(`/api/roles?projectId=${proj.id}`);
-			const afterData = await after.json();
-			const coderAfter = afterData.roles.find((r: any) => r.name === "coder");
-			expect(coderAfter.origin).toBe("project");
-			expect(coderAfter.overrides).toBe(initialOrigin);
-		} finally {
-			await deleteProject(proj.id);
-			rmSync(tmpDir, { recursive: true, force: true });
-		}
+		const after = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		const coderAfter = (await after.json()).roles.find((r: any) => r.name === "coder");
+		expect(coderAfter.origin).toBe("project");
+		expect(coderAfter.overrides).toBe(coder.origin);
 	});
 
 	test("revert role override restores inherited origin", async () => {
-		const tmpDir = createProjectDir();
-		const proj = await registerProject("cascade-test-revert", tmpDir);
+		const before = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		const coder = (await before.json()).roles.find((r: any) => r.name === "coder");
 
-		try {
-			// Get initial origin
-			const before = await apiFetch(`/api/roles?projectId=${proj.id}`);
-			const beforeData = await before.json();
-			const coder = beforeData.roles.find((r: any) => r.name === "coder");
-			const initialOrigin = coder.origin;
-			const initialOverrides = coder.overrides;
+		await apiFetch(
+			`/api/roles/coder/customize?scope=project&projectId=${primaryProject.id}`,
+			{ method: "POST" },
+		);
+		const revertRes = await apiFetch(
+			`/api/roles/coder/override?scope=project&projectId=${primaryProject.id}`,
+			{ method: "DELETE" },
+		);
+		expect(revertRes.status).toBe(200);
 
-			// Customize then revert
-			await apiFetch(
-				`/api/roles/coder/customize?scope=project&projectId=${proj.id}`,
-				{ method: "POST" },
-			);
-
-			const revertRes = await apiFetch(
-				`/api/roles/coder/override?scope=project&projectId=${proj.id}`,
-				{ method: "DELETE" },
-			);
-			expect(revertRes.status).toBe(200);
-
-			// Verify it reverted to the same state as before customization
-			const after = await apiFetch(`/api/roles?projectId=${proj.id}`);
-			const afterData = await after.json();
-			const coderAfter = afterData.roles.find((r: any) => r.name === "coder");
-			expect(coderAfter.origin).toBe(initialOrigin);
-			expect(coderAfter.overrides).toBe(initialOverrides);
-		} finally {
-			await deleteProject(proj.id);
-			rmSync(tmpDir, { recursive: true, force: true });
-		}
+		const after = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		const coderAfter = (await after.json()).roles.find((r: any) => r.name === "coder");
+		expect(coderAfter.origin).toBe(coder.origin);
+		expect(coderAfter.overrides).toBe(coder.overrides);
 	});
 
 	test("project-scoped role creation has origin 'project'", async () => {
-		const tmpDir = createProjectDir();
-		const proj = await registerProject("cascade-test-create", tmpDir);
 		const roleName = `proj-only-${Date.now()}`;
+		const createRes = await apiFetch("/api/roles", {
+			method: "POST",
+			body: JSON.stringify({
+				name: roleName,
+				label: "Project Only",
+				promptTemplate: "test",
+				projectId: primaryProject.id,
+			}),
+		});
+		expect(createRes.status).toBe(201);
 
-		try {
-			// Create a role scoped to the project
-			const createRes = await apiFetch("/api/roles", {
-				method: "POST",
-				body: JSON.stringify({
-					name: roleName,
-					label: "Project Only",
-					promptTemplate: "test",
-					projectId: proj.id,
-				}),
-			});
-			expect(createRes.status).toBe(201);
+		const projRoles = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		const found = (await projRoles.json()).roles.find((r: any) => r.name === roleName);
+		expect(found).toBeDefined();
+		expect(found.origin).toBe("project");
 
-			// Visible in project scope with origin "project"
-			const projRoles = await apiFetch(`/api/roles?projectId=${proj.id}`);
-			const projData = await projRoles.json();
-			const found = projData.roles.find((r: any) => r.name === roleName);
-			expect(found).toBeDefined();
-			expect(found.origin).toBe("project");
-
-			// NOT visible in system scope
-			const sysRoles = await apiFetch("/api/roles");
-			const sysData = await sysRoles.json();
-			const notFound = sysData.roles.find((r: any) => r.name === roleName);
-			expect(notFound).toBeUndefined();
-		} finally {
-			await deleteProject(proj.id);
-			rmSync(tmpDir, { recursive: true, force: true });
-		}
+		const sysRoles = await apiFetch("/api/roles");
+		const notFound = (await sysRoles.json()).roles.find((r: any) => r.name === roleName);
+		expect(notFound).toBeUndefined();
 	});
 
 	test("cascade correctness: server override shadows builtins for all projects", async () => {
-		const tmpDirA = createProjectDir();
-		const tmpDirB = createProjectDir();
-		const projA = await registerProject("cascade-A", tmpDirA);
-		const projB = await registerProject("cascade-B", tmpDirB);
+		const beforeA = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		const coderInitial = (await beforeA.json()).roles.find((r: any) => r.name === "coder");
+		expect(coderInitial).toBeDefined();
 
-		try {
-			// Get the initial origin of "coder" for project A
-			const beforeA = await apiFetch(`/api/roles?projectId=${projA.id}`);
-			const beforeAData = await beforeA.json();
-			const coderInitial = beforeAData.roles.find((r: any) => r.name === "coder");
-			expect(coderInitial).toBeDefined();
+		const beforeB = await apiFetch(`/api/roles?projectId=${secondaryProject.id}`);
+		const coderB = (await beforeB.json()).roles.find((r: any) => r.name === "coder");
+		expect(coderB.origin).toBe(coderInitial.origin);
 
-			// Both projects should see the same origin for "coder"
-			const beforeB = await apiFetch(`/api/roles?projectId=${projB.id}`);
-			const beforeBData = await beforeB.json();
-			const coderB = beforeBData.roles.find((r: any) => r.name === "coder");
-			expect(coderB.origin).toBe(coderInitial.origin);
+		await apiFetch(
+			`/api/roles/coder/customize?scope=project&projectId=${primaryProject.id}`,
+			{ method: "POST" },
+		);
 
-			// Customize coder at project A level only
-			await apiFetch(
-				`/api/roles/coder/customize?scope=project&projectId=${projA.id}`,
-				{ method: "POST" },
-			);
+		const afterA = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		expect((await afterA.json()).roles.find((r: any) => r.name === "coder").origin).toBe("project");
 
-			// Project A should see "project" origin
-			const afterA = await apiFetch(`/api/roles?projectId=${projA.id}`);
-			const afterAData = await afterA.json();
-			expect(afterAData.roles.find((r: any) => r.name === "coder").origin).toBe("project");
+		const afterB = await apiFetch(`/api/roles?projectId=${secondaryProject.id}`);
+		expect((await afterB.json()).roles.find((r: any) => r.name === "coder").origin).toBe(coderInitial.origin);
 
-			// Project B should still see the original origin (unchanged)
-			const afterB = await apiFetch(`/api/roles?projectId=${projB.id}`);
-			const afterBData = await afterB.json();
-			expect(afterBData.roles.find((r: any) => r.name === "coder").origin).toBe(coderInitial.origin);
-
-			// Revert project A override
-			await apiFetch(
-				`/api/roles/coder/override?scope=project&projectId=${projA.id}`,
-				{ method: "DELETE" },
-			);
-
-			// Project A reverts to the original
-			const revertedA = await apiFetch(`/api/roles?projectId=${projA.id}`);
-			const revertedAData = await revertedA.json();
-			expect(revertedAData.roles.find((r: any) => r.name === "coder").origin).toBe(coderInitial.origin);
-		} finally {
-			await deleteProject(projA.id);
-			await deleteProject(projB.id);
-			rmSync(tmpDirA, { recursive: true, force: true });
-			rmSync(tmpDirB, { recursive: true, force: true });
-		}
+		await apiFetch(
+			`/api/roles/coder/override?scope=project&projectId=${primaryProject.id}`,
+			{ method: "DELETE" },
+		);
+		const revertedA = await apiFetch(`/api/roles?projectId=${primaryProject.id}`);
+		expect((await revertedA.json()).roles.find((r: any) => r.name === "coder").origin).toBe(coderInitial.origin);
 	});
 
 	// Removed: "customize workflow at project level" — workflows are no longer
@@ -290,21 +242,13 @@ test.describe("Config Cascade API", () => {
 	// `tests/e2e/workflows-project-scope.spec.ts` and `workflows-api.spec.ts`.
 
 	test("tools with projectId scope return origin fields", async () => {
-		const tmpDir = createProjectDir();
-		const proj = await registerProject("cascade-tools", tmpDir);
-
-		try {
-			const res = await apiFetch(`/api/tools?projectId=${proj.id}`);
-			expect(res.ok).toBe(true);
-			const data = await res.json();
-			expect(data.tools.length).toBeGreaterThan(0);
-			for (const t of data.tools) {
-				expect(t.origin).toBeDefined();
-				expect(["builtin", "server", "project"]).toContain(t.origin);
-			}
-		} finally {
-			await deleteProject(proj.id);
-			rmSync(tmpDir, { recursive: true, force: true });
+		const res = await apiFetch(`/api/tools?projectId=${primaryProject.id}`);
+		expect(res.ok).toBe(true);
+		const data = await res.json();
+		expect(data.tools.length).toBeGreaterThan(0);
+		for (const t of data.tools) {
+			expect(t.origin).toBeDefined();
+			expect(["builtin", "server", "project"]).toContain(t.origin);
 		}
 	});
 });
