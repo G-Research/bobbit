@@ -8,6 +8,7 @@ export const DEFAULT_TEST_MAP_PATH = join(REPO_ROOT, "tests2", "tests-map.json")
 
 export const APPROVED_E2E_VITEST_PATHS = Object.freeze([
 	"tests2/core/marketplace-install.test.ts",
+	"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
 	"tests2/core/team-manager.test.ts",
 ]);
 

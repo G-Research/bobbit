@@ -260,6 +260,7 @@ describe("direct unit-stage scheduling", () => {
 				retry: 3,
 				include: [
 					"tests2/core/marketplace-install.test.ts",
+					"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
 					"tests2/core/team-manager.test.ts",
 				],
 				setupFiles: undefined,

@@ -61,7 +61,7 @@ function parseArgs(argv) {
 	return out;
 }
 
-/** Categorize daily-bucket entries into groups A/B/C (excluding manual-integration). */
+/** Categorize daily-bucket entries and native real-fidelity owners (excluding manual-integration). */
 function classifyDaily() {
 	const map = JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "tests-map.json"), "utf8"));
 	const daily = (map.entries || []).filter((e) => (e.tier || e.bucket) === "daily");
@@ -94,7 +94,18 @@ function classifyDaily() {
 		else if (f.endsWith(".test.ts")) A.push(f);
 		else excluded.missing.push(f); // unexpected shape
 	}
-	// De-dupe Group C (multiple map entries can map to the same physical spec).
+	// Native tests do not have legacy daily-bucket records. Their explicit path
+	// and execution ownership place browser/e2e specs in Group C and approved
+	// Vitest real-filesystem suites in Group D.
+	for (const entry of map.v2Native || []) {
+		const dest = String(entry.path || "").replace(/\\/g, "/");
+		if (!dest || !existsSync(join(REPO_ROOT, dest))) {
+			if (dest) excluded.missing.push(dest);
+			continue;
+		}
+		if (dest.startsWith("tests2/browser/e2e/") && entry.execution?.runner === "playwright") C.push(dest);
+		if (entry.execution?.runner === "vitest" && entry.execution?.tier === "e2e" && entry.execution?.project === "e2e") D.push(dest);
+	}
 	return { A: [...new Set(A)], B: [...new Set(B)], C: [...new Set(C)], D: [...new Set(D)], excluded };
 }
 

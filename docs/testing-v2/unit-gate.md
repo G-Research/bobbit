@@ -29,12 +29,13 @@ Normal unit collection contains four explicit projects loaded from `tests2/tests
 
 `v2-e2e-vitest` is conditional: it exists only when `BOBBIT_V2_E2E_VITEST=1` and is selected by E2E Group D, not by the unit gate.
 
-Exactly two Vitest files own real-fidelity E2E coverage:
+Three Vitest files own real-fidelity E2E coverage:
 
 - `tests2/core/marketplace-install.test.ts`
+- `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts`
 - `tests2/core/team-manager.test.ts`
 
-Their fast decisions remain in tier 1 through `marketplace-install-decisions.test.ts` and `team-manager-decisions.test.ts`. Those suites use `gitRunner`, `mcpGatewayFetch`, and TeamManager command/configuration seams to cover routing, validation, authorization, lifecycle, and persistence without host processes. The inventory loader rejects a third Vitest E2E owner.
+Fast decisions remain in tier 1 through `marketplace-install-decisions.test.ts`, `orphan-tool-result-recovery.test.ts`, `transcript-orphan-tool-results.test.ts`, and `team-manager-decisions.test.ts`. The E2E orphan owner retains real host/sandbox transcript bytes and lifecycle boundaries; the core orphan suites retain pure sanitizer and mocked bridge/respawn decisions. The inventory loader rejects any unapproved Vitest E2E owner.
 
 ## Transform caches
 

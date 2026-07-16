@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Audit the complete Vitest inventory, explicit execution ownership, declaration
- * semantics, the two approved E2E owners, and the tier-1 subprocess boundary.
+ * semantics, the approved E2E owners, and the tier-1 subprocess boundary.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";

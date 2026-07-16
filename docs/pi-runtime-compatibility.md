@@ -160,7 +160,7 @@ Pinned coverage:
 - `tests2/core/transcript-orphan-tool-results.test.ts` uses the affected raw Pi `0.80.6` JSONL shapes and covers structural validity, active/inactive branches, metadata, compaction, newline preservation, and idempotence.
 - `tests2/core/orphan-tool-result-recovery.test.ts` covers narrow error classification plus bounded Retry, follow-up, and REST/tool prompt recovery with identity/model/queue/intent preservation.
 - `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts` covers restore/respawn/role/force-abort/continue setup boundaries, host/sandbox filesystem realms, and path-safety behavior.
-- `tests2/browser/journeys/orphan-tool-result-recovery.journey.spec.ts` covers user-visible Retry and follow-up recovery without replacing the session or losing visible history.
+- `tests2/browser/e2e/orphan-tool-result-recovery.journey.spec.ts` covers real-filesystem user-visible Retry and follow-up recovery without replacing the session or losing visible history.
 
 ## Transcript/session-tree metadata
 

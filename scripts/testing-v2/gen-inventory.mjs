@@ -281,8 +281,8 @@ export const DAILY_OVERRIDES = new Map([
 	["tests/e2e/mcp-tool-permission.spec.ts", "Spawns a real MCP subprocess to exercise tool permissions."],
 ]);
 
-// Exactly two Vitest suites retain real process/filesystem fidelity in e2e:v2.
-// Their materialized v2 paths are pinned again by test-map-execution.mjs.
+// These two legacy suites retain real process/filesystem fidelity in e2e:v2.
+// Native E2E owners are classified directly by test-map-execution.mjs.
 const VITEST_E2E_OVERRIDES = new Map([
 	["tests/marketplace-install.test.ts", "Real marketplace git/MCP installation fidelity runs in the E2E Vitest project; seam-based decisions remain in tier 1."],
 	["tests/team-manager.test.ts", "Real TeamManager git/worktree/process fidelity runs in the E2E Vitest project; seam-based decisions remain in tier 1."],
@@ -294,7 +294,7 @@ const CONTRACT_INTEGRATION = new Set([
 ]);
 
 function classify(file) {
-	// 1. The two approved Vitest E2E owners win over ordinary core classification.
+	// 1. Approved legacy Vitest E2E owners win over ordinary core classification.
 	if (VITEST_E2E_OVERRIDES.has(file)) {
 		return {
 			bucket: "daily",
