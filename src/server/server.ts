@@ -89,6 +89,7 @@ import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bri
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
 import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
+import { buildRunningGateSignalResponse, reuseCachedGateSignal } from "./gate-signal-response.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
 	GateArtifactResolutionError,
@@ -11079,72 +11080,29 @@ async function handleApiRoute(
 		}
 
 		// Auto-pass if a prior signal for the same commit already fully passed.
-		// Manual reset preserves signal history for auditability, so this route-level
-		// fast path must honor the same reset cache boundary as VerificationHarness.
-		// Human sign-offs are never reusable consent; let the harness run them again.
-		if (commitSha !== "unknown") {
-			const existingGateForCache = gateStore.getGate(goalId, gateId);
-			if (existingGateForCache) {
-				const cacheInvalidatedAt = existingGateForCache.verificationCacheInvalidatedAt;
-				const priorPassed = existingGateForCache.signals.find(s =>
-					s.commitSha === commitSha
-					&& s.verification?.status === "passed"
-					&& (cacheInvalidatedAt === undefined || s.timestamp > cacheInvalidatedAt)
-					&& !s.verification.steps.some(step => step.type === "human-signoff")
-				);
-				if (priorPassed?.verification) {
-					const phaseByStepName = new Map((gateDef.verify || []).map((s: any) => [s.name, s.phase ?? 0]));
-					const cachedSteps = priorPassed.verification.steps.map((s: any) => {
-						const status = s.skipped ? "skipped" : (s.status ?? (s.passed ? "passed" : "failed"));
-						return {
-							...s,
-							status,
-							...(status === "skipped" ? { skipped: true } : {}),
-							phase: s.phase ?? phaseByStepName.get(s.name) ?? 0,
-							output: `[cached from prior signal] ${s.output}`,
-						};
-					});
-					// Create a signal record with cached results
-					const cachedSignal = {
-						id: randomUUID(),
-						gateId,
-						goalId,
-						sessionId: body?.sessionId || "unknown",
-						timestamp: Date.now(),
-						commitSha,
-						metadata: body?.metadata,
-						content: body?.content,
-						contentVersion: body?.content ? (existingGateForCache.currentContentVersion || 0) + 1 : undefined,
-						verification: {
-							status: "passed" as const,
-							steps: cachedSteps,
-						},
-					};
-					gateStore.recordSignal(cachedSignal);
-					if (body?.content && cachedSignal.contentVersion) {
-						gateStore.updateGateContent(goalId, gateId, body.content, cachedSignal.contentVersion);
-					}
-					if (body?.metadata) {
-						gateStore.updateGateMetadata(goalId, gateId, body.metadata);
-					}
-					gateStore.updateGateStatus(goalId, gateId, "passed");
-					broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: cachedSignal.id });
-					broadcastToGoal(goalId, { type: "gate_verification_complete", goalId, gateId, signalId: cachedSignal.id, status: "passed" });
-					broadcastGateStatusChanged(broadcastToGoal, goalId, gateId, "passed");
-					const verifySteps = cachedSignal.verification.steps.map((s: any) => ({
-						name: s.name,
-						type: s.type,
-						status: s.status,
-						passed: s.passed,
-						skipped: s.skipped,
-						phase: s.phase,
-						duration_ms: s.duration_ms,
-						output: s.output,
-					}));
-					json({ signal: { id: cachedSignal.id, gateId, goalId, status: "passed", steps: verifySteps, cached: true } }, 201);
-					return;
-				}
-			}
+		// The extracted decision core owns cache-boundary and response semantics so
+		// this route cannot drift from its deterministic store-level coverage.
+		const cachedResponse = reuseCachedGateSignal({
+			gateStore,
+			goalId,
+			gate: gateDef,
+			commitSha,
+			body,
+			notifier: {
+				signalReceived: (notifiedGoalId, notifiedGateId, signalId) => {
+					broadcastToGoal(notifiedGoalId, { type: "gate_signal_received", goalId: notifiedGoalId, gateId: notifiedGateId, signalId });
+				},
+				verificationComplete: (notifiedGoalId, notifiedGateId, signalId, status) => {
+					broadcastToGoal(notifiedGoalId, { type: "gate_verification_complete", goalId: notifiedGoalId, gateId: notifiedGateId, signalId, status });
+				},
+				statusChanged: (notifiedGoalId, notifiedGateId, status) => {
+					broadcastGateStatusChanged(broadcastToGoal, notifiedGoalId, notifiedGateId, status);
+				},
+			},
+		});
+		if (cachedResponse) {
+			json(cachedResponse, 201);
+			return;
 		}
 
 		// Compute content version
@@ -11244,21 +11202,10 @@ async function handleApiRoute(
 			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
-		const verifySteps = initialSteps.map((s: any) => ({
-			name: s.name,
-			type: s.type,
-			status: s.status,
-			passed: s.passed,
-			skipped: s.skipped,
-			phase: s.phase,
-			duration_ms: s.duration_ms,
-			output: s.output,
-		}));
-		const signalResponse = { id: signal.id, gateId, goalId, status: "running", steps: verifySteps };
-		const response: { signal: typeof signalResponse; agentReminder?: string } = { signal: signalResponse };
-		if (verificationHarness.getActiveVerification(signal.id)?.overallStatus === "running") {
-			response.agentReminder = "Gate signal accepted. Verification is running asynchronously. Do not poll with `gate_status` or `gate_inspect`. Go idle now and wait for the server to deliver verification results or further instructions.";
-		}
+		const response = buildRunningGateSignalResponse(
+			signal,
+			verificationHarness.getActiveVerification(signal.id)?.overallStatus === "running",
+		);
 		json(response, 201);
 		return;
 	}
