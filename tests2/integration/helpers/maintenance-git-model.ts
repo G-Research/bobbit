@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, normalize, resolve } from "node:path";
 import type { CommandRunner, ExecFileOptions, ExecFileResult } from "../../../src/server/gateway-deps.js";
 
@@ -9,6 +9,14 @@ type RepoState = {
 };
 
 type RunnerRestore = () => void;
+
+export type MaintenanceGitSnapshot = {
+	repos: Array<{
+		root: string;
+		branches: string[];
+		worktrees: Array<{ path: string; branch: string }>;
+	}>;
+};
 
 function key(path: string): string {
 	const normalized = normalize(resolve(path)).replace(/\\/g, "/");
@@ -35,10 +43,53 @@ function commandError(args: readonly string[], cwd: string): Error & { code: num
 export class MaintenanceGitModel {
 	private readonly repos = new Map<string, RepoState>();
 	private readonly worktreeOwners = new Map<string, string>();
+	private readonly deferredPaths = new Map<string, string[]>();
+	private deferredSequence = 0;
 
 	reset(): void {
 		this.repos.clear();
 		this.worktreeOwners.clear();
+		this.deferredPaths.clear();
+		this.deferredSequence = 0;
+	}
+
+	snapshot(): MaintenanceGitSnapshot {
+		return {
+			repos: [...this.repos.values()].map(repo => ({
+				root: repo.root,
+				branches: [...repo.branches],
+				worktrees: [...repo.worktrees.values()].map(worktree => ({ ...worktree })),
+			})),
+		};
+	}
+
+	/** Restore command-visible state and cheaply resurrect worktrees renamed by cleanup. */
+	restore(snapshot: MaintenanceGitSnapshot): void {
+		const expectedPaths = new Set(snapshot.repos.flatMap(repo => repo.worktrees.map(worktree => key(worktree.path))));
+		for (const repo of this.repos.values()) {
+			for (const worktree of repo.worktrees.values()) {
+				const worktreeKey = key(worktree.path);
+				if (worktreeKey !== key(repo.root) && !expectedPaths.has(worktreeKey)) this.deferRemovePath(worktree.path);
+			}
+		}
+
+		this.repos.clear();
+		this.worktreeOwners.clear();
+		for (const source of snapshot.repos) {
+			const repoKey = key(source.root);
+			const worktrees = new Map<string, { path: string; branch: string }>();
+			for (const worktree of source.worktrees) {
+				const worktreeKey = key(worktree.path);
+				if (!existsSync(worktree.path)) this.restoreDeferredPath(source.root, worktree.path);
+				worktrees.set(worktreeKey, { ...worktree });
+				this.worktreeOwners.set(worktreeKey, repoKey);
+			}
+			this.repos.set(repoKey, {
+				root: source.root,
+				branches: new Set(source.branches),
+				worktrees,
+			});
+		}
 	}
 
 	registerRepo(root: string): void {
@@ -98,7 +149,7 @@ export class MaintenanceGitModel {
 		const worktreeKey = key(worktreePath);
 		if (repo && worktreeKey !== repoKey) repo.worktrees.delete(worktreeKey);
 		if (this.worktreeOwners.get(worktreeKey) === repoKey) this.worktreeOwners.delete(worktreeKey);
-		rmSync(worktreePath, { recursive: true, force: true });
+		this.deferRemovePath(worktreePath);
 	}
 
 	listedWorktreePaths(root: string): string[] {
@@ -173,6 +224,35 @@ export class MaintenanceGitModel {
 			return { stdout: this.run(cwd, args), stderr: "" };
 		};
 		return () => { runner.execFile = originalExecFile; };
+	}
+
+	private deferRemovePath(targetPath: string): void {
+		if (!existsSync(targetPath)) return;
+		const targetKey = key(targetPath);
+		const deferredPath = `${targetPath}.bobbit-removed-${process.pid}-${++this.deferredSequence}`;
+		try {
+			renameSync(targetPath, deferredPath);
+			const paths = this.deferredPaths.get(targetKey) ?? [];
+			paths.push(deferredPath);
+			this.deferredPaths.set(targetKey, paths);
+		} catch {
+			rmSync(targetPath, { recursive: true, force: true });
+		}
+	}
+
+	private restoreDeferredPath(repoRoot: string, worktreePath: string): void {
+		const worktreeKey = key(worktreePath);
+		const deferred = this.deferredPaths.get(worktreeKey);
+		while (deferred?.length) {
+			const candidate = deferred.pop()!;
+			if (!existsSync(candidate)) continue;
+			mkdirSync(resolve(worktreePath, ".."), { recursive: true });
+			renameSync(candidate, worktreePath);
+			if (deferred.length === 0) this.deferredPaths.delete(worktreeKey);
+			return;
+		}
+		mkdirSync(worktreePath, { recursive: true });
+		writeFileSync(resolve(worktreePath, ".git"), `gitdir: ${resolve(repoRoot, ".git", "worktrees", worktreeKey.split("/").pop() ?? "worktree")}\n`);
 	}
 
 	private worktreeList(repo: RepoState): string {

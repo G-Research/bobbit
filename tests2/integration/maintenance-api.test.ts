@@ -2,12 +2,16 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import * as maintenance from "./helpers/maintenance-api-support.js";
 
 const {
-	test, expect, apiFetch, registerProject, createSession, deleteSession,
+	test, expect, apiFetch, registerProject,
 	existsSync, mkdtempSync, rmSync, tmpdir, join,
 	expectNumberCounts, expectNumberMap, normalizeTestPath, listedWorktreePaths,
 	branchExists, initGitRepo, git, tryRemoveWorktree, tryDeleteBranch, maintenanceGit,
+	seedArchivedSession, removeSeededSessions, gateway,
 } = maintenance;
 maintenance.registerMaintenanceHooks();
+
+const maintenanceBaseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-maintenance-shared-"));
+afterAll(() => rmSync(maintenanceBaseDir, { recursive: true, force: true }));
 
 // ---------------------------------------------------------------------------
 // GET /api/maintenance/worktrees
@@ -82,7 +86,7 @@ test("POST /api/maintenance/cleanup-worktrees rejects malformed canonical cleanu
 });
 
 describe("cleanup-worktrees validation preserves one shared legacy orphan", () => {
-	const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-cleanup-validation-"));
+	const baseDir = maintenanceBaseDir;
 	const repoPath = join(baseDir, "repo");
 	const worktreePath = join(baseDir, "orphan-worktree");
 	const branch = `session/malformed-validation-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -109,7 +113,7 @@ describe("cleanup-worktrees validation preserves one shared legacy orphan", () =
 	}
 
 	beforeAll(async () => {
-		initGitRepo(repoPath, true);
+		initGitRepo(repoPath);
 		const project = await registerProject({ name: `cleanup validation ${Date.now()}`, rootPath: repoPath, seedWorkflows: false });
 		projectId = project.id;
 		git(repoPath, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
@@ -128,7 +132,6 @@ describe("cleanup-worktrees validation preserves one shared legacy orphan", () =
 		tryDeleteBranch(repoPath, branch);
 		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		maintenanceGit.forgetRepo(repoPath);
-		rmSync(baseDir, { recursive: true, force: true });
 	});
 
 	it("rejects itemIds without mode", async () => {
@@ -216,14 +219,19 @@ test("POST /api/maintenance/purge-archives runs purge", async () => {
 // Integration: create a session, terminate (archive) it, check expired-archives
 // ---------------------------------------------------------------------------
 test("expired archives stats reflect archived sessions", async () => {
-	// Create and immediately terminate a session (which archives it)
-	const sessionId = await createSession();
-	await deleteSession(sessionId);
-
-	// Get expired archive stats — newly archived session shouldn't be expired (< 7 days old)
-	const statsResp = await apiFetch("/api/maintenance/expired-archives");
-	expect(statsResp.status).toBe(200);
-	const stats = await statsResp.json();
-	// Fresh archive should NOT be expired — count should stay at 0 in clean test env
-	expect(stats.count).toBe(0);
+	const seeded = await seedArchivedSession(gateway(), {
+		baseDir: maintenanceBaseDir,
+		title: "Fresh archived maintenance candidate",
+		archivedAt: Date.now(),
+	});
+	try {
+		// Get expired archive stats — newly archived session shouldn't be expired (< 7 days old)
+		const statsResp = await apiFetch("/api/maintenance/expired-archives");
+		expect(statsResp.status).toBe(200);
+		const stats = await statsResp.json();
+		// Fresh archive should NOT be expired — count should stay at 0 in clean test env
+		expect(stats.count).toBe(0);
+	} finally {
+		removeSeededSessions([seeded]);
+	}
 });

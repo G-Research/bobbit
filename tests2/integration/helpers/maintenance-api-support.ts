@@ -377,6 +377,13 @@ async function seedArchivedSession(gateway: any, overrides: ArchivedSessionOverr
 	return seedArchivedSessions(gateway, [overrides])[0];
 }
 
+function restoreSeededSessions(seeded: SeededSession[]): void {
+	if (seeded.length === 0) return;
+	batchSessionStoreMutations(maintenanceProjectContext, store => {
+		for (const seed of seeded) store.put(seed.session);
+	});
+}
+
 function removeSeededSessions(seeded: SeededSession[], extraSessionIds: Array<string | undefined> = []): void {
 	const ids = [...seeded.map(seed => seed.session.id), ...extraSessionIds.filter((id): id is string => !!id)];
 	if (ids.length === 0) return;
@@ -414,7 +421,7 @@ export {
 	expectArchivedScanShape, expectArchivedCleanupShape,
 	git, branchExists, normalizeTestPath, listedWorktreePaths, initGitRepo,
 	tryRemoveWorktree, tryDeleteBranches, tryDeleteBranch,
-	seedArchivedSessions, seedArchivedSession, removeSeededSessions,
+	seedArchivedSessions, seedArchivedSession, restoreSeededSessions, removeSeededSessions,
 	findArchivedSession, findArchivedWorktreeItem, findArchivedWorktreeGroup,
 	getArchivedWorktreeScan,
 };
