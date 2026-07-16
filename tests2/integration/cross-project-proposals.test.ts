@@ -22,47 +22,28 @@
  *   (d) propose_project preserves absent/explicit projectId seed semantics
  *   (e) goal workflow validated against the TARGET project's workflows
  */
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { expect } from "./_e2e/in-process-harness.js";
 import { afterAll, beforeAll, describe, test } from "vitest";
 import {
 	apiFetch,
-	rawApiFetch,
 	createSession,
 	deleteSession as deleteE2ESession,
-	createGoal,
-	deleteGoal,
 	ensureGateway,
 } from "./_e2e/e2e-setup.js";
-import { TEST_DEFAULT_COMPONENT, testWorkflows } from "../../tests/e2e/seed-workflows.js";
-import { registerProposalProject, removeProposalProject } from "./_proposal-project-fixture.js";
+import {
+	MINIMAL_PROPOSAL_WORKFLOWS,
+	TARGET_ONLY_WORKFLOWS,
+	clearProposalDrafts,
+	createProposalParent,
+	proposalFields,
+	registerProposalProject,
+	releaseSharedProposalSession,
+	sharedProposalSession,
+	withProposalSessionSnapshot,
+} from "./_proposal-project-fixture.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const SYSTEM_PROJECT_ID = "system";
-
-const cleanupRoots: string[] = [];
-
-function projectDir(prefix: string): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-xproj-${prefix}-`));
-	cleanupRoots.push(dir);
-	fs.writeFileSync(path.join(dir, "README.md"), "# cross-project target\n");
-	try { return fs.realpathSync(dir); } catch { return dir; }
-}
-
-/** A workflow id that exists ONLY in the target project (never in the default). */
-const TARGET_WORKFLOWS = {
-	"target-only": {
-		id: "target-only",
-		name: "Target Only",
-		description: "Workflow present only in the cross-project target.",
-		gates: [
-			{ id: "implementation", name: "Implementation", verify: [{ name: "Check", type: "command", run: "echo ok" }] },
-			{ id: "ready-to-merge", name: "Ready to Merge", depends_on: ["implementation"], verify: [{ name: "PR raised", type: "command", run: "echo ok" }] },
-		],
-	},
-};
 
 async function seed(sid: string, type: string, args: Record<string, unknown>): Promise<Response> {
 	return apiFetch(`/api/sessions/${sid}/proposal/${type}/seed`, {
@@ -71,11 +52,8 @@ async function seed(sid: string, type: string, args: Record<string, unknown>): P
 	});
 }
 
-async function seededFields(sid: string, type: string): Promise<Record<string, unknown> | undefined> {
-	const resp = await apiFetch(`/api/sessions/${sid}/proposals`);
-	expect(resp.status).toBe(200);
-	const body = await resp.json() as { proposals?: Array<{ proposalType?: string; fields?: Record<string, unknown> }> };
-	return body.proposals?.find(p => p.proposalType === type)?.fields;
+async function seededFields(sid: string, type: "goal" | "project" | "role" | "tool" | "staff"): Promise<Record<string, unknown> | undefined> {
+	return proposalFields(gateway, sid, type);
 }
 
 const VALID_ARGS: Record<string, Record<string, unknown>> = {
@@ -86,6 +64,7 @@ const VALID_ARGS: Record<string, Record<string, unknown>> = {
 };
 
 let gateway: any;
+let sourceProjectFixture: { id: string; rootPath: string };
 let sourceProjectId: string;
 let sourceSessionId: string;
 let targetProjectId: string;
@@ -95,46 +74,37 @@ async function createSourceSession(): Promise<string> {
 	return sourceSessionId;
 }
 
-async function deleteSession(sessionId: string): Promise<void> {
-	if (sessionId !== sourceSessionId) await deleteE2ESession(sessionId);
+async function deleteSession(_sessionId: string): Promise<void> {
+	// Shared fixture sessions are gateway-owned and reset by draft-slot ownership.
 }
 
-async function clearSourceProposals(...types: string[]): Promise<void> {
-	await Promise.all(types.map(type =>
-		apiFetch(`/api/sessions/${sourceSessionId}/proposal/${type}`, { method: "DELETE" }),
-	));
+async function clearSourceProposals(...types: Array<"goal" | "project" | "role" | "tool" | "staff">): Promise<void> {
+	await clearProposalDrafts(gateway, sourceSessionId, ...types);
 }
 
 beforeAll(async () => {
 	gateway = await ensureGateway();
 	const source = registerProposalProject(gateway, {
-		name: `xproj-source-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-		rootPath: projectDir("source"),
-		components: [TEST_DEFAULT_COMPONENT],
-		workflows: testWorkflows(),
+		key: "validated",
+		workflows: MINIMAL_PROPOSAL_WORKFLOWS,
 	});
+	sourceProjectFixture = source;
 	sourceProjectId = source.id;
-	sourceSessionId = await createSession({ projectId: sourceProjectId });
+	sourceSessionId = await sharedProposalSession(gateway, sourceProjectId, () =>
+		createSession({ projectId: sourceProjectId }));
 
-	// The suite-owned targets have deliberately disjoint workflow stores.
+	// The suite-owned target has a deliberately disjoint workflow store.
 	const target = registerProposalProject(gateway, {
-		name: `xproj-target-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-		rootPath: projectDir("target"),
-		components: [{ name: "test", repo: ".", commands: { build: "echo ok" } }],
-		workflows: TARGET_WORKFLOWS,
+		key: "target-only",
+		workflows: TARGET_ONLY_WORKFLOWS,
 	});
 	targetProjectId = target.id;
-
 	injectTargetProjectId = target.id;
 });
 
 afterAll(async () => {
-	await deleteE2ESession(sourceSessionId);
-	await removeProposalProject(gateway, targetProjectId);
-	await removeProposalProject(gateway, sourceProjectId);
-	for (const dir of cleanupRoots.splice(0)) {
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
-	}
+	await clearSourceProposals("goal", "project", "role", "tool", "staff");
+	await releaseSharedProposalSession(gateway, sourceProjectId, deleteE2ESession);
 });
 
 describe("cross-project proposal seed @smoke", () => {
@@ -163,22 +133,13 @@ describe("cross-project proposal seed @smoke", () => {
 		// synthetic `system` project (see role-assistant-session.test.ts). An
 		// omitted-projectId seed must default to the user-facing headquarters
 		// scope, never the hidden `system` id.
-		const bogusCwd = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-xproj-system-"));
-		cleanupRoots.push(bogusCwd);
-		const created = await rawApiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ assistantType: "role", cwd: bogusCwd }),
-		});
-		expect(created.status, `create system-scope role session: ${await created.clone().text()}`).toBe(201);
-		const systemSid = (await created.json()).id as string;
-		try {
-			const r = await seed(systemSid, "role", VALID_ARGS.role);
+		await clearSourceProposals("role");
+		await withProposalSessionSnapshot(gateway, sourceSessionId, { projectId: SYSTEM_PROJECT_ID }, async () => {
+			const r = await seed(sourceSessionId, "role", VALID_ARGS.role);
 			expect(r.status, `system-scope role seed: ${await r.clone().text()}`).toBe(200);
-			const fields = await seededFields(systemSid, "role");
+			const fields = await seededFields(sourceSessionId, "role");
 			expect(fields?.projectId).toBe(HEADQUARTERS_PROJECT_ID);
-		} finally {
-			await rawApiFetch(`/api/sessions/${systemSid}`, { method: "DELETE" }).catch(() => {});
-		}
+		});
 	});
 
 	// ── (b) explicit valid cross-project ───────────────────────────────
@@ -263,16 +224,14 @@ describe("cross-project proposal seed @smoke", () => {
 	});
 
 	test("Headquarters propose_project with omitted projectId also preserves create intent", async () => {
-		const s = await createSession({ projectId: HEADQUARTERS_PROJECT_ID });
-		try {
-			const r = await seed(s, "project", { name: "HQ Brand New", root_path: "/tmp/hq-brand-new-create" });
+		await clearSourceProposals("project");
+		await withProposalSessionSnapshot(gateway, sourceSessionId, { projectId: HEADQUARTERS_PROJECT_ID }, async () => {
+			const r = await seed(sourceSessionId, "project", { name: "HQ Brand New", root_path: "/tmp/hq-brand-new-create" });
 			expect(r.status, `Headquarters project create seed: ${await r.clone().text()}`).toBe(200);
-			const fields = await seededFields(s, "project");
+			const fields = await seededFields(sourceSessionId, "project");
 			expect(fields).toMatchObject({ name: "HQ Brand New", root_path: "/tmp/hq-brand-new-create" });
 			expect(fields?.projectId, "Headquarters provenance must not be reinterpreted as the proposal target").toBeUndefined();
-		} finally {
-			await deleteSession(s);
-		}
+		});
 	});
 
 	// ── (c) explicit unknown → 422 UNKNOWN_PROJECT ─────────────────────
@@ -380,63 +339,36 @@ describe("cross-project proposal seed @smoke", () => {
  * goals stay top-level. The same-project / no-explicit-target path is unchanged.
  */
 describe("team-lead parent inject vs cross-project target (PR #1005) @smoke", () => {
-	let gw: any;
-	let leadSid: string;
-	let parentGoalId: string;
-	let originalRole: unknown;
-	let originalTeamGoalId: unknown;
+	let parent: ReturnType<typeof createProposalParent>;
 
-	beforeAll(async () => {
-		gw = gateway;
-
-		// A spawn-capable parent goal in the suite-owned source project.
-		const parent = await createGoal({
-			title: `xproj-inject-parent ${Date.now()}`,
-			workflowId: "feature",
-			subgoalsAllowed: true,
-			projectId: sourceProjectId,
-		});
-		parentGoalId = parent.id as string;
-
-		// The target's own workflow is supplied below, keeping workflow validation
-		// independent while the assertion isolates the parent-injection boundary.
-
-		// Promote a dedicated source-project session to team lead. Save the live
-		// fields so even a failed assertion cannot bleed this mutation into cleanup.
-		leadSid = await createSession({ projectId: sourceProjectId });
-		const sess = gw.sessionManager.getSession(leadSid);
-		expect(sess, "team-lead session must be live in the manager").toBeTruthy();
-		originalRole = sess.role;
-		originalTeamGoalId = sess.teamGoalId;
-		sess.role = "team-lead";
-		sess.teamGoalId = parentGoalId;
+	beforeAll(() => {
+		parent = createProposalParent(gateway, sourceProjectFixture);
+		parent.record.subgoalsAllowed = true;
 	});
 
-	afterAll(async () => {
-		const sess = gw?.sessionManager.getSession(leadSid);
-		if (sess) {
-			sess.role = originalRole;
-			sess.teamGoalId = originalTeamGoalId;
-		}
-		await deleteSession(leadSid);
-		await deleteGoal(parentGoalId);
+	afterAll(() => {
+		parent.remove();
 	});
 
 	test("(same-project) team-lead goal proposal STILL auto-injects the parent", async () => {
-		const r = await seed(leadSid, "goal", { title: "Same-Proj Child", spec: "body\n", workflow: "feature" });
-		expect(r.status, `same-project team-lead seed: ${await r.clone().text()}`).toBe(200);
-		const fields = await seededFields(leadSid, "goal");
-		expect(fields?.parentGoalId, "same-project proposal must auto-inject the team-lead parent").toBe(parentGoalId);
+		await withProposalSessionSnapshot(gateway, sourceSessionId, { role: "team-lead", teamGoalId: parent.id }, async () => {
+			const r = await seed(sourceSessionId, "goal", { title: "Same-Proj Child", spec: "body\n", workflow: "feature" });
+			expect(r.status, `same-project team-lead seed: ${await r.clone().text()}`).toBe(200);
+			const fields = await seededFields(sourceSessionId, "goal");
+			expect(fields?.parentGoalId, "same-project proposal must auto-inject the team-lead parent").toBe(parent.id);
+		});
 	});
 
 	test("(cross-project) team-lead goal proposal stays TOP-LEVEL (no parent inject)", async () => {
-		const r = await seed(leadSid, "goal", { title: "Cross-Proj Child", spec: "body\n", workflow: "target-only", projectId: injectTargetProjectId });
-		expect(r.status, `cross-project team-lead seed: ${await r.clone().text()}`).toBe(200);
-		const fields = await seededFields(leadSid, "goal");
-		expect(fields?.projectId, "cross-project stamp").toBe(injectTargetProjectId);
-		expect(
-			fields?.parentGoalId,
-			"cross-project proposal must NOT inject a source-project parent (would fail accept with PARENT_CROSS_PROJECT)",
-		).toBeUndefined();
+		await withProposalSessionSnapshot(gateway, sourceSessionId, { role: "team-lead", teamGoalId: parent.id }, async () => {
+			const r = await seed(sourceSessionId, "goal", { title: "Cross-Proj Child", spec: "body\n", workflow: "target-only", projectId: injectTargetProjectId });
+			expect(r.status, `cross-project team-lead seed: ${await r.clone().text()}`).toBe(200);
+			const fields = await seededFields(sourceSessionId, "goal");
+			expect(fields?.projectId, "cross-project stamp").toBe(injectTargetProjectId);
+			expect(
+				fields?.parentGoalId,
+				"cross-project proposal must NOT inject a source-project parent (would fail accept with PARENT_CROSS_PROJECT)",
+			).toBeUndefined();
+		});
 	});
 });
