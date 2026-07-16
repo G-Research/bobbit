@@ -1,12 +1,14 @@
 # Core-fidelity route below 300 seconds
 
+> **Historical profiling route.** The named lane and worker topology were retired by the direct three-worker unit gate. Current commands and projects are documented in [`../unit-gate.md`](../unit-gate.md).
+
 **Profiling reference only:** completed six-job run at **679.2s**, 7,575 passed / 1 failed. It excluded twelve formerly unit-owned integration files and is therefore not acceptance evidence.
 **Reference gap:** **379.2s**, before restoring those files.
 **Decision:** no further full suite until cross-lane pressure reductions meet the measurement gates below.
 
 ## Delegated edit accounting
 
-The delegated files were benchmarked from the exact checked-in pre-edit versions and current versions. Clean results are three isolated one-worker runs. Concurrent results are paired three-round batches with the same eight one-worker files: the two target files plus `team-manager`, `maintenance-api`, `rpc-bridge-lifecycle`, `mcp-meta-call`, `git-status-native`, and `stories-sessions-api`.
+The delegated files were benchmarked from the exact checked-in pre-edit versions and the then-current versions. Clean results are three isolated one-worker runs. Concurrent results are paired three-round batches with the same eight one-worker files: the two target files plus `team-manager`, `maintenance-api`, `rpc-bridge-lifecycle`, `mcp-meta-call`, `git-status-native`, and `stories-sessions-api`.
 
 | File | Clean before | Clean after | Clean delta | 8-way before | 8-way after | Concurrent delta | Predicted 679.2s lane effect |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -38,7 +40,7 @@ No timeout, retry, worker, scheduling, project, or test-tier setting changed.
 
 ## Direct critical-lane ceiling
 
-A clean, complete current `v2-core-fidelity` lane was measured after the delegated edits:
+A clean, complete then-current `v2-core-fidelity` lane was measured after the delegated edits:
 
 - **53/53 files passed**
 - **794 passed, 7 skipped**

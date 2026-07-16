@@ -2,7 +2,9 @@
 
 ## Status and decision
 
-This design replaces the unit-stage lane runner with one ordinary Vitest invocation. The unit stage has one coordinator, at most three Vitest workers across all projects, no test ledger reservation, no gateway-boot lease, no lane logs, and no cost-based sharding.
+**Implemented.** This is the frozen implementation design; use [`unit-gate.md`](unit-gate.md) for the current operating model and [`fast-gate-progress.md`](fast-gate-progress.md) for qualification evidence.
+
+This design replaced the unit-stage lane runner with one ordinary Vitest invocation. The unit stage has one coordinator, at most three Vitest workers across all projects, no test ledger reservation, no gateway-boot lease, no lane logs, and no cost-based sharding.
 
 The required command is:
 
@@ -13,18 +15,18 @@ npm run test:unit
 
 The hard outcome is two consecutive green solo runs at or below 300 seconds, followed by three simultaneous green runs on the Windows 12-core acceptance machine. The stretch target is 180 seconds. `retry: 3` remains configured; passing by deleting coverage, weakening assertions, or relocating any file other than the two named below is not allowed.
 
-## Current-state findings
+## Pre-implementation baseline
 
-The current unit path is `package.json::test:unit` -> `scripts/testing-v2/run-unit-lanes.mjs`. That runner starts core, fidelity, DOM, and three cost-sharded integration jobs, obtains `reserveVitestLaneBudget()` from `scripts/testing-v2/ledger.mjs`, prepares a server bundle, and writes per-lane logs. `vitest.config.ts::resolveMaxWorkers()` independently calls `reserveWorkerSlots("vitest")`; the configuration then divides the inventory among ten projects. Fidelity membership is partly inferred by reading test source and matching `node:child_process` or `playwright`.
+Before this design was implemented, `package.json::test:unit` called `scripts/testing-v2/run-unit-lanes.mjs`. That retired runner started core, fidelity, DOM, and three cost-sharded integration jobs, obtained `reserveVitestLaneBudget()` from `scripts/testing-v2/ledger.mjs`, prepared a server bundle, and wrote per-lane logs. The old `vitest.config.ts::resolveMaxWorkers()` independently called `reserveWorkerSlots("vitest")`; the configuration divided the inventory among ten projects. Fidelity membership was partly inferred by reading test source and matching `node:child_process` or `playwright`.
 
-The expensive server graph already has a useful foundation:
+The expensive server graph had a useful foundation at that baseline:
 
-- `scripts/testing-v2/server-prebundle.mjs::{computeServerPrebundleKey, validateServerPrebundle, ensureServerTestPrebundle}` creates an atomic, content-addressed bundle.
-- `tests2/harness/server-runtime-entry.ts` is the bundle entry and preserves namespace/singleton identity.
-- `tests2/harness/server-runtime.ts::{loadServerTestRuntime, serverRuntimeMode}` selects the bundle via `BOBBIT_V2_SERVER_PREBUNDLE`.
-- `tests2/harness/gateway.ts::boot` creates one gateway per worker, but currently obtains `acquireGatewayBootLease()` and only integration workers receive the prepared bundle.
+- `scripts/testing-v2/server-prebundle.mjs::{computeServerPrebundleKey, validateServerPrebundle, ensureServerTestPrebundle}` created an atomic, content-addressed bundle.
+- `tests2/harness/server-runtime-entry.ts` was the bundle entry and preserved namespace/singleton identity.
+- `tests2/harness/server-runtime.ts::{loadServerTestRuntime, serverRuntimeMode}` selected the bundle via `BOBBIT_V2_SERVER_PREBUNDLE`.
+- `tests2/harness/gateway.ts::boot` created one gateway per worker, but then obtained `acquireGatewayBootLease()` and only integration workers received the prepared bundle.
 
-The current map-driven E2E path is also reusable. `scripts/testing-v2/run-e2e-v2.mjs::classifyDaily` places entries with `bucket: "daily"` and `method: "vitest-e2e"` in Group D; `runGroupD` selects the conditional `v2-e2e-vitest` project. No such entries exist yet.
+The pre-existing map-driven E2E path was reusable. `scripts/testing-v2/run-e2e-v2.mjs::classifyDaily` placed entries with `bucket: "daily"` and `method: "vitest-e2e"` in Group D; `runGroupD` selected the conditional `v2-e2e-vitest` project. The implementation populated that path with the two approved owners.
 
 ## Target architecture
 

@@ -1,5 +1,7 @@
 # Restored integration topology and contention evidence
 
+> **Historical evidence.** This document preserves an intermediate lane/shard experiment. Its temporary Pi-discovery relocation was later reverted; the shipped Vitest E2E set contains only `team-manager.test.ts` and `marketplace-install.test.ts`. See [`../unit-gate.md`](../unit-gate.md).
+
 **Date:** 2026-07-15
 **Scope:** the twelve restored unit-owned integration files under the real cost-based three-shard, one-fork-per-shard `v2-integration` topology.
 **Authority:** profiling and edit-gate evidence only; no run in this document is full-suite acceptance unless explicitly stated.
@@ -143,12 +145,12 @@ These costs span real Git/worktree, process, filesystem, loader, and lifecycle a
 Retained-boundary follow-up work:
 
 - `verification-goal-sync-nondestructive` now clones independent real bare remotes from one immutable real-Git template. Focused time fell from 9.685s to 7.151s while all ahead/behind/diverged/hook/unchanged assertions remained real.
-- All 25 merge-base real Pi discovery declarations were restored unchanged. The newer 13 injected-backend assertions remain additive in `pi-extension-discovery-backend.test.ts`. After repeated fixed production probe-timeout failures under concurrent unit load, the 25 real process/loader/security probes moved intact to the isolated E2E Vitest group; focused Group D passes 25/25.
+- All 25 merge-base real Pi discovery declarations were restored unchanged. The newer 13 injected-backend assertions remained additive in `pi-extension-discovery-backend.test.ts`. During this intermediate experiment, the 25 real process/loader/security probes moved intact to the isolated E2E Vitest group and focused Group D passed 25/25; the relocation was later reverted for the final two-file E2E policy.
 - FlexSearch now flushes only dirty stores. Persistent failure is bounded: it returns once with the dirty obligation retained, and a later explicit retry persists. A separate deterministic test pins mutation-during-flush to exactly one follow-up write.
 
 `bg-7514` exited 1 solely because its diagnostic runner still expected 53 core-fidelity files after restoration made `pi-extension-discovery.test.ts` the 54th process-fidelity file. Vitest reported zero failed tests; process leaks were empty and ledger began/ended `0/24`. The runner recorded `error: "collected 54/53 shard files"`, so its 399.29s timing is discarded.
 
-The corrected fully guarded 54-file panel passed naturally at 362.13s wall (core fidelity 359.85s; integrations 267.98s/257.08s/291.65s). An unprofiled repeat also passed at 363.37s (core fidelity 361.10s; integrations 302.63s/281.89s/307.56s). These panels predate the explicit Pi discovery move; the current unit core-fidelity inventory contains 53 files.
+The corrected fully guarded 54-file panel passed naturally at 362.13s wall (core fidelity 359.85s; integrations 267.98s/257.08s/291.65s). An unprofiled repeat also passed at 363.37s (core fidelity 361.10s; integrations 302.63s/281.89s/307.56s). These panels predated the temporary Pi-discovery move; the then-current core-fidelity lane contained 53 files afterward.
 
 ### FlexSearch atomic export bundle
 
@@ -173,7 +175,7 @@ The format cut average write/rename fan-out by 69.7% and average profiled flush 
 
 The earlier 7,478/7,485 count is resolved semantically rather than waived:
 
-- all 25 merge-base declarations in `pi-extension-discovery.test.ts`, including real child-process, TypeScript loader, containment, filesystem, network, timeout, and cache-bound assertions, are restored by exact name and pass 25/25 in E2E Group D;
+- all 25 merge-base declarations in `pi-extension-discovery.test.ts`, including real child-process, TypeScript loader, containment, filesystem, network, timeout, and cache-bound assertions, were restored by exact name and passed 25/25 in the temporary E2E Group D placement;
 - the 13 deterministic injected-backend assertions remain additive in a new v2-native file;
 - the seven remaining renamed/consolidated ledger and lane-scheduling declarations have explicit current owners and rationales in `scripts/testing-v2/unit-declaration-semantic-map.json`;
 - the inventory audit validates every mapped target exists, rejects stale/duplicate/empty mappings, and now reports zero unmapped declarations and `declarationSemanticsPreserved: true`.
@@ -193,4 +195,4 @@ A natural `npm run test:unit` run exited at **508.4s** and failed both time and 
 | Integration 2 | Pass | 363.6s | 63 files, zero failed tests. |
 | DOM | Pass | 178.5s | 144 files, zero failed tests. |
 
-The run reported 7,630 passed and five failed tests. The `v2Native` omission was corrected immediately. This does not repair or replace the invalid run. At that historical point, inventory still preserved every one of the 880 merge-base files with zero E2E exclusions. The current inventory retains all files and explicitly owns Pi discovery in E2E Group D. Final process state was empty and ledger state was `0/24`.
+The run reported 7,630 passed and five failed tests. The `v2Native` omission was corrected immediately. This does not repair or replace the invalid run. At that historical point, inventory still preserved every one of the 880 merge-base files with zero E2E exclusions. The final inventory retains the files and owns Pi discovery in tier-1 `v2-core`; only the two approved real-fidelity files remain in Vitest E2E. Final process state was empty and ledger state was `0/24`.

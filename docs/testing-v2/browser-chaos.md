@@ -55,7 +55,7 @@ from current coverage is reported as a **full loss** — a strong signal that th
 consolidation dropped its only exercising test.
 
 **Coverage scope & complementarity.** `--run` captures V8 coverage from the
-`v2-core`, `v2-core-isolated`, and `v2-dom` projects only (override via
+`v2-core`, `v2-isolated`, and `v2-dom` projects only (override via
 `BOBBIT_COVERAGE_PROJECTS`). `v2-integration` boots a real gateway per fork and
 is unstable under coverage instrumentation (`ERR_IPC_CHANNEL_CLOSED`); its
 `src/server` coverage is measured separately by `parity.mjs`. Crucially, most

@@ -7,7 +7,7 @@ npm run build          # Build server + UI
 npm run dev:harness    # Gateway + vite dev
 npm run restart-server # Rebuild & restart after server changes
 npm run check          # Type-check server + web
-npm run test:unit      # Vitest core/dom/integration
+npm run test:unit      # Vitest tier-1, fixed 3-worker cap
 npm run test:browser   # Playwright browser-v2
 npm run test:e2e       # E2E v2: git/worktree/Docker/MCP/restart
 npm run test:manual    # Real agents/LLM + Docker (~5 min); ONLY gate-exempt path
@@ -38,8 +38,8 @@ Orient here, then `rg` for the symbol.
 
 ## Testing (Test Suite v2)
 
-- **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒vitest (`core`/`dom`/`integration`); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` (vitest) → `test:browser` (Playwright browser-v2) → `test:e2e` (real-fidelity). worktree/Docker/MCP/restart → `e2e:v2` + `test:manual`.
-- **`retries:0`** — a flake is a bug, fixed by architecture (DI seams, one-gateway-per-fork + `scope()` cleanup, observable-state waits). **External-free** (fenced runner+fetch).
+- **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒Vitest (`core`/`dom`/`integration`, with explicit isolated exceptions); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` → `test:browser` → `test:e2e`; worktree/Docker/MCP/restart coverage belongs to E2E or `test:manual`.
+- **Unit gate** — one direct Vitest run, fixed three-worker cap, `retry: 3`, subprocess guard, and hard 15 s solo file budget. See [docs/testing-v2/unit-gate.md](docs/testing-v2/unit-gate.md).
 - Isolate only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
 - Every user-facing feature needs a `tests2/browser` journey (nav, happy path, reload, cleanup). See [docs/testing-v2/](docs/testing-v2/).
 

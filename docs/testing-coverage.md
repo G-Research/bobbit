@@ -14,15 +14,15 @@ Per-area notes on what user stories and contracts are covered by which test file
 
 ## Phase invariant
 
-Tests run in one of three buckets: **unit** (`unit:` → `npm run test:unit` → `test:v2`
-= vitest tier-1 `tests2/{core,dom,integration}` + Playwright tier-2 `tests2/browser`),
-**e2e** (`e2e:` → `npm run test:e2e` → `test:e2e:v2` = the real-fidelity remainder —
-real git/worktree/pool/Docker/MCP/spawn/restart at `retries:0`), and **manual-integration**
-(`npm run test:manual`, gate-exempt, real LLM/Docker). Bucket membership is pinned by
-[`tests2/core/guard-v2.test.ts`](../tests2/core/guard-v2.test.ts) + `parity.mjs`
-against [`tests2/tests-map.json`](../tests2/tests-map.json): no orphan `tests2/` file,
-no dangling `v2Path`, no retired-without-replacement. `*.test.ts`⇒vitest,
-`*.spec.ts`⇒Playwright. See [testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first).
+Tests run in four phases: **unit** (`npm run test:unit`, one direct Vitest run over
+`v2-core`, `v2-dom`, `v2-integration`, and `v2-isolated`), **browser**
+(`npm run test:browser`, Playwright browser-v2), **e2e** (`npm run test:e2e`, the
+real-fidelity local Git/worktree/Docker/MCP/process/restart remainder), and
+**manual integration** (`npm run test:manual`, gate-exempt real LLM/agent coverage).
+Execution membership is pinned by [`tests2/tests-map.json`](../tests2/tests-map.json),
+`guard-v2`, parity, and the unit inventory audit: no orphan file, duplicate/missing
+owner, dangling `v2Path`, or lost declaration semantics. `*.test.ts` uses Vitest and
+`*.spec.ts` uses Playwright. See [testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first).
 
 ## Build warning regression coverage
 

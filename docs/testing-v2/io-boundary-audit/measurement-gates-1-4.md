@@ -1,5 +1,7 @@
 # Measurement gates 1–4
 
+> **Historical evidence.** These gates measured the retired lane/shard topology. The current unit runner has four direct projects and is documented in [`../unit-gate.md`](../unit-gate.md).
+
 **Date:** 2026-07-15
 **Rule:** no full-suite run and no fixture optimization unless the representative, disjoint projection clears its gate.
 
@@ -8,10 +10,10 @@
 The twelve integration files formerly excluded from `v2-integration` have been restored to the unit gate.
 
 - `v2-integration` no longer excludes the historical `integrationE2eFiles` set.
-- The `v2-integration-e2e` project, E2E Group I, `test:e2e:integration`, and the current exclusion-list module were removed.
-- `run-unit-lanes.mjs` already shards every `tests2/integration/*.test.ts` path; the restored files now collect in those unit shards.
+- The `v2-integration-e2e` project, E2E Group I, `test:e2e:integration`, and the then-current exclusion-list module were removed.
+- At measurement time, `run-unit-lanes.mjs` sharded every `tests2/integration/*.test.ts` path; the restored files collected in those unit shards.
 - Direct collection proof found all **12/12** restored files under `[v2-integration]`.
-- Inventory now requires all **880** merge-base core/DOM/integration files: **880/880 present**, plus three current additions, zero current E2E exclusions.
+- The measured inventory required all **880** merge-base core/DOM/integration files: **880/880 present**, plus three additions and zero E2E exclusions at that point.
 - `npm run check`, E2E list without Group I, and `git diff --check` pass.
 
 All earlier 679–685s runs omitted these twelve files. They remain useful contention profiles but are not acceptance evidence.

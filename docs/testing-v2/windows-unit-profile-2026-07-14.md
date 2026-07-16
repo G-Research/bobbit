@@ -56,7 +56,9 @@ The 970 direct Git invocations are the dominant measured process-amplification t
 
 Raw report: `.profiles/testing-v2/windows-process-profile/2026-07-14T19-56-11-552Z/report.{json,md}`.
 
-## Step 2 changes included here
+## Historical Step 2 experiment
+
+The broad relocations below describe the July 14 profiling experiment. They were later restored to tier 1. The shipped execution map relocates exactly `team-manager.test.ts` and `marketplace-install.test.ts`; their seam-based decision suites remain in tier 1.
 
 - Moved real-Git/worktree-heavy maintenance, multi-repository goal, staff patch/reassign, verification restart, and retained-artifact command tests to the real-fidelity e2e project.
 - Replaced unnecessary repository fixtures with ordinary project directories in three API-state suites.
@@ -65,9 +67,9 @@ Raw report: `.profiles/testing-v2/windows-process-profile/2026-07-14T19-56-11-55
 
 These changes preserve real-fidelity owners rather than deleting coverage. The profile shows that broad negative Git probing remains the next high-impact Step 2 cluster.
 
-## Step 3 result
+## Historical Step 3 result
 
-The integration lane now builds one content-addressed server runtime with esbuild and shares it across workers. Publication is atomic and fail-closed; the manifest hashes both bundle and source map, `import.meta.url` is rewritten per source module without modifying generated child-module strings, and namespace/boot parity is validated before publication. Identity-sensitive integration tests use the shared runtime, while source-only store tests continue to import source modules directly so they cannot initialize the bundled gateway before the fork fixture configures its environment.
+The integration lane then built one content-addressed server runtime with esbuild and shared it across workers. Publication is atomic and fail-closed; the manifest hashes both bundle and source map, `import.meta.url` is rewritten per source module without modifying generated child-module strings, and namespace/boot parity is validated before publication. Identity-sensitive integration tests use the shared runtime, while source-only store tests continue to import source modules directly so they cannot initialize the bundled gateway before the fork fixture configures its environment.
 
 A 14-file runtime smoke passed 50/50 tests in 25.42 seconds. A focused identity regression passed 47/47 assertions; disabling Vitest console interception then removed the two `onUserConsoleLog` teardown RPC errors in a 9/9 regression run.
 
