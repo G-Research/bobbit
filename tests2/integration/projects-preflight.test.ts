@@ -5,17 +5,28 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
+let fixtureRoot = "";
+let fixtureSequence = 0;
+
 function freshRoot(label: string): string {
-	// Use the real OS tmpdir, not bobbitDir() — the in-process harness
-	// auto-registers a "default" project at the e2e bobbit dir, and anything
-	// nested inside it would trip path.nested-in-project.
-	const dir = path.join(os.tmpdir(), `bobbit-preflight-e2e-${label}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+	// Keep fixtures beside (not inside) the harness default project. Reusing the
+	// fork's short temp root avoids Windows temp/antivirus contention without
+	// weakening the nested-project checks exercised below.
+	const dir = path.join(fixtureRoot, `${++fixtureSequence}-${label}`);
 	fs.mkdirSync(dir, { recursive: true });
 	return dir;
 }
+
+test.beforeAll(({ gateway }) => {
+	fixtureRoot = path.join(gateway.bobbitDir, "preflight-fixtures");
+	fs.mkdirSync(fixtureRoot, { recursive: true });
+});
+
+test.afterAll(() => {
+	fs.rmSync(fixtureRoot, { recursive: true, force: true });
+});
 
 test.describe("GET /api/projects/preflight", () => {
 	test("missing path → 400", async () => {
@@ -84,7 +95,7 @@ test.describe("POST /api/projects/archive-bobbit", () => {
 	});
 
 	test("non-existent rootPath → 400", async () => {
-		const dir = path.join(os.tmpdir(), "does-not-exist-" + Date.now());
+		const dir = path.join(fixtureRoot, "does-not-exist");
 		const res = await apiFetch("/api/projects/archive-bobbit", {
 			method: "POST",
 			body: JSON.stringify({ rootPath: dir }),
