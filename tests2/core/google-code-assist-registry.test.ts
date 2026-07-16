@@ -23,7 +23,7 @@ guardProcessEnv();
  *     authenticates ONLY the account provider (never generic API-key `google`), and
  *     a GOOGLE_API_KEY/GEMINI_API_KEY never authenticates account models.
  */
-import { afterEach, beforeEach, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -31,6 +31,7 @@ import { tmpdir } from "node:os";
 
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, isOAuthCapableProvider } from "../../src/server/agent/model-registry.js";
+import { getGoogleCodeAssistModels } from "../../src/server/agent/google-code-assist-models.js";
 import { createMemFs } from "../harness/mem-fs.js";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 
@@ -38,24 +39,76 @@ const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevGoogleKey = process.env.GOOGLE_API_KEY;
 const prevGeminiKey = process.env.GEMINI_API_KEY;
 const prevCloudToken = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+type Models = Awaited<ReturnType<typeof getAvailableModels>>;
+interface RegistrySnapshots {
+	noCredential: Models;
+	oauth: Models;
+	googleApiKey: Models;
+	genericOauth: Models;
+	cloudToken: Models;
+	whitespaceTokenAccountModels: Models;
+}
+
 let dir: string;
 let prefs: PreferencesStore;
+let snapshots: RegistrySnapshots;
 
-beforeEach(() => {
-	dir = mkdtempSync(path.join(tmpdir(), "bobbit-gca-reg-"));
-	process.env.BOBBIT_AGENT_DIR = dir;
-	pinAgentDirForTest(dir);
-	// Ensure neither the API-key `google` provider nor the Code Assist account
-	// provider is authenticated by ambient env before each case sets it explicitly.
+function clearCredentials(): void {
 	delete process.env.GOOGLE_API_KEY;
 	delete process.env.GEMINI_API_KEY;
 	delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
-	prefs = new PreferencesStore(path.resolve("/memfs/google-code-assist-registry"), createMemFs());
+	rmSync(path.join(dir, "auth.json"), { force: true });
 	invalidateModelCache();
 	clearOAuthCache();
+}
+
+function writeAuth(cred: Record<string, unknown>): void {
+	writeFileSync(path.join(dir, "auth.json"), JSON.stringify(cred), "utf-8");
+	invalidateModelCache();
+	clearOAuthCache();
+}
+
+async function captureModels(setup?: () => void): Promise<Models> {
+	clearCredentials();
+	setup?.();
+	invalidateModelCache();
+	clearOAuthCache();
+	const models = await getAvailableModels(prefs);
+	return Object.freeze(models.map((model) => Object.freeze({ ...model }))) as Models;
+}
+
+beforeAll(async () => {
+	dir = mkdtempSync(path.join(tmpdir(), "bobbit-gca-reg-"));
+	process.env.BOBBIT_AGENT_DIR = dir;
+	pinAgentDirForTest(dir);
+	prefs = new PreferencesStore(path.resolve("/memfs/google-code-assist-registry"), createMemFs());
+
+	// Model discovery is intentionally expensive. Build each distinct credential
+	// view once, then let all declaration assertions share the immutable snapshots.
+	snapshots = {
+		noCredential: await captureModels(),
+		oauth: await captureModels(() => {
+			writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
+		}),
+		googleApiKey: await captureModels(() => {
+			process.env.GOOGLE_API_KEY = "test-key";
+		}),
+		genericOauth: await captureModels(() => {
+			writeAuth({ access_token: "generic", "google-gemini-cli": { type: "oauth", access: "tok" } });
+		}),
+		cloudToken: await captureModels(() => {
+			process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "ya29.env-bearer-token";
+		}),
+		whitespaceTokenAccountModels: await (async () => {
+			clearCredentials();
+			process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "   ";
+			return Object.freeze(getGoogleCodeAssistModels()) as Models;
+		})(),
+	};
+	clearCredentials();
 });
 
-afterEach(() => {
+afterAll(() => {
 	if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR; else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
 	if (prevGoogleKey === undefined) delete process.env.GOOGLE_API_KEY; else process.env.GOOGLE_API_KEY = prevGoogleKey;
 	if (prevGeminiKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = prevGeminiKey;
@@ -63,13 +116,8 @@ afterEach(() => {
 	resetAgentDirForTest();
 	rmSync(dir, { recursive: true, force: true });
 	invalidateModelCache();
-});
-
-function writeAuth(cred: Record<string, unknown>): void {
-	writeFileSync(path.join(dir, "auth.json"), JSON.stringify(cred), "utf-8");
-	invalidateModelCache();
 	clearOAuthCache();
-}
+});
 
 describe("isOAuthCapableProvider", () => {
 	it("includes the OAuth/account providers and excludes API-key-only google", () => {
@@ -81,15 +129,12 @@ describe("isOAuthCapableProvider", () => {
 });
 
 describe("Google account model emission + auth isolation", () => {
-	it("does not emit google-gemini-cli models when no account credential exists", async () => {
-		const models = await getAvailableModels(prefs);
-		assert.equal(models.some((m) => m.provider === "google-gemini-cli"), false);
+	it("does not emit google-gemini-cli models when no account credential exists", () => {
+		assert.equal(snapshots.noCredential.some((m) => m.provider === "google-gemini-cli"), false);
 	});
 
-	it("emits authenticated google-gemini-cli Code Assist models when credential present", async () => {
-		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
-		const models = await getAvailableModels(prefs);
-		const account = models.filter((m) => m.provider === "google-gemini-cli");
+	it("emits authenticated google-gemini-cli Code Assist models when credential present", () => {
+		const account = snapshots.oauth.filter((m) => m.provider === "google-gemini-cli");
 		assert.ok(account.length > 0, "expected at least one google-gemini-cli model");
 		for (const m of account) {
 			assert.equal(m.api, "google-code-assist");
@@ -98,12 +143,10 @@ describe("Google account model emission + auth isolation", () => {
 		}
 	});
 
-	it("marks google-gemini-cli account models as session-selectable (runtime support exists)", async () => {
+	it("marks google-gemini-cli account models as session-selectable (runtime support exists)", () => {
 		// The generated Code Assist provider extension registers a google-code-assist
 		// api in the agent runtime, so account models can now be bound to a session.
-		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
-		const models = await getAvailableModels(prefs);
-		const account = models.filter((m) => m.provider === "google-gemini-cli");
+		const account = snapshots.oauth.filter((m) => m.provider === "google-gemini-cli");
 		assert.ok(account.length > 0, "expected at least one google-gemini-cli model");
 		for (const m of account) {
 			assert.notEqual(m.sessionSelectable, false, `${m.id} must be selectable for sessions`);
@@ -111,13 +154,11 @@ describe("Google account model emission + auth isolation", () => {
 		}
 	});
 
-	it("does not emit Developer-API-only Gemini models that Code Assist 404s on", async () => {
+	it("does not emit Developer-API-only Gemini models that Code Assist 404s on", () => {
 		// Live Code Assist probes return HTTP 404 "Requested entity not found" for
 		// gemini-2.0-*, gemini-3.5-flash, and the *-latest aliases even though pi-ai's
 		// `google` catalog carries them. They must be excluded from the account list.
-		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
-		const models = await getAvailableModels(prefs);
-		const accountIds = new Set(models.filter((m) => m.provider === "google-gemini-cli").map((m) => m.id));
+		const accountIds = new Set(snapshots.oauth.filter((m) => m.provider === "google-gemini-cli").map((m) => m.id));
 		assert.ok(accountIds.size > 0, "expected at least one google-gemini-cli model");
 		for (const unsupported of [
 			"gemini-2.0-flash",
@@ -130,39 +171,27 @@ describe("Google account model emission + auth isolation", () => {
 		}
 	});
 
-	it("emits the supported Code Assist Gemini models", async () => {
-		writeAuth({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } });
-		const models = await getAvailableModels(prefs);
-		const accountIds = new Set(models.filter((m) => m.provider === "google-gemini-cli").map((m) => m.id));
+	it("emits the supported Code Assist Gemini models", () => {
+		const accountIds = new Set(snapshots.oauth.filter((m) => m.provider === "google-gemini-cli").map((m) => m.id));
 		// These are confirmed-serving ids that are also present in pi-ai's catalog.
 		for (const supported of ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview"]) {
 			assert.equal(accountIds.has(supported), true, `${supported} must be emitted (Code Assist supported)`);
 		}
 	});
 
-	it("keeps API-key google (Gemini Developer API) models selectable for sessions", async () => {
+	it("keeps API-key google (Gemini Developer API) models selectable for sessions", () => {
 		// The always-working API-key fallback must never be gated. Authenticate it via env.
-		process.env.GOOGLE_API_KEY = "test-key";
-		try {
-			invalidateModelCache();
-			const models = await getAvailableModels(prefs);
-			const googleModels = models.filter((m) => m.provider === "google");
-			assert.ok(googleModels.length > 0, "expected built-in google models");
-			for (const m of googleModels) {
-				assert.equal(m.authenticated, true, `${m.id} should be authenticated by GOOGLE_API_KEY`);
-				assert.notEqual(m.sessionSelectable, false, `${m.id} must stay selectable for sessions`);
-			}
-		} finally {
-			delete process.env.GOOGLE_API_KEY;
-			invalidateModelCache();
+		const googleModels = snapshots.googleApiKey.filter((m) => m.provider === "google");
+		assert.ok(googleModels.length > 0, "expected built-in google models");
+		for (const m of googleModels) {
+			assert.equal(m.authenticated, true, `${m.id} should be authenticated by GOOGLE_API_KEY`);
+			assert.notEqual(m.sessionSelectable, false, `${m.id} must stay selectable for sessions`);
 		}
 	});
 
-	it("a generic OAuth token does not authenticate the API-key-only google provider", async () => {
+	it("a generic OAuth token does not authenticate the API-key-only google provider", () => {
 		// Top-level token (legacy generic shape) + a google-gemini-cli entry.
-		writeAuth({ access_token: "generic", "google-gemini-cli": { type: "oauth", access: "tok" } });
-		const models = await getAvailableModels(prefs);
-		const googleModels = models.filter((m) => m.provider === "google");
+		const googleModels = snapshots.genericOauth.filter((m) => m.provider === "google");
 		assert.ok(googleModels.length > 0, "expected built-in google models");
 		for (const m of googleModels) {
 			assert.equal(m.authenticated, false, `${m.id} must not be authenticated by an OAuth token`);
@@ -171,15 +200,11 @@ describe("Google account model emission + auth isolation", () => {
 });
 
 describe("GOOGLE_CLOUD_ACCESS_TOKEN env-token Code Assist exposure + isolation", () => {
-	it("emits authenticated google-gemini-cli Code Assist models from an env token alone (no auth.json)", async () => {
+	it("emits authenticated google-gemini-cli Code Assist models from an env token alone (no auth.json)", () => {
 		// Env-token-only deployments (manual/live config, sandbox) must surface
 		// authenticated account models even without a stored OAuth credential, matching
 		// the provider extension's authenticatedAtLoad gate and spawn-pinnable behavior.
-		process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "ya29.env-bearer-token";
-		invalidateModelCache();
-		clearOAuthCache();
-		const models = await getAvailableModels(prefs);
-		const account = models.filter((m) => m.provider === "google-gemini-cli");
+		const account = snapshots.cloudToken.filter((m) => m.provider === "google-gemini-cli");
 		assert.ok(account.length > 0, "expected google-gemini-cli models from env token");
 		for (const m of account) {
 			assert.equal(m.api, "google-code-assist");
@@ -188,42 +213,30 @@ describe("GOOGLE_CLOUD_ACCESS_TOKEN env-token Code Assist exposure + isolation",
 		}
 	});
 
-	it("an env token does not authenticate or expose the generic API-key `google` provider", async () => {
+	it("an env token does not authenticate or expose the generic API-key `google` provider", () => {
 		// Isolation: the Code Assist Bearer token is a different wire protocol and must
 		// never make the API-key Gemini Developer API provider look usable.
-		process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "ya29.env-bearer-token";
-		invalidateModelCache();
-		clearOAuthCache();
-		const models = await getAvailableModels(prefs);
-		const googleModels = models.filter((m) => m.provider === "google");
+		const googleModels = snapshots.cloudToken.filter((m) => m.provider === "google");
 		assert.ok(googleModels.length > 0, "expected built-in google models");
 		for (const m of googleModels) {
 			assert.equal(m.authenticated, false, `${m.id} must not be authenticated by GOOGLE_CLOUD_ACCESS_TOKEN`);
 		}
 	});
 
-	it("a GOOGLE_API_KEY does not emit or authenticate google-gemini-cli account models", async () => {
+	it("a GOOGLE_API_KEY does not emit or authenticate google-gemini-cli account models", () => {
 		// Reverse isolation: the always-working API-key path must never masquerade as
 		// the account (Code Assist) provider. With only GOOGLE_API_KEY set and no
 		// account credential, no google-gemini-cli models should be emitted.
-		process.env.GOOGLE_API_KEY = "test-key";
-		invalidateModelCache();
-		clearOAuthCache();
-		const models = await getAvailableModels(prefs);
 		assert.equal(
-			models.some((m) => m.provider === "google-gemini-cli"),
+			snapshots.googleApiKey.some((m) => m.provider === "google-gemini-cli"),
 			false,
 			"GOOGLE_API_KEY must not surface Code Assist account models",
 		);
 	});
 
-	it("a whitespace-only env token does not count as a Code Assist credential", async () => {
-		process.env.GOOGLE_CLOUD_ACCESS_TOKEN = "   ";
-		invalidateModelCache();
-		clearOAuthCache();
-		const models = await getAvailableModels(prefs);
+	it("a whitespace-only env token does not count as a Code Assist credential", () => {
 		assert.equal(
-			models.some((m) => m.provider === "google-gemini-cli"),
+			snapshots.whitespaceTokenAccountModels.some((m) => m.provider === "google-gemini-cli"),
 			false,
 			"whitespace-only GOOGLE_CLOUD_ACCESS_TOKEN must not emit account models",
 		);
