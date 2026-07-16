@@ -3,17 +3,27 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
 import { withEnv } from "../harness/with-env.js";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+
+const ROOT = path.resolve("/memfs/scaffold-agent-gitignore");
+let restoreFs: () => void;
+
+beforeAll(() => {
+	const scoped = installScopedMemFs(["existsSync", "mkdirSync", "readFileSync", "writeFileSync"]);
+	restoreFs = scoped.restore;
+});
+
+afterAll(() => restoreFs());
 
 function tmpProject(label: string): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-scaffold-${label}-`));
+	return path.join(ROOT, label);
 }
 
 function readGitignore(projectRoot: string): string {
@@ -29,33 +39,25 @@ function withProjectLocalBobbitDir(fn: () => void): void {
 describe("scaffoldBobbitDir .bobbit/.gitignore", () => {
 	it("ignores gateway state and the project-local default agent dir for new scaffolds", () => {
 		const projectRoot = tmpProject("new");
-		try {
-			withProjectLocalBobbitDir(() => scaffoldBobbitDir(projectRoot));
+		withProjectLocalBobbitDir(() => scaffoldBobbitDir(projectRoot));
 
-			const content = readGitignore(projectRoot);
-			assert.match(content, /^state\/\s*$/m);
-			assert.match(content, /^agent\/\s*$/m);
-		} finally {
-			fs.rmSync(projectRoot, { recursive: true, force: true });
-		}
+		const content = readGitignore(projectRoot);
+		assert.match(content, /^state\/\s*$/m);
+		assert.match(content, /^agent\/\s*$/m);
 	});
 
 	it("safely updates existing scaffolds that only ignored state", () => {
 		const projectRoot = tmpProject("existing");
-		try {
-			const dotBobbit = path.join(projectRoot, ".bobbit");
-			fs.mkdirSync(path.join(dotBobbit, "config"), { recursive: true });
-			fs.writeFileSync(path.join(dotBobbit, ".gitignore"), "state/\n# user rule\n");
+		const dotBobbit = path.join(projectRoot, ".bobbit");
+		fs.mkdirSync(path.join(dotBobbit, "config"), { recursive: true });
+		fs.writeFileSync(path.join(dotBobbit, ".gitignore"), "state/\n# user rule\n");
 
-			withProjectLocalBobbitDir(() => scaffoldBobbitDir(projectRoot));
+		withProjectLocalBobbitDir(() => scaffoldBobbitDir(projectRoot));
 
-			const content = readGitignore(projectRoot);
-			assert.match(content, /^state\/\s*$/m);
-			assert.match(content, /^agent\/\s*$/m);
-			assert.match(content, /^# user rule\s*$/m);
-			assert.equal((content.match(/^agent\/\s*$/gm) ?? []).length, 1);
-		} finally {
-			fs.rmSync(projectRoot, { recursive: true, force: true });
-		}
+		const content = readGitignore(projectRoot);
+		assert.match(content, /^state\/\s*$/m);
+		assert.match(content, /^agent\/\s*$/m);
+		assert.match(content, /^# user rule\s*$/m);
+		assert.equal((content.match(/^agent\/\s*$/gm) ?? []).length, 1);
 	});
 });

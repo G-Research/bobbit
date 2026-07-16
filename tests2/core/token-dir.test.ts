@@ -10,12 +10,14 @@ guardProcessEnv();
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { loadOrCreateToken, readToken } from "../../src/server/auth/token.js";
 import { caCertPath, tlsDir } from "../../src/server/auth/tls.js";
 import { bobbitStateDir, serverSecretsDir } from "../../src/server/bobbit-dir.js";
 import { withEnv } from "../harness/with-env.js";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+
+const ROOT = path.resolve("/memfs/token-dir");
 
 // Live server secrets (the admin token) now resolve to serverSecretsDir(), which
 // is driven by BOBBIT_SECRETS_DIR (outside any project root). This test pins that
@@ -26,21 +28,21 @@ describe("auth token directory resolution", () => {
 	let dirA: string;
 	let dirB: string;
 
+	let restoreFs: () => void;
+
 	beforeAll(() => {
 		// Isolate the Headquarters dir too so the legacy-token fallback in
 		// loadOrCreateToken/readToken (which reads bobbitStateDir()/token) cannot
 		// pick up a real gateway token from the environment. Env is applied via
 		// withEnv inside each test (not here) so forks never leak BOBBIT_DIR.
-		hqDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-token-hq-"));
-		dirA = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-token-a-"));
-		dirB = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-token-b-"));
+		const scoped = installScopedMemFs(["chmodSync", "existsSync", "mkdirSync", "readFileSync", "writeFileSync"]);
+		restoreFs = scoped.restore;
+		hqDir = path.join(ROOT, "headquarters");
+		dirA = path.join(ROOT, "secrets-a");
+		dirB = path.join(ROOT, "secrets-b");
 	});
 
-	afterAll(() => {
-		fs.rmSync(hqDir, { recursive: true, force: true });
-		fs.rmSync(dirA, { recursive: true, force: true });
-		fs.rmSync(dirB, { recursive: true, force: true });
-	});
+	afterAll(() => restoreFs());
 
 	it("uses the current serverSecretsDir for each token operation", () => {
 		// withEnv snapshots + restores BOBBIT_DIR / BOBBIT_SECRETS_DIR in finally;
@@ -69,7 +71,7 @@ describe("auth token directory resolution", () => {
 	it("resolves token and TLS ca under serverSecretsDir on a fresh install (no legacy <hqDir>/state secret)", () => {
 		// Fresh secrets dir with no token yet, and an empty Headquarters state dir
 		// (the legacy fallback location) so there is nothing to fall back to.
-		const freshSecrets = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-token-fresh-"));
+		const freshSecrets = path.join(ROOT, "fresh-secrets");
 
 		withEnv({ BOBBIT_DIR: hqDir, BOBBIT_SECRETS_DIR: freshSecrets }, () => {
 			const legacyToken = path.join(bobbitStateDir(), "token");
@@ -88,6 +90,5 @@ describe("auth token directory resolution", () => {
 			assert.notStrictEqual(caCertPath(), path.join(bobbitStateDir(), "tls", "ca.crt"));
 		});
 
-		fs.rmSync(freshSecrets, { recursive: true, force: true });
 	});
 });
