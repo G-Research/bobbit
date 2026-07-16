@@ -116,6 +116,7 @@ function harness(options?: {
 	};
 	manager.sessions.set(session.id, session);
 	let respawns = 0;
+	let redriveRejected = false;
 	manager._respawnAgentInPlaceOwned = async (_id: string, current: any) => {
 		respawns++;
 		// Match the real helper's temporary SessionInfo gap and fresh SessionInfo.
@@ -132,9 +133,11 @@ function harness(options?: {
 		}, options?.throwRedriveRejection);
 		if (options?.rejectRedriveOnce && !options.completeTurnBeforeRedriveReject) {
 			const rejectOnce = restoredBridge.prompt.bind(restoredBridge);
-			let promptCallCount = 0;
 			restoredBridge.prompt = (text: string, images?: unknown) => {
-				if (promptCallCount++ === 0) return rejectOnce(text, images);
+				if (!redriveRejected) {
+					redriveRejected = true;
+					return rejectOnce(text, images);
+				}
 				newPrompts.push({ text, images });
 				return Promise.resolve({ success: true });
 			};
@@ -164,6 +167,9 @@ function harness(options?: {
 		}
 		restored = {
 			...restoredState,
+			status: "idle",
+			dormant: false,
+			lifecycleFenced: false,
 			rpcClient: restoredBridge,
 		};
 		manager.sessions.set(current.id, restored);
@@ -268,6 +274,126 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rows[0].id]);
 		assert.equal(drain.mock.calls.length, 0, "manual recovery gate must not drain unrelated parked work");
 		assert.equal(restored.lifecycleGeneration, h.manager._currentRespawnGeneration(h.session.id));
+	});
+
+	it.each([
+		{ rejection: "response" as const },
+		{ rejection: "throw" as const },
+	])("keeps a rollback-revive follow-up poison-owned through rejection, replacement, and unstick ($rejection)", async ({ rejection }) => {
+		const h = harness({
+			queue: ["older parked intent"],
+			rejectRedriveWith: "fixture rollback-revive bridge rejected intent",
+			rejectRedriveOnce: true,
+			throwRedriveRejection: rejection === "throw",
+			consecutiveErrorTurns: 1,
+		});
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		h.session.status = "terminated";
+		h.session.dormant = true;
+		h.session.sessionOnlyGrantedTools = ["session-grant"];
+		h.session.oneTimeGrantedTools = ["one-turn-grant"];
+		const originalText = "/mockup rollback";
+		const modelText = "expanded rollback recovery";
+		const skillExpansions = [{
+			name: "mockup",
+			args: "rollback",
+			source: "built-in",
+			filePath: "/skills/mockup/SKILL.md",
+			range: [0, 7],
+			expanded: modelText,
+		}];
+		const images = [{ type: "image" as const, data: "fixture-image", mimeType: "image/png" }];
+		const attachments = [{ name: "fixture.txt" }];
+		const enqueue = vi.spyOn(h.session.promptQueue, "enqueue");
+
+		await assert.rejects(
+			() => h.manager.enqueuePrompt(h.session.id, originalText, {
+				modelText,
+				skillExpansions,
+				images,
+				attachments,
+				source: "agent",
+			}),
+			/fixture rollback-revive bridge rejected intent/,
+		);
+
+		let restored = h.manager.sessions.get(h.session.id);
+		const rejectedRows = restored.promptQueue.toArray();
+		const rejectedId = rejectedRows[0].id;
+		assert.equal(rejectedId, enqueue.mock.results[0]?.value.id, "rejection must retain the originally accepted queue row");
+		assert.deepEqual(rejectedRows.map((row: any) => row.text), [modelText, "older parked intent"]);
+		assert.deepEqual(rejectedRows[0].images, images);
+		assert.deepEqual(rejectedRows[0].attachments, attachments);
+		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rejectedId]);
+		assert.deepEqual(restored.poisonRecoveryPromptDispatchQueueIds, [rejectedId]);
+		assert.equal(h.persistedRecord.messageQueue[0].id, rejectedId);
+		assert.equal(restored.id, h.session.id);
+		assert.equal(restored.modelProvider, "anthropic");
+		assert.equal(restored.modelId, "claude-sonnet-4-5");
+		assert.deepEqual(restored.sessionOnlyGrantedTools, ["session-grant"]);
+		assert.deepEqual(restored.oneTimeGrantedTools, ["one-turn-grant"]);
+		assert.equal(
+			restored.pendingSkillExpansions?.some((entry: any) =>
+				entry.modelText === modelText && entry.originalText === originalText
+			) ?? false,
+			true,
+		);
+
+		// A later lifecycle replacement must carry the exact durable acceptance row
+		// and its process-local metadata onto the final canonical SessionInfo.
+		await h.manager._respawnAgentInPlace(restored, h.persistedRecord, { deferQueueDrain: true });
+		restored = h.manager.sessions.get(h.session.id);
+		assert.equal(restored.promptQueue.toArray()[0].id, rejectedId);
+		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rejectedId]);
+		assert.deepEqual(restored.poisonRecoveryPromptDispatchQueueIds, [rejectedId]);
+		assert.deepEqual(restored.sessionOnlyGrantedTools, ["session-grant"]);
+		assert.deepEqual(restored.oneTimeGrantedTools, ["one-turn-grant"]);
+		assert.equal(
+			restored.pendingSkillExpansions?.some((entry: any) =>
+				entry.modelText === modelText && entry.originalText === originalText
+			) ?? false,
+			true,
+			"replacement must preserve the rejected intent's display envelope",
+		);
+		assert.equal(h.persistedRecord.messageQueue[0].id, rejectedId);
+		assert.equal(restored.id, h.session.id);
+		assert.equal(restored.modelProvider, "anthropic");
+		assert.equal(restored.modelId, "claude-sonnet-4-5");
+
+		assert.deepEqual(
+			await h.manager.enqueuePrompt(h.session.id, "later generic follow-up", { source: "user" }),
+			{ status: "dispatched" },
+		);
+		assert.equal(restored.promptQueue.toArray()[0].id, rejectedId, "generic unstick must not supersede poison-owned work");
+		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rejectedId]);
+		assert.deepEqual(restored.poisonRecoveryPromptDispatchQueueIds, [rejectedId]);
+
+		h.manager.handleAgentLifecycle(restored, {
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "later done" }], stopReason: "stop" },
+		});
+		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		assert.equal(h.newPrompts.length, 3);
+		assert.equal(h.newPrompts[0].text, modelText);
+		assert.match(h.newPrompts[1].text, /later generic follow-up$/);
+		assert.equal(h.newPrompts[2].text, modelText);
+		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["older parked intent"]);
+		assert.equal(restored.recoveredPromptDispatchQueueIds, undefined);
+		assert.equal(restored.poisonRecoveryPromptDispatchQueueIds, undefined);
+
+		// Completing the eventual poison turn may drain unrelated work, but must not
+		// dispatch the accepted rollback intent a third time.
+		h.manager.handleAgentLifecycle(restored, {
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "rollback done" }], stopReason: "stop" },
+		});
+		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		assert.equal(h.newPrompts.filter((entry) => entry.text === modelText).length, 2);
+		assert.equal(h.newPrompts.at(-1)?.text, "older parked intent");
 	});
 
 	it.each([

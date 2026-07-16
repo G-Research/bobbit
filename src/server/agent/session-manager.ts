@@ -3648,21 +3648,39 @@ export class SessionManager {
 		// A previous poison-repair attempt may have failed after killing the old
 		// bridge and left this same session dormant. The revive above already loaded
 		// the sanitized history into a fresh process, so dispatch this follow-up
-		// directly (ahead of parked rows) rather than respawning a second time or
-		// losing the poison-specific superseding-intent behavior.
+		// ahead of parked rows without respawning a second time. Give the accepted
+		// intent the same durable poison ownership as the primary recovery path:
+		// a pre-observation RPC rejection must preserve this exact row for eventual
+		// drain rather than turn it into an ordinary, supersedable dispatch copy.
 		if (recoveredPoisonDuringRevive) {
 			if (revivedPoisonQueueIds?.length) {
 				session.recoveredPromptDispatchQueueIds = revivedPoisonQueueIds;
 				session.poisonRecoveryPromptDispatchQueueIds = revivedPoisonOwnedQueueIds;
 				this.consumeRecoveredPromptDispatchRows(session);
 			}
+			const accepted = session.promptQueue.enqueue(dispatchText, {
+				images: opts?.images,
+				attachments: opts?.attachments,
+				isSteered: opts?.isSteered,
+				suppressTitleGen: opts?.suppressTitleGen,
+			});
+			this.markPoisonRecoveryPromptDispatchRow(session, accepted.id);
+			this.broadcastQueue(session);
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.turnHadToolCalls = false;
 			session.transientRetryAttempts = 0;
 			session.lastPromptSource = opts?.source ?? "user";
 			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
+			await this.dispatchDirectPrompt(
+				session,
+				dispatchText,
+				opts?.images,
+				opts?.attachments,
+				!!opts?.isSteered,
+				!!opts?.coldStart,
+				accepted.id,
+			);
 			return { status: "dispatched" };
 		}
 
