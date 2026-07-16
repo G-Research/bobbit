@@ -9,15 +9,13 @@ import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connect
  * 2. Only the new signal's verification is active/completed
  * 3. The gate status reflects the new signal's result
  *
- * TIER-1 FAKE COMMAND-STEP RUNNER: this spec runs in the `v2-integration-fake`
- * project (see vitest.config.ts). It asserts gate-level resignal/cancel
+ * TIER-1 FAKE COMMAND-STEP RUNNER: this spec asserts gate-level resignal/cancel
  * BOOKKEEPING only — the old verification is dropped from the active set, the
  * `gate_verification_complete` "cancelled" event fires, and the NEW signal
  * determines the gate status. It does NOT assert a real OS subprocess-tree kill;
- * that fidelity is covered on the REAL command-step path by
- * cancel-verification.test.ts (kept out of the fake set). The fake's killTree()
- * closes the scripted child so the harness records the cancelled tracked key,
- * which is exactly the bookkeeping these assertions check.
+ * that production-runner contract is pinned by the focused core command-runner
+ * suites. The fake's killTree() closes the scripted child so the harness records
+ * the cancelled tracked key, which is exactly the bookkeeping checked here.
  */
 
 const SLOW_WORKFLOW_ID = `test-slow-${Date.now()}`;
@@ -74,7 +72,7 @@ async function getSignals(goalId: string, gateId: string): Promise<any[]> {
 }
 
 test.describe("Gate Re-signal Cancellation", () => {
-	// These tests use slow verification commands (5s each), so they need more time
+	// The scripted delay creates an observable in-flight state without a process.
 	test.setTimeout(60_000);
 
 	test.beforeAll(async () => {
