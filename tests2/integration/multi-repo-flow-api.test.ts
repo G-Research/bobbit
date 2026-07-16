@@ -107,12 +107,13 @@ test.describe("multi-repo flow API/data paths", () => {
 
 	test("multi-repo project exposes structured data and per-repo worktree lifecycle", async () => {
 		const project = await registerMultiRepoProject();
+		const worktreeOwnerRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-mr-wt-${process.pid}-`));
+		const customRoot = path.join(worktreeOwnerRoot, "worktrees");
 		let goalId: string | undefined;
 
 		try {
 			// Keep the two structured endpoint assertions in the representative
 			// route-flow test so this suite pays the expensive project cleanup once.
-			const customRoot = path.join(os.tmpdir(), `bobbit-wt-${Date.now()}`);
 			const put = await apiFetch(`/api/projects/${project.id}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ worktree_root: customRoot }),
@@ -191,6 +192,7 @@ test.describe("multi-repo flow API/data paths", () => {
 			if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
+			fs.rmSync(worktreeOwnerRoot, { recursive: true, force: true });
 		}
 	});
 });
