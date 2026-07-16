@@ -2,15 +2,25 @@
 // Source: tests/local-sub-agent-push-policy.test.ts
 // Bucket: v2-core | Method: codemod
 
-import { describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { WorktreePool } from "../../src/server/agent/worktree-pool.ts";
 import { createWorktree, createWorktreeSet } from "../../src/server/skills/git.ts";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import { installMemoryFs } from "./helpers/memory-fs-spies.js";
+import type { MemFs } from "../harness/mem-fs.js";
+
+let memoryFs: MemFs;
+let restoreFs: () => void;
+let fixtureSequence = 0;
+
+beforeEach(() => {
+	({ fs: memoryFs, restore: restoreFs } = installMemoryFs());
+});
+
+afterEach(() => restoreFs());
 
 interface FakeGitState {
 	commands: string[];
@@ -90,14 +100,10 @@ function fakeGitRunner(repoPath: string, initial?: { branch: string; upstream?: 
 }
 
 async function withFakeRepo<T>(fn: (root: string, repo: string) => Promise<T>): Promise<T> {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-local-push-policy-"));
+	const root = path.resolve("/memfs/local-push-policy", String(fixtureSequence++));
 	const repo = path.join(root, "repo");
-	fs.mkdirSync(repo);
-	try {
-		return await fn(root, repo);
-	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
-	}
+	memoryFs.mkdirSync(repo, { recursive: true });
+	return fn(root, repo);
 }
 
 function assertNoPush(commands: string[], message: string): void {
