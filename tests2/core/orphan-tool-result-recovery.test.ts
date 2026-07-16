@@ -55,10 +55,12 @@ function harness(options?: {
 	hadToolCalls?: boolean;
 	queue?: string[];
 	rejectRedriveWith?: string;
+	rejectRedriveOnce?: boolean;
 	observeTurnBeforeRedriveReject?: boolean;
 	completeTurnBeforeRedriveReject?: boolean;
 	terminalTurnError?: string;
 	throwRedriveRejection?: boolean;
+	consecutiveErrorTurns?: number;
 }) {
 	const oldPrompts: Array<{ text: string; images?: unknown }> = [];
 	const newPrompts: Array<{ text: string; images?: unknown }> = [];
@@ -103,7 +105,7 @@ function harness(options?: {
 		lastTurnErrored: true,
 		lastTurnErrorMessage: ORPHAN_ERROR,
 		turnHadToolCalls: options?.hadToolCalls ?? false,
-		consecutiveErrorTurns: 3,
+		consecutiveErrorTurns: options?.consecutiveErrorTurns ?? 3,
 		transientRetryAttempts: 3,
 		lastPromptText: "original user intent",
 		lastPromptSource: "user",
@@ -128,6 +130,15 @@ function harness(options?: {
 				manager.handleAgentLifecycle(restored, { type: "agent_start" });
 			}
 		}, options?.throwRedriveRejection);
+		if (options?.rejectRedriveOnce && !options.completeTurnBeforeRedriveReject) {
+			const rejectOnce = restoredBridge.prompt.bind(restoredBridge);
+			let promptCallCount = 0;
+			restoredBridge.prompt = (text: string, images?: unknown) => {
+				if (promptCallCount++ === 0) return rejectOnce(text, images);
+				newPrompts.push({ text, images });
+				return Promise.resolve({ success: true });
+			};
+		}
 		if (options?.completeTurnBeforeRedriveReject) {
 			restoredBridge.prompt = (text: string, images?: unknown) => {
 				newPrompts.push({ text, images });
@@ -257,6 +268,133 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rows[0].id]);
 		assert.equal(drain.mock.calls.length, 0, "manual recovery gate must not drain unrelated parked work");
 		assert.equal(restored.lifecycleGeneration, h.manager._currentRespawnGeneration(h.session.id));
+	});
+
+	it.each([
+		{ initiator: "follow-up" as const, rejection: "response" as const },
+		{ initiator: "follow-up" as const, rejection: "throw" as const },
+		{ initiator: "retry" as const, rejection: "response" as const },
+		{ initiator: "retry" as const, rejection: "throw" as const },
+	])("keeps a rejected poison $initiator row owned across later generic unstick ($rejection)", async ({ initiator, rejection }) => {
+		const h = harness({
+			queue: ["older parked intent"],
+			rejectRedriveWith: "fixture canonical bridge rejected redrive",
+			rejectRedriveOnce: true,
+			throwRedriveRejection: rejection === "throw",
+			consecutiveErrorTurns: 1,
+		});
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		h.session.sessionOnlyGrantedTools = ["session-grant"];
+		h.session.oneTimeGrantedTools = ["one-turn-grant"];
+		const poisonOriginalText = initiator === "follow-up" ? "/mockup poison" : "original user intent";
+		const poisonModelText = initiator === "follow-up" ? "expanded poison recovery" : "original user intent";
+		const poisonSkillExpansions = [{
+			name: "mockup",
+			args: "poison",
+			source: "built-in",
+			filePath: "/skills/mockup/SKILL.md",
+			range: [0, 7],
+			expanded: "expanded poison recovery",
+		}];
+
+		await assert.rejects(
+			() => initiator === "follow-up"
+				? h.manager.enqueuePrompt(h.session.id, poisonOriginalText, {
+					modelText: poisonModelText,
+					skillExpansions: poisonSkillExpansions,
+					source: "agent",
+				})
+				: h.manager.retryLastPrompt(h.session.id),
+			/fixture canonical bridge rejected redrive/,
+		);
+
+		const restored = h.manager.sessions.get(h.session.id);
+		const rejectedRows = restored.promptQueue.toArray();
+		const rejectedId = rejectedRows[0].id;
+		assert.deepEqual(rejectedRows.map((row: any) => row.text), [poisonModelText, "older parked intent"]);
+		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rejectedId]);
+		assert.deepEqual(restored.poisonRecoveryPromptDispatchQueueIds, [rejectedId]);
+		assert.deepEqual(restored.sessionOnlyGrantedTools, ["session-grant"]);
+		assert.deepEqual(restored.oneTimeGrantedTools, ["one-turn-grant"]);
+
+		const laterText = "later generic follow-up";
+		assert.deepEqual(await h.manager.enqueuePrompt(h.session.id, laterText, {
+			source: "user",
+		}), { status: "dispatched" });
+
+		const afterUnstick = restored.promptQueue.toArray();
+		assert.deepEqual(afterUnstick.map((row: any) => row.text), [poisonModelText, "older parked intent"]);
+		assert.equal(afterUnstick[0].id, rejectedId, "generic unstick must preserve the accepted poison row identity");
+		assert.deepEqual(h.persistedRecord.messageQueue, afterUnstick);
+		assert.deepEqual(restored.recoveredPromptDispatchQueueIds, [rejectedId]);
+		assert.deepEqual(restored.poisonRecoveryPromptDispatchQueueIds, [rejectedId]);
+		assert.deepEqual(restored.sessionOnlyGrantedTools, ["session-grant"]);
+		assert.deepEqual(restored.oneTimeGrantedTools, ["one-turn-grant"]);
+		assert.equal(h.newPrompts.length, 2);
+		assert.equal(h.newPrompts[0].text, poisonModelText);
+		assert.match(h.newPrompts[1].text, /later generic follow-up$/);
+		assert.equal(
+			restored.pendingSkillExpansions?.some((entry: any) => entry.modelText === poisonModelText) ?? false,
+			initiator === "follow-up",
+			"the rejected poison envelope must remain paired with its durable row",
+		);
+
+		h.manager.handleAgentLifecycle(restored, {
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "later done" }], stopReason: "stop" },
+		});
+		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		assert.equal(h.newPrompts.length, 3);
+		assert.equal(h.newPrompts[0].text, poisonModelText);
+		assert.match(h.newPrompts[1].text, /later generic follow-up$/);
+		assert.equal(h.newPrompts[2].text, poisonModelText);
+		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["older parked intent"]);
+		assert.equal(restored.recoveredPromptDispatchQueueIds, undefined);
+		assert.equal(restored.poisonRecoveryPromptDispatchQueueIds, undefined);
+		assert.deepEqual(restored.sessionOnlyGrantedTools, ["session-grant"]);
+		if (initiator === "follow-up") {
+			emitSessionEvent(restored, {
+				type: "message_end",
+				message: { role: "user", content: [{ type: "text", text: poisonModelText }] },
+			});
+			const poisonEcho: any = restored.eventBuffer.getAll().at(-1)?.event;
+			assert.equal(poisonEcho.message.content[0].text, poisonOriginalText);
+			assert.deepEqual(poisonEcho.message.skillExpansions, poisonSkillExpansions);
+		}
+
+		// A later successful boundary may drain unrelated work, but it must never
+		// redispatch the already accepted poison recovery row.
+		h.manager.handleAgentLifecycle(restored, {
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "recovery done" }], stopReason: "stop" },
+		});
+		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text).filter((text) => text === poisonModelText), [
+			poisonModelText,
+			poisonModelText,
+		]);
+		assert.equal(h.newPrompts.at(-1)?.text, "older parked intent");
+	});
+
+	it("still supersedes an ordinary failed-dispatch copy during generic unstick", async () => {
+		const h = harness({ consecutiveErrorTurns: 1 });
+		const recovered = h.session.promptQueue.enqueueAtFront("ordinary failed dispatch");
+		h.session.recoveredPromptDispatchQueueIds = [recovered.id];
+		h.session.lastTurnErrorMessage = "ordinary provider failure";
+
+		assert.deepEqual(
+			await h.manager.enqueuePrompt(h.session.id, "superseding follow-up", { source: "user" }),
+			{ status: "dispatched" },
+		);
+
+		assert.equal(h.oldPrompts.length, 1);
+		assert.match(h.oldPrompts[0].text, /superseding follow-up$/);
+		assert.equal(h.session.promptQueue.isEmpty, true);
+		assert.equal(h.session.recoveredPromptDispatchQueueIds, undefined);
 	});
 
 	it("does not restore or replay a durable poison follow-up after Pi observed the turn before the RPC rejection", async () => {
