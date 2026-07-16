@@ -61,15 +61,15 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 		assert.equal(ledger.leaseCap("browser", { cap: 3 }), 3);
 	});
 
-	it("caps standalone vitest below parent-ledger grants", async () => {
+	it("gives standalone Vitest the same ledger-governed cap as parent grants", async () => {
 		const { ledger } = await loadBoth();
 		const standalone = ledger.reserveWorkerSlots("vitest", { coalesceMs: 0, totalCores: 24 });
 		try {
 			assert.equal(standalone.managedByParent, false);
-			assert.equal(standalone.workerSlots, 2, "direct vitest verification runs should use the stability throttle");
+			assert.equal(standalone.workerSlots, 8, "Vitest 4 direct runs should use the full ledger-governed grant");
 			const snapshot = ledger.readLedger({ totalCores: 24 });
 			const record = snapshot.reservations.find((r: any) => r.id === standalone.reservationId);
-			assert.equal(record?.workerSlots, 2, "the persisted reservation must match the returned standalone cap");
+			assert.equal(record?.workerSlots, 8, "the persisted reservation must match the returned standalone cap");
 		} finally {
 			standalone.release();
 		}

@@ -6,17 +6,26 @@
  * Unit tests for role-store: model & thinkingLevel field round-trip and
  * malformed-value handling.
  */
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { RoleStore, validateModelString, validateThinkingLevel } from "../../src/server/agent/role-store.ts";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
-const { RoleStore, validateModelString, validateThinkingLevel } =
-	await import("../../src/server/agent/role-store.ts");
+const ROOT = path.resolve("/memfs/role-store");
+let fixtureSequence = 0;
+let restoreFs: () => void;
+
+beforeAll(() => {
+	const scoped = installScopedMemFs(["mkdirSync", "readFileSync", "readdirSync", "unlinkSync", "writeFileSync"]);
+	restoreFs = scoped.restore;
+});
+
+afterAll(() => restoreFs());
 
 function mkTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-role-store-test-"));
+	return path.join(ROOT, `case-${fixtureSequence++}`);
 }
 
 describe("validateModelString", () => {

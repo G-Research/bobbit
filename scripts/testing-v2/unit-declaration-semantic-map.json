@@ -1,0 +1,947 @@
+[
+  {
+    "baseFile": "tests2/core/ledger-lease-bridge-interop.test.ts",
+    "baseName": "caps standalone vitest below parent-ledger grants",
+    "current": [
+      {
+        "file": "tests2/core/ledger-lease-bridge-interop.test.ts",
+        "name": "gives standalone Vitest the same ledger-governed cap as parent grants"
+      }
+    ],
+    "rationale": "The standalone cap assertion was deliberately strengthened for the no-queue scheduler: standalone Vitest now receives the same ledger-governed cap as an orchestrated parent rather than the obsolete single-process throttle. The replacement still asserts the base declaration's ledger cap boundary while pinning the updated invariant."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "planLaneConcurrency never raises a lane above the per-process fork cap",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only"
+      }
+    ],
+    "rationale": "The lane-specific per-process bound is now owned by the single Vitest process's fixed three-worker cap. The replacement exercises default, fractional, invalid, and above-cap requests to prove no environment value can raise that bound."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "planLaneConcurrency keeps instantaneous forks (maxConcurrent*perLane) within the grant",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only"
+      },
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "keeps retry three across exactly four normal projects"
+      }
+    ],
+    "rationale": "There is no longer a grant multiplied across concurrent lane processes. The fixed-cap assertion and each normal project's resolved maxWorkers now preserve the original instantaneous-process bound directly in the four-project single-process model."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "REGRESSION: the single-process throttle (grant=2) collapses lanes to serial",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "runs test:unit as one direct Vitest command with no lane or ledger import"
+      },
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only"
+      }
+    ],
+    "rationale": "The obsolete serial-lane failure mode is structurally removed: test:unit launches one Vitest process rather than feeding a ledger grant into a lane scheduler, while the replacement cap test pins three workers instead of the former two-worker throttle."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "FIX: the fair orchestrator grant runs the 3 lanes concurrently",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "runs test:unit as one direct Vitest command with no lane or ledger import"
+      },
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "keeps retry three across exactly four normal projects"
+      }
+    ],
+    "rationale": "The direct Vitest command now schedules the four explicit projects internally, replacing cross-process lane concurrency. These declarations pin both the single-process entrypoint and the complete normal project topology that retains parallel unit execution."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "reserveVitestLaneBudget grants the FAIR core budget, not the single-process throttle",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "runs test:unit as one direct Vitest command with no lane or ledger import"
+      },
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only"
+      }
+    ],
+    "rationale": "The unit stage no longer reserves any ledger budget. Its replacement semantics are the direct no-ledger command and the deterministic three-worker cap, which jointly replace fair-grant selection without reintroducing the old throttle."
+  },
+  {
+    "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
+    "baseName": "reserveVitestLaneBudget REUSES a parent grant (preserves run-v2 ledger behavior)",
+    "current": [
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "runs test:unit as one direct Vitest command with no lane or ledger import"
+      }
+    ],
+    "rationale": "Parent-grant reuse is intentionally absent from the new unit path because test:unit bypasses lane and ledger orchestration entirely. The replacement pins that architectural boundary through the exact direct command and import audit."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "POST /api/maintenance/cleanup-worktrees rejects itemIds without mode without cleaning legacy orphans",
+    "current": [
+      {
+        "file": "tests2/integration/maintenance-api.test.ts",
+        "name": "rejects itemIds without mode"
+      }
+    ],
+    "rationale": "The renamed test remains the itemIds-without-mode validation case and compares the shared legacy orphan's path, branch, worktree list, and API inventory with its beforeAll baseline, preserving the original non-destruction assertion while avoiding a per-test fixture rebuild."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "POST /api/maintenance/cleanup-worktrees rejects non-object bodies without cleaning legacy orphans",
+    "current": [
+      {
+        "file": "tests2/integration/maintenance-api.test.ts",
+        "name": "rejects every non-object body"
+      }
+    ],
+    "rationale": "The renamed table-driven test sends every original non-object body shape and verifies the shared legacy orphan snapshot is unchanged after each rejection, retaining the full validation and non-destruction semantics without rebuilding the fixture."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "archived session worktree maintenance",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "GET /api/maintenance/archived-session-worktrees returns sessions, flattened items, groups, presets, and additive counts"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "scan exposes UX dispositions, reason categories, groups, and selection presets"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "POST /api/maintenance/cleanup-archived-session-worktrees validates request shape"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "scan and selected cleanup remove archived worktree while preserving archived session visibility"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "already-cleaned archived worktrees are hidden by default and stale selected cleanup is non-destructive"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "branch deletion is blocked when another archived record in the same repo references the branch"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "stale archived paths do not inherit git metadata from another worktree on the same branch"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "stale existing directories with colliding basenames are non-actionable"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "worktree key selectors must match the supplied session id"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "mode all cleans only safe candidates and leaves ineligible archived records untouched"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "sandbox container paths are skipped instead of treated as host worktrees"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "multi-repo archived sessions expose one worktree row per repoWorktrees entry"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "scan skips archived worktree paths still referenced by a live session"
+      }
+    ],
+    "rationale": "The original archived-worktree suite was split by behavior into scan, cleanup, guard, and selector files. Its thirteen child declarations are the precise static semantic owners of the original suite wrapper and collectively retain the complete suite coverage."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "GET /api/maintenance/archived-session-worktrees returns sessions, flattened items, groups, presets, and additive counts",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "GET /api/maintenance/archived-session-worktrees returns sessions, flattened items, groups, presets, and additive counts"
+      }
+    ],
+    "rationale": "This scan-shape declaration moved unchanged into the focused archived-scan suite and continues to validate the complete response shape."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "scan exposes UX dispositions, reason categories, groups, and selection presets",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "scan exposes UX dispositions, reason categories, groups, and selection presets"
+      }
+    ],
+    "rationale": "This declaration and its behavioral matrix moved unchanged into the focused archived-scan suite, preserving disposition, reason, group, and preset coverage."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "POST /api/maintenance/cleanup-archived-session-worktrees validates request shape",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "POST /api/maintenance/cleanup-archived-session-worktrees validates request shape"
+      }
+    ],
+    "rationale": "This request-validation declaration moved unchanged into the archived-scan suite and still covers missing mode, mixed selectors, empty selected mode, invalid all-mode selectors, and valid all mode."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "scan and selected cleanup remove archived worktree while preserving archived session visibility",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "scan and selected cleanup remove archived worktree while preserving archived session visibility"
+      }
+    ],
+    "rationale": "This end-to-end cleanup declaration moved unchanged into the focused archived-cleanup suite and retains worktree removal, branch deletion, response accounting, and archived-session visibility assertions."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "already-cleaned archived worktrees are hidden by default and stale selected cleanup is non-destructive",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "already-cleaned archived worktrees are hidden by default and stale selected cleanup is non-destructive"
+      }
+    ],
+    "rationale": "This declaration moved unchanged into the archived-cleanup suite and preserves default filtering, diagnostic visibility, stale selection accounting, and branch non-destruction checks."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "branch deletion is blocked when another archived record in the same repo references the branch",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "branch deletion is blocked when another archived record in the same repo references the branch"
+      }
+    ],
+    "rationale": "This shared-branch safety declaration moved unchanged into the archived-cleanup suite and still verifies cleanup removes only the worktree while retaining the referenced branch."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "stale archived paths do not inherit git metadata from another worktree on the same branch",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "stale archived paths do not inherit git metadata from another worktree on the same branch"
+      }
+    ],
+    "rationale": "This path-association guard declaration moved unchanged into the focused archived-guards suite and continues to prove the active worktree and shared branch are untouched."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "stale existing directories with colliding basenames are non-actionable",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "stale existing directories with colliding basenames are non-actionable"
+      }
+    ],
+    "rationale": "This basename-collision guard declaration moved unchanged into the archived-guards suite and retains scan classification, cleanup rejection, and filesystem/branch preservation assertions."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "worktree key selectors must match the supplied session id",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "worktree key selectors must match the supplied session id"
+      }
+    ],
+    "rationale": "This selector integrity declaration moved unchanged into the archived-guards suite and still verifies mismatched session IDs are reported as invalid selections without deleting the worktree or branch."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "mode all cleans only safe candidates and leaves ineligible archived records untouched",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "mode all cleans only safe candidates and leaves ineligible archived records untouched"
+      }
+    ],
+    "rationale": "This all-mode selection declaration moved unchanged into the focused archived-selectors suite and retains the removable, live-referenced, sandbox, stale, and already-cleaned outcome matrix."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "sandbox container paths are skipped instead of treated as host worktrees",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "sandbox container paths are skipped instead of treated as host worktrees"
+      }
+    ],
+    "rationale": "This container-path safety declaration moved unchanged into the archived-selectors suite and preserves scan classification plus non-actionable cleanup-result coverage."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "multi-repo archived sessions expose one worktree row per repoWorktrees entry",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "multi-repo archived sessions expose one worktree row per repoWorktrees entry"
+      }
+    ],
+    "rationale": "This multi-repository projection declaration moved unchanged into the archived-selectors suite and retains per-repository paths, metadata, statuses, and selection-category assertions."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "scan skips archived worktree paths still referenced by a live session",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "scan skips archived worktree paths still referenced by a live session"
+      }
+    ],
+    "rationale": "This live-reference guard declaration moved unchanged into the archived-selectors suite and continues to require the ineligible referenced-record classification and non-actionable selection flags."
+  },
+  {
+    "baseFile": "tests2/integration/pr-walkthrough-api.test.ts",
+    "baseName": "POST resolve returns real local diff cards",
+    "current": [
+      {
+        "file": "tests2/integration/pr-walkthrough-api.test.ts",
+        "name": "POST resolve returns local diff cards from the injected git boundary"
+      }
+    ],
+    "rationale": "The renamed test replaces process-backed Git setup with the injected git-diff boundary while preserving the local changeset ID, provider, files-changed count, card count, and changed-file diff-block assertions."
+  },
+  {
+    "baseFile": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+    "baseName": "newWorktree=true allocates a distinct worktree/branch; newWorktree=false reuses the source worktree",
+    "current": [
+      {
+        "file": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+        "name": "newWorktree selects repo provisioning while reuse selects the source cwd"
+      }
+    ],
+    "rationale": "The replacement moves allocation behind the fork-create seam but retains both decisions: newWorktree requests repository worktree provisioning and yields a cwd distinct from the source, while reuse omits worktree options and keeps the source cwd."
+  },
+  {
+    "baseFile": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+    "baseName": "newWorktree=true rebases cloned runtime cwd metadata off a stale source worktree",
+    "current": [
+      {
+        "file": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+        "name": "newWorktree rebases cloned runtime cwd metadata off a stale source cwd"
+      }
+    ],
+    "rationale": "The seam-based rename preserves the stale-runtime regression: cloned transcript content remains intact, stale system/session cwd records disappear, and both records are rewritten to the newly resolved cwd."
+  },
+  {
+    "baseFile": "tests2/integration/stories-sessions-api.test.ts",
+    "baseName": "S-08: session in git repo gets a worktree",
+    "current": [
+      {
+        "file": "tests2/integration/stories-sessions-api.test.ts",
+        "name": "S-08: session in a detected repository selects worktree provisioning"
+      }
+    ],
+    "rationale": "The renamed story replaces real Git provisioning with the route decision seam while preserving the repository-detection contract: a worktree-enabled session request succeeds for the project and passes the detected repository as worktree provisioning options."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-diff-parser.test.ts",
+    "baseName": "resolves real local git metadata and parsed diff files",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-diff-parser.test.ts",
+        "name": "resolves injected git metadata and parsed diff files"
+      }
+    ],
+    "rationale": "The renamed test replaces the process-created repository with the CommandRunner seam while preserving base/head resolution, shortstat and name-status metadata, parsed source and generated-file diffs, and the limited binary-diff invocation."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "posts via local gh when no bearer token is available (github.com, no --hostname)",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "builds a GitHub review payload from only valid preview rows"
+      },
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "submits only after confirm=true with credentials"
+      },
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "uses the injected gh auth runner and forwards enterprise hostname"
+      }
+    ],
+    "rationale": "The subprocess-backed gh test was decomposed across deterministic boundaries: payload construction retains event and review-line mapping, authenticated submission retains the review endpoint and response URL, and the injected auth runner proves github.com omits --hostname while enterprise hosts receive it."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "passes --hostname to gh for an enterprise host",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "uses the injected gh auth runner and forwards enterprise hostname"
+      }
+    ],
+    "rationale": "The replacement records injected gh auth arguments for github.com and github.example.com, preserving the enterprise --hostname assertion without launching gh."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "returns an actionable 401 when gh is not authenticated",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "returns an actionable auth reason when the injected gh runner rejects"
+      }
+    ],
+    "rationale": "The replacement drives the same unauthenticated branch through the command seam and preserves the canonical actionable gh auth login reason without a fake executable."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "resolveGithubExportAuth reports availability from local gh auth",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "resolveGithubExportAuth reports availability from injected local gh auth"
+      }
+    ],
+    "rationale": "An injected successful gh auth token retains the availability, provider, and host contract previously exercised by a local executable."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "resolveGithubExportAuth returns an actionable reason when no credentials exist",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "resolveGithubExportAuth returns an actionable reason when injected auth rejects"
+      }
+    ],
+    "rationale": "The replacement retains the no-environment-credentials outcome and actionable login guidance while modelling gh rejection through CommandRunner."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "reports export.available and drops previewOnly for a with-SHA github target when gh authenticates",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "reports export.available for a with-SHA GitHub target when injected gh auth succeeds"
+      }
+    ],
+    "rationale": "A with-SHA GitHub target and successful gh authentication remains exportable with no previewOnly flag; only Git and gh setup moved behind injected runners."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "reports unavailable with a gh-auth reason when gh cannot authenticate",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "reports unavailable with an auth reason when injected gh auth rejects"
+      }
+    ],
+    "rationale": "The renamed route test preserves unavailable export metadata and actionable gh-auth guidance while using deterministic rejected auth and local-diff seams."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "keeps a local target non-postable with the local reason",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "keeps a local target non-postable"
+      }
+    ],
+    "rationale": "The shortened declaration still requires a local target to be unavailable and retains the Local changesets reason; only repository setup moved behind the Git seam."
+  },
+  {
+    "baseFile": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+    "baseName": "submitExport posts via gh (host derived from the changeset) when no env token is set",
+    "current": [
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "route submit builds a preview before mocked GitHub submission"
+      },
+      {
+        "file": "tests2/core/pr-walkthrough-export-mapper.test.ts",
+        "name": "uses the injected gh auth runner and forwards enterprise hostname"
+      }
+    ],
+    "rationale": "Route submission preserves the derived review endpoint, event, comments, authentication, and submitted result against a mock server; host-specific gh argument selection is retained at the injected command boundary."
+  },
+  {
+    "baseFile": "tests2/core/support-packaging.test.ts",
+    "baseName": "npm pack --dry-run --json lists docs/ and src/ entries",
+    "current": [
+      {
+        "file": "tests2/core/support-packaging.test.ts",
+        "name": "package allowlist has shippable docs/ and src/ entries"
+      }
+    ],
+    "rationale": "The publication invariant is now checked without spawning npm: package.json must allow both directories and each allowlisted tree must contain a representative shippable file."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "command step settles from process exit when inherited stdio delays close",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-runner-contract.test.ts",
+        "name": "emits deterministic output and exit for %s"
+      },
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "resume finalizes a successful command from authored durable exit and output files"
+      }
+    ],
+    "rationale": "Deterministic runner exit/output settlement plus durable resume finalization preserve the rule that authored process verdicts settle command state independently of inherited stream-close timing."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "resume does not trust or kill an alive PID when the pidfile identity does not match",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "persisted identity rejects a mismatched nonce without authorizing a kill"
+      }
+    ],
+    "rationale": "The replacement uses an alive synthetic PID and mismatched nonce, retaining the fail-closed no-kill authorization decision."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "alive resumed command that dies without durable status remains restart-interrupted and pending",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "no durable verdict remains restart-interrupted and pending"
+      }
+    ],
+    "rationale": "The fixture omits an authored exit verdict and preserves the pending gate, waiting step, retry guidance, and absence of false failure notification."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "timeout after restart kills a process only when matching identity is verified",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "persisted identity accepts a matching nonce with a fresh heartbeat"
+      },
+      {
+        "file": "tests2/core/verification-command-runner-contract.test.ts",
+        "name": "marks timeout and closes without a clean exit"
+      }
+    ],
+    "rationale": "Matching nonce plus fresh heartbeat remains the verified identity boundary, while the deterministic runner proves timeout closes without a clean exit."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "cancel cleanup without restart-safe identity remains durable and unverifiable",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "persisted identity rejects a mismatched nonce without authorizing a kill"
+      },
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "no durable verdict remains restart-interrupted and pending"
+      }
+    ],
+    "rationale": "Fail-closed identity verification prevents an unsafe kill, while no-verdict resume preserves durable pending state and retry diagnostics instead of inventing completion."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "timeout resume keeps cleanup pending when the kill cannot be verified",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "persisted identity rejects stale heartbeat evidence"
+      },
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "no durable verdict remains restart-interrupted and pending"
+      }
+    ],
+    "rationale": "Stale identity remains unverified and a resumed command without an authored verdict remains pending, preserving the prohibition on timeout finalization before safe cleanup."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "cancelled or superseded resumed verification cannot update gate state after cancellation",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "cancelled or superseded resume cannot update gate state after cancellation"
+      }
+    ],
+    "rationale": "The renamed race test still forbids late resumed results from adding gate-store calls, broadcasts, or notifications after cancellation."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "restart cancellation hydrates persisted active state and retries until command identity appears",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "persisted identity accepts a matching nonce with a fresh heartbeat"
+      },
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "cancelled or superseded resume cannot update gate state after cancellation"
+      }
+    ],
+    "rationale": "The deprocessed owners preserve acceptance of fresh matching persisted identity and the authority of cancellation over a concurrently completing resume."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "cancelled persisted command kill intent is processed on resume before active file cleanup",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "persisted identity accepts a matching nonce with a fresh heartbeat"
+      },
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "cancelled or superseded resume cannot update gate state after cancellation"
+      }
+    ],
+    "rationale": "Persisted cleanup authorization remains pinned by fresh matching identity, and resumed completion cannot supersede cancellation; process-reaping fidelity is outside tier 1."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "resumed command success delegates remaining waiting phases to normal verification",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "recovered command success delegates remaining waiting phases"
+      }
+    ],
+    "rationale": "The renamed test keeps the recovered command passed, downstream phases waiting, continuation invoked, and no premature gate result persisted."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "normal verification preserves recovered phase results and runs only downstream waiting phases",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "normal verification keeps recovered phases and executes only downstream through the fake runner"
+      }
+    ],
+    "rationale": "The deterministic replacement retains recovered output without rerunning phase zero and proves only the downstream waiting command executes and passes."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "mixed same-phase real failure and restart interruption notifies only the real failed step",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "mixed durable failure and interruption notifies only the failed step"
+      }
+    ],
+    "rationale": "The renamed fixture keeps a durable nonzero sibling and a no-verdict sibling, notifying only the failed command while the interrupted step remains waiting."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "container or attached command fallback interruption is guarded as retryable with clear diagnostics",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "attached or container recovery stays retryable with clear diagnostics"
+      }
+    ],
+    "rationale": "The replacement retains pending status, a nonfailed step, explicit attached/container diagnostics, and retry or re-signal guidance."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "resume waits for a pidfile that appears shortly after restart before declaring interruption",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "persisted identity accepts a matching nonce with a fresh heartbeat"
+      },
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "resume finalizes a successful command from authored durable exit and output files"
+      }
+    ],
+    "rationale": "Fresh matching identity remains accepted and an authored successful durable exit plus retained output finalizes the resumed command as passed."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "stale pidfile nonce without start token or fresh heartbeat is not trusted or killed",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "persisted identity rejects stale heartbeat evidence"
+      }
+    ],
+    "rationale": "The replacement makes matching nonce evidence stale and requires identity verification to reject it, preserving the no-trust/no-kill safety boundary."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "resume finalization reads only bounded retained log tails for large stdout and stderr",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "resume reads bounded tails instead of whole retained logs"
+      }
+    ],
+    "rationale": "The renamed test retains oversized stdout, both tail sentinels, omission of the leading sentinel, and a strict bounded output length."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "real command failure mentioning restart is still notified while no-verdict rows are omitted",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "resume preserves a real durable non-zero command verdict"
+      },
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "mixed durable failure and interruption notifies only the failed step"
+      }
+    ],
+    "rationale": "A durable nonzero exit remains a failed gate with notification regardless of wording, while the mixed fixture pins omission of no-verdict waiting siblings."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "gate-signal command verification can be resumed by a fresh harness and recover real exit output",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "resume finalizes a successful command from authored durable exit and output files"
+      },
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "recovered command success delegates remaining waiting phases"
+      }
+    ],
+    "rationale": "Durable artifacts restore successful status and retained before/after output, after which resume delegates remaining phases rather than finalizing early."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-restart-lifecycle.test.ts",
+    "baseName": "resume can finalize from a durable exit file produced by a surviving command",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-restart-lifecycle.test.ts",
+        "name": "resume finalizes a successful command from authored durable exit and output files"
+      }
+    ],
+    "rationale": "The replacement supplies durable exit and output artifacts and preserves passed gate/step status plus active-verification cleanup without a timing-sensitive process."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-runner-contract.test.ts",
+    "baseName": "resolveGatewayDeps defaults commandStepRunner to the REAL runner",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-runner-contract.test.ts",
+        "name": "defaults production wiring to the real runner"
+      }
+    ],
+    "rationale": "The renamed wiring test still checks both default and empty dependency resolution select realVerificationCommandRunner."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-runner-contract.test.ts",
+    "baseName": "the real runner is NOT marked nonDurable; the fake IS",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-runner-contract.test.ts",
+        "name": "defaults production wiring to the real runner"
+      }
+    ],
+    "rationale": "The consolidated wiring declaration retains explicit nonDurable assertions for both real and fake runners."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-runner-contract.test.ts",
+    "baseName": "fake interpreter is FAIL-CLOSED (throws on an unmodelled command)",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-runner-contract.test.ts",
+        "name": "fails closed for unmodelled commands"
+      }
+    ],
+    "rationale": "The renamed test preserves accepted modelled commands and rejection of an unrecognised npm command."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-runner-contract.test.ts",
+    "baseName": "cli.ts wires no command-step fake (production is always real)",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-runner-contract.test.ts",
+        "name": "keeps production CLI free of test-runner wiring"
+      }
+    ],
+    "rationale": "The renamed source guard still rejects fake runner imports or wiring from the production CLI."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-runner-contract.test.ts",
+    "baseName": "matches on TIMEOUT (scripted delay exceeds step timeout)",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-runner-contract.test.ts",
+        "name": "marks timeout and closes without a clean exit"
+      }
+    ],
+    "rationale": "The fake-runner owner preserves startup output, timedOut=true, and a null rather than clean-zero close verdict."
+  },
+  {
+    "baseFile": "tests2/core/verification-command-runner-contract.test.ts",
+    "baseName": "matches on CANCELLATION (killTree closes the child)",
+    "current": [
+      {
+        "file": "tests2/core/verification-command-runner-contract.test.ts",
+        "name": "killTree deterministically cancels and closes the tracked child"
+      }
+    ],
+    "rationale": "The replacement preserves killTree-triggered close, killed=true, timedOut=false, and no clean self-completion."
+  },
+  {
+    "baseFile": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+    "baseName": "local-ahead goal worktree: un-pushed local commit B is NOT discarded by pre-verification sync",
+    "current": [
+      {
+        "file": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+        "name": "local-ahead goal worktree keeps the un-pushed local commit"
+      }
+    ],
+    "rationale": "The seam-based rename preserves the local-ahead topology and requires HEAD to remain on the unpublished local commit with no destructive reset."
+  },
+  {
+    "baseFile": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+    "baseName": "local-behind goal worktree: sync fast-forwards HEAD to origin tip (published-work behaviour preserved)",
+    "current": [
+      {
+        "file": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+        "name": "local-behind goal worktree fast-forwards HEAD to origin"
+      }
+    ],
+    "rationale": "The injected topology retains the local-behind decision and requires reset --hard to advance HEAD exactly to the remote tip."
+  },
+  {
+    "baseFile": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+    "baseName": "diverged goal worktree: sync keeps local commit B and surfaces a warning (no hard reset)",
+    "current": [
+      {
+        "file": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+        "name": "diverged goal worktree keeps local commit and surfaces a warning"
+      }
+    ],
+    "rationale": "The replacement preserves the divergent topology, unchanged local HEAD, warning emission, and absence of reset."
+  },
+  {
+    "baseFile": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+    "baseName": "local-behind fast-forward does NOT execute repo-local git hooks (reset --hard, not merge --ff-only)",
+    "current": [
+      {
+        "file": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+        "name": "local-behind fast-forward uses reset --hard and never merge hooks"
+      }
+    ],
+    "rationale": "The CommandRunner call audit requires reset --hard and forbids merge, preserving the no-hooks fast-forward mechanism."
+  },
+  {
+    "baseFile": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+    "baseName": "up-to-date goal worktree: sync leaves HEAD unchanged when local == origin",
+    "current": [
+      {
+        "file": "tests2/core/verification-goal-sync-nondestructive.test.ts",
+        "name": "up-to-date goal worktree leaves HEAD unchanged"
+      }
+    ],
+    "rationale": "The equal topology preserves unchanged HEAD and proves no reset is issued."
+  },
+  {
+    "baseFile": "tests2/core/verification-harness-timeout.test.ts",
+    "baseName": "times out, reports timedOut()=true, and reaps the child",
+    "current": [
+      {
+        "file": "tests2/core/verification-harness-timeout.test.ts",
+        "name": "reports timeout and closes without launching a process"
+      },
+      {
+        "file": "tests2/core/verification-harness-timeout.test.ts",
+        "name": "kills the tracked command on step timeout and emits output plus marker"
+      }
+    ],
+    "rationale": "The runner preserves timedOut and close settlement, while the command-step owner retains failed result, timeout marker, streamed output, tree kill, and deregistration."
+  },
+  {
+    "baseFile": "tests2/core/verification-harness-timeout.test.ts",
+    "baseName": "killTree reaps the entire subprocess tree",
+    "current": [
+      {
+        "file": "tests2/core/verification-harness-timeout.test.ts",
+        "name": "killTree deterministically cancels every tracked child"
+      },
+      {
+        "file": "tests2/core/verification-harness-timeout.test.ts",
+        "name": "cancellation kills the tracked command and emits output plus cancelled marker"
+      }
+    ],
+    "rationale": "Synthetic parent/child markers and deterministic closure preserve tree cancellation, and the harness owner verifies cancelled output plus tracked-child cleanup."
+  },
+  {
+    "baseFile": "tests2/core/verification-harness-timeout.test.ts",
+    "baseName": "killAllTracked reaps every tracked child",
+    "current": [
+      {
+        "file": "tests2/core/verification-harness-timeout.test.ts",
+        "name": "killTree deterministically cancels every tracked child"
+      }
+    ],
+    "rationale": "The replacement creates three tracked children, cancels all, awaits every close event, and requires each killed without timing out."
+  },
+  {
+    "baseFile": "tests2/core/verification-sandbox-exec.test.ts",
+    "baseName": "spawns docker exec when containerId is provided",
+    "current": [
+      {
+        "file": "tests2/core/verification-sandbox-exec.test.ts",
+        "name": "passes containerId and container worktree cwd when goal is sandboxed"
+      }
+    ],
+    "rationale": "Process construction moved behind the command seam; the replacement requires the project container ID and translated container worktree cwd to reach runCommandStep."
+  },
+  {
+    "baseFile": "tests2/integration/sandbox-branch-reconcile.test.ts",
+    "baseName": "non-sandboxed worktree session preserves auto-generated branch",
+    "current": [
+      {
+        "file": "tests2/integration/sandbox-branch-reconcile.test.ts",
+        "name": "non-sandboxed no-worktree session preserves seeded branch metadata"
+      }
+    ],
+    "rationale": "The renamed API journey preserves branch metadata for a non-sandboxed session while avoiding Git worktree provisioning."
+  },
+  {
+    "baseFile": "tests2/integration/sandbox-branch-reconcile.test.ts",
+    "baseName": "sandbox session creation accepts sandboxBranch parameter",
+    "current": [
+      {
+        "file": "tests2/integration/sandbox-branch-reconcile.test.ts",
+        "name": "session creation accepts sandboxBranch without provisioning Git or Docker"
+      }
+    ],
+    "rationale": "The replacement still posts sandboxBranch and requires successful creation with that value using a no-provisioning fixture."
+  },
+  {
+    "baseFile": "tests2/integration/sandbox-branch-reconcile.test.ts",
+    "baseName": "reconciliation logic does not run for non-sandboxed sessions",
+    "current": [
+      {
+        "file": "tests2/integration/sandbox-branch-reconcile.test.ts",
+        "name": "sandboxBranch metadata does not reconcile a non-sandboxed session"
+      }
+    ],
+    "rationale": "The renamed test retains the non-sandboxed guard: sandboxBranch metadata must not trigger reconciliation or overwrite the seeded branch."
+  }
+]

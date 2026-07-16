@@ -8,8 +8,8 @@
  * coverage in the persistent (file-backed) model.
  *
  * The class accepts an injected `SpawnFn` (fake EventEmitter child), a faked
- * `TailerFactory`, an isolated temp `BgProcessStore`, and a faked `BgEnv` so no
- * real OS processes are touched. Exit is now captured from a durable STATUS
+ * `TailerFactory`, an in-memory process store/filesystem, and a faked `BgEnv` so
+ * no real OS processes are touched. Exit is now captured from a durable STATUS
  * file (as a wrapper would write it); the child `exit` event is only a hint to
  * check that file promptly, so tests write the status file then emit `exit`.
  */
@@ -19,16 +19,40 @@ afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
+import { createFsFromVolume, Volume } from "memfs";
 
 import { BgProcessManager, type SpawnFn, type BgEnv, type TailerFactory, type Tailer } from "../../src/server/agent/bg-process-manager.ts";
-import { BgProcessStore } from "../../src/server/agent/bg-process-store.ts";
+import type { BgProcessStore, PersistedBgProcess, UpdatableBgFields } from "../../src/server/agent/bg-process-store.ts";
 import { createManualClock } from "../harness/clock.js";
 
 // --- Fake child plumbing --------------------------------------------------
+
+const fs = createFsFromVolume(new Volume()) as unknown as typeof import("node:fs");
+let managerId = 0;
+
+class MemoryBgProcessStore {
+	private readonly records = new Map<string, PersistedBgProcess>();
+
+	constructor(private readonly root: string) {}
+	filesDir(sessionId: string): string { return path.join(this.root, "bg-processes", sessionId); }
+	put(record: PersistedBgProcess): void { this.records.set(`${record.sessionId}\0${record.id}`, record); }
+	get(sessionId: string, id: string): PersistedBgProcess | undefined { return this.records.get(`${sessionId}\0${id}`); }
+	getForSession(sessionId: string): PersistedBgProcess[] {
+		return [...this.records.values()].filter((record) => record.sessionId === sessionId);
+	}
+	update(sessionId: string, id: string, updates: Partial<UpdatableBgFields>): void {
+		const record = this.get(sessionId, id);
+		if (record) Object.assign(record, updates);
+	}
+	remove(sessionId: string, id: string): void { this.records.delete(`${sessionId}\0${id}`); }
+	removeForSession(sessionId: string): void {
+		for (const record of this.getForSession(sessionId)) this.remove(sessionId, record.id);
+	}
+	flush(): void {}
+}
 
 interface FakeChild extends EventEmitter {
 	pid: number;
@@ -50,8 +74,8 @@ function makeFakeChild(): FakeChild {
 }
 
 function makeManager(env?: Partial<BgEnv>) {
-	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bgmgr-"));
-	const store = new BgProcessStore(stateDir);
+	const stateDir = path.join(os.tmpdir(), `bobbit-bgmgr-${++managerId}`);
+	const store = new MemoryBgProcessStore(stateDir);
 	let last: FakeChild | null = null;
 	const spawn: SpawnFn = () => { last = makeFakeChild(); return last as unknown as ChildProcess; };
 	const tailerFactory: TailerFactory = () => {
@@ -65,7 +89,15 @@ function makeManager(env?: Partial<BgEnv>) {
 		dockerCli: env?.dockerCli ?? (() => ({ code: 0, stdout: "" })),
 	};
 	const clock = createManualClock();
-	const mgr = new BgProcessManager(() => undefined, spawn, () => store, tailerFactory, fullEnv, clock);
+	const mgr = new BgProcessManager(
+		() => undefined,
+		spawn,
+		() => store as unknown as BgProcessStore,
+		tailerFactory,
+		fullEnv,
+		clock,
+		fs,
+	);
 	return {
 		mgr, stateDir, store, clock,
 		last: () => { if (!last) throw new Error("spawn not called"); return last; },

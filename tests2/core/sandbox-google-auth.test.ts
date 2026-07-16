@@ -6,11 +6,11 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import fs from "node:fs";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
 
 import { buildDockerRunArgs } from "../../src/server/agent/docker-args.js";
 import {
@@ -24,9 +24,19 @@ import {
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 
 const previousEnv: Record<string, string | undefined> = {};
+const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+let fixtureSequence = 0;
 let root: string;
 let agentDir: string;
 let bobbitDir: string;
+
+beforeAll(() => {
+	for (const name of ["existsSync", "mkdirSync", "readFileSync", "rmSync", "statSync", "writeFileSync"] as const) {
+		vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never);
+	}
+});
+
+afterAll(() => vi.restoreAllMocks());
 
 function setEnv(key: string, value: string | undefined): void {
 	if (!(key in previousEnv)) previousEnv[key] = process.env[key];
@@ -43,8 +53,8 @@ function restoreEnv(): void {
 }
 
 function writeAuthJson(data: unknown): void {
-	mkdirSync(agentDir, { recursive: true });
-	writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify(data, null, 2));
+	fs.mkdirSync(agentDir, { recursive: true });
+	fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify(data, null, 2));
 }
 
 function dockerVolumes(args: string[]): string[] {
@@ -57,7 +67,8 @@ function dockerVolumes(args: string[]): string[] {
 
 describe("sandbox Google (Gemini Code Assist) OAuth auth", () => {
 	beforeEach(() => {
-		root = mkdtempSync(path.join(tmpdir(), "bobbit-google-auth-"));
+		root = path.resolve("/memfs/google-auth", `case-${fixtureSequence++}`);
+		fs.mkdirSync(root, { recursive: true });
 		agentDir = path.join(root, "agent");
 		bobbitDir = path.join(root, ".bobbit");
 		setEnv("BOBBIT_AGENT_DIR", agentDir);
@@ -70,7 +81,7 @@ describe("sandbox Google (Gemini Code Assist) OAuth auth", () => {
 	afterEach(() => {
 		restoreEnv();
 		resetAgentDirForTest();
-		rmSync(root, { recursive: true, force: true });
+		fs.rmSync(root, { recursive: true, force: true });
 	});
 
 	it("omits the Google entry when policy does not allow it", () => {
@@ -165,7 +176,7 @@ describe("sandbox Google (Gemini Code Assist) OAuth auth", () => {
 		assert.ok(authMount, "sandbox auth.json should be mounted read-only");
 		assert.ok(!authMount.includes(path.join(agentDir, "auth.json")), "must not mount the full host auth.json");
 
-		const written = JSON.parse(readFileSync(sandboxAgentAuthPath("google-project"), "utf-8"));
+		const written = JSON.parse(fs.readFileSync(sandboxAgentAuthPath("google-project"), "utf-8"));
 		assert.deepEqual(written, { "google-gemini-cli": { type: "oauth", access: "g-access", refresh: "g-refresh", expires: 42 } });
 	});
 
@@ -180,7 +191,7 @@ describe("sandbox Google (Gemini Code Assist) OAuth auth", () => {
 		const volumes = dockerVolumes(args);
 		const authMount = volumes.find((v) => v.endsWith(":/home/node/.bobbit/agent/auth.json:ro"));
 		assert.ok(authMount, "sandbox auth.json should be mounted read-only");
-		const written = readFileSync(sandboxAgentAuthPath("excluded-project"), "utf-8");
+		const written = fs.readFileSync(sandboxAgentAuthPath("excluded-project"), "utf-8");
 		assert.equal(written.includes("g-access"), false);
 		assert.deepEqual(JSON.parse(written), {});
 	});

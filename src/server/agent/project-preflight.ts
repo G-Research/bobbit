@@ -14,9 +14,9 @@ import type { RegisteredProject } from "./project-registry.js";
 /** Local copy of detectSymlinkRoot — duplicated to avoid a runtime import
  *  cycle with project-registry.ts which calls runPreflight() from inside
  *  register(). */
-function detectSymlinkRoot(rootPath: string): { symlink: false } | { symlink: true; canonical: string } {
+function detectSymlinkRoot(rootPath: string, fileSystem: PreflightFileSystem): { symlink: false } | { symlink: true; canonical: string } {
 	try {
-		const real = fs.realpathSync(rootPath);
+		const real = fileSystem.realpathSync(rootPath);
 		const a = path.resolve(rootPath);
 		const b = path.resolve(real);
 		if (a !== b) return { symlink: true, canonical: b };
@@ -47,6 +47,20 @@ export interface PreflightReport {
 	hasFail: boolean;
 }
 
+export type PreflightFileSystem = Pick<
+	typeof fs,
+	| "accessSync"
+	| "constants"
+	| "existsSync"
+	| "mkdirSync"
+	| "readFileSync"
+	| "readdirSync"
+	| "realpathSync"
+	| "rmdirSync"
+	| "statSync"
+	| "statfsSync"
+>;
+
 export interface PreflightContext {
 	/** Snapshot of currently registered projects (excluding hidden). */
 	registeredProjects: ReadonlyArray<Pick<RegisteredProject, "id" | "name" | "rootPath" | "hidden">>;
@@ -54,16 +68,18 @@ export interface PreflightContext {
 	gatewayProjectRoot: string;
 	/** Project worktree root lookup (defaults to `<rootPath>-wt`). */
 	worktreeRootFor?: (project: { id: string; rootPath: string }) => string | undefined;
+	/** Test seam for deterministic filesystem checks; production uses node:fs. */
+	fileSystem?: PreflightFileSystem;
 }
 
 const FREE_SPACE_THRESHOLD_BYTES = 500 * 1024 * 1024; // 500 MB
 
-function tryRealpath(p: string): string {
-	try { return fs.realpathSync(p); } catch { return p; }
+function tryRealpath(p: string, fileSystem: PreflightFileSystem): string {
+	try { return fileSystem.realpathSync(p); } catch { return p; }
 }
 
-function isSamePath(a: string, b: string): boolean {
-	const normalize = (p: string) => path.resolve(tryRealpath(p)).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+function isSamePath(a: string, b: string, fileSystem: PreflightFileSystem): boolean {
+	const normalize = (p: string) => path.resolve(tryRealpath(p, fileSystem)).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 	return normalize(a) === normalize(b);
 }
 
@@ -85,9 +101,10 @@ function isSameOrInside(parent: string, child: string): boolean {
  * Always returns a report — failures are the response, not exceptions.
  */
 export function runPreflight(rootPath: string, ctx: PreflightContext): PreflightReport {
+	const fileSystem = ctx.fileSystem ?? fs;
 	const checks: PreflightCheck[] = [];
 	const canonical = (() => {
-		try { return path.resolve(fs.realpathSync(rootPath)); } catch { return path.resolve(rootPath); }
+		try { return path.resolve(fileSystem.realpathSync(rootPath)); } catch { return path.resolve(rootPath); }
 	})();
 
 	// 1. path.absolute
@@ -104,7 +121,7 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 	let isDir = false;
 	let statErr: string | null = null;
 	try {
-		const st = fs.statSync(rootPath);
+		const st = fileSystem.statSync(rootPath);
 		exists = true;
 		isDir = st.isDirectory();
 	} catch (err: any) {
@@ -121,11 +138,11 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 
 	// Short-circuit downstream filesystem checks if the dir is unusable.
 	const reachable = exists && isDir;
-	const sameAsGatewayProjectRoot = reachable && isSamePath(rootPath, ctx.gatewayProjectRoot);
+	const sameAsGatewayProjectRoot = reachable && isSamePath(rootPath, ctx.gatewayProjectRoot, fileSystem);
 
 	// 3. path.symlink
 	if (reachable) {
-		const sym = detectSymlinkRoot(rootPath);
+		const sym = detectSymlinkRoot(rootPath, fileSystem);
 		if (sym.symlink) {
 			checks.push({
 				id: "path.symlink",
@@ -150,8 +167,8 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 		let readable = false;
 		let readErr: string | null = null;
 		try {
-			fs.accessSync(rootPath, fs.constants.R_OK);
-			fs.readdirSync(rootPath);
+			fileSystem.accessSync(rootPath, fileSystem.constants.R_OK);
+			fileSystem.readdirSync(rootPath);
 			readable = true;
 		} catch (err: any) {
 			readErr = err?.message ?? String(err);
@@ -171,10 +188,10 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 		let writable = false;
 		let writeErr: string | null = null;
 		try {
-			fs.accessSync(rootPath, fs.constants.W_OK);
+			fileSystem.accessSync(rootPath, fileSystem.constants.W_OK);
 			const probe = path.join(rootPath, `.bobbit-probe-${randomBytes(6).toString("hex")}`);
-			fs.mkdirSync(probe);
-			fs.rmdirSync(probe);
+			fileSystem.mkdirSync(probe);
+			fileSystem.rmdirSync(probe);
 			writable = true;
 		} catch (err: any) {
 			writeErr = err?.message ?? String(err);
@@ -234,22 +251,22 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 	// 8. path.nested-in-project
 	{
 		const gatewayRootResolved = (() => {
-			try { return path.resolve(tryRealpath(ctx.gatewayProjectRoot)); }
+			try { return path.resolve(tryRealpath(ctx.gatewayProjectRoot, fileSystem)); }
 			catch { return path.resolve(ctx.gatewayProjectRoot); }
 		})();
 		const offenders: Array<{ name: string; rootPath: string; via: "rootPath" | "worktree"; gatewayOwned: boolean }> = [];
-		const me = tryRealpath(rootPath);
+		const me = tryRealpath(rootPath, fileSystem);
 		for (const proj of ctx.registeredProjects) {
 			if (proj.hidden) continue;
-			const projRoot = tryRealpath(proj.rootPath);
+			const projRoot = tryRealpath(proj.rootPath, fileSystem);
 			const gatewayOwned = path.resolve(projRoot) === gatewayRootResolved;
 			if (isSameOrInside(projRoot, me) && path.resolve(projRoot) !== path.resolve(me)) {
 				offenders.push({ name: proj.name, rootPath: proj.rootPath, via: "rootPath", gatewayOwned });
 				continue;
 			}
 			const wtRoot = ctx.worktreeRootFor?.({ id: proj.id, rootPath: proj.rootPath }) ?? `${proj.rootPath}-wt`;
-			const wtReal = tryRealpath(wtRoot);
-			if (fs.existsSync(wtReal) && isSameOrInside(wtReal, me)) {
+			const wtReal = tryRealpath(wtRoot, fileSystem);
+			if (fileSystem.existsSync(wtReal) && isSameOrInside(wtReal, me)) {
 				offenders.push({ name: proj.name, rootPath: wtRoot, via: "worktree", gatewayOwned });
 			}
 		}
@@ -282,10 +299,10 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 	// 9. path.contains-project
 	{
 		const containers: string[] = [];
-		const me = tryRealpath(rootPath);
+		const me = tryRealpath(rootPath, fileSystem);
 		for (const proj of ctx.registeredProjects) {
 			if (proj.hidden) continue;
-			const projRoot = tryRealpath(proj.rootPath);
+			const projRoot = tryRealpath(proj.rootPath, fileSystem);
 			if (isAncestorOf(me, projRoot)) {
 				containers.push(`"${proj.name}" at ${proj.rootPath}`);
 			}
@@ -313,9 +330,9 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 		let isSecondaryWorktree = false;
 		let detail = "Path is not a secondary git worktree.";
 		try {
-			const st = fs.statSync(gitPath);
+			const st = fileSystem.statSync(gitPath);
 			if (st.isFile()) {
-				const content = fs.readFileSync(gitPath, "utf-8");
+				const content = fileSystem.readFileSync(gitPath, "utf-8");
 				const m = content.match(/^gitdir:\s*(.+)$/m);
 				if (m) {
 					const target = m[1].trim();
@@ -340,7 +357,7 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 	if (reachable) {
 		const bobbitConfig = path.join(rootPath, ".bobbit", "config");
 		const bobbitState = path.join(rootPath, ".bobbit", "state");
-		const stats = summarizeBobbitDir(rootPath);
+		const stats = summarizeBobbitDir(rootPath, fileSystem);
 		if (stats.totalEntries > 0) {
 			if (sameAsGatewayProjectRoot) {
 				const headquartersPath = path.join(rootPath, ".bobbit", "headquarters");
@@ -376,7 +393,7 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 				id: "bobbit.existing",
 				level: "pass",
 				title: "No prior .bobbit/ state",
-				detail: fs.existsSync(bobbitConfig) || fs.existsSync(bobbitState)
+				detail: fileSystem.existsSync(bobbitConfig) || fileSystem.existsSync(bobbitState)
 					? ".bobbit/ exists but is empty."
 					: "No .bobbit/ directory yet.",
 			});
@@ -388,8 +405,8 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 	// 12. bobbit.gateway-owned
 	{
 		const sameAsGateway = sameAsGatewayProjectRoot;
-		const hasGwUrl = exists && fs.existsSync(path.join(rootPath, ".bobbit", "state", "gateway-url"));
-		const hasWatchdog = exists && fs.existsSync(path.join(rootPath, ".bobbit", "state", "watchdog.json"));
+		const hasGwUrl = exists && fileSystem.existsSync(path.join(rootPath, ".bobbit", "state", "gateway-url"));
+		const hasWatchdog = exists && fileSystem.existsSync(path.join(rootPath, ".bobbit", "state", "watchdog.json"));
 		const gatewayOwned = sameAsGateway || hasGwUrl || hasWatchdog;
 		if (gatewayOwned) {
 			const reasons: string[] = [];
@@ -417,10 +434,10 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 	// 13. git.repo
 	if (reachable) {
 		const gitPath = path.join(rootPath, ".git");
-		if (fs.existsSync(gitPath)) {
+		if (fileSystem.existsSync(gitPath)) {
 			let kind = "git repository";
 			try {
-				const st = fs.statSync(gitPath);
+				const st = fileSystem.statSync(gitPath);
 				if (st.isFile()) kind = "worktree (.git is a file)";
 				else if (st.isDirectory()) kind = "git repository (.git directory)";
 			} catch { /* ignore */ }
@@ -445,9 +462,9 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 	// 14. disk.space
 	if (reachable) {
 		try {
-			const free = (fs as any).statfsSync
+			const free = fileSystem.statfsSync
 				? ((): number => {
-					const s = (fs as any).statfsSync(rootPath);
+					const s = fileSystem.statfsSync(rootPath);
 					return Number(s.bavail) * Number(s.bsize);
 				})()
 				: NaN;
@@ -495,9 +512,9 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 
 interface BobbitSummary { totalEntries: number; summary: string; }
 
-function summarizeBobbitDir(rootPath: string): BobbitSummary {
+function summarizeBobbitDir(rootPath: string, fileSystem: PreflightFileSystem): BobbitSummary {
 	const bobbitDir = path.join(rootPath, ".bobbit");
-	if (!fs.existsSync(bobbitDir)) return { totalEntries: 0, summary: "(none)" };
+	if (!fileSystem.existsSync(bobbitDir)) return { totalEntries: 0, summary: "(none)" };
 	let configFiles = 0;
 	let sessions = 0;
 	let goals = 0;
@@ -505,7 +522,7 @@ function summarizeBobbitDir(rootPath: string): BobbitSummary {
 	let total = 0;
 	const walk = (dir: string, depth: number, base: string): void => {
 		let entries: fs.Dirent[] = [];
-		try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+		try { entries = fileSystem.readdirSync(dir, { withFileTypes: true }) as fs.Dirent[]; }
 		catch { return; }
 		for (const e of entries) {
 			const full = path.join(dir, e.name);
@@ -516,8 +533,8 @@ function summarizeBobbitDir(rootPath: string): BobbitSummary {
 			}
 			total++;
 			if (rel.startsWith("config/")) configFiles++;
-			else if (rel === "state/sessions.json") sessions = countJsonArrayEntries(full);
-			else if (rel === "state/goals.json" || rel.endsWith("/goals.json")) goals += countJsonArrayEntries(full);
+			else if (rel === "state/sessions.json") sessions = countJsonArrayEntries(full, fileSystem);
+			else if (rel === "state/goals.json" || rel.endsWith("/goals.json")) goals += countJsonArrayEntries(full, fileSystem);
 			else other++;
 		}
 	};
@@ -533,9 +550,9 @@ function summarizeBobbitDir(rootPath: string): BobbitSummary {
 	};
 }
 
-function countJsonArrayEntries(file: string): number {
+function countJsonArrayEntries(file: string, fileSystem: PreflightFileSystem): number {
 	try {
-		const raw = fs.readFileSync(file, "utf-8");
+		const raw = fileSystem.readFileSync(file, "utf-8");
 		const v = JSON.parse(raw);
 		return Array.isArray(v) ? v.length : 0;
 	} catch { return 0; }

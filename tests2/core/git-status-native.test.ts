@@ -3,243 +3,190 @@
 // Bucket: v2-core | Method: codemod | Classification: clean
 
 /**
- * Fixture-based parity tests for `runBatchGitStatusNative`. The suite builds a
- * small set of real git template repos once per file, then copies them per test
- * so native git coverage stays intact without paying repeated init/commit setup.
+ * Deterministic decision tests for `runBatchGitStatusNative`. Git responses are
+ * supplied through the production CommandRunner seam; real repository fidelity
+ * belongs to the E2E tier.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { runBatchGitStatusNative } from "../../src/server/skills/git-status-native.ts";
+import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 
-function rmDir(p: string): void {
-	try { fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* ignore */ }
+const { runBatchGitStatusNative } = await import("../../src/server/skills/git-status-native.ts");
+
+interface GitScenario {
+	branch?: string;
+	remoteHead?: string;
+	master?: boolean;
+	main?: boolean;
+	statusTracked?: string;
+	statusUntracked?: string;
+	upstream?: string;
+	originPrimary?: boolean;
+	ahead?: number;
+	behind?: number;
+	aheadPrimary?: number;
+	behindPrimary?: number;
+	committedShortstat?: string;
+	workingShortstat?: string;
 }
 
-function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf-8", windowsHide: true }).trim();
+function commandFailure(args: readonly string[]): Error {
+	return Object.assign(new Error(`fake git rejected: ${args.join(" ")}`), { code: 128 });
 }
 
-function makeFixtureDir(name: string): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-git-status-${name}-`));
+function fakeGitRunner(scenario: GitScenario): CommandRunner {
+	return {
+		async execFile(file, args) {
+			assert.equal(file, "git");
+			const argv = [...args];
+			const exact = (...expected: string[]) => argv.length === expected.length && argv.every((arg, i) => arg === expected[i]);
+
+			let stdout: string | undefined;
+			if (exact("rev-parse", "--abbrev-ref", "HEAD")) {
+				stdout = scenario.branch;
+			} else if (exact("symbolic-ref", "refs/remotes/origin/HEAD")) {
+				stdout = scenario.remoteHead;
+			} else if (exact("rev-parse", "--verify", "refs/heads/master")) {
+				if (scenario.master) stdout = "a".repeat(40);
+			} else if (exact("rev-parse", "--verify", "refs/heads/main")) {
+				if (scenario.main) stdout = "a".repeat(40);
+			} else if (argv[0] === "-c" && argv[2] === "status") {
+				stdout = argv.includes("-uall") ? (scenario.statusUntracked ?? scenario.statusTracked ?? "") : (scenario.statusTracked ?? "");
+			} else if (exact("rev-parse", "--abbrev-ref", "@{u}")) {
+				stdout = scenario.upstream;
+			} else if (argv[0] === "rev-parse" && argv[1] === "--verify" && argv[2]?.startsWith("origin/")) {
+				if (scenario.originPrimary) stdout = "b".repeat(40);
+			} else if (argv[0] === "rev-list" && argv[1] === "--count") {
+				const range = argv[2] ?? "";
+				if (range === "@{u}..HEAD") stdout = String(scenario.ahead ?? 0);
+				else if (range === "HEAD..@{u}") stdout = String(scenario.behind ?? 0);
+				else if (range.endsWith("..HEAD")) stdout = String(scenario.aheadPrimary ?? 0);
+				else if (range.startsWith("HEAD..")) stdout = String(scenario.behindPrimary ?? 0);
+			} else if (argv[0] === "diff" && argv[1] === "--shortstat") {
+				stdout = argv[2] === "HEAD" ? (scenario.workingShortstat ?? "") : (scenario.committedShortstat ?? "");
+			}
+
+			if (stdout === undefined) throw commandFailure(args);
+			return { stdout: `${stdout}\n`, stderr: "" };
+		},
+	};
 }
 
-function initRepo(cwd: string, branch = "master"): void {
-	git(cwd, "init", "-q");
-	git(cwd, "config", "user.email", "test@example.com");
-	git(cwd, "config", "user.name", "Test");
-	git(cwd, "config", "commit.gpgsign", "false");
-	git(cwd, "config", "core.autocrlf", "false");
-	// Force the initial branch name regardless of git's `init.defaultBranch`.
-	git(cwd, "checkout", "-q", "-b", branch);
-}
-
-function commit(cwd: string, file: string, content: string, message: string): string {
-	fs.writeFileSync(path.join(cwd, file), content);
-	git(cwd, "add", file);
-	git(cwd, "commit", "-q", "-m", message);
-	return git(cwd, "rev-parse", "HEAD");
-}
-
-type TemplateName = "clean" | "feature" | "detached" | "masterAndMain" | "mainOnly" | "upstreamAhead";
-
-type TemplateSet = Record<TemplateName, string>;
-
-function copyTemplate(src: string, name: string): string {
-	const dst = makeFixtureDir(name);
-	fs.cpSync(src, dst, { recursive: true, verbatimSymlinks: true });
-	return dst;
-}
-
-function buildTemplates(root: string): TemplateSet {
-	const clean = path.join(root, "clean");
-	fs.mkdirSync(clean, { recursive: true });
-	initRepo(clean, "master");
-	commit(clean, "README.md", "hello\n", "init");
-
-	const feature = path.join(root, "feature");
-	fs.cpSync(clean, feature, { recursive: true, verbatimSymlinks: true });
-	git(feature, "checkout", "-q", "-b", "feature/x");
-
-	const detached = path.join(root, "detached");
-	fs.cpSync(clean, detached, { recursive: true, verbatimSymlinks: true });
-	const firstSha = git(detached, "rev-parse", "HEAD");
-	commit(detached, "b.txt", "b\n", "second");
-	git(detached, "checkout", "-q", firstSha);
-
-	const masterAndMain = path.join(root, "master-and-main");
-	fs.cpSync(clean, masterAndMain, { recursive: true, verbatimSymlinks: true });
-	git(masterAndMain, "branch", "main");
-
-	const mainOnly = path.join(root, "main-only");
-	fs.mkdirSync(mainOnly, { recursive: true });
-	initRepo(mainOnly, "main");
-	commit(mainOnly, "a.txt", "a\n", "init");
-
-	const upstreamAhead = path.join(root, "upstream-ahead-root");
-	const upstreamRepo = path.join(upstreamAhead, "repo");
-	const upstreamOrigin = path.join(upstreamAhead, "origin.git");
-	fs.mkdirSync(upstreamRepo, { recursive: true });
-	execFileSync("git", ["init", "-q", "--bare", "origin.git"], { cwd: upstreamAhead, windowsHide: true });
-	initRepo(upstreamRepo, "master");
-	commit(upstreamRepo, "a.txt", "a\n", "init");
-	git(upstreamRepo, "remote", "add", "origin", "../origin.git");
-	git(upstreamRepo, "push", "-q", "-u", "origin", "master");
-	commit(upstreamRepo, "b.txt", "b\n", "second");
-	commit(upstreamRepo, "c.txt", "c\n", "third");
-	assert.equal(fs.existsSync(upstreamOrigin), true, "upstream template origin should exist");
-
-	return { clean, feature, detached, masterAndMain, mainOnly, upstreamAhead };
-}
-
-describe("runBatchGitStatusNative — fixtures", () => {
-	const cleanup: string[] = [];
-	let templateRoot = "";
-	let templates: TemplateSet;
-
-	beforeAll(() => {
-		templateRoot = makeFixtureDir("templates");
-		templates = buildTemplates(templateRoot);
+function run(scenario: GitScenario, opts: { untracked?: boolean } = {}) {
+	return runBatchGitStatusNative("/deterministic/repo", {
+		...opts,
+		commandRunner: fakeGitRunner(scenario),
 	});
+}
 
-	afterAll(() => {
-		for (const d of cleanup) rmDir(d);
-		if (templateRoot) rmDir(templateRoot);
-	});
-
+describe("runBatchGitStatusNative — deterministic CommandRunner", () => {
 	it("clean repo on master, no remote", async () => {
-		const cwd = copyTemplate(templates.clean, "clean");
-		cleanup.push(cwd);
-
-		const r = await runBatchGitStatusNative(cwd);
+		const r = await run({ branch: "master", master: true });
 		assert.ok(r, "result not null");
-		assert.equal(r!.branch, "master");
-		assert.equal(r!.primaryBranch, "master");
-		assert.equal(r!.isOnPrimary, true);
-		assert.deepStrictEqual(r!.status, []);
-		assert.equal(r!.hasUpstream, false);
-		assert.equal(r!.ahead, 0);
-		assert.equal(r!.behind, 0);
-		assert.equal(r!.aheadOfPrimary, 0);
-		assert.equal(r!.behindPrimary, 0);
-		// On primary, mergedIntoPrimary stays default-false (parity with legacy).
-		assert.equal(r!.mergedIntoPrimary, false);
-		assert.equal(r!.clean, true);
-		assert.equal(r!.summary, "clean");
-		// hasUpstream=false → unpushed=!mergedIntoPrimary=true
-		assert.equal(r!.unpushed, true);
-		assert.equal(r!.partial, false);
-		assert.equal(r!.untrackedIncluded, false);
+		assert.equal(r.branch, "master");
+		assert.equal(r.primaryBranch, "master");
+		assert.equal(r.isOnPrimary, true);
+		assert.deepStrictEqual(r.status, []);
+		assert.equal(r.hasUpstream, false);
+		assert.equal(r.ahead, 0);
+		assert.equal(r.behind, 0);
+		assert.equal(r.aheadOfPrimary, 0);
+		assert.equal(r.behindPrimary, 0);
+		assert.equal(r.mergedIntoPrimary, false);
+		assert.equal(r.clean, true);
+		assert.equal(r.summary, "clean");
+		assert.equal(r.unpushed, true);
+		assert.equal(r.partial, false);
+		assert.equal(r.untrackedIncluded, false);
 	});
 
 	it("dirty: tracked-modified + untracked, untracked=false omits untracked", async () => {
-		const cwd = copyTemplate(templates.clean, "dirty");
-		cleanup.push(cwd);
-		fs.writeFileSync(path.join(cwd, "README.md"), "v2\n");
-		fs.writeFileSync(path.join(cwd, "untracked.txt"), "new\n");
+		const scenario = {
+			branch: "master",
+			master: true,
+			statusTracked: " M README.md",
+			statusUntracked: " M README.md\n?? untracked.txt",
+		};
 
-		const rNoUntracked = await runBatchGitStatusNative(cwd, { untracked: false });
+		const rNoUntracked = await run(scenario, { untracked: false });
 		assert.ok(rNoUntracked);
-		assert.equal(rNoUntracked!.untrackedIncluded, false);
-		// -uno hides the untracked file → only the modified tracked file shows
-		assert.equal(rNoUntracked!.status.length, 1);
-		assert.equal(rNoUntracked!.status[0].file, "README.md");
-		assert.equal(rNoUntracked!.status[0].status, "M");
-		assert.equal(rNoUntracked!.clean, false);
-		assert.equal(rNoUntracked!.summary, "1M");
+		assert.equal(rNoUntracked.untrackedIncluded, false);
+		assert.deepStrictEqual(rNoUntracked.status, [{ file: "README.md", status: "M" }]);
+		assert.equal(rNoUntracked.clean, false);
+		assert.equal(rNoUntracked.summary, "1M");
 
-		const rUntracked = await runBatchGitStatusNative(cwd, { untracked: true });
+		const rUntracked = await run(scenario, { untracked: true });
 		assert.ok(rUntracked);
-		assert.equal(rUntracked!.untrackedIncluded, true);
-		assert.equal(rUntracked!.status.length, 2);
-		assert.equal(rUntracked!.clean, false);
-		// Summary is "1? 1M" or "1M 1?" depending on Object.entries order;
-		// just check both buckets are present.
-		assert.match(rUntracked!.summary, /1\?/);
-		assert.match(rUntracked!.summary, /1M/);
+		assert.equal(rUntracked.untrackedIncluded, true);
+		assert.equal(rUntracked.status.length, 2);
+		assert.equal(rUntracked.clean, false);
+		assert.match(rUntracked.summary, /1\?/);
+		assert.match(rUntracked.summary, /1M/);
 	});
 
 	it("feature branch, no upstream, primary detected as master", async () => {
-		const cwd = copyTemplate(templates.feature, "no-upstream");
-		cleanup.push(cwd);
-
-		const r = await runBatchGitStatusNative(cwd);
+		const r = await run({ branch: "feature/x", master: true });
 		assert.ok(r);
-		assert.equal(r!.branch, "feature/x");
-		assert.equal(r!.primaryBranch, "master");
-		assert.equal(r!.isOnPrimary, false);
-		assert.equal(r!.hasUpstream, false);
-		assert.equal(r!.ahead, 0);
-		assert.equal(r!.behind, 0);
-		// No commits since branching from master → aheadOfPrimary=0
-		assert.equal(r!.aheadOfPrimary, 0);
-		assert.equal(r!.behindPrimary, 0);
-		assert.equal(r!.mergedIntoPrimary, true);
-		assert.equal(r!.clean, true);
-		// hasUpstream=false → unpushed=!mergedIntoPrimary=false
-		assert.equal(r!.unpushed, false);
+		assert.equal(r.branch, "feature/x");
+		assert.equal(r.primaryBranch, "master");
+		assert.equal(r.isOnPrimary, false);
+		assert.equal(r.hasUpstream, false);
+		assert.equal(r.ahead, 0);
+		assert.equal(r.behind, 0);
+		assert.equal(r.aheadOfPrimary, 0);
+		assert.equal(r.behindPrimary, 0);
+		assert.equal(r.mergedIntoPrimary, true);
+		assert.equal(r.clean, true);
+		assert.equal(r.unpushed, false);
 	});
 
 	it("detached HEAD: branch === 'HEAD'", async () => {
-		const cwd = copyTemplate(templates.detached, "detached");
-		cleanup.push(cwd);
-
-		const r = await runBatchGitStatusNative(cwd);
+		const r = await run({ branch: "HEAD", master: true });
 		assert.ok(r);
-		assert.equal(r!.branch, "HEAD");
-		assert.equal(r!.primaryBranch, "master");
-		assert.equal(r!.isOnPrimary, false);
-		assert.equal(r!.hasUpstream, false);
-		// rev-list against pref still works → counts may be non-zero, but
-		// the field shape is what we assert here.
-		assert.equal(typeof r!.aheadOfPrimary, "number");
-		assert.equal(typeof r!.behindPrimary, "number");
+		assert.equal(r.branch, "HEAD");
+		assert.equal(r.primaryBranch, "master");
+		assert.equal(r.isOnPrimary, false);
+		assert.equal(r.hasUpstream, false);
+		assert.equal(typeof r.aheadOfPrimary, "number");
+		assert.equal(typeof r.behindPrimary, "number");
 	});
 
 	it("master and main both present, on master, primaryBranch=master", async () => {
-		const cwd = copyTemplate(templates.masterAndMain, "master-and-main");
-		cleanup.push(cwd);
-
-		const r = await runBatchGitStatusNative(cwd);
+		const r = await run({ branch: "master", master: true, main: true });
 		assert.ok(r);
-		assert.equal(r!.branch, "master");
-		// Fallback chain: no origin/HEAD → master exists → primaryBranch=master.
-		assert.equal(r!.primaryBranch, "master");
-		assert.equal(r!.isOnPrimary, true);
+		assert.equal(r.branch, "master");
+		assert.equal(r.primaryBranch, "master");
+		assert.equal(r.isOnPrimary, true);
 	});
 
 	it("only main exists (no master), no origin/HEAD → primaryBranch=main", async () => {
-		const cwd = copyTemplate(templates.mainOnly, "main-only");
-		cleanup.push(cwd);
-
-		const r = await runBatchGitStatusNative(cwd);
+		const r = await run({ branch: "main", main: true });
 		assert.ok(r);
-		assert.equal(r!.branch, "main");
-		assert.equal(r!.primaryBranch, "main");
-		assert.equal(r!.isOnPrimary, true);
+		assert.equal(r.branch, "main");
+		assert.equal(r.primaryBranch, "main");
+		assert.equal(r.isOnPrimary, true);
 	});
 
 	it("with-upstream-ahead: 2 commits past origin/master via local bare remote", async () => {
-		const root = copyTemplate(templates.upstreamAhead, "upstream-ahead");
-		cleanup.push(root);
-		const cwd = path.join(root, "repo");
-
-		const r = await runBatchGitStatusNative(cwd);
+		const r = await run({
+			branch: "master",
+			remoteHead: "refs/remotes/origin/master",
+			master: true,
+			upstream: "origin/master",
+			originPrimary: true,
+			ahead: 2,
+			aheadPrimary: 2,
+		});
 		assert.ok(r);
-		assert.equal(r!.branch, "master");
-		assert.equal(r!.hasUpstream, true);
-		assert.equal(r!.ahead, 2);
-		assert.equal(r!.behind, 0);
-		assert.equal(r!.unpushed, true);
+		assert.equal(r.branch, "master");
+		assert.equal(r.hasUpstream, true);
+		assert.equal(r.ahead, 2);
+		assert.equal(r.behind, 0);
+		assert.equal(r.unpushed, true);
 	});
 
 	it("returns null for non-git directory", async () => {
-		const cwd = makeFixtureDir("not-a-repo");
-		cleanup.push(cwd);
-		const r = await runBatchGitStatusNative(cwd);
+		const r = await run({});
 		assert.equal(r, null);
 	});
 });

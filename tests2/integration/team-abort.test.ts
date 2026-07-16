@@ -4,6 +4,7 @@
  * Verifies: validation (400), membership enforcement (403),
  * successful abort of busy/idle agents.
  */
+import "./_e2e/fake-cmd-setup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -13,8 +14,8 @@ import {
 	deleteGoal,
 	startTeam,
 	teardownTeam,
-	waitForSessionStatus,
 } from "./_e2e/e2e-setup.js";
+import { attachLocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
 
 test.setTimeout(30_000);
 
@@ -23,13 +24,14 @@ test.setTimeout(30_000);
 test.describe("team abort — validation", () => {
 	let goalId: string;
 
-	test.beforeAll(async () => {
+	test.beforeEach(async () => {
 		const goal = await createGoal({ title: "abort-validation", team: true });
 		goalId = goal.id;
 	});
 
-	test.afterAll(async () => {
-		await deleteGoal(goalId);
+	test.afterEach(async () => {
+		if (goalId) await deleteGoal(goalId).catch(() => {});
+		goalId = "";
 	});
 
 	test("POST /team/abort returns 400 without sessionId", async () => {
@@ -57,15 +59,17 @@ test.describe("team abort — membership enforcement", () => {
 	let goalId: string;
 	let nonTeamSessionId: string;
 
-	test.beforeAll(async () => {
+	test.beforeEach(async () => {
 		const goal = await createGoal({ title: "abort-membership", team: true });
 		goalId = goal.id;
 		nonTeamSessionId = await createSession();
 	});
 
-	test.afterAll(async () => {
-		await deleteSession(nonTeamSessionId);
-		await deleteGoal(goalId);
+	test.afterEach(async () => {
+		if (nonTeamSessionId) await deleteSession(nonTeamSessionId).catch(() => {});
+		if (goalId) await deleteGoal(goalId).catch(() => {});
+		nonTeamSessionId = "";
+		goalId = "";
 	});
 
 	test("POST /team/abort returns 403 for non-team session", async () => {
@@ -92,18 +96,19 @@ test.describe("team abort — membership enforcement", () => {
 test.describe("team abort — stuck agent", () => {
 	let goalId: string;
 
-	test.beforeAll(async () => {
+	test.beforeEach(async () => {
 		const goal = await createGoal({ title: "abort-stuck", team: true });
 		goalId = goal.id;
 		await startTeam(goalId);
 	});
 
-	test.afterAll(async () => {
-		await teardownTeam(goalId);
-		await deleteGoal(goalId);
+	test.afterEach(async () => {
+		if (goalId) await teardownTeam(goalId).catch(() => {});
+		if (goalId) await deleteGoal(goalId).catch(() => {});
+		goalId = "";
 	});
 
-	test("POST /team/abort force-kills a busy agent", async () => {
+	test("POST /team/abort force-kills a busy agent", async ({ gateway }) => {
 		// Spawn a role agent with a task that keeps it busy
 		const spawnResp = await apiFetch(`/api/goals/${goalId}/team/spawn`, {
 			method: "POST",
@@ -114,9 +119,13 @@ test.describe("team abort — stuck agent", () => {
 		});
 		expect(spawnResp.status).toBe(201);
 		const { sessionId: agentId } = await spawnResp.json();
+		const agentClock = attachLocalMockAgentClock(gateway, agentId);
 
-		// Wait until the agent is streaming
-		await waitForSessionStatus(agentId, "streaming");
+		// Drive only this mock agent; the fork-scoped gateway clock stays untouched.
+		await agentClock.waitUntil(
+			() => gateway.sessionManager.getSession(agentId)?.status === "streaming",
+			"streaming",
+		);
 
 		// Force-abort
 		const abortResp = await apiFetch(`/api/goals/${goalId}/team/abort`, {
@@ -128,8 +137,8 @@ test.describe("team abort — stuck agent", () => {
 		expect(data.ok).toBe(true);
 		expect(data.status).toBe("idle");
 
-		// Verify idle after abort
-		await waitForSessionStatus(agentId, "idle");
+		// Verify idle after abort without a wall-clock polling loop.
+		expect(gateway.sessionManager.getSession(agentId)?.status).toBe("idle");
 
 		// Verify the agent can accept new work after being aborted
 		const promptResp = await apiFetch(`/api/goals/${goalId}/team/prompt`, {
@@ -140,6 +149,7 @@ test.describe("team abort — stuck agent", () => {
 		const promptData = await promptResp.json();
 		expect(promptData.ok).toBe(true);
 		expect(promptData.status).toBe("dispatched");
+		await agentClock.settleCurrentPrompt();
 
 		// Cleanup
 		await apiFetch(`/api/goals/${goalId}/team/dismiss`, {
@@ -148,7 +158,7 @@ test.describe("team abort — stuck agent", () => {
 		});
 	});
 
-	test("POST /team/abort on an already-idle agent is a no-op", async () => {
+	test("POST /team/abort on an already-idle agent is a no-op", async ({ gateway }) => {
 		const spawnResp = await apiFetch(`/api/goals/${goalId}/team/spawn`, {
 			method: "POST",
 			body: JSON.stringify({
@@ -158,9 +168,11 @@ test.describe("team abort — stuck agent", () => {
 		});
 		expect(spawnResp.status).toBe(201);
 		const { sessionId: agentId } = await spawnResp.json();
+		const agentClock = attachLocalMockAgentClock(gateway, agentId);
 
-		// Wait for agent to become idle
-		await waitForSessionStatus(agentId, "idle");
+		// Await the actual prompt chain, not the session's pre-prompt idle value.
+		await agentClock.settleCurrentPrompt();
+		expect(gateway.sessionManager.getSession(agentId)?.status).toBe("idle");
 
 		// Abort an idle agent — should succeed as a no-op
 		const abortResp = await apiFetch(`/api/goals/${goalId}/team/abort`, {
@@ -185,13 +197,14 @@ test.describe("team abort — stuck agent", () => {
 test.describe("team abort — legacy swarm path", () => {
 	let goalId: string;
 
-	test.beforeAll(async () => {
+	test.beforeEach(async () => {
 		const goal = await createGoal({ title: "abort-swarm-compat", team: true });
 		goalId = goal.id;
 	});
 
-	test.afterAll(async () => {
-		await deleteGoal(goalId);
+	test.afterEach(async () => {
+		if (goalId) await deleteGoal(goalId).catch(() => {});
+		goalId = "";
 	});
 
 	test("POST /swarm/abort works (backward compat)", async () => {

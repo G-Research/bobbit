@@ -32,6 +32,7 @@ import {
 	isMcpGatewaySource,
 	materializeGatewayProviderPack,
 	type McpGatewayBrowsePack,
+	type McpGatewayParseResult,
 	type McpGatewaySkippedEntry,
 } from "./mcp-gateway-source.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
@@ -368,6 +369,9 @@ export interface MarketplaceInstallerOptions {
 	/** Override git runner (tests). Returns stdout; throws on failure. */
 	gitRunner?: (args: string[], cwd: string) => string;
 	commandRunner?: CommandRunner;
+	/** Injectable discovery seam for installer decision tests. Protocol fidelity is
+	 * pinned independently by marketplace-mcp-gateway.test.ts. */
+	mcpGatewayFetch?: (source: MarketplaceSource) => Promise<McpGatewayParseResult>;
 }
 
 interface ScopeContext {
@@ -379,6 +383,10 @@ interface ScopeContext {
 
 export class MarketplaceInstaller {
 	constructor(private readonly opts: MarketplaceInstallerOptions) {}
+
+	private fetchMcpGateway(source: MarketplaceSource): Promise<McpGatewayParseResult> {
+		return (this.opts.mcpGatewayFetch ?? fetchMcpGatewayWithDiagnostics)(source);
+	}
 
 	// ── git sync ─────────────────────────────────────────────────
 
@@ -486,7 +494,7 @@ export class MarketplaceInstaller {
 		if (!source) throw new MarketplaceError("unknown_source", `unknown source: ${sourceId}`);
 		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
 		if (!isMcpGatewaySource(source)) return this.browsePacks(sourceId);
-		const parsed = await fetchMcpGatewayWithDiagnostics(source);
+		const parsed = await this.fetchMcpGateway(source);
 		const fingerprint = parsed.providers.map((p) => p.fingerprint).join(",");
 		this.opts.sourceStore.update(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: fingerprint });
 		const diagnostics = mcpGatewayDiagnostics(parsed.skipped);
@@ -503,7 +511,7 @@ export class MarketplaceInstaller {
 		if (!source) throw new MarketplaceError("unknown_source", `unknown source: ${sourceId}`);
 		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
 		if (!isMcpGatewaySource(source)) return this.syncSource(sourceId).source;
-		const parsed = await fetchMcpGatewayWithDiagnostics(source);
+		const parsed = await this.fetchMcpGateway(source);
 		const fingerprint = parsed.providers.map((p) => p.fingerprint).join(",");
 		this.opts.sourceStore.update(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: fingerprint });
 		return withMcpGatewayDiagnostics(this.opts.sourceStore.get(sourceId)!, parsed.skipped);
@@ -626,7 +634,7 @@ export class MarketplaceInstaller {
 		if (!isMcpGatewaySource(source)) return this.installPack(args);
 		if (!isSafeDirName(args.dirName)) throw new MarketplaceError("unsafe_name", `unsafe source dir name: ${JSON.stringify(args.dirName)}`);
 
-		const parsed = await fetchMcpGatewayWithDiagnostics(source);
+		const parsed = await this.fetchMcpGateway(source);
 		const provider = parsed.providers.find((p) => gatewayPackNameForProvider(p.id, source.id) === args.dirName || gatewayPackNameForProvider(p.id) === args.dirName || p.id === args.dirName);
 		if (!provider) throw new MarketplaceError("unknown_pack", gatewayMissingMessage(args.dirName, parsed.skipped));
 		const manifest = gatewayProviderToVirtualPack(provider, { sourceId: source.id });
@@ -755,7 +763,7 @@ export class MarketplaceInstaller {
 		if (isLegacyMcpRegistrySource(source)) throw legacyMcpRegistryError();
 		if (!isMcpGatewaySource(source)) return this.updatePack(args);
 
-		const parsed = await fetchMcpGatewayWithDiagnostics(source);
+		const parsed = await this.fetchMcpGateway(source);
 		const storedProviderId = typeof oldMetaDetails.gatewayProviderId === "string" ? oldMetaDetails.gatewayProviderId : undefined;
 		const provider = parsed.providers.find((p) => p.id === storedProviderId)
 			?? parsed.providers.find((p) => gatewayPackNameForProvider(p.id, source.id) === packName || gatewayPackNameForProvider(p.id) === packName);

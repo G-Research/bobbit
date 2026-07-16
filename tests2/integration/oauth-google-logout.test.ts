@@ -21,8 +21,13 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_e2e/e2e-setup.js";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
-// dist/ import: shared module instance + auth.json path with the gateway.
-import { globalAuthPath } from "../../src/server/bobbit-dir.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
+
+let globalAuthPath: typeof import("../../src/server/bobbit-dir.js").globalAuthPath;
+
+test.beforeAll(async () => {
+	({ globalAuthPath } = (await loadServerTestRuntime()).bobbitDir);
+});
 
 const headers = () => ({
 	Authorization: `Bearer ${readE2EToken()}`,

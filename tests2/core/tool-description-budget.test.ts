@@ -26,17 +26,12 @@ guardProcessEnv();
 
 import { describe, it, beforeAll } from "vitest";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
-import path from "node:path";
-import { tmpdir } from "node:os";
-import { mkdtempSync } from "node:fs";
 
 import { buildMetaToolDescription } from "../../src/server/mcp/mcp-meta.ts";
 import type { McpToolDef } from "../../src/server/mcp/mcp-types.ts";
 
-const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
-
-const EXTENSION_FILES = [
+type ExtensionFactory = (pi: any) => unknown;
+const EXTENSION_GROUPS = [
 	"agent",
 	"ask",
 	"bobbit",
@@ -52,7 +47,14 @@ const EXTENSION_FILES = [
 	"tasks",
 	"team",
 	"web",
-];
+] as const;
+
+// Vite resolves this eager glob into static module imports in one transform pass.
+// Unlike sequential import(url), extension discovery has no per-group async tax.
+const EXTENSION_MODULES = import.meta.glob<{ default: ExtensionFactory }>(
+	"../../defaults/tools/{agent,ask,bobbit,browser,html,images,inbox,mcp,proposals,review,shell,skills,tasks,team,web}/extension.ts",
+	{ eager: true },
+);
 
 const TOOL_DESC_MAX = 150;
 const PARAM_DESC_MAX = 80;
@@ -66,11 +68,7 @@ interface CapturedTool {
 
 const captured: CapturedTool[] = [];
 
-beforeAll(async () => {
-	// Ensure tool extensions that read state on import have a directory to look at.
-	if (!process.env.BOBBIT_DIR) {
-		process.env.BOBBIT_DIR = mkdtempSync(path.join(tmpdir(), "bobbit-tool-budget-"));
-	}
+beforeAll(() => {
 	// Ensure staff-gated tools (inbox) register so their descriptions are budget-checked.
 	// Mirrors how BOBBIT_GOAL_ID gates the tasks/team extensions in the caller env.
 	if (!process.env.BOBBIT_STAFF_ID) {
@@ -84,11 +82,9 @@ beforeAll(async () => {
 	if (!process.env.BOBBIT_TOKEN) process.env.BOBBIT_TOKEN = "test-token";
 	if (!process.env.BOBBIT_GATEWAY_URL) process.env.BOBBIT_GATEWAY_URL = "https://127.0.0.1:0";
 
-	for (const group of EXTENSION_FILES) {
-		const file = path.join(REPO_ROOT, "defaults/tools", group, "extension.ts");
-		const url = pathToFileURL(file).href;
-		const mod: any = await import(url);
-		const factory = typeof mod.default === "function" ? mod.default : mod.default?.default;
+	for (const group of EXTENSION_GROUPS) {
+		const modulePath = `../../defaults/tools/${group}/extension.ts`;
+		const factory = EXTENSION_MODULES[modulePath]?.default;
 		assert.ok(typeof factory === "function", `${group}/extension.ts has no callable default export`);
 
 		const pi = {

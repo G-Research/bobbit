@@ -261,7 +261,27 @@ function moduleLoadPreflightScript(extensionPath: string): string {
 	return `await import(${JSON.stringify(pathToFileURL(extensionPath).href)});`;
 }
 
-function moduleLoadFailure(extensionPath: string): string | undefined {
+export type ToolModuleLoadProbe = (extensionPath: string) => string | undefined;
+
+// A worker can load this module through both Vitest's source graph and the
+// content-addressed server prebundle. Symbol.for keeps the baseline/override
+// seam shared across those module identities without changing production's
+// fallback to the confined child-process probe.
+const MODULE_LOAD_PROBE_TEST_STATE_KEY = Symbol.for("bobbit.tool-extension-preflight.module-load-probe-test-state");
+interface ModuleLoadProbeTestState {
+	baseline?: ToolModuleLoadProbe;
+	override?: ToolModuleLoadProbe;
+}
+type GlobalWithModuleLoadProbeTestState = typeof globalThis & {
+	[MODULE_LOAD_PROBE_TEST_STATE_KEY]?: ModuleLoadProbeTestState;
+};
+
+function moduleLoadProbeTestState(): ModuleLoadProbeTestState {
+	const owner = globalThis as GlobalWithModuleLoadProbeTestState;
+	return owner[MODULE_LOAD_PROBE_TEST_STATE_KEY] ??= {};
+}
+
+function realModuleLoadFailure(extensionPath: string): string | undefined {
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(extensionPath);
@@ -303,6 +323,28 @@ function moduleLoadFailure(extensionPath: string): string | undefined {
 	}
 	moduleLoadCache.set(extensionPath, { fingerprint, error });
 	return error;
+}
+
+function moduleLoadFailure(extensionPath: string): string | undefined {
+	const testState = moduleLoadProbeTestState();
+	return (testState.override ?? testState.baseline ?? realModuleLoadFailure)(extensionPath);
+}
+
+/**
+ * Unit fixture override. Clearing an override restores the installed test
+ * baseline; production has no baseline and therefore uses the real probe.
+ */
+export function __setToolModuleLoadProbeForTesting(probe: ToolModuleLoadProbe | undefined): void {
+	moduleLoadProbeTestState().override = probe;
+	moduleLoadCache.clear();
+}
+
+/** Process-wide test baseline used by tier-1 setup across non-isolated files. */
+export function __setToolModuleLoadProbeBaselineForTesting(probe: ToolModuleLoadProbe | undefined): void {
+	const testState = moduleLoadProbeTestState();
+	testState.baseline = probe;
+	testState.override = undefined;
+	moduleLoadCache.clear();
 }
 
 function makeDiagnostic(input: { toolName: string; groupDir: string }, extensionPath: string, code: ToolExtensionDiagnostic["code"], message: string): ToolExtensionDiagnostic {

@@ -1,8 +1,8 @@
 /**
  * Tier-1 gateway fixture for Test Suite v2 (vitest).
  *
- * Boots ONE real gateway per vitest fork, imported directly from `src/`
- * (never `dist/`), mirroring the durable parts of tests/e2e/in-process-harness.ts
+ * Boots ONE real gateway per vitest fork from the content-addressed `src/server`
+ * runtime bundle (never `dist/`), mirroring the durable parts of tests/e2e/in-process-harness.ts
  * while eliminating every `BOBBIT_TEST_*` / `BOBBIT_SKIP_*` env flag. All
  * configuration flows through explicit `GatewayConfig` options + `GatewayDeps`:
  *
@@ -21,28 +21,54 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type WebSocket from "ws";
 
-import { getAgentDirState, initializeAgentDirRuntime, setProjectRoot } from "../../src/server/bobbit-dir.js";
-import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
-import { loadOrCreateToken } from "../../src/server/auth/token.js";
-// createGateway (+ configureAigwRuntimeFlags) pull the WHOLE src/server graph.
-// They are imported DYNAMICALLY inside boot() while holding the gateway-boot
-// lease, so the heavy per-fork transform of that graph is serialised by the
-// global concurrency budget too (not just the runtime boot). See the lease pool
-// in scripts/testing-v2/ledger.mjs.
 import type { GatewayDeps } from "../../src/server/gateway-deps.js";
-import { acquireGatewayBootLease } from "../../scripts/testing-v2/ledger.mjs";
 import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../tests/e2e/seed-workflows.js";
 import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
 import { createFencedFetch } from "./fenced-fetch.js";
 import { createFakeVerificationCommandRunner } from "./fake-verification-command-runner.js";
+import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
 
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
 const MOCK_AGENT = resolve(REPO_ROOT, "tests", "e2e", "mock-agent.mjs");
+const apiProfileRecords: Array<{ method: string; path: string; status: number; durationMs: number; endedAt: number }> = [];
+let apiProfileExitRegistered = false;
+let apiProfileExportSequence = 0;
+let productionProfileSnapshot: (() => unknown) | undefined;
+export function exportProductionProfileForTests(dir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR): string | undefined {
+	if (!dir || !productionProfileSnapshot) return undefined;
+	mkdirSync(dir, { recursive: true });
+	const sequence = String(apiProfileExportSequence + 1).padStart(4, "0");
+	const outPath = join(dir, `production-profile-${process.pid}-${sequence}.json`);
+	writeFileSync(outPath, `${JSON.stringify(productionProfileSnapshot(), null, 2)}\n`);
+	return outPath;
+}
+export function exportGatewayApiProfileForTests(dir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR): string | undefined {
+	if (!dir) return undefined;
+	mkdirSync(dir, { recursive: true });
+	const sequence = String(++apiProfileExportSequence).padStart(4, "0");
+	const outPath = join(dir, `gateway-api-${process.pid}-${sequence}.json`);
+	writeFileSync(outPath, `${JSON.stringify({ sequence: apiProfileExportSequence, records: apiProfileRecords }, null, 2)}\n`);
+	return outPath;
+}
+export function recordProfiledApiCall(method: string, path: string, status: number, durationMs: number): void {
+	const dir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
+	if (!dir) return;
+	apiProfileRecords.push({ method, path: path.split("?", 1)[0], status, durationMs, endedAt: Date.now() });
+	if (apiProfileExitRegistered) return;
+	apiProfileExitRegistered = true;
+	process.once("exit", () => {
+		try {
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, `gateway-api-${process.pid}.json`), `${JSON.stringify(apiProfileRecords, null, 2)}\n`);
+		} catch { /* profiling must never affect test behavior */ }
+	});
+}
 // Src-booted gateway: __dirname resolves builtins to non-existent src paths, so
 // point the builtin config + packs at the repo-root source trees (dist-relative
 // defaults only exist after a build). Production/legacy dist-boot leave these
@@ -235,6 +261,17 @@ async function boot(): Promise<BootedGateway> {
 	mkdirSync(projectConfigDir, { recursive: true });
 	writeFileSync(join(projectConfigDir, "project.yaml"), yaml);
 
+	// Vitest prepares one content-addressed server bundle before workers start;
+	// each fork loads that already-published runtime through the worker cache.
+	const runtime = await loadServerTestRuntime();
+	productionProfileSnapshot = runtime.profiling.snapshot;
+	const { getAgentDirState, initializeAgentDirRuntime, setProjectRoot } = runtime.bobbitDir;
+	const { scaffoldBobbitDir } = runtime.scaffold;
+	const { loadOrCreateToken } = runtime.authToken;
+	const { createGateway } = runtime.server;
+	const { configureAigwRuntimeFlags } = runtime.aigwManager;
+	console.log(`[tests2/gateway] fork ${process.pid}: server runtime=${serverRuntimeMode()}`);
+
 	setProjectRoot(bobbitDir);
 	scaffoldBobbitDir(bobbitDir);
 	const token = loadOrCreateToken();
@@ -244,16 +281,6 @@ async function boot(): Promise<BootedGateway> {
 		if (mockBridge.shouldUseInProcessMock(opts.cliPath)) return new mockBridge.InProcessMockBridge(opts);
 		return null;
 	};
-
-	// GLOBAL CONCURRENCY BUDGET: serialise the CPU-heavy gateway boot (src/server
-	// graph transform on first import per fork + migration + subsystem init) so
-	// that N concurrent test:v2 runs never fire a cluster of simultaneous boots
-	// that spike CPU and starve timing-sensitive integration tests. Held ONLY for
-	// the boot; released the instant gw.start() resolves. Fail-open (never blocks
-	// a boot indefinitely). See docs/testing-v2/concurrency-proof.md.
-	const bootLease = await acquireGatewayBootLease();
-	const { createGateway } = await import("../../src/server/server.js");
-	const { configureAigwRuntimeFlags } = await import("../../src/server/agent/aigw-manager.js");
 
 	const clock = createManualClock();
 	// Command-STEP executor seam: default is the real durable spawn path (same as
@@ -265,7 +292,7 @@ async function boot(): Promise<BootedGateway> {
 	const useFakeCommandStep = (globalThis as { __BOBBIT_V2_FAKE_CMD_STEP__?: boolean }).__BOBBIT_V2_FAKE_CMD_STEP__ === true;
 	const deps: GatewayDeps = {
 		clock,
-		commandRunner: createFencedCommandRunner(),
+		commandRunner: createFencedCommandRunner(runtime.gatewayDeps.realCommandRunner),
 		fetchImpl: createFencedFetch(),
 		agentBridgeFactory,
 		...(useFakeCommandStep ? { commandStepRunner: createFakeVerificationCommandRunner() } : {}),
@@ -296,15 +323,7 @@ async function boot(): Promise<BootedGateway> {
 	// createGateway seeds these from env (all false here); override before start().
 	configureAigwRuntimeFlags({ skipAigwDiscovery: true, testNoExternal: true, e2e: true });
 
-	let port: number;
-	try {
-		port = await gw.start();
-	} finally {
-		// Boot's CPU burst is over once start() settles — free the lease so the
-		// next queued fork/run can boot. The remaining setup (HTTP project
-		// registration + workflow seeding) is gateway-bound, not a CPU burst.
-		bootLease.release();
-	}
+	const port = await gw.start();
 	const baseURL = `http://127.0.0.1:${port}`;
 	const wsBase = `ws://127.0.0.1:${port}`;
 	writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
@@ -354,7 +373,15 @@ async function boot(): Promise<BootedGateway> {
 			const headers = new Headers(init?.headers);
 			headers.set("Authorization", `Bearer ${token}`);
 			if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-			return fetch(`${baseURL}${path}`, { ...init, headers });
+			const startedAt = performance.now();
+			try {
+				const response = await fetch(`${baseURL}${path}`, { ...init, headers });
+				recordProfiledApiCall(init?.method ?? "GET", path, response.status, performance.now() - startedAt);
+				return response;
+			} catch (error) {
+				recordProfiledApiCall(init?.method ?? "GET", path, 0, performance.now() - startedAt);
+				throw error;
+			}
 		},
 		async apiJson<T = any>(path: string, init?: RequestInit): Promise<T> {
 			const resp = await this.api(path, init);
@@ -474,6 +501,5 @@ export async function getGateway(): Promise<GatewayFixture> {
 /** Best-effort synchronous cleanup for a stray temp dir left by a crashed run. */
 export function sweepStaleTempDirs(): void {
 	if (!existsSync(TMP_ROOT)) return;
-	// Intentionally conservative: only remove obviously-orphaned fork dirs whose
-	// owning pid is gone. Left as a no-op sweep hook for the ledger/daily lane.
+	// Cleanup is intentionally limited to the current fork's shutdown/exit hooks.
 }

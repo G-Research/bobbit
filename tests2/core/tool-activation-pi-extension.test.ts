@@ -70,6 +70,18 @@ describe("pi-extension tool activation and policy integration", () => {
 		assert.ok(!denied.includes("pi_demo"));
 	});
 
+	it("classifies one allowlist from the available-tools snapshot without per-tool provider rescans", () => {
+		const tm = mockToolManager();
+		let providerReads = 0;
+		tm.getToolProvider = () => { providerReads += 1; throw new Error("must not rescan providers"); };
+		const allowed = computeEffectiveAllowedTools(tm, undefined, undefined, undefined, ctx);
+		assert.deepEqual(allowed.filter((tool) => tool.name === "read" || tool.name === "pi_demo"), [
+			{ kind: "yaml", name: "read" },
+			{ kind: "pi-extension", name: "pi_demo" },
+		]);
+		assert.equal(providerReads, 0);
+	});
+
 	it("does not emit a Bobbit --extension for pi-extension providers", () => {
 		const tm = mockToolManager();
 		const warnings: string[] = [];

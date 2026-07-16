@@ -18,7 +18,6 @@
 import { describe, it, beforeAll, afterAll, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -39,7 +38,10 @@ const { MarketplaceSourceStore, deriveSourceId, isValidSourceId } = await import
 const { ProjectConfigStore } = await import("../../src/server/agent/project-config-store.ts");
 const { readManifest, readMeta } = await import("../../src/server/agent/pack-manifest.ts");
 const { scopePaths } = await import("../../src/server/agent/pack-types.ts");
+const { fetchMcpGatewayWithDiagnostics, parseMcpGatewayDocument } = await import("../../src/server/agent/mcp-gateway-source.ts");
 
+const gatewayFixtures = new Map<string, () => unknown[]>();
+let gatewayFixtureSequence = 0;
 let TMP: string;
 beforeAll(() => { TMP = fs.mkdtempSync(path.join(os.tmpdir(), "mkt-install-")); });
 afterAll(() => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* ignore */ } });
@@ -89,7 +91,15 @@ function makeInstaller(opts: {
 	globalUserBase: string;
 	gitRunner?: (args: string[], cwd: string) => string;
 }) {
-	return new MarketplaceInstaller(opts);
+	return new MarketplaceInstaller({
+		...opts,
+		mcpGatewayFetch: async (source: any) => {
+			const fixture = gatewayFixtures.get(source.url);
+			return fixture
+				? parseMcpGatewayDocument({ tools: fixture() }, source.url)
+				: fetchMcpGatewayWithDiagnostics(source);
+		},
+	});
 }
 
 // ── #8 MarketplaceSourceStore ────────────────────────────────────
@@ -154,65 +164,12 @@ describe("#8 MarketplaceSourceStore CRUD + YAML persistence", () => {
 
 async function withStreamableMcpGateway(tools: unknown[], fn: (url: string, setTools: (next: unknown[]) => void) => Promise<void>): Promise<void> {
 	let currentTools = tools;
-	const server = http.createServer(async (req, res) => {
-		const requestPath = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-		if (requestPath === "/signin/aigateway") {
-			res.writeHead(404, { "content-type": "text/plain" });
-			res.end("not found");
-			return;
-		}
-		if (requestPath !== "/readonly/mcp") {
-			res.writeHead(404, { "content-type": "text/plain" });
-			res.end("not found");
-			return;
-		}
-		if (req.method === "GET") {
-			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
-			res.end("method not allowed");
-			return;
-		}
-		if (req.method !== "POST") {
-			res.writeHead(405, { "content-type": "text/plain", allow: "POST" });
-			res.end("method not allowed");
-			return;
-		}
-
-		let body = "";
-		for await (const chunk of req) body += chunk;
-		const message = JSON.parse(body || "{}");
-		if (message.method === "notifications/initialized") {
-			res.writeHead(202, { "content-type": "application/json" });
-			res.end();
-			return;
-		}
-		if (message.method === "initialize") {
-			res.writeHead(200, { "content-type": "application/json" });
-			res.end(JSON.stringify({
-				jsonrpc: "2.0",
-				id: message.id,
-				result: {
-					protocolVersion: "2024-11-05",
-					capabilities: { tools: {} },
-					serverInfo: { name: "mcp-gateway", version: "0.0.0-test" },
-				},
-			}));
-			return;
-		}
-		if (message.method === "tools/list") {
-			res.writeHead(200, { "content-type": "application/json" });
-			res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: currentTools } }));
-			return;
-		}
-		res.writeHead(200, { "content-type": "application/json" });
-		res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }));
-	});
-	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const url = `https://mcp-unit-fixture-${++gatewayFixtureSequence}.invalid/readonly/mcp`;
+	gatewayFixtures.set(url, () => currentTools);
 	try {
-		const address = server.address();
-		assert.ok(address && typeof address === "object");
-		await fn(`http://127.0.0.1:${address.port}/readonly/mcp`, (next) => { currentTools = next; });
+		await fn(url, (next) => { currentTools = next; });
 	} finally {
-		await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+		gatewayFixtures.delete(url);
 	}
 }
 

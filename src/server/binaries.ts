@@ -23,7 +23,15 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-type Tool = "fd" | "rg";
+export type BinaryTool = "fd" | "rg";
+
+type Tool = BinaryTool;
+
+/** Injectable boundary for bundled-package and PATH executable probes. */
+export interface BinaryProbeBackend {
+	resolveBundled(tool: BinaryTool, packageName: string | null): string | null;
+	isOnPath(candidate: string): boolean;
+}
 
 /** What kind of resolution happened. */
 export type BinarySource = "bundled" | "path" | "missing";
@@ -93,12 +101,21 @@ function resolveBundled(tool: Tool, pkgName: string | null): string | null {
 }
 
 /** Probe PATH by trying `<candidate> --version`. */
+function isOnPath(candidate: string): boolean {
+	const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+	return !result.error && result.status === 0;
+}
+
+export const realBinaryProbeBackend: BinaryProbeBackend = {
+	resolveBundled,
+	isOnPath,
+};
+
+let binaryProbeBackend: BinaryProbeBackend = realBinaryProbeBackend;
+
 function resolveFromPath(candidates: string[]): string | null {
-	for (const cand of candidates) {
-		const result = spawnSync(cand, ["--version"], { stdio: "ignore" });
-		if (!result.error && result.status === 0) {
-			return cand;
-		}
+	for (const candidate of candidates) {
+		if (binaryProbeBackend.isOnPath(candidate)) return candidate;
 	}
 	return null;
 }
@@ -108,7 +125,7 @@ function resolve(tool: Tool): BinaryResolution {
 	if (cached) return cached;
 
 	const pkgName = expectedBinaryPackage();
-	const bundled = resolveBundled(tool, pkgName);
+	const bundled = binaryProbeBackend.resolveBundled(tool, pkgName);
 	if (bundled) {
 		const res: BinaryResolution = {
 			source: "bundled",
@@ -160,6 +177,12 @@ export function getFdResolution(): BinaryResolution {
 
 export function getRgResolution(): BinaryResolution {
 	return resolve("rg");
+}
+
+/** Test-only: replace executable probes without spawning; undefined restores production. */
+export function _setBinaryProbeBackendForTests(backend: BinaryProbeBackend | undefined): void {
+	binaryProbeBackend = backend ?? realBinaryProbeBackend;
+	cache.clear();
 }
 
 /** Test-only: clear the memoized cache so a fresh probe runs next call. */

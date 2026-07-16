@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { execFile as execFileCb } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import { StaffStore, normalizeStaffAccessory, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import { buildStaffSystemPrompt } from "./role-prompt.js";
 import type { SessionManager } from "./session-manager.js";
@@ -15,8 +13,7 @@ import { runComponentSetups } from "../skills/worktree-setup.js";
 import { execShellCommand } from "./shell-util.js";
 import { shouldCreateWorktree } from "./worktree-decision.js";
 import { resolveWorktreeSupport } from "./worktree-support.js";
-
-const execFile = promisify(execFileCb);
+import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 function sanitiseBranchName(name: string): string {
 	return name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -44,9 +41,11 @@ export class StaffManager {
 	private inboxManager: InboxManager | null = null;
 	private readonly remotePolicy: RemoteGitPolicy;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
+	private readonly commandRunner: CommandRunner;
 
-	constructor(pcm: ProjectContextManager, opts: { remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
+	constructor(pcm: ProjectContextManager, opts: { commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
 		this.pcm = pcm;
+		this.commandRunner = opts.commandRunner ?? realCommandRunner;
 		this.remotePolicy = opts.remotePolicy ?? {};
 		this.worktreeSetupRuntime = opts.worktreeSetupRuntime ?? {};
 		this.logOrphansOnce();
@@ -208,7 +207,7 @@ export class StaffManager {
 		// `multiRepo:true` — identical to a regular session. A project with no
 		// worktree-able git repo resolves `supported:false` (graceful no-worktree).
 		const configuredBaseRef = ctx.projectConfigStore.get("base_ref") || undefined;
-		const support = await resolveWorktreeSupport(components, ctx.project.rootPath, cwd, undefined, { configuredBaseRef });
+		const support = await resolveWorktreeSupport(components, ctx.project.rootPath, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
 		return { ...support, components };
 	}
 
@@ -231,7 +230,7 @@ export class StaffManager {
 		let repoWorktrees: Record<string, string> | undefined;
 
 		if (support.multiRepo) {
-			const set = await createWorktreeSet(support.repoPath, support.components, branchName, undefined, { worktreeRoot, configuredBaseRef, remotePolicy: this.remotePolicy });
+			const set = await createWorktreeSet(support.repoPath, support.components, branchName, undefined, { worktreeRoot, configuredBaseRef, commandRunner: this.commandRunner, remotePolicy: this.remotePolicy });
 			// createWorktreeSet skips a non-git `.` container entry; if NO git
 			// sub-repo remained it returns an empty set (no container created).
 			// Fall back to no-worktree (session cwd unchanged) rather than pointing
@@ -240,7 +239,7 @@ export class StaffManager {
 			worktreePath = set.container;
 			repoWorktrees = Object.fromEntries(set.worktrees.map(w => [w.repo, w.worktreePath]));
 		} else {
-			const worktreeResult = await createWorktree(support.repoPath, branchName, { configuredBaseRef, worktreeRoot, remotePolicy: this.remotePolicy });
+			const worktreeResult = await createWorktree(support.repoPath, branchName, { configuredBaseRef, worktreeRoot, commandRunner: this.commandRunner, remotePolicy: this.remotePolicy });
 			worktreePath = worktreeResult.worktreePath;
 			branchName = worktreeResult.branchName;
 		}
@@ -308,7 +307,7 @@ export class StaffManager {
 	private async cleanupStaffWorktree(staff: PersistedStaff, projectId?: string): Promise<void> {
 		const entries = this.staffWorktreeEntries(staff, projectId);
 		if (entries.length === 0) return;
-		const results = await Promise.allSettled(entries.map(entry => cleanupWorktree(entry.repoPath, entry.worktreePath, staff.branch, true, undefined, this.remotePolicy)));
+		const results = await Promise.allSettled(entries.map(entry => cleanupWorktree(entry.repoPath, entry.worktreePath, staff.branch, true, this.commandRunner, this.remotePolicy)));
 		for (const result of results) {
 			if (result.status === "rejected") {
 				console.error(`[staff-manager] Failed to clean up one worktree for staff ${staff.id}:`, result.reason);
@@ -579,8 +578,8 @@ export class StaffManager {
 		for (const entry of entries) {
 			const wt = entry.worktreePath;
 			try {
-				if (await shouldSkipRemoteGitForTests(wt, "origin", undefined, this.remotePolicy)) continue;
-				await execFile("git", ["fetch", "origin"], { cwd: wt, timeout: 60_000 });
+				if (await shouldSkipRemoteGitForTests(wt, "origin", this.commandRunner, this.remotePolicy)) continue;
+				await this.commandRunner.execFile("git", ["fetch", "origin"], { cwd: wt, timeout: 60_000 });
 			} catch (err) {
 				console.warn(`[staff-manager] git fetch failed in ${wt} (non-fatal):`, err);
 				continue; // Can't rebase this repo without fetch
@@ -592,7 +591,7 @@ export class StaffManager {
 				// target we rebase onto; otherwise we fall back to today's behaviour
 				// (`git symbolic-ref refs/remotes/origin/HEAD`). The helper returns the
 				// full ref including any `origin/` prefix, so we use it directly.
-				const { ref: rebaseTarget } = await resolveBaseRef(wt, configuredBaseRef);
+				const { ref: rebaseTarget } = await resolveBaseRef(wt, configuredBaseRef, this.commandRunner);
 				if (!rebaseTarget || rebaseTarget === "HEAD" || rebaseTarget.startsWith("-")) {
 					console.warn(`[staff-manager] Could not resolve rebase target in ${wt} (got "${rebaseTarget}"), skipping rebase`);
 				} else {
@@ -600,12 +599,12 @@ export class StaffManager {
 					// bare branch name for local bases. For staff rebase we want to track
 					// the remote tip when configured remotely; for local bases we rebase
 					// against the local branch directly.
-					await execFile("git", ["rebase", rebaseTarget], { cwd: wt, timeout: 60_000 });
+					await this.commandRunner.execFile("git", ["rebase", rebaseTarget], { cwd: wt, timeout: 60_000 });
 				}
 			} catch (err) {
 				console.warn(`[staff-manager] git rebase failed in ${wt} (non-fatal):`, err);
 				// Abort any in-progress rebase to leave worktree in a usable state
-				try { await execFile("git", ["rebase", "--abort"], { cwd: wt }); } catch { /* ignore */ }
+				try { await this.commandRunner.execFile("git", ["rebase", "--abort"], { cwd: wt }); } catch { /* ignore */ }
 			}
 		}
 

@@ -26,12 +26,25 @@ import {
 	type WsConnection,
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
+import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 const VERIFICATION_WS_TIMEOUT_MS = 60_000;
 const VERIFICATION_LLM_WS_TIMEOUT_MS = 90_000;
 const VERIFICATION_TEST_TIMEOUT_MS = 180_000;
 
 test.setTimeout(VERIFICATION_TEST_TIMEOUT_MS);
+
+let originalCommandStepRunner: unknown;
+test.beforeAll(({ gateway }) => {
+	const verificationHarness = gateway.teamManager.verificationHarness;
+	if (!verificationHarness) throw new Error("verification harness was not wired before verification-core setup");
+	originalCommandStepRunner = verificationHarness.commandStepRunner;
+	verificationHarness.commandStepRunner = createFakeVerificationCommandRunner();
+});
+test.afterAll(({ gateway }) => {
+	const verificationHarness = gateway.teamManager.verificationHarness;
+	if (verificationHarness && originalCommandStepRunner) verificationHarness.commandStepRunner = originalCommandStepRunner;
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -128,7 +141,7 @@ function gateEvent(
 	return (m) => m.type === type && m.goalId === goalId && m.gateId === gateId && m.signalId === signalId;
 }
 
-const HIGH_VOLUME_WS_BURST_CMD = `node -e "process.stdout.write('OUT_BURST_START\\n'+'x'.repeat(160*1024)+'\\nOUT_BURST_END\\n'); process.stderr.write('ERR_BURST_START\\n'+'y'.repeat(128*1024)+'\\nERR_BURST_END\\n')"`;
+const HIGH_VOLUME_WS_BURST_CMD = `node -e "console.log('OUT_BURST_START${"x".repeat(160 * 1024)}OUT_BURST_END');console.error('ERR_BURST_START${"y".repeat(128 * 1024)}ERR_BURST_END')"`;
 const STEP_OUTPUT_FRAME_CAP_BYTES = 24 * 1024;
 const STEP_COMPLETE_FRAME_CAP_BYTES = 40 * 1024;
 
@@ -711,7 +724,7 @@ test.describe("Expect failure pipeline", () => {
 				"reproducing-test",
 				{
 					metadata: {
-						test_command: "echo Expected 5 but got 3 1>&2 & exit 1",
+						test_command: `node -e "console.error('Expected 5 but got 3');process.exit(1)"`,
 						error_pattern: "Expected 5 but got 3",
 					},
 				},
@@ -737,7 +750,7 @@ test.describe("Expect failure pipeline", () => {
 				"reproducing-test",
 				{
 					metadata: {
-						test_command: "echo Module not found 1>&2 & exit 1",
+						test_command: `node -e "console.error('Module not found');process.exit(1)"`,
 						error_pattern: "Expected 5 but got 3",
 					},
 				},

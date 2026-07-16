@@ -141,7 +141,28 @@ export function mockModelFromString(modelString) {
  * @property {Object} [env] - Env-var overrides (defaults to process.env)
  * @property {string} [initialModel] - Optional spawn-time `<provider>/<modelId>` pin.
  * @property {(event: any) => void} [onEvent] - Event emitter. Required for in-process mode.
+ * @property {(ms: number, signal?: AbortSignal) => Promise<void>} [sleep] - Injectable, abortable delay. Defaults to real time.
  */
+
+function realSleep(ms, signal) {
+	return new Promise((resolve) => {
+		let settled = false;
+		let timer;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			if (timer !== undefined) clearTimeout(timer);
+			signal?.removeEventListener("abort", finish);
+			resolve();
+		};
+		if (signal?.aborted) {
+			finish();
+			return;
+		}
+		timer = setTimeout(finish, Math.max(0, ms));
+		signal?.addEventListener("abort", finish, { once: true });
+	});
+}
 
 export class MockAgentCore {
 	/** @param {MockAgentOptions} options */
@@ -160,6 +181,7 @@ export class MockAgentCore {
 		// transcript at firstKeptEntryId. Null until a compaction fires.
 		this._postCompactionEntries = null;
 		this.currentAbortController = null;
+		this._sleep = options.sleep || realSleep;
 		this.mockPiTools = options.mockPiTools || new Map();
 		this.mockPiToolCallHandlers = options.mockPiToolCallHandlers || [];
 		// Serializes concurrent handlePrompt calls so a second prompt queued
@@ -792,17 +814,14 @@ export class MockAgentCore {
 		return null;
 	}
 
-	/** Small abortable delay */
+	/** Replace the delay implementation. Used by in-process tests to inject virtual time. */
+	setSleep(sleep) {
+		this._sleep = sleep || realSleep;
+	}
+
+	/** Small abortable delay. Each delay settles once, including on abort. */
 	tick(ms = 10) {
-		return new Promise(r => {
-			const timer = setTimeout(r, ms);
-			if (this.currentAbortController) {
-				this.currentAbortController.signal.addEventListener("abort", () => {
-					clearTimeout(timer);
-					r();
-				});
-			}
-		});
+		return this._sleep(ms, this.currentAbortController?.signal);
 	}
 
 	/** Simulate a full agent turn: streaming start → tool calls → assistant text → end */
@@ -830,7 +849,7 @@ export class MockAgentCore {
 			const m = /USER_ECHO_DELAY=(\d+)/.exec(text);
 			return m ? parseInt(m[1], 10) : parseInt(this.env.MOCK_USER_ECHO_DELAY_MS || "0", 10);
 		})();
-		if (echoDelayMs > 0) await new Promise((r) => setTimeout(r, echoDelayMs));
+		if (echoDelayMs > 0) await this.tick(echoDelayMs);
 		this.conversationMessages.push(userMsg);
 		this.emit({ type: "message_end", message: userMsg });
 
@@ -2594,7 +2613,7 @@ export class MockAgentCore {
 					this._promptChain = this._promptChain
 						.catch(() => {})
 						.then(async () => {
-							if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
+							if (delayMs > 0) await this.tick(delayMs);
 							return this.handlePrompt(steeredText);
 						})
 						.catch(err => {

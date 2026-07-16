@@ -6,7 +6,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,34 +24,30 @@ const previousEnv = {
 	USERPROFILE: process.env.USERPROFILE,
 };
 
-fs.mkdirSync(projectRoot, { recursive: true });
-fs.mkdirSync(tmpHome, { recursive: true });
-process.env.BOBBIT_AGENT_DIR = activeAgentDir;
-process.env.BOBBIT_DIR = path.join(tmpRoot, ".bobbit");
-process.env.HOME = tmpHome;
-process.env.USERPROFILE = tmpHome;
-
 const bobbitDirModule = await import("../../src/server/bobbit-dir.ts");
-bobbitDirModule.setProjectRoot(projectRoot);
+const previousProjectRoot = bobbitDirModule.getProjectRoot();
 const { SessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
 const { formatAgentTimestamp, slugifyCwd } = await import("../../src/server/agent/agent-session-path.ts");
 
-// Re-assert this file's RUN-time invariants. Both the temp env AND the recorded
-// agent-dir history are established at module (collect) time, but under
-// pool:"forks"+isolate:false a sibling file's env-guard afterAll runs BETWEEN
-// collect and this file's tests and (a) restores HOME/USERPROFILE (breaking
-// os.homedir()-based legacy ~/.bobbit / ~/.pi recovery) and (b) calls
-// resetAgentDirStateForTests(), wiping the in-memory history that the historical
-// / sandbox-remap recoveries depend on. Re-apply both here (beforeAll runs
-// immediately before this file's tests, with no cross-file hook interleaving).
-// recordAgentDirHistory accumulates into the in-memory history, so re-recording
-// the active + historical roots restores trustedAgentSessionsRoots.
-beforeAll(async () => {
+// Re-assert the environment and startup-pinned agent-dir state before every
+// test. With isolate:false, sibling files reset the shared agent-dir singleton;
+// per-test setup makes this suite independent of collection and hook ordering.
+beforeEach(async () => {
+	fs.mkdirSync(projectRoot, { recursive: true });
+	fs.mkdirSync(tmpHome, { recursive: true });
+	fs.mkdirSync(sessionsRoot(activeAgentDir), { recursive: true });
+	fs.mkdirSync(sessionsRoot(historicalAgentDir), { recursive: true });
 	process.env.BOBBIT_AGENT_DIR = activeAgentDir;
 	process.env.BOBBIT_DIR = path.join(tmpRoot, ".bobbit");
 	process.env.HOME = tmpHome;
 	process.env.USERPROFILE = tmpHome;
-	await recordHistoryIfAvailable(activeAgentDir);
+	bobbitDirModule.setProjectRoot(projectRoot);
+	bobbitDirModule.resetAgentDirStateForTests();
+	bobbitDirModule.initializeAgentDirRuntime({
+		env: process.env,
+		projectRoot,
+		stateDir: path.join(tmpRoot, ".bobbit", "state"),
+	});
 	await recordHistoryIfAvailable(historicalAgentDir);
 });
 
@@ -140,17 +136,14 @@ function samePath(actual: string | null, expected: string): void {
 	assert.equal(actual?.replace(/\\/g, "/"), expected.replace(/\\/g, "/"));
 }
 
-fs.mkdirSync(sessionsRoot(activeAgentDir), { recursive: true });
-fs.mkdirSync(sessionsRoot(historicalAgentDir), { recursive: true });
-await recordHistoryIfAvailable(activeAgentDir);
-await recordHistoryIfAvailable(historicalAgentDir);
-
 afterAll(() => {
 	while (managers.length > 0) cleanupManager(managers.pop());
 	for (const [key, value] of Object.entries(previousEnv)) {
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;
 	}
+	bobbitDirModule.setProjectRoot(previousProjectRoot);
+	bobbitDirModule.resetAgentDirStateForTests();
 	fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

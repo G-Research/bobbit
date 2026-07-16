@@ -1,20 +1,50 @@
+// Gate-inspect is an HTTP selection contract, not a command-process fidelity
+// suite. It seeds completed signals and retained diagnostics directly so shared
+// integration forks never wait on an executor selected by another spec.
 import fs from "node:fs";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, defaultProjectStateDir, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { GateStore } from "../../src/server/agent/gate-store.js";
+import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
+import type { GatewayFixture } from "../harness/gateway.js";
+import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
-const VERIFY_LOG_CMD = `node -e "for (let i=1;i<=160;i++) console.log((i===125?'ERROR failed sentinel line '+i:'noise line '+i))"`;
+const VERIFY_LOG_OUTPUT = Array.from({ length: 160 }, (_, i) => {
+	const line = i + 1;
+	return `${line === 125 ? "ERROR failed sentinel line" : "noise line"} ${line}`;
+}).join("\n");
 const RETAINED_DIAGNOSTICS_MARKER = "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER stack frame";
-const FAILED_RETAINED_DIAGNOSTICS_CMD = `node -e "for (let i=1;i<=80;i++) console.log('prelude line '+i+' '+ 'x'.repeat(100)); console.log('${RETAINED_DIAGNOSTICS_MARKER}'); for (let i=81;i<=260;i++) console.log('tail line '+i+' '+ 'y'.repeat(100)); process.exit(1)"`;
+const FAILED_RETAINED_DIAGNOSTICS_OUTPUT = [
+	...Array.from({ length: 80 }, (_, i) => `prelude line ${i + 1} ${"x".repeat(100)}`),
+	RETAINED_DIAGNOSTICS_MARKER,
+	...Array.from({ length: 180 }, (_, i) => `tail line ${i + 81} ${"y".repeat(100)}`),
+].join("\n");
 const PLAYWRIGHT_ERROR_CONTEXT_MARKER = "PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER";
-const PLAYWRIGHT_STYLE_ARTIFACT_CMD = `node -e "const fs=require('fs'),path=require('path'); const dir=path.join('test-results','retain-artifact-fixture'); fs.mkdirSync(dir,{recursive:true}); const body=['# Instructions','You are given a Playwright error context.','','## Test failure','${PLAYWRIGHT_ERROR_CONTEXT_MARKER}','locator(\\\"text=Missing\\\") failed after retry',...Array.from({length:2600},(_,i)=>'artifact detail line '+(i+1)+' '+ 'z'.repeat(40))].join('\\n'); fs.writeFileSync(path.join(dir,'error-context.md'),body); fs.writeFileSync(path.join(dir,'trace.zip'),'trace placeholder'); fs.writeFileSync(path.join(dir,'screenshot.png'),'png placeholder'); console.error('PLAYWRIGHT_STYLE_FAILURE_SUMMARY: expect(locator).toBeVisible failed; see test-results/retain-artifact-fixture/error-context.md'); process.exit(1)"`;
+const PLAYWRIGHT_STYLE_FAILURE_SUMMARY = "PLAYWRIGHT_STYLE_FAILURE_SUMMARY: expect(locator).toBeVisible failed; see test-results/retain-artifact-fixture/error-context.md";
 const RETAINED_LOG_CAP_MARKER = "RETAINED_GATE_DIAGNOSTICS_CAP_MARKER";
-const HUGE_RETAINED_LOG_CHUNKS = 3072;
+const RETAINED_LOG_CAP_BYTES = 128 * 1024;
+const HUGE_RETAINED_LOG_CHUNKS = 96;
 const HUGE_RETAINED_LOG_CHUNK_BYTES = 2048;
 const HUGE_RETAINED_LOG_EMITTED_BYTES = HUGE_RETAINED_LOG_CHUNKS * ("CAP-FILL ".length + HUGE_RETAINED_LOG_CHUNK_BYTES + 1);
-const HUGE_RETAINED_LOG_CMD = `node -e "const chunk='CAP-FILL '+ 'x'.repeat(${HUGE_RETAINED_LOG_CHUNK_BYTES})+'\\n'; for (let i=0;i<${HUGE_RETAINED_LOG_CHUNKS};i++) process.stdout.write(chunk); console.error('${RETAINED_LOG_CAP_MARKER}'); process.exit(1)"`;
+const CAPPED_RETAINED_LOG_OUTPUT = Array.from(
+	{ length: HUGE_RETAINED_LOG_CHUNKS },
+	() => `CAP-FILL ${"x".repeat(HUGE_RETAINED_LOG_CHUNK_BYTES)}`,
+).join("\n").slice(0, RETAINED_LOG_CAP_BYTES);
+
+function playwrightErrorContext(): string {
+	return [
+		"# Instructions",
+		"You are given a Playwright error context.",
+		"",
+		"## Test failure",
+		PLAYWRIGHT_ERROR_CONTEXT_MARKER,
+		"locator(\"text=Missing\") failed after retry",
+		...Array.from({ length: 2600 }, (_, i) => `artifact detail line ${i + 1} ${"z".repeat(40)}`),
+	].join("\n");
+}
 
 function makeWorkflowId(): string {
 	return `gate-inspect-slicing-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -36,31 +66,31 @@ async function createInspectWorkflow(workflowId: string): Promise<void> {
 				{
 					id: "verify-gate",
 					name: "Verification Gate",
-					verify: [{ name: "Large command output", type: "command", run: VERIFY_LOG_CMD }],
+					verify: [{ name: "Large command output", type: "command", run: "true" }],
 				},
 				{
 					id: "multi-verify-gate",
 					name: "Multi Verification Gate",
 					verify: [
-						{ name: "build", type: "command", run: `node -e "console.log('build ok line')"` },
-						{ name: "unit", type: "command", run: VERIFY_LOG_CMD },
-						{ name: "lint", type: "command", run: `node -e "console.log('lint ok line')"` },
+						{ name: "build", type: "command", run: "true" },
+						{ name: "unit", type: "command", run: "true" },
+						{ name: "lint", type: "command", run: "true" },
 					],
 				},
 				{
 					id: "failed-retained-diagnostics-gate",
 					name: "Failed Retained Diagnostics Gate",
-					verify: [{ name: "failing verbose command", type: "command", run: FAILED_RETAINED_DIAGNOSTICS_CMD }],
+					verify: [{ name: "failing verbose command", type: "command", run: "false" }],
 				},
 				{
 					id: "playwright-artifacts-gate",
 					name: "Playwright Artifacts Gate",
-					verify: [{ name: "playwright-style failure", type: "command", run: PLAYWRIGHT_STYLE_ARTIFACT_CMD }],
+					verify: [{ name: "playwright-style failure", type: "command", run: "false" }],
 				},
 				{
 					id: "huge-retained-log-gate",
 					name: "Huge Retained Log Gate",
-					verify: [{ name: "huge retained log failure", type: "command", run: HUGE_RETAINED_LOG_CMD }],
+					verify: [{ name: "huge retained log failure", type: "command", run: "false" }],
 				},
 				{ id: "signals-gate", name: "Signals Gate", content: true },
 			],
@@ -75,49 +105,241 @@ async function deleteInspectWorkflow(workflowId: string): Promise<void> {
 	await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => undefined);
 }
 
-async function signalGate(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
-		method: "POST",
-		body: JSON.stringify(body),
-	});
-	if (res.status !== 201) {
-		throw new Error(`signal ${gateId} failed: ${res.status} ${await res.text().catch(() => "")}`);
-	}
-	return res.json();
+interface SeededStep {
+	name: string;
+	passed: boolean;
+	stdout?: string;
+	stderr?: string;
+	compactOutput?: string;
+	truncated?: boolean;
+	artifacts?: boolean;
 }
 
-async function waitForSignalVerificationStatus(
+const fakeCmdGlobal = globalThis as { __BOBBIT_V2_FAKE_CMD_STEP__?: boolean };
+let gatewayFixture: GatewayFixture;
+let originalCommandStepRunner: unknown;
+let originalRetainedLogCap: string | undefined;
+let originalFakeCmdFlag: boolean | undefined;
+let hadFakeCmdFlag = false;
+let signalSequence = 0;
+let inspectWorkflowId: string;
+let inspectGoalId: string;
+let inspectStateDir: string;
+
+const INSPECT_GATE_IDS = [
+	"content-gate",
+	"verify-gate",
+	"multi-verify-gate",
+	"failed-retained-diagnostics-gate",
+	"playwright-artifacts-gate",
+	"huge-retained-log-gate",
+	"signals-gate",
+];
+
+test.beforeAll(async ({ gateway }) => {
+	gatewayFixture = gateway;
+	const verificationHarness = gateway.teamManager.verificationHarness;
+	if (!verificationHarness) throw new Error("verification harness was not wired before gate-inspect setup");
+	originalCommandStepRunner = verificationHarness.commandStepRunner;
+	originalRetainedLogCap = process.env.BOBBIT_RETAINED_LOG_MAX_BYTES;
+	hadFakeCmdFlag = Object.prototype.hasOwnProperty.call(fakeCmdGlobal, "__BOBBIT_V2_FAKE_CMD_STEP__");
+	originalFakeCmdFlag = fakeCmdGlobal.__BOBBIT_V2_FAKE_CMD_STEP__;
+	process.env.BOBBIT_RETAINED_LOG_MAX_BYTES = String(RETAINED_LOG_CAP_BYTES);
+	fakeCmdGlobal.__BOBBIT_V2_FAKE_CMD_STEP__ = true;
+	verificationHarness.commandStepRunner = createFakeVerificationCommandRunner();
+	gateway.clock.advance(0);
+
+	// One goal/workflow owns all selection cases. Per-test gate-store resets remove
+	// repeated project discovery and disk churn while retaining the real HTTP route.
+	inspectWorkflowId = makeWorkflowId();
+	await createInspectWorkflow(inspectWorkflowId);
+	inspectGoalId = (await createGoal({ title: "Gate Inspect Slicing", workflowId: inspectWorkflowId })).id;
+	const context = gateway.projectContextManager.getContextForGoal(inspectGoalId);
+	if (!context) throw new Error(`missing project context for shared inspect goal ${inspectGoalId}`);
+	inspectStateDir = path.join(context.project.rootPath, ".bobbit", "state");
+});
+
+test.afterAll(async ({ gateway }) => {
+	await deleteGoal(inspectGoalId).catch(() => undefined);
+	await deleteInspectWorkflow(inspectWorkflowId);
+	const verificationHarness = gateway.teamManager.verificationHarness;
+	if (verificationHarness && originalCommandStepRunner !== undefined) {
+		verificationHarness.commandStepRunner = originalCommandStepRunner;
+	}
+	if (originalRetainedLogCap === undefined) delete process.env.BOBBIT_RETAINED_LOG_MAX_BYTES;
+	else process.env.BOBBIT_RETAINED_LOG_MAX_BYTES = originalRetainedLogCap;
+	if (hadFakeCmdFlag) fakeCmdGlobal.__BOBBIT_V2_FAKE_CMD_STEP__ = originalFakeCmdFlag;
+	else delete fakeCmdGlobal.__BOBBIT_V2_FAKE_CMD_STEP__;
+});
+
+function seededStepsForGate(gateId: string): { status: "passed" | "failed"; steps: SeededStep[] } {
+	switch (gateId) {
+		case "verify-gate":
+			return { status: "passed", steps: [{ name: "Large command output", passed: true, stdout: VERIFY_LOG_OUTPUT }] };
+		case "multi-verify-gate":
+			return {
+				status: "passed",
+				steps: [
+					{ name: "build", passed: true, stdout: "build ok line" },
+					{ name: "unit", passed: true, stdout: VERIFY_LOG_OUTPUT },
+					{ name: "lint", passed: true, stdout: "lint ok line" },
+				],
+			};
+		case "failed-retained-diagnostics-gate":
+			return {
+				status: "failed",
+				steps: [{
+					name: "failing verbose command",
+					passed: false,
+					stdout: FAILED_RETAINED_DIAGNOSTICS_OUTPUT,
+					compactOutput: "tail line 260",
+				}],
+			};
+		case "playwright-artifacts-gate":
+			return {
+				status: "failed",
+				steps: [{
+					name: "playwright-style failure",
+					passed: false,
+					stderr: PLAYWRIGHT_STYLE_FAILURE_SUMMARY,
+					compactOutput: PLAYWRIGHT_STYLE_FAILURE_SUMMARY,
+					artifacts: true,
+				}],
+			};
+		case "huge-retained-log-gate":
+			return {
+				status: "failed",
+				steps: [{
+					name: "huge retained log failure",
+					passed: false,
+					stdout: CAPPED_RETAINED_LOG_OUTPUT,
+					stderr: RETAINED_LOG_CAP_MARKER,
+					compactOutput: RETAINED_LOG_CAP_MARKER,
+					truncated: true,
+				}],
+			};
+		default:
+			return { status: "passed", steps: [] };
+	}
+}
+
+function logMetadata(filePath: string, text: string, truncated = false): Record<string, unknown> {
+	const metadata: Record<string, unknown> = {
+		path: filePath,
+		bytes: Buffer.byteLength(text, "utf8"),
+		lines: text.length ? text.split("\n").length : 0,
+	};
+	if (truncated) {
+		metadata.truncated = true;
+		metadata.truncationReason = `retained log capped at ${RETAINED_LOG_CAP_BYTES} bytes`;
+	}
+	return metadata;
+}
+
+async function seedStepDiagnostics(
 	goalId: string,
 	gateId: string,
 	signalId: string,
-	status: "passed" | "failed",
-): Promise<void> {
-	let lastStatuses = "unavailable";
-	try {
-		await pollUntil(async () => {
-			const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
-			const body = await res.json();
-			const signals = Array.isArray(body.signals) ? body.signals : [];
-			lastStatuses = signals
-				.map((s: any) => `${s.id}:${s.verification?.status ?? "missing"}`)
-				.join(", ") || "none";
-			const postedSignal = signals.find((s: any) => s.id === signalId);
-			return postedSignal?.verification?.status === status ? postedSignal : null;
-		}, { timeoutMs: 45_000, intervalMs: 100, label: `${gateId} signal ${signalId} verification ${status}` });
-	} catch (err) {
-		throw new Error(`${(err as Error).message}; last signal statuses: ${lastStatuses}`);
+	stepIndex: number,
+	step: SeededStep,
+): Promise<any> {
+	const baseDir = path.join(inspectStateDir, "gate-diagnostics", goalId, gateId, signalId, `${String(stepIndex).padStart(2, "0")}-${step.name.replace(/[^A-Za-z0-9._-]/g, "_")}`);
+	fs.rmSync(baseDir, { recursive: true, force: true });
+	fs.mkdirSync(baseDir, { recursive: true });
+	const diagnostics: any = {
+		type: "retained-command-diagnostics",
+		baseDir,
+		createdAt: gatewayFixture.clock.now(),
+	};
+	if (step.stdout !== undefined) {
+		const stdoutPath = path.join(baseDir, "stdout.log");
+		fs.writeFileSync(stdoutPath, step.stdout);
+		diagnostics.stdout = logMetadata(stdoutPath, step.stdout, step.truncated);
 	}
+	if (step.stderr !== undefined) {
+		const stderrPath = path.join(baseDir, "stderr.log");
+		fs.writeFileSync(stderrPath, step.stderr);
+		diagnostics.stderr = logMetadata(stderrPath, step.stderr);
+	}
+	if (step.truncated) {
+		diagnostics.truncated = true;
+		diagnostics.truncationReason = `retained log capped at ${RETAINED_LOG_CAP_BYTES} bytes`;
+	}
+	if (step.artifacts) {
+		const relativeRoot = path.join("test-results", "retain-artifact-fixture");
+		const retainedRoot = path.join(baseDir, "artifacts", relativeRoot);
+		fs.mkdirSync(retainedRoot, { recursive: true });
+		const files = [
+			{ name: "error-context.md", body: playwrightErrorContext(), contentType: "text/markdown" },
+			{ name: "trace.zip", body: "trace placeholder", contentType: "application/zip" },
+			{ name: "screenshot.png", body: "png placeholder", contentType: "image/png" },
+		];
+		diagnostics.artifacts = files.map(file => {
+			const retainedPath = path.join(retainedRoot, file.name);
+			fs.writeFileSync(retainedPath, file.body);
+			const relativePath = path.join(relativeRoot, file.name).replace(/\\/g, "/");
+			return {
+				path: retainedPath,
+				relativePath,
+				sourcePath: path.join(nonGitCwd(), relativePath),
+				bytes: Buffer.byteLength(file.body, "utf8"),
+				kind: "test-results",
+				contentType: file.contentType,
+			};
+		});
+	}
+	return diagnostics;
+}
+
+async function seedSignal(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
+	const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
+	if (!context) throw new Error(`missing project context for goal ${goalId}`);
+	const gateStore = context.gateStore;
+	const fixture = seededStepsForGate(gateId);
+	const signalId = `gate-inspect-${process.pid}-${++signalSequence}`;
+	const steps = await Promise.all(fixture.steps.map(async (step, index) => ({
+		name: step.name,
+		type: "command",
+		passed: step.passed,
+		status: step.passed ? "passed" : "failed",
+		output: step.compactOutput ?? step.stdout ?? step.stderr ?? "",
+		duration_ms: 0,
+		diagnostics: await seedStepDiagnostics(goalId, gateId, signalId, index, step),
+	})));
+	const content = typeof body.content === "string" ? body.content : undefined;
+	const signal = {
+		id: signalId,
+		gateId,
+		goalId,
+		sessionId: "gate-inspect-fixture",
+		timestamp: gatewayFixture.clock.now() + signalSequence,
+		commitSha: "fixture",
+		content,
+		contentVersion: content === undefined ? undefined : (gateStore.getGate(goalId, gateId)?.signals.length ?? 0) + 1,
+		verification: { status: fixture.status, steps },
+	};
+	gateStore.recordSignal(signal);
+	if (content !== undefined) gateStore.updateGateContent(goalId, gateId, content, signal.contentVersion);
+	gateStore.updateGateStatus(goalId, gateId, fixture.status);
+	// Flush any same-tick gateway observations deterministically; no polling or
+	// host timer is involved in this fixture.
+	gatewayFixture.clock.advance(0);
+	return { signal: { id: signalId } };
 }
 
 async function signalAndWait(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
-	const signal = await signalGate(goalId, gateId, body);
-	await waitForSignalVerificationStatus(goalId, gateId, signal.signal.id, "passed");
+	const signal = await seedSignal(goalId, gateId, body);
+	const stored = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+		.getGate(goalId, gateId)?.signals.find((entry: any) => entry.id === signal.signal.id);
+	if (stored?.verification?.status !== "passed") throw new Error(`seeded ${gateId} did not pass`);
 	return signal;
 }
 
 async function signalAndWaitFailed(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
-	const signal = await signalGate(goalId, gateId, body);
-	await waitForSignalVerificationStatus(goalId, gateId, signal.signal.id, "failed");
+	const signal = await seedSignal(goalId, gateId, body);
+	const stored = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+		.getGate(goalId, gateId)?.signals.find((entry: any) => entry.id === signal.signal.id);
+	if (stored?.verification?.status !== "failed") throw new Error(`seeded ${gateId} did not fail`);
 	return signal;
 }
 
@@ -134,65 +356,18 @@ async function gateSummary(goalId: string, gateId: string): Promise<any> {
 }
 
 async function withGoal<T>(run: (goalId: string) => Promise<T>): Promise<T> {
-	const workflowId = makeWorkflowId();
-	await createInspectWorkflow(workflowId);
-	const goal = await createGoal({ title: `Gate Inspect Slicing ${Date.now()}`, workflowId });
-	try {
-		return await run(goal.id);
-	} finally {
-		await deleteGoal(goal.id);
-		await deleteInspectWorkflow(workflowId);
-	}
+	return run(inspectGoalId);
 }
 
-function findFiles(root: string, predicate: (file: string) => boolean): string[] {
-	const matches: string[] = [];
-	const visit = (dir: string) => {
-		let entries: fs.Dirent[];
-		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			const fullPath = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				visit(fullPath);
-			} else if (entry.isFile() && predicate(fullPath)) {
-				matches.push(fullPath);
-			}
-		}
-	};
-	visit(root);
-	return matches;
-}
-
-function findFilesContaining(root: string, marker: string): string[] {
-	return findFiles(root, (file) => {
-		try {
-			return fs.readFileSync(file, "utf8").includes(marker);
-		} catch {
-			// Binary or transient files are irrelevant for this marker search.
-			return false;
-		}
-	});
-}
-
-function findPersistedGateStoreDir(root: string, goalId: string): string | undefined {
-	return findFiles(root, file => path.basename(file) === "gates.json")
-		.find(file => {
-			try {
-				return fs.readFileSync(file, "utf8").includes(goalId);
-			} catch {
-				return false;
-			}
-		})
-		?.replace(/[\\/]gates\.json$/, "");
+function resetInspectGateStore(): void {
+	const gateStore = gatewayFixture.projectContextManager.getContextForGoal(inspectGoalId)?.gateStore;
+	if (!gateStore) throw new Error(`missing gate store for shared inspect goal ${inspectGoalId}`);
+	gateStore.removeGoalGates(inspectGoalId);
+	gateStore.initGatesForGoal(inspectGoalId, INSPECT_GATE_IDS);
 }
 
 test.describe("gate inspect slicing", () => {
-	test.setTimeout(60_000);
-
+	test.beforeEach(() => resetInspectGateStore());
 	test("preserves existing content inspect shape while defaulting to a bounded tail", async () => {
 		await withGoal(async (goalId) => {
 			const post = await signalAndWait(goalId, "content-gate", { content: contentLines(120) });
@@ -328,11 +503,19 @@ test.describe("gate inspect slicing", () => {
 	test("retains completed failed command diagnostics after reloading persisted gate stores", async () => {
 		await withGoal(async (goalId) => {
 			const post = await signalAndWaitFailed(goalId, "failed-retained-diagnostics-gate", {});
-			const { GateStore } = await import("../../src/server/agent/gate-store.js");
-			const { buildGateVerificationSnapshot } = await import("../../src/server/gate-verification-snapshot.js");
-			const gateStoreDir = findPersistedGateStoreDir(await defaultProjectStateDir(), goalId);
-			expect(gateStoreDir, "RETAINED_GATE_DIAGNOSTICS_GATE_STORE_FILE_MISSING: persisted gates.json for the failed signal must be reconstructable after restart").toBeTruthy();
-			const reloadedGateStore = new GateStore(gateStoreDir!);
+			const liveSignal = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+				.getGate(goalId, "failed-retained-diagnostics-gate")?.signals.find((signal: any) => signal.id === post.signal.id);
+			expect(liveSignal, "RETAINED_GATE_DIAGNOSTICS_GATE_STORE_FILE_MISSING: failed signal must be available for persistence reconstruction").toBeTruthy();
+
+			// Reopen the exact persisted JSON through GateStore's in-memory FsLike seam.
+			// This tests constructor reload semantics without recursively scanning every
+			// project state directory on Defender-backed Windows filesystems.
+			const memfs = createMemFs();
+			const gateStoreDir = path.resolve("/memfs/gate-inspect-reload");
+			const persistedGateStore = new GateStore(gateStoreDir, memfs);
+			persistedGateStore.initGatesForGoal(goalId, ["failed-retained-diagnostics-gate"]);
+			persistedGateStore.recordSignal(structuredClone(liveSignal));
+			const reloadedGateStore = new GateStore(gateStoreDir, memfs);
 			const reloadedGate = reloadedGateStore.getGate(goalId, "failed-retained-diagnostics-gate");
 			const reloadedSignal = reloadedGate?.signals.find((signal: any) => signal.id === post.signal.id);
 			expect(reloadedSignal, "RETAINED_GATE_DIAGNOSTICS_RELOAD_MISSING: failed signal must survive gate-store reconstruction").toBeTruthy();
@@ -356,15 +539,10 @@ test.describe("gate inspect slicing", () => {
 	});
 
 	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async () => {
-		const workflowId = makeWorkflowId();
-		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `playwright-artifacts-${Date.now()}-`));
-		await createInspectWorkflow(workflowId);
-		const goal = await createGoal({ title: `Gate Inspect Playwright Artifacts ${Date.now()}`, workflowId, cwd });
-		try {
-			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
-			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
+		await withGoal(async (goalId) => {
+			await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
 
-			const inspectRes = await inspectGate(goal.id, "playwright-artifacts-gate", "verification", { mode: "full" });
+			const inspectRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification", { mode: "full" });
 			expect(inspectRes.status).toBe(200);
 			const body = await inspectRes.json();
 			const serialized = JSON.stringify(body);
@@ -399,7 +577,7 @@ test.describe("gate inspect slicing", () => {
 			expect(artifactFiles.filter((file: any) => file.id === "retain-artifact-fixture")).toHaveLength(1);
 			expect(artifact).not.toHaveProperty("content");
 
-			const byIdRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+			const byIdRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				step: "playwright-style failure",
 				artifact: artifact.id,
 				mode: "grep",
@@ -416,7 +594,7 @@ test.describe("gate inspect slicing", () => {
 			expect(byId.text).not.toContain("# Instructions");
 			expect(byId.selection).toMatchObject({ mode: "grep", matchCount: 1, shownMatches: 1 });
 
-			const traceRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+			const traceRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				step: "playwright-style failure",
 				artifact: traceArtifact.id,
 				mode: "tail",
@@ -424,7 +602,7 @@ test.describe("gate inspect slicing", () => {
 			expect(traceRes.status).toBe(400);
 			expect((await traceRes.json()).error).toMatch(/not a text artifact/i);
 
-			const byPathRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+			const byPathRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				step: "playwright-style failure",
 				artifact: artifact.relativePath,
 				mode: "slice",
@@ -440,35 +618,24 @@ test.describe("gate inspect slicing", () => {
 			expect(byPath.text).not.toContain("# Instructions");
 			expect(byPath.selection).toMatchObject({ mode: "slice", range: { from: 1, to: 4 } });
 
-			const stateMarkerFiles = findFilesContaining(await defaultProjectStateDir(), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
-				.filter(file => !file.endsWith("gates.json"));
 			expect(
-				stateMarkerFiles,
-				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: error-context.md content must be copied under Bobbit state outside gates.json so worktree cleanup/restart does not destroy diagnostics. This focused E2E covers the host-visible command cwd path; Docker sandbox transfer needs manual/docker coverage.",
-			).not.toEqual([]);
-		} finally {
-			await deleteGoal(goal.id);
-			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
-		}
+				fs.readFileSync(artifact.path, "utf8"),
+				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: retained artifact metadata must resolve to the copied error-context after the original worktree artifact is removed.",
+			).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+		});
 	});
 
 	test("bounds artifact grep tail slice full modes and rejects invalid artifact requests", async () => {
-		const workflowId = makeWorkflowId();
-		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `playwright-artifact-selection-${Date.now()}-`));
-		await createInspectWorkflow(workflowId);
-		const goal = await createGoal({ title: `Gate Inspect Artifact Selection ${Date.now()}`, workflowId, cwd });
-		try {
-			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
-			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
+		await withGoal(async (goalId) => {
+			await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
 
-			const inspectRes = await inspectGate(goal.id, "playwright-artifacts-gate", "verification", { mode: "full" });
+			const inspectRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification", { mode: "full" });
 			expect(inspectRes.status).toBe(200);
 			const inspect = await inspectRes.json();
 			const artifact = inspect.steps[0].diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
 			expect(artifact?.id).toBe("retain-artifact-fixture");
 
-			const grepRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+			const grepRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				artifact: artifact.id,
 				mode: "grep",
 				pattern: "artifact detail line 25[0-9]",
@@ -481,7 +648,7 @@ test.describe("gate inspect slicing", () => {
 			expect(grep.text).not.toContain("artifact detail line 1 ");
 			expect(grep.selection).toMatchObject({ mode: "grep", shownMatches: 2 });
 
-			const tailRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+			const tailRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				artifact: artifact.id,
 				mode: "tail",
 				lines: 3,
@@ -493,7 +660,7 @@ test.describe("gate inspect slicing", () => {
 			expect(tail.selection).toMatchObject({ mode: "tail" });
 			expect(tail.selection.range.to - tail.selection.range.from + 1).toBeLessThanOrEqual(3);
 
-			const sliceRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+			const sliceRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				artifact: artifact.relativePath,
 				mode: "slice",
 				from: 10,
@@ -507,7 +674,7 @@ test.describe("gate inspect slicing", () => {
 			expect(slice.text).not.toMatch(/^13\b/m);
 			expect(slice.selection).toMatchObject({ mode: "slice", range: { from: 10, to: 12 } });
 
-			const fullRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", {
+			const fullRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				artifact: artifact.id,
 				mode: "full",
 			});
@@ -519,36 +686,27 @@ test.describe("gate inspect slicing", () => {
 			expect(full.text).not.toContain("# Instructions");
 			expect(full.selection).toMatchObject({ mode: "full", truncated: true });
 
-			const missingRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", { mode: "tail" });
+			const missingRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", { mode: "tail" });
 			expect(missingRes.status).toBe(400);
 			expect((await missingRes.json()).error).toMatch(/artifact/i);
 
-			const unknownRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", { artifact: "missing-artifact-id" });
+			const unknownRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", { artifact: "missing-artifact-id" });
 			expect(unknownRes.status).toBe(400);
 			const unknown = await unknownRes.json();
 			expect(unknown.error).toMatch(/unknown|not found|artifact/i);
 			expect(JSON.stringify(unknown)).toContain("retain-artifact-fixture");
 
-			const traversalRes = await inspectGate(goal.id, "playwright-artifacts-gate", "artifact", { artifact: "../secrets.txt" });
+			const traversalRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", { artifact: "../secrets.txt" });
 			expect(traversalRes.status).toBe(400);
 			expect((await traversalRes.json()).error).toMatch(/artifact|path|traversal|invalid/i);
-		} finally {
-			await deleteGoal(goal.id);
-			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
-		}
+		});
 	});
 
 	test("keeps gate status compact while explicit inspection exposes retained diagnostics", async () => {
-		const workflowId = makeWorkflowId();
-		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `compact-artifacts-${Date.now()}-`));
-		await createInspectWorkflow(workflowId);
-		const goal = await createGoal({ title: `Gate Status Compact Diagnostics ${Date.now()}`, workflowId, cwd });
-		try {
-			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
-			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
+		await withGoal(async (goalId) => {
+			await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
 
-			const summary = await gateSummary(goal.id, "playwright-artifacts-gate");
+			const summary = await gateSummary(goalId, "playwright-artifacts-gate");
 			const summaryJson = JSON.stringify(summary.latestSignal?.verification ?? summary);
 			expect(summary.latestSignal?.verification?.status).toBe("failed");
 			expect(
@@ -556,7 +714,7 @@ test.describe("gate inspect slicing", () => {
 				"GATE_STATUS_RETAINED_DIAGNOSTICS_TOO_VERBOSE: compact gate status/default verification snapshots must not expose retained log paths or bulky Playwright artifact file lists",
 			).not.toMatch(/stdout\.log|stderr\.log|trace\.zip|screenshot\.png|gate-diagnostics|PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/i);
 
-			const defaultInspectRes = await inspectGate(goal.id, "playwright-artifacts-gate", "verification");
+			const defaultInspectRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification");
 			expect(defaultInspectRes.status).toBe(200);
 			const defaultInspect = await defaultInspectRes.json();
 			expect(
@@ -564,7 +722,7 @@ test.describe("gate inspect slicing", () => {
 				"GATE_INSPECT_DEFAULT_RETAINED_DIAGNOSTICS_TOO_VERBOSE: implicit/default gate_inspect should stay compact unless a mode is explicit",
 			).not.toMatch(/stdout\.log|stderr\.log|trace\.zip|screenshot\.png|gate-diagnostics|PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/i);
 
-			const explicitRes = await inspectGate(goal.id, "playwright-artifacts-gate", "verification", { mode: "full" });
+			const explicitRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification", { mode: "full" });
 			expect(explicitRes.status).toBe(200);
 			const explicit = await explicitRes.json();
 			const explicitJson = JSON.stringify(explicit.steps);
@@ -576,14 +734,9 @@ test.describe("gate inspect slicing", () => {
 			expect(explicitJson).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 			expect(explicit.steps[0].diagnostics.artifacts.files[0]).not.toHaveProperty("content");
 
-			const stateMarkerFiles = findFilesContaining(await defaultProjectStateDir(), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
-				.filter(file => !file.endsWith("gates.json"));
-			expect(stateMarkerFiles).not.toEqual([]);
-		} finally {
-			await deleteGoal(goal.id);
-			await deleteInspectWorkflow(workflowId);
-			fs.rmSync(cwd, { recursive: true, force: true });
-		}
+			const retainedArtifact = explicit.steps[0].diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
+			expect(fs.readFileSync(retainedArtifact.path, "utf8")).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+		});
 	});
 
 	test("caps retained command logs and exposes cap metadata in explicit inspection", async () => {

@@ -49,7 +49,7 @@ import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
@@ -1849,6 +1849,7 @@ export class SessionManager {
 			searchIndex: resolvedSearchIndex,
 			sessions: this.sessions,
 			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
+			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
@@ -1936,8 +1937,8 @@ export class SessionManager {
 		}
 
 		try {
-			if (await isGitRepo(cwd)) {
-				const repoRoot = await getRepoRoot(cwd);
+			if (await isGitRepo(cwd, this.commandRunner)) {
+				const repoRoot = await getRepoRoot(cwd, this.commandRunner);
 				const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
 				if (repoOffset) return repoOffset;
 			}
@@ -1950,8 +1951,8 @@ export class SessionManager {
 			const projectRoot = project?.rootPath;
 			if (projectRoot) {
 				try {
-					if (await isGitRepo(projectRoot)) {
-						const repoRoot = await getRepoRoot(projectRoot);
+					if (await isGitRepo(projectRoot, this.commandRunner)) {
+						const repoRoot = await getRepoRoot(projectRoot, this.commandRunner);
 						const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
 						if (repoOffset) return repoOffset;
 					}
@@ -5656,9 +5657,9 @@ export class SessionManager {
 		const hasExplicitAllowlist = overrideAllowedTools !== undefined || persistedAllowedTools !== undefined;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
 		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
-			? overrideAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			? tagAllowedTools(overrideAllowedTools, this.toolManager)
 			: persistedAllowedTools
-				? persistedAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+				? tagAllowedTools(persistedAllowedTools, this.toolManager)
 				: this.resolveEffectiveAllowedTools(restoredRole);
 		// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
 		// restored allowlist so the prompt tool-docs + persisted allowedTools stay
@@ -6027,7 +6028,7 @@ export class SessionManager {
 			}
 		}
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
-			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			? tagAllowedTools(opts.allowedTools, this.toolManager)
 			: undefined;
 		const sessionScopedAllowedTools = opts?.allowedTools && opts.allowedTools.length > 0
 			? [...opts.allowedTools]
@@ -6400,7 +6401,7 @@ export class SessionManager {
 			?? parentMeta?.goalId ?? parentMeta?.teamGoalId;
 		const sourceAllowedTools = opts.allowedTools ?? parentSession?.allowedTools;
 		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
-			? sourceAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			? tagAllowedTools(sourceAllowedTools, this.toolManager)
 			: undefined;
 		// H2 — PERSIST the (already-stripped) allow-list so restart/revive preserves
 		// the recursion guard (spawn verbs removed) AND read-only restrictions
@@ -9286,10 +9287,10 @@ export class SessionManager {
 							return Promise.resolve();
 						}
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
-						return cleanupWorktree(repoPath, wt, ps.branch, true);
+						return cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 					}));
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
-					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
+					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
 				}
@@ -9843,7 +9844,7 @@ export class SessionManager {
 			const forceAbortPersisted = this.resolveStoreForSession(id).get(id);
 			const forceAbortAllowedNames = forceAbortPersisted?.allowedTools ?? session.allowedTools;
 			const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
-				? forceAbortAllowedNames.map(n => tagAllowedTool(n, this.toolManager))
+				? tagAllowedTools(forceAbortAllowedNames, this.toolManager)
 				: this.resolveEffectiveAllowedTools(role);
 			// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 			// distinction. A persisted `[]` means NO tools and MUST stay `[]` — never

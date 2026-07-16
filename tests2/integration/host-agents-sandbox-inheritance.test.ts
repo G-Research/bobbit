@@ -19,7 +19,13 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { createSession, deleteSession, connectWs, apiFetch } from "./_e2e/e2e-setup.js";
-import { createServerHostApi } from "../../src/server/extension-host/server-host-api.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
+
+let createServerHostApi: typeof import("../../src/server/extension-host/server-host-api.js").createServerHostApi;
+
+test.beforeAll(async () => {
+	({ createServerHostApi } = (await loadServerTestRuntime()).serverHostApi);
+});
 
 const OPUS = { provider: "anthropic", modelId: "claude-opus-4-8" };
 

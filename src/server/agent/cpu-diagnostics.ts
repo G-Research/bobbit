@@ -4,11 +4,26 @@ import { realClock } from "../gateway-deps.js";
 import path from "node:path";
 import { monitorEventLoopDelay, performance, type EventLoopUtilization } from "node:perf_hooks";
 
-const ENABLED = process.env.BOBBIT_CPU_DIAG === "1";
 const DEFAULT_FLUSH_MS = 1000;
-const parsedFlushMs = Number(process.env.BOBBIT_CPU_DIAG_FLUSH_MS);
-const FLUSH_MS = Number.isFinite(parsedFlushMs) && parsedFlushMs > 0 ? parsedFlushMs : DEFAULT_FLUSH_MS;
-const JSONL_PATH = process.env.BOBBIT_CPU_DIAG_JSONL;
+
+interface CpuDiagnosticsConfig {
+	enabled: boolean;
+	flushMs: number;
+	jsonlPath?: string;
+}
+
+function cpuDiagnosticsConfig(env: NodeJS.ProcessEnv): CpuDiagnosticsConfig {
+	const parsedFlushMs = Number(env.BOBBIT_CPU_DIAG_FLUSH_MS);
+	return {
+		enabled: env.BOBBIT_CPU_DIAG === "1",
+		flushMs: Number.isFinite(parsedFlushMs) && parsedFlushMs > 0 ? parsedFlushMs : DEFAULT_FLUSH_MS,
+		jsonlPath: env.BOBBIT_CPU_DIAG_JSONL,
+	};
+}
+
+const RUNTIME_CONFIG = cpuDiagnosticsConfig(process.env);
+const ENABLED = RUNTIME_CONFIG.enabled;
+const FLUSH_MS = RUNTIME_CONFIG.flushMs;
 const MAX_LABELS = 256;
 const MAX_SAMPLES_PER_LABEL = 2048;
 const OVERFLOW_LABEL = "__overflow__";
@@ -171,12 +186,15 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 	private readonly beforeExitHandler: () => void;
 	private readonly exitHandler: () => void;
 
-	constructor(private readonly clock: Clock = realClock) {
-		this.outFile = JSONL_PATH;
+	constructor(
+		private readonly clock: Clock = realClock,
+		config: CpuDiagnosticsConfig = RUNTIME_CONFIG,
+	) {
+		this.outFile = config.jsonlPath;
 		if (this.outFile) fs.mkdirSync(path.dirname(this.outFile), { recursive: true });
 		this.delay = monitorEventLoopDelay({ resolution: 20 });
 		this.delay.enable();
-		this.timer = this.clock.setInterval(() => this.flush("tick"), FLUSH_MS);
+		this.timer = this.clock.setInterval(() => this.flush("tick"), config.flushMs);
 		if (typeof this.timer.unref === "function") this.timer.unref();
 		this.beforeExitHandler = () => { try { this.flush("beforeExit"); } catch { /* best-effort */ } };
 		this.exitHandler = () => { try { this.flush("exit"); } catch { /* best-effort */ } };
@@ -246,7 +264,7 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		try { this.delay.disable(); } catch { /* best-effort */ }
 		process.off("beforeExit", this.beforeExitHandler);
 		process.off("exit", this.exitHandler);
-		singleton = null;
+		if (singleton === this) singleton = null;
 	}
 
 	private buildSnapshot(reason?: string): CpuDiagnosticsSnapshot {
@@ -343,8 +361,14 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 
 let singleton: CpuDiagnostics | null = null;
 
-export function cpuDiagnosticsEnabled(): boolean {
-	return ENABLED;
+export function cpuDiagnosticsEnabled(env?: NodeJS.ProcessEnv): boolean {
+	return env ? cpuDiagnosticsConfig(env).enabled : ENABLED;
+}
+
+/** Create an isolated diagnostics instance without mutating the process-wide singleton. */
+export function createCpuDiagnostics(options: { env: NodeJS.ProcessEnv; clock?: Clock }): CpuDiagnostics {
+	const config = cpuDiagnosticsConfig(options.env);
+	return config.enabled ? new EnabledCpuDiagnostics(options.clock, config) : disabledDiagnostics;
 }
 
 export function getCpuDiagnostics(clock?: Clock): CpuDiagnostics {

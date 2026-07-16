@@ -5,7 +5,9 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { useGateApiTestSupport, waitForAuthoredGateStatus } from "./helpers/gate-api-test-support.js";
+
+useGateApiTestSupport();
 
 const OPTIONAL_STEPS_GATE_TIMEOUT_MS = 60_000;
 const OPTIONAL_STEPS_TEST_TIMEOUT_MS = 120_000;
@@ -81,16 +83,9 @@ async function waitForGateStatus(
 	goalId: string,
 	gateId: string,
 	targetStatus: string,
-	timeoutMs = OPTIONAL_STEPS_GATE_TIMEOUT_MS,
+	_timeoutMs = OPTIONAL_STEPS_GATE_TIMEOUT_MS,
 ): Promise<any> {
-	return pollUntil(
-		async () => {
-			const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-			const data = await res.json();
-			return data.status === targetStatus ? data : null;
-		},
-		{ timeoutMs, intervalMs: 50, label: `gate ${gateId} -> ${targetStatus}` },
-	);
+	return waitForAuthoredGateStatus(goalId, gateId, targetStatus);
 }
 
 test.describe("Optional steps API", () => {

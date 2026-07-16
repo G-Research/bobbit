@@ -9,124 +9,115 @@
  *   - The snapshotted workflow matches the inline yaml exactly.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import yaml from "yaml";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, base, defaultProject } from "./_e2e/e2e-setup.js";
+import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
 
-let token: string;
+const COMPONENTS = [
+	{ name: "default", repo: ".", commands: { build: "echo built", check: "echo checked" } },
+];
+
+const INLINE_WORKFLOWS = {
+	"flow-alpha": {
+		id: "flow-alpha",
+		name: "Flow Alpha",
+		description: "First inline workflow",
+		gates: [
+			{ id: "step-one", name: "Step One", verify: [
+				{ name: "Build", type: "command", component: "default", command: "build" },
+			] },
+		],
+	},
+	"flow-beta": {
+		id: "flow-beta",
+		name: "Flow Beta",
+		description: "Second inline workflow",
+		gates: [
+			{ id: "implementation", name: "Implementation", verify: [
+				{ name: "Check", type: "command", component: "default", command: "check" },
+				{ name: "Echo", type: "command", run: "echo {{branch}}" },
+			] },
+		],
+	},
+};
+
+let projectId = "";
+let projectRoot = "";
 
 test.beforeAll(async () => {
-	token = readE2EToken();
+	projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-inline-workflow-"));
+	const project = await registerProject({
+		name: `inline-workflow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		rootPath: projectRoot,
+		components: COMPONENTS,
+		workflows: INLINE_WORKFLOWS,
+		seedWorkflows: false,
+	});
+	projectId = project.id;
 });
 
-async function api(p: string, opts?: RequestInit): Promise<Response> {
-	return fetch(`${base()}${p}`, {
-		...opts,
-		headers: {
-			Authorization: `Bearer ${token}`,
-			"Content-Type": "application/json",
-			...(opts?.headers || {}),
-		},
-	});
-}
+test.afterAll(async () => {
+	if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+	if (projectRoot) fs.rmSync(projectRoot, { recursive: true, force: true });
+});
 
 test("inline workflows from project.yaml drive goal creation @smoke", async () => {
-	// Seed an inline workflows: block in the normal harness default project's project.yaml.
-	// Headquarters owns the gateway bobbitDir, so normal project workflow tests must
-	// write under the default project's own .bobbit/config scope.
-	const project = await defaultProject();
-	const projectId = project.id;
-	const configDir = path.join(project.rootPath, ".bobbit", "config");
-	fs.mkdirSync(configDir, { recursive: true });
-	const yamlFile = path.join(configDir, "project.yaml");
-	const existing: Record<string, unknown> = fs.existsSync(yamlFile)
-		? (yaml.parse(fs.readFileSync(yamlFile, "utf-8")) as Record<string, unknown> ?? {})
-		: {};
-	existing.components = [
-		{ name: "default", repo: ".", commands: { build: "echo built", check: "echo checked" } },
-	];
-	existing.workflows = {
-		"flow-alpha": {
-			id: "flow-alpha",
-			name: "Flow Alpha",
-			description: "First inline workflow",
-			gates: [
-				{ id: "step-one", name: "Step One", verify: [
-					{ name: "Build", type: "command", component: "default", command: "build" },
-				] },
-			],
-		},
-		"flow-beta": {
-			id: "flow-beta",
-			name: "Flow Beta",
-			description: "Second inline workflow",
-			gates: [
-				{ id: "implementation", name: "Implementation", verify: [
-					{ name: "Check", type: "command", component: "default", command: "check" },
-					{ name: "Echo", type: "command", run: "echo {{branch}}" },
-				] },
-			],
-		},
-	};
-	fs.writeFileSync(yamlFile, yaml.stringify(existing));
-
-	// GET /api/workflows?projectId=... — both inline workflows must appear in the cascade.
-	// Poll briefly to absorb inline-store reload latency on Windows fs.
-	let alpha: any, beta: any;
-	for (let attempt = 0; attempt < 5; attempt++) {
-		const resp = await api(`/api/workflows?projectId=${projectId}`);
+	const createdGoalIds: string[] = [];
+	try {
+		// The suite owns a registered project whose declaration persists these two
+		// workflows inline in project.yaml. Registration updates the live project
+		// context synchronously, so discovery needs no filesystem polling.
+		const resp = await apiFetch(`/api/workflows?projectId=${projectId}`);
 		expect(resp.status).toBe(200);
 		const { workflows } = await resp.json();
-		alpha = workflows.find((w: any) => w.id === "flow-alpha");
-		beta = workflows.find((w: any) => w.id === "flow-beta");
-		if (alpha && beta) break;
-		await new Promise(r => setTimeout(r, 250));
+		const alpha = workflows.find((workflow: any) => workflow.id === "flow-alpha");
+		const beta = workflows.find((workflow: any) => workflow.id === "flow-beta");
+		expect(alpha).toMatchObject(INLINE_WORKFLOWS["flow-alpha"]);
+		expect(beta).toMatchObject(INLINE_WORKFLOWS["flow-beta"]);
+
+		// POST /api/goals — workflowId: flow-alpha. The created goal must snapshot
+		// the project declaration, including component-command verification.
+		const goalResp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "inline-flow-test",
+				workflowId: "flow-alpha",
+				projectId,
+				autoStartTeam: false,
+			}),
+		});
+		expect(goalResp.status).toBe(201);
+		const goal = await goalResp.json();
+		createdGoalIds.push(goal.id);
+		expect(goal.workflowId).toBe("flow-alpha");
+		expect(goal.workflow).toBeTruthy();
+		expect(goal.workflow.gates).toHaveLength(1);
+		expect(goal.workflow.gates[0].id).toBe("step-one");
+		expect(goal.workflow.gates[0].verify[0]).toMatchObject({
+			name: "Build", type: "command", component: "default", command: "build",
+		});
+
+		// A second goal gets an independent snapshot of the other declaration.
+		const goalRespB = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "inline-flow-test-b",
+				workflowId: "flow-beta",
+				projectId,
+				autoStartTeam: false,
+			}),
+		});
+		expect(goalRespB.status).toBe(201);
+		const goalB = await goalRespB.json();
+		createdGoalIds.push(goalB.id);
+		expect(goalB.workflow.gates[0].verify).toHaveLength(2);
+		expect(goalB.workflow.gates[0].verify[1]).toMatchObject({
+			name: "Echo", type: "command", run: "echo {{branch}}",
+		});
+	} finally {
+		for (const goalId of createdGoalIds) {
+			await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+		}
 	}
-	expect(alpha).toBeTruthy();
-	expect(beta).toBeTruthy();
-	expect(alpha.name).toBe("Flow Alpha");
-	expect(beta.name).toBe("Flow Beta");
-
-	// POST /api/goals — workflowId: flow-alpha. The created goal must have
-	// `workflow.gates[0].verify[0].component === "default"` etc.
-	const goalResp = await api("/api/goals", {
-		method: "POST",
-		body: JSON.stringify({
-			title: "inline-flow-test",
-			workflowId: "flow-alpha",
-			projectId,
-			autoStartTeam: false,
-		}),
-	});
-	expect(goalResp.status).toBe(201);
-	const goal = await goalResp.json();
-	expect(goal.workflowId).toBe("flow-alpha");
-	expect(goal.workflow).toBeTruthy();
-	expect(goal.workflow.gates).toHaveLength(1);
-	expect(goal.workflow.gates[0].id).toBe("step-one");
-	expect(goal.workflow.gates[0].verify[0]).toMatchObject({
-		name: "Build", type: "command", component: "default", command: "build",
-	});
-
-	// And again for flow-beta to confirm the second workflow snapshot is independent.
-	const goalRespB = await api("/api/goals", {
-		method: "POST",
-		body: JSON.stringify({
-			title: "inline-flow-test-b",
-			workflowId: "flow-beta",
-			projectId,
-			autoStartTeam: false,
-		}),
-	});
-	expect(goalRespB.status).toBe(201);
-	const goalB = await goalRespB.json();
-	expect(goalB.workflow.gates[0].verify).toHaveLength(2);
-	expect(goalB.workflow.gates[0].verify[1]).toMatchObject({
-		name: "Echo", type: "command", run: "echo {{branch}}",
-	});
-
-	// Cleanup
-	await api(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => {});
-	await api(`/api/goals/${goalB.id}`, { method: "DELETE" }).catch(() => {});
 });

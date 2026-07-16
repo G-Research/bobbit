@@ -9,31 +9,23 @@
  */
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, agentEndPredicate, nonGitCwd, createSession as createSessionFromHarness } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { apiFetch, nonGitCwd, createSession as createSessionFromHarness } from "./_e2e/e2e-setup.js";
+import {
+	createSessionTracker,
+	localApiFetch,
+	seedArchivedSession,
+	trackGoal,
+	waitForSessionIdle,
+} from "./helpers/session-fixtures.js";
 import fs from "node:fs";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-async function sendPromptAndWait(id: string, text: string): Promise<void> {
-	const ws = await connectWs(id);
-	try {
-		ws.send({ type: "prompt", text });
-		await ws.waitFor(agentEndPredicate(), 10_000);
-	} finally {
-		ws.close();
-	}
-}
+const sessions = createSessionTracker();
 
 async function archive(id: string): Promise<void> {
 	const resp = await apiFetch(`/api/sessions/${id}`, { method: "DELETE" });
 	expect(resp.ok, `archive ${id}: ${resp.status}`).toBe(true);
-}
-
-async function getPersisted(id: string): Promise<any> {
-	const r = await apiFetch(`/api/sessions/${id}?include=archived`);
-	if (!r.ok) return null;
-	return r.json();
 }
 
 async function getArchivedRec(id: string): Promise<any> {
@@ -41,115 +33,104 @@ async function getArchivedRec(id: string): Promise<any> {
 	return (arch.sessions as any[]).find(s => s.id === id) || null;
 }
 
-async function makeArchivedSourceSession(opts?: {
+async function makeArchivedSourceSession(gateway: any, opts?: {
 	promptText?: string;
 	roleId?: string;
 }): Promise<string> {
-	const body: any = { cwd: nonGitCwd() };
-	if (opts?.roleId) body.roleId = opts.roleId;
-	const resp = await apiFetch("/api/sessions", { method: "POST", body: JSON.stringify(body) });
-	expect(resp.status).toBe(201);
-	const id = (await resp.json()).id;
-	await sendPromptAndWait(id, opts?.promptText || "Hello from the original session, please acknowledge.");
-	await archive(id);
-	return id;
+	return sessions.add(seedArchivedSession(gateway, {
+		cwd: nonGitCwd(),
+		...(opts?.roleId ? { role: opts.roleId } : {}),
+	}, [{
+		role: "user",
+		text: opts?.promptText || "Hello from the original session, please acknowledge.",
+	}]));
+}
+
+async function trackContinuedSession(resp: Response): Promise<void> {
+	if (resp.status !== 201) return;
+	const data = await resp.clone().json();
+	if (data?.id) sessions.add(data.id);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
 test.describe("Continue-Archived API (lossless)", () => {
-	test("happy path: returns 201 with Continued: title and a fresh session id", async () => {
-		const archivedId = await makeArchivedSourceSession({
+	test.afterEach(async ({ gateway }) => sessions.cleanup(gateway));
+	test("happy path: returns 201 with Continued: title and a fresh session id", async ({ gateway }) => {
+		const archivedId = await makeArchivedSourceSession(gateway, {
 			promptText: "UNIQUE_MARKER_ALPHA hello world",
 		});
 
-		const resp = await apiFetch(`/api/sessions/${archivedId}/continue`, {
+		const resp = await localApiFetch(gateway, `/api/sessions/${archivedId}/continue`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
+		sessions.add(data.id);
 		expect(data.id).toBeTruthy();
 		expect(data.id).not.toBe(archivedId);
 		expect(data.title).toMatch(/^Continued: /);
 
-		// New session should reach idle (i.e. switch_session against the cloned
-		// `.jsonl` succeeded). pollUntil retries the GET until status flips.
-		const rec = await pollUntil(async () => {
-			const r = await getPersisted(data.id);
-			return r && r.status !== "preparing" && r.status !== "starting" ? r : null;
-		}, { timeoutMs: 15_000, intervalMs: 100, label: "new session reached non-preparing status" });
-		expect(rec).toBeTruthy();
-		expect(["idle", "streaming"]).toContain(rec.status);
+		// switch_session completes in the create pipeline; observe its live state
+		// directly instead of polling the REST representation.
+		await waitForSessionIdle(gateway, data.id);
+		expect(gateway.sessionManager.getSession(data.id)?.status).toBe("idle");
 	});
 
-	test("body fields are ignored — legacy {mode:'summary'} no longer 400s", async () => {
-		const archivedId = await makeArchivedSourceSession();
+	test("body fields are ignored — legacy {mode:'summary'} no longer 400s", async ({ gateway }) => {
+		const archivedId = await makeArchivedSourceSession(gateway);
 
-		const resp = await apiFetch(`/api/sessions/${archivedId}/continue`, {
+		const resp = await localApiFetch(gateway, `/api/sessions/${archivedId}/continue`, {
 			method: "POST",
 			body: JSON.stringify({ mode: "summary" }),
 		});
 		expect(resp.status).toBe(201);
+		await trackContinuedSession(resp);
 	});
 
-	test("empty body returns 201", async () => {
-		const archivedId = await makeArchivedSourceSession();
-		const resp = await apiFetch(`/api/sessions/${archivedId}/continue`, {
+	test("empty body returns 201", async ({ gateway }) => {
+		const archivedId = await makeArchivedSourceSession(gateway);
+		const resp = await localApiFetch(gateway, `/api/sessions/${archivedId}/continue`, {
 			method: "POST",
 			body: "",
 		});
 		expect(resp.status).toBe(201);
+		await trackContinuedSession(resp);
 	});
 
-	test("title format: 'Continued: <original title>' and survives first prompt", async () => {
-		const archivedId = await makeArchivedSourceSession();
-		const resp = await apiFetch(`/api/sessions/${archivedId}/continue`, {
+	test("title format: 'Continued: <original title>' and survives first prompt", async ({ gateway }) => {
+		const archivedId = await makeArchivedSourceSession(gateway);
+		const resp = await localApiFetch(gateway, `/api/sessions/${archivedId}/continue`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
+		sessions.add(data.id);
 
-		const info = await pollUntil(async () => {
-			const rec = await getPersisted(data.id);
-			return rec?.title?.startsWith("Continued: ") ? rec : null;
-		}, { timeoutMs: 5_000, intervalMs: 50, label: "continued title persisted" });
-		expect(info?.title?.startsWith("Continued: ")).toBe(true);
+		const before = gateway.sessionManager.getPersistedSession(data.id)?.title;
+		expect(before?.startsWith("Continued: ")).toBe(true);
 
 		// markGenerated:true protects the title from the first-prompt auto-titler.
-		await apiFetch(`/api/sessions/${data.id}/prompt`, {
-			method: "POST",
-			body: JSON.stringify({ text: "hi" }),
-		}).catch(() => {});
-
-		let titleChanged = false;
-		try {
-			await pollUntil(async () => {
-				const rec = await getPersisted(data.id);
-				if (rec?.title && !rec.title.startsWith("Continued: ")) {
-					titleChanged = true;
-					return true;
-				}
-				return false;
-			}, { timeoutMs: 500, intervalMs: 100, label: "title overwritten (expected to time out)" });
-		} catch { /* expected */ }
-		expect(titleChanged).toBe(false);
+		const prompt = await gateway.sessionManager.enqueuePrompt(data.id, "hi");
+		expect(prompt.status).toBe("dispatched");
+		await waitForSessionIdle(gateway, data.id);
+		expect(gateway.sessionManager.getPersistedSession(data.id)?.title).toBe(before);
 	});
 
-	test("unknown session returns 404", async () => {
-		const resp = await apiFetch(`/api/sessions/does-not-exist-abc123/continue`, {
+	test("unknown session returns 404", async ({ gateway }) => {
+		const resp = await localApiFetch(gateway, `/api/sessions/does-not-exist-abc123/continue`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
 		expect(resp.status).toBe(404);
 	});
 
-	test("not-archived (live) session returns 409", async () => {
-		const liveId = await createSessionFromHarness();
+	test("not-archived (live) session returns 409", async ({ gateway }) => {
+		const liveId = sessions.add(await createSessionFromHarness());
 		try {
-			await sendPromptAndWait(liveId, "hello");
-			const resp = await apiFetch(`/api/sessions/${liveId}/continue`, {
+			const resp = await localApiFetch(gateway, `/api/sessions/${liveId}/continue`, {
 				method: "POST",
 				body: JSON.stringify({}),
 			});
@@ -159,102 +140,81 @@ test.describe("Continue-Archived API (lossless)", () => {
 		}
 	});
 
-	test("goal-linked session returns 422", async () => {
+	test("goal-linked session returns 422", async ({ gateway }) => {
 		const goalResp = await apiFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify({ title: "Archived goal test", cwd: nonGitCwd(), team: false, worktree: false, workflowId: "general" }),
 		});
 		expect(goalResp.status).toBe(201);
 		const goal = await goalResp.json();
-		const sessionResp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: nonGitCwd(), goalId: goal.id }),
-		});
-		expect(sessionResp.status).toBe(201);
-		const sid = (await sessionResp.json()).id;
-		await sendPromptAndWait(sid, "goal session message");
-		await archive(sid);
+		trackGoal(goal.id);
+		const sid = sessions.add(seedArchivedSession(gateway, {
+			cwd: nonGitCwd(),
+			goalId: goal.id,
+		}));
 
-		const resp = await apiFetch(`/api/sessions/${sid}/continue`, {
+		const resp = await localApiFetch(gateway, `/api/sessions/${sid}/continue`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
 		expect(resp.status).toBe(422);
 	});
 
-	test("delegate session returns 422", async () => {
-		const parentId = await createSessionFromHarness();
-		await sendPromptAndWait(parentId, "parent");
-		const delegateId = await createSessionFromHarness();
-		const patch = await apiFetch(`/api/sessions/${delegateId}`, {
-			method: "PATCH",
-			body: JSON.stringify({ delegateOf: parentId }),
-		});
-		expect(patch.ok).toBe(true);
-		await sendPromptAndWait(delegateId, "delegate msg");
-		await archive(delegateId);
+	test("delegate session returns 422", async ({ gateway }) => {
+		const delegateId = sessions.add(seedArchivedSession(gateway, {
+			cwd: nonGitCwd(),
+			delegateOf: "fixture-parent-session",
+		}));
 
-		const resp = await apiFetch(`/api/sessions/${delegateId}/continue`, {
+		const resp = await localApiFetch(gateway, `/api/sessions/${delegateId}/continue`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
 		expect(resp.status).toBe(422);
-		await archive(parentId).catch(() => {});
 	});
 
-	test("assistant session (assistantType) is now allowed — returns 201", async () => {
+	test("assistant session (assistantType) is now allowed — returns 201", async ({ gateway }) => {
 		// Path B of the Reopen-Archived-Proposals design: assistant sessions can
 		// now be continued. The 422 block remains only for goal/delegate/team
 		// sessions (covered by sibling tests above).
-		const resp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: nonGitCwd(), goalAssistant: true }),
-		});
-		expect(resp.status).toBe(201);
-		const sid = (await resp.json()).id;
-		await sendPromptAndWait(sid, "assistant init");
-		await archive(sid);
+		const sid = sessions.add(seedArchivedSession(gateway, {
+			cwd: nonGitCwd(),
+			assistantType: "goal",
+		}, [{ role: "user", text: "assistant init" }]));
 
-		const cont = await apiFetch(`/api/sessions/${sid}/continue`, {
+		const cont = await localApiFetch(gateway, `/api/sessions/${sid}/continue`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
 		expect(cont.status).toBe(201);
 		const data = await cont.json();
+		sessions.add(data.id);
 		expect(data.id).toBeTruthy();
 		expect(data.id).not.toBe(sid);
 		expect(data.assistantType).toBe("goal");
 	});
 
-	test("role copied to new session", async () => {
-		const archivedId = await makeArchivedSourceSession({ roleId: "coder" });
-		const resp = await apiFetch(`/api/sessions/${archivedId}/continue`, {
+	test("role copied to new session", async ({ gateway }) => {
+		const archivedId = await makeArchivedSourceSession(gateway, { roleId: "general" });
+		const resp = await localApiFetch(gateway, `/api/sessions/${archivedId}/continue`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
-		await pollUntil(async () => {
-			const info = await getPersisted(data.id);
-			return info?.role === "coder";
-		}, { timeoutMs: 5_000, intervalMs: 50, label: "role copied" });
+		sessions.add(data.id);
+		expect(gateway.sessionManager.getPersistedSession(data.id)?.role).toBe("general");
 	});
 
-	test("archived session with empty .jsonl returns 404", async () => {
-		const resp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: nonGitCwd() }),
-		});
-		expect(resp.status).toBe(201);
-		const id = (await resp.json()).id;
-		await archive(id);
+	test("archived session with empty .jsonl returns 404", async ({ gateway }) => {
+		const id = sessions.add(seedArchivedSession(gateway, { cwd: nonGitCwd() }, []));
 
 		const rec = await getArchivedRec(id);
 		if (rec?.agentSessionFile && fs.existsSync(rec.agentSessionFile)) {
 			fs.writeFileSync(rec.agentSessionFile, "");
 		}
 
-		const cont = await apiFetch(`/api/sessions/${id}/continue`, {
+		const cont = await localApiFetch(gateway, `/api/sessions/${id}/continue`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});

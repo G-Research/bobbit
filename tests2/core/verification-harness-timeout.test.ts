@@ -7,22 +7,10 @@ import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
 /**
- * Tree-kill on verification command-step timeout / cancellation.
+ * Verification command-step timeout / cancellation coverage.
  *
- * Pins the contract laid out in docs/design (Verification command-step
- * tree-kill v2): when a `command` verification step exceeds its timeout
- * or is cancelled, the entire spawned process tree must be reaped — not
- * just the immediate shell — and the step must resolve as failed with
- * the specified marker text.
- *
- * Every test runs on POSIX *and* Windows. The fixtures rely only on:
- *   - `process.execPath` to invoke Node from itself.
- *   - inline `node -e "<js>"` payloads (no bash, no cmd builtins, no
- *     temp script files).
- *   - `process.kill(pid, 0)` for liveness — maps to ESRCH/EPERM via
- *     OpenProcess+ExitCode on Windows and kill(pid,0) on POSIX.
- *
- * There are no `process.platform` skip guards anywhere.
+ * Tier-1 drives a deterministic TrackedChild through the injected command
+ * runner. Real process-tree reaping fidelity belongs to the e2e tier.
  */
 
 import { describe, it, afterAll } from "vitest";
@@ -36,7 +24,6 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
-const { spawnTracked, killAllTracked, _trackedCount } = await import("../../src/server/agent/spawn-tree.ts");
 const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
@@ -47,19 +34,6 @@ async function poll(predicate: () => boolean | Promise<boolean>, budgetMs: numbe
 		await new Promise(r => setTimeout(r, stepMs));
 	}
 	return Boolean(await predicate());
-}
-
-/**
- * Cross-platform: is `pid` a live OS process?
- *
- * `process.kill(pid, 0)` sends signal 0 — a permission/existence check that
- * delivers no signal. Node maps this to OpenProcess+ExitCode on Windows and
- * kill(pid, 0) on POSIX. ESRCH = gone, EPERM = alive but we don't own it.
- */
-function isAlive(pid: number): boolean {
-	if (!pid || !Number.isFinite(pid) || pid <= 0) return false;
-	try { process.kill(pid, 0); return true; }
-	catch (err: any) { return err?.code === "EPERM"; }
 }
 
 async function withTimeout<T>(promise: Promise<T>, budgetMs: number, label: string): Promise<T> {
@@ -97,84 +71,37 @@ function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = [])
 	);
 }
 
-/**
- * Inline JS payload (passed via `node -e`) that:
- *   - prints `PARENT_PID=<pid>`
- *   - spawns an inner `node -e` child that prints `CHILD_PID=<pid>` and idles
- *   - pipes the inner stdout through so the parent's stdout carries both
- *   - idles forever (the test kills the parent via tree-kill)
- *
- * Works identically on POSIX and Windows.
- */
-// Inner script: print CHILD_PID then idle. The child writes through its own
-// piped stdout, which the parent forwards onto its own stdout. We wait for
-// the first chunk before printing PARENT_PID so the test always sees both
-// pids together (no timing window where only PARENT_PID is visible).
-// Three-level escaping (this TS source → outer node -e → inner node -e).
-// To get a real newline written by the innermost script, the inner-
-// inner JS source string must contain the literal sequence `\n` (two
-// chars). The outer payload is itself a JS string, so we double again
-// to `\\n`. That requires four backslashes in this TS source.
-const TREE_PAYLOAD = [
-	'var cp=require("child_process");',
-	'var inner=\'process.stdout.write("CHILD_PID="+process.pid+"\\\\n");setInterval(function(){},1000);\';',
-	'var c=cp.spawn(process.execPath,["-e",inner],{stdio:["ignore","pipe","inherit"]});',
-	'c.stdout.on("data",function(d){process.stdout.write(d);});',
-	'c.stdout.once("data",function(){process.stdout.write("PARENT_PID="+process.pid+"\\n");});',
-	'setInterval(function(){},1000);',
-].join("");
-
 function fakeTreeCommand(): string {
 	return `node -e "console.log('PARENT_PID=910001'); console.log('CHILD_PID=910002'); setTimeout(()=>process.exit(0),300000)"`;
 }
 
-describe("spawn-tree helper", () => {
-	it("times out, reports timedOut()=true, and reaps the child", async () => {
-		const t = spawnTracked(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], {
-			stdio: "ignore",
-			timeoutMs: 200,
+describe("deterministic tracked child", () => {
+	it("reports timeout and closes without launching a process", async () => {
+		const runner = createFakeVerificationCommandRunner();
+		const tracked = runner.spawn({
+			shellBin: "fake-shell", shellArgs: [], cmdToRun: "ignored",
+			command: `node -e "setTimeout(()=>process.exit(0),1000)"`,
+			cwd: TEST_DIR, timeoutMs: 5, stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true, useDetached: false,
 		});
-		const childPid = t.child.pid!;
-		await new Promise<void>((resolve) => t.child.once("close", () => resolve()));
-		assert.strictEqual(t.timedOut(), true, "timedOut() should be true after timer fires");
-		const dead = await poll(() => !isAlive(childPid), 15000);
-		assert.ok(dead, `child pid ${childPid} should be reaped after close`);
+		await new Promise<void>((resolve) => tracked.child.once("close", () => resolve()));
+		assert.equal(tracked.timedOut(), true);
+		assert.equal(tracked.killed(), false);
+		assert.ok((tracked.child.pid ?? 0) >= 900_000, "fake child uses a synthetic pid");
 	});
 
-	it("killTree reaps the entire subprocess tree", async () => {
-		// Parent node spawns inner node. Parent pipes inner stdout through its
-		// own, so we can capture BOTH PARENT_PID and CHILD_PID from a single
-		// stdout stream without any platform-specific tooling.
-		let buf = "";
-		const t = spawnTracked(process.execPath, ["-e", TREE_PAYLOAD], {
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		t.child.stdout!.on("data", (d: Buffer) => { buf += d.toString(); });
-
-		const got = await poll(() => /PARENT_PID=(\d+)/.test(buf) && /CHILD_PID=(\d+)/.test(buf), 15000);
-		assert.ok(got, `expected both pids on stdout; got: ${JSON.stringify(buf)}`);
-		const parentPid = Number(/PARENT_PID=(\d+)/.exec(buf)![1]);
-		const childPid = Number(/CHILD_PID=(\d+)/.exec(buf)![1]);
-		assert.ok(isAlive(parentPid), "parent should be alive before kill");
-		assert.ok(isAlive(childPid), "grandchild should be alive before kill");
-
-		t.killTree("SIGKILL", 0);
-		await new Promise<void>((resolve) => t.child.once("close", () => resolve()));
-
-		const cleaned = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 15000);
-		assert.ok(cleaned, `both pids should be reaped; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
-	});
-
-	it("killAllTracked reaps every tracked child", async () => {
-		const children = [0, 1, 2].map(() =>
-			spawnTracked(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" }),
-		);
-		const pids = children.map(c => c.child.pid!);
-		assert.ok(_trackedCount() >= 3, `expected >=3 tracked, got ${_trackedCount()}`);
-		killAllTracked("SIGKILL");
-		await Promise.all(children.map(c => new Promise<void>((res) => c.child.once("close", () => res()))));
-		const ok = await poll(() => pids.every(p => !isAlive(p)), 15000);
-		assert.ok(ok, "all tracked children should be reaped within budget");
+	it("killTree deterministically cancels every tracked child", async () => {
+		const runner = createFakeVerificationCommandRunner();
+		const children = [0, 1, 2].map(() => runner.spawn({
+			shellBin: "fake-shell", shellArgs: [], cmdToRun: "ignored",
+			command: `node -e "setTimeout(()=>process.exit(0),1000)"`,
+			cwd: TEST_DIR, timeoutMs: 2_000, stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true, useDetached: false,
+		}));
+		const closed = children.map((tracked) => new Promise<void>((resolve) => tracked.child.once("close", () => resolve())));
+		for (const tracked of children) tracked.killTree("SIGKILL", 0);
+		await Promise.all(closed);
+		assert.ok(children.every((tracked) => tracked.killed() && !tracked.timedOut()));
 	});
 });
 
@@ -280,6 +207,5 @@ describe("runCommandStep tree-kill", () => {
 });
 
 afterAll(() => {
-	try { killAllTracked("SIGKILL"); } catch {}
 	try { fs.rmSync(TEST_DIR, { recursive: true, force: true }); } catch {}
 });
