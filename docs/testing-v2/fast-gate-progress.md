@@ -295,3 +295,31 @@ Transform plus import consumed 94.54s of the 732.74s summed phase time (12.90%),
 One file exceeded the 15s tier-1 budget: `bg-process-persistence` completed in 18.320s.
 
 All maintenance, sidebar, and prior order failures passed. Fixes for the two failures and the budget breach have been launched.
+
+## Solo attempt 9
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 9 | One Vitest process / 3 workers | 275.82s | **FAIL** | `.profiles/testing-v2/fast-gate-run9.log` | 2 failed files, 888 passed, 4 skipped; 4 failed tests, 7,585 passed, 22 skipped |
+
+The run remained below the 300s wall-time target, but failed these files:
+
+- `commit-file-diffs-api`
+- `sidebar-actions-fork-github-link`
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 24.05s |
+| Setup | 80.90s |
+| Import | 95.92s |
+| Tests | 493.84s |
+| Environment | 86.65s |
+| **Summed** | **781.36s** |
+
+Transform plus import consumed 119.97s. This is 15.35% of the 781.36s summed phase time. Against the fixed three-worker capacity of 827.46s (`3 × 275.82s`), it is 14.50%, below the 15% capacity target.
+
+No file exceeded the 15s tier-1 budget. The slowest file completed in 11.985s.
+
+All Node UI, story, maintenance, and budget failures passed. The two remaining failures indicate residual shared-route facade interference; both files are being converted to isolated route/core tests.
