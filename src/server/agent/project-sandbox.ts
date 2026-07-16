@@ -338,7 +338,13 @@ export class ProjectSandbox {
 	private _healthInterval: ReturnType<typeof setInterval> | null = null;
 	private _healthListeners: Array<(event: SandboxHealthEvent) => void> = [];
 	private _recovering = false;
+	/** Serializes health recovery and explicit mount recreation. */
+	private _containerLifecycleTail: Promise<void> = Promise.resolve();
 	private _modelRefreshPromise: Promise<void> | null = null;
+	/** Monotonic publication generation requested by models.json writers. */
+	private _modelMountGeneration = 0;
+	/** Latest publication generation known to be mounted by the live container. */
+	private _mountedModelGeneration = 0;
 	private readonly commandRunner: CommandRunner;
 	private readonly clock: Clock;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -681,6 +687,19 @@ export class ProjectSandbox {
 		}
 	}
 
+	/** Run one container lifecycle mutation after every previously queued mutation. */
+	private async _withContainerLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this._containerLifecycleTail;
+		let release!: () => void;
+		this._containerLifecycleTail = new Promise<void>((resolve) => { release = resolve; });
+		await previous.catch(() => {});
+		try {
+			return await operation();
+		} finally {
+			release();
+		}
+	}
+
 	private async _healthCheck(): Promise<void> {
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;
@@ -697,39 +716,43 @@ export class ProjectSandbox {
 			recoveryErrors: 0,
 		} : undefined;
 		try {
-			if (this._recovering) { if (counters) counters.skippedRecovering = 1; return; }
-			// Skip if never initialized (still in first-time startup)
-			if (this._status === "starting") { if (counters) counters.skippedStarting = 1; return; }
-			// If status is "ready", check container health; if "error", retry recovery
-			if (this._status === "ready") {
-				if (!this.containerId) { if (counters) counters.skippedNoContainer = 1; return; }
-				if (counters) counters.inspectCalls = 1;
-				const isRunning = await this._isContainerRunning(this.containerId);
-				if (isRunning) { if (counters) counters.running = 1; return; }
-				if (counters) counters.dead = 1;
-			}
+			await this._withContainerLifecycle(async () => {
+				if (this._recovering) { if (counters) counters.skippedRecovering = 1; return; }
+				// Skip if never initialized (still in first-time startup)
+				if (this._status === "starting") { if (counters) counters.skippedStarting = 1; return; }
+				// If status is "ready", check container health; if "error", retry recovery
+				if (this._status === "ready") {
+					if (!this.containerId) { if (counters) counters.skippedNoContainer = 1; return; }
+					if (counters) counters.inspectCalls = 1;
+					const isRunning = await this._isContainerRunning(this.containerId);
+					if (isRunning) { if (counters) counters.running = 1; return; }
+					if (counters) counters.dead = 1;
+				}
 
-			// Container is dead or previous recovery failed — begin recovery
-			this._recovering = true;
-			const oldContainerId = this.containerId ?? "unknown";
-			this._status = "error";
-			if (counters) counters.recoveryAttempts = 1;
+				// Container is dead or previous recovery failed — begin recovery.
+				// The lifecycle queue keeps this inspect/recovery sequence atomic with
+				// models.json remounts, so neither path can create a competing container.
+				this._recovering = true;
+				const oldContainerId = this.containerId ?? "unknown";
+				this._status = "error";
+				if (counters) counters.recoveryAttempts = 1;
 
-			console.log(`[project-sandbox] Container ${oldContainerId.substring(0, 12)} died for project ${this.options.projectId}, attempting recovery...`);
-			this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
+				console.log(`[project-sandbox] Container ${oldContainerId.substring(0, 12)} died for project ${this.options.projectId}, attempting recovery...`);
+				this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
 
-			try {
-				await this.init();
-				if (counters) counters.recovered = 1;
-				console.log(`[project-sandbox] Container recovered for project ${this.options.projectId} (new container: ${this.containerId!.substring(0, 12)})`);
-				this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
-			} catch (err: any) {
-				if (counters) counters.recoveryErrors = 1;
-				console.error(`[project-sandbox] Recovery failed for project ${this.options.projectId}:`, err?.message || err);
-				// Will retry on next poll cycle — _recovering resets so next cycle can try again
-			} finally {
-				this._recovering = false;
-			}
+				try {
+					await this.init();
+					if (counters) counters.recovered = 1;
+					console.log(`[project-sandbox] Container recovered for project ${this.options.projectId} (new container: ${this.containerId!.substring(0, 12)})`);
+					this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
+				} catch (err: any) {
+					if (counters) counters.recoveryErrors = 1;
+					console.error(`[project-sandbox] Recovery failed for project ${this.options.projectId}:`, err?.message || err);
+					// Will retry on next poll cycle — _recovering resets so next cycle can try again
+				} finally {
+					this._recovering = false;
+				}
+			});
 		} finally {
 			if (diagEnabled) {
 				getCpuDiagnostics().recordTimer("project-sandbox:healthCheck", performance.now() - diagStart, counters);
@@ -742,23 +765,42 @@ export class ProjectSandbox {
 	 * Docker file bind mounts retain the replaced inode while a container is
 	 * running; recreation remounts the current inode. Named workspace/worktree
 	 * volumes survive, and the normal recovery event respawns live sessions.
+	 *
+	 * Every call represents a distinct atomic publication. Concurrent calls may
+	 * share the drain promise, but never the generation: if another publication
+	 * lands while a container is being recreated, the loop recreates it again
+	 * until the mounted generation equals the latest published generation.
 	 */
 	async refreshAgentModelMount(): Promise<void> {
+		this._modelMountGeneration++;
 		if (this._modelRefreshPromise) return this._modelRefreshPromise;
-		if (!this.containerId || this._status !== "ready") return;
+
 		const refresh = (async () => {
-			const oldContainerId = this.containerId!;
-			this._recovering = true;
-			this._status = "error";
-			this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
-			try {
-				await this._removeContainer(oldContainerId);
-				this.containerId = null;
-				await this.init();
-				this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
-				console.log(`[project-sandbox] Refreshed atomic agent models mount for project ${this.options.projectId}`);
-			} finally {
-				this._recovering = false;
+			while (this._mountedModelGeneration < this._modelMountGeneration) {
+				await this._withContainerLifecycle(async () => {
+					// Capture only after entering the lifecycle queue so publications that
+					// arrived while waiting can be mounted by this recreation.
+					const targetGeneration = this._modelMountGeneration;
+					if (this._status === "starting" && this._readyPromise) {
+						await this._readyPromise;
+					}
+					const oldContainerId = this.containerId;
+					this._recovering = true;
+					this._status = "error";
+					if (oldContainerId) {
+						this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
+					}
+					try {
+						if (oldContainerId) await this._removeContainer(oldContainerId);
+						this.containerId = null;
+						await this.init();
+						this._mountedModelGeneration = targetGeneration;
+						this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
+						console.log(`[project-sandbox] Refreshed atomic agent models mount for project ${this.options.projectId} (generation ${targetGeneration})`);
+					} finally {
+						this._recovering = false;
+					}
+				});
 			}
 		})();
 		this._modelRefreshPromise = refresh;
