@@ -107,18 +107,29 @@ export function loadVitestExecutionMap({
 			errors.push(`${item.record}: missing execution metadata for ${path}`);
 			continue;
 		}
-		const { runner, tier, project } = item.execution;
-		if (runner !== "vitest") continue;
+		let expected;
+		try {
+			expected = executionForMaterializedPath(path);
+		} catch (error) {
+			errors.push(`${item.record}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
+		const expectedHasReason = Object.hasOwn(expected, "reason");
+		const actualHasReason = Object.hasOwn(item.execution, "reason");
+		const executionMatches = item.execution.runner === expected.runner
+			&& item.execution.tier === expected.tier
+			&& item.execution.project === expected.project
+			&& actualHasReason === expectedHasReason
+			&& (!expectedHasReason || item.execution.reason === expected.reason);
+		if (!executionMatches) {
+			errors.push(`${item.record}: execution metadata for ${path} must match ${JSON.stringify(expected)}, got ${JSON.stringify(item.execution)}`);
+			continue;
+		}
+		if (expected.runner !== "vitest") continue;
+		const { project } = expected;
 		if (!ALL_VITEST_PROJECTS.has(project)) {
 			errors.push(`${item.record}: unknown Vitest execution project ${JSON.stringify(project)}`);
 			continue;
-		}
-		if ((project === "e2e") !== (tier === "e2e") || (UNIT_PROJECTS.has(project) && tier !== "unit")) {
-			errors.push(`${item.record}: invalid Vitest tier/project combination ${JSON.stringify({ tier, project })}`);
-			continue;
-		}
-		if (project === "isolated" && !String(item.execution.reason ?? "").trim()) {
-			errors.push(`${item.record}: isolated execution requires a non-empty reason`);
 		}
 		vitestOwnership.set(path, item.record);
 		projects[project].push(path);
