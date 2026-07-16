@@ -1,11 +1,24 @@
 import { EventEmitter } from "node:events";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
-import { apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, createSession, registerProject } from "./_e2e/e2e-setup.js";
 
-type GitFixtureRefs = { cwd: string; baseSha: string; headSha: string };
+type GitFixtureRefs = {
+	cwd: string;
+	projectId: string;
+	sessionId: string;
+	baseSha: string;
+	headSha: string;
+};
+
+type CommandRunnerState = {
+	execFile: (...args: any[]) => any;
+	spawn: (...args: any[]) => any;
+};
 
 const BASE_SHA = "a".repeat(40);
 const HEAD_SHA = "b".repeat(40);
@@ -27,17 +40,17 @@ const LOCAL_DIFF = [
 	"",
 ].join("\n");
 
-function localFixture(): GitFixtureRefs {
-	return { cwd: nonGitCwd(), baseSha: BASE_SHA, headSha: HEAD_SHA };
-}
-
-async function withFakeGitDiff<T>(gateway: any, run: () => Promise<T>): Promise<T> {
-	const runner = gateway.sessionManager.commandRunner;
-	const originalExecFile = runner.execFile;
-	const originalSpawn = runner.spawn;
+function installFakeGitAndGhProbes(gateway: any): () => void {
+	const runner = gateway.sessionManager.commandRunner as CommandRunnerState;
+	const original = { execFile: runner.execFile, spawn: runner.spawn };
 	runner.execFile = async (command: string, args: readonly string[]) => {
-		if (command !== "git") throw new Error(`${command} unavailable in tier-1`);
-		if (args[0] === "rev-parse") return { stdout: args.join(" ").includes(BASE_SHA) ? `${BASE_SHA}\n` : `${HEAD_SHA}\n`, stderr: "" };
+		if (command === "gh") throw new Error("[pr-walkthrough-api] gh unavailable in tier-1");
+		if (command !== "git") throw new Error(`[pr-walkthrough-api] ${command} unavailable in tier-1`);
+		if (args[0] === "rev-parse" && args.includes("--verify")) {
+			const requested = args.join(" ");
+			if (requested.includes(BASE_SHA)) return { stdout: `${BASE_SHA}\n`, stderr: "" };
+			if (requested.includes(HEAD_SHA)) return { stdout: `${HEAD_SHA}\n`, stderr: "" };
+		}
 		if (args.includes("--shortstat")) return { stdout: " 2 files changed, 2 insertions(+)\n", stderr: "" };
 		if (args.includes("--name-status")) return { stdout: "M\tREADME.md\nA\tsrc/feature.ts\n", stderr: "" };
 		if (args[0] === "diff") return { stdout: LOCAL_DIFF, stderr: "" };
@@ -56,21 +69,40 @@ async function withFakeGitDiff<T>(gateway: any, run: () => Promise<T>): Promise<
 		});
 		return child;
 	};
-	try {
-		return await run();
-	} finally {
-		runner.execFile = originalExecFile;
-		runner.spawn = originalSpawn;
-	}
+	return () => {
+		runner.execFile = original.execFile;
+		runner.spawn = original.spawn;
+	};
+}
+
+async function createLocalFixture(gateway: any): Promise<GitFixtureRefs> {
+	const root = join(gateway.bobbitDir, "pr-walkthrough-api", `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	const cwd = join(root, "repo");
+	mkdirSync(cwd, { recursive: true });
+	const project = await registerProject({
+		name: `pr-walkthrough-api-${Math.random().toString(36).slice(2)}`,
+		rootPath: root,
+		seedWorkflows: false,
+	});
+	const sessionId = await createSession({ cwd, projectId: project.id });
+	return { cwd, projectId: project.id, sessionId, baseSha: BASE_SHA, headSha: HEAD_SHA };
+}
+
+async function deleteLocalFixture(fixture: GitFixtureRefs | undefined): Promise<void> {
+	if (!fixture) return;
+	await apiFetch(`/api/sessions/${encodeURIComponent(fixture.sessionId)}?purge=true`, { method: "DELETE" }).catch(() => undefined);
+	await apiFetch(`/api/projects/${encodeURIComponent(fixture.projectId)}`, { method: "DELETE" }).catch(() => undefined);
+	rmSync(join(fixture.cwd, ".."), { recursive: true, force: true });
 }
 
 async function resolveLocal(fixture: GitFixtureRefs, overrides: Record<string, unknown> = {}): Promise<any> {
 	const resp = await apiFetch("/api/pr-walkthrough/resolve", {
 		method: "POST",
-		body: JSON.stringify({ cwd: fixture.cwd, baseSha: fixture.baseSha, headSha: fixture.headSha, ...overrides }),
+		body: JSON.stringify({ sessionId: fixture.sessionId, baseSha: fixture.baseSha, headSha: fixture.headSha, ...overrides }),
 	});
-	expect(resp.status).toBe(200);
-	return resp.json();
+	const body = await resp.json();
+	expect(resp.status, JSON.stringify(body)).toBe(200);
+	return body;
 }
 
 async function resolveFixtureWalkthrough(): Promise<any> {
@@ -95,15 +127,38 @@ function firstLineAnchor(result: any): { cardId: string; diffBlockId: string; li
 }
 
 test.describe("PR walkthrough REST API", () => {
+	let fixture: GitFixtureRefs | undefined;
+	let restoreCommandRunner: (() => void) | undefined;
+
+	test.beforeEach(async ({ gateway }) => {
+		restoreCommandRunner = installFakeGitAndGhProbes(gateway);
+		try {
+			fixture = await createLocalFixture(gateway);
+		} catch (error) {
+			restoreCommandRunner();
+			restoreCommandRunner = undefined;
+			throw error;
+		}
+	});
+
+	test.afterEach(async () => {
+		try {
+			await deleteLocalFixture(fixture);
+		} finally {
+			fixture = undefined;
+			restoreCommandRunner?.();
+			restoreCommandRunner = undefined;
+		}
+	});
+
 	// NOTE: the legacy `POST /api/pr-walkthrough/launch` test was removed with the
 	// WalkthroughAgentManager launcher (host.agents reviewer migration, design
 	// Decision F Phase 3). The reviewer is now minted via the pack `run` route +
 	// host.agents.spawn; that flow is covered by the host-agents API/browser E2Es.
 
-	test("POST resolve returns local diff cards from the injected git boundary", async ({ gateway }) => {
-		const fixture = localFixture();
-		const result = await withFakeGitDiff(gateway, () => resolveLocal(fixture));
-		expect(result.changesetId).toBe(`${fixture.baseSha.slice(0, 7)}..${fixture.headSha.slice(0, 7)}`);
+	test("POST resolve returns local diff cards from the injected git boundary", async () => {
+		const result = await resolveLocal(fixture!);
+		expect(result.changesetId).toBe(`${fixture!.baseSha.slice(0, 7)}..${fixture!.headSha.slice(0, 7)}`);
 		expect(result.changeset.provider).toBe("local");
 		expect(result.changeset.filesChanged).toBe(2);
 		expect(result.cards.length).toBeGreaterThanOrEqual(2);
@@ -148,11 +203,10 @@ test.describe("PR walkthrough REST API", () => {
 	// the "no credentials" branch — available:false + an actionable gh-auth reason,
 	// previewOnly GONE. The gh-authenticated (available:true) + gh-posting variants are
 	// unit-pinned in tests2/core/pr-walkthrough-export-mapper.test.ts (fake gh, no fence).
-	test("GitHub PR resolve faked from local SHAs reports gh-auth availability (no previewOnly)", async ({ gateway }) => {
-		const fixture = localFixture();
+	test("GitHub PR resolve faked from local SHAs reports gh-auth availability (no previewOnly)", async () => {
 		const prUrl = "https://github.com/acme/widgets/pull/42";
-		const result = await withFakeGitDiff(gateway, () => resolveLocal(fixture, { prUrl }));
-		expect(result.changesetId).toBe(`github:acme/widgets#42:${fixture.headSha.slice(0, 7)}`);
+		const result = await resolveLocal(fixture!, { prUrl });
+		expect(result.changesetId).toBe(`github:acme/widgets#42:${fixture!.headSha.slice(0, 7)}`);
 		expect(result.changeset.provider).toBe("github");
 		expect(result.changeset.prUrl).toBe(prUrl);
 		expect(result.changeset.externalUrl).toBe(prUrl);
