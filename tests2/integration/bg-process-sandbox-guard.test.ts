@@ -7,8 +7,37 @@
  * The Docker-dependent test (sandboxed session WITH containerId) lives in
  * sandbox-recovery-docker.spec.ts and runs via test:manual.
  */
+import { EventEmitter } from "node:events";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./_e2e/e2e-setup.js";
+
+function installFakeBgRuntime(manager: any): () => void {
+	const original = {
+		spawnFn: manager.spawnFn,
+		tailerFactory: manager.tailerFactory,
+		env: manager.env,
+	};
+	let nextPid = 20_000;
+	manager.spawnFn = () => Object.assign(new EventEmitter(), {
+		pid: nextPid++,
+		unref() {},
+		kill: () => true,
+	});
+	manager.tailerFactory = () => {
+		const tailer = { start() {}, stop() {} };
+		return { out: tailer, err: tailer };
+	};
+	manager.env = {
+		isHostPidAlive: () => false,
+		killHostTree: () => {},
+		dockerCli: () => ({ code: -1, stdout: "" }),
+	};
+	return () => {
+		manager.spawnFn = original.spawnFn;
+		manager.tailerFactory = original.tailerFactory;
+		manager.env = original.env;
+	};
+}
 
 async function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
 	const method = (opts.method || "GET").toUpperCase();
@@ -28,6 +57,15 @@ async function adminFetch(baseURL: string, path: string, opts: RequestInit = {})
 }
 
 test.describe("BgProcess Sandbox Guard", () => {
+	let restoreBgRuntime: () => void;
+
+	test.beforeAll(async ({ gateway }) => {
+		restoreBgRuntime = installFakeBgRuntime(gateway.bgProcessManager);
+	});
+
+	test.afterAll(async () => {
+		restoreBgRuntime();
+	});
 
 	test("sandboxed session without containerId returns 403", async ({ gateway }) => {
 		// Create a normal session

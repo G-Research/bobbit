@@ -2,63 +2,68 @@
 // Source: tests/rpc-bridge-lifecycle.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
+import { EventEmitter } from "node:events";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 
 import { RpcBridge } from "../../src/server/agent/rpc-bridge.ts";
 
-function writeCrashOnPromptCli(): string {
-	const file = `${os.tmpdir()}/bobbit-rpc-crash-${process.pid}.mjs`;
-	fs.writeFileSync(file, `
-process.stdin.setEncoding("utf8");
-let received = "";
-function onData(chunk) {
-  received += chunk;
-  const newline = received.indexOf("\\n");
-  if (newline < 0) return;
-  const command = JSON.parse(received.slice(0, newline));
-  if (command.type !== "prompt" || !command.id) process.exit(2);
-  process.stdin.off("data", onData);
-  process.stdin.pause();
-  process.stdin.destroy();
-  process.exitCode = 17;
-  process.stderr.end("synthetic pi child crash after pending prompt\\n");
+interface FakeRpcChild extends EventEmitter {
+	pid: number;
+	stdin: EventEmitter & { write(data: string): boolean };
+	stdout: EventEmitter;
+	stderr: EventEmitter;
+	kill(signal?: string): boolean;
 }
-process.stdin.on("data", onData);
-process.stdout.end('{"type":"fixture_ready"}\\n');
-`, "utf-8");
-	return file;
+
+function makeCrashOnPromptChild(): FakeRpcChild {
+	const child = new EventEmitter() as FakeRpcChild;
+	child.pid = 17;
+	child.stdout = new EventEmitter();
+	child.stderr = new EventEmitter();
+	child.stdin = Object.assign(new EventEmitter(), {
+		write(data: string): boolean {
+			const command = JSON.parse(data.trim());
+			assert.equal(command.type, "prompt");
+			assert.ok(command.id);
+			queueMicrotask(() => {
+				child.stderr.emit("data", Buffer.from("synthetic pi child crash after pending prompt\n"));
+				child.emit("exit", 17, null);
+			});
+			return true;
+		},
+	});
+	child.kill = () => true;
+	return child;
+}
+
+/**
+ * Attach the in-memory child to the real lifecycle handlers without invoking
+ * RpcBridge.start(), whose only additional responsibility here is OS spawning.
+ */
+function attachFakeChild(bridge: RpcBridge, child: FakeRpcChild): void {
+	const internals = bridge as any;
+	internals.process = child;
+	internals._attachProcessHandlers();
 }
 
 describe("RpcBridge lifecycle", () => {
 	it("rejects a pending prompt exactly once when the Pi child exits unexpectedly", async () => {
-		const cliFile = writeCrashOnPromptCli();
-		const bridge = new RpcBridge({ cliPath: cliFile });
+		const bridge = new RpcBridge({});
+		attachFakeChild(bridge, makeCrashOnPromptChild());
 		let processExitEvents = 0;
-		let resolveReady!: () => void;
-		let rejectReady!: (error: Error) => void;
-		const ready = new Promise<void>((resolve, reject) => {
-			resolveReady = resolve;
-			rejectReady = reject;
-		});
 		let resolveProcessExit!: (event: any) => void;
 		const processExit = new Promise<any>((resolve) => {
 			resolveProcessExit = resolve;
 		});
 		const unsubscribe = bridge.onEvent((event) => {
-			if (event?.type === "fixture_ready") resolveReady();
 			if (event?.type === "process_exit") {
 				processExitEvents++;
-				rejectReady(new Error("synthetic Pi child exited before its readiness handshake"));
 				resolveProcessExit(event);
 			}
 		});
 
 		try {
-			await Promise.all([bridge.start(), ready]);
-
 			let rejectionCount = 0;
 			const promptResult = bridge.prompt("trigger crash").then(
 				(value) => ({ ok: true as const, value }),
@@ -72,7 +77,7 @@ describe("RpcBridge lifecycle", () => {
 			assert.equal(result.ok, false, "prompt should reject when the child exits before replying");
 			assert.match(String(result.error?.message || result.error), /Agent process exited with code 17/);
 			assert.match(String(result.error?.message || result.error), /synthetic pi child crash/);
-			assert.equal(exitEvent.code, 17, "process_exit should carry the real child exit code");
+			assert.equal(exitEvent.code, 17, "process_exit should carry the child exit code");
 			assert.equal(rejectionCount, 1, "pending prompt promise must reject exactly once");
 			assert.equal(processExitEvents, 1, "process_exit event should be emitted exactly once");
 			assert.equal(bridge.running, false, "bridge should clear its process after exit");
@@ -84,7 +89,6 @@ describe("RpcBridge lifecycle", () => {
 		} finally {
 			unsubscribe();
 			await bridge.stop();
-			fs.rmSync(cliFile, { force: true });
 		}
 	});
 });

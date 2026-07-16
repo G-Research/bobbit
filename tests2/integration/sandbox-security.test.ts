@@ -9,6 +9,7 @@
  * Uses the per-project token model: one token per project, sessions
  * are tracked under the project scope via addSession().
  */
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -36,13 +37,43 @@ function sandboxFetch(baseURL: string, path: string, token: string, opts: Reques
 	});
 }
 
+function installFakeBgRuntime(manager: any): () => void {
+	const original = {
+		spawnFn: manager.spawnFn,
+		tailerFactory: manager.tailerFactory,
+		env: manager.env,
+	};
+	let nextPid = 30_000;
+	manager.spawnFn = () => Object.assign(new EventEmitter(), {
+		pid: nextPid++,
+		unref() {},
+		kill: () => true,
+	});
+	manager.tailerFactory = () => {
+		const tailer = { start() {}, stop() {} };
+		return { out: tailer, err: tailer };
+	};
+	manager.env = {
+		isHostPidAlive: () => false,
+		killHostTree: () => {},
+		dockerCli: () => ({ code: -1, stdout: "" }),
+	};
+	return () => {
+		manager.spawnFn = original.spawnFn;
+		manager.tailerFactory = original.tailerFactory;
+		manager.env = original.env;
+	};
+}
+
 test.describe("Sandbox Security Boundaries", () => {
 	let scopedToken: string;
 	let sessionId: string;
 	const goalId = "test-goal-id";
 	const projectId = "test-project-for-security";
+	let restoreBgRuntime: () => void;
 
 	test.beforeAll(async ({ gateway }) => {
+		restoreBgRuntime = installFakeBgRuntime(gateway.bgProcessManager);
 		// Create a real session via admin token
 		const res = await adminFetch(gateway.baseURL, "/api/sessions", {
 			method: "POST",
@@ -59,7 +90,11 @@ test.describe("Sandbox Security Boundaries", () => {
 	});
 
 	test.afterAll(async ({ gateway }) => {
-		await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+		try {
+			await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+		} finally {
+			restoreBgRuntime();
+		}
 	});
 
 	// ── BLOCKED endpoints ──────────────────────────────────────────────
@@ -102,7 +137,8 @@ test.describe("Sandbox Security Boundaries", () => {
 			method: "POST",
 			body: JSON.stringify({ command: "echo hello" }),
 		});
-		// bg-processes are now allowed for sandbox tokens on own session (spawns via docker exec)
+		// The authorization path permits background work on the token's own session;
+		// the manager's injected SpawnFn keeps this tier-1 assertion in-process.
 		expect(res.status).toBe(201);
 	});
 
