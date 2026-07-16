@@ -485,3 +485,51 @@ Phase totals:
 No file exceeded the 15s tier-1 budget. The slowest file completed in 12.717s.
 
 All previously isolated gate reminder/status, proposal, maintenance, and preview tests passed. Isolation of the `gate-resign-cancel` suite has been launched.
+
+## Solo attempt 17
+
+| Date | Attempt | Process / workers | Wall time | Result | Final tally |
+|---|---:|---|---:|---|---|
+| 2026-07-16 | 17 | One Vitest process / 3 workers | 273.85s | **PASS** | 890 passed files, 4 skipped; 7,589 passed tests, 22 skipped; zero budget breaches |
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 7.34s |
+| Setup | 86.51s |
+| Import | 85.29s |
+| Tests | 493.75s |
+| Environment | 89.35s |
+| **Summed** | **762.24s** |
+
+## Solo attempt 18
+
+| Date | Attempt | Process / workers | Wall time | Result | Final tally |
+|---|---:|---|---:|---|---|
+| 2026-07-16 | 18 | One Vitest process / 3 workers | 273.97s | **PASS** | 890 passed files, 4 skipped; 7,589 passed tests, 22 skipped; zero budget breaches |
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 7.99s |
+| Setup | 63.60s |
+| Import | 85.18s |
+| Tests | 515.94s |
+| Environment | 86.97s |
+| **Summed** | **759.68s** |
+
+Attempts 17 and 18 are consecutive qualifying solo runs: both were green, below 300s, and had no tier-1 budget breaches.
+
+## First simultaneous 3x attempt
+
+All three `npm run test:unit` processes started simultaneously.
+
+| Date | Run | Wall time | Test result | Budget result | Overall result |
+|---|---:|---:|---|---|---|
+| 2026-07-16 | 1 | 562.74s | All 7,589 tests passed | 12 breaches | **FAIL** |
+| 2026-07-16 | 2 | 575.28s | 3 `transcript-sanitizer` failures | Numerous breaches | **FAIL** |
+| 2026-07-16 | 3 | 583.38s | The same 3 `transcript-sanitizer` failures | Numerous breaches | **FAIL** |
+
+The transcript failures use a startup-global root, allowing simultaneous processes to interfere. Common heavy files also exceeded their solo budgets under concurrent disk and cache contention. Transcript-root injection and process-scoped cache investigation have been launched, together with six heavy-tail fixture optimizations. A new simultaneous 3x attempt is required after those changes.
