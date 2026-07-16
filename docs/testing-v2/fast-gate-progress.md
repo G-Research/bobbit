@@ -410,3 +410,29 @@ Phase totals:
 | Tests | 491.28s |
 | Environment | 85.17s |
 | **Summed** | **723.67s** |
+
+## Solo attempt 14
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 14 | One Vitest process / 3 workers | 347.15s | **FAIL** | `.profiles/testing-v2/fast-gate-run14.log` | 2 failed files, 888 passed, 4 skipped; 1 failed test, 7,572 passed, 38 skipped |
+
+The run exceeded the 300s wall-time target and failed these files:
+
+- `proposal-goal-workflow-validation` — suite setup failed when the `beforeAll` route-visibility check returned 404.
+- `gate-status-cache-ws` — the test exhausted its 15s timeout and retries.
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 27.92s |
+| Setup | 64.97s |
+| Import | 101.68s |
+| Tests | 590.81s |
+| Environment | 88.20s |
+| **Summed** | **873.58s** |
+
+One file exceeded the 15s tier-1 budget: `gate-status-cache-ws` completed in 67.683s.
+
+Attempt 12 remains the first qualifying green run. Attempt 14 was killed after Vitest emitted its summary. Both newly exposed shared-gateway tests are being fully isolated.
