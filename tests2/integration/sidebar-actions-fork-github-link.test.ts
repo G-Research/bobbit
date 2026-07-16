@@ -2,7 +2,7 @@
 //
 // This file exercises the REST decision boundaries without provisioning Git
 // processes. Worktree creation itself is covered by the dedicated Git suites.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { rebaseAgentTranscriptCwdMetadataFile } from "../../src/server/agent/transcript-sanitizer.js";
@@ -15,29 +15,18 @@ import {
 	deleteSession,
 	nonGitCwd,
 	registerProject,
-	waitForSessionStatus,
 } from "./_e2e/e2e-setup.js";
 
-async function pollUntil<T>(
-	fn: () => Promise<T> | T,
-	opts: { timeoutMs: number; intervalMs: number; label: string },
-): Promise<T> {
-	const start = Date.now();
-	for (;;) {
-		const value = await fn();
-		if (value) return value;
-		if (Date.now() - start > opts.timeoutMs) throw new Error(`pollUntil timed out: ${opts.label}`);
-		await new Promise((resolve) => setTimeout(resolve, opts.intervalMs));
-	}
-}
-
-async function seedSessionTranscript(gateway: any, sessionId: string, entries: unknown[]): Promise<string> {
-	const jsonlPath = await pollUntil<string>(() => {
-		const file = gateway.sessionManager.getPersistedSession(sessionId)?.agentSessionFile;
-		return file || "";
-	}, { timeoutMs: 5_000, intervalMs: 25, label: `session ${sessionId} jsonl path persisted` });
+function seedSessionTranscript(gateway: any, sessionId: string, entries: unknown[]): string {
+	const session = gateway.sessionManager.getSession(sessionId);
+	const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+	if (!session || !persisted?.projectId) throw new Error(`session ${sessionId} was not persisted`);
+	const jsonlPath = join(gateway.bobbitDir, "state", "session-prompts", `${sessionId}-fork-source.jsonl`);
 	mkdirSync(dirname(jsonlPath), { recursive: true });
-	appendFileSync(jsonlPath, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+	writeFileSync(jsonlPath, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+	session.agentSessionFile = jsonlPath;
+	const ctx = gateway.sessionManager.getProjectContextManager().getOrCreate(persisted.projectId);
+	ctx.sessionStore.update(sessionId, { agentSessionFile: jsonlPath });
 	return jsonlPath;
 }
 
@@ -220,25 +209,32 @@ test.describe.serial("fork worktree choice", () => {
 	let baseDir = "";
 	let repoPath = "";
 	let projectId = "";
+	let sourceIds: string[] = [];
 
-	test.beforeAll(async () => {
-		baseDir = realpathSync(tmpdir()) + `/bobbit-v2-fork-seam-${process.pid}-${Date.now()}`;
+	test.beforeEach(async () => {
+		baseDir = mkdtempSync(join(realpathSync(tmpdir()), `bobbit-v2-fork-seam-${process.pid}-`));
 		repoPath = join(baseDir, "repo");
 		mkdirSync(repoPath, { recursive: true });
-		projectId = (await registerProject({ name: `fork-seam-${Date.now()}`, rootPath: repoPath, seedWorkflows: false })).id;
+		projectId = (await registerProject({ name: `fork-seam-${process.pid}-${Date.now()}`, rootPath: repoPath, seedWorkflows: false })).id;
+		sourceIds = [];
 	});
 
-	test.afterAll(async () => {
+	test.afterEach(async () => {
+		for (const sourceId of sourceIds) await deleteSession(sourceId).catch(() => {});
 		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		if (baseDir) rmSync(baseDir, { recursive: true, force: true });
+		baseDir = "";
+		repoPath = "";
+		projectId = "";
+		sourceIds = [];
 	});
 
 	test("newWorktree selects repo provisioning while reuse selects the source cwd", async ({ gateway }) => {
 		const sourceId = await createSession({ cwd: repoPath, projectId });
-		await waitForSessionStatus(sourceId, "idle");
-		const sourceWorktree = join(repoPath, ".synthetic-source-worktree");
+		sourceIds.push(sourceId);
+		const sourceWorktree = join(repoPath, `.synthetic-source-worktree-${sourceId}`);
 		seedSyntheticSourceWorktree(gateway, sourceId, projectId, sourceWorktree, repoPath);
-		await seedSessionTranscript(gateway, sourceId, [transcriptMessage(`fork-${sourceId}`, "FORK_WT_MARKER")]);
+		seedSessionTranscript(gateway, sourceId, [transcriptMessage(`fork-${sourceId}`, "FORK_WT_MARKER")]);
 
 		try {
 			await withForkCreateSeam(gateway, repoPath, async (captures) => {
@@ -274,11 +270,11 @@ test.describe.serial("fork worktree choice", () => {
 
 	test("newWorktree rebases cloned runtime cwd metadata off a stale source cwd", async ({ gateway }) => {
 		const sourceId = await createSession({ cwd: repoPath, projectId });
-		await waitForSessionStatus(sourceId, "idle");
+		sourceIds.push(sourceId);
 		const sourceWorktree = join(repoPath, `.synthetic-stale-${sourceId}`);
 		seedSyntheticSourceWorktree(gateway, sourceId, projectId, sourceWorktree, repoPath);
 		const marker = `FORK_STALE_CWD_${Date.now()}`;
-		const sourceJsonl = await seedSessionTranscript(gateway, sourceId, [
+		const sourceJsonl = seedSessionTranscript(gateway, sourceId, [
 			transcriptMessage(`${marker}-prompt`, `${marker} hello from stale source`),
 		]);
 		ensureStaleRuntimeCwdMetadata(sourceJsonl, sourceWorktree, sourceId);

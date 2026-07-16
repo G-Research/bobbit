@@ -14,7 +14,7 @@
  * layer ABOVE runBatchGitStatus is what these tests actually verify — that
  * layer doesn't care whether the producer is git or a fake.
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, deleteSession, defaultProjectId, nonGitCwd } from "./_e2e/e2e-setup.js";
@@ -35,8 +35,7 @@ test.beforeAll(async () => {
 // repo — the fake returns whatever we program). We still need cwd to exist
 // so the handler's fs.existsSync check passes.
 async function mkFakeSession(tag: string): Promise<{ id: string; cwd: string }> {
-	const cwd = join(nonGitCwd(), `gitfake-${tag}-${process.pid}-${Date.now()}`);
-	mkdirSync(cwd, { recursive: true });
+	const cwd = mkdtempSync(join(nonGitCwd(), `gitfake-${tag}-${process.pid}-`));
 	const projectId = await defaultProjectId();
 	const resp = await apiFetch("/api/sessions", {
 		method: "POST",
@@ -57,8 +56,8 @@ async function mkFakeSession(tag: string): Promise<{ id: string; cwd: string }> 
 test.describe.configure({ timeout: 60_000 });
 
 test.describe("git-status server cache + single-flight", () => {
-	let sessionId: string;
-	let sessionCwd: string;
+	let sessionId = "";
+	let sessionCwd = "";
 
 	// The fake's shape matches GitStatusResult from the server.
 	function okResult(overrides: Record<string, unknown> = {}) {
@@ -81,48 +80,70 @@ test.describe("git-status server cache + single-flight", () => {
 		};
 	}
 
-	// Delay controls how long the fake takes to resolve — used to exercise
-	// in-flight single-flight coalescing.
-	let fakeDelayMs = 0;
-	// Error controls whether the fake throws (for testing error-not-cached).
+	// Per-test producer state keeps this suite independent from other files sharing
+	// the fork-scoped server module. A gate holds the producer in flight without a
+	// wall-clock sleep, making coalescing deterministic.
 	let fakeShouldThrow = false;
-	// Null controls whether the fake returns null (not-a-repo).
 	let fakeReturnsNull = false;
+	let fakeGate: {
+		started(): void;
+		allStarted: Promise<void>;
+		release(): void;
+		waitForRelease: Promise<void>;
+	} | undefined;
 
-	test.beforeAll(async () => {
+	function blockFakeUntilReleased(expectedStarts: number): NonNullable<typeof fakeGate> {
+		let starts = 0;
+		let resolveStarted!: () => void;
+		let resolveRelease!: () => void;
+		const gate = {
+			started: () => { if (++starts === expectedStarts) resolveStarted(); },
+			allStarted: new Promise<void>((resolve) => { resolveStarted = resolve; }),
+			release: () => resolveRelease(),
+			waitForRelease: new Promise<void>((resolve) => { resolveRelease = resolve; }),
+		};
+		fakeGate = gate;
+		return gate;
+	}
+
+	test.beforeEach(async () => {
 		const s = await mkFakeSession("cache");
 		sessionId = s.id;
 		sessionCwd = s.cwd;
+		fakeShouldThrow = false;
+		fakeReturnsNull = false;
+		fakeGate = undefined;
+		serverModule.invalidateGitStatusCache(sessionCwd);
+		serverModule.__resetGitStatusInvocationCount();
 		serverModule.__setGitStatusFake(async (_cwd: string, _cid: string | undefined, opts?: { untracked?: boolean }) => {
-			// Fake-producer artificial latency — NOT a flakiness sleep. Used to test
-			// single-flight coalescing under simulated slow git-status.
-			if (fakeDelayMs > 0) await new Promise((r) => setTimeout(r, fakeDelayMs));
+			const gate = fakeGate;
+			if (gate) {
+				gate.started();
+				await gate.waitForRelease;
+			}
 			if (fakeShouldThrow) throw new Error("fake git error");
 			if (fakeReturnsNull) return null;
 			return okResult({ untrackedIncluded: opts?.untracked === true });
 		});
 	});
 
-	test.afterAll(async () => {
+	test.afterEach(async () => {
+		fakeGate?.release();
 		serverModule.__clearGitStatusFake();
+		if (sessionCwd) serverModule.invalidateGitStatusCache(sessionCwd);
 		if (sessionId) await deleteSession(sessionId);
-	});
-
-	test.beforeEach(async () => {
-		fakeDelayMs = 0;
-		fakeShouldThrow = false;
-		fakeReturnsNull = false;
-		serverModule.invalidateGitStatusCache(sessionCwd);
-		serverModule.__resetGitStatusInvocationCount();
+		sessionId = "";
+		sessionCwd = "";
 	});
 
 	test("5 concurrent calls coalesce into 1 underlying git invocation", async () => {
-		fakeDelayMs = 80; // enough that all 5 arrive while first is in-flight
-		const calls = await Promise.all(
-			Array.from({ length: 5 }, () =>
-				apiFetch(`/api/sessions/${sessionId}/git-status`),
-			),
+		const gate = blockFakeUntilReleased(1);
+		const pending = Promise.all(
+			Array.from({ length: 5 }, () => apiFetch(`/api/sessions/${sessionId}/git-status`)),
 		);
+		await gate.allStarted;
+		gate.release();
+		const calls = await pending;
 		for (const r of calls) {
 			if (r.status !== 200) {
 				const body = await r.text().catch(() => "<no body>");
@@ -135,19 +156,18 @@ test.describe("git-status server cache + single-flight", () => {
 	});
 
 	test("in-flight single-flight — 4 callers share one invocation", async () => {
-		fakeDelayMs = 80;
+		const gate = blockFakeUntilReleased(1);
 		const burst = Promise.all(
-			Array.from({ length: 4 }, () =>
-				apiFetch(`/api/sessions/${sessionId}/git-status`),
-			),
+			Array.from({ length: 4 }, () => apiFetch(`/api/sessions/${sessionId}/git-status`)),
 		);
+		await gate.allStarted;
+		gate.release();
 		const results = await burst;
 		for (const r of results) expect(r.status).toBe(200);
 		expect(serverModule.__getGitStatusInvocationCount()).toBe(1);
 	});
 
-	test("TTL expiry re-runs git after 750ms", async () => {
-		fakeDelayMs = 0;
+	test("forced TTL expiry re-runs git", async () => {
 		const before = serverModule.__getGitStatusInvocationCount();
 		const r1 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 		expect(r1.status).toBe(200);
@@ -161,23 +181,25 @@ test.describe("git-status server cache + single-flight", () => {
 	});
 
 	test("within TTL a second call is a cache hit (1 invocation)", async () => {
-		fakeDelayMs = 0;
 		const before = serverModule.__getGitStatusInvocationCount();
 		const r1 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 		expect(r1.status).toBe(200);
-		// Fire second call well within the 750ms TTL window.
+		// Fire the second call immediately, well within the TTL window.
 		const r2 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 		expect(r2.status).toBe(200);
 		expect(serverModule.__getGitStatusInvocationCount() - before).toBe(1);
 	});
 
 	test("?untracked=1 and summary use separate cache keys", async () => {
-		fakeDelayMs = 50;
+		const gate = blockFakeUntilReleased(2);
 		const before = serverModule.__getGitStatusInvocationCount();
-		const [rSum, rU] = await Promise.all([
+		const pending = Promise.all([
 			apiFetch(`/api/sessions/${sessionId}/git-status`),
 			apiFetch(`/api/sessions/${sessionId}/git-status?untracked=1`),
 		]);
+		await gate.allStarted;
+		gate.release();
+		const [rSum, rU] = await pending;
 		expect(rSum.status).toBe(200);
 		expect(rU.status).toBe(200);
 
@@ -190,7 +212,6 @@ test.describe("git-status server cache + single-flight", () => {
 	});
 
 	test("?fetch=true invalidates the cache entry", async () => {
-		fakeDelayMs = 0;
 		const [a, b] = await Promise.all([
 			apiFetch(`/api/sessions/${sessionId}/git-status`),
 			apiFetch(`/api/sessions/${sessionId}/git-status`),

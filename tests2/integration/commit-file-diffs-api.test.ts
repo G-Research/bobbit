@@ -139,7 +139,8 @@ async function expectSessionCommitDiffValidation(endpoint: string, targetSha: st
 	expect((await invalidCommitResp.json()).error).toBe("Invalid commit");
 }
 
-test.beforeAll(async ({ gateway }) => {
+test.beforeEach(async ({ gateway }) => {
+	restoreCommandRunner = undefined;
 	installCannedGitRunner(gateway);
 	projectId = (await defaultProjectId())!;
 	const workspaceRoot = path.join(harnessDefaultProjectRoot(), ".e2e-workspaces");
@@ -167,7 +168,7 @@ test.beforeAll(async ({ gateway }) => {
 	})).toBe(true);
 });
 
-test.afterAll(async ({ gateway }) => {
+test.afterEach(async ({ gateway }) => {
 	const context = projectId ? gateway.projectContextManager.getOrCreate(projectId) : undefined;
 	if (sessionId) {
 		await gateway.sessionManager.terminateSession(sessionId).catch(() => {});
@@ -175,8 +176,15 @@ test.afterAll(async ({ gateway }) => {
 	}
 	if (goalId) await context?.goalManager.deleteGoal(goalId).catch(() => {});
 	restoreCommandRunner?.();
+	restoreCommandRunner = undefined;
 	targetCommits.clear();
 	if (sharedRoot) cleanupDir(sharedRoot);
+	sharedRoot = "";
+	sessionRoot = "";
+	goalRoot = "";
+	projectId = "";
+	sessionId = "";
+	goalId = "";
 });
 
 // Shared gateway state and the injected command runner are intentionally serial.
