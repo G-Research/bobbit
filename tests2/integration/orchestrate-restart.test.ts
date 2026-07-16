@@ -16,10 +16,21 @@
  */
 import { readFileSync } from "node:fs";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession, connectWs, type WsMsg } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { apiFetch, createSession, deleteSession } from "./_e2e/e2e-setup.js";
+import {
+	createSessionTracker,
+	nextUserMessage,
+	seedSessionTranscript,
+	waitForSessionIdle,
+} from "./helpers/session-fixtures.js";
 
 test.describe.configure({ mode: "serial" });
+
+const sessions = createSessionTracker();
+
+async function createTrackedSession(): Promise<string> {
+	return sessions.add(await createSession());
+}
 
 async function spawnChild(ownerId: string, instructions: string, readOnly = false): Promise<string> {
 	const resp = await apiFetch(`/api/sessions/${ownerId}/orchestrate/spawn`, {
@@ -27,7 +38,7 @@ async function spawnChild(ownerId: string, instructions: string, readOnly = fals
 		body: JSON.stringify({ instructions, read_only: readOnly }),
 	});
 	expect(resp.status).toBe(201);
-	return (await resp.json()).childSessionId as string;
+	return sessions.add((await resp.json()).childSessionId as string);
 }
 
 async function listChildren(ownerId: string): Promise<string[]> {
@@ -54,29 +65,11 @@ async function refreshPromptSections(sessionId: string): Promise<void> {
 	expect(resp.status).toBe(200);
 }
 
-function messageText(m: WsMsg): string {
-	const msg = m.data?.message;
-	return Array.isArray(msg?.content)
-		? msg.content.map((c: any) => c?.text ?? "").join("")
-		: "";
-}
-
-/** Predicate: parent received an [ORCHESTRATION] live-children reminder. */
-function orchestrationReminderPredicate(): (m: WsMsg) => boolean {
-	return (m) => {
-		if (m.type !== "event" || m.data?.type !== "message_end") return false;
-		const msg = m.data?.message;
-		if (msg?.role !== "user") return false;
-		const text = messageText(m);
-		return text.includes("[ORCHESTRATION]") && text.includes("team_wait");
-	};
-}
-
 test.describe("orchestration restart survival", () => {
+	test.afterEach(async ({ gateway }) => sessions.cleanup(gateway));
 	test("children survive a restart, the parent is reminded, and team_wait re-collects", async ({ gateway }) => {
-		const parent = await createSession();
+		const parent = await createTrackedSession();
 		const child = await spawnChild(parent, "restart-survivor helper");
-		const parentWs = await connectWs(parent);
 		try {
 			// Child is tracked before the simulated restart.
 			expect(await listChildren(parent)).toContain(child);
@@ -90,11 +83,13 @@ test.describe("orchestration restart survival", () => {
 			// 1) Children SURVIVE — still tracked after the rebuild.
 			expect(await listChildren(parent)).toContain(child);
 
-			// 2) Parent is REMINDED of its live children (capture cursor first
-			// so we match the reminder even if it arrives before the waiter).
-			const cursor = parentWs.messageCount();
+			// 2) Parent is REMINDED of its live children. Observe the bridge event
+			// directly so the assertion does not pay WebSocket auth/poll latency.
+			const reminder = nextUserMessage(gateway, parent);
 			await gateway.orchestrationCore.remindOwnersWithLiveChildren((h: any) => h.childKind !== "team");
-			await parentWs.waitForFrom(cursor, orchestrationReminderPredicate(), 15_000);
+			const reminderText = await reminder;
+			expect(reminderText).toContain("[ORCHESTRATION]");
+			expect(reminderText).toContain("team_wait");
 
 			// 3) The parent re-collects via the SHARED team_wait — no transparent
 			// resumption, just the normal wait path.
@@ -114,7 +109,6 @@ test.describe("orchestration restart survival", () => {
 			expect(dismiss.status).toBe(200);
 			expect(await listChildren(parent)).not.toContain(child);
 		} finally {
-			parentWs.close();
 			await deleteSession(parent);
 		}
 	});
@@ -128,15 +122,13 @@ test.describe("orchestration restart survival", () => {
 	// the persisted output rather than `timeout`.
 	test("team_wait collects a restored DORMANT child's persisted output well under the timeout", async ({ gateway }) => {
 		const sm = gateway.sessionManager;
-		const parent = await createSession();
+		const parent = await createTrackedSession();
 		const child = await spawnChild(parent, "dormant-collect helper");
 		try {
-			// Let the child run its spawn prompt to completion (mock agent → "OK")
-			// so a persisted transcript with assistant output exists.
-			await pollUntil(async () => sm.getSession(child)?.status === "idle" ? true : null,
-				{ timeoutMs: 15_000, intervalMs: 50, label: "child idle before dormancy" });
-			await pollUntil(async () => (await sm.getSessionOutput(child)).includes("OK") ? true : null,
-				{ timeoutMs: 15_000, intervalMs: 50, label: "child output persisted" });
+			// Settle through the manager's event stream, then persist the exact
+			// assistant output the dormant read path must collect.
+			await waitForSessionIdle(gateway, child);
+			seedSessionTranscript(gateway, child, [{ role: "assistant", text: "OK" }]);
 
 			// Simulate the restart: re-add the child as DORMANT from its persisted
 			// record (the boot delegate-dormancy path). The index already tracks it.
@@ -178,17 +170,16 @@ test.describe("orchestration restart survival", () => {
 	// primitive (teardown live SessionInfo + restoreSessions()).
 	test("a delegate child is restored LIVE with its task intact across a restoreSessions reboot", async ({ gateway }) => {
 		const sm = gateway.sessionManager;
-		const parent = await createSession();
+		const parent = await createTrackedSession();
 		// Distinctive marker so we can assert it lands in the rebuilt system prompt.
 		const marker = "restart-live-survivor-MARKER";
 		const child = await spawnChild(parent, `${marker} helper task`);
+		const originalRestoreOne = (sm as any).restoreOneSession;
 		try {
-			// Drive the child's spawn prompt to completion (mock agent → "OK") so a
-			// persisted transcript + agentSessionFile exist before the reboot.
-			await pollUntil(async () => sm.getSession(child)?.status === "idle" ? true : null,
-				{ timeoutMs: 15_000, intervalMs: 50, label: "child idle before reboot" });
-			await pollUntil(async () => (await sm.getSessionOutput(child)).includes("OK") ? true : null,
-				{ timeoutMs: 15_000, intervalMs: 50, label: "child output persisted" });
+			// Settle through the manager's event stream and persist a deterministic
+			// transcript for the real restore path.
+			await waitForSessionIdle(gateway, child);
+			seedSessionTranscript(gateway, child, [{ role: "assistant", text: "OK" }]);
 			expect(sm.getPersistedSession(child)?.agentSessionFile).toBeTruthy();
 
 			// ── Simulate a clean gateway reboot (steer-gateway-restart.spec.ts
@@ -201,6 +192,11 @@ test.describe("orchestration restart survival", () => {
 			try { await liveChild.rpcClient.stop(); } catch { /* already dead */ }
 			sm.sessions.delete(child);
 
+			// Restore only the torn-down child; the parent remains live and should not
+			// pay a second setup pipeline during this focused reboot assertion.
+			(sm as any).restoreOneSession = async (persisted: any) => {
+				if (persisted.id === child) return originalRestoreOne.call(sm, persisted);
+			};
 			await sm.restoreSessions();
 
 			// CORE REPRO — the delegate must come back LIVE, not a dormant
@@ -241,13 +237,14 @@ test.describe("orchestration restart survival", () => {
 				"before-prompt refresh should retain restored delegate task instructions in prompt sections",
 			).toContain(marker);
 		} finally {
+			(sm as any).restoreOneSession = originalRestoreOne;
 			await deleteSession(child).catch(() => {});
 			await deleteSession(parent).catch(() => {});
 		}
 	});
 
 	test("a child whose owner is gone/archived is reaped on rebuild", async ({ gateway }) => {
-		const parent = await createSession();
+		const parent = await createTrackedSession();
 		const child = await spawnChild(parent, "to-be-orphaned helper");
 		expect(await listChildren(parent)).toContain(child);
 
@@ -266,7 +263,7 @@ test.describe("orchestration restart survival", () => {
 
 	test("restoreSessions() sends restart collection reminders only for collectable child kinds", async ({ gateway }) => {
 		const sm = gateway.sessionManager;
-		const parent = await createSession();
+		const parent = await createTrackedSession();
 		const parentProjectId = sm.getPersistedSession(parent)?.projectId;
 		const delegateChild = await spawnChild(parent, "collectable delegate restart-reminder helper");
 		const prWalkthroughInfo = await sm.createSession(
@@ -291,24 +288,22 @@ test.describe("orchestration restart survival", () => {
 			undefined, undefined, undefined,
 			{ parentSessionId: parent, childKind: "team", projectId: parentProjectId, title: "Team Worker" },
 		);
-		const prWalkthroughChild = prWalkthroughInfo.id;
-		const hostAgentsChild = hostAgentsInfo.id;
-		const teamChild = teamInfo.id;
+		const prWalkthroughChild = sessions.add(prWalkthroughInfo.id);
+		const hostAgentsChild = sessions.add(hostAgentsInfo.id);
+		const teamChild = sessions.add(teamInfo.id);
 		const persistedHostAgent = sm.getPersistedSession(hostAgentsChild);
 		expect(persistedHostAgent?.childKind).toBe("host-agents");
 		expect(persistedHostAgent?.title).toBe("PR Walkthrough");
 		expect(persistedHostAgent?.role).toBe("pr-reviewer");
 		expect(persistedHostAgent?.readOnly).toBe(true);
-		const parentWs = await connectWs(parent);
 
 		const origRestoreOne = (sm as any).restoreOneSession;
 		(sm as any).restoreOneSession = async () => { /* skip heavy live-session restore */ };
 
 		try {
-			const cursor = parentWs.messageCount();
+			const reminder = nextUserMessage(gateway, parent);
 			await sm.restoreSessions();
-			const reminder = await parentWs.waitForFrom(cursor, orchestrationReminderPredicate(), 15_000);
-			const reminderText = messageText(reminder);
+			const reminderText = await reminder;
 
 			expect(reminderText).toContain(delegateChild);
 			expect(reminderText, "legacy PR Walkthrough child sessions must not receive generic restart team_wait reminders").not.toContain(prWalkthroughChild);
@@ -316,7 +311,6 @@ test.describe("orchestration restart survival", () => {
 			expect(reminderText).not.toContain(teamChild);
 			expect(reminderText).toContain("You have 1 live child agent(s)");
 		} finally {
-			parentWs.close();
 			(sm as any).restoreOneSession = origRestoreOne;
 			await deleteSession(teamChild).catch(() => {});
 			await deleteSession(hostAgentsChild).catch(() => {});
@@ -335,7 +329,7 @@ test.describe("orchestration restart survival", () => {
 	test("restoreSessions() wires the rebuild + restart collection reminder filter and boot-reaps an orphaned child", async ({ gateway }) => {
 		const sm = gateway.sessionManager;
 		const core = gateway.orchestrationCore;
-		const parent = await createSession();
+		const parent = await createTrackedSession();
 		const child = await spawnChild(parent, "orphan-on-boot helper");
 		expect(await listChildren(parent)).toContain(child);
 
@@ -388,7 +382,7 @@ test.describe("orchestration restart survival", () => {
 	// was archived while the server was down.
 	test("a non-delegate kinded child (parentSessionId+childKind) is boot-reaped when its parent is archived", async ({ gateway }) => {
 		const sm = gateway.sessionManager;
-		const parent = await createSession();
+		const parent = await createTrackedSession();
 		const parentProjectId = sm.getPersistedSession(parent)?.projectId;
 		// A kinded child linked by parentSessionId+childKind, NOT delegateOf.
 		const childInfo = await sm.createSession(
@@ -396,7 +390,7 @@ test.describe("orchestration restart survival", () => {
 			undefined, undefined, undefined,
 			{ parentSessionId: parent, childKind: "host-agents", projectId: parentProjectId },
 		);
-		const child = childInfo.id;
+		const child = sessions.add(childInfo.id);
 		try {
 			const cps = sm.getPersistedSession(child);
 			expect(cps?.childKind).toBe("host-agents");
