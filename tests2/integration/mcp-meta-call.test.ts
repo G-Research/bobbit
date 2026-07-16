@@ -191,19 +191,44 @@ async function seedFakeGatewayRuntimeMcpManager(gw: GatewayInfo, projectId?: str
 	return mgr;
 }
 
-async function clearFakeMcpManagers(gw: GatewayInfo): Promise<void> {
+interface McpManagerState {
+	defaultManager: any;
+	scopedManagers: Map<string, any>;
+}
+
+function isolateMcpManagers(gw: GatewayInfo): McpManagerState {
 	const sessionManager = gw.sessionManager as any;
-	const managers = new Set<any>([
+	const state = {
+		defaultManager: sessionManager.mcpManager,
+		scopedManagers: sessionManager.scopedMcpManagers,
+	};
+	// Own a fresh routing table for every test. Clearing the shared map would
+	// disconnect or discard managers installed by a previous fork-mate.
+	sessionManager.mcpManager = null;
+	sessionManager.scopedMcpManagers = new Map<string, any>();
+	gw.sessionManager.refreshExternalMcpToolRegistrations?.();
+	return state;
+}
+
+async function restoreMcpManagers(gw: GatewayInfo, state: McpManagerState): Promise<void> {
+	const sessionManager = gw.sessionManager as any;
+	const ownedManagers = new Set<any>([
 		...(sessionManager.mcpManager ? [sessionManager.mcpManager] : []),
 		...sessionManager.scopedMcpManagers.values(),
 	]);
+	const preservedManagers = new Set<any>([
+		...(state.defaultManager ? [state.defaultManager] : []),
+		...state.scopedManagers.values(),
+	]);
 
-	// Remove ownership first so no request can observe a manager while teardown
-	// awaits its clients. Refresh once after every disconnect has settled.
-	sessionManager.mcpManager = null;
-	sessionManager.scopedMcpManagers.clear();
+	// Restore the exact manager routes before awaiting owned-client teardown, so
+	// another request can never observe this test's fake managers.
+	sessionManager.mcpManager = state.defaultManager;
+	sessionManager.scopedMcpManagers = state.scopedManagers;
 	const results = await Promise.allSettled(
-		[...managers].map((mgr) => typeof mgr?.disconnectAll === "function" ? mgr.disconnectAll() : Promise.resolve()),
+		[...ownedManagers]
+			.filter((manager) => !preservedManagers.has(manager))
+			.map((manager) => typeof manager?.disconnectAll === "function" ? manager.disconnectAll() : Promise.resolve()),
 	);
 	gw.sessionManager.refreshExternalMcpToolRegistrations?.();
 	const failures = results
@@ -217,14 +242,23 @@ async function clearFakeMcpManagers(gw: GatewayInfo): Promise<void> {
 test.describe("MCP meta-tool API E2E", () => {
 	let projectId: string;
 	let token: string;
-	let sharedSessionId: string;
-	let denySessionId: string;
-	let broadAllowSessionId: string;
+	let managerState: McpManagerState;
+	let ownedSessionIds: Set<string>;
+
+	async function createOwnedSession(roleId?: string): Promise<string> {
+		const sessionId = await createSession({ projectId });
+		ownedSessionIds.add(sessionId);
+		if (roleId) {
+			const assignResp = await apiFetch(`/api/sessions/${sessionId}`, {
+				method: "PATCH",
+				body: JSON.stringify({ roleId }),
+			});
+			expect([200, 204]).toContain(assignResp.status);
+		}
+		return sessionId;
+	}
 
 	test.beforeAll(async () => {
-		const resolvedProjectId = await defaultProjectId();
-		expect(resolvedProjectId).toBeTruthy();
-		projectId = resolvedProjectId!;
 		token = readE2EToken();
 
 		for (const role of [DENY_ROLE, BROAD_ALLOW_ROLE]) {
@@ -247,30 +281,33 @@ test.describe("MCP meta-tool API E2E", () => {
 			});
 			expect(putResp.status).toBe(200);
 		}
+	});
 
-		// One immutable identity serves role-free HTTP cases; policy cases each get
-		// a dedicated identity so assignments never bleed between tests.
-		sharedSessionId = await createSession({ projectId });
-		denySessionId = await createSession({ projectId });
-		broadAllowSessionId = await createSession({ projectId });
-		expect(new Set([sharedSessionId, denySessionId, broadAllowSessionId]).size).toBe(3);
+	test.beforeEach(async ({ gateway }) => {
+		ownedSessionIds = new Set();
+		managerState = isolateMcpManagers(gateway);
+		const resolvedProjectId = await defaultProjectId();
+		expect(resolvedProjectId).toBeTruthy();
+		projectId = resolvedProjectId!;
 	});
 
 	test.afterEach(async ({ gateway }) => {
-		await clearFakeMcpManagers(gateway);
+		try {
+			for (const sessionId of ownedSessionIds) {
+				const purgeResp = await apiFetch(`/api/sessions/${sessionId}?purge=true`, { method: "DELETE" });
+				expect([200, 404]).toContain(purgeResp.status);
+			}
+		} finally {
+			await restoreMcpManagers(gateway, managerState);
+		}
 	});
 
-	test.afterAll(async ({ gateway }) => {
-		await clearFakeMcpManagers(gateway);
+	test.afterAll(async () => {
 		const policyReset = await apiFetch(`/api/tool-group-policies/${encodeURIComponent(OP_POLICY_KEY)}`, {
 			method: "PUT",
 			body: JSON.stringify({ policy: null }),
 		});
 		expect(policyReset.status).toBe(200);
-		for (const sessionId of [sharedSessionId, denySessionId, broadAllowSessionId].filter(Boolean)) {
-			const purgeResp = await apiFetch(`/api/sessions/${sessionId}?purge=true`, { method: "DELETE" });
-			expect(purgeResp.status).toBe(200);
-		}
 		for (const role of [DENY_ROLE, BROAD_ALLOW_ROLE]) {
 			const deleteResp = await apiFetch(`/api/roles/${role.name}`, { method: "DELETE" });
 			expect([200, 204]).toContain(deleteResp.status);
@@ -328,7 +365,6 @@ test.describe("MCP meta-tool API E2E", () => {
 	});
 
 	test("GET /api/mcp-servers scoped reads do not create managers unless ensure=true", async ({ gateway }) => {
-		await clearFakeMcpManagers(gateway);
 		expect(gateway.sessionManager.getMcpManager({ projectId })).toBeNull();
 
 		const readOnly = await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(projectId!)}`);
@@ -469,7 +505,7 @@ test.describe("MCP meta-tool API E2E", () => {
 	// 3. unknown server
 	test("POST /api/internal/mcp-describe returns 503 for unknown server", async ({ gateway }) => {
 		await seedFakeMcpManager(gateway);
-		const sessionId = sharedSessionId;
+		const sessionId = await createOwnedSession();
 
 		const resp = await fetch(`${base()}/api/internal/mcp-describe`, {
 			method: "POST",
@@ -488,7 +524,7 @@ test.describe("MCP meta-tool API E2E", () => {
 
 	test("POST /api/internal/mcp-describe does not fall back from project manager to default", async ({ gateway }) => {
 		await seedFakeMcpManager(gateway);
-		const sessionId = sharedSessionId;
+		const sessionId = await createOwnedSession();
 
 		const resp = await fetch(`${base()}/api/internal/mcp-describe`, {
 			method: "POST",
@@ -508,7 +544,7 @@ test.describe("MCP meta-tool API E2E", () => {
 	// 4. happy path
 	test("POST /api/internal/mcp-describe lists ops and returns single op detail", async ({ gateway }) => {
 		await seedFakeScopedMcpManager(gateway, projectId);
-		const sessionId = sharedSessionId;
+		const sessionId = await createOwnedSession();
 
 		const headers = {
 			"Content-Type": "application/json",
@@ -558,7 +594,7 @@ test.describe("MCP meta-tool API E2E", () => {
 
 	test("POST /api/internal/mcp-describe accepts gateway public server names with generated runtime keys", async ({ gateway }) => {
 		await seedFakeGatewayRuntimeMcpManager(gateway, projectId);
-		const sessionId = sharedSessionId;
+		const sessionId = await createOwnedSession();
 
 		const resp = await fetch(`${base()}/api/internal/mcp-describe`, {
 			method: "POST",
@@ -578,7 +614,7 @@ test.describe("MCP meta-tool API E2E", () => {
 
 	test("POST /api/internal/mcp-describe uses stripped operation names for sub-namespace servers", async ({ gateway }) => {
 		await seedFakeScopedMcpManager(gateway, projectId, "gr", SUB_NAMESPACE_OPS, ["ai-adoption"]);
-		const sessionId = sharedSessionId;
+		const sessionId = await createOwnedSession();
 
 		const headers = {
 			"Content-Type": "application/json",
@@ -612,7 +648,7 @@ test.describe("MCP meta-tool API E2E", () => {
 
 	test("POST /api/internal/mcp-call does not fall back from project manager to default", async ({ gateway }) => {
 		await seedFakeMcpManager(gateway);
-		const sessionId = sharedSessionId;
+		const sessionId = await createOwnedSession();
 
 		const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
 			method: "POST",
@@ -634,11 +670,7 @@ test.describe("MCP meta-tool API E2E", () => {
 	// 5. mcp-call never-policy enforcement (Layer B)
 	test("POST /api/internal/mcp-call denies per-op `never` policy via role", async ({ gateway }) => {
 		await seedFakeScopedMcpManager(gateway, projectId);
-		const assignResp = await apiFetch(`/api/sessions/${denySessionId}`, {
-			method: "PATCH",
-			body: JSON.stringify({ roleId: DENY_ROLE.name }),
-		});
-		expect([200, 204]).toContain(assignResp.status);
+		const denySessionId = await createOwnedSession(DENY_ROLE.name);
 
 		// Call the denied tool — Layer B enforcement should return 403.
 		const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
@@ -668,11 +700,7 @@ test.describe("MCP meta-tool API E2E", () => {
 		expect(policyResp.status).toBe(200);
 
 		try {
-			const assignResp = await apiFetch(`/api/sessions/${broadAllowSessionId}`, {
-				method: "PATCH",
-				body: JSON.stringify({ roleId: BROAD_ALLOW_ROLE.name }),
-			});
-			expect([200, 204]).toContain(assignResp.status);
+			const broadAllowSessionId = await createOwnedSession(BROAD_ALLOW_ROLE.name);
 
 			const callResp = await fetch(`${base()}/api/internal/mcp-call`, {
 				method: "POST",

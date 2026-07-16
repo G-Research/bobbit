@@ -55,9 +55,9 @@ test.describe("Session story API invariants", () => {
 	let projectId = "";
 	let sessionId = "";
 
-	test.beforeAll(async () => {
-		// A plain project root is enough for persistence. The worktree-selection
-		// story injects the repository probe at the route boundary below.
+	test.beforeEach(async () => {
+		// Each story owns its project. A describe-level project is outside the
+		// harness's per-test baseline and would be swept after the first story.
 		repoRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-session-story-")));
 		fs.writeFileSync(path.join(repoRoot, "README.md"), "# Session story fixture\n");
 
@@ -67,11 +67,10 @@ test.describe("Session story API invariants", () => {
 			seedWorkflows: false,
 		});
 		projectId = project.id;
-		sessionId = await createSession({ cwd: repoRoot, projectId });
-		await waitForSessionStatus(sessionId, "idle");
+		sessionId = "";
 	});
 
-	test.afterAll(async () => {
+	test.afterEach(async () => {
 		try {
 			if (sessionId) {
 				const deleted = await apiFetch(`/api/sessions/${sessionId}?purge=true`, { method: "DELETE" });
@@ -103,9 +102,10 @@ test.describe("Session story API invariants", () => {
 	});
 
 	test("S-09/S-10: renamed title and session properties persist", async () => {
-		// Reuse the fully-idle worktree session from S-08. This keeps the original
-		// persistence assertions while ensuring teardown cannot stop the bridge
-		// between its pre-idle metadata read and the idle transition.
+		// This story owns a fully-idle session so a fork-mate or the preceding
+		// worktree-decision route cannot replace or sweep its persisted identity.
+		sessionId = await createSession({ cwd: repoRoot, projectId });
+		await waitForSessionStatus(sessionId, "idle");
 		const patchResp = await apiFetch(`/api/sessions/${sessionId}`, {
 			method: "PATCH",
 			body: JSON.stringify({ title: "My Custom Title", colorIndex: 5 }),
