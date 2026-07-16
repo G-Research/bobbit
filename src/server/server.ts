@@ -9953,6 +9953,7 @@ async function handleApiRoute(
 		try {
 			const models = await configureAigw(body.url, preferencesStore);
 			invalidateModelCache();
+			sessionManager.invalidateAigwModelCache();
 			broadcastPreferencesChanged();
 			json({ ok: true, models });
 		} catch (err: any) {
@@ -9965,6 +9966,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
 		removeAigw(preferencesStore);
 		invalidateModelCache();
+		sessionManager.invalidateAigwModelCache();
 		broadcastPreferencesChanged();
 		json({ ok: true });
 		return;
@@ -9996,6 +9998,7 @@ async function handleApiRoute(
 		try {
 			const models = await configureAigw(aigwUrl, preferencesStore);
 			invalidateModelCache();
+			sessionManager.invalidateAigwModelCache();
 			broadcastPreferencesChanged();
 			json({ models });
 		} catch (err: any) {

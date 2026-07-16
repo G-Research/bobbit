@@ -32,6 +32,8 @@ const {
 	fetchWellKnownConfig,
 	normalizeAigwPricing,
 	normalizeWellKnownCost,
+	createAigwGuardedLookup,
+	collectAigwProviderDnsHosts,
 } = await import("../../src/server/agent/aigw-manager.ts");
 const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.js");
 
@@ -184,6 +186,14 @@ describe("writeAigwModelsJson — authoritative per-model api/baseUrl", () => {
 		assert.equal(normalizeAigwModelString("aigw/unknown/multi/segment"), "aigw/unknown/multi/segment");
 	});
 
+	it("preserves legacy prefixes while an old models file has duplicate bare ids", () => {
+		fs.writeFileSync(path.join(tmpAgentDir, "models.json"), JSON.stringify({ providers: { aigw: { models: [
+			{ id: "shared", upstreamProvider: "first" },
+			{ id: "shared", upstreamProvider: "second" },
+		] } } }));
+		assert.equal(normalizeAigwModelString("aigw/first/shared"), "aigw/first/shared");
+	});
+
 	it("does not persist configuration when the atomic models.json write fails", async () => {
 		const badAgentDir = path.join(tmpAgentDir, "not-a-directory");
 		fs.writeFileSync(badAgentDir, "file");
@@ -253,6 +263,7 @@ describe("discoverAigwModels — fallback option-1 (no well-known probe under gu
 			assert.equal(gpt.api, "openai-responses", "OpenAI reasoning id routes to responses in fallback");
 			assert.ok(gpt.baseUrl?.endsWith("/openai/v1"), `baseUrl should be origin/openai/v1, got ${gpt.baseUrl}`);
 			assert.equal(gpt.wireId, "gpt-5.2");
+			assert.equal(gpt.compat?.supportsReasoningEffort, true, "fallback Responses models must retain reasoning effort");
 
 			// Claude is NOT routed to responses in fallback (remapped to bedrock downstream).
 			const claude = models.find((m: any) => m.id.includes("claude"));
@@ -263,7 +274,7 @@ describe("discoverAigwModels — fallback option-1 (no well-known probe under gu
 			const qwen = models.find((m: any) => m.id === "gresearch/qwen3-coder");
 			assert.ok(qwen, "expected non-reasoning fallback model");
 			assert.equal(qwen.api, "openai-completions");
-			assert.ok(!qwen.baseUrl, "non-reasoning fallback model has no per-model baseUrl override");
+			assert.equal(qwen.baseUrl, `${mock.url}/v1`, "legacy completions retain the /v1 route from /v1/models");
 		} finally {
 			await mock.close();
 		}
@@ -350,6 +361,27 @@ describe("well-known collision, validation, and pricing invariants", () => {
 		} }, GATEWAY);
 		assert.equal(publicLiteral.length, 1);
 		assert.equal(publicLiteral[0].upstreamProvider, "publicIp");
+	});
+
+	it("accepts public cross-origin HTTPS DNS providers and guards every connection-time lookup", async () => {
+		const models = translateWellKnown({ provider: {
+			publicDns: provider("https://api.vendor.example/v1", "public-dns"),
+		} }, GATEWAY);
+		assert.equal(models.length, 1);
+		assert.deepEqual(collectAigwProviderDnsHosts({ baseUrl: GATEWAY, models }), ["api.vendor.example"]);
+
+		let lookupCount = 0;
+		const original = ((_hostname: string, _options: any, callback: any) => {
+			lookupCount++;
+			callback(null, lookupCount === 1
+				? [{ address: "93.184.216.34", family: 4 }]
+				: [{ address: "169.254.169.254", family: 4 }]);
+		}) as any;
+		const guarded = createAigwGuardedLookup(new Set(["api.vendor.example"]), original) as any;
+		const lookup = () => new Promise<any[]>((resolve, reject) => guarded("api.vendor.example", { all: true }, (error: Error, addresses: any[]) => error ? reject(error) : resolve(addresses)));
+		assert.deepEqual(await lookup(), [{ address: "93.184.216.34", family: 4 }]);
+		await assert.rejects(lookup, /non-public address/);
+		assert.equal(lookupCount, 2, "DNS must be revalidated for each actual connection lookup");
 	});
 
 	it("keeps legacy per-token and well-known per-million costs one million-fold apart", () => {

@@ -153,15 +153,21 @@ test.describe("AI Gateway Configure Flow", () => {
 		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
 	});
 
-	test("refresh re-discovers models with the Bobbit User-Agent", async () => {
+	test("refresh re-discovers models, clears session auto-selection cache, and uses the Bobbit User-Agent", async ({ gateway }) => {
 		await apiFetch("/api/aigw/configure", {
 			method: "POST",
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
 		});
 		resetRecordedRequests();
+		(gateway.sessionManager as any)._aigwModelCache = {
+			url: `http://127.0.0.1:${mockPort}`,
+			models: [{ id: "removed-old-model" }],
+			ts: Date.now(),
+		};
 
 		const res = await apiFetch("/api/aigw/refresh", { method: "POST" });
 		expect(res.status).toBe(200);
+		expect((gateway.sessionManager as any)._aigwModelCache).toBeNull();
 		const data = await res.json();
 		expect(data.models).toHaveLength(3);
 		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
@@ -235,6 +241,22 @@ test.describe("AI Gateway Configure Flow", () => {
 		const prefs = await res.json();
 		expect(prefs["aigw.url"]).toBe(`http://127.0.0.1:${mockPort}`);
 		// aigw.models is no longer cached in preferences — models are discovered fresh via GET /api/models
+	});
+
+	test("/api/models/test keeps legacy fallback completions probes under /v1", async () => {
+		await apiFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
+		});
+		resetRecordedRequests();
+		const response = await apiFetch("/api/models/test", {
+			method: "POST",
+			body: JSON.stringify({ pref: "aigw/gresearch/qwen3-coder-480b-a35b" }),
+		});
+		expect(response.status).toBe(200);
+		expect((await response.json()).ok).toBe(true);
+		expect(lastRecordedRequest("/v1/chat/completions")?.method).toBe("POST");
+		expect(lastRecordedRequest("/chat/completions")).toBeUndefined();
 	});
 
 	test("/api/models/test probes well-known openai-responses models on their per-provider baseUrl", async () => {
