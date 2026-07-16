@@ -1,11 +1,28 @@
 # Windows unit profile — 2026-07-14
 
-## Configuration
+## Historical configuration
 
 - Windows x64, Node 24.13.1, Vitest 4.1.10.
-- Production three-suite lane allocation: core=3, integration=4, DOM=1.
-- Child processes measured by `scripts/testing-v2/profile-windows-unit.mjs`; arguments and environment values were not captured.
-- The profiler refuses a non-empty concurrency ledger by default. `--allow-loaded` is required to record an explicitly loaded run.
+- The July 14 measurements used the former three-lane allocation: core=3, integration=4, DOM=1.
+- Child processes were measured by `scripts/testing-v2/profile-windows-unit.mjs`; arguments and environment values were not captured.
+- References below to lanes, lane allocation, and the concurrency ledger describe the retired profiler architecture used to collect these retained measurements.
+
+## Current profiler usage
+
+The profiler now invokes `node_modules/vitest/vitest.mjs` directly and writes each project's streamed `vitest.log` and process telemetry beneath its profile directory. It has no unit-lane runner, ledger, slot reservation, cost shard, or boot lease.
+
+```bash
+# Profile all four tier-1 projects with the fixed three-worker cap.
+npm run test:v2:profile-windows
+
+# Profile a narrow core file. --workers may only lower the cap.
+npm run test:v2:profile-windows -- --project v2-core --workers 1 tests2/core/windows-process-profile.test.ts
+
+# Rebuild reports from an existing profile without rerunning Vitest.
+npm run test:v2:profile-windows -- --from-dir .profiles/testing-v2/windows-process-profile/<timestamp>
+```
+
+Projects are `v2-core`, `v2-integration`, `v2-dom`, and `v2-isolated`. The repeatable `--lane` option remains only as a backward-compatible alias for `--project`; old short values such as `core` are accepted.
 
 ## Retained measurements
 
@@ -54,6 +71,6 @@ The integration lane now builds one content-addressed server runtime with esbuil
 
 A 14-file runtime smoke passed 50/50 tests in 25.42 seconds. A focused identity regression passed 47/47 assertions; disabling Vitest console interception then removed the two `onUserConsoleLog` teardown RPC errors in a 9/9 regression run.
 
-## Status
+## Historical status
 
-Steps 1–3 are implemented and the profiler now exposes the remaining bottleneck. Final three-suite acceptance is not yet met: the clean DOM lane is under 180 seconds, but integration still performs hundreds of avoidable Git probes and no uncontaminated core/integration acceptance profile was available during this session because other eight-worker suites repeatedly occupied the shared ledger.
+At the end of the July 14 profiling session, the clean DOM lane was under 180 seconds, while integration still performed hundreds of avoidable Git probes. This is retained as historical evidence only; current unit-stage qualification is recorded in `fast-gate-progress.md` and uses direct Vitest projects with no ledger.

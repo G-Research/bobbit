@@ -1,44 +1,87 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, copyFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
-import { readLedger } from "./ledger.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const PRELOAD_URL = pathToFileURL(join(HERE, "child-process-profile-preload.mjs")).href;
-const UNIT_RUNNER = join(HERE, "run-unit-lanes.mjs");
+export const VITEST_ENTRY = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
+const VITEST_CONFIG = join(REPO_ROOT, "vitest.config.ts");
 const DEFAULT_ROOT = join(REPO_ROOT, ".profiles", "testing-v2", "windows-process-profile");
-const KNOWN_LANES = ["core", "integration", "dom"];
-const PRODUCTION_WORKERS = { core: 3, integration: 4, dom: 1 };
+const DEFAULT_PROJECTS = ["v2-core", "v2-integration", "v2-dom", "v2-isolated"];
+const PROJECT_ALIASES = new Map([
+	["core", "v2-core"],
+	["integration", "v2-integration"],
+	["dom", "v2-dom"],
+	["isolated", "v2-isolated"],
+	...DEFAULT_PROJECTS.map((project) => [project, project]),
+]);
+const LEGACY_DIR_NAMES = new Map([
+	["v2-core", "core"],
+	["v2-integration", "integration"],
+	["v2-dom", "dom"],
+	["v2-isolated", "isolated"],
+]);
+const FIXED_WORKER_CAP = 3;
 
 function timestamp() { return new Date().toISOString().replace(/[:.]/g, "-"); }
-function parseArgs(argv) {
-	const opts = { lanes: [], outRoot: DEFAULT_ROOT, top: 20, fromDir: null, workers: null, allowLoaded: false };
+
+function requiredValue(argv, index, flag) {
+	const value = argv[index + 1];
+	if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
+	return value;
+}
+
+function normalizeProject(value) {
+	const project = PROJECT_ALIASES.get(String(value || "").toLowerCase());
+	if (!project) throw new Error(`Unknown project ${JSON.stringify(value)}; expected ${DEFAULT_PROJECTS.join(", ")}`);
+	return project;
+}
+
+export function parseArgs(argv) {
+	const opts = { projects: [], outRoot: DEFAULT_ROOT, top: 20, fromDir: null, workers: null, filters: [] };
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
-		if (arg === "--lane") opts.lanes.push(String(argv[++i] || ""));
-		else if (arg.startsWith("--lane=")) opts.lanes.push(arg.slice(7));
-		else if (arg === "--out-dir") opts.outRoot = resolve(REPO_ROOT, argv[++i]);
-		else if (arg.startsWith("--out-dir=")) opts.outRoot = resolve(REPO_ROOT, arg.slice(10));
-		else if (arg === "--from-dir") opts.fromDir = resolve(REPO_ROOT, argv[++i]);
-		else if (arg.startsWith("--from-dir=")) opts.fromDir = resolve(REPO_ROOT, arg.slice(11));
-		else if (arg === "--top") opts.top = Math.max(1, Number(argv[++i]) || 20);
-		else if (arg === "--workers") opts.workers = Math.max(1, Number(argv[++i]) || 1);
-		else if (arg.startsWith("--workers=")) opts.workers = Math.max(1, Number(arg.slice(10)) || 1);
-		else if (arg === "--allow-loaded") opts.allowLoaded = true;
+		if (arg === "--") {
+			opts.filters.push(...argv.slice(i + 1));
+			break;
+		}
+		if (arg === "--project" || arg === "--lane") {
+			opts.projects.push(normalizeProject(requiredValue(argv, i, arg)));
+			i += 1;
+		} else if (arg.startsWith("--project=")) opts.projects.push(normalizeProject(arg.slice(10)));
+		else if (arg.startsWith("--lane=")) opts.projects.push(normalizeProject(arg.slice(7)));
+		else if (arg === "--out-dir") {
+			opts.outRoot = resolve(REPO_ROOT, requiredValue(argv, i, arg));
+			i += 1;
+		} else if (arg.startsWith("--out-dir=")) opts.outRoot = resolve(REPO_ROOT, arg.slice(10));
+		else if (arg === "--from-dir") {
+			opts.fromDir = resolve(REPO_ROOT, requiredValue(argv, i, arg));
+			i += 1;
+		} else if (arg.startsWith("--from-dir=")) opts.fromDir = resolve(REPO_ROOT, arg.slice(11));
+		else if (arg === "--top") {
+			opts.top = Math.max(1, Number(requiredValue(argv, i, arg)) || 20);
+			i += 1;
+		} else if (arg.startsWith("--top=")) opts.top = Math.max(1, Number(arg.slice(6)) || 20);
+		else if (arg === "--workers") {
+			opts.workers = Math.max(1, Math.floor(Number(requiredValue(argv, i, arg)) || 1));
+			i += 1;
+		} else if (arg.startsWith("--workers=")) opts.workers = Math.max(1, Math.floor(Number(arg.slice(10)) || 1));
 		else if (arg === "--help" || arg === "-h") opts.help = true;
-		else throw new Error(`Unknown argument: ${arg}`);
+		else if (arg.startsWith("-")) throw new Error(`Unknown profiler argument: ${arg}; put Vitest filters after --`);
+		else opts.filters.push(arg);
 	}
-	if (!opts.lanes.length) opts.lanes = [...KNOWN_LANES];
-	for (const lane of opts.lanes) if (!KNOWN_LANES.includes(lane)) throw new Error(`Unknown lane ${JSON.stringify(lane)}`);
+	opts.projectsSpecified = opts.projects.length > 0;
+	if (!opts.projects.length) opts.projects = [...DEFAULT_PROJECTS];
+	else opts.projects = [...new Set(opts.projects)];
 	return opts;
 }
 
 function usage() {
-	return `Usage: node scripts/testing-v2/profile-windows-unit.mjs [--lane core|integration|dom] [--workers N] [--out-dir PATH] [--allow-loaded]\n\nRuns selected lanes sequentially with child-process telemetry. Defaults to the production three-suite allocation (core=3, integration=4, dom=1) and refuses a contaminated concurrency ledger unless --allow-loaded is explicit. Arguments and environment values are never recorded.`;
+	return `Usage: node scripts/testing-v2/profile-windows-unit.mjs [options] [TEST_FILTER ...]\n\nRuns selected Vitest projects sequentially with child-process telemetry.\n\nOptions:\n  --project NAME   Select v2-core, v2-integration, v2-dom, or v2-isolated (repeatable)\n  --lane NAME      Backward-compatible alias for --project; core-style names are accepted\n  --workers N      Lower the fixed three-worker cap (never raises VITEST_MAX_WORKERS)\n  --out-dir PATH   Root for a new timestamped profile\n  --from-dir PATH  Rebuild a report from an existing profile directory without running tests\n  --top N          Executable rows per project in the Markdown report (default: 20)\n  -h, --help       Show this help\n\nPositional values, or values after --, are forwarded as Vitest test-file filters.\nExample: npm run test:v2:profile-windows -- --project v2-core tests2/core/windows-process-profile.test.ts\n\nThe profiler invokes node_modules/vitest/vitest.mjs directly with vitest.config.ts, the selected project, and --silent=passed-only. Arguments and environment values are never recorded.`;
 }
 
 function nodeOptionsWithPreload(existing = "") {
@@ -46,28 +89,76 @@ function nodeOptionsWithPreload(existing = "") {
 	return existing.includes(PRELOAD_URL) ? existing : [existing, flag].filter(Boolean).join(" ");
 }
 
-function runLane(lane, laneDir, workers) {
-	mkdirSync(laneDir, { recursive: true });
+export function resolveWorkerLimit(environmentValue, requestedValue) {
+	const limits = [FIXED_WORKER_CAP];
+	for (const value of [environmentValue, requestedValue]) {
+		const parsed = Number(value);
+		if (Number.isFinite(parsed) && parsed >= 1) limits.push(Math.floor(parsed));
+	}
+	return Math.min(...limits);
+}
+
+export function buildVitestArgs(project, filters = []) {
+	return [
+		"run",
+		"--config", VITEST_CONFIG,
+		"--project", normalizeProject(project),
+		"--silent=passed-only",
+		...filters,
+	];
+}
+
+function findProjectDir(runDir, project) {
+	const current = join(runDir, project);
+	if (existsSync(current)) return current;
+	return join(runDir, LEGACY_DIR_NAMES.get(project) || project);
+}
+
+function readExistingReport(runDir) {
+	const reportPath = join(runDir, "report.json");
+	if (!existsSync(reportPath)) return null;
+	try { return JSON.parse(readFileSync(reportPath, "utf8")); }
+	catch { return null; }
+}
+
+function reportProjects(report) {
+	if (Array.isArray(report?.projects)) return report.projects.map((row) => normalizeProject(row.project));
+	if (Array.isArray(report?.lanes)) return report.lanes.map((row) => normalizeProject(row.lane));
+	return [];
+}
+
+function priorProjectRun(report, project) {
+	const current = report?.projects?.find((row) => normalizeProject(row.project) === project);
+	if (current) return current;
+	return report?.lanes?.find((row) => normalizeProject(row.lane) === project) || null;
+}
+
+function runProject(project, projectDir, workers, filters) {
+	mkdirSync(projectDir, { recursive: true });
+	const logPath = join(projectDir, "vitest.log");
+	const log = createWriteStream(logPath, { flags: "w" });
 	const start = performance.now();
 	return new Promise((resolveRun) => {
-		const child = spawn(process.execPath, [UNIT_RUNNER, "--lane", lane], {
+		let settled = false;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			log.end(() => resolveRun({ project, wallMs: performance.now() - start, logPath, ...result }));
+		};
+		const child = spawn(process.execPath, [VITEST_ENTRY, ...buildVitestArgs(project, filters)], {
 			cwd: REPO_ROOT,
 			env: {
 				...process.env,
 				NODE_OPTIONS: nodeOptionsWithPreload(process.env.NODE_OPTIONS),
-				BOBBIT_V2_CHILD_PROFILE_DIR: join(laneDir, "processes"),
-				BOBBIT_V2_LEDGER_PARENT: `profile-${process.pid}-${lane}`,
-				BOBBIT_V2_SLOTS_VITEST: String(workers),
+				BOBBIT_V2_CHILD_PROFILE_DIR: join(projectDir, "processes"),
+				VITEST_MAX_WORKERS: String(workers),
 			},
-			stdio: "inherit",
+			stdio: ["inherit", "pipe", "pipe"],
 		});
-		child.once("error", (error) => resolveRun({ lane, code: 1, wallMs: performance.now() - start, error: String(error) }));
-		child.once("close", (code, signal) => {
-			const sourceLog = join(REPO_ROOT, ".profiles", "unit-lanes", `${lane}.log`);
-			const copiedLog = join(laneDir, "vitest.log");
-			if (existsSync(sourceLog)) copyFileSync(sourceLog, copiedLog);
-			resolveRun({ lane, code: code ?? (signal ? 1 : 0), signal, wallMs: performance.now() - start, logPath: existsSync(copiedLog) ? copiedLog : null });
-		});
+		child.stdout.on("data", (chunk) => { process.stdout.write(chunk); log.write(chunk); });
+		child.stderr.on("data", (chunk) => { process.stderr.write(chunk); log.write(chunk); });
+		child.once("error", (error) => finish({ code: 1, error: String(error) }));
+		child.once("close", (code, signal) => finish({ code: code ?? (signal ? 1 : 0), signal }));
 	});
 }
 
@@ -145,14 +236,14 @@ function markdown(report, top) {
 		"",
 		`Generated: ${report.generatedAt}`,
 		`Platform: ${report.platform} ${report.arch}; Node ${report.node}`,
-		`Ledger at start: ${report.ledgerAtStart.reserved}/${report.ledgerAtStart.totalCores} workers reserved${report.contaminated ? " (loaded profile)" : " (quiet profile)"}`,
+		`Vitest worker cap: ${report.workerCap}`,
 		"",
 	];
-	for (const lane of report.lanes) {
-		lines.push(`## ${lane.lane}`, "", `- Workers: ${lane.workers ?? "unknown"}`, `- Exit: ${lane.code}`, `- Wall: ${(lane.wallMs / 1000).toFixed(1)}s`, `- Completed children: ${lane.processes.completed}`, `- Incomplete children: ${lane.processes.incomplete}`, `- Peak concurrent children: ${lane.processes.peakConcurrent}`);
-		if (lane.vitest?.duration) lines.push(`- ${lane.vitest.duration}`);
+	for (const project of report.projects) {
+		lines.push(`## ${project.project}`, "", `- Workers: ${project.workers ?? "unknown"}`, `- Exit: ${project.code}`, `- Wall: ${(project.wallMs / 1000).toFixed(1)}s`, `- Completed children: ${project.processes.completed}`, `- Incomplete children: ${project.processes.incomplete}`, `- Peak concurrent children: ${project.processes.peakConcurrent}`);
+		if (project.vitest?.duration) lines.push(`- ${project.vitest.duration}`);
 		lines.push("", "| Executable | Spawned | OK | Failed | Timeouts | Errors | Incomplete | Cumulative | Max |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|");
-		for (const row of lane.processes.byExecutable.slice(0, top)) {
+		for (const row of project.processes.byExecutable.slice(0, top)) {
 			lines.push(`| \`${row.executable}\` | ${row.count} | ${row.ok} | ${row.failed} | ${row.timeouts} | ${row.errors} | ${row.incomplete} | ${(row.cumulativeMs / 1000).toFixed(1)}s | ${(row.maxMs / 1000).toFixed(1)}s |`);
 		}
 		lines.push("");
@@ -164,32 +255,41 @@ function markdown(report, top) {
 async function main() {
 	const opts = parseArgs(process.argv.slice(2));
 	if (opts.help) { console.log(usage()); return; }
-	const ledgerAtStart = readLedger();
-	const reservedAtStart = ledgerAtStart.reservations.reduce((sum, row) => sum + (row.workerSlots || 0), 0);
-	if (!opts.fromDir && !opts.allowLoaded && reservedAtStart > 0) {
-		throw new Error(`Refusing contaminated profile: concurrency ledger already has ${reservedAtStart}/${ledgerAtStart.totalCores} workers reserved (pass --allow-loaded to override)`);
-	}
+	if (!opts.fromDir && !existsSync(VITEST_ENTRY)) throw new Error(`Vitest entry not found: ${VITEST_ENTRY}; run npm install first`);
 	const runDir = opts.fromDir || join(opts.outRoot, timestamp());
 	mkdirSync(runDir, { recursive: true });
-	const laneRuns = [];
+	const existingReport = opts.fromDir ? readExistingReport(runDir) : null;
+	if (opts.fromDir && !opts.projectsSpecified) {
+		const existingProjects = reportProjects(existingReport);
+		if (existingProjects.length) opts.projects = [...new Set(existingProjects)];
+	}
+	const workerCap = resolveWorkerLimit(process.env.VITEST_MAX_WORKERS, opts.workers ?? existingReport?.workerCap);
+	const projectRuns = [];
 	if (!opts.fromDir) {
-		for (const lane of opts.lanes) {
-			console.log(`[windows-profile] starting ${lane}`);
-			const workers = opts.workers ?? PRODUCTION_WORKERS[lane];
-			console.log(`[windows-profile] ${lane} workers=${workers}`);
-			laneRuns.push({ ...(await runLane(lane, join(runDir, lane), workers)), workers });
+		for (const project of opts.projects) {
+			const workers = project === "v2-isolated" ? 1 : workerCap;
+			console.log(`[windows-profile] starting ${project} workers=${workers}`);
+			projectRuns.push({ ...(await runProject(project, join(runDir, project), workers, opts.filters)), workers });
 		}
 	}
-	const lanes = opts.lanes.map((lane) => {
-		const laneRun = laneRuns.find((r) => r.lane === lane) || { lane, code: null, wallMs: 0, logPath: join(runDir, lane, "vitest.log") };
-		const records = readProfileRecords(join(runDir, lane, "processes"));
-		return { ...laneRun, processes: aggregateProcessRecords(records), vitest: vitestTiming(laneRun.logPath) };
+	const projects = opts.projects.map((project) => {
+		const projectDir = findProjectDir(runDir, project);
+		const prior = priorProjectRun(existingReport, project);
+		const projectRun = projectRuns.find((run) => run.project === project) || {
+			project,
+			code: prior?.code ?? null,
+			wallMs: prior?.wallMs ?? 0,
+			workers: prior?.workers ?? (project === "v2-isolated" ? 1 : workerCap),
+			logPath: join(projectDir, "vitest.log"),
+		};
+		const records = readProfileRecords(join(projectDir, "processes"));
+		return { ...projectRun, processes: aggregateProcessRecords(records), vitest: vitestTiming(projectRun.logPath) };
 	});
-	const report = { generatedAt: new Date().toISOString(), platform: process.platform, arch: process.arch, node: process.version, runDir, ledgerAtStart: { reserved: reservedAtStart, totalCores: ledgerAtStart.totalCores }, contaminated: reservedAtStart > 0, lanes };
+	const report = { generatedAt: new Date().toISOString(), platform: process.platform, arch: process.arch, node: process.version, runDir, workerCap, projects };
 	writeFileSync(join(runDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
 	writeFileSync(join(runDir, "report.md"), markdown(report, opts.top));
 	console.log(`[windows-profile] report: ${join(runDir, "report.md")}`);
-	if (lanes.some((lane) => lane.code != null && lane.code !== 0)) process.exitCode = 1;
+	if (projects.some((project) => project.code != null && project.code !== 0)) process.exitCode = 1;
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
