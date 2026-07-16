@@ -643,6 +643,12 @@ export interface SessionInfo {
 	promptQueue: PromptQueue;
 	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
 	recoveredPromptDispatchQueueIds?: string[];
+	/**
+	 * Subset of recovered IDs owned by a user-initiated poisoned-history repair.
+	 * Unlike ordinary failed-dispatch copies, these accepted rows are not
+	 * superseded by a later generic error unstick before Pi accepts them.
+	 */
+	poisonRecoveryPromptDispatchQueueIds?: string[];
 	/** Exact durable row owned by an explicit Retry until canonical dispatch accepts it. */
 	explicitRetryQueueRowId?: string;
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
@@ -1344,6 +1350,25 @@ export class SessionManager {
 				...existing,
 				...owner.pendingSkillExpansions.filter(entry => !signatures.has(JSON.stringify(entry))),
 			];
+		}
+		if (owner.recoveredPromptDispatchQueueIds?.length) {
+			canonical.recoveredPromptDispatchQueueIds = [
+				...new Set([
+					...(canonical.recoveredPromptDispatchQueueIds ?? []),
+					...owner.recoveredPromptDispatchQueueIds,
+				]),
+			];
+		}
+		if (owner.poisonRecoveryPromptDispatchQueueIds?.length) {
+			canonical.poisonRecoveryPromptDispatchQueueIds = [
+				...new Set([
+					...(canonical.poisonRecoveryPromptDispatchQueueIds ?? []),
+					...owner.poisonRecoveryPromptDispatchQueueIds,
+				]),
+			];
+		}
+		if (owner.explicitRetryQueueRowId && canonical.promptQueue.toArray().some(row => row.id === owner.explicitRetryQueueRowId)) {
+			canonical.explicitRetryQueueRowId = owner.explicitRetryQueueRowId;
 		}
 		canonical.lastPromptSource = owner.lastPromptSource ?? canonical.lastPromptSource;
 		coordinator.promptOwner = canonical;
@@ -3507,6 +3532,7 @@ export class SessionManager {
 		if (!session) return { status: "queued" };
 		let recoveredPoisonDuringRevive = false;
 		let revivedPoisonQueueIds: string[] | undefined;
+		let revivedPoisonOwnedQueueIds: string[] | undefined;
 		let revivedPoisonPromptEnvelopes: SessionInfo["pendingSkillExpansions"];
 		let revivedSessionOnlyGrantedTools: string[] | undefined;
 		let revivedOneTimeGrantedTools: string[] | undefined;
@@ -3530,6 +3556,7 @@ export class SessionManager {
 			const poisonedDormant = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
 			if (poisonedDormant) {
 				revivedPoisonQueueIds = session.recoveredPromptDispatchQueueIds?.slice();
+				revivedPoisonOwnedQueueIds = session.poisonRecoveryPromptDispatchQueueIds?.slice();
 				revivedPoisonPromptEnvelopes = session.pendingSkillExpansions?.slice();
 				revivedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools?.slice();
 				revivedOneTimeGrantedTools = session.oneTimeGrantedTools?.slice();
@@ -3626,6 +3653,7 @@ export class SessionManager {
 		if (recoveredPoisonDuringRevive) {
 			if (revivedPoisonQueueIds?.length) {
 				session.recoveredPromptDispatchQueueIds = revivedPoisonQueueIds;
+				session.poisonRecoveryPromptDispatchQueueIds = revivedPoisonOwnedQueueIds;
 				this.consumeRecoveredPromptDispatchRows(session);
 			}
 			session.lastTurnErrored = false;
@@ -3671,6 +3699,7 @@ export class SessionManager {
 					isSteered: opts?.isSteered,
 					suppressTitleGen: opts?.suppressTitleGen,
 				});
+				this.markPoisonRecoveryPromptDispatchRow(session, accepted.id);
 				this.broadcastQueue(session);
 				const recovery = (async () => {
 					const recovered = await this._recoverPoisonedHistory(session, "follow-up", async (target) => {
@@ -3730,9 +3759,10 @@ export class SessionManager {
 				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
 			);
 
-			// A fresh prompt supersedes any recovered dispatch-time copy of the
-			// failed prompt. Drop it before dispatching the new intent so a later
-			// agent_end drain cannot replay stale work after the follow-up succeeds.
+			// A fresh prompt supersedes ordinary recovered dispatch-time copies of
+			// the failed prompt. A poison-repair row is different: Bobbit already
+			// accepted it as a manual recovery action, so it remains durable until Pi
+			// accepts it and drains exactly once after this follow-up succeeds.
 			this.consumeRecoveredPromptDispatchRows(session);
 
 			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
@@ -4092,6 +4122,7 @@ export class SessionManager {
 		// enqueueing a duplicate. Other dispatch paths retain the normal front
 		// re-enqueue behavior. Reverse iteration because enqueueAtFront unshifts.
 		const currentIds = new Set(session.promptQueue.toArray().map(row => row.id));
+		const poisonOwnedIds = new Set(session.poisonRecoveryPromptDispatchQueueIds ?? []);
 		const recoveredIds: string[] = [];
 		for (let index = rows.length - 1; index >= 0; index--) {
 			const durableId = durableQueueRowIds?.[index];
@@ -4106,6 +4137,12 @@ export class SessionManager {
 				isSteered: r.isSteered,
 			});
 			recoveredIds.push(recovered.id);
+			if (durableId && poisonOwnedIds.has(durableId)) {
+				const wasExplicitRetry = session.explicitRetryQueueRowId === durableId;
+				this.clearRecoveredPromptDispatchOwnership(session, [durableId]);
+				this.markPoisonRecoveryPromptDispatchRow(session, recovered.id);
+				if (wasExplicitRetry) session.explicitRetryQueueRowId = recovered.id;
+			}
 		}
 		if (recoveredIds.length > 0) {
 			session.recoveredPromptDispatchQueueIds = [
@@ -4180,14 +4217,7 @@ export class SessionManager {
 
 		const consumeDurableAcceptanceRow = () => {
 			if (!durableQueueRowId || !session.promptQueue.remove(durableQueueRowId)) return;
-			if (session.explicitRetryQueueRowId === durableQueueRowId) {
-				session.explicitRetryQueueRowId = undefined;
-			}
-			session.recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds
-				?.filter(id => id !== durableQueueRowId);
-			if (session.recoveredPromptDispatchQueueIds?.length === 0) {
-				session.recoveredPromptDispatchQueueIds = undefined;
-			}
+			this.clearRecoveredPromptDispatchOwnership(session, [durableQueueRowId]);
 			this.broadcastQueue(session);
 		};
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
@@ -4280,6 +4310,10 @@ export class SessionManager {
 		const dispatchedRowsForRecovery = steered.length > 0
 			? steered.map(r => ({ text: r.text, images: r.images, attachments: r.attachments, isSteered: true }))
 			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered }];
+		const dispatchedQueueRowIds = steered.length > 0 ? steered.map(row => row.id) : [next.id];
+		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
+			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
+		);
 
 		const recoverDispatchedRows = (reason: string) => {
 			// Suppress recovery only after an inbound agent event proves the dequeued
@@ -4291,9 +4325,17 @@ export class SessionManager {
 			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
 			if (observedTurnVersion !== dispatchObservedTurnVersion) {
 				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+				this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 				return;
 			}
-			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
+			this.recoverPromptDispatch(
+				session,
+				dispatchedRowsForRecovery,
+				reason,
+				"drainQueue",
+				dispatchedQueueRowIds,
+				poisonOwnedDispatch,
+			);
 		};
 
 		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
@@ -4306,8 +4348,9 @@ export class SessionManager {
 				if (resp && resp.success === false) {
 					recoverDispatchedRows(resp.error || "unknown");
 				} else {
-					// Dispatch landed — clear the busy-guard retry budget so a
-					// future recovery starts fresh.
+					// Dispatch landed — clear the busy-guard retry budget and any
+					// ownership ledger for the dequeued durable row.
+					this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 					session.recoverDrainAttempts = 0;
 				}
 			})
@@ -4931,6 +4974,7 @@ export class SessionManager {
 
 			const pendingPromptEnvelopes = current.pendingSkillExpansions?.slice();
 			const recoveredPromptDispatchQueueIds = current.recoveredPromptDispatchQueueIds?.slice();
+			const poisonRecoveryPromptDispatchQueueIds = current.poisonRecoveryPromptDispatchQueueIds?.slice();
 			const savedSessionOnlyGrantedTools = current.sessionOnlyGrantedTools?.slice();
 			const savedOneTimeGrantedTools = current.oneTimeGrantedTools?.slice();
 			const overrideAllowedTools = this.recomputeAllowedToolsForRestart(current, ps);
@@ -4965,6 +5009,14 @@ export class SessionManager {
 						]),
 					];
 				}
+				if (poisonRecoveryPromptDispatchQueueIds?.length) {
+					target.poisonRecoveryPromptDispatchQueueIds = [
+						...new Set([
+							...poisonRecoveryPromptDispatchQueueIds,
+							...(target.poisonRecoveryPromptDispatchQueueIds ?? []),
+						]),
+					];
+				}
 			}
 			return target;
 		}, { coalesceKey: "poison-recovery", drainOnRelease: false, cancelOnTerminal: () => undefined });
@@ -4983,17 +5035,40 @@ export class SessionManager {
 		}, { coalesceKey: "poison-redrive", drainOnRelease: false, cancelOnTerminal: () => undefined });
 	}
 
+	private markPoisonRecoveryPromptDispatchRow(session: SessionInfo, id: string): void {
+		session.poisonRecoveryPromptDispatchQueueIds = [
+			...new Set([...(session.poisonRecoveryPromptDispatchQueueIds ?? []), id]),
+		];
+	}
+
+	private clearRecoveredPromptDispatchOwnership(session: SessionInfo, ids: Iterable<string>): void {
+		const cleared = new Set(ids);
+		if (cleared.size === 0) return;
+		session.recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds
+			?.filter(id => !cleared.has(id));
+		if (session.recoveredPromptDispatchQueueIds?.length === 0) {
+			session.recoveredPromptDispatchQueueIds = undefined;
+		}
+		session.poisonRecoveryPromptDispatchQueueIds = session.poisonRecoveryPromptDispatchQueueIds
+			?.filter(id => !cleared.has(id));
+		if (session.poisonRecoveryPromptDispatchQueueIds?.length === 0) {
+			session.poisonRecoveryPromptDispatchQueueIds = undefined;
+		}
+		if (session.explicitRetryQueueRowId && cleared.has(session.explicitRetryQueueRowId)) {
+			session.explicitRetryQueueRowId = undefined;
+		}
+	}
+
 	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
 		const ids = session.recoveredPromptDispatchQueueIds;
 		if (!ids?.length) return false;
+		const poisonOwned = new Set(session.poisonRecoveryPromptDispatchQueueIds ?? []);
+		const supersededIds = ids.filter(id => !poisonOwned.has(id));
 		let removedAny = false;
-		for (const id of ids) {
+		for (const id of supersededIds) {
 			removedAny = session.promptQueue.remove(id) || removedAny;
 		}
-		session.recoveredPromptDispatchQueueIds = undefined;
-		if (session.explicitRetryQueueRowId && !session.promptQueue.toArray().some(row => row.id === session.explicitRetryQueueRowId)) {
-			session.explicitRetryQueueRowId = undefined;
-		}
+		this.clearRecoveredPromptDispatchOwnership(session, supersededIds);
 		if (removedAny) this.broadcastQueue(session);
 		return removedAny;
 	}
@@ -5138,6 +5213,7 @@ export class SessionManager {
 			// Explicit Retry owns a newly allocated durable row. Equal text/images in
 			// the existing queue are independent accepted intent and must survive.
 			const acceptedRetry = this.enqueueDurableRetryRow(session, retryText, retryImages);
+			this.markPoisonRecoveryPromptDispatchRow(session, acceptedRetry.id);
 			const recovery = (async () => {
 				const target = await this._recoverPoisonedHistory(session, "retry", async (canonical) => {
 					canonical.lastTurnErrored = false;
