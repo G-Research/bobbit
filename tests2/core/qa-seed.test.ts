@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 const SEED_SCRIPT = path.resolve(import.meta.dirname, "..", "..",
 	"scripts",
@@ -32,13 +32,30 @@ let tmpDir: string;
 let stateDir: string;
 let serverStateDir: string;
 let configDir: string;
+let seedRun = 0;
 
-beforeAll(() => {
+async function runSeed(workDir: string, bobbitDir?: string): Promise<void> {
+	const previousArgv = process.argv;
+	const previousBobbitDir = process.env.BOBBIT_DIR;
+	const previousPiDir = process.env.BOBBIT_PI_DIR;
+	process.argv = [process.execPath, SEED_SCRIPT, workDir];
+	if (bobbitDir === undefined) delete process.env.BOBBIT_DIR;
+	else process.env.BOBBIT_DIR = bobbitDir;
+	delete process.env.BOBBIT_PI_DIR;
+	try {
+		await import(`${pathToFileURL(SEED_SCRIPT).href}?unit=${++seedRun}`);
+	} finally {
+		process.argv = previousArgv;
+		if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+		else process.env.BOBBIT_DIR = previousBobbitDir;
+		if (previousPiDir === undefined) delete process.env.BOBBIT_PI_DIR;
+		else process.env.BOBBIT_PI_DIR = previousPiDir;
+	}
+}
+
+beforeAll(async () => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "qa-seed-test-"));
-	const env = { ...process.env };
-	delete env.BOBBIT_DIR;
-	delete env.BOBBIT_PI_DIR;
-	execFileSync("node", [SEED_SCRIPT, tmpDir], { stdio: "pipe", env });
+	await runSeed(tmpDir);
 	stateDir = path.join(tmpDir, ".bobbit", "state");
 	serverStateDir = path.join(tmpDir, ".bobbit", "headquarters", "state");
 	configDir = path.join(tmpDir, ".bobbit", "config");
@@ -143,13 +160,11 @@ describe("qa-seed: file creation", () => {
 		);
 	});
 
-	it("writes server registry under BOBBIT_DIR when overridden", () => {
+	it("writes server registry under BOBBIT_DIR when overridden", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qa-seed-hq-override-"));
 		try {
 			const hqDir = path.join(dir, "custom-headquarters");
-			const env: Record<string, string | undefined> = { ...process.env, BOBBIT_DIR: hqDir };
-			delete env.BOBBIT_PI_DIR;
-			execFileSync("node", [SEED_SCRIPT, dir], { stdio: "pipe", env });
+			await runSeed(dir, hqDir);
 			assert.ok(
 				fs.existsSync(path.join(hqDir, "state", "projects.json")),
 				"projects.json should exist under custom Headquarters state dir",

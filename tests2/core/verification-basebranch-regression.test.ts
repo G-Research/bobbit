@@ -4,11 +4,11 @@
 
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { inspect } from "node:util";
+import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
 
@@ -19,39 +19,33 @@ function makeTempStateDir(): string {
 	return stateDir;
 }
 
+function fakeGitRunner(options: { hasOrigin: boolean; hasRemoteGoalBranch: boolean }): CommandRunner {
+	return {
+		execFile: async (_file, args) => {
+			if (args[0] === "symbolic-ref") return { stdout: "refs/remotes/origin/master\n", stderr: "" };
+			if (args[0] === "remote" && args[1] === "get-url") {
+				if (!options.hasOrigin) throw new Error("origin is absent");
+				return { stdout: "https://example.test/repo.git\n", stderr: "" };
+			}
+			if (args[0] === "ls-remote") {
+				if (!options.hasRemoteGoalBranch) throw new Error("remote ref not found");
+				return { stdout: `${"a".repeat(40)}\trefs/heads/${args.at(-1)}\n`, stderr: "" };
+			}
+			if (args[0] === "rev-parse") return { stdout: `${"a".repeat(40)}\n`, stderr: "" };
+			return { stdout: "", stderr: "" };
+		},
+	};
+}
+
 function makeLocalGitRepoWithoutOrigin(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-no-origin-regression-"));
-	execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
-	execFileSync("git", ["checkout", "-B", "master"], { cwd: root, stdio: "ignore" });
-	fs.writeFileSync(path.join(root, "README.md"), "local-only verification repo\n");
-	execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
-	execFileSync("git", ["-c", "user.name=Bobbit Test", "-c", "user.email=bobbit@example.test", "commit", "-m", "Initial commit"], { cwd: root, stdio: "ignore" });
-	assert.throws(() => execFileSync("git", ["remote", "get-url", "origin"], { cwd: root, stdio: "pipe" }));
-	return root;
+	return fs.mkdtempSync(path.join(os.tmpdir(), "verif-no-origin-regression-"));
 }
 
 function makeCloneWithLocalOnlyGoalBranch(): { root: string; repoDir: string; goalBranch: string } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-local-only-origin-regression-"));
-	const remoteDir = path.join(root, "remote.git");
-	const seedDir = path.join(root, "seed");
 	const repoDir = path.join(root, "repo");
-	const goalBranch = "goal/local-only-regression";
-
-	execFileSync("git", ["init", "--bare", remoteDir], { stdio: "ignore" });
-	execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/master"], { cwd: remoteDir, stdio: "ignore" });
-	execFileSync("git", ["init", seedDir], { stdio: "ignore" });
-	execFileSync("git", ["checkout", "-B", "master"], { cwd: seedDir, stdio: "ignore" });
-	fs.writeFileSync(path.join(seedDir, "README.md"), "published master only\n");
-	execFileSync("git", ["add", "README.md"], { cwd: seedDir, stdio: "ignore" });
-	execFileSync("git", ["-c", "user.name=Bobbit Test", "-c", "user.email=bobbit@example.test", "commit", "-m", "Initial commit"], { cwd: seedDir, stdio: "ignore" });
-	execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: seedDir, stdio: "ignore" });
-	execFileSync("git", ["push", "-u", "origin", "master"], { cwd: seedDir, stdio: "ignore" });
-
-	execFileSync("git", ["clone", remoteDir, repoDir], { stdio: "ignore" });
-	execFileSync("git", ["checkout", "-b", goalBranch], { cwd: repoDir, stdio: "ignore" });
-	assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: repoDir, encoding: "utf8" }).trim(), goalBranch);
-	assert.throws(() => execFileSync("git", ["ls-remote", "--exit-code", "--heads", "origin", goalBranch], { cwd: repoDir, stdio: "pipe" }));
-	return { root, repoDir, goalBranch };
+	fs.mkdirSync(repoDir, { recursive: true });
+	return { root, repoDir, goalBranch: "goal/local-only-regression" };
 }
 
 function makeProjectConfigStore(baseRef: string) {
@@ -91,7 +85,7 @@ function makeGateStore(signal: any) {
 	};
 }
 
-function makeHarnessFixture(baseRef = "origin/master") {
+function makeHarnessFixture(baseRef = "origin/master", commandRunner: CommandRunner = fakeGitRunner({ hasOrigin: false, hasRemoteGoalBranch: false })) {
 	const signal = {
 		id: "signal-basebranch",
 		goalId: "goal-basebranch",
@@ -131,13 +125,15 @@ function makeHarnessFixture(baseRef = "origin/master") {
 		undefined,
 		projectConfigStore as any,
 		projectContextManager as any,
+		undefined,
+		{ commandRunner },
 	);
 	return { harness, signal, gateStore, goal };
 }
 
 test("local-only verification does not warn when origin remote is absent", async () => {
 	const repoDir = makeLocalGitRepoWithoutOrigin();
-	const { harness, signal, gateStore } = makeHarnessFixture("origin/master");
+	const { harness, signal, gateStore } = makeHarnessFixture("origin/master", fakeGitRunner({ hasOrigin: false, hasRemoteGoalBranch: false }));
 	const warnings: string[] = [];
 	const originalWarn = console.warn;
 	(harness as any).runCommandStep = async (command: string) => ({ passed: true, output: `executed ${command}` });
@@ -181,7 +177,7 @@ test("local-only verification does not warn when origin remote is absent", async
 
 test("local-only goal branch with origin does not warn when remote goal ref is missing", async () => {
 	const { root, repoDir, goalBranch } = makeCloneWithLocalOnlyGoalBranch();
-	const { harness, signal, gateStore } = makeHarnessFixture("origin/master");
+	const { harness, signal, gateStore } = makeHarnessFixture("origin/master", fakeGitRunner({ hasOrigin: true, hasRemoteGoalBranch: false }));
 	const warnings: string[] = [];
 	const originalWarn = console.warn;
 	(harness as any).runCommandStep = async (command: string) => ({ passed: true, output: `executed ${command}` });

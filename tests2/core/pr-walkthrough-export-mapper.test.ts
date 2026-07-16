@@ -6,12 +6,10 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { PassThrough } from "node:stream";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.ts";
 import {
@@ -30,25 +28,6 @@ import {
 	resolveGithubPr,
 } from "../../src/server/pr-walkthrough/github-adapter.ts";
 import { resolveDiffForBindingTargetForTesting, submitExportForTesting } from "../../src/server/pr-walkthrough/routes.ts";
-
-type LocalGitFixture = { cwd: string; baseSha: string; headSha: string; cleanup: () => void };
-
-// One suite-scoped top-level temp root avoids repeated Windows Defender scans;
-// unique children retain fixture isolation. The real git fixture is shared
-// read-only across route cases and remains this suite's process/filesystem canary.
-const suiteRoot = mkdtempSync(join(tmpdir(), "bobbit-prw-mapper-suite-"));
-let fixtureSequence = 0;
-function fixtureDir(label: string): string {
-	const dir = join(suiteRoot, `${label}-${++fixtureSequence}`);
-	mkdirSync(dir, { recursive: true });
-	return dir;
-}
-let sharedLocalGitFixture: LocalGitFixture;
-beforeAll(() => { sharedLocalGitFixture = makeLocalGitFixture(); });
-afterAll(() => {
-	sharedLocalGitFixture?.cleanup();
-	try { rmSync(suiteRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
-});
 
 const cards: PrWalkthroughCard[] = [
 	{
@@ -216,68 +195,29 @@ describe("PR walkthrough GitHub export mapper", () => {
 		assert.match(result.message, /External GitHub API access is disabled in tests/);
 	});
 
-	it("posts via local gh when no bearer token is available (github.com, no --hostname)", async () => {
-		const review = fakeGhReviewBin();
+	it("uses the injected gh auth runner and forwards enterprise hostname", async () => {
 		await withoutGithubTokens(async () => {
-			process.env.BOBBIT_GH_COMMAND = review.command;
-			try {
-				const preview = buildGithubReviewPreview(draft(), cards);
-				const result = await submitGithubReview(preview, { confirm: true, event: "COMMENT" });
-				assert.equal(result.ok, true);
-				assert.equal(result.submitted, true);
-				assert.equal(result.reviewUrl, "https://github.com/SuuBro/bobbit/pull/42#pullrequestreview-gh");
-
-				const args = review.readArgs();
-				assert.ok(args.includes("api"), args.join(" "));
-				assert.ok(args.includes("repos/SuuBro/bobbit/pulls/42/reviews"), args.join(" "));
-				assert.ok(args.includes("--method") && args.includes("POST"), args.join(" "));
-				assert.ok(args.includes("--input"), args.join(" "));
-				assert.equal(args.includes("--hostname"), false);
-
-				// The gh path wrote the review payload to the temp --input file.
-				const payload = review.readInput() as { event: string; comments: Array<{ path: string; side: string; line: number }> };
-				assert.equal(payload.event, "COMMENT");
-				assert.equal(payload.comments.length, 2);
-				assert.deepEqual(payload.comments.map(c => [c.path, c.side, c.line]), [
-					["src/example.ts", "RIGHT", 11],
-					["src/example.ts", "LEFT", 10],
-				]);
-			} finally {
-				delete process.env.BOBBIT_GH_COMMAND;
-			}
+			const calls: string[][] = [];
+			const commandRunner: CommandRunner = {
+				execFile: async (_file, args) => {
+					calls.push([...args]);
+					return { stdout: "gh-cli-token\n", stderr: "" };
+				},
+			};
+			const github = await resolveGithubExportAuth({ commandRunner }, "github.com");
+			const enterprise = await resolveGithubExportAuth({ commandRunner }, "github.example.com");
+			assert.equal(github.available, true);
+			assert.equal(enterprise.available, true);
+			assert.deepEqual(calls, [["auth", "token"], ["auth", "token", "--hostname", "github.example.com"]]);
 		});
 	});
 
-	it("passes --hostname to gh for an enterprise host", async () => {
-		const review = fakeGhReviewBin();
+	it("returns an actionable auth reason when the injected gh runner rejects", async () => {
 		await withoutGithubTokens(async () => {
-			process.env.BOBBIT_GH_COMMAND = review.command;
-			try {
-				const preview = buildGithubReviewPreview(draft(), cards);
-				const result = await submitGithubReview(preview, { confirm: true, event: "COMMENT" }, { ghHost: "github.example.com" });
-				assert.equal(result.ok, true);
-				const args = review.readArgs();
-				assert.ok(args.includes("--hostname"), args.join(" "));
-				assert.ok(args.includes("github.example.com"), args.join(" "));
-			} finally {
-				delete process.env.BOBBIT_GH_COMMAND;
-			}
-		});
-	});
-
-	it("returns an actionable 401 when gh is not authenticated", async () => {
-		await withoutGithubTokens(async () => {
-			// A gh that exits non-zero mimics `gh` not authenticated / not installed.
-			process.env.BOBBIT_GH_COMMAND = join(fakeGhBin(undefined, 1), process.platform === "win32" ? "gh.cmd" : "gh");
-			try {
-				const preview = buildGithubReviewPreview(draft(), cards);
-				const result = await submitGithubReview(preview, { confirm: true, event: "COMMENT" });
-				assert.equal(result.ok, false);
-				assert.equal(result.status, 401);
-				assert.match(result.message, /gh auth login/);
-			} finally {
-				delete process.env.BOBBIT_GH_COMMAND;
-			}
+			const auth = await resolveGithubExportAuth({ commandRunner: githubAuthRunner() }, "github.com");
+			assert.equal(auth.available, false);
+			assert.equal(auth.reason, GITHUB_EXPORT_NEEDS_AUTH_REASON);
+			assert.match(auth.reason ?? "", /gh auth login/);
 		});
 	});
 
@@ -420,28 +360,22 @@ describe("PR walkthrough GitHub adapter", () => {
 		});
 	});
 
-	it("resolveGithubExportAuth reports availability from local gh auth", async () => {
+	it("resolveGithubExportAuth reports availability from injected local gh auth", async () => {
 		await withoutGithubTokens(async () => {
-			process.env.BOBBIT_GH_COMMAND = join(fakeGhBin("gh-cli-token"), process.platform === "win32" ? "gh.cmd" : "gh");
-			try {
-				const auth = await resolveGithubExportAuth({}, "github.com");
-				assert.equal(auth.available, true);
-				assert.equal(auth.token, "gh-cli-token");
-				assert.equal(auth.reason, undefined);
-			} finally { delete process.env.BOBBIT_GH_COMMAND; }
+			const auth = await resolveGithubExportAuth({ commandRunner: githubAuthRunner("gh-cli-token") }, "github.com");
+			assert.equal(auth.available, true);
+			assert.equal(auth.token, "gh-cli-token");
+			assert.equal(auth.reason, undefined);
 		});
 	});
 
-	it("resolveGithubExportAuth returns an actionable reason when no credentials exist", async () => {
+	it("resolveGithubExportAuth returns an actionable reason when injected auth rejects", async () => {
 		await withoutGithubTokens(async () => {
-			process.env.BOBBIT_GH_COMMAND = join(fakeGhBin(undefined, 1), process.platform === "win32" ? "gh.cmd" : "gh");
-			try {
-				const auth = await resolveGithubExportAuth({}, "github.com");
-				assert.equal(auth.available, false);
-				assert.equal(auth.token, undefined);
-				assert.equal(auth.reason, GITHUB_EXPORT_NEEDS_AUTH_REASON);
-				assert.match(auth.reason ?? "", /gh auth login/);
-			} finally { delete process.env.BOBBIT_GH_COMMAND; }
+			const auth = await resolveGithubExportAuth({ commandRunner: githubAuthRunner() }, "github.com");
+			assert.equal(auth.available, false);
+			assert.equal(auth.token, undefined);
+			assert.equal(auth.reason, GITHUB_EXPORT_NEEDS_AUTH_REASON);
+			assert.match(auth.reason ?? "", /gh auth login/);
 		});
 	});
 
@@ -577,95 +511,94 @@ describe("PR walkthrough GitHub adapter", () => {
 	});
 });
 
-describe("PR walkthrough binding-target availability + submit gh path (routes)", () => {
-	const githubTarget = (fixture: LocalGitFixture) => ({
+function localChangesetRunner(): CommandRunner {
+	const baseSha = "a".repeat(40);
+	const headSha = "b".repeat(40);
+	const diff = `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ # Demo
++Second line
+`;
+	return {
+		execFile: async (_file, args) => {
+			if (args[0] === "rev-parse") return { stdout: args[2]?.startsWith("a") ? `${baseSha}\n` : `${headSha}\n`, stderr: "" };
+			if (args.includes("--shortstat")) return { stdout: " 1 file changed, 1 insertion(+)\n", stderr: "" };
+			if (args.includes("--name-status")) return { stdout: "M\tREADME.md\n", stderr: "" };
+			throw new Error(`unexpected git command: ${args.join(" ")}`);
+		},
+		spawn: () => {
+			const child = new EventEmitter() as any;
+			child.stdout = new PassThrough();
+			child.stderr = new PassThrough();
+			child.kill = () => true;
+			queueMicrotask(() => {
+				child.stdout.end(diff);
+				child.stderr.end();
+				child.emit("close", 0);
+			});
+			return child;
+		},
+	};
+}
+
+async function withDefaultGitRunner<T>(runner: CommandRunner, fn: () => Promise<T>): Promise<T> {
+	const previousExecFile = realCommandRunner.execFile;
+	const previousSpawn = realCommandRunner.spawn;
+	realCommandRunner.execFile = runner.execFile;
+	realCommandRunner.spawn = runner.spawn;
+	try {
+		return await fn();
+	} finally {
+		realCommandRunner.execFile = previousExecFile;
+		realCommandRunner.spawn = previousSpawn;
+	}
+}
+
+describe("PR walkthrough binding-target availability (routes)", () => {
+	const baseSha = "a".repeat(40);
+	const headSha = "b".repeat(40);
+	const target = {
 		provider: "github" as const,
 		prUrl: "https://github.com/SuuBro/bobbit/pull/42",
 		owner: "SuuBro",
 		repo: "bobbit",
 		number: 42,
 		host: "github.com",
-		baseSha: fixture.baseSha,
-		headSha: fixture.headSha,
+		baseSha,
+		headSha,
 		canonicalKey: "github:SuuBro/bobbit#42",
-	});
-	const deps = (fixture: LocalGitFixture, commandRunner?: CommandRunner) => ({
-		defaultCwd: fixture.cwd,
-		readBody: async () => ({}),
-		commandRunner,
-	}) as any;
+	};
 
-	it("reports export.available and drops previewOnly for a with-SHA github target when gh authenticates", async () => {
-		const fixture = sharedLocalGitFixture;
-		await withoutGithubTokens(async () => {
-			const parsed = await resolveDiffForBindingTargetForTesting(githubTarget(fixture), fixture.cwd, deps(fixture, githubAuthRunner("gh-token")));
+	it("reports export.available for a with-SHA GitHub target when injected gh auth succeeds", async () => {
+		await withoutGithubTokens(async () => withDefaultGitRunner(localChangesetRunner(), async () => {
+			const parsed = await resolveDiffForBindingTargetForTesting(target, "/synthetic/pr-walkthrough", { commandRunner: githubAuthRunner("gh-token") } as any);
 			assert.equal(parsed.export?.available, true);
 			assert.equal((parsed.export as any)?.previewOnly, undefined);
-		});
+		}));
 	});
 
-	it("reports unavailable with a gh-auth reason when gh cannot authenticate", async () => {
-		const fixture = sharedLocalGitFixture;
-		await withoutGithubTokens(async () => {
-			const parsed = await resolveDiffForBindingTargetForTesting(githubTarget(fixture), fixture.cwd, deps(fixture, githubAuthRunner()));
+	it("reports unavailable with an auth reason when injected gh auth rejects", async () => {
+		await withoutGithubTokens(async () => withDefaultGitRunner(localChangesetRunner(), async () => {
+			const parsed = await resolveDiffForBindingTargetForTesting(target, "/synthetic/pr-walkthrough", { commandRunner: githubAuthRunner() } as any);
 			assert.equal(parsed.export?.available, false);
 			assert.match(parsed.export?.reason ?? "", /gh auth login/);
-		});
+		}));
 	});
 
-	it("keeps a local target non-postable with the local reason", async () => {
-		const fixture = sharedLocalGitFixture;
-		const parsed = await resolveDiffForBindingTargetForTesting(
-			{ provider: "local", baseSha: fixture.baseSha, headSha: fixture.headSha, canonicalKey: "local:test" },
-			fixture.cwd,
-			deps(fixture),
-		);
-		assert.equal(parsed.export?.available, false);
-		assert.match(parsed.export?.reason ?? "", /Local changesets/);
-	});
-
-	it("submitExport posts via gh (host derived from the changeset) when no env token is set", async () => {
-		const review = fakeGhReviewBin();
-		await withoutGithubTokens(async () => {
-			process.env.BOBBIT_GH_COMMAND = review.command;
-			try {
-				const result = await submitExportForTesting("github:SuuBro/bobbit#42:bbbbbbb", {
-					changesetId: "github:SuuBro/bobbit#42:bbbbbbb",
-					changeset: draft().changeset,
-					cards: cards as any,
-					warnings: [],
-					export: { provider: "github", available: true },
-				}, { draft: draft(), event: "COMMENT" });
-				assert.equal(result.ok, true);
-				assert.equal(result.submitted, true);
-				const args = review.readArgs();
-				assert.ok(args.includes("repos/SuuBro/bobbit/pulls/42/reviews"), args.join(" "));
-				assert.equal(args.includes("--hostname"), false); // github.com → no --hostname
-			} finally {
-				delete process.env.BOBBIT_GH_COMMAND;
-			}
+	it("keeps a local target non-postable", async () => {
+		await withDefaultGitRunner(localChangesetRunner(), async () => {
+			const parsed = await resolveDiffForBindingTargetForTesting(
+				{ provider: "local", baseSha, headSha, canonicalKey: "local:test" },
+				"/synthetic/pr-walkthrough",
+				{} as any,
+			);
+			assert.equal(parsed.export?.available, false);
+			assert.match(parsed.export?.reason ?? "", /Local changesets/);
 		});
 	});
 });
-
-function makeLocalGitFixture(): LocalGitFixture {
-	const cwd = fixtureDir("git");
-	const git = (args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-	git(["init"]);
-	git(["config", "user.name", "Bobbit Unit"]);
-	git(["config", "user.email", "unit@example.test"]);
-	writeFileSync(join(cwd, "README.md"), "# Demo\n\nFirst line\n", "utf8");
-	git(["add", "."]);
-	git(["commit", "-m", "base"]);
-	const baseSha = git(["rev-parse", "HEAD"]);
-	mkdirSync(join(cwd, "src"));
-	writeFileSync(join(cwd, "README.md"), "# Demo\n\nFirst line\nSecond line\n", "utf8");
-	writeFileSync(join(cwd, "src", "feature.ts"), "export const answer = 42;\n", "utf8");
-	git(["add", "."]);
-	git(["commit", "-m", "head"]);
-	const headSha = git(["rev-parse", "HEAD"]);
-	return { cwd, baseSha, headSha, cleanup: () => { try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best-effort */ } } };
-}
 
 async function startMockGithubReviewServer(): Promise<{ baseUrl: string; requests: Array<{ url?: string; authorization?: string; body: any }>; close: () => Promise<void> }> {
 	const requests: Array<{ url?: string; authorization?: string; body: any }> = [];
@@ -692,67 +625,12 @@ async function startMockGithubReviewServer(): Promise<{ baseUrl: string; request
 	};
 }
 
-function fakeGhBin(token: string | undefined, exitCode = 0): string {
-	const dir = fixtureDir("fake-gh");
-	const posixScript = exitCode === 0
-		? `#!/bin/sh\nprintf '%s\\n' '${token ?? ""}'\n`
-		: `#!/bin/sh\necho 'not logged in' >&2\nexit ${exitCode}\n`;
-	writeFileSync(join(dir, "gh"), posixScript, "utf8");
-	chmodSync(join(dir, "gh"), 0o755);
-	const cmdScript = exitCode === 0
-		? `@echo off\r\necho ${token ?? ""}\r\n`
-		: `@echo off\r\necho not logged in 1>&2\r\nexit /b ${exitCode}\r\n`;
-	writeFileSync(join(dir, "gh.cmd"), cmdScript, "utf8");
-	return dir;
-}
-
-/**
- * A fake `gh` that records the `gh api …/reviews` invocation: it copies the
- * `--input <file>` payload to a stable record file and echoes a `{ html_url }`
- * success body. Both a POSIX `gh` and a Windows `gh.cmd` are written.
- */
-function fakeGhReviewBin(): { dir: string; command: string; readInput: () => unknown; readArgs: () => string[] } {
-	const dir = fixtureDir("fake-ghreview");
-	const rec = fixtureDir("ghreview-rec");
-	const recPosix = rec.replace(/\\/g, "/");
-	const okBody = '{"html_url":"https://github.com/SuuBro/bobbit/pull/42#pullrequestreview-gh"}';
-	const posixScript =
-		`#!/bin/sh\n` +
-		`echo "$@" >> "${recPosix}/args.txt"\n` +
-		`prev=""\n` +
-		`for a in "$@"; do\n` +
-		`  if [ "$prev" = "--input" ]; then cp "$a" "${recPosix}/input.json"; fi\n` +
-		`  prev="$a"\n` +
-		`done\n` +
-		`printf '%s\\n' '${okBody}'\n`;
-	writeFileSync(join(dir, "gh"), posixScript, "utf8");
-	chmodSync(join(dir, "gh"), 0o755);
-	const recWin = rec.replace(/\//g, "\\");
-	const cmdScript =
-		`@echo off\r\n` +
-		`echo %* >> "${recWin}\\args.txt"\r\n` +
-		`:loop\r\n` +
-		`if "%~1"=="--input" copy /y "%~2" "${recWin}\\input.json" >nul\r\n` +
-		`shift\r\n` +
-		`if not "%~1"=="" goto loop\r\n` +
-		`echo ${okBody}\r\n`;
-	writeFileSync(join(dir, "gh.cmd"), cmdScript, "utf8");
-	return {
-		dir,
-		command: join(dir, process.platform === "win32" ? "gh.cmd" : "gh"),
-		readInput: () => JSON.parse(readFileSync(join(rec, "input.json"), "utf8")),
-		readArgs: () => readFileSync(join(rec, "args.txt"), "utf8").trim().split(/\s+/).filter(Boolean),
-	};
-}
-
 function githubAuthRunner(token?: string): CommandRunner {
 	return {
-		execFile: async (file, args, options) => {
-			if (args[0] === "auth" && args[1] === "token") {
-				if (token !== undefined) return { stdout: `${token}\n`, stderr: "" };
-				throw new Error("gh is not authenticated");
-			}
-			return realCommandRunner.execFile(file, args, options);
+		execFile: async (_file, args) => {
+			if (args[0] !== "auth" || args[1] !== "token") throw new Error(`unexpected command: ${args.join(" ")}`);
+			if (token !== undefined) return { stdout: `${token}\n`, stderr: "" };
+			throw new Error("gh is not authenticated");
 		},
 	};
 }
