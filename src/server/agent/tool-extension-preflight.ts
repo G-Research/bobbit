@@ -263,6 +263,10 @@ function moduleLoadPreflightScript(extensionPath: string): string {
 
 export type ToolModuleLoadProbe = (extensionPath: string) => string | undefined;
 
+// A worker can load this module through both Vitest's source graph and the
+// content-addressed server prebundle. Symbol.for keeps the baseline/override
+// seam shared across those module identities without changing production's
+// fallback to the confined child-process probe.
 const MODULE_LOAD_PROBE_TEST_STATE_KEY = Symbol.for("bobbit.tool-extension-preflight.module-load-probe-test-state");
 interface ModuleLoadProbeTestState {
 	baseline?: ToolModuleLoadProbe;
