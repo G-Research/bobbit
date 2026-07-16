@@ -30,7 +30,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	deleteGoal,
-	gitCwd,
+	nonGitCwd,
 	rawApiFetch,
 	readE2EToken,
 	seedTeamLeadHeader,
@@ -69,16 +69,17 @@ function humanHeaders(extra?: Record<string, string>): Record<string, string> {
 }
 
 /**
- * Create a goal in a real git repo so it gets a worktree (`repoPath`).
- * `autoStartTeam: false` so no team-lead is established — a teamless goal is
- * mutable ONLY by a verified human operator, so agent callers are denied.
+ * Create a data-only goal. The archive route depends on goal relationships and
+ * authz, not Git; `autoStartTeam: false` leaves the goal teamless so only the
+ * verified human operator may mutate it.
  */
-async function createReadyGoal(label: string): Promise<{ id: string; repoPath?: string }> {
+async function createReadyGoal(label: string): Promise<{ id: string }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
 			title: `${label} ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			cwd: gitCwd(),
+			cwd: nonGitCwd(),
+			worktree: false,
 			autoStartTeam: false,
 			workflowId: "feature",
 		}),
@@ -90,9 +91,9 @@ async function createReadyGoal(label: string): Promise<{ id: string; repoPath?: 
 			const r = await apiFetch(`/api/goals/${created.id}`);
 			if (r.status !== 200) return null;
 			const g = await r.json();
-			return g.setupStatus === "ready" && g.repoPath ? g : null;
+			return g.setupStatus === "ready" ? g : null;
 		},
-		{ timeoutMs: 30_000, intervalMs: 100, label: `goal ${created.id} setup ready` },
+		{ timeoutMs: 5_000, intervalMs: 25, label: `goal ${created.id} setup ready` },
 	);
 	return settled;
 }
@@ -103,12 +104,25 @@ async function createReadyGoal(label: string): Promise<{ id: string; repoPath?: 
  * seeded matching X-Bobbit-Spawning-Session header.
  */
 async function spawnChild(parentId: string, planId: string): Promise<string> {
+	const context = gw.projectContextManager.getContextForGoal(parentId);
+	const parent = context.goalStore.get(parentId);
+	const dependencyPlanId = `fixture-dependency-${planId}`;
+	const dependency = await context.goalManager.createGoal(`dependency ${planId}`, nonGitCwd(), {
+		spec: "Data-only dependency used to keep the target child from auto-starting a team during route-authz coverage.",
+		workflowId: "feature",
+		projectId: parent.projectId,
+		parentGoalId: parentId,
+		worktree: false,
+	});
+	await context.goalManager.updateGoal(dependency.id, { spawnedFromPlanId: dependencyPlanId });
+
 	const tlHeader = seedTeamLeadHeader(gw, parentId);
 	const resp = await rawApiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...tlHeader },
 		body: JSON.stringify({
 			planId,
+			dependsOn: [dependencyPlanId],
 			title: `archive-child target ${planId}`,
 			spec: "archive-child authz fixture: a direct child goal created so the parent-scoped archive route has a real relationship to validate.",
 		}),
@@ -116,6 +130,10 @@ async function spawnChild(parentId: string, planId: string): Promise<string> {
 	expect(resp.status).toBe(201);
 	const body = await resp.json();
 	expect(body.id).toBeTruthy();
+	// Resolve the seeded dependency after creation and make the target live. This
+	// retains relationship semantics without starting an incidental child team.
+	await context.goalManager.updateGoal(dependency.id, { state: "complete" });
+	await context.goalManager.updateGoal(body.id, { state: "todo" });
 	// The spawn-child response does not echo parentGoalId — read the
 	// persisted record back to confirm the direct-child relationship.
 	const read = await apiFetch(`/api/goals/${body.id}`);
