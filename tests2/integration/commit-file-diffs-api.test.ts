@@ -1,10 +1,9 @@
 /**
  * Representative commit-file metadata and commit-scoped diff routes.
  *
- * Git command results are injected through the gateway CommandRunner so parser,
- * route, validation, session, and goal behavior stay covered without spawning
- * Git. Session coverage exercises the full validation matrix; goal coverage is
- * a smoke path for the separate goal route.
+ * Each declaration owns a live route entity, an exact cwd-to-repository model,
+ * and a scoped CommandRunner. This keeps the shared fork's runner and commit
+ * responses from leaking between this file and neighboring Git suites.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, createSession, defaultProjectId, harnessDefaultProjectRoot } from "./_e2e/e2e-setup.js";
@@ -12,80 +11,96 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 
-const targetCommits = new Map<string, { sha: string; marker: string }>();
-let restoreCommandRunner: (() => void) | undefined;
-let sharedRoot = "";
-let sessionRoot = "";
-let goalRoot = "";
-let projectId = "";
-let sessionId = "";
-let goalId = "";
+type CommitFixture = {
+	cwd: string;
+	sha: string;
+	marker: string;
+};
+
+type InstalledRunner = {
+	reset(): void;
+};
 
 function fixtureRepo(projectRoot: string, name: string): string {
-	const root = path.join(projectRoot, name);
+	const root = path.resolve(projectRoot, name);
 	fs.mkdirSync(root, { recursive: true });
 	fs.writeFileSync(path.join(root, "tracked.txt"), "base\n");
 	return root;
 }
 
-function commitTargetChanges(root: string, trackedContent = "base\ncommit scoped marker\n"): string {
-	const marker = trackedContent.includes("goal commit") ? "goal commit scoped marker" : "commit scoped marker";
-	const sha = marker.startsWith("goal") ? "2222222222222222222222222222222222222222" : "1111111111111111111111111111111111111111";
-	targetCommits.set(path.resolve(root), { sha, marker });
-	return sha;
+function commitLog(fixture: CommitFixture): string {
+	return [
+		`\x1e${fixture.sha}\x1f${fixture.sha.slice(0, 7)}\x1ftarget commit\x1fCommit Diff Test\x1f2026-01-01T00:00:00.000Z`,
+		":100644 100644 0000000 0000000 M\ttracked.txt",
+		":000000 100644 0000000 0000000 A\tadded.txt",
+		":100644 000000 0000000 0000000 D\tdelete-me.txt",
+		":100644 100644 0000000 0000000 R100\trename-old.txt\trename-new.txt",
+		"1\t1\ttracked.txt",
+	].join("\n");
 }
 
-function cannedGit(cwd: string, args: readonly string[]): string {
-	const target = targetCommits.get(path.resolve(cwd));
+function cannedGit(fixture: CommitFixture, args: readonly string[]): string {
 	const key = args.join(" ");
-	if (key === "rev-parse --show-toplevel") return cwd;
+	if (key === "rev-parse --show-toplevel") return fixture.cwd;
 	if (key === "rev-parse --abbrev-ref HEAD") return "master";
-	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master") return target?.sha ?? "0".repeat(40);
-	if (key.startsWith("rev-parse --abbrev-ref ") || key.startsWith("symbolic-ref ")) throw new Error("no upstream");
+	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master") return fixture.sha;
+	if (key === "symbolic-ref refs/remotes/origin/HEAD") return "refs/remotes/origin/master";
+	if (key.startsWith("rev-parse --abbrev-ref ")) throw new Error("no upstream");
 	if (args[0] === "cat-file" && args[1] === "-e") {
-		if (target && args[2] === `${target.sha}^{commit}`) return "";
+		if (args[2] === `${fixture.sha}^{commit}`) return "";
 		throw new Error("unknown commit");
 	}
-	if (args[0] === "log") {
-		if (!target) return "";
-		return [
-			`\x1e${target.sha}\x1f${target.sha.slice(0, 7)}\x1ftarget commit\x1fCommit Diff Test\x1f2026-01-01T00:00:00.000Z`,
-			":100644 100644 0000000 0000000 M\ttracked.txt",
-			":000000 100644 0000000 0000000 A\tadded.txt",
-			":100644 000000 0000000 0000000 D\tdelete-me.txt",
-			":100644 100644 0000000 0000000 R100\trename-old.txt\trename-new.txt",
-			"1\t1\ttracked.txt",
-		].join("\n");
-	}
+	if (args[0] === "log") return commitLog(fixture);
 	if (args[0] === "show" && args.includes("--name-status")) {
-		if (!target || !args.includes(target.sha)) throw new Error("unknown commit");
+		if (!args.includes(fixture.sha)) throw new Error("unknown commit");
 		return "M\ttracked.txt\nA\tadded.txt\nD\tdelete-me.txt\nR100\trename-old.txt\trename-new.txt";
 	}
-	if (args[0] === "show" && target && args.includes(target.sha)) {
+	if (args[0] === "show" && args.includes(fixture.sha)) {
 		const file = args.at(-1);
-		if (file === "rename-new.txt") return "diff --git a/rename-old.txt b/rename-new.txt\nsimilarity index 100%\nrename from rename-old.txt\nrename to rename-new.txt";
-		return `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n+${target.marker}`;
+		if (file === "rename-new.txt") {
+			return "diff --git a/rename-old.txt b/rename-new.txt\nsimilarity index 100%\nrename from rename-old.txt\nrename to rename-new.txt";
+		}
+		return `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n+${fixture.marker}`;
 	}
 	if (args[0] === "diff" && args.includes("tracked.txt")) {
 		return "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n+worktree marker";
 	}
-	if (args[0] === "worktree" || args[0] === "branch") return "";
 	throw new Error(`unexpected canned git command: ${key}`);
 }
 
-function installCannedGitRunner(gateway: any): void {
+function installCannedGitRunner(gateway: any, fixture: CommitFixture): InstalledRunner {
 	const runner = gateway.sessionManager.commandRunner as CommandRunner;
 	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	const commitResponses = new Map<string, CommitFixture>([[path.resolve(fixture.cwd), fixture]]);
+
+	const fixtureFor = (cwd: unknown): CommitFixture => {
+		const resolved = path.resolve(String(cwd ?? ""));
+		const match = commitResponses.get(resolved);
+		if (!match) {
+			throw new Error(`unexpected git cwd: ${resolved}; expected ${[...commitResponses.keys()].join(", ")}`);
+		}
+		return match;
+	};
+
 	runner.execFile = async (file, args, options) => {
 		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
-		return { stdout: cannedGit(String(options?.cwd ?? ""), args), stderr: "" };
+		return { stdout: cannedGit(fixtureFor(options?.cwd), args), stderr: "" };
 	};
 	runner.execFileSync = (file, args, options) => {
 		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
-		return cannedGit(String(options?.cwd ?? ""), args);
+		return cannedGit(fixtureFor(options?.cwd), args);
 	};
 	runner.spawn = undefined;
-	restoreCommandRunner = () => Object.assign(runner, original);
+
+	let reset = false;
+	return {
+		reset() {
+			if (reset) return;
+			reset = true;
+			commitResponses.clear();
+			Object.assign(runner, original);
+		},
+	};
 }
 
 function byPath(files: any[], p: string): any {
@@ -139,74 +154,101 @@ async function expectSessionCommitDiffValidation(endpoint: string, targetSha: st
 	expect((await invalidCommitResp.json()).error).toBe("Invalid commit");
 }
 
-test.beforeEach(async ({ gateway }) => {
-	restoreCommandRunner = undefined;
-	installCannedGitRunner(gateway);
-	projectId = (await defaultProjectId())!;
+function makeCaseRoot(tag: string): string {
 	const workspaceRoot = path.join(harnessDefaultProjectRoot(), ".e2e-workspaces");
 	fs.mkdirSync(workspaceRoot, { recursive: true });
-	sharedRoot = fs.mkdtempSync(path.join(workspaceRoot, "commit-diff-"));
-	sessionRoot = fixtureRepo(sharedRoot, "session");
-	goalRoot = fixtureRepo(sharedRoot, "goal");
-	commitTargetChanges(sessionRoot);
-	commitTargetChanges(goalRoot, "base\ngoal commit scoped marker\n");
+	return fs.mkdtempSync(path.join(workspaceRoot, `commit-diff-${tag}-`));
+}
 
-	sessionId = await createSession({ cwd: sessionRoot, projectId });
-	const goal = await createGoal({
-		title: "Commit file diff API goal",
-		cwd: goalRoot,
-		worktree: false,
-		autoStartTeam: false,
-		projectId,
-	});
-	goalId = String(goal.id);
-	const goalStore = gateway.projectContextManager.getOrCreate(projectId)?.goalStore;
-	expect(goalStore?.update(goalId, {
-		branch: "master",
-		worktreePath: goalRoot,
-		setupStatus: "ready",
-	})).toBe(true);
-});
+async function cleanupSession(gateway: any, sessionId: string): Promise<void> {
+	await gateway.sessionManager.terminateSession(sessionId).catch(() => {});
+	await gateway.sessionManager.purgeArchivedSession(sessionId).catch(() => {});
+}
 
-test.afterEach(async ({ gateway }) => {
-	const context = projectId ? gateway.projectContextManager.getOrCreate(projectId) : undefined;
-	if (sessionId) {
-		await gateway.sessionManager.terminateSession(sessionId).catch(() => {});
-		await gateway.sessionManager.purgeArchivedSession(sessionId).catch(() => {});
-	}
-	if (goalId) await context?.goalManager.deleteGoal(goalId).catch(() => {});
-	restoreCommandRunner?.();
-	restoreCommandRunner = undefined;
-	targetCommits.clear();
-	if (sharedRoot) cleanupDir(sharedRoot);
-	sharedRoot = "";
-	sessionRoot = "";
-	goalRoot = "";
-	projectId = "";
-	sessionId = "";
-	goalId = "";
-});
-
-// Shared gateway state and the injected command runner are intentionally serial.
+// The gateway CommandRunner is shared within a fork, so these cases must remain serial.
 test.describe.configure({ mode: "serial" });
 
 test.describe("commit file diff API", () => {
-	test("session commits include changed files and commit-scoped git-diff", async () => {
-		const targetSha = targetCommits.get(path.resolve(sessionRoot))!.sha;
-		await expectSessionCommitDiffValidation(`/api/sessions/${sessionId}`, targetSha);
+	test("session commits include changed files and commit-scoped git-diff", async ({ gateway }) => {
+		const projectId = (await defaultProjectId())!;
+		const caseRoot = makeCaseRoot("session");
+		const requestedRoot = fixtureRepo(caseRoot, "repo");
+		let sessionId = "";
+		let installedRunner: InstalledRunner | undefined;
+		try {
+			sessionId = await createSession({ cwd: requestedRoot, projectId });
+			const liveSession = gateway.sessionManager.getSession(sessionId);
+			expect(liveSession).toBeTruthy();
+			const liveCwd = path.resolve(liveSession.cwd);
+			expect(liveCwd).toBe(path.resolve(requestedRoot));
 
-		const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
-		expect(sessionResp.status).toBe(200);
-		const sessionCwd = (await sessionResp.json()).cwd;
-		fs.writeFileSync(path.join(sessionCwd, "tracked.txt"), "base\nworktree marker\n");
-		const worktreeResp = await apiFetch(`/api/sessions/${sessionId}/git-diff?file=${encodeURIComponent("tracked.txt")}`);
-		expect(worktreeResp.status).toBe(200);
-		expect((await worktreeResp.json()).diff).toContain("+worktree marker");
+			const fixture: CommitFixture = {
+				cwd: liveCwd,
+				sha: "1111111111111111111111111111111111111111",
+				marker: "commit scoped marker",
+			};
+			installedRunner = installCannedGitRunner(gateway, fixture);
+
+			await expectSessionCommitDiffValidation(`/api/sessions/${sessionId}`, fixture.sha);
+
+			const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(sessionResp.status).toBe(200);
+			const sessionCwd = path.resolve((await sessionResp.json()).cwd);
+			expect(sessionCwd).toBe(fixture.cwd);
+			fs.writeFileSync(path.join(sessionCwd, "tracked.txt"), "base\nworktree marker\n");
+			const worktreeResp = await apiFetch(`/api/sessions/${sessionId}/git-diff?file=${encodeURIComponent("tracked.txt")}`);
+			expect(worktreeResp.status).toBe(200);
+			expect((await worktreeResp.json()).diff).toContain("+worktree marker");
+		} finally {
+			installedRunner?.reset();
+			if (sessionId) await cleanupSession(gateway, sessionId);
+			cleanupDir(caseRoot);
+		}
 	});
 
-	test("goal commits include changed files and commit-scoped git-diff", async () => {
-		const goalTargetSha = targetCommits.get(path.resolve(goalRoot))!.sha;
-		await expectTargetCommitSummary(`/api/goals/${goalId}`, goalTargetSha);
-		await expectCommitDiff(`/api/goals/${goalId}`, goalTargetSha, "tracked.txt", "goal commit scoped marker");
+	test("goal commits include changed files and commit-scoped git-diff", async ({ gateway }) => {
+		const projectId = (await defaultProjectId())!;
+		const caseRoot = makeCaseRoot("goal");
+		const requestedRoot = fixtureRepo(caseRoot, "repo");
+		let goalId = "";
+		let installedRunner: InstalledRunner | undefined;
+		try {
+			const createdGoal = await createGoal({
+				title: "Commit file diff API goal",
+				cwd: requestedRoot,
+				worktree: false,
+				autoStartTeam: false,
+				projectId,
+			});
+			goalId = String(createdGoal.id);
+			const context = gateway.projectContextManager.getOrCreate(projectId);
+			const goalStore = context?.goalStore;
+			expect(goalStore?.update(goalId, {
+				branch: "master",
+				worktreePath: requestedRoot,
+				setupStatus: "ready",
+			})).toBe(true);
+			const liveGoal = goalStore?.get(goalId);
+			expect(liveGoal).toBeTruthy();
+			const liveCwd = path.resolve(liveGoal.cwd);
+			expect(liveCwd).toBe(path.resolve(requestedRoot));
+
+			const fixture: CommitFixture = {
+				cwd: liveCwd,
+				sha: "2222222222222222222222222222222222222222",
+				marker: "goal commit scoped marker",
+			};
+			installedRunner = installCannedGitRunner(gateway, fixture);
+
+			await expectTargetCommitSummary(`/api/goals/${goalId}`, fixture.sha);
+			await expectCommitDiff(`/api/goals/${goalId}`, fixture.sha, "tracked.txt", fixture.marker);
+		} finally {
+			installedRunner?.reset();
+			if (goalId) {
+				const context = gateway.projectContextManager.getOrCreate(projectId);
+				await context?.goalManager.deleteGoal(goalId).catch(() => {});
+			}
+			cleanupDir(caseRoot);
+		}
 	});
 });
