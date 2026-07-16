@@ -165,33 +165,36 @@ test.describe("POST /api/internal/verification-result", () => {
 		const path = await import("node:path");
 		const os = await import("node:os");
 
-		// Write a temp HTML file
-		const tmpFile = path.join(os.tmpdir(), `qa-report-test-${Date.now()}.html`);
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-verification-result-"));
+		const tmpFile = path.join(tmpDir, "qa-report.html");
 		const htmlContent = "<html><body><h1>Report from file</h1><img src='data:image/png;base64,abc123'></body></html>";
-		fs.writeFileSync(tmpFile, htmlContent);
 
-		const promise = new Promise<any>((resolve) => {
-			harness.pendingResults.set("test-session-file", resolve);
-		});
+		try {
+			fs.writeFileSync(tmpFile, htmlContent);
 
-		const res = await apiFetch("/api/internal/verification-result", {
-			method: "POST",
-			body: JSON.stringify({
-				sessionId: "test-session-file",
-				verdict: "pass",
-				summary: "QA passed via file",
-				report_html_file: tmpFile,
-			}),
-		});
+			const promise = new Promise<any>((resolve) => {
+				harness.pendingResults.set("test-session-file", resolve);
+			});
 
-		expect(res.status).toBe(200);
+			const res = await apiFetch("/api/internal/verification-result", {
+				method: "POST",
+				body: JSON.stringify({
+					sessionId: "test-session-file",
+					verdict: "pass",
+					summary: "QA passed via file",
+					report_html_file: tmpFile,
+				}),
+			});
 
-		const result = await promise;
-		expect(result.verdict).toBe(true);
-		expect(result.reportHtml).toBe(htmlContent);
+			expect(res.status).toBe(200);
 
-		harness.pendingResults.delete("test-session-file");
-		fs.unlinkSync(tmpFile);
+			const result = await promise;
+			expect(result.verdict).toBe(true);
+			expect(result.reportHtml).toBe(htmlContent);
+		} finally {
+			harness.pendingResults.delete("test-session-file");
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	test("report_html_file returns 400 for nonexistent file", async ({ gateway }) => {
