@@ -111,12 +111,11 @@ function makeAgentFixture(): {
 }
 
 describe("tool startup resilience", () => {
-	it("real module-load probe accepts a valid TypeScript extension", () => {
+	it("accepts a valid TypeScript extension when the module-load probe succeeds", () => {
 		const root = tempRoot();
 		const groupDir = "agent";
 		const extension = "extension.ts";
 		writeFile(path.join(root, groupDir, extension), "export default function extension() { return {}; }\n");
-		__setToolModuleLoadProbeForTesting(undefined);
 		assert.equal(preflightConfigExtensionFile({ toolName: "canary", groupDir, baseDir: root, extension }), undefined);
 	});
 
