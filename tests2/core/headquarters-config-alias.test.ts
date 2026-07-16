@@ -3,15 +3,15 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
 	bobbitConfigDir,
 	bobbitDir,
 	bobbitStateDir,
+	getProjectRoot,
 	headquartersDir,
 	normalProjectBobbitDir,
 	setProjectRoot,
@@ -24,15 +24,36 @@ import {
 	ProjectRegistry,
 	SYSTEM_PROJECT_ID,
 } from "../../src/server/agent/project-registry.ts";
+import { createMemFs } from "../harness/mem-fs.js";
 
-let fixtureRoot: string;
+const fixtureRoot = path.resolve("/memfs/headquarters-config-alias");
+const originalProjectRoot = getProjectRoot();
+const memoryFs = createMemFs();
+const fsSpies: Array<{ mockRestore(): void }> = [];
 
 beforeAll(() => {
-	fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-hq-"));
+	(memoryFs as any).rmdirSync = (value: fs.PathLike) => memoryFs.rmSync(value, { recursive: true, force: true });
+	const methods = [
+		"existsSync", "mkdirSync", "readFileSync", "writeFileSync", "appendFileSync",
+		"readdirSync", "statSync", "lstatSync", "renameSync", "rmSync", "rmdirSync", "unlinkSync", "copyFileSync",
+	] as const;
+	for (const method of methods) {
+		fsSpies.push((vi.spyOn as any)(fs, method).mockImplementation((...args: unknown[]) => (memoryFs as any)[method](...args)));
+	}
+	fsSpies.push(vi.spyOn(fs, "realpathSync").mockImplementation(((value: fs.PathLike) => {
+		const resolved = path.resolve(String(value));
+		if (!memoryFs.existsSync(resolved)) throw Object.assign(new Error(`ENOENT: realpath '${resolved}'`), { code: "ENOENT" });
+		return resolved;
+	}) as typeof fs.realpathSync));
+	fsSpies.push(vi.spyOn(fs, "accessSync").mockImplementation(((value: fs.PathLike) => {
+		if (!memoryFs.existsSync(value)) throw Object.assign(new Error(`ENOENT: access '${value}'`), { code: "ENOENT" });
+	}) as typeof fs.accessSync));
+	memoryFs.mkdirSync(fixtureRoot, { recursive: true });
 });
 
 afterAll(() => {
-	fs.rmSync(fixtureRoot, { recursive: true, force: true });
+	setProjectRoot(originalProjectRoot);
+	for (const spy of fsSpies.reverse()) spy.mockRestore();
 });
 
 function fixturePath(label: string): string {
@@ -173,7 +194,10 @@ describe("Headquarters storage and config aliasing", () => {
 			},
 		} as any;
 
-		const cascade = new ConfigCascade(builtins, serverStores, fakePcm);
+		// Explicit empty pack roots avoid scanning the real home/default pack trees;
+		// every layer needed by this declaration is the pre-authored snapshot above.
+		const emptyPackRoot = fixturePath("immutable-empty-pack-root");
+		const cascade = new ConfigCascade(builtins, serverStores, fakePcm, undefined, undefined, emptyPackRoot, emptyPackRoot);
 
 		const role = cascade.resolveRoles(HEADQUARTERS_PROJECT_ID).find((entry: any) => entry.item.name === "hq-role");
 		assert.ok(role);
@@ -206,9 +230,13 @@ describe("ProjectRegistry Headquarters ordering", () => {
 		const stateDir = fixturePath("registry-state");
 		const configDir = fixturePath("registry-config");
 		const serverRoot = fixturePath("registry-root");
+		const bRoot = fixturePath("registry-b");
+		// Vitest retries the same declaration in-process. Restore the immutable
+		// empty snapshot first so a failed attempt cannot poison the next one.
+		for (const dir of [stateDir, configDir, serverRoot, bRoot]) memoryFs.rmSync(dir, { recursive: true, force: true });
 		const hqRoot = path.join(serverRoot, ".bobbit", "headquarters");
 		const systemRoot = path.join(stateDir, "system-project");
-		for (const dir of [stateDir, configDir, systemRoot, hqRoot]) fs.mkdirSync(dir, { recursive: true });
+		for (const dir of [stateDir, configDir, systemRoot, hqRoot, bRoot]) fs.mkdirSync(dir, { recursive: true });
 
 		const registry = new ProjectRegistry(stateDir);
 		registry.registerSystemProject(systemRoot);
@@ -223,10 +251,15 @@ describe("ProjectRegistry Headquarters ordering", () => {
 		assert.notEqual(hq.provisional, true);
 		assert.equal(hq.position, 0, "Headquarters participates in user-controlled ordering (anchored first only by default)");
 
-		const sameRootNormal = registry.register("Server Root Normal", serverRoot, { acceptCanonical: true });
-		const bRoot = fixturePath("registry-b");
-		fs.mkdirSync(bRoot, { recursive: true });
-		const b = registry.register("B", bRoot, { acceptCanonical: true });
+		// Seed the two normal records from an immutable post-registration snapshot.
+		// Registration/preflight has its own owners; this declaration exercises only
+		// Headquarters identity and ordering, without probing the host filesystem.
+		const sameRootNormal = minimalProject("same-root-normal", "Server Root Normal", serverRoot, { position: 1 });
+		const b = minimalProject("normal-b", "B", bRoot, { position: 2 });
+		(registry as any).projects.set(sameRootNormal.id, sameRootNormal);
+		(registry as any).projects.set(b.id, b);
+		(registry as any).normalizeVisiblePositions();
+		registry.save();
 		// Headquarters is now a first-class reorderable project and MUST be included
 		// in the reorder payload alongside the normal projects.
 		const reordered = registry.setVisibleOrder([b.id, HEADQUARTERS_PROJECT_ID, sameRootNormal.id]);
