@@ -5,9 +5,20 @@
 
 import { describe, it, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
+import { migrateAgentDirData } from "../../src/server/agent-dir-config.js";
+
+const fs = createFsFromVolume(new Volume()) as unknown as typeof import("node:fs");
+const rawRealpathSync = fs.realpathSync.bind(fs);
+(fs as { realpathSync: typeof fs.realpathSync }).realpathSync = ((value: Parameters<typeof fs.realpathSync>[0]) => {
+	const real = rawRealpathSync(value) as string;
+	if (process.platform !== "win32") return real;
+	const drive = path.parse(String(value)).root.slice(0, 2) || "C:";
+	return `${drive}${real.replace(/\//g, "\\")}`;
+}) as typeof fs.realpathSync;
+fs.mkdirSync(os.tmpdir(), { recursive: true });
 
 type MigrationOptions = { sourcePath: string; destinationPath: string; overwrite?: boolean };
 type MigrationFn = (opts: MigrationOptions) => unknown | Promise<unknown>;
@@ -22,31 +33,12 @@ type MigrationReport = {
 };
 
 async function loadMigrationFn(): Promise<MigrationFn> {
-	const candidates = [
-		"../../src/server/agent-dir-migration.ts",
-		"../../src/server/agent-dir-config.ts",
-		"../../src/server/bobbit-dir.ts",
-	];
-	const names = ["migrateAgentDirData", "copyMigrateAgentDir", "migrateAgentDir"];
-	for (const specifier of candidates) {
-		try {
-			const mod = await import(/* @vite-ignore */ specifier) as Record<string, any>;
-			for (const name of names) {
-				if (typeof mod[name] === "function") {
-					return (opts) => callMigration(mod[name], opts);
-				}
-			}
-		} catch (err: any) {
-			if (err?.code === "ERR_MODULE_NOT_FOUND" || /Cannot find module/.test(String(err?.message))) continue;
-			throw err;
-		}
-	}
-	throw new Error(`agent dir migration helper must export one of: ${names.join(", ")}`);
-}
-
-function callMigration(fn: Function, opts: MigrationOptions): unknown | Promise<unknown> {
-	if (fn.length >= 2) return fn(opts.sourcePath, opts.destinationPath, opts.overwrite === true);
-	return fn(opts);
+	return (opts) => migrateAgentDirData(
+		opts.sourcePath,
+		opts.destinationPath,
+		opts.overwrite === true,
+		fs,
+	);
 }
 
 function makeTree(): { root: string; source: string; dest: string } {
