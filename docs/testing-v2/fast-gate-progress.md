@@ -344,3 +344,31 @@ Phase totals:
 | **Summed** | **780.82s** |
 
 The sole budget breach was `headquarters-state-migration` at 18.525s. Optimization has been launched.
+
+## Solo attempt 11
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 11 | One Vitest process / 3 workers | 264.78s | **FAIL** | `.profiles/testing-v2/fast-gate-run11.log` | 2 failed files, 888 passed, 4 skipped; 2 failed tests, 7,585 passed, 24 skipped |
+
+The run remained below the 300s wall-time target, but failed these files:
+
+- `maintenance-api` — suite setup failed because the shared model inventory was empty.
+- `pr-walkthrough-api` — two resolve tests reached real Git and were blocked by the tier-1 spawn guard.
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 8.84s |
+| Setup | 60.18s |
+| Import | 77.76s |
+| Tests | 498.92s |
+| Environment | 84.49s |
+| **Summed** | **730.19s** |
+
+Transform plus import consumed 86.60s of the 730.19s summed phase time (11.86%), below the 15% target.
+
+No file exceeded the 15s tier-1 budget. The slowest file completed in 12.672s.
+
+All newly isolated sidebar, commit, Node, story, and budget tests passed. The final two shared routes are being isolated.
