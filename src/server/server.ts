@@ -88,6 +88,7 @@ import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
+import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
 	GateArtifactResolutionError,
@@ -2113,11 +2114,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
 	projectContextManager.setDependencies({ sessionManager });
-	// Wire gate status changes to bump goal generation for all project contexts
+	// Wire gate status changes to bump goal generation for all project contexts.
 	for (const ctx of projectContextManager.all()) {
-		ctx.gateStore.onStatusChange = () => {
-			ctx.goalStore.bumpGeneration();
-		};
+		wireGateStatusGenerationInvalidation(ctx.gateStore, ctx.goalStore);
 	}
 
 	const builtinConfigProvider = new BuiltinConfigProvider(config.builtinsDir);
@@ -10829,7 +10828,7 @@ async function handleApiRoute(
 		});
 
 		for (const gate of affectedGates) {
-			broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId: gate.gateId, status: gate.status });
+			broadcastGateStatusChanged(broadcastToGoal, goalId, gate.gateId, gate.status);
 		}
 		broadcastToGoal(goalId, {
 			type: "gate_reset",
@@ -10941,7 +10940,7 @@ async function handleApiRoute(
 		const bypassSignal = gateStore.bypassGate(goalId, gateId, { whyBypassed, whoAmI });
 		const bypassedAt = bypassSignal.metadata?.bypassedAt ?? String(bypassSignal.timestamp);
 
-		broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "bypassed" });
+		broadcastGateStatusChanged(broadcastToGoal, goalId, gateId, "bypassed");
 
 		let teamLeadNotified = false;
 		try {
@@ -11131,7 +11130,7 @@ async function handleApiRoute(
 					gateStore.updateGateStatus(goalId, gateId, "passed");
 					broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: cachedSignal.id });
 					broadcastToGoal(goalId, { type: "gate_verification_complete", goalId, gateId, signalId: cachedSignal.id, status: "passed" });
-					broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "passed" });
+					broadcastGateStatusChanged(broadcastToGoal, goalId, gateId, "passed");
 					const verifySteps = cachedSignal.verification.steps.map((s: any) => ({
 						name: s.name,
 						type: s.type,
@@ -11160,7 +11159,7 @@ async function handleApiRoute(
 				if (g.dependsOn.includes(gateId) || hasTransitiveDep(goal.workflow, g.id, gateId)) {
 					const downstream = gateStore.getGate(goalId, g.id);
 					if (downstream) {
-						broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId: g.id, status: downstream.status });
+						broadcastGateStatusChanged(broadcastToGoal, goalId, g.id, downstream.status);
 					}
 				}
 			}

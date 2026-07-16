@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
+import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
@@ -1659,10 +1660,7 @@ export class VerificationHarness {
 						console.error(`[verification] Failed to update gate store for ${v.signalId} during restart-interrupt cleanup:`, storeErr);
 					}
 					try {
-						this.broadcastFn(v.goalId, {
-							type: "gate_status_changed",
-							goalId: v.goalId, gateId: v.gateId, status: "pending",
-						});
+						broadcastGateStatusChanged(this.broadcastFn, v.goalId, v.gateId, "pending");
 						this.notifyTeamLeadFn?.(
 							v.goalId,
 							`Gate verification on "${v.gateId}" was interrupted by a server restart and could not be recovered. Please re-signal the gate to run a fresh verification — no real failure was observed.`,
@@ -1689,10 +1687,7 @@ export class VerificationHarness {
 							type: "gate_verification_complete",
 							goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
 						});
-						this.broadcastFn(v.goalId, {
-							type: "gate_status_changed",
-							goalId: v.goalId, gateId: v.gateId, status: "failed",
-						});
+						broadcastGateStatusChanged(this.broadcastFn, v.goalId, v.gateId, "failed");
 						this.notifyTeamLead(v.goalId, v.gateId, "failed");
 					} catch (bcastErr) {
 						console.error(`[verification] Failed to broadcast failure for ${v.signalId} during resume cleanup:`, bcastErr);
@@ -2065,10 +2060,7 @@ export class VerificationHarness {
 			type: "gate_verification_complete",
 			goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: persistedStatus,
 		});
-		this.broadcastFn(v.goalId, {
-			type: "gate_status_changed",
-			goalId: v.goalId, gateId: v.gateId, status: gateStatus,
-		});
+		broadcastGateStatusChanged(this.broadcastFn, v.goalId, v.gateId, gateStatus);
 		if (suppressedByRestart) {
 			// Benign nudge — the team-lead should re-signal, not investigate a
 			// phantom regression. notifyTeamLead is keyed off the gate status
@@ -3218,12 +3210,7 @@ export class VerificationHarness {
 				signalId: signal.id,
 				status: "passed",
 			});
-			this.broadcastFn(signal.goalId, {
-				type: "gate_status_changed",
-				goalId: signal.goalId,
-				gateId: signal.gateId,
-				status: "passed",
-			});
+			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "passed");
 			this.notifyTeamLead(signal.goalId, signal.gateId, "passed");
 			return;
 		}
@@ -3392,10 +3379,7 @@ export class VerificationHarness {
 					type: "gate_verification_complete",
 					goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, status,
 				});
-				this.broadcastFn(signal.goalId, {
-					type: "gate_status_changed",
-					goalId: signal.goalId, gateId: signal.gateId, status,
-				});
+				broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, status);
 				this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 				return;
 			}
@@ -4017,12 +4001,7 @@ export class VerificationHarness {
 				signalId: signal.id,
 				status,
 			});
-			this.broadcastFn(signal.goalId, {
-				type: "gate_status_changed",
-				goalId: signal.goalId,
-				gateId: signal.gateId,
-				status,
-			});
+			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, status);
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
 			if (active.cancelled) {
@@ -4046,12 +4025,7 @@ export class VerificationHarness {
 				signalId: signal.id,
 				status: "failed",
 			});
-			this.broadcastFn(signal.goalId, {
-				type: "gate_status_changed",
-				goalId: signal.goalId,
-				gateId: signal.gateId,
-				status: "failed",
-			});
+			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "failed");
 			this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [errorStep], goalBranch });
 		}
 	}
