@@ -1,3 +1,5 @@
+// v2-e2e-vitest real-filesystem owner: exercises host and sandbox transcript
+// rehydration boundaries plus coordinated replacement lifecycle behavior.
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 

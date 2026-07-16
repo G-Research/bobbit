@@ -1,6 +1,6 @@
 # Restored integration topology and contention evidence
 
-> **Historical evidence.** This document preserves an intermediate lane/shard experiment. Its temporary Pi-discovery relocation was later reverted; the shipped Vitest E2E set contains only `team-manager.test.ts` and `marketplace-install.test.ts`. See [`../unit-gate.md`](../unit-gate.md).
+> **Historical evidence.** This document preserves an intermediate lane/shard experiment. Its temporary Pi-discovery relocation was later reverted; the shipped Vitest E2E set now contains `team-manager.test.ts`, `marketplace-install.test.ts`, and the native real-filesystem `orphan-tool-result-rehydration-boundaries.test.ts`. See [`../unit-gate.md`](../unit-gate.md).
 
 **Date:** 2026-07-15
 **Scope:** the twelve restored unit-owned integration files under the real cost-based three-shard, one-fork-per-shard `v2-integration` topology.
@@ -195,4 +195,4 @@ A natural `npm run test:unit` run exited at **508.4s** and failed both time and 
 | Integration 2 | Pass | 363.6s | 63 files, zero failed tests. |
 | DOM | Pass | 178.5s | 144 files, zero failed tests. |
 
-The run reported 7,630 passed and five failed tests. The `v2Native` omission was corrected immediately. This does not repair or replace the invalid run. At that historical point, inventory still preserved every one of the 880 merge-base files with zero E2E exclusions. The final inventory retains the files and owns Pi discovery in tier-1 `v2-core`; only the two approved real-fidelity files remain in Vitest E2E. Final process state was empty and ledger state was `0/24`.
+The run reported 7,630 passed and five failed tests. The `v2Native` omission was corrected immediately. This does not repair or replace the invalid run. At that historical point, inventory still preserved every one of the 880 merge-base files with zero E2E exclusions. The final inventory retains the files and owns Pi discovery in tier-1 `v2-core`; only the approved real-fidelity files remain in Vitest E2E. Final process state was empty and ledger state was `0/24`.

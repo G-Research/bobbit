@@ -185,7 +185,7 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
   4. For a sandbox session, verify the persisted path is in the correct realm: container paths must resolve through the sessions bind mount, while an already host-absolute path must remain a host path. Bobbit fails closed rather than switching realms or rewriting an arbitrary host file.
   5. If the same error remains after one user action, retain the session and transcript, capture the content-free recovery/refusal diagnostics, and inspect the persisted path/realm and Pi package version. Do not repeatedly Retry—the loop is intentionally bounded.
 
-- **Reference and coverage**: [Pi runtime compatibility — Orphan tool-result persistence and recovery](pi-runtime-compatibility.md#orphan-tool-result-persistence-and-recovery); `tests2/core/transcript-orphan-tool-results.test.ts`, `tests2/core/orphan-tool-result-recovery.test.ts`, `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts`, and `tests2/browser/journeys/orphan-tool-result-recovery.journey.spec.ts`.
+- **Reference and coverage**: [Pi runtime compatibility — Orphan tool-result persistence and recovery](pi-runtime-compatibility.md#orphan-tool-result-persistence-and-recovery); `tests2/core/transcript-orphan-tool-results.test.ts`, `tests2/core/orphan-tool-result-recovery.test.ts`, `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts`, and `tests2/browser/e2e/orphan-tool-result-recovery.journey.spec.ts`.
 
 ## Session connection issues
 
