@@ -4,6 +4,9 @@ import type { Reporter } from "vitest/reporters";
 type TestModule = Parameters<NonNullable<Reporter["onTestModuleStart"]>>[0];
 
 export const UNIT_FILE_WALL_BUDGET_MS = 15_000;
+export const UNIT_CONCURRENT_PROOF_ENV = "BOBBIT_UNIT_CONCURRENT_PROOF";
+export const UNIT_CONCURRENT_PROOF_BANNER =
+	"[unit-file-budget] CONCURRENT PROOF MODE — wall-budget overruns are report-only and do not qualify as solo unit-stage evidence.";
 
 const CONDITIONAL_E2E_PROJECT = "v2-e2e-vitest";
 
@@ -27,12 +30,20 @@ function timingKey(path: string, project: string): string {
 export class UnitFileBudgetReporter implements Reporter {
 	private readonly starts = new Map<TestModule, number>();
 	private readonly timings = new Map<string, FileTiming>();
+	private readonly concurrentProof: boolean;
 
-	constructor(private readonly now: () => number = () => performance.now()) {}
+	constructor(
+		private readonly now: () => number = () => performance.now(),
+		env: NodeJS.ProcessEnv = process.env,
+		private readonly output: (message: string) => void = message => console.warn(message),
+	) {
+		this.concurrentProof = env[UNIT_CONCURRENT_PROOF_ENV] === "1";
+	}
 
 	onTestRunStart(): void {
 		this.starts.clear();
 		this.timings.clear();
+		if (this.concurrentProof) this.output(UNIT_CONCURRENT_PROOF_BANNER);
 	}
 
 	onTestModuleStart(testModule: TestModule): void {
@@ -67,10 +78,21 @@ export class UnitFileBudgetReporter implements Reporter {
 		const details = violations.map(({ path, project, durationMs }) =>
 			`- path=${path} project=${project} duration=${Math.ceil(durationMs)}ms`
 		);
-		throw new Error([
+		const report = [
 			`Tier-1 unit file wall budget exceeded (budget=${UNIT_FILE_WALL_BUDGET_MS}ms):`,
 			...details,
-		].join("\n"));
+		].join("\n");
+		if (this.concurrentProof) {
+			this.output([
+				UNIT_CONCURRENT_PROOF_BANNER,
+				report,
+				"[unit-file-budget] Proof-mode wall-budget overruns did not fail this run; suite and test failures remain authoritative.",
+			].join("\n"));
+			// Only this reporter's budget exception is suppressed; Vitest still owns
+			// the process exit status for failed suites and tests.
+			return;
+		}
+		throw new Error(report);
 	}
 }
 
