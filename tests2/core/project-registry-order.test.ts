@@ -2,13 +2,12 @@
 // Source: tests/project-registry-order.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { test } from "vitest";
+import { afterAll, beforeAll, test, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { createFsFromVolume, Volume } from "memfs";
 
 import {
   ProjectOrderError,
@@ -17,8 +16,25 @@ import {
   type RegisteredProject,
 } from "../../src/server/agent/project-registry.js";
 
+const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+let fixtureSequence = 0;
+
+beforeAll(() => {
+  for (const name of [
+    "accessSync", "existsSync", "mkdirSync", "readFileSync", "readdirSync",
+    "realpathSync", "renameSync", "rmSync", "rmdirSync", "statSync",
+    "statfsSync", "writeFileSync",
+  ] as const) {
+    vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never);
+  }
+});
+
+afterAll(() => vi.restoreAllMocks());
+
 function makeStateDir(): string {
-  return makeTmpDir("bobbit-project-order-state-");
+  const dir = path.resolve("/memfs/project-order", `state-${fixtureSequence++}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function cleanup(dir: string): void {
@@ -118,7 +134,8 @@ test("ProjectRegistry register and registerProvisional append after a custom ord
   const stateDir = makeStateDir();
   const roots: string[] = [];
   const makeRoot = (name: string) => {
-    const root = makeTmpDir(`bobbit-project-order-${name}-`);
+    const root = path.resolve("/memfs/project-order", `root-${fixtureSequence++}-${name}`);
+    fs.mkdirSync(root, { recursive: true });
     roots.push(root);
     return root;
   };

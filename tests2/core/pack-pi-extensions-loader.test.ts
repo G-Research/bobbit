@@ -2,11 +2,11 @@
 // Source: tests/pack-pi-extensions-loader.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
 import type { PackManifest } from "../../src/server/agent/pack-types.js";
 import { PackContributionError } from "../../src/server/agent/pack-contributions.js";
 import {
@@ -20,8 +20,24 @@ import {
 	resolvePiExtensionEntry,
 } from "../../src/server/agent/pi-extension-contributions.js";
 
+const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+let fixtureSequence = 0;
+
+beforeAll(() => {
+	for (const name of [
+		"existsSync", "lstatSync", "mkdirSync", "readFileSync", "realpathSync",
+		"rmSync", "statSync", "symlinkSync", "writeFileSync",
+	] as const) {
+		vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never);
+	}
+});
+
+afterAll(() => vi.restoreAllMocks());
+
 function tempPack(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-pack-"));
+	const pack = path.resolve("/memfs/pi-extension-packs", `pack-${fixtureSequence++}`);
+	fs.mkdirSync(pack, { recursive: true });
+	return pack;
 }
 
 function manifest(piExtensions: string[]): PackManifest {
@@ -158,7 +174,7 @@ describe("pi extension contribution loader", () => {
 
 	it("rejects symlink entries that escape pi-extensions containment", { skip: process.platform === "win32" }, () => {
 		const pack = tempPack();
-		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-outside-"));
+		const outside = tempPack();
 		try {
 			write(path.join(outside, "extension.js"));
 			fs.mkdirSync(path.join(pack, "pi-extensions"), { recursive: true });
