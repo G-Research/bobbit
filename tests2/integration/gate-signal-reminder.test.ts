@@ -1,85 +1,64 @@
-// Opt into the non-spawning command-step runner before the shared gateway can
-// boot, regardless of which of these integration files Vitest imports first.
-import { resetAndInstallFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+import path from "node:path";
+import { expect, test } from "vitest";
 
-import { resolve } from "node:path";
-import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
-import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
+import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
+import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
+import {
+	buildRunningGateSignalResponse,
+	reuseCachedGateSignal,
+	type CachedGateSignalNotifier,
+} from "../../src/server/gate-signal-response.js";
+import { createManualClock, type ManualClock } from "../harness/clock.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const DO_NOT_POLL_PATTERN = /Verification is running asynchronously|Do not poll|gate_status|gate_inspect|Go idle|wait for the server/i;
+const GOAL_ID = "gate-signal-reminder-goal";
+const GATE_ID = "cached-gate";
+const COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567";
+const START_TIME = 1_700_000_000_000;
 
-function workflowId(prefix: string): string {
-	return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const gate: WorkflowGate = {
+	id: GATE_ID,
+	name: "Cached Gate",
+	dependsOn: [],
+	verify: [{ name: "Fast cached verification", type: "command", run: "echo cache-seed" }],
+};
+
+type Notification =
+	| { type: "signal"; goalId: string; gateId: string; signalId: string }
+	| { type: "complete"; goalId: string; gateId: string; signalId: string; status: "passed" }
+	| { type: "status"; goalId: string; gateId: string; status: "passed" };
+
+function makeNotifier(notifications: Notification[]): CachedGateSignalNotifier {
+	return {
+		signalReceived: (goalId, gateId, signalId) => notifications.push({ type: "signal", goalId, gateId, signalId }),
+		verificationComplete: (goalId, gateId, signalId, status) => notifications.push({ type: "complete", goalId, gateId, signalId, status }),
+		statusChanged: (goalId, gateId, status) => notifications.push({ type: "status", goalId, gateId, status }),
+	};
 }
 
-async function createWorkflow(id: string, gates: Array<Record<string, unknown>>): Promise<void> {
-	const res = await apiFetch("/api/workflows", {
-		method: "POST",
-		body: JSON.stringify({
-			id,
-			name: `Gate Signal Reminder ${id}`,
-			description: "Workflow fixture for gate signal reminder API response tests",
-			gates,
-		}),
-	});
-	expect(res.status, `workflow create failed: ${res.status} ${await res.text().catch(() => "")}`).toBe(201);
-}
-
-async function deleteWorkflow(id: string): Promise<void> {
-	await apiFetch(`/api/workflows/${id}`, { method: "DELETE" }).catch(() => {});
-}
-
-async function signalGate(goalId: string, gateId: string, body: Record<string, unknown> = {}): Promise<any> {
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
-		method: "POST",
-		body: JSON.stringify(body),
-	});
-	const text = await res.text();
-	expect(res.status, `signal ${gateId} failed: ${res.status} ${text}`).toBe(201);
-	return text ? JSON.parse(text) : null;
-}
-
-async function waitForPassedSignal(gateway: any, goalId: string, gateId: string, signalId: string): Promise<any> {
-	// Cache lookup reads the project-scoped gate store. Wait for that exact
-	// source of truth rather than a derived gate status or an HTTP projection.
-	for (let turn = 0; turn < 100; turn++) {
-		const signal = gateway.projectContextManager.getContextForGoal(goalId)?.gateStore
-			.getGate(goalId, gateId)?.signals.find((entry: any) => entry.id === signalId);
-		if (signal?.verification?.status === "passed") return signal;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	throw new Error(`signal ${signalId} did not reach stored passed state within 100 event-loop turns`);
-}
-
-async function waitForGoalSetupReady(goalId: string): Promise<any> {
-	for (let turn = 0; turn < 100; turn++) {
-		const res = await apiFetch(`/api/goals/${goalId}`);
-		if (res.ok) {
-			const goal = await res.json();
-			if (goal.setupStatus === "error") throw new Error(`Goal setup failed: ${JSON.stringify(goal)}`);
-			if (goal.setupStatus === "ready") return goal;
-		}
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	throw new Error(`goal ${goalId} setup did not become ready within 100 event-loop turns`);
-}
-
-function fakeGateCommitSha(gateway: any, cwd: string, sha = "0123456789abcdef0123456789abcdef01234567"): () => void {
-	// createGateway installs one CommandRunner object process-wide; TeamManager
-	// and the gate route retain that exact DI object. The owner-scoped dispatcher
-	// prevents a neighboring Git suite's teardown from restoring over this probe.
-	const expectedCwd = resolve(cwd);
-	return installCommandRunnerInterceptor(gateway.teamManager.commandRunner, {
-		label: `gate-commit:${expectedCwd}`,
-		async execFile(file, args, options, next) {
-			const commandCwd = typeof options?.cwd === "string" ? resolve(options.cwd) : resolve(process.cwd());
-			if (/^(?:git|git\.exe)$/i.test(file) && commandCwd === expectedCwd && args.length === 2 && args[0] === "rev-parse" && args[1] === "HEAD") {
-				return { stdout: sha, stderr: "" };
-			}
-			return next();
+function signal(overrides: Partial<GateSignal> = {}): GateSignal {
+	return {
+		id: "running-signal",
+		gateId: GATE_ID,
+		goalId: GOAL_ID,
+		sessionId: "session-owner",
+		timestamp: START_TIME,
+		commitSha: COMMIT_SHA,
+		verification: {
+			status: "running",
+			steps: [{
+				name: "Fast cached verification",
+				type: "command",
+				status: "running",
+				passed: false,
+				output: "",
+				duration_ms: 0,
+				phase: 0,
+			}],
 		},
-	});
+		...overrides,
+	};
 }
 
 function expectUiSignalShapePreserved(body: any, expected: { goalId: string; gateId: string; status: string; stepNames: string[] }): void {
@@ -89,100 +68,116 @@ function expectUiSignalShapePreserved(body: any, expected: { goalId: string; gat
 	expect(body.signal.gateId).toBe(expected.gateId);
 	expect(body.signal.goalId).toBe(expected.goalId);
 	expect(body.signal.status).toBe(expected.status);
-	expect(body.signal.steps.map((s: { name: string }) => s.name)).toEqual(expected.stepNames);
+	expect(body.signal.steps.map((step: { name: string }) => step.name)).toEqual(expected.stepNames);
 	expect(body.signal.agentReminder, "GATE_SIGNAL_AGENT_REMINDER: reminder must be top-level, never nested under signal").toBeUndefined();
 }
 
 test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () => {
-	test.beforeEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
-	test.afterEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
+	let gateStore: GateStore;
+	let clock: ManualClock;
+	let notifications: Notification[];
+	let notifier: CachedGateSignalNotifier;
 
-	test("async verification response includes top-level agentReminder while preserving the UI signal shape", async () => {
-		const wf = workflowId("gate-signal-reminder-async");
-		await createWorkflow(wf, [
-			{
-				id: "async-gate",
-				name: "Async Gate",
-				dependsOn: [],
-				verify: [
-					{ name: "Slow async verification", type: "command", run: "node -e \"setTimeout(()=>process.exit(0),3000)\"" },
-				],
-			},
-		]);
-
-		const goal = await createGoal({ title: `Gate Signal Reminder Async ${Date.now()}`, workflowId: wf, worktree: false, team: false, autoStartTeam: false });
-		const goalId = goal.id;
-		try {
-			const body = await signalGate(goalId, "async-gate");
-
-			expectUiSignalShapePreserved(body, {
-				goalId,
-				gateId: "async-gate",
-				status: "running",
-				stepNames: ["Slow async verification"],
-			});
-			expect(Object.keys(body), "GATE_SIGNAL_AGENT_REMINDER: agent reminder must be a top-level sibling after signal").toEqual(["signal", "agentReminder"]);
-			expect(body.agentReminder, "GATE_SIGNAL_AGENT_REMINDER: async signal response should tell agents not to poll").toEqual(expect.any(String));
-			expect(body.agentReminder).toMatch(/Gate signal accepted/i);
-			expect(body.agentReminder).toMatch(/Verification is running asynchronously/i);
-			expect(body.agentReminder).toMatch(/Do not poll/i);
-			expect(body.agentReminder).toMatch(/gate_status/);
-			expect(body.agentReminder).toMatch(/gate_inspect/);
-			expect(body.agentReminder).toMatch(/Go idle now/i);
-		} finally {
-			await deleteGoal(goalId).catch(() => {});
-			await deleteWorkflow(wf);
-		}
+	test.beforeEach(() => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-signal-reminder");
+		memfs.mkdirSync(stateDir, { recursive: true });
+		gateStore = new GateStore(stateDir, memfs);
+		gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
+		clock = createManualClock(START_TIME);
+		notifications = [];
+		notifier = makeNotifier(notifications);
 	});
 
-	test("cached pass response does not include the async wait reminder", async ({ gateway }) => {
-		const wf = workflowId("gate-signal-reminder-cache");
-		await createWorkflow(wf, [
-			{
-				id: "cached-gate",
-				name: "Cached Gate",
-				dependsOn: [],
-				verify: [
-					{ name: "Fast cached verification", type: "command", run: "echo cache-seed" },
-				],
+	test("async verification response includes top-level agentReminder while preserving the UI signal shape", () => {
+		const runningSignal = signal();
+		gateStore.recordSignal(runningSignal);
+
+		const body = buildRunningGateSignalResponse(runningSignal, true);
+
+		expectUiSignalShapePreserved(body, {
+			goalId: GOAL_ID,
+			gateId: GATE_ID,
+			status: "running",
+			stepNames: ["Fast cached verification"],
+		});
+		expect(Object.keys(body), "GATE_SIGNAL_AGENT_REMINDER: agent reminder must be a top-level sibling after signal").toEqual(["signal", "agentReminder"]);
+		expect(body.agentReminder, "GATE_SIGNAL_AGENT_REMINDER: async signal response should tell agents not to poll").toEqual(expect.any(String));
+		expect(body.agentReminder).toMatch(/Gate signal accepted/i);
+		expect(body.agentReminder).toMatch(/Verification is running asynchronously/i);
+		expect(body.agentReminder).toMatch(/Do not poll/i);
+		expect(body.agentReminder).toMatch(/gate_status/);
+		expect(body.agentReminder).toMatch(/gate_inspect/);
+		expect(body.agentReminder).toMatch(/Go idle now/i);
+	});
+
+	test("cached pass response does not include the async wait reminder", () => {
+		const passedSignal = signal({
+			id: "authored-passed-signal",
+			verification: {
+				status: "passed",
+				steps: [{
+					name: "Fast cached verification",
+					type: "command",
+					status: "passed",
+					passed: true,
+					output: "cache-seed",
+					duration_ms: 4,
+				}],
 			},
+		});
+		gateStore.recordSignal(passedSignal);
+		gateStore.updateGateStatus(GOAL_ID, GATE_ID, "passed");
+		clock.advance(25);
+
+		const body = reuseCachedGateSignal({
+			gateStore,
+			goalId: GOAL_ID,
+			gate,
+			commitSha: COMMIT_SHA,
+			body: { sessionId: "cache-requester", content: "approved", metadata: { verdict: "pass" } },
+			notifier,
+			clock,
+			createSignalId: () => "cached-response-signal",
+		});
+
+		expect(body?.signal, "GATE_SIGNAL_AGENT_REMINDER: cached response must still include the signal object").toBeTruthy();
+		expect(body?.signal.id).toBe("cached-response-signal");
+		expect(body?.signal.gateId).toBe(GATE_ID);
+		expect(body?.signal.goalId).toBe(GOAL_ID);
+		expect(body?.signal.status).toBe("passed");
+		expect(body?.signal.cached).toBe(true);
+		expect(body?.signal.steps.map((step) => step.name)).toEqual(["Fast cached verification"]);
+		expect((body?.signal as any).agentReminder, "GATE_SIGNAL_AGENT_REMINDER: reminder must not be nested under signal on cached responses").toBeUndefined();
+		expect(String(body?.agentReminder ?? ""), "GATE_SIGNAL_AGENT_REMINDER: cached/pass responses must not instruct agents to wait for async verification").not.toMatch(DO_NOT_POLL_PATTERN);
+
+		const storedGate = gateStore.getGate(GOAL_ID, GATE_ID);
+		const cachedSignal = storedGate?.signals.at(-1);
+		expect(storedGate).toMatchObject({
+			status: "passed",
+			currentContent: "approved",
+			currentContentVersion: 1,
+			currentMetadata: { verdict: "pass" },
+		});
+		expect(cachedSignal).toMatchObject({
+			id: "cached-response-signal",
+			sessionId: "cache-requester",
+			timestamp: START_TIME + 25,
+			commitSha: COMMIT_SHA,
+			verification: {
+				status: "passed",
+				steps: [{
+					name: "Fast cached verification",
+					status: "passed",
+					phase: 0,
+					output: "[cached from prior signal] cache-seed",
+				}],
+			},
+		});
+		expect(notifications).toEqual([
+			{ type: "signal", goalId: GOAL_ID, gateId: GATE_ID, signalId: "cached-response-signal" },
+			{ type: "complete", goalId: GOAL_ID, gateId: GATE_ID, signalId: "cached-response-signal", status: "passed" },
+			{ type: "status", goalId: GOAL_ID, gateId: GATE_ID, status: "passed" },
 		]);
-
-		const commitSha = "0123456789abcdef0123456789abcdef01234567";
-		const goal = await createGoal({ title: `Gate Signal Reminder Cache ${Date.now()}`, workflowId: wf, worktree: false, team: false, autoStartTeam: false });
-		const goalId = goal.id;
-		const gateCwd = goal.worktreePath ?? goal.cwd;
-		if (typeof gateCwd !== "string") throw new Error(`cached gate fixture has no cwd: ${JSON.stringify(goal)}`);
-		const restoreCommitSha = fakeGateCommitSha(gateway, gateCwd, commitSha);
-		try {
-			await waitForGoalSetupReady(goalId);
-			const firstBody = await signalGate(goalId, "cached-gate");
-			expect(firstBody.signal.status).toBe("running");
-
-			// Complete the fake command on the shared manual clock, then prove the
-			// exact persisted record used by the route cache is a reusable pass.
-			gateway.clock.advance(0);
-			const cacheSeed = await waitForPassedSignal(gateway, goalId, "cached-gate", firstBody.signal.id);
-			expect(cacheSeed.commitSha).toBe(commitSha);
-			expect(cacheSeed.verification.steps).toEqual([
-				expect.objectContaining({ name: "Fast cached verification", status: "passed" }),
-			]);
-
-			const cachedBody = await signalGate(goalId, "cached-gate");
-
-			expect(cachedBody.signal, "GATE_SIGNAL_AGENT_REMINDER: cached response must still include the signal object").toBeTruthy();
-			expect(cachedBody.signal.id).toEqual(expect.any(String));
-			expect(cachedBody.signal.gateId).toBe("cached-gate");
-			expect(cachedBody.signal.goalId).toBe(goalId);
-			expect(cachedBody.signal.status).toBe("passed");
-			expect(cachedBody.signal.cached).toBe(true);
-			expect(cachedBody.signal.steps.map((s: { name: string }) => s.name)).toEqual(["Fast cached verification"]);
-			expect(cachedBody.signal.agentReminder, "GATE_SIGNAL_AGENT_REMINDER: reminder must not be nested under signal on cached responses").toBeUndefined();
-			expect(String(cachedBody.agentReminder ?? ""), "GATE_SIGNAL_AGENT_REMINDER: cached/pass responses must not instruct agents to wait for async verification").not.toMatch(DO_NOT_POLL_PATTERN);
-		} finally {
-			restoreCommitSha();
-			await deleteGoal(goalId).catch(() => {});
-			await deleteWorkflow(wf);
-		}
 	});
 });
