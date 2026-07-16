@@ -72,9 +72,12 @@ test.describe("Sandbox Security Boundaries", () => {
 	const projectId = "test-project-for-security";
 	let restoreBgRuntime: () => void;
 
-	test.beforeAll(async ({ gateway }) => {
+	test.beforeEach(async ({ gateway }) => {
+		// The integration harness snapshots entities before a describe's beforeAll,
+		// so describe-scoped sessions are correctly swept after the first test. Give
+		// every assertion a fresh scope instead of depending on a prior test's state.
+		gateway.sessionManager.sandboxTokenStore.remove(projectId);
 		restoreBgRuntime = installFakeBgRuntime(gateway.bgProcessManager);
-		// Create a real session via admin token
 		const res = await adminFetch(gateway.baseURL, "/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: nonGitCwd() }),
@@ -83,15 +86,16 @@ test.describe("Sandbox Security Boundaries", () => {
 		const data = await res.json();
 		sessionId = data.id;
 
-		// Register a sandbox-scoped token using the per-project model
+		// Register a sandbox-scoped token using the per-project model.
 		scopedToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
 		gateway.sessionManager.sandboxTokenStore.addSession(projectId, sessionId);
 		gateway.sessionManager.sandboxTokenStore.addGoal(projectId, goalId);
 	});
 
-	test.afterAll(async ({ gateway }) => {
+	test.afterEach(async ({ gateway }) => {
 		try {
 			await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+			gateway.sessionManager.sandboxTokenStore.remove(projectId);
 		} finally {
 			restoreBgRuntime();
 		}
