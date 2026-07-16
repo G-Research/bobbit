@@ -1,6 +1,9 @@
 # Windows Unit-Suite Parity Plan
 
-## Goal
+> [!CAUTION]
+> **Superseded historical plan.** This document is preserved as planning evidence and does not describe the shipped unit gate. The current architecture runs one direct Vitest process with a fixed three-worker cap per suite and no unit ledger, lane orchestration, cost sharding, or gateway-boot lease. See the [unit gate operating model](../testing-v2/unit-gate.md) for the current contract and the [fast-gate progress log](../testing-v2/fast-gate-progress.md) for qualification evidence. All eight-worker, `3/4/1` lane allocation, ledger peak of 24 or lower, weighted scheduler, and acceptance statements below are historical and must not guide new work.
+
+## Historical Goal
 
 Bring a Windows `npm run test:unit` run to the Linux-class target of under three minutes while preserving three-way concurrency on a 24-core host:
 
@@ -77,7 +80,7 @@ Keep the Vitest 4 weighted no-queue scheduler. Rebalance `core/integration/DOM` 
 
 Do not use broader global leases as the primary speed fix: leases turn contention into queues. Eliminate unnecessary work first.
 
-## Acceptance
+## Historical Acceptance
 
 From three independent worktrees, run three concurrent suites for three repetitions:
 
