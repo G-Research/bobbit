@@ -6,30 +6,20 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, afterEach, vi } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { cpuDiagnosticsEnabled, createCpuDiagnostics } from "../../src/server/agent/cpu-diagnostics.ts";
 
-const originalEnv = {
-	BOBBIT_CPU_DIAG: process.env.BOBBIT_CPU_DIAG,
-	BOBBIT_CPU_DIAG_FLUSH_MS: process.env.BOBBIT_CPU_DIAG_FLUSH_MS,
-	BOBBIT_CPU_DIAG_JSONL: process.env.BOBBIT_CPU_DIAG_JSONL,
-};
-
-function restoreEnv(): void {
-	for (const [key, value] of Object.entries(originalEnv)) {
-		if (value === undefined) delete process.env[key];
-		else process.env[key] = value;
+function diagnosticsEnv(patch: Record<string, string | undefined>): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	for (const [key, value] of Object.entries(patch)) {
+		if (value === undefined) delete env[key];
+		else env[key] = value;
 	}
-}
-
-async function importFresh(_tag: string): Promise<typeof import("../../src/server/agent/cpu-diagnostics.ts")> {
-	// Re-execute the module top-level (reads env at init) instead of query cache-
-	// busting, which vitest's module runner does not support.
-	vi.resetModules();
-	return await import("../../src/server/agent/cpu-diagnostics.ts");
+	return env;
 }
 
 function tempFile(name: string): { dir: string; file: string } {
@@ -37,22 +27,18 @@ function tempFile(name: string): { dir: string; file: string } {
 	return { dir, file: path.join(dir, name) };
 }
 
-afterEach(() => {
-	restoreEnv();
-});
-
 describe("cpu diagnostics", () => {
-	it("is a disabled no-op unless BOBBIT_CPU_DIAG=1", async () => {
+	it("is a disabled no-op unless BOBBIT_CPU_DIAG=1", () => {
 		const { dir, file } = tempFile("disabled.jsonl");
 		try {
-			delete process.env.BOBBIT_CPU_DIAG;
-			process.env.BOBBIT_CPU_DIAG_JSONL = file;
-			process.env.BOBBIT_CPU_DIAG_FLUSH_MS = "1";
+			const env = diagnosticsEnv({
+				BOBBIT_CPU_DIAG: undefined,
+				BOBBIT_CPU_DIAG_JSONL: file,
+				BOBBIT_CPU_DIAG_FLUSH_MS: "1",
+			});
+			assert.equal(cpuDiagnosticsEnabled(env), false);
 
-			const mod = await importFresh("disabled");
-			assert.equal(mod.cpuDiagnosticsEnabled(), false);
-
-			const diag = mod.getCpuDiagnostics();
+			const diag = createCpuDiagnostics({ env });
 			diag.recordRest("GET /api/projects", 200, 1, 10);
 			diag.recordWsBroadcast("server:broadcastToAll", "projects_changed", { frames: 1, recipients: 1, bytes: 10 });
 			diag.recordTimer("session-manager:statusHeartbeat", 2, { sessionsScanned: 1 });
@@ -66,16 +52,16 @@ describe("cpu diagnostics", () => {
 		}
 	});
 
-	it("writes JSONL snapshots and resets interval aggregation after flush", async () => {
+	it("writes JSONL snapshots and resets interval aggregation after flush", () => {
 		const { dir, file } = tempFile("enabled.jsonl");
 		try {
-			process.env.BOBBIT_CPU_DIAG = "1";
-			process.env.BOBBIT_CPU_DIAG_JSONL = file;
-			process.env.BOBBIT_CPU_DIAG_FLUSH_MS = "60000";
-
-			const mod = await importFresh("enabled");
-			assert.equal(mod.cpuDiagnosticsEnabled(), true);
-			const diag = mod.getCpuDiagnostics();
+			const env = diagnosticsEnv({
+				BOBBIT_CPU_DIAG: "1",
+				BOBBIT_CPU_DIAG_JSONL: file,
+				BOBBIT_CPU_DIAG_FLUSH_MS: "60000",
+			});
+			assert.equal(cpuDiagnosticsEnabled(env), true);
+			const diag = createCpuDiagnostics({ env });
 
 			diag.recordRest("GET /api/projects", 200, 10, 100);
 			diag.recordRest("GET /api/projects", 404, 30, 50);
