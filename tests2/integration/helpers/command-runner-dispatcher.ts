@@ -28,15 +28,30 @@ type DispatcherInstallation = {
 	spawn: Spawn;
 	registrations: Registration[];
 };
+type Method = (this: unknown, ...args: any[]) => any;
+export type MethodInterceptor<TMethod extends Method = Method> = (
+	args: Parameters<TMethod>,
+	next: (...args: Parameters<TMethod>) => ReturnType<TMethod>,
+) => ReturnType<TMethod>;
+type MethodRegistration = { owner: symbol; interceptor: MethodInterceptor };
+type MethodInstallation = {
+	base: Method;
+	facade: Method;
+	registrations: MethodRegistration[];
+};
 type DispatcherGlobalState = {
 	installations: WeakMap<CommandRunner, DispatcherInstallation>;
+	methodInstallations: WeakMap<object, Map<PropertyKey, MethodInstallation>>;
 };
 
 const GLOBAL_STATE_KEY = Symbol.for("bobbit.tests2.command-runner-dispatcher.state");
 
 function globalState(): DispatcherGlobalState {
-	const scope = globalThis as typeof globalThis & { [GLOBAL_STATE_KEY]?: DispatcherGlobalState };
-	return scope[GLOBAL_STATE_KEY] ??= { installations: new WeakMap() };
+	const scope = globalThis as typeof globalThis & { [GLOBAL_STATE_KEY]?: Partial<DispatcherGlobalState> };
+	const state = scope[GLOBAL_STATE_KEY] ??= {};
+	state.installations ??= new WeakMap();
+	state.methodInstallations ??= new WeakMap();
+	return state as DispatcherGlobalState;
 }
 
 function missingMethod(method: "execFileSync" | "spawn", file: string, args: readonly string[]): never {
@@ -130,5 +145,65 @@ export function installCommandRunnerInterceptor(runner: CommandRunner, intercept
 		if (runner.execFileSync === installation!.execFileSync) runner.execFileSync = installation!.baseExecFileSync;
 		if (runner.spawn === installation!.spawn) runner.spawn = installation!.baseSpawn;
 		if (state.installations.get(runner) === installation) state.installations.delete(runner);
+	};
+}
+
+/**
+ * Lease one method through the same process-global, owner-scoped dispatch model.
+ * Test seams use this instead of assigning and later restoring shared gateway
+ * methods, which can otherwise restore over a neighboring file's active seam.
+ */
+export function installMethodInterceptor<
+	TTarget extends object,
+	TKey extends keyof TTarget,
+	TMethod extends Extract<TTarget[TKey], Method>,
+>(target: TTarget, key: TKey, label: string, interceptor: MethodInterceptor<TMethod>): () => void {
+	const state = globalState();
+	let targetInstallations = state.methodInstallations.get(target);
+	if (!targetInstallations) {
+		targetInstallations = new Map();
+		state.methodInstallations.set(target, targetInstallations);
+	}
+
+	let installation = targetInstallations.get(key);
+	if (!installation) {
+		const base = target[key];
+		if (typeof base !== "function") throw new Error(`[command-runner-dispatcher] ${String(key)} is not a method`);
+		installation = {
+			base: base as Method,
+			facade: undefined as unknown as Method,
+			registrations: [],
+		};
+		installation.facade = function (this: unknown, ...args: unknown[]) {
+			const registrations = installation!.registrations.slice().reverse();
+			const dispatch = (index: number, callArgs: unknown[]): unknown => {
+				const registration = registrations[index];
+				if (registration) {
+					return registration.interceptor(callArgs, (...nextArgs: unknown[]) => dispatch(index + 1, nextArgs.length > 0 ? nextArgs : callArgs));
+				}
+				return Reflect.apply(installation!.base, this, callArgs);
+			};
+			return dispatch(0, args);
+		};
+		targetInstallations.set(key, installation);
+	}
+
+	if (target[key] !== installation.facade) {
+		installation.base = target[key] as Method;
+		(target as Record<PropertyKey, unknown>)[key] = installation.facade;
+	}
+	const owner = Symbol(label);
+	installation.registrations.push({ owner, interceptor: interceptor as MethodInterceptor });
+
+	let restored = false;
+	return () => {
+		if (restored) return;
+		restored = true;
+		const index = installation!.registrations.findIndex(registration => registration.owner === owner);
+		if (index >= 0) installation!.registrations.splice(index, 1);
+		if (installation!.registrations.length > 0) return;
+		if (target[key] === installation!.facade) (target as Record<PropertyKey, unknown>)[key] = installation!.base;
+		targetInstallations!.delete(key);
+		if (targetInstallations!.size === 0) state.methodInstallations.delete(target);
 	};
 }

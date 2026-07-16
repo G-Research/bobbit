@@ -4,11 +4,15 @@ import * as maintenance from "./helpers/maintenance-api-support.js";
 const {
 	test, expect, apiFetch, registerProject,
 	existsSync, mkdtempSync, rmSync, tmpdir, join,
-	expectNumberCounts, expectNumberMap, normalizeTestPath, listedWorktreePaths,
-	branchExists, initGitRepo, git, tryRemoveWorktree, tryDeleteBranch, maintenanceGit,
+	expectNumberCounts, expectNumberMap, normalizeTestPath,
 	seedArchivedSession, removeSeededSessions, gateway,
 } = maintenance;
-maintenance.registerMaintenanceHooks();
+const maintenanceOwner = maintenance.createMaintenanceApiFixture("maintenance-api");
+const {
+	listedWorktreePaths, branchExists, initGitRepo, git,
+	tryRemoveWorktree, tryDeleteBranch, maintenanceGit,
+} = maintenanceOwner;
+maintenanceOwner.registerMaintenanceHooks();
 
 const maintenanceBaseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-maintenance-shared-"));
 afterAll(() => rmSync(maintenanceBaseDir, { recursive: true, force: true }));

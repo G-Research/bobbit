@@ -5,13 +5,14 @@ import type { MaintenanceGitSnapshot } from "./maintenance-git-model.js";
 const {
 	test, expect, apiFetch, expectArchivedCleanupShape,
 	existsSync, mkdtempSync, rmSync, tmpdir, join,
-	git, branchExists, initGitRepo,
 	seedArchivedSessions, removeSeededSessions, restoreSeededSessions,
 	findArchivedSession, findArchivedWorktreeItem, findArchivedWorktreeGroup,
-	getArchivedWorktreeScan, gateway, maintenanceGit
+	getArchivedWorktreeScan, gateway,
 } = maintenance;
+const maintenanceOwner = maintenance.createMaintenanceApiFixture("archived-cleanup");
+const { git, branchExists, initGitRepo, maintenanceGit } = maintenanceOwner;
 type SeededSession = maintenance.SeededSession;
-maintenance.registerMaintenanceHooks();
+maintenanceOwner.registerMaintenanceHooks();
 
 type CleanupScenario = {
 	repoPath: string;

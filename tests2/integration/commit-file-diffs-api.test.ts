@@ -9,7 +9,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, createSession, defaultProjectId, harnessDefaultProjectRoot } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
-import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 
 type CommitFixture = {
 	cwd: string;
@@ -69,38 +69,23 @@ function cannedGit(fixture: CommitFixture, args: readonly string[]): string {
 }
 
 function installCannedGitRunner(gateway: any, fixture: CommitFixture): InstalledRunner {
-	const runner = gateway.sessionManager.commandRunner as CommandRunner;
-	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
-	const commitResponses = new Map<string, CommitFixture>([[path.resolve(fixture.cwd), fixture]]);
-
-	const fixtureFor = (cwd: unknown): CommitFixture => {
-		const resolved = path.resolve(String(cwd ?? ""));
-		const match = commitResponses.get(resolved);
-		if (!match) {
-			throw new Error(`unexpected git cwd: ${resolved}; expected ${[...commitResponses.keys()].join(", ")}`);
-		}
-		return match;
-	};
-
-	runner.execFile = async (file, args, options) => {
-		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
-		return { stdout: cannedGit(fixtureFor(options?.cwd), args), stderr: "" };
-	};
-	runner.execFileSync = (file, args, options) => {
-		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
-		return cannedGit(fixtureFor(options?.cwd), args);
-	};
-	runner.spawn = undefined;
-
-	let reset = false;
-	return {
-		reset() {
-			if (reset) return;
-			reset = true;
-			commitResponses.clear();
-			Object.assign(runner, original);
+	const runner = gateway.sessionManager.commandRunner;
+	const expectedCwd = path.resolve(fixture.cwd);
+	const owns = (file: string, cwd: unknown): boolean =>
+		path.basename(file).toLowerCase().replace(/\.exe$/, "") === "git" &&
+		typeof cwd === "string" && path.resolve(cwd) === expectedCwd;
+	const reset = installCommandRunnerInterceptor(runner, {
+		label: `commit-file-diffs:${expectedCwd}`,
+		async execFile(file, args, options, next) {
+			if (!owns(file, options?.cwd)) return next();
+			return { stdout: cannedGit(fixture, args), stderr: "" };
 		},
-	};
+		execFileSync(file, args, options, next) {
+			if (!owns(file, options?.cwd)) return next();
+			return cannedGit(fixture, args);
+		},
+	});
+	return { reset };
 }
 
 function byPath(files: any[], p: string): any {
@@ -165,7 +150,8 @@ async function cleanupSession(gateway: any, sessionId: string): Promise<void> {
 	await gateway.sessionManager.purgeArchivedSession(sessionId).catch(() => {});
 }
 
-// The gateway CommandRunner is shared within a fork, so these cases must remain serial.
+// Each case owns an exact cwd-scoped dispatcher lease; keep the declarations
+// serial because they also mutate the shared session/goal stores.
 test.describe.configure({ mode: "serial" });
 
 test.describe("commit file diff API", () => {
