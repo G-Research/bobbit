@@ -9,10 +9,9 @@ guardProcessEnv();
 enableTsWorkerResolver();
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { test, onTestFinished } from "vitest";
 import { pathToFileURL } from "node:url";
 
@@ -184,64 +183,68 @@ async function saveMinimumChunks(ctx: any) {
 	await saveChunk(ctx, "chunk:readme", "phase: significant\ntitle: README\nreviewer_goal: G\nexplanation: E\nfiles: []\nrelevant_hunks: []\nsuggested_concerns: []\npositive_notes: []");
 }
 
-function git(cwd: string, args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-}
-
-function writeRepoFile(root: string, relativePath: string, content: string): void {
-	fs.mkdirSync(join(root, dirname(relativePath)), { recursive: true });
-	fs.writeFileSync(join(root, relativePath), content);
-}
+type SyntheticRepo = {
+	baseSha: string;
+	headSha: string;
+	hunks: Array<{ file: string; hunkId: string; hunkIndex: number; header: string }>;
+	parsedDiff: any;
+};
 
 function routeSlug(value: string): string {
 	return String(value).replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "file";
 }
 
-function routeHunks(cwd: string, base: string, head: string): Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> {
-	const diff = git(cwd, ["diff", "--no-ext-diff", "--no-color", "--unified=80", base, head]);
-	const hunks: Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> = [];
-	let blockIndex = 0;
-	let hunkIndex = 0;
-	let file = "";
-	for (const line of diff.split(/\r?\n/)) {
-		const fileMatch = line.match(/^diff --git a\/(.+) b\/(.+)$/);
-		if (fileMatch) {
-			blockIndex += 1;
-			file = fileMatch[2];
-			hunkIndex = 0;
-			continue;
-		}
-		if (line.startsWith("@@ ")) {
-			hunkIndex += 1;
-			hunks.push({ file, hunkId: `block-${blockIndex}-${routeSlug(file)}-h${hunkIndex}`, hunkIndex: hunkIndex - 1, header: line });
-		}
-	}
-	return hunks;
+function seedGitRepo(_t: any, afterFiles: Record<string, string>, beforeFiles: Record<string, string> = {}): SyntheticRepo {
+	const syntheticBase = "c".repeat(40);
+	const syntheticHead = "d".repeat(40);
+	const files = Object.entries(afterFiles).map(([filePath, after], index) => {
+		const before = beforeFiles[filePath] ?? "";
+		const oldLines = before.trimEnd().split("\n").filter(Boolean);
+		const newLines = after.trimEnd().split("\n").filter(Boolean);
+		const blockId = `block-${index + 1}-${routeSlug(filePath)}`;
+		const hunkId = `${blockId}-h1`;
+		const header = `@@ -1,${oldLines.length} +1,${newLines.length} @@`;
+		return {
+			filePath,
+			status: before ? "modified" : "added",
+			additions: newLines.length,
+			deletions: oldLines.length,
+			diffBlocks: [{
+				id: blockId,
+				filePath,
+				status: before ? "modified" : "added",
+				hunks: [{
+					id: hunkId,
+					header,
+					lines: [
+						...oldLines.map((text, line) => ({ id: `${hunkId}:old:${line}`, side: "old", oldLine: line + 1, kind: "del", text })),
+						...newLines.map((text, line) => ({ id: `${hunkId}:new:${line}`, side: "new", newLine: line + 1, kind: "add", text })),
+					],
+				}],
+			}],
+		};
+	});
+	return {
+		baseSha: syntheticBase,
+		headSha: syntheticHead,
+		hunks: files.map(file => ({ file: file.filePath, hunkId: file.diffBlocks[0].hunks[0].id, hunkIndex: 0, header: file.diffBlocks[0].hunks[0].header })),
+		parsedDiff: {
+			changeset: { baseSha: syntheticBase, headSha: syntheticHead, provider: "local", filesChanged: files.length, additions: files.reduce((sum, file) => sum + file.additions, 0), deletions: files.reduce((sum, file) => sum + file.deletions, 0) },
+			files,
+			warnings: [],
+		},
+	};
 }
 
-function seedGitRepo(_t: any, afterFiles: Record<string, string>, beforeFiles: Record<string, string> = {}): { cwd: string; baseSha: string; headSha: string; hunks: Array<{ file: string; hunkId: string; hunkIndex: number; header: string }> } {
-	const cwd = fs.mkdtempSync(join(os.tmpdir(), "prw-route-git-"));
-	onTestFinished(() => { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } });
-	git(cwd, ["init"]);
-	git(cwd, ["config", "user.name", "Test User"]);
-	git(cwd, ["config", "user.email", "test@example.invalid"]);
-	git(cwd, ["config", "core.autocrlf", "false"]);
-	for (const [file, content] of Object.entries(beforeFiles)) writeRepoFile(cwd, file, content);
-	git(cwd, ["add", "."]);
-	git(cwd, ["commit", "-m", "base"]);
-	const base = git(cwd, ["rev-parse", "HEAD"]);
-	for (const [file, content] of Object.entries(afterFiles)) writeRepoFile(cwd, file, content);
-	git(cwd, ["add", "."]);
-	git(cwd, ["commit", "-m", "head"]);
-	const head = git(cwd, ["rev-parse", "HEAD"]);
-	return { cwd, baseSha: base, headSha: head, hunks: routeHunks(cwd, base, head) };
-}
-
-async function withCwd(cwd: string, fn: () => Promise<any>): Promise<any> {
-	const previous = process.cwd();
-	process.chdir(cwd);
-	try { return await fn(); }
-	finally { process.chdir(previous); }
+function installRepoEvidence(store: MemoryStore, repo: SyntheticRepo): void {
+	store.data.set(bundleDiffEvidenceKey(), {
+		schemaVersion: 1,
+		kind: "pr_walkthrough_finalization_diff",
+		jobId,
+		source: "analysis-bundle",
+		generatedAt: "2026-06-01T00:00:00.000Z",
+		parsedDiff: repo.parsedDiff,
+	});
 }
 
 function numberedLines(prefix: string, count: number, suffix = ""): string {
@@ -365,6 +368,7 @@ test("PR walkthrough durable finalization rejects duplicate primary hunk ownersh
 	const hunk = repo.hunks.find((item) => item.file === "src/app.ts");
 	assert.ok(hunk, JSON.stringify(repo.hunks));
 	const { ctx, store } = seedCtx({ baseSha: repo.baseSha, headSha: repo.headSha });
+	installRepoEvidence(store, repo);
 	await saveRequiredChunks(ctx);
 	await saveChunk(ctx, "chunk:first", `phase: significant
 title: First owner
@@ -391,7 +395,7 @@ relevant_hunks:
 suggested_concerns: []
 positive_notes: []`);
 
-	const finalized = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "finalizeSubmission" } }));
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
 	assert.equal(finalized.ok, false);
 	assert.equal(finalized.code, "PRW_DUPLICATE_PRIMARY_HUNK");
 	assert.equal(finalized.retryable, true);
@@ -413,6 +417,7 @@ test("PR walkthrough status and final payload include read-receipt coverage summ
 	const skippedHunk = repo.hunks.find((item) => item.file === "src/skipped.ts");
 	assert.ok(appHunk && skippedHunk, JSON.stringify(repo.hunks));
 	const { ctx, store } = seedCtx({ baseSha: repo.baseSha, headSha: repo.headSha });
+	installRepoEvidence(store, repo);
 	await saveRequiredChunks(ctx);
 	await saveChunk(ctx, "chunk:primary", `phase: significant
 title: App flow
@@ -465,7 +470,7 @@ positive_notes: []`);
 		truncated: false,
 	});
 
-	const draftStatus = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "submissionStatus" } }));
+	const draftStatus = await routes.publish(ctx, { body: { op: "submissionStatus" } });
 	assert.equal(draftStatus.readReceipts.total, 1);
 	assert.deepEqual(draftStatus.readReceipts.bodyReadHunkIds, [appHunk.hunkId]);
 	assert.equal(draftStatus.draftCoverage.primaryReviewed, 1);
@@ -474,7 +479,7 @@ positive_notes: []`);
 	assert.equal(draftStatus.draftCoverage.repeated_refs[0].hunkId, appHunk.hunkId);
 	assert.equal(draftStatus.draftCoverage.skipped_hunks[0].hunkId, skippedHunk.hunkId);
 
-	const finalized = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "finalizeSubmission" } }));
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
 	assert.equal(finalized.ok, true, JSON.stringify(finalized));
 	assert.equal(finalized.coverage.primaryReviewed, 1);
 	assert.equal(finalized.coverage.skipped, 1);
@@ -515,13 +520,14 @@ test("PR walkthrough durable finalization blocks major completion-sweep hunks wi
 	const after = { "src/app.ts": numberedLines("new-major-", 12) };
 	const repo = seedGitRepo(t, after, before);
 	const { ctx, store } = seedCtx({ baseSha: repo.baseSha, headSha: repo.headSha });
+	installRepoEvidence(store, repo);
 	await saveRequiredChunks(ctx);
 
-	const status = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "submissionStatus" } }));
+	const status = await routes.publish(ctx, { body: { op: "submissionStatus" } });
 	assert.equal(status.draftSynthesisError.code, "PRW_MAJOR_REMAINING_HUNKS");
 	assert.equal(status.major_remaining[0].filePath, "src/app.ts");
 
-	const finalized = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "finalizeSubmission" } }));
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
 	assert.equal(finalized.ok, false);
 	assert.equal(finalized.code, "PRW_MAJOR_REMAINING_HUNKS");
 	assert.equal(finalized.retryable, true);
@@ -534,6 +540,7 @@ test("PR walkthrough review chunk files stay metadata-only at durable finalizati
 	const after = { "docs/guide.md": "new line one\nnew line two\n" };
 	const repo = seedGitRepo(t, after, before);
 	const { ctx, store } = seedCtx({ baseSha: repo.baseSha, headSha: repo.headSha });
+	installRepoEvidence(store, repo);
 	await saveRequiredChunks(ctx);
 	await saveChunk(ctx, "chunk:docs", `phase: significant
 title: Docs metadata
@@ -545,7 +552,7 @@ relevant_hunks: []
 suggested_concerns: []
 positive_notes: []`);
 
-	const finalized = await withCwd(repo.cwd, () => routes.publish(ctx, { body: { op: "finalizeSubmission" } }));
+	const finalized = await routes.publish(ctx, { body: { op: "finalizeSubmission" } });
 	assert.equal(finalized.ok, true, JSON.stringify(finalized));
 	assert.equal(finalized.coverage.completionSweepRemaining, 1);
 	const finalPayload: any = await store.get(`reviews/${jobId}/final/payload`);
