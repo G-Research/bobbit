@@ -182,9 +182,11 @@ When the agent finishes a turn, the browser client notifies the user via:
 
 These cues are scoped to **human attention**: standalone sessions notify on idle (as before), team members and delegates stay silent (they escalate to their team lead, not the user), and a team lead notifies when the goal is `complete`, needs immediate human action, or is persistently stuck. One-shot beeps do not fire merely because a team lead went idle to wait for workers or verification. Notification surfaces consult the predicates in `src/app/notification-policy.ts`. See [design/notification-policy.md](design/notification-policy.md).
 
-## Model Authentication
+## Model routing and authentication
 
-Models become usable either via an **account OAuth login** (Settings → Account) or a **provider API key** (Settings → Models → Provider API Keys). OAuth credentials are provider-partitioned in `auth.json` and are propagated into agent sandboxes through the same sanitized path for every provider. Text-session model fallback is opt-in via `allowSessionModelFallback`; see [Controlled session model fallback](session-model-fallback.md).
+Bobbit can source models from built-in providers, local custom providers, or one configured AI Gateway. AI Gateway discovery is well-known-first so each upstream retains its native Responses, Bedrock Converse, or chat-completions route; the legacy model-list path remains available for older gateways. See [AI Gateway routing](ai-gateway-routing.md) for setup, operator controls, security boundaries, model-ID migration, and refresh behavior.
+
+Models become usable either through the configured AI Gateway, via an **account OAuth login** (Settings → Account), or with a **provider API key** (Settings → Models → Provider API Keys). OAuth credentials are provider-partitioned in `auth.json` and are propagated into agent sandboxes through the same sanitized path for every provider. Text-session model fallback is opt-in via `allowSessionModelFallback`; see [Controlled session model fallback](session-model-fallback.md).
 
 - **Anthropic** and **OpenAI** account login work as before.
 - **Google** has two intentionally separate paths: account OAuth (`google-gemini-cli`, via the official Gemini Code Assist API) and a Google AI Studio API key (`google`, Gemini Developer API). Both are session-usable: account-backed Gemini models run in agent sessions through a generated Code Assist provider extension (per-request Bearer token + project from the gateway), while the API key remains an independent path. See [google-oauth-models.md](google-oauth-models.md) for the full split, runtime architecture, project selection, and caveats.

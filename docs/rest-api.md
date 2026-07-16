@@ -931,13 +931,13 @@ interface AgentDirApiState {
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/models` | List currently available models (`ApiModel[]`) |
-| `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 10s timeout. |
+| `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 15s timeout. |
 | `GET` | `/api/pi-ai/providers` | List built-in pi-ai provider IDs through a browser-safe server boundary |
 | `POST` | `/api/pi-ai/provider-key-test` | Test a built-in provider API key without persisting it |
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
-`GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`, plus optional `cost.tiers[]` when Pi exposes tiered pricing metadata. Reasoning-capable models may also include `thinkingLevelMap`; Pi `0.80.6` uses that map to expose `max` thinking support for GPT 5.6 and Fable-class models. For AI Gateway models, Bobbit derives cost from `/v1/models` `pricing.prompt` and `pricing.completion` metadata and does not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
+`GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`, plus optional `cost.tiers[]` when Pi exposes tiered pricing metadata. Reasoning-capable models may also include `thinkingLevelMap`; Pi `0.80.6` uses that map to expose `max` thinking support for GPT 5.6 and Fable-class models. AI Gateway models may also include `upstreamProvider`, which the UI uses for badges and search while preferences remain `aigw/<bare-id>`. Bobbit takes AIGW cost from well-known per-million-token `cost` metadata or converts legacy `/v1/models` per-token `pricing`; it does not call aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
 
 `GET /api/pi-ai/providers` and `POST /api/pi-ai/provider-key-test` are an internal browser-safe pi-ai boundary. Browser UI uses them instead of runtime bare value imports from `@earendil-works/pi-ai`, because the package index traverses Node-only exports such as environment API-key probing and causes browser builds to externalize `node:fs`. Keep provider catalog reads and key tests behind these server endpoints; first-message streaming is the separate lazy `@earendil-works/pi-ai/api/*` boundary documented in [Pi runtime compatibility](pi-runtime-compatibility.md).
 
@@ -961,27 +961,33 @@ The key is used only for a one-off minimal completion probe (`"Reply with: OK"`)
 - `404 { ok: false, status: 404, error: "Model \"<provider>/<modelId>\" is not in the built-in pi-ai catalog." }` — the requested built-in model cannot be resolved.
 - `502 { ok: false, modelResolved, latencyMs, error }` — pi-ai resolved the model but the provider request failed or timed out. The body has no `status` field in this path.
 
-`POST /api/models/test` responses:
+`POST /api/models/test` resolves the current model record before probing. AIGW Responses models call their per-model `{baseUrl}/responses`; AIGW completions models call `{baseUrl}/chat/completions`; Converse, future provider-native APIs, and non-AIGW models run through pi-ai. A failed route is not retried through another API.
+
+Responses:
 
 - `200 { ok: true, modelResolved, latencyMs }` — success.
-- `400 { ok: false, error: "Malformed pref" }` — pref could not be parsed as `provider/modelId`.
+- `200 { ok: false, modelResolved, latencyMs, error }` — a direct AIGW Responses/completions probe reached an upstream or transport failure.
+- `400 { ok: false, error }` — pref is missing or could not be parsed as `provider/modelId`.
 - `404 { ok: false, error: "Model \"...\" is not in the current available-models list..." }` — pref does not resolve against `/api/models`.
-- `422 { ok: false, error: "Test not supported for this provider yet..." }` — non-aigw providers are not probed.
+- `502 { ok: false, modelResolved, latencyMs, error }` — a pi-ai-backed provider/native-API probe failed.
+- `500 { ok: false, error }` — unexpected model discovery or probe setup failure.
 
-Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debug a review or naming model picking the wrong model under AI Gateway](../AGENTS.md).
+Used by the Settings → Models tab per-row Test button. See [AI Gateway routing — Model probes](ai-gateway-routing.md#model-probes) and [Debugging](debugging.md#reviewnaming-model-mismatch-under-ai-gateway).
 
 ### AI Gateway
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Check if AI gateway is configured, return available models |
-| `POST` | `/api/aigw/configure` | Set AI gateway URL, discover models (`{ url }`) |
-| `DELETE` | `/api/aigw/configure` | Remove AI gateway configuration |
-| `POST` | `/api/aigw/test` | Test connection to a URL without saving (`{ url }`) |
-| `POST` | `/api/aigw/refresh` | Re-discover models from configured gateway |
-| `*` | `/api/aigw/v1/*` | Proxy requests to configured AI gateway |
+| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh, with failures represented by `models: []` |
+| `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url }`), publish `models.json`, and refresh sandbox mounts |
+| `DELETE` | `/api/aigw/configure` | Remove gateway configuration and its generated provider |
+| `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url }` without saving or changing active routing |
+| `POST` | `/api/aigw/refresh` | Repeat configuration for the saved URL and refresh models/default seeding |
+| `*` | `/api/aigw/v1/*` | Append `/v1/*` to the configured URL and proxy the request; save the gateway origin, not an already suffixed `/v1`, when using this route |
 
-Outbound requests that these endpoints make to the configured/tested AI Gateway carry Bobbit's canonical AI Gateway user agent. Model discovery also consumes `/v1/models` pricing metadata and persists converted costs into generated agent `models.json` entries. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) and [AI Gateway model pricing](internals.md#ai-gateway-model-pricing).
+Configure, refresh, and delete return `remountPending: true` when the durable configuration succeeded but one or more tracked sandbox containers could not yet remount the atomically replaced `models.json`. Callers must not interpret that flag as a rollback; normal container health recovery continues.
+
+Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md) for precedence, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
 
 ### OAuth
 
