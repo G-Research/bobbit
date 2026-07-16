@@ -2,13 +2,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { copyGitTemplate, prepareGitTemplate } from "./git-template.js";
+import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
 
 const root = mkdtempSync(join(tmpdir(), "bb-git-template-test-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-describe("git template", () => {
-	it("prepares one configured master repository per fork", async () => {
+describe("setup-prepared git template", () => {
+	it("reuses the configured master repository prepared before the spawn guard", async () => {
 		const first = await prepareGitTemplate();
 		const second = await prepareGitTemplate();
 		expect(second).toBe(first);

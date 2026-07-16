@@ -739,6 +739,33 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/spawn-with-retry-policy.test.ts",
+      "reason": "Subprocess-free policy coverage for bounded fixture command retry, timeout, redaction, literal argv, and safe process options through an injectable backend.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tier1-spawn-guard-policy.test.ts",
+      "reason": "Subprocess-free policy coverage for every guarded child-process API, migration diagnostics, ESM synchronization, restoration, and idempotent ownership through an injectable target.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-template-copy.test.ts",
+      "reason": "Pins setup-prepared immutable Git template reuse, configured master metadata, independent filesystem-only copies, and destination safety after the tier-1 guard is installed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [

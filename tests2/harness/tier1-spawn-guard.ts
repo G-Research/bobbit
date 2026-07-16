@@ -8,10 +8,16 @@ const STATE_KEY = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
 const GUARDED_APIS = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"] as const;
 type GuardedApi = (typeof GUARDED_APIS)[number];
 type ChildProcessModule = typeof ChildProcess;
+type GuardTarget = Record<GuardedApi, unknown>;
 
 interface GuardState {
 	installed: boolean;
-	originals?: Pick<ChildProcessModule, GuardedApi>;
+	originals?: Record<GuardedApi, unknown>;
+}
+
+export interface Tier1SpawnGuardController {
+	install(): () => void;
+	isInstalled(): boolean;
 }
 
 type ProcessWithGuardState = NodeJS.Process & { [STATE_KEY]?: GuardState };
@@ -41,33 +47,41 @@ function blocked(api: GuardedApi, firstArgument: unknown): never {
 	);
 }
 
-/** Install the process-wide tier-1 subprocess fence. Repeated installs are harmless. */
-export function installTier1SpawnGuard(): () => void {
-	const shared = state();
+function installOnTarget(target: GuardTarget, shared: GuardState, syncExports: () => void): () => void {
 	if (shared.installed) return () => {};
-	const originals = {} as Pick<ChildProcessModule, GuardedApi>;
-	for (const api of GUARDED_APIS) originals[api] = childProcess[api] as never;
+	const originals = {} as Record<GuardedApi, unknown>;
+	for (const api of GUARDED_APIS) originals[api] = target[api];
 	shared.originals = originals;
 	shared.installed = true;
 
-	for (const api of GUARDED_APIS) {
-		(childProcess as unknown as Record<GuardedApi, (...args: unknown[]) => never>)[api] = (...args: unknown[]) => blocked(api, args[0]);
-	}
+	for (const api of GUARDED_APIS) target[api] = (...args: unknown[]) => blocked(api, args[0]);
 	// Built-in ESM named exports are live only after explicitly syncing mutations
 	// made through the CommonJS facade. This catches imports made before setup too.
-	syncBuiltinESMExports();
+	syncExports();
 
 	let restored = false;
 	return () => {
 		if (restored || !shared.installed || shared.originals !== originals) return;
 		restored = true;
-		for (const api of GUARDED_APIS) {
-			(childProcess as unknown as Record<GuardedApi, unknown>)[api] = originals[api];
-		}
+		for (const api of GUARDED_APIS) target[api] = originals[api];
 		shared.originals = undefined;
 		shared.installed = false;
-		syncBuiltinESMExports();
+		syncExports();
 	};
+}
+
+/** Create an isolated guard around an injectable target for subprocess-free tests. */
+export function createTier1SpawnGuardController(target: GuardTarget, syncExports: () => void = () => {}): Tier1SpawnGuardController {
+	const shared: GuardState = { installed: false };
+	return {
+		install: () => installOnTarget(target, shared, syncExports),
+		isInstalled: () => shared.installed,
+	};
+}
+
+/** Install the process-wide tier-1 subprocess fence. Repeated installs are harmless. */
+export function installTier1SpawnGuard(): () => void {
+	return installOnTarget(childProcess as unknown as GuardTarget, state(), syncBuiltinESMExports);
 }
 
 /** True when this fork has activated the tier-1 subprocess fence. */

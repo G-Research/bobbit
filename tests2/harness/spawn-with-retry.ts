@@ -32,6 +32,56 @@ interface AttemptFailure {
 	cause?: unknown;
 }
 
+export interface FixtureCommandProcess {
+	onStdout(listener: (chunk: Buffer<ArrayBufferLike> | string) => void): void;
+	onStderr(listener: (chunk: Buffer<ArrayBufferLike> | string) => void): void;
+	onError(listener: (cause: unknown) => void): void;
+	onClose(listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void): void;
+	kill(signal: NodeJS.Signals): void;
+}
+
+interface FixtureCommandTimer {
+	cancel(): void;
+	unref(): void;
+}
+
+/** Injectable only so tier-1 tests can exercise command policy without spawning. */
+export interface FixtureCommandBackend {
+	spawn(file: string, args: readonly string[], options: {
+		cwd?: string;
+		env?: NodeJS.ProcessEnv;
+		shell: false;
+		windowsHide: true;
+		windowsVerbatimArguments: false;
+		stdio: ["ignore", "pipe", "pipe"];
+	}): FixtureCommandProcess;
+	schedule(callback: () => void, delayMs: number): FixtureCommandTimer;
+	sleep(delayMs: number): Promise<void>;
+}
+
+function schedule(callback: () => void, delayMs: number): FixtureCommandTimer {
+	const timer = setTimeout(callback, delayMs);
+	return {
+		cancel: () => clearTimeout(timer),
+		unref: () => timer.unref(),
+	};
+}
+
+const productionBackend: FixtureCommandBackend = {
+	spawn(file, args, options) {
+		const child = spawn(file, [...args], options);
+		return {
+			onStdout: listener => { child.stdout.on("data", listener); },
+			onStderr: listener => { child.stderr.on("data", listener); },
+			onError: listener => { child.once("error", listener); },
+			onClose: listener => { child.once("close", listener); },
+			kill: signal => { child.kill(signal); },
+		};
+	},
+	schedule,
+	sleep: delayMs => delayMs === 0 ? Promise.resolve() : new Promise(resolve => setTimeout(resolve, delayMs)),
+};
+
 export class FixtureCommandError extends Error {
 	readonly attempts: number;
 	readonly exitCode: number | null;
@@ -88,16 +138,13 @@ function renderCommand(file: string, args: readonly string[], secrets: readonly 
 	return redact([file, ...args].map(quoteArg).join(" "), secrets);
 }
 
-function sleep(ms: number): Promise<void> {
-	return ms === 0 ? Promise.resolve() : new Promise(resolve => setTimeout(resolve, ms));
-}
-
 async function runAttempt(
 	file: string,
 	args: readonly string[],
 	options: FixtureCommandOptions,
 	timeoutMs: number,
 	maxOutputBytes: number,
+	backend: FixtureCommandBackend,
 ): Promise<{ stdout: string; stderr: string } | AttemptFailure> {
 	return await new Promise(resolve => {
 		let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
@@ -105,20 +152,20 @@ async function runAttempt(
 		let timedOut = false;
 		let outputExceeded = false;
 		let settled = false;
-		let timeout: NodeJS.Timeout | undefined;
-		let forcedFinish: NodeJS.Timeout | undefined;
+		let timeout: FixtureCommandTimer | undefined;
+		let forcedFinish: FixtureCommandTimer | undefined;
 
 		const finish = (result: { stdout: string; stderr: string } | AttemptFailure): void => {
 			if (settled) return;
 			settled = true;
-			if (timeout) clearTimeout(timeout);
-			if (forcedFinish) clearTimeout(forcedFinish);
+			timeout?.cancel();
+			forcedFinish?.cancel();
 			resolve(result);
 		};
 
-		let child;
+		let child: FixtureCommandProcess;
 		try {
-			child = spawn(file, [...args], {
+			child = backend.spawn(file, args, {
 				cwd: options.cwd,
 				env: options.env,
 				shell: false,
@@ -138,12 +185,12 @@ async function runAttempt(
 			child.kill("SIGKILL");
 			return next.subarray(0, maxOutputBytes);
 		};
-		child.stdout.on("data", chunk => { stdout = append(stdout, chunk); });
-		child.stderr.on("data", chunk => { stderr = append(stderr, chunk); });
-		child.once("error", cause => {
+		child.onStdout(chunk => { stdout = append(stdout, chunk); });
+		child.onStderr(chunk => { stderr = append(stderr, chunk); });
+		child.onError(cause => {
 			finish({ exitCode: null, signal: null, stderr: stderr.toString("utf8"), timedOut, cause });
 		});
-		child.once("close", (exitCode, signal) => {
+		child.onClose((exitCode, signal) => {
 			const stderrText = stderr.toString("utf8");
 			if (exitCode === 0 && !timedOut && !outputExceeded) {
 				finish({ stdout: stdout.toString("utf8"), stderr: stderrText });
@@ -152,12 +199,12 @@ async function runAttempt(
 			const suffix = outputExceeded ? `\nfixture command output exceeded ${maxOutputBytes} bytes` : "";
 			finish({ exitCode, signal, stderr: `${stderrText}${suffix}`.trim(), timedOut });
 		});
-		timeout = setTimeout(() => {
+		timeout = backend.schedule(() => {
 			timedOut = true;
 			child.kill("SIGKILL");
 			// A platform adapter can fail to deliver even SIGKILL. Bound the caller's
 			// wait regardless; commands are direct children because shell is false.
-			forcedFinish = setTimeout(() => finish({
+			forcedFinish = backend.schedule(() => finish({
 				exitCode: null,
 				signal: "SIGKILL",
 				stderr: stderr.toString("utf8"),
@@ -180,6 +227,16 @@ export async function runFixtureCommand(
 	args: readonly string[],
 	options: FixtureCommandOptions = {},
 ): Promise<FixtureCommandResult> {
+	return runFixtureCommandWithBackend(file, args, options, productionBackend);
+}
+
+/** Test seam for policy coverage; production callers use runFixtureCommand(). */
+export async function runFixtureCommandWithBackend(
+	file: string,
+	args: readonly string[],
+	options: FixtureCommandOptions,
+	backend: FixtureCommandBackend,
+): Promise<FixtureCommandResult> {
 	if (typeof file !== "string" || file.trim() === "") throw new TypeError("fixture command file must be a non-empty string");
 	if (!Array.isArray(args) || args.some(arg => typeof arg !== "string")) throw new TypeError("fixture command args must be an array of strings");
 	const attempts = positiveInteger(options.attempts ?? MAX_ATTEMPTS, "attempts", MAX_ATTEMPTS);
@@ -192,12 +249,12 @@ export async function runFixtureCommand(
 	let lastFailure: AttemptFailure | undefined;
 
 	for (let attempt = 1; attempt <= attempts; attempt++) {
-		const result = await runAttempt(file, args, options, timeoutMs, maxOutputBytes);
+		const result = await runAttempt(file, args, options, timeoutMs, maxOutputBytes, backend);
 		if ("stdout" in result) return { ...result, attempts: attempt, exitCode: 0 };
 		lastFailure = result;
 		if (attempt < attempts) {
 			const delay = Math.min(maxRetryDelayMs, retryDelayMs * (2 ** (attempt - 1)));
-			await sleep(delay);
+			await backend.sleep(delay);
 		}
 	}
 
