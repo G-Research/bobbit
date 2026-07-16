@@ -13,6 +13,7 @@
 import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
+import type { CommandRunner } from "../gateway-deps.js";
 import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd } from "./session-manager.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
@@ -351,6 +352,8 @@ export interface PipelineContext {
 	searchIndex: SearchService;
 	sessions: Map<string, SessionInfo>;
 	listPersistedSessionsForWorktreeGuard?: () => WorktreeReferenceRecord[];
+	/** Injected command boundary used by setup-failure worktree cleanup. */
+	commandRunner?: CommandRunner;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
@@ -1747,7 +1750,7 @@ export function handleSetupFailure(
 	if (plan.worktreePath && plan.repoPath && plan.branch) {
 		const persistedSessions = ctx.listPersistedSessionsForWorktreeGuard?.() ?? ctx.store.getAll();
 		if (!isWorktreePathReferencedByLiveSession(plan.worktreePath, persistedSessions, { ignoreSessionId: session.id })) {
-			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true, undefined, ctx.remoteGitPolicy).catch(() => {});
+			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true, ctx.commandRunner, ctx.remoteGitPolicy).catch(() => {});
 		} else {
 			console.log(`[session-setup] Skipping setup-failure cleanup for shared worktree ${plan.worktreePath} (session ${session.id})`);
 		}

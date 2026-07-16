@@ -7,28 +7,9 @@
  * supplied through the production CommandRunner seam; real repository fidelity
  * belongs to the E2E tier.
  */
-import { describe, it, vi } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-
-const defaultGitState = vi.hoisted(() => ({ porcelain: "" }));
-
-// runHost routes the porcelain probe through the module default runner while
-// every other Git call uses opts.commandRunner. Replace that default at the
-// module boundary so this decision suite never reaches child_process.
-vi.mock("../../src/server/gateway-deps.ts", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../../src/server/gateway-deps.ts")>();
-	return {
-		...actual,
-		realCommandRunner: {
-			async execFile(file: string, args: readonly string[]) {
-				assert.equal(file, "git");
-				assert.deepEqual(args.slice(0, 3), ["-c", "core.filemode=false", "status"]);
-				return { stdout: defaultGitState.porcelain, stderr: "" };
-			},
-		},
-	};
-});
 
 const { runBatchGitStatusNative } = await import("../../src/server/skills/git-status-native.ts");
 
@@ -92,9 +73,6 @@ function fakeGitRunner(scenario: GitScenario): CommandRunner {
 }
 
 function run(scenario: GitScenario, opts: { untracked?: boolean } = {}) {
-	defaultGitState.porcelain = opts.untracked
-		? (scenario.statusUntracked ?? scenario.statusTracked ?? "")
-		: (scenario.statusTracked ?? "");
 	return runBatchGitStatusNative("/deterministic/repo", {
 		...opts,
 		commandRunner: fakeGitRunner(scenario),

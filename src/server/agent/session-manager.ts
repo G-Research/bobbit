@@ -1849,6 +1849,7 @@ export class SessionManager {
 			searchIndex: resolvedSearchIndex,
 			sessions: this.sessions,
 			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
+			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
@@ -9286,10 +9287,10 @@ export class SessionManager {
 							return Promise.resolve();
 						}
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
-						return cleanupWorktree(repoPath, wt, ps.branch, true);
+						return cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 					}));
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
-					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
+					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
 				}
