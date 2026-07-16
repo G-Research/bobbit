@@ -14,12 +14,12 @@
  * non-loopback host) is enforced structurally by the injected CommandRunner /
  * fetch — this shim never re-enables a remote.
  */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import WebSocket from "ws";
 import { performance } from "node:perf_hooks";
 import { recordProfiledApiCall } from "../../harness/gateway.js";
+import { copyGitTemplate } from "../../harness/git-template.js";
 import { currentScope, ensureGateway, gatewaySync } from "./runtime.js";
 
 export { ensureGateway };
@@ -64,13 +64,8 @@ const _gitCwd: Record<string, string> = {};
 export function gitCwd(): string {
 	const root = harnessDefaultProjectRoot();
 	if (!_gitCwd[root]) {
-		const cwd = join(root, ".e2e-workspaces", `git-${Date.now()}`);
-		mkdirSync(cwd, { recursive: true });
-		writeFileSync(join(cwd, "README.md"), "# E2E test repo\n");
-		execFileSync("git", ["init"], { cwd, stdio: "pipe" });
-		execFileSync("git", ["-c", "user.email=e2e@bobbit.ai", "-c", "user.name=e2e", "add", "."], { cwd, stdio: "pipe" });
-		execFileSync("git", ["-c", "user.email=e2e@bobbit.ai", "-c", "user.name=e2e", "commit", "-m", "init"], { cwd, stdio: "pipe" });
-		try { _gitCwd[root] = realpathSync(cwd); } catch { _gitCwd[root] = cwd; }
+		const cwd = join(root, ".e2e-workspaces", `git-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+		_gitCwd[root] = copyGitTemplate(cwd);
 	}
 	return _gitCwd[root];
 }

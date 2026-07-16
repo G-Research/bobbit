@@ -8,7 +8,7 @@
  * See docs/nested-goals.md.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, gitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
 /** Flip the system-scope subgoalsEnabled flag via PUT /api/preferences. */
@@ -29,13 +29,14 @@ async function unsetSubgoalsEnabled(): Promise<void> {
 	expect(resp.status).toBe(200);
 }
 
-/** Create a parent-style goal with a worktree so route handlers can target it. */
+/** Create a data-only parent goal; these route gates do not depend on Git. */
 async function createGoalReady(): Promise<{ id: string }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
 			title: `subgoals-flag-test ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			cwd: gitCwd(),
+			cwd: nonGitCwd(),
+			worktree: false,
 			autoStartTeam: false,
 			workflowId: "feature",
 		}),
@@ -47,9 +48,9 @@ async function createGoalReady(): Promise<{ id: string }> {
 			const r = await apiFetch(`/api/goals/${created.id}`);
 			if (r.status !== 200) return null;
 			const g = await r.json();
-			return g.setupStatus === "ready" && g.repoPath ? g : null;
+			return g.setupStatus === "ready" ? g : null;
 		},
-		{ timeoutMs: 30_000, intervalMs: 100, label: `goal ${created.id} setup ready` },
+		{ timeoutMs: 5_000, intervalMs: 25, label: `goal ${created.id} setup ready` },
 	);
 	return settled;
 }
