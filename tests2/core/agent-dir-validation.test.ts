@@ -8,10 +8,10 @@ guardProcessEnv();
 
 import { describe, it, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
 
 type ValidationResult = {
 	ok: boolean;
@@ -19,12 +19,12 @@ type ValidationResult = {
 	error?: { code?: string; message?: string; resolvedPath?: string };
 };
 
-async function loadValidationFn(): Promise<(input: string, projectRoot: string) => Promise<ValidationResult> | ValidationResult> {
+async function loadValidationFn(): Promise<(input: string, projectRoot: string, commandRunner: CommandRunner) => Promise<ValidationResult> | ValidationResult> {
 	for (const specifier of ["../../src/server/agent-dir-config.ts", "../../src/server/bobbit-dir.ts"]) {
 		try {
 			const mod = await import(/* @vite-ignore */ specifier) as Record<string, any>;
 			if (typeof mod.validateAgentDirTarget === "function") {
-				return (input, projectRoot) => mod.validateAgentDirTarget(input, projectRoot);
+				return (input, projectRoot, commandRunner) => mod.validateAgentDirTarget(input, projectRoot, commandRunner);
 			}
 		} catch (err: any) {
 			if (err?.code === "ERR_MODULE_NOT_FOUND" || /Cannot find module/.test(String(err?.message))) continue;
@@ -35,9 +35,18 @@ async function loadValidationFn(): Promise<(input: string, projectRoot: string) 
 }
 
 function makeGitProject(prefix: string): string {
-	const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-	execFileSync("git", ["init"], { cwd: projectRoot, stdio: "ignore" });
-	return projectRoot;
+	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function fakeGitRoot(projectRoot: string): CommandRunner {
+	return {
+		execFile: async () => { throw new Error("unexpected async command"); },
+		execFileSync: (file, args) => {
+			assert.equal(file, "git");
+			assert.deepEqual(args, ["rev-parse", "--show-toplevel"]);
+			return `${projectRoot}\n`;
+		},
+	};
 }
 
 function cleanup(dir: string): void {
@@ -72,7 +81,7 @@ describe("validateAgentDirTarget", () => {
 			onTestFinished(() => cleanup(projectRoot));
 
 			const defaultDir = path.join(projectRoot, ".bobbit", "headquarters", "agent");
-			const result = await validate(defaultDir, projectRoot);
+			const result = await validate(defaultDir, projectRoot, fakeGitRoot(projectRoot));
 
 			assert.equal(result.ok, true, JSON.stringify(result.error));
 			assertSamePath(result.resolvedPath, defaultDir);
@@ -87,7 +96,7 @@ describe("validateAgentDirTarget", () => {
 			onTestFinished(() => cleanup(projectRoot));
 
 			const nested = path.join(projectRoot, ".bobbit", "headquarters", "agent", "nested");
-			const result = await validate(nested, projectRoot);
+			const result = await validate(nested, projectRoot, fakeGitRoot(projectRoot));
 
 			assert.equal(result.ok, true, JSON.stringify(result.error));
 			assertSamePath(result.resolvedPath, nested);
@@ -100,7 +109,7 @@ describe("validateAgentDirTarget", () => {
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-inside-");
 		onTestFinished(() => cleanup(projectRoot));
 
-		const result = await validate(path.join(projectRoot, "credentials", "agent"), projectRoot);
+		const result = await validate(path.join(projectRoot, "credentials", "agent"), projectRoot, fakeGitRoot(projectRoot));
 
 		assert.equal(result.ok, false);
 		assert.equal(result.error?.code, "INSIDE_WORKTREE");
@@ -111,7 +120,7 @@ describe("validateAgentDirTarget", () => {
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-relative-");
 		onTestFinished(() => cleanup(projectRoot));
 
-		const result = await validate("relative-agent-dir", projectRoot);
+		const result = await validate("relative-agent-dir", projectRoot, fakeGitRoot(projectRoot));
 
 		assert.equal(result.ok, false);
 		assert.equal(result.error?.code, "INSIDE_WORKTREE");
@@ -136,7 +145,7 @@ describe("validateAgentDirTarget", () => {
 			return;
 		}
 
-		const result = await validate(link, projectRoot);
+		const result = await validate(link, projectRoot, fakeGitRoot(projectRoot));
 
 		assert.equal(result.ok, false);
 		assert.equal(result.error?.code, "INSIDE_WORKTREE");
@@ -162,7 +171,7 @@ describe("validateAgentDirTarget", () => {
 		}
 
 		const createdInside = path.join(insideParent, "agent");
-		const result = await validate(path.join(link, "agent"), projectRoot);
+		const result = await validate(path.join(link, "agent"), projectRoot, fakeGitRoot(projectRoot));
 
 		assert.equal(result.ok, false);
 		assert.equal(result.error?.code, "INSIDE_WORKTREE");
@@ -180,7 +189,7 @@ describe("validateAgentDirTarget", () => {
 		});
 
 		const target = path.join(outsideRoot, "agent");
-		const result = await validate(target, projectRoot);
+		const result = await validate(target, projectRoot, fakeGitRoot(projectRoot));
 
 		assert.equal(result.ok, true, JSON.stringify(result.error));
 		assertSamePath(result.resolvedPath, target);
@@ -198,13 +207,13 @@ describe("validateAgentDirTarget", () => {
 			cleanup(outsideRoot);
 		});
 
-		const empty = await validate("   ", projectRoot);
+		const empty = await validate("   ", projectRoot, fakeGitRoot(projectRoot));
 		assert.equal(empty.ok, false);
 		assert.equal(empty.error?.code, "EMPTY_PATH");
 
 		const fileTarget = path.join(outsideRoot, "agent-file");
 		fs.writeFileSync(fileTarget, "not a directory");
-		const fileResult = await validate(fileTarget, projectRoot);
+		const fileResult = await validate(fileTarget, projectRoot, fakeGitRoot(projectRoot));
 		assert.equal(fileResult.ok, false);
 		assert.equal(fileResult.error?.code, "NOT_DIRECTORY");
 		assertSamePath(fileResult.error?.resolvedPath ?? fileResult.resolvedPath, fileTarget);
