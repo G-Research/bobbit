@@ -201,3 +201,40 @@ Transform plus import consumed 128.61s of the 810.11s summed phase time (15.88%)
 One file exceeded the 15s tier-1 budget: `project-isolation` completed in 16.283s.
 
 The failures indicate shared route-visible `CommandRunner` seam ownership across prebundled helper facades. Fixes for that ownership issue have been launched, along with work on `project-isolation` and the final module-tax reduction.
+
+## Solo attempt 6
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 6 | One Vitest process / 3 workers | 304.57s | **FAIL** | `.profiles/testing-v2/fast-gate-run6.log` | 6 failed files, 884 passed, 4 skipped; 9 failed tests, 7,562 passed, 40 skipped |
+
+The run exceeded the 300s wall-time target and failed these files:
+
+- `maintenance-api`
+- `proposal-goal-workflow-validation`
+- `commit-file-diffs-api`
+- `stories-sessions-api`
+- `maintenance-api-archived-cleanup`
+- `maintenance-api-archived-guards`
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 25.66s |
+| Setup | 67.87s |
+| Import | 105.86s |
+| Tests | 568.60s |
+| Environment | 95.94s |
+| **Summed** | **863.93s** |
+
+Transform plus import consumed 131.52s of the 863.93s summed phase time (15.22%), narrowly above the 15% target.
+
+Two files exceeded the 15s tier-1 budget:
+
+| File | Duration |
+|---|---:|
+| `project-config-api` | 16.706s |
+| `pi-extension-discovery` | 15.337s |
+
+The remaining failures indicate direct shared seams and registry identities that bypass the new dispatcher. Fixes have been launched alongside final budget and module-ratio work.
