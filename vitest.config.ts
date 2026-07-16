@@ -52,7 +52,9 @@ const coverage = {
 
 const prebundle = await serverPrebundle.ensureServerTestPrebundle();
 process.env.BOBBIT_V2_SERVER_PREBUNDLE = prebundle.bundlePath;
-const prebundlePlugins = () => [serverPrebundle.serverPrebundleResolver(prebundle)];
+const prebundlePlugins = (options: { webEntries?: boolean } = {}) => [
+	serverPrebundle.serverPrebundleResolver(prebundle, options),
+];
 
 console.log(
 	`[vitest.config] maxWorkers=${MAX_WORKERS} (fixed cap ${FIXED_UNIT_WORKERS}${
@@ -67,7 +69,7 @@ export default defineConfig({
 		coverage,
 		projects: [
 			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
-				plugins: prebundlePlugins(),
+				plugins: prebundlePlugins({ webEntries: false }),
 				test: {
 					...shared,
 					name: "v2-e2e-vitest",
@@ -78,7 +80,7 @@ export default defineConfig({
 				},
 			}] : []),
 			{
-				plugins: prebundlePlugins(),
+				plugins: prebundlePlugins({ webEntries: false }),
 				test: {
 					...shared,
 					name: "v2-core",
@@ -100,7 +102,7 @@ export default defineConfig({
 				},
 			},
 			{
-				plugins: prebundlePlugins(),
+				plugins: prebundlePlugins({ webEntries: false }),
 				test: {
 					...shared,
 					name: "v2-integration",
@@ -112,7 +114,7 @@ export default defineConfig({
 				},
 			},
 			{
-				plugins: prebundlePlugins(),
+				plugins: prebundlePlugins({ webEntries: false }),
 				test: {
 					...shared,
 					name: "v2-isolated",
