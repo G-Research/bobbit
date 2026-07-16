@@ -14,6 +14,13 @@ import {
 	type WsConnection,
 } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import {
+	trackGateApiConnection,
+	useGateApiTestSupport,
+	waitForAuthoredGateStatus,
+} from "./helpers/gate-api-test-support.js";
+
+useGateApiTestSupport();
 
 function workflowId(prefix: string): string {
 	return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -46,13 +53,8 @@ async function signalGate(goalId: string, gateId: string, body: Record<string, u
 	return text ? JSON.parse(text) : null;
 }
 
-async function waitForGateStatus(goalId: string, gateId: string, status: "pending" | "passed" | "failed", timeoutMs = 30_000): Promise<any> {
-	return pollUntil(async () => {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		if (!res.ok) return null;
-		const gate = await res.json();
-		return gate.status === status ? gate : null;
-	}, { timeoutMs, intervalMs: 50, label: `gate ${gateId} status=${status}` });
+async function waitForGateStatus(goalId: string, gateId: string, status: "pending" | "passed" | "failed"): Promise<any> {
+	return waitForAuthoredGateStatus(goalId, gateId, status);
 }
 
 async function getGate(goalId: string, gateId: string): Promise<any> {
@@ -165,7 +167,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 		let sessionId: string | undefined;
 		try {
 			sessionId = await createSession({ goalId });
-			conn = await connectWs(sessionId);
+			conn = trackGateApiConnection(await connectWs(sessionId));
 
 			const rootSignal = await signalGate(goalId, "root", {
 				content: "# Root content\n\nReset must preserve this content.",
@@ -270,7 +272,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 		const sessionId = await createSession({ goalId });
 		let conn: WsConnection | undefined;
 		try {
-			conn = await connectWs(sessionId);
+			conn = trackGateApiConnection(await connectWs(sessionId));
 			const cursor = conn.messageCount();
 			const signal = await signalGate(goalId, "slow-root", { content: "slow verification" });
 			const signalId = signal.signal.id;
