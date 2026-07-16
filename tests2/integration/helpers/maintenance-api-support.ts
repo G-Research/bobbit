@@ -19,8 +19,6 @@ export function gateway(): any {
 }
 let maintenanceProjectId: string;
 let maintenanceProjectContext: any;
-let restoreCommandRunner: (() => void) | undefined;
-let restoreSessionStorePersistence: (() => void) | undefined;
 export const maintenanceGit = new MaintenanceGitModel();
 
 /** Buffer every real HTTP response before returning it so fixture teardown cannot race an open body. */
@@ -35,7 +33,11 @@ async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response>
 }
 
 export function registerMaintenanceHooks(): void {
+	let restoreCommandRunner: (() => void) | undefined;
+	let restoreSessionStorePersistence: (() => void) | undefined;
+
 	test.beforeAll(({ gateway }) => {
+		maintenanceGit.reset();
 		readE2EToken();
 		maintenanceGateway = gateway;
 		maintenanceProjectId = gateway.defaultProjectId;
@@ -55,6 +57,7 @@ export function registerMaintenanceHooks(): void {
 	test.afterAll(() => {
 		restoreSessionStorePersistence?.();
 		restoreCommandRunner?.();
+		maintenanceGit.reset();
 	});
 }
 

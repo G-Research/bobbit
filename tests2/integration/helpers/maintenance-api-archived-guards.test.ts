@@ -8,7 +8,7 @@ const {
 	tryRemoveWorktree, tryDeleteBranch,
 	seedArchivedSession, removeSeededSessions,
 	findArchivedSession,
-	getArchivedWorktreeScan, gateway
+	getArchivedWorktreeScan, gateway, maintenanceGit
 } = maintenance;
 type SeededSession = maintenance.SeededSession;
 maintenance.registerMaintenanceHooks();
@@ -80,6 +80,7 @@ describe("archived session worktree maintenance", () => {
 			if (seeded) removeSeededSessions([seeded]);
 			tryRemoveWorktree(repoPath, activeWorktreePath);
 			tryDeleteBranch(repoPath, branch);
+			maintenanceGit.forgetRepo(repoPath);
 			rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
@@ -159,6 +160,7 @@ describe("archived session worktree maintenance", () => {
 			if (seeded) removeSeededSessions([seeded]);
 			tryRemoveWorktree(repoPath, activeWorktreePath);
 			tryDeleteBranch(repoPath, branch);
+			maintenanceGit.forgetRepo(repoPath);
 			rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
@@ -213,6 +215,7 @@ describe("archived session worktree maintenance", () => {
 			if (seeded) removeSeededSessions([seeded]);
 			tryRemoveWorktree(repoPath, worktreePath);
 			tryDeleteBranch(repoPath, branch);
+			maintenanceGit.forgetRepo(repoPath);
 			rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
