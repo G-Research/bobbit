@@ -25,6 +25,15 @@ const shared = {
 	testTimeout: 30_000,
 	hookTimeout: 60_000,
 	teardownTimeout: 30_000,
+	// Vitest's cache key covers source, project environment, transform plugins,
+	// config dependencies, lockfile state, NODE_ENV, and coverage instrumentation.
+	// It stores transformed code only (never evaluated module state), so isolated
+	// DOM/env suites keep fresh globals while repeated and concurrent runs avoid
+	// paying the TypeScript transform tax. Cache publication is atomic.
+	experimental: {
+		fsModuleCache: true,
+		fsModuleCachePath: ".profiles/testing-v2/vitest-module-cache",
+	},
 };
 const tier1SetupFiles = ["tests2/harness/tier1-spawn-guard.ts"];
 
@@ -43,7 +52,7 @@ const coverage = {
 
 const prebundle = await serverPrebundle.ensureServerTestPrebundle();
 process.env.BOBBIT_V2_SERVER_PREBUNDLE = prebundle.bundlePath;
-const prebundleResolver = () => serverPrebundle.serverPrebundleResolver(prebundle);
+const prebundlePlugins = () => [serverPrebundle.serverPrebundleResolver(prebundle)];
 
 console.log(
 	`[vitest.config] maxWorkers=${MAX_WORKERS} (fixed cap ${FIXED_UNIT_WORKERS}${
@@ -58,7 +67,7 @@ export default defineConfig({
 		coverage,
 		projects: [
 			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
-				plugins: [prebundleResolver()],
+				plugins: prebundlePlugins(),
 				test: {
 					...shared,
 					name: "v2-e2e-vitest",
@@ -69,7 +78,7 @@ export default defineConfig({
 				},
 			}] : []),
 			{
-				plugins: [prebundleResolver()],
+				plugins: prebundlePlugins(),
 				test: {
 					...shared,
 					name: "v2-core",
@@ -79,7 +88,7 @@ export default defineConfig({
 				},
 			},
 			{
-				plugins: [prebundleResolver()],
+				plugins: prebundlePlugins(),
 				test: {
 					...shared,
 					name: "v2-dom",
@@ -91,7 +100,7 @@ export default defineConfig({
 				},
 			},
 			{
-				plugins: [prebundleResolver()],
+				plugins: prebundlePlugins(),
 				test: {
 					...shared,
 					name: "v2-integration",
@@ -103,7 +112,7 @@ export default defineConfig({
 				},
 			},
 			{
-				plugins: [prebundleResolver()],
+				plugins: prebundlePlugins(),
 				test: {
 					...shared,
 					name: "v2-isolated",

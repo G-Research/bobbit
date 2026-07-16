@@ -68,7 +68,9 @@ function testSupportSourceFiles(repoRoot) {
 	const roots = [
 		join(repoRoot, "tests2", "harness"),
 		join(repoRoot, "tests2", "core", "helpers"),
+		join(repoRoot, "tests2", "dom", "_setup"),
 		join(repoRoot, "tests2", "integration", "_e2e"),
+		join(repoRoot, "tests2", "integration", "helpers"),
 	];
 	return roots.flatMap((root) => existsSync(root) ? walkFiles(root, /\.ts$/) : [])
 		.filter((file) => !/\.(?:test|spec)\.ts$/.test(file));
@@ -205,11 +207,18 @@ export function validateServerPrebundle(dir, key) {
 }
 
 function sourceUrlPlugin(repoRoot) {
+	const webSourceRoots = [
+		normalizeServerSourcePath(join(repoRoot, "src", "app")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "src", "ui")) + "/",
+	];
 	const sourceRoots = [
 		normalizeServerSourcePath(join(repoRoot, "src", "server")) + "/",
+		...webSourceRoots,
 		normalizeServerSourcePath(join(repoRoot, "tests2", "harness")) + "/",
 		normalizeServerSourcePath(join(repoRoot, "tests2", "core", "helpers")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests2", "dom", "_setup")) + "/",
 		normalizeServerSourcePath(join(repoRoot, "tests2", "integration", "_e2e")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests2", "integration", "helpers")) + "/",
 	];
 	return {
 		name: "bobbit-source-import-meta-url",
@@ -225,6 +234,9 @@ function sourceUrlPlugin(repoRoot) {
 					sourcefile: args.path,
 					sourcemap: "inline",
 					define: { "import.meta.url": JSON.stringify(pathToFileURL(args.path).href) },
+					...(webSourceRoots.some((root) => normalized.startsWith(root)) ? {
+						tsconfigRaw: { compilerOptions: { experimentalDecorators: true, useDefineForClassFields: false } },
+					} : {}),
 				});
 				return { contents: transformed.code, loader: "js", resolveDir: dirname(args.path) };
 			});
@@ -421,7 +433,9 @@ function manifestKeyForSource(sourcePath, repoRoot, entries) {
 	const supported = key.startsWith("src/server/")
 		|| key.startsWith("tests2/harness/")
 		|| key.startsWith("tests2/core/helpers/")
-		|| key.startsWith("tests2/integration/_e2e/");
+		|| key.startsWith("tests2/dom/_setup/")
+		|| key.startsWith("tests2/integration/_e2e/")
+		|| key.startsWith("tests2/integration/helpers/");
 	if (!supported) return undefined;
 	if (entries[key]) return key;
 	if (extname(key) === ".js") {
@@ -465,6 +479,12 @@ export function serverPrebundleResolver(prebundle, { repoRoot = REPO_ROOT } = {}
 		config() {
 			return { test: { server: { deps: { external: [externalPattern] } } } };
 		},
+		configureVitest(context) {
+			// Vitest hashes plugin names but cannot see resolver closure options.
+			// Include the content-addressed graph key so a newly published bundle
+			// can never reuse a transformed test that imports an older entry URL.
+			context.experimental_defineCacheKeyGenerator(() => `bobbit-server-prebundle:${manifest.key}`);
+		},
 		resolveId(source, importer) {
 			const sourcePath = resolveSourceCandidate(source, importer, repoRoot);
 			if (!sourcePath) return null;
@@ -473,7 +493,10 @@ export function serverPrebundleResolver(prebundle, { repoRoot = REPO_ROOT } = {}
 			const output = entries[key];
 			return {
 				id: pathToFileURL(join(cacheDir, ...output.split("/"))).href,
-				external: true,
+				// DOM setup must execute against every fresh happy-dom environment.
+				// Keep its bundled graph inside Vitest's isolated module runner rather
+				// than sharing Node's evaluated ESM namespace across test files.
+				external: !key.startsWith("tests2/dom/_setup/"),
 				moduleSideEffects: true,
 			};
 		},
