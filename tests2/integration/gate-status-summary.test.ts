@@ -1,3 +1,7 @@
+// Select the fork-local fake runner before either harness import can boot the
+// process-global gateway; file collection order must not select the real runner.
+import { resetFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+
 import { expect } from "./_e2e/in-process-harness.js";
 import { test } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "./_e2e/e2e-setup.js";
@@ -33,16 +37,20 @@ async function deleteWorkflow(id: string, projectId: string): Promise<void> {
 }
 
 async function waitForActive(goalId: string): Promise<void> {
-	await expect.poll(async () => {
-		const res = await apiFetch(`/api/goals/${goalId}/verifications/active`);
-		if (!res.ok) return false;
-		const body = await res.json();
-		return Array.isArray(body.verifications)
-			&& body.verifications.some((v: any) => v.gateId === GATE_ID && v.overallStatus === "running");
-	}, { timeout: 10_000 }).toBe(true);
+	// beginVerification seeds the active record before the signal response. Read
+	// that synchronous contract directly instead of paying expect.poll's default
+	// wall-clock interval (which previously let a 30s real command dominate).
+	const res = await apiFetch(`/api/goals/${goalId}/verifications/active`);
+	expect(res.status).toBe(200);
+	const body = await res.json();
+	expect(Array.isArray(body.verifications)
+		&& body.verifications.some((v: any) => v.gateId === GATE_ID && v.overallStatus === "running")).toBe(true);
 }
 
 test.describe("authoritative gate status summary", () => {
+	test.beforeEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+	test.afterEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+
 	test("summary reports active verification from VerificationHarness state", async () => {
 		const projectId = await defaultProjectId();
 		expect(projectId).toBeTruthy();

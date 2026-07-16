@@ -15,7 +15,7 @@
 // This suite owns command-step cancellation bookkeeping, not OS process
 // fidelity. Opt into the non-spawning runner before the gateway singleton is
 // imported and booted.
-import "./_e2e/fake-cmd-setup.js";
+import { resetFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "./_e2e/e2e-setup.js";
@@ -132,6 +132,8 @@ test.describe.configure({ mode: "serial" });
 
 test.describe("Cancel Verification API", () => {
 	test.setTimeout(60_000);
+	test.beforeEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+	test.afterEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
 
 	test("cancel a running verification returns cancelled: true", async ({ gateway }) => {
 		let setup: SlowWorkflowGoal | undefined;

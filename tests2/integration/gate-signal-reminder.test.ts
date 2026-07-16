@@ -1,6 +1,9 @@
+// Opt into the non-spawning command-step runner before the shared gateway can
+// boot, regardless of which of these integration files Vitest imports first.
+import { resetFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, gitCwd } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
 
 const DO_NOT_POLL_PATTERN = /Verification is running asynchronously|Do not poll|gate_status|gate_inspect|Go idle|wait for the server/i;
 
@@ -35,23 +38,48 @@ async function signalGate(goalId: string, gateId: string, body: Record<string, u
 	return text ? JSON.parse(text) : null;
 }
 
-async function waitForGateStatus(goalId: string, gateId: string, status: "pending" | "running" | "passed" | "failed", timeoutMs = 15_000): Promise<any> {
-	return pollUntil(async () => {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		if (!res.ok) return null;
-		const gate = await res.json();
-		return gate.status === status ? gate : null;
-	}, { timeoutMs, intervalMs: 50, label: `gate ${gateId} status=${status}` });
+async function waitForPassedSignal(goalId: string, gateId: string, signalId: string): Promise<any> {
+	// A passed gate status can become visible just before the signal record is
+	// finalized. The cache path reads the signal record, so wait for that exact
+	// source of truth with bounded scheduler yields and no wall-clock interval.
+	for (let turn = 0; turn < 100; turn++) {
+		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
+		if (res.ok) {
+			const { signals } = await res.json();
+			const signal = signals?.find((entry: any) => entry.id === signalId);
+			if (signal?.verification?.status === "passed") return signal;
+		}
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	throw new Error(`signal ${signalId} did not reach passed within 100 event-loop turns`);
 }
 
 async function waitForGoalSetupReady(goalId: string): Promise<any> {
-	return pollUntil(async () => {
+	for (let turn = 0; turn < 100; turn++) {
 		const res = await apiFetch(`/api/goals/${goalId}`);
-		if (!res.ok) return null;
-		const goal = await res.json();
-		if (goal.setupStatus === "error") throw new Error(`Goal setup failed: ${JSON.stringify(goal)}`);
-		return goal.setupStatus === "ready" ? goal : null;
-	}, { timeoutMs: 60_000, intervalMs: 250, label: `goal ${goalId} setup ready` });
+		if (res.ok) {
+			const goal = await res.json();
+			if (goal.setupStatus === "error") throw new Error(`Goal setup failed: ${JSON.stringify(goal)}`);
+			if (goal.setupStatus === "ready") return goal;
+		}
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	throw new Error(`goal ${goalId} setup did not become ready within 100 event-loop turns`);
+}
+
+function fakeGateCommitSha(gateway: any, sha = "0123456789abcdef0123456789abcdef01234567"): () => void {
+	// createGateway installs one CommandRunner object process-wide; TeamManager
+	// retains that same DI object. Script only the route's read-only commit probe
+	// so cache coverage needs neither a git subprocess nor a repository fixture.
+	const runner = gateway.teamManager.commandRunner;
+	const original = runner.execFile;
+	runner.execFile = async function (file: string, args: readonly string[], options?: unknown) {
+		if (/^(?:git|git\.exe)$/i.test(file) && args.length === 2 && args[0] === "rev-parse" && args[1] === "HEAD") {
+			return { stdout: sha, stderr: "" };
+		}
+		return original.call(this, file, args, options);
+	};
+	return () => { runner.execFile = original; };
 }
 
 function expectUiSignalShapePreserved(body: any, expected: { goalId: string; gateId: string; status: string; stepNames: string[] }): void {
@@ -66,6 +94,9 @@ function expectUiSignalShapePreserved(body: any, expected: { goalId: string; gat
 }
 
 test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () => {
+	test.beforeEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+	test.afterEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+
 	test("async verification response includes top-level agentReminder while preserving the UI signal shape", async () => {
 		const wf = workflowId("gate-signal-reminder-async");
 		await createWorkflow(wf, [
@@ -104,7 +135,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		}
 	});
 
-	test("cached pass response does not include the async wait reminder", async () => {
+	test("cached pass response does not include the async wait reminder", async ({ gateway }) => {
 		const wf = workflowId("gate-signal-reminder-cache");
 		await createWorkflow(wf, [
 			{
@@ -119,12 +150,13 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 			},
 		]);
 
-		const goal = await createGoal({ title: `Gate Signal Reminder Cache ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const restoreCommitSha = fakeGateCommitSha(gateway);
+		const goal = await createGoal({ title: `Gate Signal Reminder Cache ${Date.now()}`, workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
-			await signalGate(goalId, "cached-gate");
-			await waitForGateStatus(goalId, "cached-gate", "passed");
+			const firstBody = await signalGate(goalId, "cached-gate");
+			await waitForPassedSignal(goalId, "cached-gate", firstBody.signal.id);
 
 			const cachedBody = await signalGate(goalId, "cached-gate");
 
@@ -138,6 +170,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 			expect(cachedBody.signal.agentReminder, "GATE_SIGNAL_AGENT_REMINDER: reminder must not be nested under signal on cached responses").toBeUndefined();
 			expect(String(cachedBody.agentReminder ?? ""), "GATE_SIGNAL_AGENT_REMINDER: cached/pass responses must not instruct agents to wait for async verification").not.toMatch(DO_NOT_POLL_PATTERN);
 		} finally {
+			restoreCommitSha();
 			await deleteGoal(goalId).catch(() => {});
 			await deleteWorkflow(wf);
 		}
