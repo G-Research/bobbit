@@ -6,9 +6,62 @@
  * makes from its live-steer code path). The wait must return `aborted: true`
  * within 500ms and the bg process must keep running.
  */
+import { EventEmitter } from "node:events";
+import { writeFileSync } from "node:fs";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+
+interface FakeBgChild extends EventEmitter {
+	pid: number;
+	unref(): void;
+	kill(): boolean;
+}
+
+function installFakeBgRuntime(manager: any) {
+	const original = {
+		spawnFn: manager.spawnFn,
+		tailerFactory: manager.tailerFactory,
+		env: manager.env,
+	};
+	let nextPid = 10_000;
+	let latestTailer: any;
+
+	manager.spawnFn = () => {
+		const child = new EventEmitter() as FakeBgChild;
+		child.pid = nextPid++;
+		child.unref = () => {};
+		child.kill = () => true;
+		return child;
+	};
+	manager.tailerFactory = (spec: any) => {
+		latestTailer = spec;
+		const tailer = { start() {}, stop() {} };
+		return { out: tailer, err: tailer };
+	};
+	manager.env = {
+		isHostPidAlive: () => false,
+		killHostTree: () => {},
+		dockerCli: () => ({ code: -1, stdout: "" }),
+	};
+
+	return {
+		emitStdout(lines: string[]): void {
+			latestTailer.onChunk("stdout", `${lines.join("\n")}\n`, Buffer.byteLength(`${lines.join("\n")}\n`));
+		},
+		exit(sessionId: string, processId: string, code = 0): void {
+			const process = manager.processes.get(sessionId)?.get(processId);
+			if (!process) throw new Error(`missing fake background process ${processId}`);
+			writeFileSync(process.paths.statusSnapshot, `${code}\n`, "utf-8");
+			process.child.emit("exit", code, null);
+		},
+		restore(): void {
+			manager.spawnFn = original.spawnFn;
+			manager.tailerFactory = original.tailerFactory;
+			manager.env = original.env;
+		},
+	};
+}
 
 async function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
 	const method = (opts.method || "GET").toUpperCase();
@@ -27,11 +80,16 @@ async function adminFetch(baseURL: string, path: string, opts: RequestInit = {})
 	});
 }
 
-const SLEEP_CMD = process.platform === "win32"
-	? "ping -n 60 127.0.0.1 >NUL"
-	: "sleep 60";
-
 test.describe("bash_bg wait — steer abort", () => {
+	let fakeRuntime: ReturnType<typeof installFakeBgRuntime>;
+
+	test.beforeAll(async ({ gateway }) => {
+		fakeRuntime = installFakeBgRuntime(gateway.bgProcessManager);
+	});
+
+	test.afterAll(async () => {
+		fakeRuntime.restore();
+	});
 	test("logs endpoint defaults to the last 15 lines", async ({ gateway }) => {
 		let sessionId: string | undefined;
 		try {
@@ -42,13 +100,16 @@ test.describe("bash_bg wait — steer abort", () => {
 			expect(res.status).toBe(201);
 			({ id: sessionId } = await res.json());
 
-			const command = `node -e "for (let i = 1; i <= 20; i++) console.log('line-' + i); setTimeout(() => {}, 100)"`;
+			const command = "fake log producer";
 			const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
 				method: "POST",
 				body: JSON.stringify({ command, name: "log tail" }),
 			});
 			expect(bgRes.status).toBe(201);
 			const bg = await bgRes.json();
+			const allLines = Array.from({ length: 20 }, (_, i) => `line-${i + 1}`);
+			fakeRuntime.emitStdout(allLines);
+			fakeRuntime.exit(sessionId!, bg.id);
 
 			const waitRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=5`);
 			expect(waitRes.status).toBe(200);
@@ -76,7 +137,7 @@ test.describe("bash_bg wait — steer abort", () => {
 		// Spawn a long-running bg process
 		const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
 			method: "POST",
-			body: JSON.stringify({ command: SLEEP_CMD, name: "sleeper" }),
+			body: JSON.stringify({ command: "fake long-running command", name: "sleeper" }),
 		});
 		expect(bgRes.status).toBe(201);
 		const bg = await bgRes.json();
@@ -128,7 +189,7 @@ test.describe("bash_bg wait — steer abort", () => {
 
 		const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
 			method: "POST",
-			body: JSON.stringify({ command: SLEEP_CMD, name: "sleeper2" }),
+			body: JSON.stringify({ command: "fake long-running command", name: "sleeper2" }),
 		});
 		expect(bgRes.status).toBe(201);
 		const bg = await bgRes.json();
