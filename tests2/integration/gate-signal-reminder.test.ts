@@ -38,20 +38,16 @@ async function signalGate(goalId: string, gateId: string, body: Record<string, u
 	return text ? JSON.parse(text) : null;
 }
 
-async function waitForPassedSignal(goalId: string, gateId: string, signalId: string): Promise<any> {
-	// A passed gate status can become visible just before the signal record is
-	// finalized. The cache path reads the signal record, so wait for that exact
-	// source of truth with bounded scheduler yields and no wall-clock interval.
+async function waitForPassedSignal(gateway: any, goalId: string, gateId: string, signalId: string): Promise<any> {
+	// Cache lookup reads the project-scoped gate store. Wait for that exact
+	// source of truth rather than a derived gate status or an HTTP projection.
 	for (let turn = 0; turn < 100; turn++) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
-		if (res.ok) {
-			const { signals } = await res.json();
-			const signal = signals?.find((entry: any) => entry.id === signalId);
-			if (signal?.verification?.status === "passed") return signal;
-		}
+		const signal = gateway.projectContextManager.getContextForGoal(goalId)?.gateStore
+			.getGate(goalId, gateId)?.signals.find((entry: any) => entry.id === signalId);
+		if (signal?.verification?.status === "passed") return signal;
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
-	throw new Error(`signal ${signalId} did not reach passed within 100 event-loop turns`);
+	throw new Error(`signal ${signalId} did not reach stored passed state within 100 event-loop turns`);
 }
 
 async function waitForGoalSetupReady(goalId: string): Promise<any> {
@@ -143,20 +139,28 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 				name: "Cached Gate",
 				dependsOn: [],
 				verify: [
-					// Use the harness-skipped llm-review path instead of a real command step;
-					// this test only needs a prior passed verification for the route-level cache.
-					{ name: "Fast cached verification", type: "llm-review", prompt: "Review cached response fixture." },
+					{ name: "Fast cached verification", type: "command", run: "echo cache-seed" },
 				],
 			},
 		]);
 
-		const restoreCommitSha = fakeGateCommitSha(gateway);
+		const commitSha = "0123456789abcdef0123456789abcdef01234567";
+		const restoreCommitSha = fakeGateCommitSha(gateway, commitSha);
 		const goal = await createGoal({ title: `Gate Signal Reminder Cache ${Date.now()}`, workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
 			const firstBody = await signalGate(goalId, "cached-gate");
-			await waitForPassedSignal(goalId, "cached-gate", firstBody.signal.id);
+			expect(firstBody.signal.status).toBe("running");
+
+			// Complete the fake command on the shared manual clock, then prove the
+			// exact persisted record used by the route cache is a reusable pass.
+			gateway.clock.advance(0);
+			const cacheSeed = await waitForPassedSignal(gateway, goalId, "cached-gate", firstBody.signal.id);
+			expect(cacheSeed.commitSha).toBe(commitSha);
+			expect(cacheSeed.verification.steps).toEqual([
+				expect.objectContaining({ name: "Fast cached verification", status: "passed" }),
+			]);
 
 			const cachedBody = await signalGate(goalId, "cached-gate");
 
