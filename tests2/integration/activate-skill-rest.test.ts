@@ -14,6 +14,7 @@
 //
 // Uses the v2-integration compat shim (fork-scoped gateway) so the body stays
 // semantically identical to the legacy Playwright in-process harness.
+import "./_e2e/fake-cmd-setup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -37,41 +38,40 @@ function writeSkill(rootPath: string, name: string, body: string) {
 	fs.writeFileSync(path.join(dir, "SKILL.md"), body, "utf-8");
 }
 
+let sessionId: string;
+let projectRoot: string;
+let projectId: string;
+
+// Root hooks run before the compat describe snapshots its baseline, so this
+// read-only catalogue is intentionally shared without being swept between
+// declarations. The root teardown restores every project/session/fs mutation.
+test.beforeAll(async () => {
+	projectRoot = freshCwd("activate");
+	writeSkill(projectRoot, "skill-alpha",
+		"---\nname: skill-alpha\ndescription: Alpha skill for E2E\nargument-hint: <thing>\n---\nALPHA-BODY $ARGUMENTS"
+	);
+	writeSkill(projectRoot, "skill-beta",
+		"---\nname: skill-beta\ndescription: Beta skill (model-invocable)\n---\nBETA-BODY"
+	);
+	writeSkill(projectRoot, "skill-locked",
+		"---\nname: skill-locked\ndescription: User-only skill\ndisable-model-invocation: true\n---\nLOCKED-BODY"
+	);
+	const project = await registerProject({
+		name: `activate-skill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		rootPath: projectRoot,
+		seedWorkflows: false,
+	});
+	projectId = project.id;
+	sessionId = await createSession({ cwd: projectRoot, projectId });
+});
+
+test.afterAll(async () => {
+	if (sessionId) await deleteSession(sessionId).catch(() => {});
+	if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+	if (projectRoot) fs.rmSync(projectRoot, { recursive: true, force: true });
+});
+
 test.describe.serial("activate_skill REST endpoint", () => {
-	let sessionId: string;
-	let projectRoot: string;
-	let projectId: string;
-
-	test.beforeAll(async () => {
-		// Fresh registered project so the 5s TTL skill cache (keyed on cwd+config)
-		// never returns stale data from a sibling test file, while projectId
-		// remains the authoritative scope.
-		projectRoot = freshCwd("activate");
-		writeSkill(projectRoot, "skill-alpha",
-			"---\nname: skill-alpha\ndescription: Alpha skill for E2E\nargument-hint: <thing>\n---\nALPHA-BODY $ARGUMENTS"
-		);
-		writeSkill(projectRoot, "skill-beta",
-			"---\nname: skill-beta\ndescription: Beta skill (model-invocable)\n---\nBETA-BODY"
-		);
-		writeSkill(projectRoot, "skill-locked",
-			"---\nname: skill-locked\ndescription: User-only skill\ndisable-model-invocation: true\n---\nLOCKED-BODY"
-		);
-		const project = await registerProject({
-			name: `activate-skill-${Date.now()}`,
-			rootPath: projectRoot,
-			seedWorkflows: false,
-		});
-		projectId = project.id;
-		// Endpoint cases are stateless reads of the same skill catalogue. Reuse one
-		// worktree-free session instead of provisioning/deleting six agent records.
-		sessionId = await createSession({ cwd: projectRoot, projectId });
-	});
-
-	test.afterAll(async () => {
-		if (sessionId) await deleteSession(sessionId).catch(() => {});
-		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-	});
-
 	test("happy path: returns expanded body with substituted arguments", async () => {
 		const resp = await apiFetch(`/api/sessions/${sessionId}/activate-skill`, {
 			method: "POST",
