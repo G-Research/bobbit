@@ -58,3 +58,44 @@ Record the required concurrent proof below only after all three processes have e
 ```text
 | YYYY-MM-DD | 3 simultaneous `npm run test:unit` processes | machine details | N.Ns | `0, 0, 0` | `0 / 0` | `log-a`, `log-b`, `log-c` | PASS |
 ```
+
+## Solo attempt 2
+
+Preflight and the unit inventory audit were green before this run.
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 2 | One Vitest process / 3 workers | 1,197.38s | **FAIL** | `.profiles/testing-v2/fast-gate-run2.log` | 28 failed files, 862 passed, 4 skipped; 93 failed tests, 7,491 passed, 26 skipped |
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 291.17s |
+| Setup | 63.11s |
+| Import | 304.23s |
+| Tests | 2,590.05s |
+| Environment | 84.89s |
+| **Summed** | **3,333.45s** |
+
+Transform plus import consumed 595.40s of the 3,333.45s summed phase time (17.86%), above the 15% target.
+
+Major per-file budget outliers:
+
+| File | Duration |
+|---|---:|
+| `gate-inspect` | 547.648s |
+| `optional-steps` | 484.610s |
+| `gate-reset` | 366.099s |
+| `agent-tools` | 183.576s |
+| `gateway-deps-default-real` | 69.773s |
+| `gates-api-heavy` | 64.731s |
+| `gate-status` | 40.568s |
+| `preview-token-cost` | 25.856s |
+| `sandbox-google-auth` | 20.946s |
+| `pack-pi-loader` | 18.232s |
+| `project-registry-order` | 18.089s |
+| `HQ config alias` | 15.902s |
+| `cross-project-proposals` | 15.362s |
+
+The failures indicate fake command-runner and gateway-boot import-order problems, compounded by shared-state contamination between suites.
