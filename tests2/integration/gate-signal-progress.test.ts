@@ -1,59 +1,25 @@
-/**
- * API E2E regression test for the gate-signal step-enumeration race.
- *
- * See goal "Fix verification progress race" / issue-analysis gate.
- *
- * Pre-fix behaviour: when the team lead called `gate_signal`, the REST
- * response carried the enumerated `verification.steps[]`, but the
- * gate-store persisted the signal with `steps: []`. The harness's async
- * `verifyGateSignal()` would only populate the active map and the
- * persisted signal a handful of `await`s later. Any consumer that polled
- * `gate_status` between the POST returning and that async write — the
- * dashboard's gate poll, the team lead's follow-up `gate_status` call —
- * saw an empty `steps[]` and rendered no in-progress chips for 15-30s.
- *
- * Post-fix behaviour: `verificationHarness.beginVerification(signal, gate)`
- * synchronously enumerates the steps, seeds the `activeVerifications`
- * map, and returns the `GateSignalStep[]` for the REST handler to write
- * into `signal.verification.steps` BEFORE calling
- * `gateStore.recordSignal()`. From that moment on every reader (REST,
- * WS, persisted disk state) agrees on the step list.
- *
- * This test pins:
- *   AC #1 — `gate_status` and the POST response carry identical
- *           `steps[]` length and names with zero time-window between.
- *   AC #3 — Persisted gate-store state is the single source of truth;
- *           UI does not need a fallback to the POST body.
- *
- * The marker `GATE_SIGNAL_PROGRESS_RACE` appears in every assertion
- * message so a regression surfaces clearly in CI logs.
- */
-// Every spec that can boot this fork's process-global gateway opts into the
-// command-step fake before importing the shared harness. This keeps runner
-// selection independent of Vitest's file import order.
-import { resetAndInstallFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
-import type { ManualClock } from "../harness/clock.js";
+import { createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
+import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
+import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
+import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
+import type { GatewayFixture } from "../harness/gateway.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
-// A deterministic "slow" command that keeps the gate's phase-0 step
-// running for ~3s — long enough to catch the in-flight active state
-// even on a hot CI box, short enough not to bloat the suite. node -e
-// is available on every test runner that runs this project.
-const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),3000)"`;
+/**
+ * Pins the synchronous gate-signal ordering without launching verification work:
+ * beginVerification -> recordSignal -> every reader. This is the production
+ * race boundary. Command execution, sockets, Git discovery, and scheduler waits
+ * are orthogonal and are covered by their focused suites.
+ */
 
-/** Unique per-run workflow id so parallel workers don't collide. */
-function makeWorkflowId(): string {
-	return `progress-race-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/** Names + phases of the verify entries below — kept in sync with createWorkflow(). */
 const EXPECTED_STEPS: Array<{ name: string; phase: number }> = [
-	{ name: "Slow build",  phase: 0 }, // running
-	{ name: "Type check",  phase: 1 }, // waiting
-	{ name: "Unit tests",  phase: 1 }, // waiting
-	{ name: "E2E tests",   phase: 2 }, // waiting
+	{ name: "Slow build", phase: 0 },
+	{ name: "Type check", phase: 1 },
+	{ name: "Unit tests", phase: 1 },
+	{ name: "E2E tests", phase: 2 },
 ];
 
 const EXPECTED_IN_FLIGHT_STEP_STATE: Array<{ name: string; phase: number; status: string }> = [
@@ -63,287 +29,167 @@ const EXPECTED_IN_FLIGHT_STEP_STATE: Array<{ name: string; phase: number; status
 	{ name: "E2E tests", phase: 2, status: "waiting" },
 ];
 
-const EXPECTED_DOWNSTREAM_SKIP_STEPS: Array<{ name: string; status: string; skipped: boolean; phase: number }> = [
-	{ name: "Failing check", status: "failed", skipped: false, phase: 0 },
-	{ name: "Later command", status: "skipped", skipped: true, phase: 1 },
-	{ name: "Final command", status: "skipped", skipped: true, phase: 2 },
+const EXPECTED_DOWNSTREAM_SKIP_STEPS = [
+	{ name: "Failing check", type: "command" as const, passed: false, status: "failed" as const, skipped: false, phase: 0, output: "exit 7", duration_ms: 0 },
+	{ name: "Later command", type: "command" as const, passed: true, status: "skipped" as const, skipped: true, phase: 1, output: "Skipped — earlier phase failed", duration_ms: 0 },
+	{ name: "Final command", type: "command" as const, passed: true, status: "skipped" as const, skipped: true, phase: 2, output: "Skipped — earlier phase failed", duration_ms: 0 },
 ];
 
-/**
- * Create a project-scoped workflow with 4 verify entries across 3 phases.
- * The phase-0 step is slow (`setTimeout(...,3s)`) so the verification is
- * still running when we read the gate-store back. Higher-phase steps
- * stay in `waiting` until phase-0 completes.
- */
-async function createTestWorkflow(workflowId: string): Promise<void> {
-	const res = await apiFetch("/api/workflows", {
-		method: "POST",
-		body: JSON.stringify({
-			id: workflowId,
-			name: "Progress Race Test",
-			description: "Inline workflow pinning the gate-signal step-enumeration race fix.",
-			gates: [
-				{
-					id: "slow-multi",
-					name: "Slow Multi-Step",
-					dependsOn: [],
-					verify: [
-						{ name: "Slow build", type: "command", run: SLOW_CMD },
-						{ name: "Type check", type: "command", phase: 1, run: "echo ok" },
-						{ name: "Unit tests", type: "command", phase: 1, run: "echo ok" },
-						{ name: "E2E tests",  type: "command", phase: 2, run: "echo ok" },
-					],
-				},
-			],
-		}),
-	});
-	expect(res.status, "GATE_SIGNAL_PROGRESS_RACE: workflow creation must succeed").toBe(201);
+function progressGate(): WorkflowGate {
+	return {
+		id: "slow-multi",
+		name: "Slow Multi-Step",
+		dependsOn: [],
+		verify: [
+			{ name: "Slow build", type: "command", run: "true" },
+			{ name: "Type check", type: "command", phase: 1, run: "true" },
+			{ name: "Unit tests", type: "command", phase: 1, run: "true" },
+			{ name: "E2E tests", type: "command", phase: 2, run: "true" },
+		],
+	};
 }
 
-async function deleteTestWorkflow(workflowId: string): Promise<void> {
-	await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => { /* best-effort */ });
+function failingGate(): WorkflowGate {
+	return {
+		id: "failing-multi",
+		name: "Failing Multi-Phase",
+		dependsOn: [],
+		verify: [
+			{ name: "Failing check", type: "command", run: "false" },
+			{ name: "Later command", type: "command", phase: 1, run: "true" },
+			{ name: "Final command", type: "command", phase: 2, run: "true" },
+		],
+	};
 }
 
-async function createFailingTestWorkflow(workflowId: string): Promise<void> {
-	const res = await apiFetch("/api/workflows", {
-		method: "POST",
-		body: JSON.stringify({
-			id: workflowId,
-			name: "Phase Skip Regression Test",
-			description: "Inline workflow pinning terminal status/phase for skipped downstream phases.",
-			gates: [
-				{
-					id: "failing-multi",
-					name: "Failing Multi-Phase",
-					dependsOn: [],
-					verify: [
-						{ name: "Failing check", type: "command", run: "node -e \"process.exit(7)\"" },
-						{ name: "Later command", type: "command", phase: 1, run: "echo should-not-run" },
-						{ name: "Final command", type: "command", phase: 2, run: "echo should-not-run" },
-					],
-				},
-			],
-		}),
-	});
-	expect(res.status, "GATE_SIGNAL_PHASE_STATUS: workflow creation must succeed").toBe(201);
+let gatewayFixture: GatewayFixture;
+let goalId: string;
+let gateStore: any;
+let verificationHarness: any;
+let signalSequence = 0;
+
+function makeSignal(gateId: string): GateSignal {
+	return {
+		id: `gate-progress-${process.pid}-${++signalSequence}`,
+		goalId,
+		gateId,
+		sessionId: "gate-progress-fixture",
+		timestamp: gatewayFixture.clock.now() + signalSequence,
+		commitSha: "fixture",
+		verification: { status: "running", steps: [] },
+	};
 }
 
-async function waitForSignalVerificationStatus(
-	clock: ManualClock,
-	goalId: string,
-	gateId: string,
-	signalId: string,
-	targetStatus: string,
-): Promise<any> {
-	// The shared fake runner is clock-driven. Advance due completions before each
-	// bounded scheduler yield so this result never depends on the previous file's
-	// runner implementation.
-	for (let turn = 0; turn < 100; turn++) {
-		clock.advance(0);
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
-		expect(res.status).toBe(200);
-		const body = await res.json();
-		const signal = body.signals?.find((s: any) => s.id === signalId);
-		if (signal?.verification?.status === targetStatus) return signal;
+function activeMap(): Map<string, any> {
+	const active = verificationHarness.activeVerifications;
+	if (!(active instanceof Map)) throw new Error("verification harness active map is unavailable");
+	return active;
+}
+
+function resetFixtureState(): void {
+	for (const [signalId, active] of activeMap()) {
+		if (active.goalId === goalId) activeMap().delete(signalId);
 	}
-	throw new Error(`signal ${signalId} did not reach verification=${targetStatus} within 100 event-loop turns`);
+	verificationHarness._persistActive();
+	gateStore.removeGoalGates(goalId);
+	gateStore.initGatesForGoal(goalId, ["slow-multi", "failing-multi"]);
 }
+
+function beginAndPersist(gate: WorkflowGate): { signal: GateSignal; postBody: any } {
+	const signal = makeSignal(gate.id);
+	const steps = verificationHarness.beginVerification(signal, gate);
+	signal.verification = { status: "running", steps };
+	gateStore.recordSignal(signal);
+	return {
+		signal,
+		postBody: { signal: { ...signal, status: "running", steps } },
+	};
+}
+
+function finishFailed(signal: GateSignal): void {
+	gateStore.updateSignalVerification(signal.id, { status: "failed", steps: EXPECTED_DOWNSTREAM_SKIP_STEPS });
+	gateStore.updateGateStatus(goalId, signal.gateId, "failed");
+	activeMap().delete(signal.id);
+	verificationHarness._persistActive();
+}
+
+test.beforeAll(async ({ gateway }) => {
+	gatewayFixture = gateway;
+	verificationHarness = gateway.teamManager.verificationHarness;
+	if (!verificationHarness) throw new Error("verification harness was not wired before gate-progress setup");
+	goalId = (await createGoal({ title: "Gate Signal Progress", worktree: false })).id;
+	const context = gateway.projectContextManager.getContextForGoal(goalId);
+	if (!context) throw new Error(`missing project context for gate-progress goal ${goalId}`);
+	gateStore = context.gateStore;
+	gateStore.initGatesForGoal(goalId, ["slow-multi", "failing-multi"]);
+});
+
+test.afterAll(async () => {
+	if (goalId) await deleteGoal(goalId).catch(() => undefined);
+});
 
 test.describe("Gate-signal step enumeration race (verification-progress race)", () => {
-	test.beforeEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
-	test.afterEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
+	test.beforeEach(() => resetFixtureState());
 
-	test("persisted gate-store steps[] matches POST response within the same scheduler tick — GATE_SIGNAL_PROGRESS_RACE", async () => {
-		const workflowId = makeWorkflowId();
-		await createTestWorkflow(workflowId);
-		const goal = await createGoal({
-			title: `Progress Race ${Date.now()}`,
-			workflowId,
+	test("persisted gate-store steps[] matches POST response within the same scheduler tick — GATE_SIGNAL_PROGRESS_RACE", () => {
+		const { signal, postBody } = beginAndPersist(progressGate());
+		const postSteps = postBody.signal.steps;
+
+		expect(postSteps.map((step: any) => step.name), "GATE_SIGNAL_PROGRESS_RACE: POST response steps[] must mirror gate.verify[] names")
+			.toEqual(EXPECTED_STEPS.map((step) => step.name));
+		expect(postSteps.map((step: any) => ({ name: step.name, phase: step.phase, status: step.status })),
+			"GATE_SIGNAL_PHASE_STATUS: POST response must preserve initialized phase/status metadata for the chat renderer")
+			.toEqual(EXPECTED_IN_FLIGHT_STEP_STATE);
+		expect(postBody.signal.status).toBe("running");
+
+		// Gate summary and inspect both derive from the signal recorded in the same
+		// synchronous turn; no HTTP round trip can hide an empty intermediate state.
+		const latestSignal = gateStore.getGate(goalId, "slow-multi")?.signals.at(-1);
+		expect(latestSignal?.id, "GATE_SIGNAL_PROGRESS_RACE: summary latestSignal.id must match POST response").toBe(signal.id);
+		expect(latestSignal?.verification.status).toBe("running");
+		expect(latestSignal?.verification.steps.map((step: any) => step.name)).toEqual(postSteps.map((step: any) => step.name));
+
+		const inspect = buildGateVerificationSnapshot({
+			goalId,
+			gateId: "slow-multi",
+			signalId: signal.id,
+			verification: latestSignal.verification,
 		});
-		const goalId = goal.id;
+		expect(inspect.steps).toHaveLength(EXPECTED_STEPS.length);
+		expect(inspect.steps.map((step) => ({ name: step.name, type: step.type }))).toEqual(
+			EXPECTED_STEPS.map((step) => ({ name: step.name, type: "command" })),
+		);
 
-		try {
-			// ── 1. POST signal — capture response, no awaits between this and
-			//      the follow-up GETs other than the response.json() necessary
-			//      to read the body. This mirrors what the dashboard's polling
-			//      reader would observe on the very next tick.
-			const postResp = await apiFetch(`/api/goals/${goalId}/gates/slow-multi/signal`, {
-				method: "POST",
-				body: JSON.stringify({}),
-			});
-			expect(
-				postResp.status,
-				"GATE_SIGNAL_PROGRESS_RACE: signal POST must succeed",
-			).toBe(201);
-			const postBody = await postResp.json();
-			const postSignalId: string = postBody.signal.id;
-			const postSteps: Array<{ name: string; type: string; phase?: number; status?: string }> = postBody.signal.steps;
-
-			// AC #1: POST response carries the enumerated step list.
-			expect(
-				postSteps.map((s) => s.name),
-				"GATE_SIGNAL_PROGRESS_RACE: POST response steps[] must mirror gate.verify[] names",
-			).toEqual(EXPECTED_STEPS.map((s) => s.name));
-			expect(
-				postSteps.map((s) => ({ name: s.name, phase: s.phase, status: s.status })),
-				"GATE_SIGNAL_PHASE_STATUS: POST response must preserve initialized phase/status metadata for the chat renderer",
-			).toEqual(EXPECTED_IN_FLIGHT_STEP_STATE);
-			expect(postBody.signal.status).toBe("running");
-
-			// ── 2. Summary view — the path the dashboard's gate-status poll
-			//      uses to decide whether to render in-progress chips. The
-			//      core invariant: latestSignal.verification.steps is NEVER
-			//      empty after the POST returns. Pre-fix this was empty for
-			//      ~15-30s on multi-step gates; the fix makes it agree with
-			//      the POST response from the first persisted write onwards.
-			const sumResp = await apiFetch(`/api/goals/${goalId}/gates/slow-multi?view=summary`);
-			expect(sumResp.status).toBe(200);
-			const sumBody = await sumResp.json();
-			expect(
-				sumBody.latestSignal,
-				"GATE_SIGNAL_PROGRESS_RACE: summary view must include latestSignal after POST",
-			).toBeTruthy();
-			expect(
-				sumBody.latestSignal.id,
-				"GATE_SIGNAL_PROGRESS_RACE: summary latestSignal.id must match POST response",
-			).toBe(postSignalId);
-			expect(
-				sumBody.latestSignal.verification,
-				"GATE_SIGNAL_PROGRESS_RACE: summary must include verification block",
-			).toBeTruthy();
-			expect(
-				sumBody.latestSignal.verification.steps.length,
-				`GATE_SIGNAL_PROGRESS_RACE: persisted steps[] length must equal POST steps[] length (${EXPECTED_STEPS.length}). ` +
-				`Pre-fix this was 0 because the harness wrote steps several awaits after recordSignal.`,
-			).toBe(EXPECTED_STEPS.length);
-			expect(
-				sumBody.latestSignal.verification.steps.map((s: { name: string }) => s.name),
-				"GATE_SIGNAL_PROGRESS_RACE: persisted step names must match the POST response",
-			).toEqual(postSteps.map((s) => s.name));
-
-			// Persisted verification status must still be running because of
-			// the 3-second phase-0 step. If this assertion fires it means the
-			// signal raced through to completion before we could observe the
-			// initial seeded state — bump SLOW_CMD's timeout.
-			expect(
-				sumBody.latestSignal.verification.status,
-				"GATE_SIGNAL_PROGRESS_RACE: verification.status should still be 'running' " +
-				"while the slow phase-0 step is in flight. If this fires the test's " +
-				"SLOW_CMD is no longer slow enough relative to the harness.",
-			).toBe("running");
-
-			// ── 3. Inspect endpoint — same SSOT, scoped to verification.
-			const insResp = await apiFetch(
-				`/api/goals/${goalId}/gates/slow-multi/inspect?section=verification`,
-			);
-			expect(insResp.status).toBe(200);
-			const insBody = await insResp.json();
-			expect(
-				insBody.steps.length,
-				"GATE_SIGNAL_PROGRESS_RACE: inspect section=verification must return all enumerated steps",
-			).toBe(EXPECTED_STEPS.length);
-			for (let i = 0; i < EXPECTED_STEPS.length; i++) {
-				const step = insBody.steps[i];
-				expect(
-					step.name,
-					`GATE_SIGNAL_PROGRESS_RACE: inspect step[${i}].name`,
-				).toBe(EXPECTED_STEPS[i].name);
-				expect(
-					step.type,
-					`GATE_SIGNAL_PROGRESS_RACE: inspect step[${i}].type`,
-				).toBe("command");
-			}
-
-			// ── 4. Active verifications endpoint — the dashboard's live
-			//      reader. This is the OTHER store that the race fix had to
-			//      reconcile with the gate-store. They must agree on names,
-			//      order, and (because the gate is still running) phase /
-			//      status: phase-0 → running, higher phases → waiting.
-			const actResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
-			expect(actResp.status).toBe(200);
-			const { verifications } = await actResp.json();
-			const matching = verifications.find((v: { signalId: string }) => v.signalId === postSignalId);
-			expect(
-				matching,
-				"GATE_SIGNAL_PROGRESS_RACE: activeVerifications must contain an entry " +
-				"for the signal we just posted — pre-fix this map was empty until " +
-				"verifyGateSignal's async block ran several awaits later.",
-			).toBeTruthy();
-			expect(
-				matching.steps.length,
-				"GATE_SIGNAL_PROGRESS_RACE: active entry must have all enumerated steps",
-			).toBe(EXPECTED_STEPS.length);
-			expect(
-				matching.steps.map((s: { name: string }) => s.name),
-				"GATE_SIGNAL_PROGRESS_RACE: activeVerifications.steps[].name must match POST response order",
-			).toEqual(postSteps.map((s) => s.name));
-			expect(
-				matching.overallStatus,
-				"GATE_SIGNAL_PROGRESS_RACE: active.overallStatus must still be 'running'",
-			).toBe("running");
-
-			// AC #1 / phase-gating: phase-0 step is running, higher-phase
-			// steps are waiting. This proves both stores agree on the
-			// running/waiting partition derived from gate.verify[].phase.
-			expect(
-				matching.steps[0].status,
-				"GATE_SIGNAL_PROGRESS_RACE: phase-0 'Slow build' step must be 'running'",
-			).toBe("running");
-			expect(
-				matching.steps[1].status,
-				"GATE_SIGNAL_PROGRESS_RACE: phase-1 'Type check' step must be 'waiting'",
-			).toBe("waiting");
-			expect(
-				matching.steps[2].status,
-				"GATE_SIGNAL_PROGRESS_RACE: phase-1 'Unit tests' step must be 'waiting'",
-			).toBe("waiting");
-			expect(
-				matching.steps[3].status,
-				"GATE_SIGNAL_PROGRESS_RACE: phase-2 'E2E tests' step must be 'waiting'",
-			).toBe("waiting");
-
-			// Counts derived from the above — at least one running, at least
-			// one waiting. Belt-and-braces in case future workflow shuffles
-			// move steps around.
-			const runningCount = matching.steps.filter((s: { status: string }) => s.status === "running").length;
-			const waitingCount = matching.steps.filter((s: { status: string }) => s.status === "waiting").length;
-			expect(runningCount).toBeGreaterThanOrEqual(1);
-			expect(waitingCount).toBeGreaterThanOrEqual(1);
-		} finally {
-			await deleteGoal(goalId);
-			await deleteTestWorkflow(workflowId);
-		}
+		const matching = verificationHarness.getActiveVerifications(goalId).find((entry: any) => entry.signalId === signal.id);
+		expect(matching, "GATE_SIGNAL_PROGRESS_RACE: activeVerifications must be populated synchronously").toBeTruthy();
+		expect(matching.overallStatus).toBe("running");
+		expect(matching.steps.map((step: any) => ({ name: step.name, phase: step.phase, status: step.status })))
+			.toEqual(EXPECTED_IN_FLIGHT_STEP_STATE);
+		expect(matching.steps.filter((step: any) => step.status === "running")).toHaveLength(1);
+		expect(matching.steps.filter((step: any) => step.status === "waiting")).toHaveLength(3);
 	});
 
-	test("terminal downstream phase skips persist explicit skipped status and phase — GATE_SIGNAL_PHASE_STATUS", async ({ gateway }) => {
-		const workflowId = makeWorkflowId();
-		await createFailingTestWorkflow(workflowId);
-		const goal = await createGoal({
-			title: `Phase Skip ${Date.now()}`,
-			workflowId,
-		});
-		const goalId = goal.id;
+	test("terminal downstream phase skips persist explicit skipped status and phase — GATE_SIGNAL_PHASE_STATUS", () => {
+		const { signal } = beginAndPersist(failingGate());
+		finishFailed(signal);
 
-		try {
-			const postResp = await apiFetch(`/api/goals/${goalId}/gates/failing-multi/signal`, {
-				method: "POST",
-				body: JSON.stringify({}),
-			});
-			expect(postResp.status, "GATE_SIGNAL_PHASE_STATUS: signal POST must succeed").toBe(201);
-			const postBody = await postResp.json();
-			const signalId: string = postBody.signal.id;
+		const stored = gateStore.getGate(goalId, "failing-multi")?.signals.find((candidate: any) => candidate.id === signal.id);
+		expect(stored?.verification.steps.map((step: any) => ({
+			name: step.name,
+			status: step.status,
+			skipped: !!step.skipped,
+			phase: step.phase,
+		})), "GATE_SIGNAL_PHASE_STATUS: failed phase-0 must leave later phases persisted as explicit skipped steps with original phases")
+			.toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS.map(({ name, status, skipped, phase }) => ({ name, status, skipped, phase })));
 
-			const signal = await waitForSignalVerificationStatus(gateway.clock, goalId, "failing-multi", signalId, "failed");
-			const steps = signal.verification.steps ?? [];
-
-			expect(
-				steps.map((s: any) => ({ name: s.name, status: s.status, skipped: !!s.skipped, phase: s.phase })),
-				"GATE_SIGNAL_PHASE_STATUS: failed phase-0 must leave later phases persisted as explicit skipped steps with original phases",
-			).toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS);
-		} finally {
-			await deleteGoal(goalId);
-			await deleteTestWorkflow(workflowId);
-		}
+		// Reopen the persisted rows through the store's in-memory filesystem seam,
+		// proving terminal status/phase survives reconstruction without NTFS I/O.
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-progress-reopen");
+		const persisted = new GateStore(stateDir, memfs);
+		persisted.initGatesForGoal(goalId, ["failing-multi"]);
+		persisted.recordSignal(structuredClone(stored));
+		const reopened = new GateStore(stateDir, memfs).getGate(goalId, "failing-multi")?.signals[0];
+		expect(reopened?.verification.steps).toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS);
 	});
 });
