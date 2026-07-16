@@ -13,7 +13,9 @@
       "label": "playwright-v2 browser (geometry adapters + smoke journeys)",
       "maxWallMs": 3600000,
       "maxCpuMs": 600000,
-      "note": "≤3600 s wall. Enforced by test:v2:browser via assert-budget browser --report. crash/restart + heavy fixtures live in the daily lane."
+      "perSpecMaxMs": 60000,
+      "perSpecGrandfather": {},
+      "note": "≤3600 s wall. Enforced by test:v2:browser via assert-budget browser --report. crash/restart + heavy fixtures live in the daily lane. perSpecMaxMs: each spec FILE's total wall (sum of test results incl. retries, from the Playwright JSON report) must stay under this cap; files listed in perSpecGrandfather (spec-file -> observed ms when grandfathered) warn instead of fail — do not add NEW entries, shrink the spec instead. WALL-only; CPU never gates."
     },
     "full": {
       "label": "npm run test:v2 (tier1 ∥ tier2, single isolated run)",

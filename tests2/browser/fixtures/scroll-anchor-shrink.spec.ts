@@ -1,7 +1,10 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
+import { waitForStableScroll } from "../_helpers/stable-wait.js";
 
 const TEST_PAGE = `file://${path.resolve("tests/fixtures/scroll-anchor-shrink.html")}`;
+
+const SCROLLER = "#scroll-container";
 
 test.describe("Scroll anchor on shrink", () => {
 	test("does not jolt viewport when content shrinks while scrolled up (small collapse)", async ({ page }) => {
@@ -12,7 +15,7 @@ test.describe("Scroll anchor on shrink", () => {
 			const sc = document.getElementById("scroll-container")!;
 			sc.scrollTop = sc.scrollHeight;
 		});
-		await page.waitForTimeout(200);
+		await waitForStableScroll(page, SCROLLER);
 
 		// Scroll up ~300px from bottom so _stickToBottom becomes false
 		const initialState = await page.evaluate(() => {
@@ -21,7 +24,7 @@ test.describe("Scroll anchor on shrink", () => {
 			(window as any).__scrollTo(target);
 			return (window as any).__getState();
 		});
-		await page.waitForTimeout(200);
+		await waitForStableScroll(page, SCROLLER);
 
 		// Verify we're scrolled up (not stuck to bottom)
 		expect(initialState.stickToBottom).toBe(false);
@@ -32,7 +35,8 @@ test.describe("Scroll anchor on shrink", () => {
 			(window as any).__handleResize();
 		});
 
-		await page.waitForTimeout(100);
+		// Wait for the browser's async scroll clamp/adjustment to settle
+		await waitForStableScroll(page, SCROLLER);
 
 		// With the new post-collapse clamp, small collapses (< half viewport)
 		// let the browser naturally adjust scrollTop. The clamp only fires if
@@ -61,17 +65,17 @@ test.describe("Scroll anchor on shrink", () => {
 			const sc = document.getElementById("scroll-container")!;
 			(window as any).__scrollTo(sc.scrollHeight);
 		});
-		await page.waitForTimeout(200);
+		await waitForStableScroll(page, SCROLLER);
 
 		const state = await page.evaluate(() => (window as any).__getState());
 		expect(state.stickToBottom).toBe(true);
 
-		// Collapse and trigger resize
+		// Collapse and trigger resize, then wait for scroll to settle
 		await page.evaluate(() => {
 			(window as any).__collapseElement();
 			(window as any).__handleResize();
 		});
-		await page.waitForTimeout(100);
+		await waitForStableScroll(page, SCROLLER);
 
 		// Should remain at the bottom
 		const afterState = await page.evaluate(() => {
@@ -94,7 +98,7 @@ test.describe("Scroll anchor on shrink", () => {
 			const sc = document.getElementById("scroll-container")!;
 			(window as any).__scrollTo(sc.scrollHeight - sc.clientHeight - 300);
 		});
-		await page.waitForTimeout(200);
+		await waitForStableScroll(page, SCROLLER);
 
 		const scrollTopBefore = await page.evaluate(() =>
 			document.getElementById("scroll-container")!.scrollTop,
@@ -111,7 +115,8 @@ test.describe("Scroll anchor on shrink", () => {
 			}
 			(window as any).__handleResize();
 		});
-		await page.waitForTimeout(100);
+		// Wait for any (buggy) async scroll adjustment to settle before reading
+		await waitForStableScroll(page, SCROLLER);
 
 		const scrollTopAfter = await page.evaluate(() =>
 			document.getElementById("scroll-container")!.scrollTop,
@@ -129,17 +134,18 @@ test.describe("Scroll anchor on shrink", () => {
 			const sc = document.getElementById("scroll-container")!;
 			(window as any).__scrollTo(sc.scrollHeight);
 		});
-		await page.waitForTimeout(200);
+		await waitForStableScroll(page, SCROLLER);
 
 		const state = await page.evaluate(() => (window as any).__getState());
 		expect(state.stickToBottom).toBe(true);
 
-		// Collapse the element and trigger resize handler
+		// Collapse the element and trigger resize handler, then wait for the
+		// browser's async scroll clamp to settle
 		await page.evaluate(() => {
 			(window as any).__collapseElement();
 			(window as any).__handleResize();
 		});
-		await page.waitForTimeout(100);
+		await waitForStableScroll(page, SCROLLER);
 
 		// With the new post-collapse clamp, a 400px collapse while at bottom:
 		// browser clamps scrollTop naturally, content bottom = clientHeight (full viewport),

@@ -22,7 +22,7 @@
  * ─── Programmatic (imported by run-v2.mjs) ───
  *   createCpuSampler(rootPid, { intervalMs? }) -> { stop() -> {cpuMs, peakProcesses, samples} }
  *   assertBudget({ scope, wallMs, cpuMs, rawCpuMs?, cpuCeilingMs?, cpuOverCount?, pilot?,
- *                  underLoad?, argv?, reservations?, rootPid?, processCount? })
+ *                  underLoad?, argv?, reservations?, rootPid?, processCount?, perSpec? })
  *       -> { pass, violations, caps, artifactPath, wallMs, cpuMs }
  *       WALL is the only hard gate; CPU is recorded for observability and NEVER gates.
  *   resolveCaps(scope, pilot?, underLoadOverride?) -> { tier, maxWallMs, maxCpuMs, underLoad?, pilot }
@@ -32,6 +32,9 @@
  *       clamps a process-tree reading to the physical ceiling (cores × wall).
  *   isUnderLoad(override?) -> boolean
  *   treeCpuMs(rootPid) -> number    (single cumulative snapshot)
+ *   perSpecWallFromReport(report) -> { 'path/spec.ts': totalMs, ... }
+ *   evaluatePerSpecBudget(report, { perSpecMaxMs, perSpecGrandfather? })
+ *       -> { perFileMs, warns, violations }   (pure; tier2 per-spec WALL budget)
  *
  * Artifacts: .profiles/testing-v2/budgets/<timestamp>-<scope>.json
  */
@@ -286,6 +289,63 @@ function wallFromReport(reportPath) {
 	return null;
 }
 
+// ────────────────────── per-spec wall budget (tier2) ──────────────────────
+// Design: WALL-only, no CPU gating. A Playwright JSON report's suites/specs
+// tree is folded into per-FILE total wall (sum of every test result's duration,
+// including retries). Files over tiers.tier2.perSpecMaxMs fail the gate unless
+// grandfathered in tiers.tier2.perSpecGrandfather (map of spec-file -> observed
+// ms at grandfathering time), which downgrades them to a warning. Suite-level
+// budget behaviour is unchanged; this is an ADDITIONAL check.
+
+const normSpecPath = (p) => String(p).replace(/\\/g, "/");
+
+/** Pure: fold a Playwright JSON report into { 'spec/file.ts': totalMs }. */
+export function perSpecWallFromReport(report) {
+	const perFileMs = Object.create(null);
+	const walkSuite = (suite, inheritedFile) => {
+		if (!suite || typeof suite !== "object") return;
+		const suiteFile = suite.file ? normSpecPath(suite.file) : inheritedFile;
+		for (const spec of suite.specs || []) {
+			const file = spec.file ? normSpecPath(spec.file) : suiteFile;
+			if (!file) continue;
+			let ms = 0;
+			for (const test of spec.tests || []) {
+				for (const result of test.results || []) {
+					if (Number.isFinite(result?.duration)) ms += result.duration;
+				}
+			}
+			perFileMs[file] = (perFileMs[file] || 0) + ms;
+		}
+		for (const child of suite.suites || []) walkSuite(child, suiteFile);
+	};
+	for (const suite of report?.suites || []) walkSuite(suite, null);
+	return perFileMs;
+}
+
+/**
+ * Pure: classify per-spec wall against the budget.
+ * Returns { perFileMs, warns, violations } where warns/violations are
+ * [{ file, ms, grandfatheredMs? }]. Grandfathered over-budget files WARN only;
+ * everything else over budget is a VIOLATION. Under-budget files pass silently.
+ */
+export function evaluatePerSpecBudget(report, { perSpecMaxMs, perSpecGrandfather = {} } = {}) {
+	const perFileMs = perSpecWallFromReport(report);
+	const warns = [];
+	const violations = [];
+	if (!Number.isFinite(perSpecMaxMs) || perSpecMaxMs <= 0) return { perFileMs, warns, violations };
+	const grandfather = Object.create(null);
+	for (const [k, v] of Object.entries(perSpecGrandfather || {})) grandfather[normSpecPath(k)] = v;
+	for (const [file, msRaw] of Object.entries(perFileMs)) {
+		const ms = Math.round(msRaw);
+		if (ms <= perSpecMaxMs) continue;
+		if (file in grandfather) warns.push({ file, ms, grandfatheredMs: grandfather[file] });
+		else violations.push({ file, ms });
+	}
+	warns.sort((a, b) => b.ms - a.ms);
+	violations.sort((a, b) => b.ms - a.ms);
+	return { perFileMs, warns, violations };
+}
+
 /** Latest CPU sample artifact for a scope, if run-v2 (or a prior run) left one. */
 function latestSampleCpu(scope) {
 	if (!existsSync(SAMPLE_DIR)) return null;
@@ -309,9 +369,18 @@ function timestamp() {
 
 // ─────────────────────────────── core assert ───────────────────────────────
 
-export function assertBudget({ scope, wallMs = null, cpuMs = null, rawCpuMs = null, cpuCeilingMs = null, cpuOverCount = false, pilot = false, underLoad = undefined, argv = null, reservations = null, rootPid = null, processCount = null, wallSource = null, cpuSource = null }) {
+export function assertBudget({ scope, wallMs = null, cpuMs = null, rawCpuMs = null, cpuCeilingMs = null, cpuOverCount = false, pilot = false, underLoad = undefined, argv = null, reservations = null, rootPid = null, processCount = null, wallSource = null, cpuSource = null, perSpec = null }) {
 	const caps = resolveCaps(scope, pilot, underLoad);
 	const violations = [];
+
+	// Per-spec wall budget (tier2): non-grandfathered over-budget spec files are
+	// hard violations; grandfathered ones were already warned by the CLI. Absent
+	// perSpec (all other callers) behaviour is unchanged.
+	if (perSpec && Array.isArray(perSpec.violations)) {
+		for (const v of perSpec.violations) {
+			violations.push(`per-spec wall ${(v.ms / 1000).toFixed(1)}s > cap ${(perSpec.maxMs / 1000).toFixed(1)}s for ${v.file} (not grandfathered)`);
+		}
+	}
 
 	// In pilot mode the tier cap acts as a generous ceiling for a partial suite;
 	// a subset should stay well under it, so we still check but never invent a
@@ -351,6 +420,9 @@ export function assertBudget({ scope, wallMs = null, cpuMs = null, rawCpuMs = nu
 		underLoad: caps.underLoad ?? isUnderLoad(underLoad),
 		wallSource,
 		cpuSource,
+		perSpec: perSpec
+			? { maxMs: perSpec.maxMs ?? null, warns: perSpec.warns ?? [], violations: perSpec.violations ?? [] }
+			: null,
 		budget: { maxWallMs: caps.maxWallMs, maxCpuMs: caps.maxCpuMs, label: caps.label },
 		rootPid,
 		processCount,
@@ -425,6 +497,18 @@ function cli() {
 	const clamped = clampCpuMs(cpuMs, cores, wallMs);
 	if (clamped.overCount) cpuSource = `${cpuSource || "cpu"} (clamped cores×wall)`;
 
+	// Per-spec wall budget: only for the tier2/browser scope with a Playwright
+	// JSON report and a configured tiers.tier2.perSpecMaxMs. WALL-only, no CPU.
+	let perSpec = null;
+	if (SCOPE_TIER[opts.scope] === "tier2" && opts.report) {
+		const reportAbs = isAbsolute(opts.report) ? opts.report : join(REPO_ROOT, opts.report);
+		const rep = readJsonSafe(reportAbs);
+		const tier2 = readBudgets().tiers?.tier2 || {};
+		if (rep && Number.isFinite(tier2.perSpecMaxMs)) {
+			perSpec = { maxMs: tier2.perSpecMaxMs, ...evaluatePerSpecBudget(rep, tier2) };
+		}
+	}
+
 	const result = assertBudget({
 		scope: opts.scope,
 		wallMs,
@@ -435,6 +519,7 @@ function cli() {
 		pilot: opts.pilot,
 		wallSource,
 		cpuSource,
+		perSpec,
 	});
 
 	const caps = result.caps;
@@ -442,6 +527,17 @@ function cli() {
 	console.log(`  wall: ${wallMs != null ? (wallMs / 1000).toFixed(1) + "s" : "n/a"} (cap ${(caps.maxWallMs / 1000).toFixed(0)}s)  [${wallSource || "unmeasured"}]`);
 	console.log(`  cpu:  ${clamped.cpuMs != null ? (clamped.cpuMs / 60000).toFixed(2) + " CPU-min" : "n/a"} (observability-only, not gated; physical ceiling ${clamped.ceilingMs != null ? (clamped.ceilingMs / 60000).toFixed(2) + " CPU-min = " + cores + "×" + (wallMs / 1000).toFixed(0) + "s" : "n/a"})  [${cpuSource || "unmeasured"}]${clamped.overCount ? ` (raw ${(clamped.rawCpuMs / 60000).toFixed(2)} over-counted, clamped)` : ""}`);
 	console.log(`  artifact: ${result.artifactPath}`);
+
+	if (perSpec) {
+		const fileCount = Object.keys(perSpec.perFileMs).length;
+		console.log(`  per-spec: ${fileCount} spec file(s), cap ${(perSpec.maxMs / 1000).toFixed(0)}s each — ${perSpec.violations.length} violation(s), ${perSpec.warns.length} grandfathered warn(s)`);
+		for (const w of perSpec.warns) {
+			console.warn(`  per-spec WARN (grandfathered): ${w.file} — ${(w.ms / 1000).toFixed(1)}s > cap ${(perSpec.maxMs / 1000).toFixed(0)}s (grandfathered at ${(w.grandfatheredMs / 1000).toFixed(1)}s)`);
+		}
+		for (const v of perSpec.violations) {
+			console.error(`  per-spec VIOLATION: ${v.file} — ${(v.ms / 1000).toFixed(1)}s > cap ${(perSpec.maxMs / 1000).toFixed(0)}s (not grandfathered)`);
+		}
+	}
 
 	if (!result.pass) {
 		console.error(`assert-budget: FAIL — ${result.violations.join("; ")}`);

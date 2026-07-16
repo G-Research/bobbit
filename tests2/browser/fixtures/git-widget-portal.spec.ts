@@ -13,8 +13,9 @@ test.describe("Git widget dropdown inside transformed ancestor", () => {
 		// Click the git status pill to expand the dropdown
 		await page.click("#git-pill");
 
-		// Wait a frame for positioning to apply
-		await page.waitForTimeout(100);
+		// The click handler creates and positions the dropdown synchronously —
+		// its visibility is the observable outcome to wait on.
+		await expect(page.locator("#git-status-dropdown")).toBeVisible();
 
 		// Verify the dropdown is toggled on
 		const isExpanded = await page.evaluate(() => (window as any).__isExpanded());

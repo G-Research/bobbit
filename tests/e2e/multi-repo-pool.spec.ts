@@ -19,14 +19,18 @@ import { waitForPool, pollSessionUntil, pollSessionUntilArchived } from "./test-
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
 
-function gitInit(dir: string): void {
-	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--initial-branch=master"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
-	execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: dir });
+// Repos come from the immutable committed template (master + README.md +
+// .gitattributes + one commit); nothing in this spec asserts on tree contents.
+async function gitInit(dir: string): Promise<void> {
+	await prepareGitTemplate();
+	copyGitTemplate(dir);
+}
+
+async function gitStdout(args: readonly string[], cwd: string): Promise<string> {
+	return (await runFixtureCommand("git", args, { cwd })).stdout;
 }
 
 test.describe.serial("multi-repo worktree pool E2E", () => {
@@ -35,8 +39,8 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 
 	test.beforeAll(async () => {
 		root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-pool-"));
-		gitInit(path.join(root, "api"));
-		gitInit(path.join(root, "web"));
+		await gitInit(path.join(root, "api"));
+		await gitInit(path.join(root, "web"));
 
 		const reg = await apiFetch("/api/projects", {
 			method: "POST",
@@ -106,7 +110,7 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 
 		// Each per-repo worktree should be on the goal's branch.
 		for (const wt of [apiWt, webWt]) {
-			const stdout = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wt, encoding: "utf-8" });
+			const stdout = await gitStdout(["rev-parse", "--abbrev-ref", "HEAD"], wt);
 			expect(stdout.trim()).toBe(branch);
 		}
 	});
@@ -114,9 +118,9 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 	test("multi-repo session lifecycle: branch + dir stable across creation, prompt, restart, archive", async ({ gateway }) => {
 		// Use a fresh project so the pool state for this test is independent.
 		const lifecycleRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-life-"));
-		gitInit(path.join(lifecycleRoot, "api"));
-		gitInit(path.join(lifecycleRoot, "web"));
-		gitInit(path.join(lifecycleRoot, "data"));
+		await gitInit(path.join(lifecycleRoot, "api"));
+		await gitInit(path.join(lifecycleRoot, "web"));
+		await gitInit(path.join(lifecycleRoot, "data"));
 
 		const reg = await apiFetch("/api/projects", {
 			method: "POST",
@@ -168,20 +172,20 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 		for (const r of repos) {
 			const wt = path.join(container, r);
 			expect(fs.existsSync(wt), `${r} worktree must exist at ${wt}`).toBe(true);
-			const head = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wt, encoding: "utf-8" }).trim();
+			const head = (await gitStdout(["rev-parse", "--abbrev-ref", "HEAD"], wt)).trim();
 			expect(head).toBe(branch);
 		}
 
 		// Capture pre-restart per-repo fingerprints. Use the branch's own
 		// reflog only (NOT --all) so background pool replenishment doesn't
 		// pollute the snapshot.
-		const beforeReflogs = repos.map(r => {
+		const beforeReflogs = await Promise.all(repos.map(async r => {
 			try {
-				return execFileSync("git", ["reflog", "show", "--no-abbrev", branch!], {
-					cwd: path.join(container, r), encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
-				});
+				return (await runFixtureCommand("git", ["reflog", "show", "--no-abbrev", branch!], {
+					cwd: path.join(container, r), attempts: 1,
+				})).stdout;
 			} catch { return ""; }
-		});
+		}));
 
 		// 3. PATCH title — metadata only, branch must NOT change.
 		const patch = await apiFetch(`/api/sessions/${sessionId}`, {
@@ -232,13 +236,13 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 		for (let i = 0; i < repos.length; i++) {
 			const wt = path.join(container, repos[i]);
 			expect(fs.existsSync(wt)).toBe(true);
-			const head = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wt, encoding: "utf-8" }).trim();
+			const head = (await gitStdout(["rev-parse", "--abbrev-ref", "HEAD"], wt)).trim();
 			expect(head).toBe(branch);
 			let reflogAfter = "";
 			try {
-				reflogAfter = execFileSync("git", ["reflog", "show", "--no-abbrev", branch!], {
-					cwd: wt, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
-				});
+				reflogAfter = (await runFixtureCommand("git", ["reflog", "show", "--no-abbrev", branch!], {
+					cwd: wt, attempts: 1,
+				})).stdout;
 			} catch { /* may be empty */ }
 			expect(reflogAfter).toBe(beforeReflogs[i]);
 		}
@@ -263,9 +267,7 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 
 		for (const r of repos) {
 			const repoRoot = path.join(lifecycleRoot, r);
-			const legacy = execFileSync("git", ["branch", "--list"], {
-				cwd: repoRoot, encoding: "utf-8",
-			}).trim();
+			const legacy = (await gitStdout(["branch", "--list"], repoRoot)).trim();
 			expect(legacy, `${r} must not have any session/new-session-* ghost branch`).not.toMatch(/session\/new-session-/);
 			expect(legacy, `${r} must not have any session/<slug>-<id8> ghost from the legacy rename path`).not.toMatch(new RegExp(`session/[a-z0-9-]+-${branch!.slice("session/".length)}`));
 		}

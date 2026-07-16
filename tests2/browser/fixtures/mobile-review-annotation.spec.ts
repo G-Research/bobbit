@@ -43,9 +43,8 @@ test.describe("Mobile review annotation — floating button", () => {
 		await setupMobile(page);
 		await selectText(page);
 
-		// Wait for debounce (300ms) + buffer
-		await page.waitForTimeout(400);
-
+		// The observable outcome of the 300ms debounce firing is the button
+		// becoming visible — toBeVisible() polls until then.
 		const btn = page.locator("#floating-btn");
 		await expect(btn).toBeVisible();
 		expect(await btn.textContent()).toContain("Comment");
@@ -55,6 +54,8 @@ test.describe("Mobile review annotation — floating button", () => {
 		await page.goto(TEST_PAGE);
 		// Do NOT call setupMobile — desktop mode
 		await selectText(page);
+		// Deliberate fixed wait: asserting the button NEVER appears — no mobile
+		// handler is registered, so there is no observable event to await.
 		await page.waitForTimeout(400);
 
 		const btn = page.locator("#floating-btn");
@@ -65,17 +66,16 @@ test.describe("Mobile review annotation — floating button", () => {
 		await page.goto(TEST_PAGE);
 		await setupMobile(page);
 		await selectText(page);
-		await page.waitForTimeout(400);
 
+		// Debounce fires → button appears (observable outcome, auto-waited)
 		await expect(page.locator("#floating-btn")).toBeVisible();
 
-		// Collapse selection
+		// Collapse selection — debounce fires → button hides (observable
+		// transition from visible to hidden, auto-waited)
 		await page.evaluate(() => {
 			window.getSelection()!.removeAllRanges();
 			document.dispatchEvent(new Event("selectionchange"));
 		});
-		await page.waitForTimeout(400);
-
 		await expect(page.locator("#floating-btn")).not.toBeVisible();
 	});
 
@@ -94,6 +94,8 @@ test.describe("Mobile review annotation — floating button", () => {
 			selection.addRange(range);
 			document.dispatchEvent(new Event("selectionchange"));
 		});
+		// Deliberate fixed wait: asserting the button NEVER appears after the
+		// 300ms debounce — the hide path is a no-op with no observable signal.
 		await page.waitForTimeout(400);
 
 		await expect(page.locator("#floating-btn")).not.toBeVisible();
@@ -128,8 +130,9 @@ test.describe("Mobile review annotation — bottom sheet", () => {
 		await page.goto(TEST_PAGE);
 		await setupMobile(page);
 		await selectText(page);
-		await page.waitForTimeout(400);
 
+		// Debounce fires → button appears (observable outcome, auto-waited)
+		await expect(page.locator("#floating-btn")).toBeVisible();
 		await page.locator("#floating-btn").click();
 
 		const sheet = page.locator("#sheet-popover");
@@ -162,7 +165,9 @@ test.describe("Mobile review annotation — bottom sheet", () => {
 		await page.goto(TEST_PAGE);
 		await setupMobile(page);
 		await selectText(page);
-		await page.waitForTimeout(400);
+
+		// Debounce fires → button appears (observable outcome, auto-waited)
+		await expect(page.locator("#floating-btn")).toBeVisible();
 
 		// Clear any existing annotations
 		await page.evaluate(() => sessionStorage.clear());
@@ -190,7 +195,9 @@ test.describe("Mobile review annotation — bottom sheet", () => {
 		await page.goto(TEST_PAGE);
 		await setupMobile(page);
 		await selectText(page);
-		await page.waitForTimeout(400);
+
+		// Debounce fires → button appears (observable outcome, auto-waited)
+		await expect(page.locator("#floating-btn")).toBeVisible();
 
 		await page.evaluate(() => sessionStorage.clear());
 
@@ -220,8 +227,8 @@ test.describe("Mobile review annotation — toast", () => {
 		await page.goto(TEST_PAGE);
 		await setupMobile(page);
 		await selectText(page);
-		await page.waitForTimeout(400);
 
+		// Debounce fires → button appears (observable outcome, auto-waited)
 		await expect(page.locator("#floating-btn")).toBeVisible();
 
 		// Clear selection before tapping Add Comment

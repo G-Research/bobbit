@@ -11,19 +11,16 @@ import { test, expect } from "./in-process-harness.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 import { worktreeRoot, branchContainer } from "../../src/server/skills/worktree-paths.js";
 import { createWorktree, createWorktreeSet, cleanupWorktree } from "../../src/server/skills/git.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
 
-function gitInit(dir: string): void {
-	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet", "-b", "master"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "t@b.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
-	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: dir });
+// Repos come from the immutable committed template (master + README.md +
+// .gitattributes + one commit); nothing here asserts on tree contents.
+async function gitInit(dir: string): Promise<void> {
+	await prepareGitTemplate();
+	copyGitTemplate(dir);
 }
 
 test("absolute worktree_root override is used as-is", () => {
@@ -47,7 +44,7 @@ test("single-repo createWorktree honors worktreeRoot override on disk", async ()
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-wtr-single-"));
 	const repo = path.join(tmp, "repo");
 	const override = path.join(tmp, "custom-wt");
-	gitInit(repo);
+	await gitInit(repo);
 
 	const branch = `feat/wtr-${Date.now()}`;
 	process.env.BOBBIT_TEST_NO_PUSH = "1";
@@ -68,9 +65,9 @@ test("multi-repo createWorktreeSet honors worktreeRoot override (claim + cleanup
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-wtr-multi-"));
 	const rootPath = path.join(tmp, "proj");
 	fs.mkdirSync(rootPath);
-	gitInit(path.join(rootPath, "api"));
-	gitInit(path.join(rootPath, "web"));
-	gitInit(path.join(rootPath, "shared"));
+	await gitInit(path.join(rootPath, "api"));
+	await gitInit(path.join(rootPath, "web"));
+	await gitInit(path.join(rootPath, "shared"));
 	const override = path.join(tmp, "shared-wt");
 
 	const branch = `goal/wtr-${Date.now()}`;

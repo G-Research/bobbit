@@ -1,7 +1,10 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
+import { waitForStableScroll } from "../_helpers/stable-wait.js";
 
 const TEST_PAGE = `file://${path.resolve("tests/fixtures/collapse-scroll-bugs.html")}`;
+
+const SCROLLER = "#scroll-container";
 
 test.describe("Collapse scroll bugs", () => {
 	test("phantom padding after collapse", async ({ page }) => {
@@ -12,20 +15,21 @@ test.describe("Collapse scroll bugs", () => {
 			const sc = document.getElementById("scroll-container")!;
 			(window as any).__scrollTo(sc.scrollHeight);
 		});
-		await page.waitForTimeout(200);
+		await waitForStableScroll(page, SCROLLER);
 
 		const state = await page.evaluate(() => (window as any).__getState());
 		expect(state.stickToBottom).toBe(true);
 
-		// Collapse all three 400px collapsible elements, calling handleResize after each
+		// Collapse all three 400px collapsible elements, calling handleResize after
+		// each and waiting for the async scroll clamp/adjustment to settle so each
+		// collapse is processed as a distinct resize (matching real usage).
 		for (const id of ["collapsible-1", "collapsible-2", "collapsible-3"]) {
 			await page.evaluate((elId) => {
 				(window as any).__collapseElement(elId);
 				(window as any).__handleResize();
 			}, id);
-			await page.waitForTimeout(50);
+			await waitForStableScroll(page, SCROLLER);
 		}
-		await page.waitForTimeout(200);
 
 		// Check the wrapper's paddingBottom — it should be "" or "0px" (no phantom padding)
 		const paddingBottom = await page.evaluate(() =>
@@ -47,7 +51,7 @@ test.describe("Collapse scroll bugs", () => {
 			const sc = document.getElementById("scroll-container")!;
 			(window as any).__scrollTo(sc.scrollHeight);
 		});
-		await page.waitForTimeout(200);
+		await waitForStableScroll(page, SCROLLER);
 
 		const state = await page.evaluate(() => (window as any).__getState());
 		expect(state.stickToBottom).toBe(true);
@@ -67,7 +71,8 @@ test.describe("Collapse scroll bugs", () => {
 			(window as any).__collapseElement("large-collapsible");
 			(window as any).__handleResize();
 		});
-		await page.waitForTimeout(200);
+		// Wait for the post-collapse clamp / async scroll events to settle
+		await waitForStableScroll(page, SCROLLER);
 
 		// The final message should still be visible within the scroll container viewport
 		const result = await page.evaluate(() => {

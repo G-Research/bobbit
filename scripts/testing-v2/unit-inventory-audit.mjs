@@ -101,7 +101,7 @@ const FILESYSTEM_MUTATORS = new Set([
 	"unlinkSync", "utimes", "utimesSync", "writeFile", "writeFileSync",
 ]);
 
-function concurrentPathOwnershipViolations(source, file) {
+function concurrentPathOwnershipViolations(source, file, messageLabel = "concurrent isolate:false filesystem path") {
 	const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 	const declarations = new Map();
 	const declarationNodes = new Map();
@@ -186,7 +186,7 @@ function concurrentPathOwnershipViolations(source, file) {
 	const unsafeNames = [...declarations.keys()].filter((name) => isUnsafe(analyse(name)) && (mutated(name) || externallyOwned(name)));
 	const violation = (node, label) => {
 		const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-		return `${file}:${line} — concurrent isolate:false filesystem path ${label} uses Date.now() as its only owner token and is mutated or cleaned; use mkdtempSync, process.pid, randomUUID()/UUID, or place it beneath a clearly unique owner root`;
+		return `${file}:${line} — ${messageLabel} ${label} uses Date.now() as its only owner token and is mutated or cleaned; use mkdtempSync, process.pid, randomUUID()/UUID, or place it beneath a clearly unique owner root`;
 	};
 	const violations = unsafeNames.map((name) => violation(declarationNodes.get(name) ?? declarations.get(name), JSON.stringify(name)));
 	for (const call of calls) {
@@ -264,6 +264,50 @@ const declarationSemanticsPreserved = unmappedDeclarations.length === 0 && inval
 const childProcessImports = currentUnit.flatMap((file) => childProcessValueImports(fs.readFileSync(file, "utf-8"), file));
 const concurrentPathViolations = [...execution.core, ...execution.integration]
 	.flatMap((file) => concurrentPathOwnershipViolations(fs.readFileSync(file, "utf-8"), file));
+
+// E2E/browser tiers get the SAME unsafe rule (Date.now()-only owner token on a
+// shared/mutated temp path) with a distinct label. Pre-existing offenders are
+// FROZEN below (file:line) so the audit lands green while pinning that NO NEW
+// violations appear — fix an entry, then delete it; never add entries.
+const E2E_FIXTURE_PATH_GRANDFATHER = Object.freeze([
+	"tests/e2e/pool-claim-restart-resume.spec.ts:50",
+	"tests/e2e/pool-flow.spec.ts:41",
+	"tests/e2e/port-auto-increment.spec.ts:24",
+	"tests/e2e/provider-turn-hooks.spec.ts:101",
+	"tests/e2e/ui/add-project-helpers.ts:52",
+	"tests/e2e/ui/add-project-symlink.spec.ts:33",
+	"tests/e2e/ui/marketplace.spec.ts:73",
+	"tests/e2e/ui/project-management.spec.ts:17",
+	"tests/e2e/ui/sidebar-archived-per-project.spec.ts:13",
+	"tests/e2e/ui/sidebar-keyboard-nav.spec.ts:23",
+	"tests/e2e/ui/sidebar-unified-tree.spec.ts:161",
+	"tests2/browser/fixtures/project-drag-reorder.spec.ts:64",
+	"tests2/browser/journeys/prompt-interaction.journey.spec.ts:166",
+]);
+function listTestSources(root, extensions) {
+	if (!fs.existsSync(root)) return [];
+	const files = [];
+	const stack = [root];
+	while (stack.length) {
+		const dir = stack.pop();
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) stack.push(full);
+			else if (extensions.some((ext) => entry.name.endsWith(ext))) files.push(full.split(path.sep).join("/"));
+		}
+	}
+	return files.sort();
+}
+const e2eBrowserSources = [
+	...listTestSources("tests/e2e", [".ts", ".mjs"]),
+	...listTestSources("tests2/browser", [".ts"]),
+];
+const allE2eFixtureViolations = e2eBrowserSources
+	.flatMap((file) => concurrentPathOwnershipViolations(fs.readFileSync(file, "utf-8"), file, "concurrent e2e fixture path"));
+const grandfatheredE2eFixtureViolations = allE2eFixtureViolations
+	.filter((entry) => E2E_FIXTURE_PATH_GRANDFATHER.some((frozen) => entry.startsWith(`${frozen} —`)));
+const concurrentE2eFixtureViolations = allE2eFixtureViolations
+	.filter((entry) => !grandfatheredE2eFixtureViolations.includes(entry));
 const approvedE2e = [...APPROVED_E2E_VITEST_PATHS].sort();
 const e2eOwnershipExact = JSON.stringify(currentE2eVitestFiles) === JSON.stringify(approvedE2e);
 const scheduledInventoryPreserved = currentUnit.length + currentE2eVitestFiles.length === currentInventory.length;
@@ -286,6 +330,8 @@ const report = {
 	isolatedFiles: execution.isolated,
 	childProcessValueImports: childProcessImports,
 	concurrentPathOwnershipViolations: concurrentPathViolations,
+	concurrentE2eFixturePathViolations: concurrentE2eFixtureViolations,
+	grandfatheredE2eFixturePathViolations: grandfatheredE2eFixtureViolations,
 	baseStaticTestDeclarations: baseDeclarations,
 	currentStaticDeclarationsInBaseFiles: currentDeclarations,
 	allCurrentStaticTestDeclarations: allCurrentDeclarations,
@@ -307,7 +353,8 @@ const report = {
 		&& scheduledInventoryPreserved
 		&& e2eOwnershipExact
 		&& childProcessImports.length === 0
-		&& concurrentPathViolations.length === 0,
+		&& concurrentPathViolations.length === 0
+		&& concurrentE2eFixtureViolations.length === 0,
 };
 
 const json = `${JSON.stringify(report, null, 2)}\n`;

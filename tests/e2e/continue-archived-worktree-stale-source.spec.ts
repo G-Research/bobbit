@@ -5,10 +5,11 @@
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, connectWs, agentEndPredicate, registerProject } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
 
 test.use({ enableWorktreePool: false });
 
@@ -22,41 +23,41 @@ async function sendPromptAndWait(id: string, text: string): Promise<void> {
 	}
 }
 
-function initRepo(repoPath: string): void {
-	mkdirSync(repoPath, { recursive: true });
-	execFileSync("git", ["init", "--initial-branch=master"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: repoPath, stdio: "pipe" });
+// Repo comes from the immutable committed template (master + README.md +
+// .gitattributes + one commit); nothing here asserts on tree contents.
+async function initRepo(repoPath: string): Promise<void> {
+	await prepareGitTemplate();
+	copyGitTemplate(repoPath);
 }
 
-function branchExists(repoPath: string, branch: string): boolean {
+// attempts: 1 for probes/best-effort helpers whose failure is an accepted
+// outcome — retrying would only change timing, not semantics.
+async function branchExists(repoPath: string, branch: string): Promise<boolean> {
 	try {
-		execFileSync("git", ["rev-parse", "--verify", `refs/heads/${branch}`], { cwd: repoPath, stdio: "pipe" });
+		await runFixtureCommand("git", ["rev-parse", "--verify", `refs/heads/${branch}`], { cwd: repoPath, attempts: 1 });
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-function deleteBranchIfPresent(repoPath: string, branch: string): void {
+async function deleteBranchIfPresent(repoPath: string, branch: string): Promise<void> {
 	try {
-		execFileSync("git", ["branch", "-D", branch], { cwd: repoPath, stdio: "pipe" });
+		await runFixtureCommand("git", ["branch", "-D", branch], { cwd: repoPath, attempts: 1 });
 	} catch {
 		// Best-effort cleanup; assertions verify the stale state.
 	}
 }
 
-function removeWorktreeIfPresent(repoPath: string, worktreePath: string): void {
+async function removeWorktreeIfPresent(repoPath: string, worktreePath: string): Promise<void> {
 	try {
-		execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath, stdio: "pipe" });
+		await runFixtureCommand("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath, attempts: 1 });
 	} catch {
 		// It may already have been removed by archive cleanup.
 	}
 	rmSync(worktreePath, { recursive: true, force: true });
 	try {
-		execFileSync("git", ["worktree", "prune"], { cwd: repoPath, stdio: "pipe" });
+		await runFixtureCommand("git", ["worktree", "prune"], { cwd: repoPath, attempts: 1 });
 	} catch {
 		// Best-effort cleanup.
 	}
@@ -136,7 +137,7 @@ test.describe("Continue-Archived stale worktree source", () => {
 		let newId: string | undefined;
 
 		try {
-			initRepo(repoPath);
+			await initRepo(repoPath);
 			const project = await registerProject({ name: `cont-wt-stale-source-${Date.now()}`, rootPath: repoPath });
 			projectId = project.id;
 
@@ -157,7 +158,7 @@ test.describe("Continue-Archived stale worktree source", () => {
 			expect(srcRec.cwd).toBe(srcRec.worktreePath);
 			expect(srcRec.branch).toBe(`session/${srcId.slice(0, 8)}`);
 			expect(existsSync(srcRec.worktreePath), "source worktree should exist before staling it").toBe(true);
-			expect(branchExists(repoPath, srcRec.branch), "source branch should exist before staling it").toBe(true);
+			expect(await branchExists(repoPath, srcRec.branch), "source branch should exist before staling it").toBe(true);
 
 			const transcriptMarker = `STALE_SOURCE_CONTINUE_TRANSCRIPT_${Date.now()}`;
 			const proposalMarker = `STALE_SOURCE_CONTINUE_PROPOSAL_${Date.now()}`;
@@ -203,10 +204,10 @@ test.describe("Continue-Archived stale worktree source", () => {
 			expect(readRuntimeCwdRecords(archivedSourceJsonl), "archived source transcript should retain stale system cwd metadata").toContainEqual({ type: "system", cwd: srcRec.worktreePath });
 			expect(readRuntimeCwdRecords(archivedSourceJsonl), "archived source transcript should retain stale Pi-style session cwd metadata").toContainEqual({ type: "session", cwd: srcRec.worktreePath });
 
-			removeWorktreeIfPresent(repoPath, srcRec.worktreePath);
-			deleteBranchIfPresent(repoPath, srcRec.branch);
+			await removeWorktreeIfPresent(repoPath, srcRec.worktreePath);
+			await deleteBranchIfPresent(repoPath, srcRec.branch);
 			expect(existsSync(srcRec.worktreePath), "source worktree must be stale before continue").toBe(false);
-			expect(branchExists(repoPath, srcRec.branch), "source branch must be stale before continue").toBe(false);
+			expect(await branchExists(repoPath, srcRec.branch), "source branch must be stale before continue").toBe(false);
 
 			const cont = await apiFetch(`/api/sessions/${srcId}/continue`, {
 				method: "POST",
@@ -233,11 +234,11 @@ test.describe("Continue-Archived stale worktree source", () => {
 			expect(newRec.worktreePath).not.toBe(srcRec.worktreePath);
 			expect(newRec.cwd).toBe(newRec.worktreePath);
 			expect(existsSync(newRec.worktreePath), "continued session worktree should exist").toBe(true);
-			expect(branchExists(repoPath, newRec.branch), "continued session branch should exist").toBe(true);
+			expect(await branchExists(repoPath, newRec.branch), "continued session branch should exist").toBe(true);
 
 			// The deleted archived source must remain stale; continue must not revive it.
 			expect(existsSync(srcRec.worktreePath), "continue must not recreate the deleted source worktree").toBe(false);
-			expect(branchExists(repoPath, srcRec.branch), "continue must not recreate the deleted source branch").toBe(false);
+			expect(await branchExists(repoPath, srcRec.branch), "continue must not recreate the deleted source branch").toBe(false);
 
 			const projSlugDir = join(sessionsDir, `--${slugifyCwd(repoPath)}--`);
 			const wtSlugDir = join(sessionsDir, `--${slugifyCwd(newRec.worktreePath)}--`);

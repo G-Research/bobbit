@@ -561,6 +561,33 @@
       }
     },
     {
+      "path": "tests2/core/ensure-dist-build-key.test.ts",
+      "reason": "Pins the content-addressed dist build cache used by test:e2e:v2 and browser-global-setup: changed build inputs must change the key, and validation must fail closed on missing/stale manifests or missing dist artifacts so a stale build is never silently tested.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pwtest-cache-publish.test.ts",
+      "reason": "Pins the persistent Playwright transform-cache seed/publish helpers: seed copies the latest snapshot without clobbering run-dir files and tolerates a missing latest; publish atomically replaces latest from a non-empty run dir and a concurrent-publish loser cleans its tmp dir; the env-gated wrapper honours OWNED gating, the v2 namespace guard, and KEEP=1 not suppressing publish.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/per-spec-budget.test.ts",
+      "reason": "Pins per-spec tier-2 wall budget classification from Playwright JSON reports: grandfathered files warn, non-grandfathered files over budget fail, and retries count toward a file's total so budget regressions in the browser tier cannot creep in silently.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/server-prebundle-cache.test.ts",
       "reason": "Pins content-addressed server-test prebundle cache invalidation and fail-closed artifact validation so changed source, stale keys, missing maps, or truncated bundles can never be silently reused.",
       "execution": {
