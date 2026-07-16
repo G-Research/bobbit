@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { invalidateModelCache, type ApiModel } from "../../src/server/agent/model-registry.js";
-import { generateSessionTitle } from "../../src/server/agent/title-generator.js";
+import { generateGoalSummaryTitle, generateSessionTitle } from "../../src/server/agent/title-generator.js";
 import { completeModelText, testModelPreference } from "../../src/server/agent/model-completion.js";
 import { createMemFs } from "../harness/mem-fs.js";
 
@@ -81,6 +81,34 @@ describe("title generation with non-AI-Gateway naming models", () => {
 		assert.equal(calls[0].model.provider, "direct");
 		assert.equal(calls[0].model.id, "direct-title-model");
 		assert.equal(calls[0].args.thinkingLevel, "off");
+	});
+
+	it("keeps explicit Anthropic naming direct when AIGW-exclusive models hide built-ins", async () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "bobbit-title-anthropic-"));
+		process.env.BOBBIT_AGENT_DIR = dir;
+		resetAgentDirStateForTests();
+		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ anthropic: { type: "api-key", key: "anthropic-test-key" } }));
+		const requests: any[] = [];
+		const fetchImpl = (async (_input: any, init?: RequestInit) => {
+			requests.push(JSON.parse(String(init?.body)));
+			return new Response(JSON.stringify({ content: [{ type: "text", text: "<title>Direct Anthropic</title>" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		}) as typeof fetch;
+		try {
+			const options = {
+				namingModel: "anthropic/claude-explicit",
+				aigwUrl: "http://127.0.0.1:1",
+				availableModels: [],
+				fetchImpl,
+			};
+			assert.equal(await generateSessionTitle([{ role: "user", content: "Keep my model" }], options), "Direct Anthropic");
+			assert.equal(await generateGoalSummaryTitle("Keep explicit naming model", options), "Direct Anthropic");
+			assert.deepEqual(requests.map((body) => body.model), ["claude-explicit", "claude-explicit"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("uses the session model as fallback when no naming model is set", async () => {

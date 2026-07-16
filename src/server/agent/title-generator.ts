@@ -465,6 +465,12 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 			const systemPrompt = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
 			return generateViaConfiguredDirectModel(configured.model, userPrompt, systemPrompt, options);
 		}
+		// Anthropic remains directly runnable even when exclusive AIGW mode hides
+		// built-ins from the available-model registry. Preserve that established
+		// explicit-preference path rather than silently selecting an AIGW fallback.
+		if (configured?.provider === "anthropic") {
+			return generateViaAnthropic(preview, "off", configured.modelId, fetchImpl);
+		}
 		console.warn(`[title-gen] Naming model "${options.namingModel}" is not available; falling back`);
 	}
 
@@ -656,6 +662,9 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 		if (configured?.model) {
 			const userPrompt = `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:`;
 			return generateViaConfiguredDirectModel(configured.model, userPrompt, GOAL_SUMMARY_SYSTEM, options);
+		}
+		if (configured?.provider === "anthropic") {
+			return generateGoalSummaryViaAnthropic(goalTitle, configured.modelId, fetchImpl);
 		}
 		console.warn(`[title-gen] Naming model "${options.namingModel}" is not available for goal summary; falling back`);
 	}

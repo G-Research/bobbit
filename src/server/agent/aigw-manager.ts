@@ -14,13 +14,15 @@
 
 import http from "node:http";
 import https from "node:https";
+import dnsCallback from "node:dns";
 import dns from "node:dns/promises";
 import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { globalAgentDir } from "../bobbit-dir.js";
+import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
@@ -338,9 +340,12 @@ export function normalizeAigwModelId(modelId: string): string {
 		const exact = models.find((m: any) => m?.id === modelId);
 		if (exact) return modelId;
 		const bareMatches = models.filter((m: any) => m?.id === bareId);
-		if (bareMatches.length === 0) return modelId;
-		const upstreamMatch = bareMatches.find((m: any) => m?.upstreamProvider === upstream);
-		if (upstreamMatch || bareMatches.length === 1) return bareId;
+		// Old generated files can contain duplicate bare ids from different
+		// upstreams. Even a provenance match is not enough to erase the prefix:
+		// the resulting bare preference would bind whichever duplicate Pi sees
+		// first. Wait for a successful regeneration to make the candidate unique.
+		if (bareMatches.length !== 1) return modelId;
+		return bareId;
 	} catch { /* best-effort */ }
 	return modelId;
 }
@@ -738,6 +743,101 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 	setBedrockEnvVars(aigwUrl);
 }
 
+export function collectAigwProviderDnsHosts(provider: any): string[] {
+	let configuredOrigin = "";
+	try { configuredOrigin = new URL(provider?.baseUrl).origin; }
+	catch { return []; }
+	const hosts = new Set<string>();
+	for (const model of Array.isArray(provider?.models) ? provider.models : []) {
+		if (typeof model?.baseUrl !== "string") continue;
+		try {
+			const target = new URL(model.baseUrl);
+			const hostname = target.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+			if (target.protocol === "https:" && target.origin !== configuredOrigin && !net.isIP(hostname)) hosts.add(hostname);
+		} catch { /* malformed entries are ignored by the runtime registry */ }
+	}
+	return [...hosts].sort();
+}
+
+/**
+ * Generate the in-agent DNS guard for cross-origin AIGW provider hostnames.
+ * Pi's SDKs retain the hostname for TLS, while this guard validates and returns
+ * the exact DNS answers used by each socket connection. Content-addressing
+ * keeps restored/sandboxed extension mounts stable across model refreshes.
+ */
+export function writeAigwDnsGuardExtension(): string | undefined {
+	const provider = readModelsJson()?.providers?.aigw;
+	const hosts = collectAigwProviderDnsHosts(provider);
+	if (hosts.length === 0) return undefined;
+	const code = `import dns from "node:dns";
+import net from "node:net";
+const guardedHosts = new Set(${JSON.stringify(hosts)});
+const originalLookup = dns.lookup.bind(dns);
+function isPublicIpv4(address: string): boolean {
+  const octets = address.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b, c] = octets;
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+  if (a === 192 && b === 88 && c === 99) return false;
+  if (a === 198 && (b === 18 || b === 19 || b === 51)) return false;
+  if (a === 203 && b === 0 && c === 113) return false;
+  if (a >= 240) return false;
+  return true;
+}
+function isPublicIp(address: string): boolean {
+  const version = net.isIP(address);
+  if (version === 4) return isPublicIpv4(address);
+  if (version !== 6) return false;
+  const lower = address.toLowerCase().split("%")[0];
+  const dotted = lower.match(/^(?:0*:){5}(?:ffff:)?(\\d+\\.\\d+\\.\\d+\\.\\d+)$/);
+  if (dotted) return isPublicIpv4(dotted[1]);
+  const mapped = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mapped) {
+    const value = (Number.parseInt(mapped[1], 16) << 16) | Number.parseInt(mapped[2], 16);
+    return isPublicIpv4([value >>> 24, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join("."));
+  }
+  if (lower === "::" || lower === "::1" || /^f[cd]/.test(lower) || /^fe[89ab]/.test(lower) || /^ff/.test(lower)) return false;
+  if (/^2001:db8(?:[:]|$)/.test(lower)) return false;
+  return /^[23]/.test(lower);
+}
+(dns as any).lookup = (hostname: string, options: any, callback?: any) => {
+  const cb = typeof options === "function" ? options : callback;
+  const requested = typeof options === "function" || options == null ? {} : typeof options === "number" ? { family: options } : options;
+  if (!guardedHosts.has(hostname.toLowerCase())) return typeof options === "function"
+    ? (originalLookup as any)(hostname, options)
+    : (originalLookup as any)(hostname, options, callback);
+  (originalLookup as any)(hostname, { all: true, verbatim: true }, (error: Error | null, answers: Array<{ address: string; family: number }>) => {
+    if (error) return cb(error);
+    if (!Array.isArray(answers) || answers.length === 0 || answers.some((answer) => !isPublicIp(answer.address))) {
+      const rejected: NodeJS.ErrnoException = new Error("AIGW provider DNS resolved to a non-public address");
+      rejected.code = "EAI_AGAIN";
+      return cb(rejected);
+    }
+    const eligible = requested.family ? answers.filter((answer) => answer.family === requested.family) : answers;
+    if (eligible.length === 0) return cb(Object.assign(new Error("No validated AIGW provider address for requested family"), { code: "EAI_AGAIN" }));
+    return requested.all ? cb(null, eligible) : cb(null, eligible[0].address, eligible[0].family);
+  });
+};
+export default function aigwDnsGuard() {}
+`;
+	const hash = createHash("sha256").update(code).digest("hex").slice(0, 16);
+	const dir = path.join(bobbitStateDir(), "aigw-dns-guard", hash);
+	const file = path.join(dir, "guard.ts");
+	try {
+		fs.mkdirSync(dir, { recursive: true });
+		if (!fs.existsSync(file) || fs.readFileSync(file, "utf-8") !== code) fs.writeFileSync(file, code, "utf-8");
+		return file;
+	} catch (error) {
+		console.warn("[aigw] Failed to write DNS guard extension:", error);
+		return undefined;
+	}
+}
+
 /**
  * Remove the "aigw" provider from models.json.
  */
@@ -990,16 +1090,66 @@ function structurallyValidateTarget(raw: string, configuredOrigin: string): URL 
 	}
 }
 
+type DnsLookup = typeof dnsCallback.lookup;
+
+/**
+ * Wrap DNS lookup so every connection to an approved cross-origin provider
+ * resolves once, validates every answer, and returns those exact answers to the
+ * socket. This closes the validation/connect rebinding gap while retaining the
+ * original hostname for HTTPS SNI and certificate verification.
+ */
+export function createAigwGuardedLookup(guardedHosts: ReadonlySet<string>, originalLookup: DnsLookup): DnsLookup {
+	return ((hostname: string, options: any, callback?: any) => {
+		const cb = typeof options === "function" ? options : callback;
+		const requested = typeof options === "function" || options == null
+			? {}
+			: typeof options === "number" ? { family: options } : options;
+		if (!guardedHosts.has(hostname.toLowerCase())) {
+			return typeof options === "function"
+				? (originalLookup as any)(hostname, options)
+				: (originalLookup as any)(hostname, options, callback);
+		}
+		(originalLookup as any)(hostname, { all: true, verbatim: true }, (error: Error | null, answers: Array<{ address: string; family: number }>) => {
+			if (error) return cb(error);
+			if (!Array.isArray(answers) || answers.length === 0 || answers.some((answer) => !isPublicIp(answer.address))) {
+				const rejected = new Error("AIGW provider DNS resolved to a non-public address");
+				(rejected as NodeJS.ErrnoException).code = "EAI_AGAIN";
+				return cb(rejected);
+			}
+			const eligible = requested.family ? answers.filter((answer) => answer.family === requested.family) : answers;
+			if (eligible.length === 0) {
+				const missing = new Error("AIGW provider DNS returned no address for the requested family");
+				(missing as NodeJS.ErrnoException).code = "EAI_AGAIN";
+				return cb(missing);
+			}
+			if (requested.all) return cb(null, eligible);
+			return cb(null, eligible[0].address, eligible[0].family);
+		});
+	}) as DnsLookup;
+}
+
+const guardedProviderHosts = new Set<string>();
+let gatewayDnsGuardInstalled = false;
+
+function registerProviderDnsGuard(target: URL, configuredOrigin: string): void {
+	const hostname = target.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	if (target.origin === configuredOrigin || net.isIP(hostname)) return;
+	guardedProviderHosts.add(hostname);
+	if (gatewayDnsGuardInstalled) return;
+	gatewayDnsGuardInstalled = true;
+	const originalLookup = dnsCallback.lookup.bind(dnsCallback) as DnsLookup;
+	dnsCallback.lookup = createAigwGuardedLookup(guardedProviderHosts, originalLookup);
+}
+
 function validateProviderBaseTarget(raw: string, configuredOrigin: string): URL | null {
 	const target = structurallyValidateTarget(raw, configuredOrigin);
 	if (!target) return null;
-	if (target.origin === configuredOrigin) return target;
-	// Provider base URLs are persisted for a separate pi-ai process, where this
-	// module cannot carry a pinned lookup into the SDK. Fail closed for mutable
-	// cross-origin DNS names rather than validating once and permitting rebinding.
-	// Public literal HTTPS addresses remain safe because they cannot re-resolve.
-	const hostname = target.hostname.replace(/^\[|\]$/g, "");
-	return target.protocol === "https:" && net.isIP(hostname) && isPublicIp(hostname) ? target : null;
+	// Cross-origin DNS names stay as hostnames for TLS. Both the gateway process
+	// and every spawned Pi process install a lookup guard which validates and pins
+	// the answers used by each actual connection; a one-time discovery lookup is
+	// deliberately not treated as authorization for a later request.
+	registerProviderDnsGuard(target, configuredOrigin);
+	return target;
 }
 
 interface ValidatedTarget {
@@ -1444,11 +1594,20 @@ async function resolveWellKnownPayload(
 	}
 }
 
-function filterValidatedProviderUrls(config: WellKnownConfig, configuredOrigin: string): WellKnownConfig {
-	const entries = Object.entries(config.provider ?? {}).filter(([, provider]) =>
-		provider && typeof provider.options?.baseURL === "string" &&
-		validateProviderBaseTarget(provider.options.baseURL, configuredOrigin) !== null,
-	);
+async function filterValidatedProviderUrls(config: WellKnownConfig, configuredOrigin: string): Promise<WellKnownConfig> {
+	const entries: Array<[string, WkProvider]> = [];
+	for (const [name, provider] of Object.entries(config.provider ?? {})) {
+		if (!provider || typeof provider.options?.baseURL !== "string") continue;
+		const target = validateProviderBaseTarget(provider.options.baseURL, configuredOrigin);
+		if (!target) continue;
+		// Discovery admission resolves public DNS now, while the installed runtime
+		// lookup guard independently re-resolves, validates, and pins the answers
+		// used for every later connection.
+		if (target.origin !== configuredOrigin && !net.isIP(target.hostname)) {
+			if (!await validateAndPinTarget(target.href, configuredOrigin)) continue;
+		}
+		entries.push([name, provider]);
+	}
 	return { ...config, provider: Object.fromEntries(entries) };
 }
 
@@ -1499,7 +1658,7 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 
 	const fetchedWellKnown = await fetchWellKnownConfig(url);
 	if (fetchedWellKnown && fetchedWellKnown.provider) {
-		const wellKnown = filterValidatedProviderUrls(fetchedWellKnown, gateway.origin);
+		const wellKnown = await filterValidatedProviderUrls(fetchedWellKnown, gateway.origin);
 		return { models: translateWellKnown(wellKnown, url), wellKnown };
 	}
 
@@ -1531,6 +1690,9 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 			...(upstreamProvider ? { upstreamProvider } : {}),
 			name: deriveName(item.id),
 			api: "openai-completions",
+			// Legacy /v1/models discovery implies the matching completions root is
+			// /v1, even when the user configured the bare gateway origin.
+			baseUrl: url.endsWith("/v1") ? url : `${url}/v1`,
 			reasoning: meta.reasoning,
 			input: meta.input,
 			contextWindow: Math.max(Number.isFinite(ctxFromGw) ? ctxFromGw : 0, meta.contextWindow),
@@ -1551,7 +1713,14 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 			};
 		} else if (meta.reasoning && isOpenAiFamily(item.id)) {
 			const wireId = stripPrefix(item.id);
-			model = { ...model, id: wireId, wireId, api: "openai-responses", baseUrl: openaiResponsesBaseUrl };
+			model = {
+				...model,
+				id: wireId,
+				wireId,
+				api: "openai-responses",
+				baseUrl: openaiResponsesBaseUrl,
+				compat: { ...(meta.compat ?? {}), supportsReasoningEffort: true },
+			};
 		}
 		const emittedId = model.id;
 		if (!emittedIds.has(emittedId)) {

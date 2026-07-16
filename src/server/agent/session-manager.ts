@@ -71,7 +71,7 @@ import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from ".
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
-import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString } from "./aigw-manager.js";
+import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
@@ -1242,6 +1242,12 @@ export class SessionManager {
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
+
+	/** Clear auto-selection discovery state after configure, refresh, or removal. */
+	invalidateAigwModelCache(): void {
+		this._aigwModelCache = null;
+	}
+
 	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
 
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
@@ -2833,6 +2839,11 @@ export class SessionManager {
 		const codeAssistPath = writeGoogleCodeAssistProviderExtension(sessionId);
 		if (codeAssistPath) {
 			args.push("--extension", codeAssistPath);
+		}
+
+		const aigwDnsGuardPath = writeAigwDnsGuardExtension();
+		if (aigwDnsGuardPath) {
+			args.push("--extension", aigwDnsGuardPath);
 		}
 
 		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
