@@ -6,14 +6,15 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import fs from "node:fs";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
 
 import { buildDockerRunArgs } from "../../src/server/agent/docker-args.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
+import { resolveSandboxTokens } from "../../src/server/agent/session-manager.js";
 import {
 	buildSandboxAgentAuthJson,
 	ensureSandboxAgentAuthFile,
@@ -24,9 +25,22 @@ import {
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 
 const previousEnv: Record<string, string | undefined> = {};
+const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+const fsSpies: Array<{ mockRestore(): void }> = [];
+let fixtureSequence = 0;
 let root: string;
 let agentDir: string;
 let bobbitDir: string;
+
+beforeAll(() => {
+	for (const name of ["existsSync", "mkdirSync", "readFileSync", "rmSync", "statSync", "writeFileSync"] as const) {
+		fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
+	}
+});
+
+afterAll(() => {
+	for (const spy of fsSpies) spy.mockRestore();
+});
 
 function setEnv(key: string, value: string | undefined): void {
 	if (!(key in previousEnv)) previousEnv[key] = process.env[key];
@@ -43,8 +57,8 @@ function restoreEnv(): void {
 }
 
 function writeAuthJson(data: unknown): void {
-	mkdirSync(agentDir, { recursive: true });
-	writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify(data, null, 2));
+	fs.mkdirSync(agentDir, { recursive: true });
+	fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify(data, null, 2));
 }
 
 function dockerVolumes(args: string[]): string[] {
@@ -57,7 +71,8 @@ function dockerVolumes(args: string[]): string[] {
 
 describe("sandbox OpenAI Codex auth", () => {
 	beforeEach(() => {
-		root = mkdtempSync(path.join(tmpdir(), "bobbit-codex-auth-"));
+		root = path.resolve("/memfs/codex-auth", `case-${fixtureSequence++}`);
+		fs.mkdirSync(root, { recursive: true });
 		agentDir = path.join(root, "agent");
 		bobbitDir = path.join(root, ".bobbit");
 		setEnv("BOBBIT_AGENT_DIR", agentDir);
@@ -70,7 +85,7 @@ describe("sandbox OpenAI Codex auth", () => {
 	afterEach(() => {
 		restoreEnv();
 		resetAgentDirForTest();
-		rmSync(root, { recursive: true, force: true });
+		fs.rmSync(root, { recursive: true, force: true });
 	});
 
 	it("writes empty sandbox auth.json when OpenAI/Codex is not allowed", () => {
@@ -85,7 +100,7 @@ describe("sandbox OpenAI Codex auth", () => {
 
 		const file = ensureSandboxAgentAuthFile({ includeCodexAuth: false, scope: "excluded-project" });
 		assert.equal(file, sandboxAgentAuthPath("excluded-project"));
-		const written = readFileSync(file, "utf-8");
+		const written = fs.readFileSync(file, "utf-8");
 		assert.equal(written.includes("codex-access"), false);
 		assert.deepEqual(JSON.parse(written), {});
 	});
@@ -111,7 +126,7 @@ describe("sandbox OpenAI Codex auth", () => {
 
 		const file = ensureSandboxAgentAuthFile({ includeCodexAuth: true, scope: "allowed-project" });
 		assert.equal(file, sandboxAgentAuthPath("allowed-project"));
-		const written = JSON.parse(readFileSync(file, "utf-8"));
+		const written = JSON.parse(fs.readFileSync(file, "utf-8"));
 		assert.deepEqual(written, auth);
 	});
 
@@ -133,7 +148,7 @@ describe("sandbox OpenAI Codex auth", () => {
 		assert.ok(!authMount.includes(path.join(agentDir, "auth.json")), "must not mount the full host auth.json");
 		assert.ok(!volumes.some((v) => v === `${agentDir}:/home/node/.bobbit/agent` || v === `${agentDir}:/home/node/.bobbit/agent:ro`));
 
-		const written = readFileSync(sandboxAgentAuthPath("excluded-project"), "utf-8");
+		const written = fs.readFileSync(sandboxAgentAuthPath("excluded-project"), "utf-8");
 		assert.equal(written.includes("codex-access"), false);
 		assert.deepEqual(JSON.parse(written), {});
 	});
@@ -155,12 +170,12 @@ describe("sandbox OpenAI Codex auth", () => {
 		assert.ok(authMount, "sandbox auth.json should be mounted read-only");
 		assert.ok(!authMount.includes(path.join(agentDir, "auth.json")), "must not mount the full host auth.json");
 
-		const written = JSON.parse(readFileSync(sandboxAgentAuthPath("allowed-project"), "utf-8"));
+		const written = JSON.parse(fs.readFileSync(sandboxAgentAuthPath("allowed-project"), "utf-8"));
 		assert.deepEqual(written, { "openai-codex": { type: "api_key", key: "codex-key" } });
 	});
 
 	it("mounts preference-backed OpenAI Codex auth when sandbox token policy allows it", () => {
-		const prefs = new PreferencesStore(path.join(root, "state"));
+		const prefs = new PreferencesStore(path.join(root, "state"), memoryFs);
 		prefs.set("providerKey.openai-codex", "pref-codex-key");
 		writeAuthJson({
 			"openai-codex": { type: "api_key", key: "host-codex-key" },
@@ -177,7 +192,7 @@ describe("sandbox OpenAI Codex auth", () => {
 		const authMount = volumes.find((v) => v.endsWith(":/home/node/.bobbit/agent/auth.json:ro"));
 		assert.ok(authMount, "sandbox auth.json should be mounted read-only");
 
-		const written = JSON.parse(readFileSync(sandboxAgentAuthPath("pref-project"), "utf-8"));
+		const written = JSON.parse(fs.readFileSync(sandboxAgentAuthPath("pref-project"), "utf-8"));
 		assert.deepEqual(written, { "openai-codex": { type: "api_key", key: "pref-codex-key" } });
 	});
 
@@ -190,7 +205,6 @@ describe("sandbox OpenAI Codex auth", () => {
 		assert.equal(resolveHostTokenValue("ANTHROPIC_OAUTH_TOKEN"), "anthropic-env-key");
 		assert.equal(resolveHostTokenValue("OPENAI_API_KEY"), "openai-env-key");
 
-		const { resolveSandboxTokens } = await import("../../src/server/agent/session-manager.ts");
 		const projectConfig = {
 			getSandboxTokens: () => [
 				{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true },
