@@ -7,7 +7,7 @@
  * checks batched: the in-process integration cleanup runs after every test, so
  * splitting pure scenario permutations here materially increases suite time.
  */
-import { describe, it } from "vitest";
+import { it } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
@@ -174,7 +174,7 @@ test.afterAll(() => {
 
 // Suite-owned project contexts and the canned runner make each declaration
 // deterministic without the compatibility harness's per-test entity sweep.
-describe("base_ref API validation", () => {
+test.describe("base_ref API validation", () => {
 	it("persists remote refs, clears empty values, and accepts local/whitespace refs", async () => {
 		const remoteSet = await put(gitProjectId, { base_ref: "origin/develop" });
 		expect(remoteSet.status, JSON.stringify(remoteSet.json)).toBe(200);

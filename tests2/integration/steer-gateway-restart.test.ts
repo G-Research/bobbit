@@ -7,7 +7,7 @@
  * real busy turn or wall-clock delay. Restore then re-enqueues the ledger once;
  * a fresh bridge echoes it into the transcript observed after reconnect.
  */
-import { describe, it } from "vitest";
+import { it } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -21,7 +21,7 @@ import { attachLocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
 
 test.beforeAll(() => { /* boot the fork-scoped gateway before direct declarations */ });
 
-describe("Steer + gateway restart (AC §3)", () => {
+test.describe("Steer + gateway restart (AC §3)", () => {
 	it("steered queued text survives in-flight restart exactly once, ordered", async () => {
 		const priorQueueDrop = process.env.MOCK_STEER_QUEUE_DROP;
 		process.env.MOCK_STEER_QUEUE_DROP = "always";
