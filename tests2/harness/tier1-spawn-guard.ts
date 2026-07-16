@@ -1,0 +1,83 @@
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import { basename } from "node:path";
+import type * as ChildProcess from "node:child_process";
+import { prepareGitTemplate } from "./git-template.js";
+
+const DISABLE_ENV = "BOBBIT_TIER1_SPAWN_GUARD_DISABLE";
+const STATE_KEY = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
+const GUARDED_APIS = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"] as const;
+type GuardedApi = (typeof GUARDED_APIS)[number];
+type ChildProcessModule = typeof ChildProcess;
+
+interface GuardState {
+	installed: boolean;
+	originals?: Pick<ChildProcessModule, GuardedApi>;
+}
+
+type ProcessWithGuardState = NodeJS.Process & { [STATE_KEY]?: GuardState };
+const childProcess = createRequire(import.meta.url)("node:child_process") as ChildProcessModule;
+
+function state(): GuardState {
+	const owner = process as ProcessWithGuardState;
+	return owner[STATE_KEY] ??= { installed: false };
+}
+
+function displayExecutable(api: GuardedApi, firstArgument: unknown): string {
+	if (typeof firstArgument !== "string" || firstArgument.trim() === "") return "<unknown>";
+	let executable = firstArgument;
+	if (api === "exec" || api === "execSync") {
+		const match = /^\s*(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(firstArgument);
+		executable = match?.[1] ?? match?.[2] ?? match?.[3] ?? firstArgument;
+	}
+	return basename(executable) || executable;
+}
+
+function blocked(api: GuardedApi, firstArgument: unknown): never {
+	const executable = displayExecutable(api, firstArgument);
+	throw new Error(
+		`[tests2/tier1-spawn-guard] blocked child_process.${api} executable=${JSON.stringify(executable)}. ` +
+		"Tier-1 tests must inject a commandRunner/gitRunner fake or copy the prebuilt repository with copyGitTemplate(); " +
+		"unavoidable bootstrap commands belong in runFixtureCommand() before this guard is installed.",
+	);
+}
+
+/** Install the process-wide tier-1 subprocess fence. Repeated installs are harmless. */
+export function installTier1SpawnGuard(): () => void {
+	const shared = state();
+	if (shared.installed) return () => {};
+	const originals = {} as Pick<ChildProcessModule, GuardedApi>;
+	for (const api of GUARDED_APIS) originals[api] = childProcess[api] as never;
+	shared.originals = originals;
+	shared.installed = true;
+
+	for (const api of GUARDED_APIS) {
+		(childProcess as unknown as Record<GuardedApi, (...args: unknown[]) => never>)[api] = (...args: unknown[]) => blocked(api, args[0]);
+	}
+	// Built-in ESM named exports are live only after explicitly syncing mutations
+	// made through the CommonJS facade. This catches imports made before setup too.
+	syncBuiltinESMExports();
+
+	let restored = false;
+	return () => {
+		if (restored || !shared.installed || shared.originals !== originals) return;
+		restored = true;
+		for (const api of GUARDED_APIS) {
+			(childProcess as unknown as Record<GuardedApi, unknown>)[api] = originals[api];
+		}
+		shared.originals = undefined;
+		shared.installed = false;
+		syncBuiltinESMExports();
+	};
+}
+
+/** True when this fork has activated the tier-1 subprocess fence. */
+export function isTier1SpawnGuardInstalled(): boolean {
+	return state().installed;
+}
+
+// Vitest loads this module as a setup file. Build the one allowed git template
+// first, then close every subprocess API before test modules are collected.
+if (process.env[DISABLE_ENV] !== "1") {
+	await prepareGitTemplate();
+	installTier1SpawnGuard();
+}
