@@ -87,11 +87,17 @@ function connectWs(sessionId: string): Promise<{
 		});
 
 		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: TOKEN() })));
-		ws.on("error", reject);
+		let authTimer: ReturnType<typeof setTimeout>;
+		ws.on("error", (error) => {
+			clearInterval(iv);
+			clearTimeout(authTimer);
+			reject(error);
+		});
 
 		const iv = setInterval(() => {
 			if (messages.some((m) => m.type === "auth_ok")) {
 				clearInterval(iv);
+				clearTimeout(authTimer);
 				resolve({
 					ws, messages,
 					waitFor(pred, timeoutMs = 30_000) {
@@ -108,13 +114,46 @@ function connectWs(sessionId: string): Promise<{
 			}
 		}, 50);
 
-		setTimeout(() => { clearInterval(iv); reject(new Error("WS auth timeout")); }, 15_000);
+		authTimer = setTimeout(() => { clearInterval(iv); reject(new Error("WS auth timeout")); }, 15_000);
 	});
 }
 
-// Wait for the server to be fully ready (replaces fixed sleep)
+let sharedSessionId: string;
+let sharedConn: Awaited<ReturnType<typeof connectWs>>;
+let sharedGoalId: string;
+let taskGoalId: string;
+let artifactGoalId: string;
+
+// Build reusable route fixtures once. Declarations whose contract is entity
+// creation or deletion continue to own their records.
 test.beforeAll(async () => {
 	await waitForHealth();
+	sharedSessionId = await createSession();
+	sharedConn = await connectWs(sharedSessionId);
+
+	const sharedGoal = await apiFetch("/api/goals", {
+		method: "POST",
+		body: JSON.stringify({ title: "Shared tools route goal", cwd: nonGitCwd(), spec: "spec here" }),
+	});
+	sharedGoalId = (await sharedGoal.json()).id;
+	const taskGoal = await apiFetch("/api/goals", {
+		method: "POST",
+		body: JSON.stringify({ title: "Shared task route goal", cwd: nonGitCwd(), team: true, worktree: false }),
+	});
+	taskGoalId = (await taskGoal.json()).id;
+	const artifactGoal = await apiFetch("/api/goals", {
+		method: "POST",
+		body: JSON.stringify({ title: "Shared gate route goal", cwd: nonGitCwd(), team: false, workflowId: "general" }),
+	});
+	artifactGoalId = (await artifactGoal.json()).id;
+});
+
+test.afterAll(async () => {
+	sharedConn.close();
+	await deleteSession(sharedSessionId);
+	for (const id of [sharedGoalId, taskGoalId, artifactGoalId]) {
+		await apiFetch(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => {});
+	}
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -136,9 +175,6 @@ test.describe("Health endpoint", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 test.describe("Sessions API", () => {
-	let sessionId: string;
-	test.afterEach(async () => { if (sessionId) { await deleteSession(sessionId); sessionId = ""; } });
-
 	test("POST creates a session @smoke", async () => {
 		const resp = await apiFetch("/api/sessions", {
 			method: "POST",
@@ -148,24 +184,22 @@ test.describe("Sessions API", () => {
 		const data = await resp.json();
 		expect(data.id).toBeTruthy();
 		expect(data.status).toBeTruthy();
-		sessionId = data.id;
+		await deleteSession(data.id);
 	});
 
 	test("GET lists sessions @smoke", async () => {
-		sessionId = await createSession();
 		const resp = await apiFetch("/api/sessions");
 		expect(resp.status).toBe(200);
 		const { sessions } = await resp.json();
 		expect(Array.isArray(sessions)).toBe(true);
-		expect(sessions.some((s: any) => s.id === sessionId)).toBe(true);
+		expect(sessions.some((s: any) => s.id === sharedSessionId)).toBe(true);
 	});
 
 	test("GET /:id returns a single session", async () => {
-		sessionId = await createSession();
-		const resp = await apiFetch(`/api/sessions/${sessionId}`);
+		const resp = await apiFetch(`/api/sessions/${sharedSessionId}`);
 		expect(resp.status).toBe(200);
 		const data = await resp.json();
-		expect(data.id).toBe(sessionId);
+		expect(data.id).toBe(sharedSessionId);
 		expect(data.cwd).toBeTruthy();
 	});
 
@@ -175,29 +209,26 @@ test.describe("Sessions API", () => {
 	});
 
 	test("DELETE terminates a session", async () => {
-		sessionId = await createSession();
+		const sessionId = await createSession();
 		const resp = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 		expect(resp.status).toBe(200);
 		const listResp = await apiFetch("/api/sessions");
 		const { sessions } = await listResp.json();
 		expect(sessions.some((s: any) => s.id === sessionId)).toBe(false);
-		sessionId = "";
 	});
 
 	test("PATCH updates colorIndex", async () => {
-		sessionId = await createSession();
-		const resp = await apiFetch(`/api/sessions/${sessionId}`, {
+		const resp = await apiFetch(`/api/sessions/${sharedSessionId}`, {
 			method: "PATCH",
 			body: JSON.stringify({ colorIndex: 7 }),
 		});
 		expect(resp.status).toBe(200);
-		const getResp = await apiFetch(`/api/sessions/${sessionId}`);
+		const getResp = await apiFetch(`/api/sessions/${sharedSessionId}`);
 		expect((await getResp.json()).colorIndex).toBe(7);
 	});
 
 	test("PATCH updates accessory", async () => {
-		sessionId = await createSession();
-		const resp = await apiFetch(`/api/sessions/${sessionId}`, {
+		const resp = await apiFetch(`/api/sessions/${sharedSessionId}`, {
 			method: "PATCH",
 			body: JSON.stringify({ accessory: "crown" }),
 		});
@@ -205,13 +236,12 @@ test.describe("Sessions API", () => {
 	});
 
 	test("PATCH updates preview flag", async () => {
-		sessionId = await createSession();
-		const resp = await apiFetch(`/api/sessions/${sessionId}`, {
+		const resp = await apiFetch(`/api/sessions/${sharedSessionId}`, {
 			method: "PATCH",
 			body: JSON.stringify({ preview: true }),
 		});
 		expect(resp.status).toBe(200);
-		const getResp = await apiFetch(`/api/sessions/${sessionId}`);
+		const getResp = await apiFetch(`/api/sessions/${sharedSessionId}`);
 		expect((await getResp.json()).preview).toBe(true);
 	});
 });
@@ -221,9 +251,6 @@ test.describe("Sessions API", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 test.describe("Goals API", () => {
-	let goalId: string;
-	test.afterEach(async () => { if (goalId) { await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {}); goalId = ""; } });
-
 	test("POST creates a goal @smoke", async () => {
 		const resp = await apiFetch("/api/goals", {
 			method: "POST",
@@ -234,15 +261,12 @@ test.describe("Goals API", () => {
 		expect(data.id).toBeTruthy();
 		expect(data.title).toBe("E2E test goal");
 		expect(data.state).toBe("todo");
-		goalId = data.id;
+		const goalId = data.id;
+		await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 	});
 
 	test("GET lists goals", async () => {
-		const resp1 = await apiFetch("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({ title: "List test", cwd: nonGitCwd() }),
-		});
-		goalId = (await resp1.json()).id;
+		const goalId = sharedGoalId;
 		const resp = await apiFetch("/api/goals");
 		expect(resp.status).toBe(200);
 		const { goals } = await resp.json();
@@ -250,22 +274,14 @@ test.describe("Goals API", () => {
 	});
 
 	test("GET /:id returns a single goal", async () => {
-		const resp1 = await apiFetch("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({ title: "Get test", cwd: nonGitCwd(), spec: "spec here" }),
-		});
-		goalId = (await resp1.json()).id;
+		const goalId = sharedGoalId;
 		const resp = await apiFetch(`/api/goals/${goalId}`);
 		expect(resp.status).toBe(200);
 		expect((await resp.json()).spec).toBe("spec here");
 	});
 
 	test("PUT updates a goal", async () => {
-		const resp1 = await apiFetch("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({ title: "Update test", cwd: nonGitCwd() }),
-		});
-		goalId = (await resp1.json()).id;
+		const goalId = sharedGoalId;
 		const resp = await apiFetch(`/api/goals/${goalId}`, {
 			method: "PUT",
 			body: JSON.stringify({ title: "Updated title", state: "in-progress" }),
@@ -282,7 +298,7 @@ test.describe("Goals API", () => {
 			method: "POST",
 			body: JSON.stringify({ title: "Archive test", cwd: nonGitCwd() }),
 		});
-		goalId = (await resp1.json()).id;
+		const goalId = (await resp1.json()).id;
 		// Server requires explicit cascade query param (422 CASCADE_REQUIRED otherwise).
 		const resp = await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 		expect(resp.status).toBe(200);
@@ -298,7 +314,6 @@ test.describe("Goals API", () => {
 			body: JSON.stringify({ title: "Should fail" }),
 		});
 		expect(putResp.status).toBe(409);
-		goalId = "";
 	});
 
 	test("creating a session under a goal auto-transitions to in-progress", async () => {
@@ -306,7 +321,7 @@ test.describe("Goals API", () => {
 			method: "POST",
 			body: JSON.stringify({ title: "Integration test goal", cwd: nonGitCwd() }),
 		});
-		goalId = (await resp1.json()).id;
+		const goalId = (await resp1.json()).id;
 		expect((await (await apiFetch(`/api/goals/${goalId}`)).json()).state).toBe("todo");
 
 		const sessResp = await apiFetch("/api/sessions", {
@@ -317,6 +332,7 @@ test.describe("Goals API", () => {
 
 		expect((await (await apiFetch(`/api/goals/${goalId}`)).json()).state).toBe("in-progress");
 		await deleteSession(sessId);
+		await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 	});
 });
 
@@ -327,15 +343,8 @@ test.describe("Goals API", () => {
 test.describe("Tasks API", () => {
 	let goalId: string;
 
-	test.beforeEach(async () => {
-		const resp = await apiFetch("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({ title: "Task test goal " + Date.now(), cwd: nonGitCwd(), team: true, worktree: false }),
-		});
-		goalId = (await resp.json()).id;
-	});
-	test.afterEach(async () => {
-		if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
+	test.beforeEach(() => {
+		goalId = taskGoalId;
 	});
 
 	test("creates a non-implementation task without design-doc", async () => {
@@ -420,15 +429,8 @@ test.describe("Tasks API", () => {
 test.describe("Artifacts API", () => {
 	let goalId: string;
 
-	test.beforeEach(async () => {
-		const resp = await apiFetch("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({ title: "Gate test " + Date.now(), cwd: nonGitCwd(), team: false, workflowId: "general" }),
-		});
-		goalId = (await resp.json()).id;
-	});
-	test.afterEach(async () => {
-		if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
+	test.beforeEach(() => {
+		goalId = artifactGoalId;
 	});
 
 	test("CRUD lifecycle", async () => {
@@ -516,83 +518,64 @@ test.describe("Auth enforcement", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 test.describe("WebSocket protocol", () => {
-	let sessionId: string;
-	test.afterEach(async () => { if (sessionId) { await deleteSession(sessionId); sessionId = ""; } });
-
 	test("authenticates and receives initial state", async () => {
-		sessionId = await createSession();
-		const conn = await connectWs(sessionId);
-		try {
-			expect(conn.messages.some((m) => m.type === "auth_ok")).toBe(true);
-			const status = await conn.waitFor((m) => m.type === "session_status");
-			expect(typeof status.status).toBe("string");
-			const title = await conn.waitFor((m) => m.type === "session_title");
-			expect(title.sessionId).toBe(sessionId);
-			const queue = await conn.waitFor((m) => m.type === "queue_update");
-			expect(queue.queue).toEqual([]);
-		} finally {
-			conn.close();
-		}
+		expect(sharedConn.messages.some((m) => m.type === "auth_ok")).toBe(true);
+		const status = await sharedConn.waitFor((m) => m.type === "session_status");
+		expect(typeof status.status).toBe("string");
+		const title = await sharedConn.waitFor((m) => m.type === "session_title");
+		expect(title.sessionId).toBe(sharedSessionId);
+		const queue = await sharedConn.waitFor((m) => m.type === "queue_update");
+		expect(queue.queue).toEqual([]);
 	});
 
 	test("rejects invalid auth token", async () => {
-		sessionId = await createSession();
 		const result = await new Promise<string>((resolve) => {
-			const ws = new WebSocket(`${wsBase()}/ws/${sessionId}`);
+			const ws = new WebSocket(`${wsBase()}/ws/${sharedSessionId}`);
+			let settled = false;
+			let timer: ReturnType<typeof setTimeout>;
+			const finish = (value: string) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				ws.close();
+				resolve(value);
+			};
+			timer = setTimeout(() => finish("timeout"), 5000);
 			ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: "bad-token" })));
 			ws.on("message", (data) => {
 				const msg = JSON.parse(data.toString());
-				if (msg.type === "auth_failed") resolve("auth_failed");
+				if (msg.type === "auth_failed") finish("auth_failed");
 			});
-			ws.on("close", (code) => resolve(`closed:${code}`));
-			setTimeout(() => resolve("timeout"), 5000);
+			ws.on("close", (code) => finish(`closed:${code}`));
 		});
 		expect(result).toBe("auth_failed");
 	});
 
 	test("ping/pong works", async () => {
-		sessionId = await createSession();
-		const conn = await connectWs(sessionId);
-		try {
-			conn.send({ type: "ping" });
-			const pong = await conn.waitFor((m) => m.type === "pong");
-			expect(pong.type).toBe("pong");
-		} finally {
-			conn.close();
-		}
+		sharedConn.send({ type: "ping" });
+		const pong = await sharedConn.waitFor((m) => m.type === "pong");
+		expect(pong.type).toBe("pong");
 	});
 
 	test("set_title updates session title", async () => {
-		sessionId = await createSession();
-		const conn = await connectWs(sessionId);
-		try {
-			conn.send({ type: "set_title", title: "My Custom Title" });
-			const titleMsg = await conn.waitFor(
-				(m) => m.type === "session_title" && m.title === "My Custom Title",
-			);
-			expect(titleMsg.title).toBe("My Custom Title");
+		sharedConn.send({ type: "set_title", title: "My Custom Title" });
+		const titleMsg = await sharedConn.waitFor(
+			(m) => m.type === "session_title" && m.title === "My Custom Title",
+		);
+		expect(titleMsg.title).toBe("My Custom Title");
 
-			const resp = await apiFetch(`/api/sessions/${sessionId}`);
-			expect((await resp.json()).title).toBe("My Custom Title");
-		} finally {
-			conn.close();
-		}
+		const resp = await apiFetch(`/api/sessions/${sharedSessionId}`);
+		expect((await resp.json()).title).toBe("My Custom Title");
 	});
 
 	test("second client gets client_joined, first gets client_left on disconnect", async () => {
-		sessionId = await createSession();
-		const conn1 = await connectWs(sessionId);
-		try {
-			const conn2 = await connectWs(sessionId);
-			const joinMsg = await conn1.waitFor((m) => m.type === "client_joined", 5000);
-			expect(joinMsg.clientId).toBeTruthy();
+		const conn2 = await connectWs(sharedSessionId);
+		const joinMsg = await sharedConn.waitFor((m) => m.type === "client_joined", 5000);
+		expect(joinMsg.clientId).toBeTruthy();
 
-			conn2.close();
-			const leftMsg = await conn1.waitFor((m) => m.type === "client_left", 5000);
-			expect(leftMsg.clientId).toBeTruthy();
-		} finally {
-			conn1.close();
-		}
+		conn2.close();
+		const leftMsg = await sharedConn.waitFor((m) => m.type === "client_left", 5000);
+		expect(leftMsg.clientId).toBeTruthy();
 	});
 });
 

@@ -17,7 +17,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	deleteGoal,
-	gitCwd,
+	nonGitCwd,
 	rawApiFetch,
 	readE2EToken,
 	seedTeamLeadHeader,
@@ -52,12 +52,13 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 	};
 }
 
-async function createParentGoal(): Promise<{ id: string; repoPath?: string }> {
+async function createParentGoal(): Promise<{ id: string }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
 			title: `unresolved-children parent ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			cwd: gitCwd(),
+			cwd: nonGitCwd(),
+			worktree: false,
 			autoStartTeam: false,
 			workflowId: "feature",
 		}),
@@ -69,14 +70,26 @@ async function createParentGoal(): Promise<{ id: string; repoPath?: string }> {
 			const r = await apiFetch(`/api/goals/${created.id}`);
 			if (r.status !== 200) return null;
 			const g = await r.json();
-			return g.setupStatus === "ready" && g.repoPath ? g : null;
+			return g.setupStatus === "ready" ? g : null;
 		},
-		{ timeoutMs: 30_000, intervalMs: 100, label: `parent ${created.id} setup ready` },
+		{ timeoutMs: 5_000, intervalMs: 25, label: `parent ${created.id} setup ready` },
 	);
 	return settled;
 }
 
 async function spawnChild(parentId: string, planId: string): Promise<string> {
+	const context = gw.projectContextManager.getContextForGoal(parentId);
+	const parent = context.goalStore.get(parentId);
+	const dependencyPlanId = `fixture-dependency-${planId}`;
+	const dependency = await context.goalManager.createGoal(`dependency ${planId}`, nonGitCwd(), {
+		spec: "Data-only dependency used to suppress incidental child-team startup while the route guard is exercised.",
+		workflowId: "feature",
+		projectId: parent.projectId,
+		parentGoalId: parentId,
+		worktree: false,
+	});
+	await context.goalManager.updateGoal(dependency.id, { spawnedFromPlanId: dependencyPlanId });
+
 	// spawn-child is an ORCHESTRATION verb (cookie does NOT bypass) — authorize
 	// as the parent's team-lead via a seeded matching header.
 	const tlHeader = seedTeamLeadHeader(gw, parentId);
@@ -85,6 +98,7 @@ async function spawnChild(parentId: string, planId: string): Promise<string> {
 		headers: authHeaders(tlHeader),
 		body: JSON.stringify({
 			planId,
+			dependsOn: [dependencyPlanId],
 			title: `child ${planId}`,
 			spec: "child goal spec used to assert the parent cannot complete while this child is unresolved (live).",
 		}),
@@ -92,6 +106,10 @@ async function spawnChild(parentId: string, planId: string): Promise<string> {
 	expect(resp.status).toBe(201);
 	const body = await resp.json();
 	expect(body.id).toBeTruthy();
+	// Resolve the fixture dependency and restore the target to a live runnable
+	// state without requesting a team start; only descendant state matters here.
+	await context.goalManager.updateGoal(dependency.id, { state: "complete" });
+	await context.goalManager.updateGoal(body.id, { state: "todo" });
 	return body.id;
 }
 
@@ -178,7 +196,7 @@ test.describe("request body-size cap — 413 BODY_TOO_LARGE", () => {
 		// > 1 MiB declared body. The Content-Length precheck in the request
 		// handler refuses it with a definitive 413 before auth/dispatch and
 		// before any handler buffers or JSON-parses the payload.
-		const oversized = JSON.stringify({ title: "x".repeat(1024 * 1024 + 64), cwd: gitCwd() });
+		const oversized = JSON.stringify({ title: "x".repeat(1024 * 1024 + 64), cwd: nonGitCwd(), worktree: false });
 		const resp = await rawApiFetch("/api/goals", {
 			method: "POST",
 			headers: authHeaders(),
@@ -195,7 +213,8 @@ test.describe("request body-size cap — 413 BODY_TOO_LARGE", () => {
 			method: "POST",
 			body: JSON.stringify({
 				title: `body-cap sanity ${Date.now()}`,
-				cwd: gitCwd(),
+				cwd: nonGitCwd(),
+				worktree: false,
 				autoStartTeam: false,
 				workflowId: "feature",
 			}),

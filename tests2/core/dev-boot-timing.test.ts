@@ -2,7 +2,7 @@
 // Source: tests/dev-boot-timing.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -29,12 +29,16 @@ function sample(extra: Partial<BootTimingSample> = {}): BootTimingSample {
 	};
 }
 
-beforeEach(() => {
-	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-boot-timing-"));
+beforeAll(() => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-boot-"));
 });
 
-afterEach(() => {
-	try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch { /* ignore */ }
+beforeEach(() => {
+	fs.rmSync(path.join(stateDir, BOOT_TIMING_FILE), { force: true });
+});
+
+afterAll(() => {
+	fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
 describe("dev-boot-timing sink", () => {

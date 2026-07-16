@@ -457,7 +457,7 @@ function runTargetedTest(worktreePath, testFile, tier) {
  * This is spec R8's over-narrow-targeting guard: a kill by a NON-listed test
  * still counts and updates the corpus entry's expectedV2Catchers.
  *
- * Scope: the `v2-core`, `v2-core-isolated`, and `v2-dom` projects. The
+ * Scope: the `v2-core`, `v2-isolated`, and `v2-dom` projects. The
  * `v2-integration` project boots a real gateway per fork and is excluded here
  * for cost — its coverage is exercised by the per-file targeted integration
  * runs. Running every core+dom test (hundreds of files) is unambiguously the
@@ -467,7 +467,7 @@ function runFullV2Suite(worktreePath) {
   const configPath = path.join(worktreePath, "vitest.config.ts");
   const reportPath = path.join(worktreePath, `.chaos-fullv2-${Date.now()}.json`);
   const cliArgs = [VITEST_ENTRY, "run", "--config", configPath,
-    "--project", "v2-core", "--project", "v2-core-isolated", "--project", "v2-dom",
+    "--project", "v2-core", "--project", "v2-isolated", "--project", "v2-dom",
     "--reporter=json", `--outputFile=${reportPath}`];
   const result = runCommand("node", cliArgs, worktreePath, 360_000);
   const parsed = parseVitestJsonFailures(reportPath, worktreePath);

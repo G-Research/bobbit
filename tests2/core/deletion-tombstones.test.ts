@@ -1,15 +1,31 @@
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import {
+	deletionTombstoneFile,
+	readAllDeletionTombstones,
+	readDeletionTombstones,
+	recordDeletionTombstone,
+} from "../../src/server/agent/deletion-tombstones.ts";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
-const { recordDeletionTombstone, readDeletionTombstones, readAllDeletionTombstones, deletionTombstoneFile } = await import(
-	"../../src/server/agent/deletion-tombstones.ts"
-);
+const ROOT = path.resolve("/memfs/deletion-tombstones");
+let fixtureSequence = 0;
+let restoreFs: () => void;
+
+beforeAll(() => {
+	const scoped = installScopedMemFs(["existsSync", "mkdirSync", "readFileSync", "writeFileSync"]);
+	restoreFs = scoped.restore;
+	scoped.fs.mkdirSync(ROOT, { recursive: true });
+});
+
+afterAll(() => restoreFs());
 
 function tmpDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-tombstones-"));
+	const dir = path.join(ROOT, `case-${fixtureSequence++}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
 }
 
 describe("deletion tombstones", () => {

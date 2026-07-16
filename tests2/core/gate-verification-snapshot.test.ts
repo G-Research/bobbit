@@ -2,12 +2,13 @@
 // Source: tests/gate-verification-snapshot.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { afterAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { installScopedMemoryFs } from "./helpers/scoped-memory-fs.ts";
 import { GateArtifactResolutionError, buildArtifactLookup, resolveArtifactFromLookup } from "../../src/server/gate-artifacts.ts";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "../../src/server/gate-verification-snapshot.ts";
 import {
@@ -18,9 +19,17 @@ import {
 } from "../../src/server/agent/verification-harness.ts";
 
 const tempDirs: string[] = [];
+let sharedArtifactFixtureDir: string | undefined;
+let sharedLiveLogPath: string | undefined;
+let restoreFs: (() => void) | undefined;
+
+beforeAll(() => {
+	restoreFs = installScopedMemoryFs();
+});
 
 afterAll(() => {
 	for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+	restoreFs?.();
 });
 
 function makeTempDir(): string {
@@ -29,13 +38,18 @@ function makeTempDir(): string {
 	return dir;
 }
 
-function writeLines(filePath: string, prefix: string, count: number): void {
-	const fd = fs.openSync(filePath, "w");
-	try {
-		for (let i = 1; i <= count; i++) fs.writeSync(fd, `${prefix}-${i}\n`);
-	} finally {
-		fs.closeSync(fd);
-	}
+function makeSharedArtifactFixtureDir(): string {
+	return sharedArtifactFixtureDir ??= makeTempDir();
+}
+
+function makeSharedLiveLog(): string {
+	if (sharedLiveLogPath) return sharedLiveLogPath;
+	const dir = makeTempDir();
+	sharedLiveLogPath = path.join(dir, "shared-live.log");
+	// Just over the 256 KiB read cap: the head drives bounded full-mode
+	// selection, while the suffix drives the line-aware tail selection.
+	fs.writeFileSync(sharedLiveLogPath, `${lines("full-mode-line", 15_000)}\n${lines("live-line", 10_000)}\n`);
+	return sharedLiveLogPath;
 }
 
 function makeSnapshot(outFile: string, selectionOptions?: Parameters<typeof buildGateVerificationSnapshot>[0]["selectionOptions"]) {
@@ -97,7 +111,7 @@ function makeMultiStepSnapshot(stepName?: string, selectionOptions?: Parameters<
 }
 
 function makeDiagnosticsSnapshot(selectionOptions?: Parameters<typeof buildGateVerificationSnapshot>[0]["selectionOptions"]) {
-	const dir = makeTempDir();
+	const dir = makeSharedArtifactFixtureDir();
 	const stdoutPath = path.join(dir, "stdout.log");
 	const stderrPath = path.join(dir, "stderr.log");
 	const artifactPath = path.join(dir, "artifacts", "test-results", "case", "error-context.md");
@@ -122,7 +136,7 @@ function makeArtifactDiagnosticsSnapshot(input: {
 	stdoutPath?: string;
 	stderrPath?: string;
 }) {
-	const dir = input.dir ?? makeTempDir();
+	const dir = input.dir ?? makeSharedArtifactFixtureDir();
 	const stdoutPath = input.stdoutPath ?? path.join(dir, "stdout.log");
 	const stderrPath = input.stderrPath ?? path.join(dir, "stderr.log");
 	if (!fs.existsSync(stdoutPath)) fs.writeFileSync(stdoutPath, "retained stdout marker\n", "utf8");
@@ -365,7 +379,7 @@ describe("gate verification retained diagnostics compactness", () => {
 			selectionOptions: { mode: "full" },
 			artifacts: Array.from({ length: artifactCount }, (_, i) => ({
 				relativePath: `test-results/failing-case-${String(i + 1).padStart(3, "0")}/error-context.md`,
-				content: `# Error Context\n${marker}-${i + 1}\n${"artifact body ".repeat(500)}\n`,
+				content: `# Error Context\n${marker}-${i + 1}\n${"artifact body ".repeat(20)}\n`,
 			})),
 		});
 		const json = JSON.stringify(snapshot);
@@ -507,17 +521,13 @@ describe("gate verification retained diagnostics compactness", () => {
 
 describe("gate verification active live command log reads", () => {
 	it("default tail selection reads a bounded suffix and exposes the last 20 live log lines", () => {
-		const dir = makeTempDir();
-		const outFile = path.join(dir, "stdout.log");
-		writeLines(outFile, "live-line", 100_000);
-
-		const snapshot = makeSnapshot(outFile);
+		const snapshot = makeSnapshot(makeSharedLiveLog());
 		const step = snapshot.steps[0];
 
 		assert.equal(step.status, "running");
-		assert.match(step.output ?? "", /live-line-99981/);
-		assert.match(step.output ?? "", /live-line-100000/);
-		assert.doesNotMatch(step.output ?? "", /live-line-99980/);
+		assert.match(step.output ?? "", /live-line-9981/);
+		assert.match(step.output ?? "", /live-line-10000/);
+		assert.doesNotMatch(step.output ?? "", /live-line-9980/);
 		assert.doesNotMatch(step.output ?? "", /live-line-1\b/);
 		assert.equal(step.selection?.mode, "tail");
 		assert.equal(step.selection?.truncated, true);
@@ -525,15 +535,11 @@ describe("gate verification active live command log reads", () => {
 	});
 
 	it("non-tail selection modes mark live logs truncated before selection when the read budget is reached", () => {
-		const dir = makeTempDir();
-		const outFile = path.join(dir, "stdout.log");
-		writeLines(outFile, "full-mode-line", 100_000);
-
-		const snapshot = makeSnapshot(outFile, { mode: "full" });
+		const snapshot = makeSnapshot(makeSharedLiveLog(), { mode: "full" });
 		const step = snapshot.steps[0];
 
 		assert.match(step.output ?? "", /full-mode-line-1\b/);
-		assert.doesNotMatch(step.output ?? "", /full-mode-line-100000\b/);
+		assert.doesNotMatch(step.output ?? "", /full-mode-line-15000\b/);
 		assert.equal(step.selection?.truncated, true);
 		assert.match(step.selection?.truncationReason ?? "", /live log read bounded to first \d+ bytes before selection/);
 	});

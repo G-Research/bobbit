@@ -4,11 +4,11 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { detectPrimaryBranch } from "../../src/server/skills/git.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -118,16 +118,22 @@ function moduleName(modulePath: string): string {
 	return path.basename(modulePath).replace(/\.(tsx?|jsx?)$/, "");
 }
 
-function git(cwd: string, args: string[]): void {
-	execFileSync("git", args, { cwd, stdio: "ignore", windowsHide: true });
+function fakeGitRunner(run: (args: readonly string[]) => string): CommandRunner {
+	return {
+		execFile: async (file, args) => {
+			assert.equal(file, "git");
+			return { stdout: run(args), stderr: "" };
+		},
+	};
 }
 
-function initCommittedRepo(dir: string, branch: string): void {
-	fs.mkdirSync(dir, { recursive: true });
-	git(dir, ["init", "--initial-branch", branch]);
-	git(dir, ["config", "user.email", "test@bobbit.local"]);
-	git(dir, ["config", "user.name", "test"]);
-	git(dir, ["commit", "--allow-empty", "-m", "init"]);
+function noPrimaryRefsRunner(options: { insideWorktree?: boolean; originUrl?: string } = {}): CommandRunner {
+	return fakeGitRunner((args) => {
+		if (args[0] === "remote" && args[1] === "get-url" && options.originUrl) return `${options.originUrl}\n`;
+		if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree" && options.insideWorktree) return "true\n";
+		if (args[0] === "for-each-ref") return "";
+		throw new Error(`fake git failure: ${args.join(" ")}`);
+	});
 }
 
 async function capturePrimaryBranchWarnings(run: () => Promise<void>): Promise<string[]> {
@@ -222,87 +228,65 @@ describe("clean build warning regression tests", () => {
 	});
 
 	it("keeps expected primary-branch fallback quiet for minimal test repos", async () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-primary-branch-fallback-"));
-		try {
-			execFileSync("git", ["init", "-q"], { cwd: tmp, windowsHide: true });
+		const cwd = path.join(repoRoot, ".tmp-primary-branch-fallback");
+		const runner = noPrimaryRefsRunner({ insideWorktree: true });
+		const warnings = await capturePrimaryBranchWarnings(async () => {
+			const primary = await detectPrimaryBranch(cwd, runner);
+			assert.equal(primary, "master");
+		});
 
-			const warnings = await capturePrimaryBranchWarnings(async () => {
-				const primary = await detectPrimaryBranch(tmp);
-				assert.equal(primary, "master");
-			});
-
-			assert.equal(
-				primaryBranchWarningCount(warnings),
-				0,
-				`expected minimal test repo fallback to avoid noisy detectPrimaryBranch warnings, got:\n${warnings.join("\n")}`,
-			);
-		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
-		}
+		assert.equal(
+			primaryBranchWarningCount(warnings),
+			0,
+			`expected minimal test repo fallback to avoid noisy detectPrimaryBranch warnings, got:\n${warnings.join("\n")}`,
+		);
 	});
 
 	it("keeps expected non-git temp fallback paths quiet", async () => {
-		const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-e2e-"));
+		const tmpRoot = path.join(os.tmpdir(), `bobbit-e2e-${Date.now()}`);
 		const projectDir = path.join(tmpRoot, `proj-isolation-${Date.now()}`);
-		try {
-			fs.mkdirSync(projectDir, { recursive: true });
+		const runner = noPrimaryRefsRunner();
+		const warnings = await capturePrimaryBranchWarnings(async () => {
+			assert.equal(await detectPrimaryBranch(os.tmpdir(), runner), "master");
+			assert.equal(await detectPrimaryBranch(tmpRoot, runner), "master");
+			assert.equal(await detectPrimaryBranch(projectDir, runner), "master");
+		});
 
-			const warnings = await capturePrimaryBranchWarnings(async () => {
-				assert.equal(await detectPrimaryBranch(os.tmpdir()), "master");
-				assert.equal(await detectPrimaryBranch(tmpRoot), "master");
-				assert.equal(await detectPrimaryBranch(projectDir), "master");
-			});
-
-			assert.equal(
-				primaryBranchWarningCount(warnings),
-				0,
-				`expected non-git temp fallback paths to avoid noisy detectPrimaryBranch warnings, got:\n${warnings.join("\n")}`,
-			);
-		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
-		}
+		assert.equal(
+			primaryBranchWarningCount(warnings),
+			0,
+			`expected non-git temp fallback paths to avoid noisy detectPrimaryBranch warnings, got:\n${warnings.join("\n")}`,
+		);
 	});
 
 	it("keeps expected temp worktree fallback paths quiet when no primary refs exist", async () => {
-		const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verif-restart-repo-"));
+		const tmpRoot = path.join(os.tmpdir(), `verif-restart-repo-${Date.now()}`);
 		const worktreeDir = path.join(`${tmpRoot}-wt`, "goal-test");
-		try {
-			initCommittedRepo(worktreeDir, "goal/test");
+		const runner = noPrimaryRefsRunner({ insideWorktree: true });
+		const warnings = await capturePrimaryBranchWarnings(async () => {
+			const primary = await detectPrimaryBranch(worktreeDir, runner);
+			assert.equal(primary, "master");
+		});
 
-			const warnings = await capturePrimaryBranchWarnings(async () => {
-				const primary = await detectPrimaryBranch(worktreeDir);
-				assert.equal(primary, "master");
-			});
-
-			assert.equal(
-				primaryBranchWarningCount(warnings),
-				0,
-				`expected temp worktree fallback paths to avoid noisy detectPrimaryBranch warnings, got:\n${warnings.join("\n")}`,
-			);
-		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
-			fs.rmSync(`${tmpRoot}-wt`, { recursive: true, force: true });
-		}
+		assert.equal(
+			primaryBranchWarningCount(warnings),
+			0,
+			`expected temp worktree fallback paths to avoid noisy detectPrimaryBranch warnings, got:\n${warnings.join("\n")}`,
+		);
 	});
 
 	it("still warns once when a repo has an origin but no detectable primary branch", async () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-primary-branch-origin-"));
-		try {
-			initCommittedRepo(tmp, "feature/test");
-			git(tmp, ["remote", "add", "origin", "https://example.invalid/repo.git"]);
+		const cwd = path.join(repoRoot, `.tmp-primary-branch-origin-${Date.now()}`);
+		const runner = noPrimaryRefsRunner({ insideWorktree: true, originUrl: "https://example.invalid/repo.git" });
+		const warnings = await capturePrimaryBranchWarnings(async () => {
+			assert.equal(await detectPrimaryBranch(cwd, runner), "master");
+			assert.equal(await detectPrimaryBranch(cwd, runner), "master");
+		});
 
-			const warnings = await capturePrimaryBranchWarnings(async () => {
-				assert.equal(await detectPrimaryBranch(tmp), "master");
-				assert.equal(await detectPrimaryBranch(tmp), "master");
-			});
-
-			assert.equal(
-				primaryBranchWarningCount(warnings),
-				1,
-				`expected one production diagnostic for origin-backed repo fallback, got:\n${warnings.join("\n")}`,
-			);
-		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
-		}
+		assert.equal(
+			primaryBranchWarningCount(warnings),
+			1,
+			`expected one production diagnostic for origin-backed repo fallback, got:\n${warnings.join("\n")}`,
+		);
 	});
 });

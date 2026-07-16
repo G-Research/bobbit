@@ -9,15 +9,14 @@ import {
 	createSession,
 	deleteSession,
 	connectWs,
-	waitForHealth,
 	apiFetch,
-	agentEndPredicate,
-	registerProject,
+	defaultProjectId,
+	harnessDefaultProjectRoot,
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { attachLocalMockAgentClock, type LocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
 
 // Use a DEDICATED, unique cwd per worker (NOT the shared nonGitCwd) so the
 // slash-skill discovery cache cannot return a previously-cached empty skill
@@ -27,11 +26,14 @@ import { join } from "node:path";
 // beforeAll wrote SKILL.md, the cache would mask our skill until it expires.
 let skillCwd: string;
 let skillProjectId: string;
+let sessionId: string;
+let conn: Awaited<ReturnType<typeof connectWs>>;
+let agentClock: LocalMockAgentClock;
 
-test.beforeAll(async () => {
-	await waitForHealth();
-
-	skillCwd = join(tmpdir(), `bobbit-e2e-slash-skill-${process.pid}-${Date.now()}`);
+test.beforeAll(async ({ gateway }) => {
+	// A unique cwd under the immutable harness project avoids project
+	// registration and the 5s discovery cache while preserving real discovery.
+	skillCwd = join(harnessDefaultProjectRoot(), ".e2e-workspaces", `slash-skill-${process.pid}-${Date.now()}`);
 	const skillDir = join(skillCwd, ".claude", "skills", "e2e-test-skill");
 	mkdirSync(skillDir, { recursive: true });
 	writeFileSync(
@@ -42,16 +44,17 @@ description: E2E test skill for slash command expansion
 EXPANDED_SKILL_CONTENT_E2E_MARKER
 `,
 	);
-	const project = await registerProject({
-		name: `slash-skill-${Date.now()}`,
-		rootPath: skillCwd,
-		seedWorkflows: false,
-	});
-	skillProjectId = project.id;
+	skillProjectId = (await defaultProjectId())!;
+	sessionId = await createSession({ cwd: skillCwd, projectId: skillProjectId });
+	agentClock = attachLocalMockAgentClock(gateway, sessionId);
+	conn = await connectWs(sessionId);
+	await conn.waitFor((m) => m.type === "queue_update", 5_000);
 });
 
 test.afterAll(async () => {
-	if (skillProjectId) await apiFetch(`/api/projects/${skillProjectId}`, { method: "DELETE" }).catch(() => {});
+	conn.close();
+	await deleteSession(sessionId).catch(() => {});
+	rmSync(skillCwd, { recursive: true, force: true });
 });
 
 /** Predicate for user message_end events. */
@@ -70,33 +73,26 @@ function extractText(msg: WsMsg): string {
 test.describe("Slash skill E2E", () => {
 	test.describe.configure({ mode: "serial" });
 	test("story 32: prefix slash skill expands to skill content @smoke", async () => {
-		const sessionId = await createSession({ cwd: skillCwd, projectId: skillProjectId });
-		const conn = await connectWs(sessionId);
+		const cursor = conn.messageCount();
+		const agentEnded = conn.waitForFrom(cursor, (m) => m.type === "event" && m.data?.type === "agent_end", 10_000);
+		conn.send({ type: "prompt", text: "/e2e-test-skill some args" });
 
-		try {
-			await conn.waitFor((m) => m.type === "queue_update", 5_000);
-			conn.send({ type: "prompt", text: "/e2e-test-skill some args" });
+		const userMsgEnd = await agentClock.advanceUntilSettled(conn.waitForFrom(cursor, userMessageEnd, 10_000));
+		const userText = extractText(userMsgEnd);
 
-			const userMsgEnd = await conn.waitFor(userMessageEnd, 10_000);
-			const userText = extractText(userMsgEnd);
+		// New contract: persisted user message text is the literal slash
+		// invocation; the expanded body lives in skillExpansions[].expanded.
+		expect(userText).toBe("/e2e-test-skill some args");
+		expect(userText).not.toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
 
-			// New contract: persisted user message text is the literal slash
-			// invocation; the expanded body lives in skillExpansions[].expanded.
-			expect(userText).toBe("/e2e-test-skill some args");
-			expect(userText).not.toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
+		const expansions = userMsgEnd.data.message.skillExpansions;
+		expect(Array.isArray(expansions)).toBe(true);
+		expect(expansions.length).toBe(1);
+		expect(expansions[0].name).toBe("e2e-test-skill");
+		expect(expansions[0].args).toBe("some args");
+		expect(expansions[0].expanded).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
 
-			const expansions = userMsgEnd.data.message.skillExpansions;
-			expect(Array.isArray(expansions)).toBe(true);
-			expect(expansions.length).toBe(1);
-			expect(expansions[0].name).toBe("e2e-test-skill");
-			expect(expansions[0].args).toBe("some args");
-			expect(expansions[0].expanded).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
-
-			await conn.waitFor(agentEndPredicate(), 10_000);
-		} finally {
-			conn.close();
-			await deleteSession(sessionId);
-		}
+		await agentClock.advanceUntilSettled(agentEnded);
 	});
 
 	test("story 33: intra-prompt slash skill expands inline", async () => {
@@ -107,41 +103,34 @@ test.describe("Slash skill E2E", () => {
 		expect(existsSync(skillFile), `Skill file must exist at ${skillFile}`).toBe(true);
 
 		// Verify the session's cwd matches where the skill was created.
-		const sessionId = await createSession({ cwd: skillCwd, projectId: skillProjectId });
 		const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
 		const session = await sessionResp.json();
 		expect(session.cwd).toBe(skillCwd);
 
-		const conn = await connectWs(sessionId);
+		const cursor = conn.messageCount();
+		const agentEnded = conn.waitForFrom(cursor, (m) => m.type === "event" && m.data?.type === "agent_end", 10_000);
+		conn.send({
+			type: "prompt",
+			text: "Analyse using /e2e-test-skill the code",
+		});
 
-		try {
-			await conn.waitFor((m) => m.type === "queue_update", 5_000);
-			conn.send({
-				type: "prompt",
-				text: "Analyse using /e2e-test-skill the code",
-			});
+		const userMsgEnd = await agentClock.advanceUntilSettled(conn.waitForFrom(cursor, userMessageEnd, 10_000));
+		const userText = extractText(userMsgEnd);
 
-			const userMsgEnd = await conn.waitFor(userMessageEnd, 10_000);
-			const userText = extractText(userMsgEnd);
+		// New contract: persisted text retains the literal slash; expansion
+		// body is carried in skillExpansions[].expanded.
+		expect(userText).toBe("Analyse using /e2e-test-skill the code");
+		expect(userText).not.toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
 
-			// New contract: persisted text retains the literal slash; expansion
-			// body is carried in skillExpansions[].expanded.
-			expect(userText).toBe("Analyse using /e2e-test-skill the code");
-			expect(userText).not.toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
+		const expansions = userMsgEnd.data.message.skillExpansions;
+		expect(Array.isArray(expansions)).toBe(true);
+		expect(expansions.length).toBe(1);
+		expect(expansions[0].name).toBe("e2e-test-skill");
+		expect(expansions[0].expanded).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
+		// Range should point at the literal `/e2e-test-skill` token.
+		const [start, end] = expansions[0].range;
+		expect(userText.slice(start, end)).toBe("/e2e-test-skill");
 
-			const expansions = userMsgEnd.data.message.skillExpansions;
-			expect(Array.isArray(expansions)).toBe(true);
-			expect(expansions.length).toBe(1);
-			expect(expansions[0].name).toBe("e2e-test-skill");
-			expect(expansions[0].expanded).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
-			// Range should point at the literal `/e2e-test-skill` token.
-			const [start, end] = expansions[0].range;
-			expect(userText.slice(start, end)).toBe("/e2e-test-skill");
-
-			await conn.waitFor(agentEndPredicate(), 10_000);
-		} finally {
-			conn.close();
-			await deleteSession(sessionId);
-		}
+		await agentClock.advanceUntilSettled(agentEnded);
 	});
 });

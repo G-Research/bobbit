@@ -2,7 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, defaultProject, defaultProjectId, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
-import { gateDiagnosticsGoalDir } from "../../src/server/agent/gate-diagnostics-cleanup.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
+
+let gateDiagnosticsGoalDir: typeof import("../../src/server/agent/gate-diagnostics-cleanup.js").gateDiagnosticsGoalDir;
+
+test.beforeAll(async () => {
+	({ gateDiagnosticsGoalDir } = (await loadServerTestRuntime()).gateDiagnosticsCleanup);
+});
 
 const SPEC = "Gate diagnostics cleanup E2E goal spec padded enough to satisfy goal creation validation.";
 

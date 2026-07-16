@@ -11,10 +11,26 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
+
+let restoreCommandRunner: (() => void) | undefined;
+
+test.beforeAll(({ gateway }) => {
+	const runner = gateway.sessionManager.commandRunner as CommandRunner;
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	const reject = (file: string): never => {
+		throw new Error(`non-git project fixture does not execute ${basename(file)}`);
+	};
+	runner.execFile = async file => reject(file);
+	runner.execFileSync = file => reject(file);
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
+});
+
+test.afterAll(() => restoreCommandRunner?.());
 
 test.describe("Bug 1: Fresh folder has zero projects (no implicit default)", () => {
 	test("gateway starts with an empty project list", async () => {
@@ -35,9 +51,12 @@ test.describe("Bug 3: Project registration upsert (idempotent)", () => {
 	let projectRootPath: string;
 
 	test.beforeAll(() => {
-		// Create a real directory to use as project root
-		projectRootPath = join(tmpdir(), `bobbit-e2e-project-${Date.now()}`);
-		mkdirSync(projectRootPath, { recursive: true });
+		// Create a real directory to use as project root.
+		projectRootPath = mkdtempSync(join(tmpdir(), "bobbit-e2e-project-"));
+	});
+
+	test.afterAll(() => {
+		try { rmSync(projectRootPath, { recursive: true, force: true }); } catch { /* ignore */ }
 	});
 
 	test("registering the same rootPath twice with upsert returns existing project", async () => {
@@ -71,17 +90,26 @@ test.describe("Bug 3b: Config write atomicity", () => {
 	let projectId: string;
 	let projectRootPath: string;
 
-	test.beforeAll(async () => {
-		projectRootPath = join(tmpdir(), `bobbit-e2e-config-${Date.now()}`);
-		mkdirSync(projectRootPath, { recursive: true });
+	test.beforeEach(async () => {
+		projectRootPath = mkdtempSync(join(tmpdir(), "bobbit-e2e-config-"));
 
 		const resp = await apiFetch("/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "config-test", rootPath: projectRootPath }),
+			body: JSON.stringify({
+				name: `config-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+				rootPath: projectRootPath,
+				__e2e_seed_skip__: true,
+			}),
 		});
-		// May be 201 or 200 depending on whether Bug 1 fix is in place
+		// May be 201 or 200 depending on whether Bug 1 fix is in place.
 		const project = await resp.json();
 		projectId = project.id;
+	});
+
+	test.afterEach(async () => {
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		try { rmSync(projectRootPath, { recursive: true, force: true }); } catch { /* ignore */ }
+		projectId = "";
 	});
 
 	test("PUT config with one invalid key should write nothing (atomic)", async () => {
@@ -133,19 +161,15 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 	let projectId: string;
 
 	test.beforeAll(async () => {
-		// Create a real git repo with a subdirectory structure:
-		//   <repoDir>/
-		//     packages/my-app/    <-- project rootPath
-		//       package.json
-		repoDir = join(tmpdir(), `bobbit-e2e-subrepo-${Date.now()}`);
+		// The sole assertion in this block remains skipped until the production
+		// subdirectory-worktree contract is implemented. Keep only the directory
+		// shape needed to register its project; constructing a Git repository here
+		// would add subprocess cost without executing or covering Git behavior.
+		repoDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-subrepo-"));
 		subdirPath = join(repoDir, "packages", "my-app");
 		mkdirSync(subdirPath, { recursive: true });
 		writeFileSync(join(subdirPath, "package.json"), JSON.stringify({ name: "my-app" }));
 		writeFileSync(join(repoDir, "README.md"), "# Monorepo\n");
-
-		execFileSync("git", ["init"], { cwd: repoDir, stdio: "pipe" });
-		execFileSync("git", ["add", "."], { cwd: repoDir, stdio: "pipe" });
-		execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir, stdio: "pipe" });
 
 		// Register a project at the subdirectory (not the repo root)
 		const resp = await apiFetch("/api/projects", {
@@ -155,6 +179,11 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		expect(resp.status).toBe(201);
 		const project = await resp.json();
 		projectId = project.id;
+	});
+
+	test.afterAll(async () => {
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		if (repoDir) rmSync(repoDir, { recursive: true, force: true });
 	});
 
 	// TODO: subdirectory worktree CWD offset is not implemented.

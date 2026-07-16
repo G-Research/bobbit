@@ -27,49 +27,9 @@ guardProcessEnv();
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-
-// Module-load shims: `goal-dashboard-plan-tab.ts` transitively imports
-// `state.ts`, which touches localStorage at module init. Polyfill before
-// importing the module under test (same pattern as proposal-helpers.test.ts).
-function makeFakeStorage() {
-	const m = new Map<string, string>();
-	return {
-		getItem: (k: string) => m.get(k) ?? null,
-		setItem: (k: string, v: string) => { m.set(k, v); },
-		removeItem: (k: string) => { m.delete(k); },
-		clear: () => { m.clear(); },
-	};
-}
-(globalThis as any).localStorage = makeFakeStorage();
-(globalThis as any).window ??= { location: { origin: "http://localhost" }, addEventListener: () => {} };
-// lit-html (transitively imported by goal-dashboard-plan-tab.ts) calls
-// document.createTreeWalker at module init. Stub the methods it needs so
-// the import resolves without a real DOM.
-const _treeWalkerStub = { nextNode: () => null, currentNode: null as any, firstChild: () => null, nextSibling: () => null };
-const _createElementStub = (): any => ({
-	content: { firstChild: null, appendChild: () => {}, childNodes: [] },
-	innerHTML: "",
-	appendChild: () => {},
-	setAttribute: () => {},
-});
-// Force-set (not ??=): a partial `document` leaked by an earlier file in the
-// shared fork must not shadow this complete stub (would drop createTreeWalker).
-(globalThis as any).document = {
-	documentElement: { dataset: {}, style: { setProperty: () => {} } },
-	createTreeWalker: () => _treeWalkerStub,
-	createElement: _createElementStub,
-	createElementNS: _createElementStub,
-	createDocumentFragment: () => ({ appendChild: () => {}, childNodes: [] }),
-	createTextNode: (t: string) => ({ data: t, nodeValue: t }),
-	createComment: () => ({}),
-	addEventListener: () => {},
-	dispatchEvent: () => {},
-};
-
-const planTab = await import("../../src/app/goal-dashboard-plan-tab.ts");
-const computePlanStepsForGoal = planTab.computePlanStepsForGoal;
-const { collectDescendants } = await import("../../src/server/agent/goal-descendants.ts");
-type Goal = import("../../src/app/state.ts").Goal;
+import { computePlanStepsForGoal } from "../../src/app/goal-plan-steps.js";
+import { collectDescendants } from "../../src/server/agent/goal-descendants.js";
+import type { Goal } from "../../src/app/state.js";
 
 function goal(over: Partial<Goal> & { id: string; title: string }): Goal {
 	return {

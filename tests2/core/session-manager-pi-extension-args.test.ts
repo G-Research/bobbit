@@ -2,17 +2,33 @@
 // Source: tests/session-manager-pi-extension-args.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
-import os from "node:os";
-import fs from "node:fs";
 
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { resolveMarketplacePiExtensionActivation, type ResolvedPiExtensionContribution } from "../../src/server/agent/session-setup.ts";
 import type { ScopedToolContext } from "../../src/server/agent/tool-manager.ts";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
+import { installMemoryFs } from "./helpers/memory-fs-spies.js";
+import type { MemFs } from "../harness/mem-fs.js";
+
+let memoryFs: MemFs;
+let restoreFs: () => void;
+let fixtureSequence = 0;
+
+beforeEach(() => {
+	({ fs: memoryFs, restore: restoreFs } = installMemoryFs());
+});
+
+afterEach(() => restoreFs());
+
+function fixtureRoot(label: string): string {
+	const root = path.resolve("/memfs/pi-extension-args", `${label}-${fixtureSequence++}`);
+	memoryFs.mkdirSync(root, { recursive: true });
+	return root;
+}
 
 function contribution(listName: string, entryPath: string | undefined, status: ResolvedPiExtensionContribution["diagnostic"]["status"] = "ok"): ResolvedPiExtensionContribution {
 	return {
@@ -53,12 +69,12 @@ function scopedPiToolManager() {
 
 describe("marketplace pi extension activation args", () => {
 	it("emits enabled resolved entries and omits disabled/unresolved entries", () => {
-		const a = path.join(os.tmpdir(), "pi-ext-a", "extension.ts");
-		const b = path.join(os.tmpdir(), "pi-ext-b", "extension.ts");
+		const a = path.resolve("/virtual/pi-ext-a/extension.ts");
+		const b = path.resolve("/virtual/pi-ext-b/extension.ts");
 		const result = resolveMarketplacePiExtensionActivation(
 			() => [
 				contribution("enabled", a),
-				contribution("disabled", path.join(os.tmpdir(), "disabled.ts"), "disabled"),
+				contribution("disabled", path.resolve("/virtual/disabled.ts"), "disabled"),
 				contribution("missing", undefined, "unresolved"),
 				contribution("discovery_failed", b, "discovery-failed"),
 			],
@@ -72,64 +88,56 @@ describe("marketplace pi extension activation args", () => {
 	});
 
 	it("threads marketplace pi extension args through SessionManager restore/respawn helper after Bobbit activation args", () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-session-"));
-		try {
-			const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
-			const manager: any = new SessionManager();
-			manager.setMarketplacePiExtensionResolver((scope: { projectId?: string; cwd?: string }) => {
-				assert.equal(scope.projectId, "project-1");
-				assert.equal(scope.cwd, tmp);
-				return [contribution("demo", extPath)];
-			});
+		const tmp = fixtureRoot("session");
+		const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
+		const manager: any = new SessionManager();
+		manager.setMarketplacePiExtensionResolver((scope: { projectId?: string; cwd?: string }) => {
+			assert.equal(scope.projectId, "project-1");
+			assert.equal(scope.cwd, tmp);
+			return [contribution("demo", extPath)];
+		});
 
-			const { args } = manager.buildToolActivationArgs("session-1", undefined, undefined, tmp, "project-1");
-			const noExtensionsIndex = args.indexOf("--no-extensions");
-			const piIndex = args.indexOf(extPath);
-			const codeAssistIndex = args.findIndex((arg: string) => arg.includes("google-code-assist"));
+		const { args } = manager.buildToolActivationArgs("session-1", undefined, undefined, tmp, "project-1");
+		const noExtensionsIndex = args.indexOf("--no-extensions");
+		const piIndex = args.indexOf(extPath);
+		const codeAssistIndex = args.findIndex((arg: string) => arg.includes("google-code-assist"));
 
-			assert.ok(noExtensionsIndex >= 0, "Bobbit activation args should still be first");
-			assert.ok(piIndex > noExtensionsIndex, "pi extension should be appended after Bobbit activation args");
-			assert.ok(codeAssistIndex === -1 || piIndex < codeAssistIndex, "pi extension should be before generated guard/provider extensions");
-		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
-		}
+		assert.ok(noExtensionsIndex >= 0, "Bobbit activation args should still be first");
+		assert.ok(piIndex > noExtensionsIndex, "pi extension should be appended after Bobbit activation args");
+		assert.ok(codeAssistIndex === -1 || piIndex < codeAssistIndex, "pi extension should be before generated guard/provider extensions");
 	});
 
 	it("overlays cached runtime load diagnostics on resolved marketplace contributions", () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-runtime-diag-"));
-		try {
-			const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
-			const manager: any = new SessionManager();
-			manager.setMarketplacePiExtensionResolver(() => [contribution("demo", extPath)]);
-			const session = { clients: new Set(), eventBuffer: new EventBuffer() };
-			manager.recordPiExtensionDiagnostic(
-				session,
-				{ status: "runtime-load-failed", code: "runtime_load_failed", message: "Pi extension failed to load: boom", updatedAt: "2026-01-02T00:00:00.000Z" },
-				{ listName: "demo", entryPath: extPath, packRoot: tmp, origin: { scope: "project", packName: "pi-pack", packId: "market:project:pi-pack" } },
-			);
+		const tmp = fixtureRoot("runtime-diag");
+		const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
+		const manager: any = new SessionManager();
+		manager.setMarketplacePiExtensionResolver(() => [contribution("demo", extPath)]);
+		const session = { clients: new Set(), eventBuffer: new EventBuffer() };
+		manager.recordPiExtensionDiagnostic(
+			session,
+			{ status: "runtime-load-failed", code: "runtime_load_failed", message: "Pi extension failed to load: boom", updatedAt: "2026-01-02T00:00:00.000Z" },
+			{ listName: "demo", entryPath: extPath, packRoot: tmp, origin: { scope: "project", packName: "pi-pack", packId: "market:project:pi-pack" } },
+		);
 
-			const rows = manager.resolveMarketplacePiExtensionContributions("project-1", tmp);
-			assert.equal(rows[0].diagnostic.status, "runtime-load-failed");
-			assert.equal(rows[0].diagnostic.code, "runtime_load_failed");
-			assert.equal(session.eventBuffer.size, 1);
-		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
-		}
+		const rows = manager.resolveMarketplacePiExtensionContributions("project-1", tmp);
+		assert.equal(rows[0].diagnostic.status, "runtime-load-failed");
+		assert.equal(rows[0].diagnostic.code, "runtime_load_failed");
+		assert.equal(session.eventBuffer.size, 1);
 	});
 
 	it("resolveInitialModel is auth-aware for Code Assist spawn pins", () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-init-model-auth-"));
+		const tmp = fixtureRoot("initial-model-auth");
 		const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 		try {
 			process.env.BOBBIT_AGENT_DIR = tmp;
 			pinAgentDirForTest(tmp);
 			const writeGoogleAuth = () =>
-				fs.writeFileSync(
+				memoryFs.writeFileSync(
 					path.join(tmp, "auth.json"),
 					JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "tok", expires: Date.now() + 60_000 } }),
 					"utf-8",
 				);
-			const clearGoogleAuth = () => fs.writeFileSync(path.join(tmp, "auth.json"), JSON.stringify({}), "utf-8");
+			const clearGoogleAuth = () => memoryFs.writeFileSync(path.join(tmp, "auth.json"), JSON.stringify({}), "utf-8");
 
 			// Fake preferences store returning a stale Code Assist default.sessionModel.
 			let sessionModelPref: string | undefined = "google-gemini-cli/gemini-2.5-pro";
@@ -184,28 +192,23 @@ describe("marketplace pi extension activation args", () => {
 			resetAgentDirForTest();
 			if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
 			else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
-			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});
 
 	it("uses project-scoped pi-extension tool policies when rebuilding guard args after restore or respawn", () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-session-scope-"));
-		try {
-			const manager: any = new SessionManager();
-			manager.toolManager = scopedPiToolManager();
-			const { args } = manager.buildToolActivationArgs(
-				"session-scoped-guard",
-				undefined,
-				{ toolPolicies: { pi_demo: "ask" } },
-				tmp,
-				"project-1",
-			);
-			const guardPath = extensionPaths(args).find((p) => p.includes(`${path.sep}tool-guard${path.sep}`) || p.includes("/tool-guard/"));
-			assert.ok(guardPath, "expected scoped ask policy to emit a guard extension");
-			const code = fs.readFileSync(guardPath!, "utf-8");
-			assert.match(code, /pi_demo/, "guard must include the project-scoped pi-extension tool policy");
-		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
-		}
+		const tmp = fixtureRoot("session-scope");
+		const manager: any = new SessionManager();
+		manager.toolManager = scopedPiToolManager();
+		const { args } = manager.buildToolActivationArgs(
+			"session-scoped-guard",
+			undefined,
+			{ toolPolicies: { pi_demo: "ask" } },
+			tmp,
+			"project-1",
+		);
+		const guardPath = extensionPaths(args).find((p) => p.includes(`${path.sep}tool-guard${path.sep}`) || p.includes("/tool-guard/"));
+		assert.ok(guardPath, "expected scoped ask policy to emit a guard extension");
+		const code = memoryFs.readFileSync(guardPath!, "utf-8");
+		assert.match(code, /pi_demo/, "guard must include the project-scoped pi-extension tool policy");
 	});
 });

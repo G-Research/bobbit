@@ -1,48 +1,27 @@
 /**
  * API E2E — Reopen Archived Proposals (Path B).
  *
- * Path B of the design lifts the 422 block on continuing assistant sessions
- * and clones the source's `<stateDir>/proposal-drafts/<sid>/` directory
- * verbatim into the new session's slot. The cloned directory contains the
- * live `<type>.{md,yaml}` file plus the entire `<type>.history/<rev>.<ext>`
- * snapshot tree so the new agent picks up the in-progress draft and rev
- * counter without colliding.
- *
- * Coverage:
- *   - Goal / role / tool / staff / project assistant happy paths.
- *   - History snapshots survive the clone byte-identical.
- *   - `response.assistantType` is echoed in the 201 body for the UI.
- *   - Negative: goal-linked + delegate sessions still 422.
- *   - No-draft assistant: continue succeeds; no `proposal-drafts/<newId>/`
- *     directory is created (silent no-op).
+ * Path B lifts the 422 block on continuing assistant sessions and clones the
+ * source proposal draft directory verbatim into the new session's slot.
  */
-import { test, expect } from "./_e2e/in-process-harness.js";
-import {
-	apiFetch,
-	connectWs,
-	agentEndPredicate,
-	nonGitCwd,
-	createSession as createSessionFromHarness,
-} from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import fs from "node:fs";
 import path from "node:path";
 
+import { test, expect } from "./_e2e/in-process-harness.js";
+import {
+	apiFetch,
+	nonGitCwd,
+	createSession as createSessionFromHarness,
+} from "./_e2e/e2e-setup.js";
+import { createSessionTracker, seedSessionTranscript, trackGoal } from "./helpers/session-fixtures.js";
+
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+const sessions = createSessionTracker();
 
 async function archive(id: string): Promise<void> {
 	const resp = await apiFetch(`/api/sessions/${id}`, { method: "DELETE" });
 	expect(resp.ok, `archive ${id}: ${resp.status}`).toBe(true);
-}
-
-async function sendPromptAndWait(id: string, text: string): Promise<void> {
-	const ws = await connectWs(id);
-	try {
-		ws.send({ type: "prompt", text });
-		await ws.waitFor(agentEndPredicate(), 10_000);
-	} finally {
-		ws.close();
-	}
 }
 
 async function createAssistantSession(assistantType: string): Promise<string> {
@@ -53,7 +32,12 @@ async function createAssistantSession(assistantType: string): Promise<string> {
 	});
 	expect(resp.status, `create ${assistantType} assistant`).toBe(201);
 	const data = await resp.json();
-	return data.id as string;
+	return sessions.add(data.id as string);
+}
+
+async function archiveWithTranscript(gateway: any, id: string, text: string): Promise<void> {
+	await archive(id);
+	seedSessionTranscript(gateway, id, [{ role: "user", text }]);
 }
 
 function extFor(type: string): string {
@@ -111,10 +95,9 @@ function diffBytes(a: string, b: string): void {
 // ── Tests ────────────────────────────────────────────────────────────────
 
 test.describe("Continue-Archived (assistant) — Path B", () => {
+	test.afterEach(async ({ gateway }) => sessions.cleanup(gateway));
 	test("goal-assistant: clones live file + history snapshots byte-identical", async ({ gateway }) => {
 		const sid = await createAssistantSession("goal");
-		// Continue route rejects empty `.jsonl` with 404 — prime the transcript.
-		await sendPromptAndWait(sid, "prime goal-assistant transcript");
 		await seedDraftWithHistory(sid, "goal",
 			{ title: "Original Title", spec: "Original spec\n", workflow: "feature" },
 			[
@@ -122,14 +105,13 @@ test.describe("Continue-Archived (assistant) — Path B", () => {
 				{ old_text: "Original spec", new_text: "Polished spec" },
 			],
 		);
-		// Sanity: source file and history exist before archive.
 		const srcLive = proposalFile(gateway.bobbitDir, sid, "goal");
 		const srcHist = historyDir(gateway.bobbitDir, sid, "goal");
 		expect(fs.existsSync(srcLive)).toBe(true);
 		const histFiles = fs.readdirSync(srcHist).sort();
 		expect(histFiles.length).toBeGreaterThanOrEqual(2);
 
-		await archive(sid);
+		await archiveWithTranscript(gateway, sid, "prime goal-assistant transcript");
 
 		const resp = await continueArchived(sid);
 		expect(resp.status).toBe(201);
@@ -138,19 +120,11 @@ test.describe("Continue-Archived (assistant) — Path B", () => {
 		expect(data.id).not.toBe(sid);
 		expect(data.assistantType).toBe("goal");
 
-		const newId: string = data.id;
+		const newId = sessions.add(data.id as string);
 		const dstLive = proposalFile(gateway.bobbitDir, newId, "goal");
 		const dstHist = historyDir(gateway.bobbitDir, newId, "goal");
 
-		// Wait for the clone to settle (fs.cpSync is sync in the request handler,
-		// but the response races the disk flush on some Windows FS — pollUntil
-		// keeps the test robust without artificial sleeps).
-		await pollUntil(async () => fs.existsSync(dstLive), {
-			timeoutMs: 5_000,
-			intervalMs: 25,
-			label: "cloned live proposal file exists",
-		});
-
+		// copyProposalDirIfPresent uses cpSync before the response is written.
 		diffBytes(srcLive, dstLive);
 		const dstHistFiles = fs.readdirSync(dstHist).sort();
 		expect(dstHistFiles).toEqual(histFiles);
@@ -161,95 +135,75 @@ test.describe("Continue-Archived (assistant) — Path B", () => {
 
 	test("role-assistant: yaml draft + history clone verbatim", async ({ gateway }) => {
 		const sid = await createAssistantSession("role");
-		await sendPromptAndWait(sid, "prime role-assistant transcript");
 		await seedDraftWithHistory(sid, "role",
 			{ name: "alpha", label: "Alpha Role", prompt: "do alpha things" },
 			[{ old_text: "Alpha Role", new_text: "Alpha Role v2" }],
 		);
-		await archive(sid);
+		await archiveWithTranscript(gateway, sid, "prime role-assistant transcript");
 
 		const resp = await continueArchived(sid);
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
 		expect(data.assistantType).toBe("role");
 
-		const newId: string = data.id;
-		const srcLive = proposalFile(gateway.bobbitDir, sid, "role");
-		const dstLive = proposalFile(gateway.bobbitDir, newId, "role");
-		await pollUntil(async () => fs.existsSync(dstLive), {
-			timeoutMs: 5_000,
-			intervalMs: 25,
-			label: "cloned role proposal file exists",
-		});
-		diffBytes(srcLive, dstLive);
+		const newId = sessions.add(data.id as string);
+		diffBytes(
+			proposalFile(gateway.bobbitDir, sid, "role"),
+			proposalFile(gateway.bobbitDir, newId, "role"),
+		);
 	});
 
 	test("tool-assistant: yaml draft clone", async ({ gateway }) => {
 		const sid = await createAssistantSession("tool");
-		await sendPromptAndWait(sid, "prime tool-assistant transcript");
 		await seedDraftWithHistory(sid, "tool",
 			{ tool: "alpha", action: "create", content: "name: alpha\nlabel: Alpha Tool\n" },
 			[],
 		);
-		await archive(sid);
+		await archiveWithTranscript(gateway, sid, "prime tool-assistant transcript");
 
 		const resp = await continueArchived(sid);
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
 		expect(data.assistantType).toBe("tool");
 
-		const newId: string = data.id;
-		const dstLive = proposalFile(gateway.bobbitDir, newId, "tool");
-		await pollUntil(async () => fs.existsSync(dstLive), {
-			timeoutMs: 5_000,
-			intervalMs: 25,
-			label: "cloned tool proposal file exists",
-		});
-		const srcLive = proposalFile(gateway.bobbitDir, sid, "tool");
-		diffBytes(srcLive, dstLive);
+		const newId = sessions.add(data.id as string);
+		diffBytes(
+			proposalFile(gateway.bobbitDir, sid, "tool"),
+			proposalFile(gateway.bobbitDir, newId, "tool"),
+		);
 	});
 
 	test("staff-assistant: clone happy path", async ({ gateway }) => {
 		const sid = await createAssistantSession("staff");
-		await sendPromptAndWait(sid, "prime staff-assistant transcript");
 		await seedDraftWithHistory(sid, "staff",
 			{ name: "alpha-staff", prompt: "do staff things" },
 			[],
 		);
-		await archive(sid);
+		await archiveWithTranscript(gateway, sid, "prime staff-assistant transcript");
 
 		const resp = await continueArchived(sid);
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
 		expect(data.assistantType).toBe("staff");
 
-		const newId: string = data.id;
-		const dstLive = proposalFile(gateway.bobbitDir, newId, "staff");
-		await pollUntil(async () => fs.existsSync(dstLive), {
-			timeoutMs: 5_000,
-			intervalMs: 25,
-			label: "cloned staff proposal file exists",
-		});
-		const srcLive = proposalFile(gateway.bobbitDir, sid, "staff");
-		diffBytes(srcLive, dstLive);
+		const newId = sessions.add(data.id as string);
+		diffBytes(
+			proposalFile(gateway.bobbitDir, sid, "staff"),
+			proposalFile(gateway.bobbitDir, newId, "staff"),
+		);
 	});
 
 	test("no-draft assistant: continue succeeds, no proposal-drafts dir created", async ({ gateway }) => {
 		const sid = await createAssistantSession("goal");
-		// Send a prompt so the .jsonl has content (continue rejects empty transcripts).
-		await sendPromptAndWait(sid, "no draft, just chatter");
-		// Source has no draft on disk.
 		expect(fs.existsSync(proposalRoot(gateway.bobbitDir, sid))).toBe(false);
-		await archive(sid);
+		await archiveWithTranscript(gateway, sid, "no draft, just chatter");
 
 		const resp = await continueArchived(sid);
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
 		expect(data.assistantType).toBe("goal");
 
-		const newId: string = data.id;
-		// Give the silent no-op a beat — but it really should be synchronous.
-		await pollUntil(async () => true, { timeoutMs: 100, intervalMs: 25, label: "settle" }).catch(() => {});
+		const newId = sessions.add(data.id as string);
 		expect(fs.existsSync(proposalRoot(gateway.bobbitDir, newId))).toBe(false);
 	});
 
@@ -266,13 +220,13 @@ test.describe("Continue-Archived (assistant) — Path B", () => {
 		});
 		expect(goalResp.status).toBe(201);
 		const goal = await goalResp.json();
+		trackGoal(goal.id);
 		const sessionResp = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: nonGitCwd(), goalId: goal.id }),
 		});
 		expect(sessionResp.status).toBe(201);
-		const sid = (await sessionResp.json()).id as string;
-		await sendPromptAndWait(sid, "goal session message");
+		const sid = sessions.add((await sessionResp.json()).id as string);
 		await archive(sid);
 
 		const cont = await continueArchived(sid);
@@ -280,15 +234,13 @@ test.describe("Continue-Archived (assistant) — Path B", () => {
 	});
 
 	test("delegate session is still rejected with 422 (regression guard)", async () => {
-		const parentId = await createSessionFromHarness();
-		await sendPromptAndWait(parentId, "parent");
-		const delegateId = await createSessionFromHarness();
+		const parentId = sessions.add(await createSessionFromHarness());
+		const delegateId = sessions.add(await createSessionFromHarness());
 		const patch = await apiFetch(`/api/sessions/${delegateId}`, {
 			method: "PATCH",
 			body: JSON.stringify({ delegateOf: parentId }),
 		});
 		expect(patch.ok).toBe(true);
-		await sendPromptAndWait(delegateId, "delegate msg");
 		await archive(delegateId);
 
 		const resp = await continueArchived(delegateId);

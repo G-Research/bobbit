@@ -14,12 +14,11 @@
  *   - `copyToolContentDirIfPresent`: no-op when absent; recursive copy
  *     when present.
  */
-import { describe, it } from "vitest";
+import { beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { createFsFromVolume, Volume } from "memfs";
 
 import { formatAgentSessionFilePath, slugifyCwd, formatAgentTimestamp } from "../../src/server/agent/agent-session-path.js";
 import { sessionFileCopy, CrossRealmCopyError } from "../../src/server/agent/session-fs.js";
@@ -29,8 +28,16 @@ import {
 	cleanupFailedContinue,
 } from "../../src/server/agent/continue-archived.js";
 
+let testFs: typeof import("node:fs");
+let dirSequence = 0;
+
+beforeAll(() => {
+	testFs = createFsFromVolume(new Volume()) as unknown as typeof import("node:fs");
+});
+
 function tmpDir(label: string): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-${label}-`));
+	const dir = path.resolve("/memfs/continue-archived", `${label}-${dirSequence++}`);
+	testFs.mkdirSync(dir, { recursive: true });
 	return dir;
 }
 
@@ -90,7 +97,7 @@ describe("sessionFileCopy (non-sandboxed)", () => {
 				Buffer.from([0x00, 0xff, 0x7f, 0x80, 0x01, 0xfe]),
 				Buffer.from("\n", "utf-8"),
 			]);
-			fs.writeFileSync(src, bytes);
+			testFs.writeFileSync(src, bytes);
 
 			await sessionFileCopy(
 				{ sandboxed: false },
@@ -98,13 +105,14 @@ describe("sessionFileCopy (non-sandboxed)", () => {
 				{ sandboxed: false },
 				dst,
 				null,
+				testFs,
 			);
 
-			assert.ok(fs.existsSync(dst), "destination should exist");
-			const got = fs.readFileSync(dst);
+			assert.ok(testFs.existsSync(dst), "destination should exist");
+			const got = testFs.readFileSync(dst);
 			assert.ok(got.equals(bytes), "destination bytes must match source verbatim");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			testFs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
@@ -113,11 +121,11 @@ describe("sessionFileCopy (non-sandboxed)", () => {
 		try {
 			const src = path.join(dir, "src.jsonl");
 			const dst = path.join(dir, "a", "b", "c", "out.jsonl");
-			fs.writeFileSync(src, "x");
-			await sessionFileCopy({ sandboxed: false }, src, { sandboxed: false }, dst, null);
-			assert.ok(fs.existsSync(dst));
+			testFs.writeFileSync(src, "x");
+			await sessionFileCopy({ sandboxed: false }, src, { sandboxed: false }, dst, null, testFs);
+			assert.ok(testFs.existsSync(dst));
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			testFs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
@@ -127,10 +135,10 @@ describe("sessionFileCopy (non-sandboxed)", () => {
 			const src = path.join(dir, "does-not-exist.jsonl");
 			const dst = path.join(dir, "dst.jsonl");
 			await assert.rejects(
-				sessionFileCopy({ sandboxed: false }, src, { sandboxed: false }, dst, null),
+				sessionFileCopy({ sandboxed: false }, src, { sandboxed: false }, dst, null, testFs),
 			);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			testFs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
@@ -179,10 +187,10 @@ describe("copyToolContentDirIfPresent", () => {
 		const stateDir = tmpDir("toolcontent-noop");
 		try {
 			// Should not throw, should not create anything.
-			copyToolContentDirIfPresent("src-id", "dst-id", stateDir);
-			assert.ok(!fs.existsSync(path.join(stateDir, "tool-content", "dst-id")));
+			copyToolContentDirIfPresent("src-id", "dst-id", stateDir, testFs);
+			assert.ok(!testFs.existsSync(path.join(stateDir, "tool-content", "dst-id")));
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 
@@ -190,17 +198,17 @@ describe("copyToolContentDirIfPresent", () => {
 		const stateDir = tmpDir("toolcontent-copy");
 		try {
 			const srcRoot = path.join(stateDir, "tool-content", "src-id");
-			fs.mkdirSync(path.join(srcRoot, "0"), { recursive: true });
-			fs.writeFileSync(path.join(srcRoot, "0", "1.txt"), "block-1-content");
-			fs.writeFileSync(path.join(srcRoot, "top.txt"), "top-content");
+			testFs.mkdirSync(path.join(srcRoot, "0"), { recursive: true });
+			testFs.writeFileSync(path.join(srcRoot, "0", "1.txt"), "block-1-content");
+			testFs.writeFileSync(path.join(srcRoot, "top.txt"), "top-content");
 
-			copyToolContentDirIfPresent("src-id", "dst-id", stateDir);
+			copyToolContentDirIfPresent("src-id", "dst-id", stateDir, testFs);
 
 			const dstRoot = path.join(stateDir, "tool-content", "dst-id");
-			assert.equal(fs.readFileSync(path.join(dstRoot, "0", "1.txt"), "utf-8"), "block-1-content");
-			assert.equal(fs.readFileSync(path.join(dstRoot, "top.txt"), "utf-8"), "top-content");
+			assert.equal(testFs.readFileSync(path.join(dstRoot, "0", "1.txt"), "utf-8"), "block-1-content");
+			assert.equal(testFs.readFileSync(path.join(dstRoot, "top.txt"), "utf-8"), "top-content");
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 });
@@ -217,10 +225,10 @@ describe("copyToolContentDirIfPresent", () => {
 
 function seedDraft(stateDir: string, sessionId: string): void {
 	const root = path.join(stateDir, "proposal-drafts", sessionId);
-	fs.mkdirSync(path.join(root, "goal.history"), { recursive: true });
-	fs.writeFileSync(path.join(root, "goal.md"), "live draft contents\n");
-	fs.writeFileSync(path.join(root, "goal.history", "1.md"), "snapshot rev 1\n");
-	fs.writeFileSync(path.join(root, "goal.history", "2.md"), "snapshot rev 2\n");
+	testFs.mkdirSync(path.join(root, "goal.history"), { recursive: true });
+	testFs.writeFileSync(path.join(root, "goal.md"), "live draft contents\n");
+	testFs.writeFileSync(path.join(root, "goal.history", "1.md"), "snapshot rev 1\n");
+	testFs.writeFileSync(path.join(root, "goal.history", "2.md"), "snapshot rev 2\n");
 }
 
 describe("copyProposalDirIfPresent", () => {
@@ -229,28 +237,28 @@ describe("copyProposalDirIfPresent", () => {
 		try {
 			seedDraft(stateDir, "src");
 
-			copyProposalDirIfPresent("src", "dst", stateDir);
+			copyProposalDirIfPresent("src", "dst", stateDir, testFs);
 
 			const srcRoot = path.join(stateDir, "proposal-drafts", "src");
 			const dstRoot = path.join(stateDir, "proposal-drafts", "dst");
 
 			for (const rel of ["goal.md", "goal.history/1.md", "goal.history/2.md"]) {
-				const a = fs.readFileSync(path.join(srcRoot, rel));
-				const b = fs.readFileSync(path.join(dstRoot, rel));
+				const a = testFs.readFileSync(path.join(srcRoot, rel));
+				const b = testFs.readFileSync(path.join(dstRoot, rel));
 				assert.ok(b.equals(a), `mismatch for ${rel}`);
 			}
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 
 	it("is a silent no-op when the source directory is absent", () => {
 		const stateDir = tmpDir("proposal-clone-missing");
 		try {
-			copyProposalDirIfPresent("nope", "dst", stateDir);
-			assert.ok(!fs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
+			copyProposalDirIfPresent("nope", "dst", stateDir, testFs);
+			assert.ok(!testFs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 
@@ -258,21 +266,21 @@ describe("copyProposalDirIfPresent", () => {
 		const stateDir = tmpDir("proposal-clone-idem");
 		try {
 			seedDraft(stateDir, "src");
-			copyProposalDirIfPresent("src", "dst", stateDir);
+			copyProposalDirIfPresent("src", "dst", stateDir, testFs);
 			// Second call must not throw; existing destination is overwritten.
-			copyProposalDirIfPresent("src", "dst", stateDir);
+			copyProposalDirIfPresent("src", "dst", stateDir, testFs);
 
 			const dstRoot = path.join(stateDir, "proposal-drafts", "dst");
 			assert.equal(
-				fs.readFileSync(path.join(dstRoot, "goal.md"), "utf-8"),
+				testFs.readFileSync(path.join(dstRoot, "goal.md"), "utf-8"),
 				"live draft contents\n",
 			);
 			assert.equal(
-				fs.readFileSync(path.join(dstRoot, "goal.history", "1.md"), "utf-8"),
+				testFs.readFileSync(path.join(dstRoot, "goal.history", "1.md"), "utf-8"),
 				"snapshot rev 1\n",
 			);
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 
@@ -282,14 +290,14 @@ describe("copyProposalDirIfPresent", () => {
 			seedDraft(stateDir, "src");
 			seedDraft(stateDir, "other");
 
-			copyProposalDirIfPresent("src", "dst", stateDir);
+			copyProposalDirIfPresent("src", "dst", stateDir, testFs);
 
 			// "other" remains untouched
 			const otherFile = path.join(stateDir, "proposal-drafts", "other", "goal.md");
-			assert.equal(fs.readFileSync(otherFile, "utf-8"), "live draft contents\n");
-			assert.ok(fs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
+			assert.equal(testFs.readFileSync(otherFile, "utf-8"), "live draft contents\n");
+			assert.ok(testFs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 });
@@ -299,17 +307,17 @@ describe("cleanupFailedContinue (proposal-dir branch)", () => {
 		const stateDir = tmpDir("cleanup-proposal");
 		try {
 			seedDraft(stateDir, "src");
-			copyProposalDirIfPresent("src", "dst", stateDir);
+			copyProposalDirIfPresent("src", "dst", stateDir, testFs);
 			const dstRoot = path.join(stateDir, "proposal-drafts", "dst");
-			assert.ok(fs.existsSync(dstRoot));
+			assert.ok(testFs.existsSync(dstRoot));
 
-			cleanupFailedContinue(undefined, "dst", stateDir);
+			cleanupFailedContinue(undefined, "dst", stateDir, testFs);
 
-			assert.ok(!fs.existsSync(dstRoot));
+			assert.ok(!testFs.existsSync(dstRoot));
 			// Source must remain intact — cleanup only touches the new session id.
-			assert.ok(fs.existsSync(path.join(stateDir, "proposal-drafts", "src")));
+			assert.ok(testFs.existsSync(path.join(stateDir, "proposal-drafts", "src")));
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 
@@ -317,22 +325,22 @@ describe("cleanupFailedContinue (proposal-dir branch)", () => {
 		const stateDir = tmpDir("cleanup-multi");
 		try {
 			seedDraft(stateDir, "src");
-			copyProposalDirIfPresent("src", "dst", stateDir);
+			copyProposalDirIfPresent("src", "dst", stateDir, testFs);
 
 			// Seed a tool-content dir and a placeholder destJsonl too.
 			const toolDir = path.join(stateDir, "tool-content", "dst");
-			fs.mkdirSync(toolDir, { recursive: true });
-			fs.writeFileSync(path.join(toolDir, "0.json"), "{}");
+			testFs.mkdirSync(toolDir, { recursive: true });
+			testFs.writeFileSync(path.join(toolDir, "0.json"), "{}");
 			const destJsonl = path.join(stateDir, "session.jsonl");
-			fs.writeFileSync(destJsonl, "irrelevant\n");
+			testFs.writeFileSync(destJsonl, "irrelevant\n");
 
-			cleanupFailedContinue(destJsonl, "dst", stateDir);
+			cleanupFailedContinue(destJsonl, "dst", stateDir, testFs);
 
-			assert.ok(!fs.existsSync(destJsonl));
-			assert.ok(!fs.existsSync(toolDir));
-			assert.ok(!fs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
+			assert.ok(!testFs.existsSync(destJsonl));
+			assert.ok(!testFs.existsSync(toolDir));
+			assert.ok(!testFs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 
@@ -340,9 +348,9 @@ describe("cleanupFailedContinue (proposal-dir branch)", () => {
 		const stateDir = tmpDir("cleanup-noop");
 		try {
 			// Must not throw even though nothing was ever cloned.
-			cleanupFailedContinue(undefined, "missing", stateDir);
+			cleanupFailedContinue(undefined, "missing", stateDir, testFs);
 		} finally {
-			fs.rmSync(stateDir, { recursive: true, force: true });
+			testFs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 });

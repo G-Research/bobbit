@@ -5,24 +5,37 @@
 
 /**
  * Unit tests for runPreflight() — see docs/design/robust-add-project.md.
- * Uses file:// fixtures via tmp dirs.
+ * Uses an injected in-memory filesystem so path semantics stay deterministic.
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
 
 import { runPreflight, type PreflightContext } from "../../src/server/agent/project-preflight.js";
 
+const fs = createFsFromVolume(new Volume()) as unknown as typeof import("node:fs");
+const rawRealpathSync = fs.realpathSync.bind(fs);
+(fs as { realpathSync: typeof fs.realpathSync }).realpathSync = ((value: Parameters<typeof fs.realpathSync>[0]) => {
+	const real = rawRealpathSync(value) as string;
+	if (process.platform !== "win32") return real;
+	const drive = path.parse(String(value)).root.slice(0, 2) || "C:";
+	return `${drive}${real.replace(/\//g, "\\")}`;
+}) as typeof fs.realpathSync;
+let fixtureId = 0;
+
 function mkTmp(prefix = "bobbit-preflight-"): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const dir = path.join(os.tmpdir(), `${prefix}${++fixtureId}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
 }
 
 function emptyCtx(overrides: Partial<PreflightContext> = {}): PreflightContext {
 	return {
 		registeredProjects: [],
 		gatewayProjectRoot: path.join(os.tmpdir(), "fake-gateway-root-" + Math.random()),
+		fileSystem: fs,
 		...overrides,
 	};
 }

@@ -14,14 +14,19 @@
  * Uses stub `McpClient` instances injected via a `_createClient` override
  * (no real subprocesses). Test timeouts are tiny (20–50 ms) via constructor opts.
  */
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
-const { McpManager } = await import("../../src/server/mcp/mcp-manager.ts");
+import { McpManager } from "../../src/server/mcp/mcp-manager.ts";
 import type { McpToolDef, McpToolResult, McpServerConfig } from "../../src/server/mcp/mcp-types.ts";
+import { installScopedMemoryFs } from "./helpers/scoped-memory-fs.ts";
+
+let restoreFs: (() => void) | undefined;
+beforeAll(() => { restoreFs = installScopedMemoryFs(); });
+afterAll(() => { restoreFs?.(); });
 
 /** Minimal stub matching the surface of McpClient used by McpManager. */
 class StubMcpClient {

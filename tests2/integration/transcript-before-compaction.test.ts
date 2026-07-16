@@ -19,13 +19,15 @@ import { readE2EToken, base } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import {
-	appendCompactionSidecarEntry,
-	initCompactionSidecarDir,
-} from "../../src/server/agent/compaction-sidecar.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
+let appendCompactionSidecarEntry: typeof import("../../src/server/agent/compaction-sidecar.js").appendCompactionSidecarEntry;
+let initCompactionSidecarDir: typeof import("../../src/server/agent/compaction-sidecar.js").initCompactionSidecarDir;
 let token: string;
-test.beforeAll(() => { token = readE2EToken(); });
+test.beforeAll(async () => {
+	token = readE2EToken();
+	({ appendCompactionSidecarEntry, initCompactionSidecarDir } = (await loadServerTestRuntime()).compactionSidecar);
+});
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
 	return { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...extra };

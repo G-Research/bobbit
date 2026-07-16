@@ -15,36 +15,61 @@ guardProcessEnv();
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import fs from "node:fs";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { handlePreviewRequest, pickEntry } from "../../src/server/preview/content-route.ts";
-import { CookieStore, COOKIE_NAME } from "../../src/server/auth/cookie.ts";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { COOKIE_NAME, type CookieStore } from "../../src/server/auth/cookie.ts";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
-// We need `mountDir(sid)` from preview/mount.ts to point inside our temp dir.
-// The stub uses `bobbitStateDir()` which reads BOBBIT_STATE_DIR env. Set it
-// before importing anything that captures it.
-let workspaceRoot: string;
+// `mountDir(sid)` reads BOBBIT_DIR on demand, so one immutable in-memory tree
+// can serve every route assertion without creating or deleting NTFS fixtures.
+const workspaceRoot = path.resolve("/memfs/preview-content-route");
 const SID = "11111111-2222-3333-4444-555555555555";
+const ENTRY_INLINE_DIR = path.join(workspaceRoot, "entries", "inline");
+const ENTRY_ALPHA_DIR = path.join(workspaceRoot, "entries", "alpha");
+const ENTRY_EMPTY_DIR = path.join(workspaceRoot, "entries", "empty");
+const ARTIFACT_ID = "abc123";
+const artifactMountPath = path.join(workspaceRoot, "state", "preview-artifacts", SID, ARTIFACT_ID, "mount");
+let restoreFs: () => void;
 
 beforeAll(() => {
-	workspaceRoot = makeTmpDir("bobbit-cr-");
-	// mountDir(sid) resolves to <bobbitStateDir()>/preview/<sid>; redirect
-	// the resolver to a temp dir via BOBBIT_DIR.
+	const scoped = installScopedMemFs([
+		"createReadStream", "existsSync", "mkdirSync", "readFileSync", "readdirSync",
+		"realpathSync", "statSync", "writeFileSync",
+	]);
+	restoreFs = scoped.restore;
 	process.env.BOBBIT_DIR = workspaceRoot;
+
+	// The theme snapshot finds the repository root from its module directory.
+	// Seed only the two files its route contract needs.
+	fs.mkdirSync(path.join(process.cwd(), "src", "ui"), { recursive: true });
+	fs.writeFileSync(path.join(process.cwd(), "package.json"), "{}");
+	fs.writeFileSync(path.join(process.cwd(), "src", "ui", "app.css"), ":root { --background: canvas; } .dark { --background: canvastext; }");
+
 	const mountRoot = path.join(workspaceRoot, "state", "preview", SID);
-	mkdirSync(path.join(mountRoot, "subdir"), { recursive: true });
-	writeFileSync(path.join(mountRoot, "index.html"), "<html><head><title>x</title></head><body>hi</body></html>");
-	writeFileSync(path.join(mountRoot, "report.html"), "<!doctype html><html><body>r</body></html>");
-	writeFileSync(path.join(mountRoot, "styles.css"), "body{color:red}");
-	writeFileSync(path.join(mountRoot, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-	writeFileSync(path.join(mountRoot, "data.json"), `{"a":1}`);
-	writeFileSync(path.join(mountRoot, "subdir", "nested.html"), "<html><body>n</body></html>");
+	fs.mkdirSync(path.join(mountRoot, "subdir"), { recursive: true });
+	fs.writeFileSync(path.join(mountRoot, "index.html"), "<html><head><title>x</title></head><body>hi</body></html>");
+	fs.writeFileSync(path.join(mountRoot, "report.html"), "<!doctype html><html><body>r</body></html>");
+	fs.writeFileSync(path.join(mountRoot, "styles.css"), "body{color:red}");
+	fs.writeFileSync(path.join(mountRoot, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+	fs.writeFileSync(path.join(mountRoot, "data.json"), `{"a":1}`);
+	fs.writeFileSync(path.join(mountRoot, "subdir", "nested.html"), "<html><body>n</body></html>");
+
+	fs.mkdirSync(ENTRY_INLINE_DIR, { recursive: true });
+	fs.writeFileSync(path.join(ENTRY_INLINE_DIR, "inline.html"), "<html></html>");
+	fs.writeFileSync(path.join(ENTRY_INLINE_DIR, "zzz.html"), "<html></html>");
+	fs.mkdirSync(ENTRY_ALPHA_DIR, { recursive: true });
+	fs.writeFileSync(path.join(ENTRY_ALPHA_DIR, "zeta.html"), "<html></html>");
+	fs.writeFileSync(path.join(ENTRY_ALPHA_DIR, "alpha.html"), "<html></html>");
+	fs.mkdirSync(ENTRY_EMPTY_DIR, { recursive: true });
+
+	fs.mkdirSync(artifactMountPath, { recursive: true });
+	fs.writeFileSync(path.join(artifactMountPath, "01.html"), "<!doctype html><html><head><title>a1</title></head><body>v1</body></html>");
+	fs.writeFileSync(path.join(artifactMountPath, "styles.css"), "body{color:blue}");
 });
-afterAll(() => {
-	rmSync(workspaceRoot, { recursive: true, force: true });
-});
+
+afterAll(() => restoreFs());
 
 interface FakeRes {
 	statusCode: number;
@@ -110,8 +135,20 @@ function bodyText(res: FakeRes): string {
 	return Buffer.concat(res.body).toString("utf-8");
 }
 
+function memoryCookieStore(): CookieStore {
+	const values = new Set<string>();
+	return {
+		mint() {
+			const value = "a".repeat(64);
+			values.add(value);
+			return value;
+		},
+		verify(value: string) { return values.has(value); },
+	} as CookieStore;
+}
+
 function makeOpts(localhost: boolean) {
-	const store = new CookieStore(mkdtempSync(path.join(workspaceRoot, "ck-")));
+	const store = memoryCookieStore();
 	return { cookieStore: store, isLocalhost: localhost, store };
 }
 
@@ -120,20 +157,13 @@ describe("pickEntry", () => {
 		assert.equal(pickEntry(path.join(workspaceRoot, "state", "preview", SID)), "index.html");
 	});
 	it("falls back to inline.html when no index.html", () => {
-		const d = mkdtempSync(path.join(workspaceRoot, "pe-"));
-		writeFileSync(path.join(d, "inline.html"), "<html></html>");
-		writeFileSync(path.join(d, "zzz.html"), "<html></html>");
-		assert.equal(pickEntry(d), "inline.html");
+		assert.equal(pickEntry(ENTRY_INLINE_DIR), "inline.html");
 	});
 	it("falls back to first .html alphabetically", () => {
-		const d = mkdtempSync(path.join(workspaceRoot, "pe-"));
-		writeFileSync(path.join(d, "zeta.html"), "<html></html>");
-		writeFileSync(path.join(d, "alpha.html"), "<html></html>");
-		assert.equal(pickEntry(d), "alpha.html");
+		assert.equal(pickEntry(ENTRY_ALPHA_DIR), "alpha.html");
 	});
 	it("returns null on empty dir", () => {
-		const d = mkdtempSync(path.join(workspaceRoot, "pe-"));
-		assert.equal(pickEntry(d), null);
+		assert.equal(pickEntry(ENTRY_EMPTY_DIR), null);
 	});
 });
 
@@ -281,14 +311,6 @@ describe("handlePreviewRequest — per-artifact URL", () => {
 	// per-artifact mount dir instead of the session's live mount slot, so
 	// multiple preview tabs (each backed by a different artifact) can be
 	// loaded at their own stable URLs without mount swapping.
-	const ARTIFACT_ID = "abc123";
-	let artifactMountPath: string;
-	beforeAll(() => {
-		artifactMountPath = path.join(workspaceRoot, "state", "preview-artifacts", SID, ARTIFACT_ID, "mount");
-		mkdirSync(artifactMountPath, { recursive: true });
-		writeFileSync(path.join(artifactMountPath, "01.html"), "<!doctype html><html><head><title>a1</title></head><body>v1</body></html>");
-		writeFileSync(path.join(artifactMountPath, "styles.css"), "body{color:blue}");
-	});
 
 	it("serves an artifact HTML file with artifact-prefixed <base>", async () => {
 		const o = makeOpts(true);
@@ -350,7 +372,7 @@ describe("handlePreviewRequest — per-artifact URL", () => {
 
 describe("handlePreviewRequest — admin bearer fallback", () => {
 	it("accepts ?token=<admin>", async () => {
-		const store = new CookieStore(mkdtempSync(path.join(workspaceRoot, "ab-")));
+		const store = memoryCookieStore();
 		const opts = { cookieStore: store, isLocalhost: false, adminBearerToken: "admin-secret" };
 		const res = fakeRes();
 		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/index.html?token=admin-secret` }), res as any, `/preview/${SID}/index.html`, opts);
@@ -358,7 +380,7 @@ describe("handlePreviewRequest — admin bearer fallback", () => {
 	});
 
 	it("rejects wrong ?token=", async () => {
-		const store = new CookieStore(mkdtempSync(path.join(workspaceRoot, "ab-")));
+		const store = memoryCookieStore();
 		const opts = { cookieStore: store, isLocalhost: false, adminBearerToken: "admin-secret" };
 		const res = fakeRes();
 		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/index.html?token=wrong` }), res as any, `/preview/${SID}/index.html`, opts);

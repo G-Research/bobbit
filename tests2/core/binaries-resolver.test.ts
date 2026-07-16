@@ -2,26 +2,7 @@
 // Source: tests/binaries-resolver.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-/**
- * Pinning tests for src/server/binaries.ts.
- *
- * Invariants pinned:
- *   1. getFdPath() / getRgPath() probe each binary at most once per gateway
- *      lifetime (memoized). A test exposes _resetBinaryCacheForTests() to
- *      clear the cache between scenarios.
- *   2. Resolution order is bundled → PATH → null.
- *   3. stageBundledBinaries() is idempotent — re-running with the same inputs
- *      doesn't recreate already-correct symlinks.
- *   4. stageBundledBinaries() only stages source="bundled" — PATH binaries
- *      are left alone (pi finds them on PATH directly).
- *
- * Strategy: we don't mock spawnSync (Node test runner has no built-in stub
- * for ESM exports); instead we exercise the public behaviours through the
- * filesystem and cache. The bundled path is exercised by creating a fake
- * sub-package on disk and pointing require.resolve at it.
- */
-
-import { describe, it, beforeAll, beforeEach, afterAll } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -30,11 +11,37 @@ import path from "node:path";
 import {
 	expectedBinaryPackage,
 	getFdPath,
-	getRgPath,
 	getFdResolution,
+	getRgPath,
+	getRgResolution,
 	stageBundledBinaries,
-	_resetBinaryCacheForTests,
+	_setBinaryProbeBackendForTests,
+	type BinaryProbeBackend,
+	type BinaryTool,
 } from "../../src/server/binaries.ts";
+
+function fakeBackend(options: {
+	bundled?: Partial<Record<BinaryTool, string>>;
+	onPath?: readonly string[];
+	bundledCalls?: BinaryTool[];
+	pathCalls?: string[];
+} = {}): BinaryProbeBackend {
+	const onPath = new Set(options.onPath ?? []);
+	return {
+		resolveBundled(tool) {
+			options.bundledCalls?.push(tool);
+			return options.bundled?.[tool] ?? null;
+		},
+		isOnPath(candidate) {
+			options.pathCalls?.push(candidate);
+			return onPath.has(candidate);
+		},
+	};
+}
+
+afterEach(() => {
+	_setBinaryProbeBackendForTests(undefined);
+});
 
 describe("expectedBinaryPackage", () => {
 	it("maps supported tuples to @bobbit/binaries-<plat>-<arch>", () => {
@@ -49,77 +56,113 @@ describe("expectedBinaryPackage", () => {
 	});
 });
 
-describe("getFdPath / getRgPath", () => {
-	beforeEach(() => _resetBinaryCacheForTests());
-
+describe("binary resolution", () => {
 	it("memoizes the result across calls", () => {
-		const a = getFdPath();
-		const b = getFdPath();
-		const c = getFdPath();
-		// All three calls return strictly the same value (memoized) — even if it's null.
-		assert.equal(a, b);
-		assert.equal(b, c);
-	});
+		const bundledCalls: BinaryTool[] = [];
+		const pathCalls: string[] = [];
+		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["fdfind", "rg"], bundledCalls, pathCalls }));
 
-	it("returns the same instance for rg too", () => {
-		const a = getRgPath();
-		const b = getRgPath();
-		assert.equal(a, b);
+		assert.equal(getFdPath(), "fdfind");
+		assert.equal(getFdPath(), "fdfind");
+		assert.equal(getRgPath(), "rg");
+		assert.equal(getRgPath(), "rg");
+		assert.deepEqual(bundledCalls, ["fd", "rg"]);
+		assert.deepEqual(pathCalls, ["fd", "fdfind", "rg"]);
 	});
 
 	it("getFdResolution() reports a known source", () => {
-		const res = getFdResolution();
-		assert.ok(["bundled", "path", "missing"].includes(res.source));
-		// When source is missing, path is null and pathProbes is non-empty.
-		if (res.source === "missing") {
-			assert.equal(res.path, null);
-			assert.ok(res.pathProbes.length > 0);
-		} else {
-			assert.equal(typeof res.path, "string");
-			assert.ok((res.path ?? "").length > 0);
-		}
+		const pathCalls: string[] = [];
+		_setBinaryProbeBackendForTests(fakeBackend({ bundled: { fd: "/bundled/fd" }, onPath: ["fd"], pathCalls }));
+
+		assert.deepEqual(getFdResolution(), {
+			source: "bundled",
+			path: "/bundled/fd",
+			expectedPackage: expectedBinaryPackage() ?? "(none)",
+			pathProbes: [],
+		});
+		assert.deepEqual(pathCalls, []);
+	});
+
+	it("returns the same instance for rg too", () => {
+		const pathCalls: string[] = [];
+		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["rg"], pathCalls }));
+
+		assert.equal(getRgPath(), "rg");
+		assert.equal(getRgPath(), "rg");
+		assert.deepEqual(pathCalls, ["rg"]);
+	});
+
+	it("falls back through PATH candidates in order", () => {
+		const pathCalls: string[] = [];
+		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["fdfind"], pathCalls }));
+
+		const resolution = getFdResolution();
+		assert.equal(resolution.source, "path");
+		assert.equal(resolution.path, "fdfind");
+		assert.deepEqual(resolution.pathProbes, ["fd", "fdfind"]);
+		assert.deepEqual(pathCalls, ["fd", "fdfind"]);
+	});
+
+	it("reports missing after exhausting candidates", () => {
+		const pathCalls: string[] = [];
+		_setBinaryProbeBackendForTests(fakeBackend({ pathCalls }));
+
+		const resolution = getRgResolution();
+		assert.equal(resolution.source, "missing");
+		assert.equal(resolution.path, null);
+		assert.deepEqual(resolution.pathProbes, ["rg"]);
+		assert.deepEqual(pathCalls, ["rg"]);
 	});
 });
 
 describe("stageBundledBinaries", () => {
 	let tmpDir: string;
+	let fdSource: string;
+	let rgSource: string;
 
 	beforeAll(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-binaries-test-"));
+		fdSource = path.join(tmpDir, "source-fd");
+		rgSource = path.join(tmpDir, "source-rg");
+		fs.writeFileSync(fdSource, "fd-binary");
+		fs.writeFileSync(rgSource, "rg-binary");
 	});
 
 	afterAll(() => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	beforeEach(() => _resetBinaryCacheForTests());
-
 	it("creates <agentDir>/bin and returns binDir path", async () => {
-		const agentDir = fs.mkdtempSync(path.join(tmpDir, "agent-"));
+		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["fd", "rg"] }));
+		const agentDir = fs.mkdtempSync(path.join(tmpDir, "agent-create-"));
 		const result = await stageBundledBinaries(agentDir);
+
 		assert.equal(result.binDir, path.join(agentDir, "bin"));
-		assert.ok(fs.existsSync(result.binDir!));
+		assert.equal(fs.statSync(result.binDir!).isDirectory(), true);
 	});
 
 	it("is idempotent — second call doesn't error", async () => {
-		const agentDir = fs.mkdtempSync(path.join(tmpDir, "agent-idem-"));
-		const r1 = await stageBundledBinaries(agentDir);
-		const r2 = await stageBundledBinaries(agentDir);
-		assert.equal(r1.binDir, r2.binDir);
-		assert.equal(r1.fd.source, r2.fd.source);
-		assert.equal(r1.rg.source, r2.rg.source);
+		_setBinaryProbeBackendForTests(fakeBackend({ bundled: { fd: fdSource, rg: rgSource } }));
+		const agentDir = fs.mkdtempSync(path.join(tmpDir, "agent-bundled-"));
+		const first = await stageBundledBinaries(agentDir);
+		const second = await stageBundledBinaries(agentDir);
+		const ext = process.platform === "win32" ? ".exe" : "";
+
+		assert.equal(first.binDir, path.join(agentDir, "bin"));
+		assert.equal(second.binDir, first.binDir);
+		assert.equal(first.fd.source, "bundled");
+		assert.equal(first.rg.source, "bundled");
+		assert.equal(fs.readFileSync(path.join(first.binDir!, `fd${ext}`), "utf-8"), "fd-binary");
+		assert.equal(fs.readFileSync(path.join(first.binDir!, `rg${ext}`), "utf-8"), "rg-binary");
 	});
 
 	it("does not stage anything when both tools are 'path' or 'missing'", async () => {
-		const agentDir = fs.mkdtempSync(path.join(tmpDir, "agent-nostage-"));
+		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["fd", "rg"] }));
+		const agentDir = fs.mkdtempSync(path.join(tmpDir, "agent-path-"));
 		const result = await stageBundledBinaries(agentDir);
-		// In CI / dev we don't have the bundled sub-packages installed; so
-		// staging should be a no-op on the bin dir contents (only the dir is
-		// created). If the test environment somehow does have bundled binaries
-		// resolved, this assertion is skipped.
-		if (result.fd.source !== "bundled" && result.rg.source !== "bundled") {
-			const entries = fs.readdirSync(result.binDir!);
-			assert.equal(entries.length, 0, `expected empty bin dir, got: ${entries.join(", ")}`);
-		}
+
+		assert.equal(result.fd.source, "path");
+		assert.equal(result.rg.source, "path");
+		assert.deepEqual(fs.readdirSync(result.binDir!), []);
 	});
 });

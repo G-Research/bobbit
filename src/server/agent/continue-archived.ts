@@ -21,17 +21,24 @@
 import fs from "node:fs";
 import path from "node:path";
 
+type ContinueArchivedFs = Pick<typeof fs, "existsSync" | "mkdirSync" | "cpSync" | "unlinkSync" | "rmSync">;
+
 /**
  * Recursively copy `<stateDir>/tool-content/<srcId>/` to
  * `<stateDir>/tool-content/<dstId>/` if the source directory exists.
  * Silent no-op when absent.
  */
-export function copyToolContentDirIfPresent(srcId: string, dstId: string, stateDir: string): void {
+export function copyToolContentDirIfPresent(
+	srcId: string,
+	dstId: string,
+	stateDir: string,
+	fsImpl: ContinueArchivedFs = fs,
+): void {
 	const src = path.join(stateDir, "tool-content", srcId);
-	if (!fs.existsSync(src)) return;
+	if (!fsImpl.existsSync(src)) return;
 	const dst = path.join(stateDir, "tool-content", dstId);
-	fs.mkdirSync(dst, { recursive: true });
-	fs.cpSync(src, dst, { recursive: true });
+	fsImpl.mkdirSync(dst, { recursive: true });
+	fsImpl.cpSync(src, dst, { recursive: true });
 }
 
 /**
@@ -44,25 +51,35 @@ export function copyToolContentDirIfPresent(srcId: string, dstId: string, stateD
  * plus `<type>.history/<rev>.<ext>` snapshots). Schema-agnostic recursive
  * copy — the new session inherits the entire draft + history verbatim.
  */
-export function copyProposalDirIfPresent(srcId: string, dstId: string, stateDir: string): void {
+export function copyProposalDirIfPresent(
+	srcId: string,
+	dstId: string,
+	stateDir: string,
+	fsImpl: ContinueArchivedFs = fs,
+): void {
 	const src = path.join(stateDir, "proposal-drafts", srcId);
-	if (!fs.existsSync(src)) return;
+	if (!fsImpl.existsSync(src)) return;
 	const dst = path.join(stateDir, "proposal-drafts", dstId);
-	fs.mkdirSync(dst, { recursive: true });
-	fs.cpSync(src, dst, { recursive: true });
+	fsImpl.mkdirSync(dst, { recursive: true });
+	fsImpl.cpSync(src, dst, { recursive: true });
 }
 
 /** Best-effort cleanup after a failed continue-archived flow. */
-export function cleanupFailedContinue(destPath: string | undefined, newSessionId: string, stateDir: string): void {
+export function cleanupFailedContinue(
+	destPath: string | undefined,
+	newSessionId: string,
+	stateDir: string,
+	fsImpl: ContinueArchivedFs = fs,
+): void {
 	if (destPath) {
-		try { fs.unlinkSync(destPath); } catch { /* may be absent */ }
+		try { fsImpl.unlinkSync(destPath); } catch { /* may be absent */ }
 	}
 	try {
 		const dir = path.join(stateDir, "tool-content", newSessionId);
-		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		if (fsImpl.existsSync(dir)) fsImpl.rmSync(dir, { recursive: true, force: true });
 	} catch { /* best-effort */ }
 	try {
 		const dir = path.join(stateDir, "proposal-drafts", newSessionId);
-		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		if (fsImpl.existsSync(dir)) fsImpl.rmSync(dir, { recursive: true, force: true });
 	} catch { /* best-effort */ }
 }

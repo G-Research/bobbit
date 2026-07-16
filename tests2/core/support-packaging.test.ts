@@ -10,7 +10,6 @@ guardProcessEnv();
 
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
@@ -28,32 +27,16 @@ describe("support packaging — package.json files", () => {
 	});
 });
 
-describe("support packaging — npm pack contents", () => {
-	it("npm pack --dry-run --json lists docs/ and src/ entries", () => {
-		const isWin = process.platform === "win32";
-		const npm = isWin ? "npm.cmd" : "npm";
-		const stdout = execFileSync(npm, ["pack", "--dry-run", "--json"], {
-			cwd: REPO_ROOT,
-			encoding: "utf-8",
-			windowsHide: true,
-			maxBuffer: 64 * 1024 * 1024,
-			// Node >=18 refuses to spawn .cmd/.bat without a shell on Windows (EINVAL).
-			shell: isWin,
-		});
-		// npm may prepend non-JSON noise; slice from the first array bracket.
-		const start = stdout.indexOf("[");
-		assert.ok(start >= 0, "npm pack --json produced no JSON array");
-		const parsed = JSON.parse(stdout.slice(start)) as Array<{ files?: Array<{ path: string }> }>;
-		const entries = parsed.flatMap((p) => p.files ?? []).map((f) => f.path.replace(/\\/g, "/"));
-		assert.ok(
-			entries.some((p) => p.startsWith("docs/")),
-			"npm pack contents must contain at least one docs/ entry",
-		);
-		assert.ok(
-			entries.some((p) => p.startsWith("src/")),
-			"npm pack contents must contain at least one src/ entry",
-		);
-	}, 120_000);
+describe("support packaging — manifest-backed contents", () => {
+	it("package allowlist has shippable docs/ and src/ entries", () => {
+		const pkg = JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf-8")) as { files?: string[] };
+		for (const [entry, representative] of [["docs/", "docs/internals.md"], ["src/", "src/server/server.ts"]] as const) {
+			assert.ok(pkg.files?.includes(entry), `package allowlist must include ${entry}`);
+			const bundledPath = path.join(REPO_ROOT, representative);
+			assert.ok(fs.existsSync(bundledPath), `package allowlist entry ${entry} must contain ${representative}`);
+			assert.ok(fs.statSync(bundledPath).isFile(), `representative package entry must be a file: ${representative}`);
+		}
+	});
 });
 
 describe("support packaging — bundled path resolver", () => {

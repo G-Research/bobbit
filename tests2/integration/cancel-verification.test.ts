@@ -1,5 +1,8 @@
 /**
- * E2E API tests for cancel verification endpoint.
+ * Tier-1 API tests for the cancel-verification endpoint. The integration
+ * project injects the non-spawning fake command-step runner: these assertions
+ * cover API state, idempotency, cancellation bookkeeping, and re-signal
+ * behavior without claiming OS process-tree fidelity.
  *
  * Tests:
  * 1. Cancel a running verification via POST /api/goals/:goalId/gates/:gateId/cancel-verification
@@ -9,9 +12,14 @@
  * 4b. Cancel on archived goal (409)
  * 5. Re-signal after cancel succeeds (no 409)
  */
+// This suite owns command-step cancellation bookkeeping, not OS process
+// fidelity. Opt into the non-spawning runner before the gateway singleton is
+// imported and booted.
+import { resetAndInstallFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "./_e2e/e2e-setup.js";
-import { pollUntil as pollUntilCleanup } from "../../tests/e2e/test-utils/cleanup.js";
+import type { ManualClock } from "../harness/clock.js";
 
 type SlowWorkflowGoal = {
 	workflowId: string;
@@ -23,7 +31,7 @@ function makeSlowWorkflowId(): string {
 	return `test-cancel-verif-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Create a per-test workflow with a slow verification command so we can cancel mid-flight. */
+/** Create a per-test workflow whose scripted fake step remains cancellable. */
 async function createSlowWorkflow(): Promise<{ workflowId: string; projectId: string }> {
 	const projectId = await defaultProjectId();
 	if (!projectId) throw new Error("cancel-verification requires a default project");
@@ -102,30 +110,32 @@ async function getActiveVerifications(goalId: string): Promise<any[]> {
 	return data.verifications || [];
 }
 
-/** Poll until a predicate is satisfied — adapter over the shared pollUntil. */
-async function pollUntil<T>(
+/** Observe cancellation state without adding wall-clock sleeps to tier 1. */
+async function observeUntil<T>(
+	clock: ManualClock,
 	fn: () => Promise<T>,
 	pred: (val: T) => boolean,
-	timeoutMs = 15000,
-	intervalMs = 100,
+	maxVirtualMs = 15000,
 ): Promise<T> {
-	let captured: T;
-	await pollUntilCleanup(async () => {
-		captured = await fn();
-		return pred(captured);
-	}, { timeoutMs, intervalMs, label: "cancel-verif predicate" });
-	return captured!;
+	for (let advanced = 0; advanced <= maxVirtualMs; advanced += 100) {
+		const captured = await fn();
+		if (pred(captured)) return captured;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		clock.advance(100);
+	}
+	throw new Error(`cancel-verification state did not settle after ${maxVirtualMs}ms of virtual time`);
 }
 
-// These tests intentionally start cancellable verification commands. Keep them
-// serial so a broad E2E run does not stack multiple slow child processes and
-// verification-harness state transitions in the same hot window.
+// Keep the stateful cancellation cases serial so cleanup and re-signal
+// transitions cannot overlap in the shared verification harness.
 test.describe.configure({ mode: "serial" });
 
 test.describe("Cancel Verification API", () => {
 	test.setTimeout(60_000);
+	test.beforeEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
+	test.afterEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
 
-	test("cancel a running verification returns cancelled: true", async () => {
+	test("cancel a running verification returns cancelled: true", async ({ gateway }) => {
 		let setup: SlowWorkflowGoal | undefined;
 		try {
 			setup = await createSlowWorkflowGoal("Cancel Running Verif");
@@ -138,8 +148,9 @@ test.describe("Cancel Verification API", () => {
 			});
 			expect(signalRes.status).toBe(201);
 
-			// Wait for verification to start running
-			await pollUntil(
+			// Observe the running record without a wall-clock polling interval.
+			await observeUntil(
+				gateway.clock,
 				() => getActiveVerifications(goalId),
 				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"),
 				10000,
@@ -153,8 +164,10 @@ test.describe("Cancel Verification API", () => {
 			const cancelBody = await cancelRes.json();
 			expect(cancelBody.cancelled).toBe(true);
 
-			// Verification should no longer be running
-			await pollUntil(
+			// Cancellation bookkeeping is synchronous; drive any queued cleanup with
+			// the gateway's manual clock instead of sleeping between REST reads.
+			await observeUntil(
+				gateway.clock,
 				() => getActiveVerifications(goalId),
 				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"),
 				5000,
@@ -240,7 +253,7 @@ test.describe("Cancel Verification API", () => {
 		}
 	});
 
-	test("re-signal after cancel succeeds (no 409)", async () => {
+	test("re-signal after cancel succeeds (no 409)", async ({ gateway }) => {
 		let setup: SlowWorkflowGoal | undefined;
 		try {
 			setup = await createSlowWorkflowGoal("Re-signal After Cancel");
@@ -253,8 +266,8 @@ test.describe("Cancel Verification API", () => {
 			});
 			expect(signal1Res.status).toBe(201);
 
-			// Wait for verification to start running
-			await pollUntil(
+			await observeUntil(
+				gateway.clock,
 				() => getActiveVerifications(goalId),
 				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"),
 				10000,
@@ -267,8 +280,8 @@ test.describe("Cancel Verification API", () => {
 			expect(cancelRes.status).toBe(200);
 			expect((await cancelRes.json()).cancelled).toBe(true);
 
-			// Wait for the cancellation to fully propagate
-			await pollUntil(
+			await observeUntil(
+				gateway.clock,
 				() => getActiveVerifications(goalId),
 				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"),
 				5000,
@@ -281,8 +294,9 @@ test.describe("Cancel Verification API", () => {
 			});
 			expect(signal2Res.status).toBe(201);
 
-			// Verify the new signal starts verification
-			await pollUntil(
+			// Verify the new signal starts verification without a real wait.
+			await observeUntil(
+				gateway.clock,
 				() => getActiveVerifications(goalId),
 				(v) => v.length > 0,
 				10000,
@@ -297,7 +311,7 @@ test.describe("Cancel Verification API", () => {
 		}
 	});
 
-	test("double cancel is idempotent", async () => {
+	test("double cancel is idempotent", async ({ gateway }) => {
 		let setup: SlowWorkflowGoal | undefined;
 		try {
 			setup = await createSlowWorkflowGoal("Double Cancel");
@@ -310,8 +324,8 @@ test.describe("Cancel Verification API", () => {
 			});
 			expect(signalRes.status).toBe(201);
 
-			// Wait for verification to start
-			await pollUntil(
+			await observeUntil(
+				gateway.clock,
 				() => getActiveVerifications(goalId),
 				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"),
 				10000,
@@ -324,8 +338,8 @@ test.describe("Cancel Verification API", () => {
 			expect(cancel1.status).toBe(200);
 			expect((await cancel1.json()).cancelled).toBe(true);
 
-			// Wait for cancellation to take effect
-			await pollUntil(
+			await observeUntil(
+				gateway.clock,
 				() => getActiveVerifications(goalId),
 				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"),
 				5000,

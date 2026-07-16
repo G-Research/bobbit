@@ -18,11 +18,14 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_e2e/e2e-setup.js";
-// Import from dist/ so we share the same module instance (and therefore
-// the same `pendingFlows` Map) as the in-process gateway, which also imports
-// from dist/. Importing from src/ would yield a different module instance
-// under tsx and the REST cross-checks would never see our flows.
-import { oauthStart, oauthFlowStatus } from "../../src/server/auth/oauth.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
+
+let oauthStart: typeof import("../../src/server/auth/oauth.js").oauthStart;
+let oauthFlowStatus: typeof import("../../src/server/auth/oauth.js").oauthFlowStatus;
+
+test.beforeAll(async () => {
+	({ oauthStart, oauthFlowStatus } = (await loadServerTestRuntime()).oauth);
+});
 
 const headers = () => ({
 	Authorization: `Bearer ${readE2EToken()}`,

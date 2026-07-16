@@ -135,8 +135,8 @@
     "area": "di-fence",
     "file": "tests2/harness/fenced-command-runner.ts",
     "description": "DI-fence: gh invocation no longer blocked in execFile — the test-only gh fence is disabled.",
-    "search": "\t\t\tif (name === \"gh\") throw new Error(\"[fenced-command-runner] blocked gh invocation\");\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") await assertGitRemoteAllowed(args, options);\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
-    "replace": "\t\t\t// if (name === \"gh\") ... // mutant: gh check removed\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") await assertGitRemoteAllowed(args, options);\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
+    "search": "\t\t\tif (name === \"gh\") throw new Error(\"[fenced-command-runner] blocked gh invocation\");\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") {\n\t\t\t\tif (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);\n\t\t\t\tawait assertGitRemoteAllowed(realCommandRunner, args, options);\n\t\t\t}\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
+    "replace": "\t\t\t// if (name === \"gh\") ... // mutant: gh check removed\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") {\n\t\t\t\tif (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);\n\t\t\t\tawait assertGitRemoteAllowed(realCommandRunner, args, options);\n\t\t\t}\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
     "expectedLegacyCatchers": [],
     "expectedV2Catchers": ["tests2/core/command-runner-fence.test.ts"],
     "note": "No legacy catcher — fence is a new v2 seam (demonstrates v2 NEW coverage)"

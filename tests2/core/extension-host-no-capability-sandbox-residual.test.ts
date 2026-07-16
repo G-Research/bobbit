@@ -22,8 +22,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
+import fs, { type Dirent } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -63,6 +62,19 @@ const DOC_FRAMING = [
 ];
 
 const TEXT_EXT = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".md", ".yaml", ".yml", ".txt", ".html", ".css"]);
+const EXCLUDED_DIRS = new Set([
+	".git",
+	".bobbit",
+	"node_modules",
+	"dist",
+	"build",
+	"coverage",
+	"playwright-report",
+	"test-results",
+	"tmp",
+]);
+const MAX_SCAN_DEPTH = 24;
+const MAX_SCAN_FILES = 50_000;
 
 // Never scanned — they describe the removal and would self-match (no exception hole).
 const EXCLUDE_RELS = new Set([
@@ -71,29 +83,36 @@ const EXCLUDE_RELS = new Set([
 ]);
 
 /**
- * Collect only git-tracked text files. This keeps the guard bounded under the
- * full unit suite: concurrent tests and browser fixtures may create temporary
- * directories, traces, or generated files, but only committed source/docs/packs
- * can reintroduce the deleted sandbox surface this test guards.
+ * Enumerate source text directly without spawning Git. Traversal is constrained
+ * to explicit repository roots, never follows symlinks, excludes generated/VCS
+ * directories, and has depth/file-count limits so the unit guard stays bounded.
  */
 function trackedTextFiles(...roots: string[]): string[] {
-	let raw: string;
-	try {
-		raw = execFileSync("git", ["ls-files", "-z", "--", ...roots], {
-			cwd: REPO_ROOT,
-			encoding: "utf8",
-			maxBuffer: 8 * 1024 * 1024,
-		});
-	} catch (err: any) {
-		assert.fail(`could not enumerate tracked files for residual sandbox scan: ${err?.message || err}`);
-	}
-	const files = raw
-		.split("\0")
-		.filter(Boolean)
-		.filter((rel) => TEXT_EXT.has(path.extname(rel)))
-		.filter((rel) => !EXCLUDE_RELS.has(path.normalize(rel)))
-		.map((rel) => path.join(REPO_ROOT, rel));
-	assert.ok(files.length > 0, `residual sandbox scan found no tracked files under: ${roots.join(", ")}`);
+	const files: string[] = [];
+	const visit = (abs: string, depth: number): void => {
+		assert.ok(depth <= MAX_SCAN_DEPTH, `residual sandbox scan exceeded depth ${MAX_SCAN_DEPTH} at ${path.relative(REPO_ROOT, abs)}`);
+		let entries: Dirent[];
+		try {
+			entries = fs.readdirSync(abs, { withFileTypes: true });
+		} catch (err: any) {
+			assert.fail(`could not enumerate files for residual sandbox scan at ${path.relative(REPO_ROOT, abs)}: ${err?.message || err}`);
+		}
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) continue;
+			const child = path.join(abs, entry.name);
+			if (entry.isDirectory()) {
+				if (!EXCLUDED_DIRS.has(entry.name)) visit(child, depth + 1);
+				continue;
+			}
+			if (!entry.isFile() || !TEXT_EXT.has(path.extname(entry.name))) continue;
+			const rel = path.normalize(path.relative(REPO_ROOT, child));
+			if (!EXCLUDE_RELS.has(rel)) files.push(child);
+			assert.ok(files.length <= MAX_SCAN_FILES, `residual sandbox scan exceeded ${MAX_SCAN_FILES} text files`);
+		}
+	};
+
+	for (const root of roots) visit(path.join(REPO_ROOT, root), 0);
+	assert.ok(files.length > 0, `residual sandbox scan found no text files under: ${roots.join(", ")}`);
 	return files;
 }
 

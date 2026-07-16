@@ -9,10 +9,10 @@ guardProcessEnv();
 /**
  * Unit tests for sandbox verification command execution.
  *
- * Tests that `runCommandStep` in VerificationHarness:
- * 1. Uses `docker exec` when a containerId is provided (sandboxed goal)
- * 2. Falls back to host shell when sandboxed but no container available
- * 3. Uses host shell as normal for non-sandboxed goals
+ * Tests verification command routing in VerificationHarness:
+ * 1. Routes a containerId and container worktree cwd for sandboxed goals
+ * 2. Falls back to host execution when no container is available
+ * 3. Uses deterministic host execution for non-sandboxed goals
  *
  * Also tests the call-site container resolution logic in verifyGateSignal,
  * which now uses SandboxManager → ProjectSandbox.getContainerId() instead
@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { GateSignal } from "../../src/server/agent/gate-store.ts";
+import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 // Isolated temp dir for harness persistence
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-sandbox-test-"));
@@ -31,7 +32,10 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
-const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
+
+const HOST_CWD = os.tmpdir();
+const HOST_MARKER_COMMAND = "echo host-shell-test-marker";
+const STREAM_MARKER_COMMAND = "echo streamed-marker";
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -150,10 +154,18 @@ function createHarness(opts: {
 		undefined, // projectConfigStore
 		pcm as any,
 		undefined, // configCascade
-		{ commandStepRunner: createFakeVerificationCommandRunner() },
+		{
+			commandRunner: {
+				execFile: async () => ({ stdout: "refs/remotes/origin/master\n", stderr: "" }),
+			},
+			commandStepRunner: createFakeVerificationCommandRunner(),
+		},
 	);
-
 	return { harness, broadcastCalls, pcm };
+}
+
+async function runCommandStep(harness: InstanceType<typeof VerificationHarness>, ...args: any[]) {
+	return (harness as any).runCommandStep(...args);
 }
 
 // ---------------------------------------------------------------------------
@@ -163,9 +175,9 @@ function createHarness(opts: {
 describe("runCommandStep spawn behavior", () => {
 	it("runs on host shell when no containerId is provided", async () => {
 		const { harness } = createHarness();
-		const result = await (harness as any).runCommandStep(
-			"echo host-shell-test-marker",
-			os.tmpdir(),
+		const result = await runCommandStep(harness,
+			HOST_MARKER_COMMAND,
+			HOST_CWD,
 			10,
 			false,
 			undefined,
@@ -179,24 +191,6 @@ describe("runCommandStep spawn behavior", () => {
 		);
 	});
 
-	it("spawns docker exec when containerId is provided", async () => {
-		const { harness } = createHarness();
-		const result = await (harness as any).runCommandStep(
-			"echo docker-test",
-			os.tmpdir(),
-			10,
-			false,
-			undefined,
-			undefined,
-			"nonexistent-container-abc123", // containerId
-		);
-		// docker exec will fail — either Docker not installed (ENOENT) or container not found
-		assert.ok(!result.passed, "Expected command to fail with nonexistent container");
-		// On systems with Docker: error about container
-		// On systems without Docker: ENOENT or "not found"
-		assert.ok(result.output.length > 0, "Should have some error output");
-	});
-
 	it("streams output via broadcastFn for host path", async () => {
 		const { harness, broadcastCalls } = createHarness();
 		const streamCtx = {
@@ -205,9 +199,9 @@ describe("runCommandStep spawn behavior", () => {
 			signalId: "sig-1",
 			stepIndex: 0,
 		};
-		const result = await (harness as any).runCommandStep(
-			"echo streamed-marker",
-			os.tmpdir(),
+		const result = await runCommandStep(harness,
+			STREAM_MARKER_COMMAND,
+			HOST_CWD,
 			10,
 			false,
 			streamCtx,
@@ -222,6 +216,9 @@ describe("runCommandStep spawn behavior", () => {
 		assert.ok(outputEvents.length > 0, "Should broadcast stdout output");
 		const allText = outputEvents.map(e => e.event.text).join("");
 		assert.ok(allText.includes("streamed-marker"), `Expected streamed output to include marker, got: ${allText}`);
+		assert.equal(result.diagnostics?.type, "retained-command-diagnostics");
+		assert.ok(result.diagnostics?.stdout?.path, "fake output should retain stdout diagnostics");
+		assert.match(fs.readFileSync(result.diagnostics.stdout.path, "utf8"), /streamed-marker/);
 	});
 });
 

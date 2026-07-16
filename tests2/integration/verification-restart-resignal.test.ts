@@ -37,37 +37,28 @@
  * "Verification already in progress for this commit").
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, defaultProjectRootPath, deleteGoal } from "./_e2e/e2e-setup.js";
-import { execFileSync } from "node:child_process";
+import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-const SLOW_WORKFLOW_ID = `test-restart-resignal-${Date.now()}`;
+const WORKFLOW_ID = `test-restart-resignal-${Date.now()}`;
+const HEAD_SHA = "c".repeat(40);
 
-/** Create a workflow with one slow command step. */
-async function createSlowWorkflow(): Promise<void> {
+/** Create a workflow whose historical zombie is seeded explicitly below. */
+async function createWorkflow(): Promise<void> {
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
 		body: JSON.stringify({
-			id: SLOW_WORKFLOW_ID,
+			id: WORKFLOW_ID,
 			name: "Test Restart Resignal",
-			description: "Workflow with slow command for restart-resignal tests",
+			description: "Workflow for restart-resignal decision tests",
 			gates: [
 				{
 					id: "slow-gate",
 					name: "Slow Gate",
 					dependsOn: [],
-					verify: [
-						{
-							name: "Slow check",
-							type: "command",
-							// Long enough that we can intercept mid-flight if needed,
-							// but the actual restart-resignal path below never waits
-							// on this command — it seeds a fake zombie directly.
-							run: 'node -e "setTimeout(()=>{console.log(\'done\');process.exit(0)},5000)"',
-						},
-					],
+					verify: [],
 				},
 			],
 		}),
@@ -75,18 +66,22 @@ async function createSlowWorkflow(): Promise<void> {
 	expect(res.status).toBe(201);
 }
 
-async function deleteSlowWorkflow(): Promise<void> {
-	await apiFetch(`/api/workflows/${SLOW_WORKFLOW_ID}`, { method: "DELETE" }).catch(() => {});
+async function deleteWorkflow(): Promise<void> {
+	await apiFetch(`/api/workflows/${WORKFLOW_ID}`, { method: "DELETE" }).catch(() => {});
 }
 
-/** Initialize a git repo at `dir` and produce one commit; return HEAD SHA. */
-function gitInitWithCommit(dir: string): string {
-	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--initial-branch=master"], { cwd: dir, stdio: "ignore" });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir, stdio: "ignore" });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir, stdio: "ignore" });
-	execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString().trim();
+async function withHeadSha<T>(gateway: any, run: () => Promise<T>): Promise<T> {
+	const runner = gateway.sessionManager.commandRunner;
+	const originalExecFile = runner.execFile;
+	runner.execFile = async (command: string, args: readonly string[]) => {
+		if (command === "git" && args.join(" ") === "rev-parse HEAD") return { stdout: `${HEAD_SHA}\n`, stderr: "" };
+		throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+	};
+	try {
+		return await run();
+	} finally {
+		runner.execFile = originalExecFile;
+	}
 }
 
 /** A pid that is overwhelmingly unlikely to be in use. */
@@ -96,29 +91,22 @@ function deadPid(): number {
 }
 
 test.describe("Verification lock after restart — re-signal is accepted", () => {
-	test.setTimeout(60_000);
-
 	test.beforeAll(async () => {
-		await createSlowWorkflow();
+		await createWorkflow();
 	});
 
 	test.afterAll(async () => {
-		await deleteSlowWorkflow();
+		await deleteWorkflow();
 	});
 
 	test("zombie command verification from previous boot is cleaned up; re-signal at same SHA returns 201", async ({ gateway }) => {
-		// 1. Real git repo so `git rev-parse HEAD` returns a real SHA — without
-		//    this the duplicate-detection block in server.ts:4792 is skipped
-		//    entirely and we wouldn't actually exercise the bug.
-		const defaultRoot = await defaultProjectRootPath();
-		const repoDir = fs.mkdtempSync(path.join(defaultRoot, ".e2e-verif-restart-repo-"));
-		const headSha = gitInitWithCommit(repoDir);
-
+		// The Git identity is supplied through the gateway CommandRunner seam; the
+		// duplicate-detection path still sees an authentic full commit SHA.
 		const goal = await createGoal({
 			title: `Restart Resignal ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
+			workflowId: WORKFLOW_ID,
 			worktree: false,
-			cwd: repoDir,
+			cwd: nonGitCwd(),
 		});
 		const goalId = goal.id;
 		const gateId = "slow-gate";
@@ -145,7 +133,7 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 				gateId,
 				sessionId: "unknown",
 				timestamp: startedAt,
-				commitSha: headSha,
+				commitSha: HEAD_SHA,
 				verification: {
 					status: "running",
 					startedAt,
@@ -229,10 +217,10 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 			// 6. Re-signal the same gate at the same SHA via the public HTTP API.
 			//    Pre-fix: HTTP 409 "Verification already in progress for this commit"
 			//    Post-fix: HTTP 201, a brand-new signalId, a fresh verification running.
-			const resignal = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
+			const resignal = await withHeadSha(gateway, () => apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "Re-signal after simulated restart" }),
-			});
+			}));
 			if (resignal.status !== 201) {
 				const body = await resignal.text();
 				throw new Error(`re-signal expected 201, got ${resignal.status}: ${body}`);
@@ -263,7 +251,6 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 			}).catch(() => {});
 		} finally {
 			try { await deleteGoal(goalId); } catch { /* ignore */ }
-			try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch { /* ignore */ }
 		}
 	});
 });

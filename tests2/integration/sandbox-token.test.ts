@@ -3,6 +3,16 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken } from "./_e2e/e2e-setup.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
+
+let SandboxTokenStore: typeof import("../../src/server/auth/sandbox-token.js").SandboxTokenStore;
+let isSandboxAllowed: typeof import("../../src/server/auth/sandbox-guard.js").isSandboxAllowed;
+
+test.beforeAll(async () => {
+	const runtime = await loadServerTestRuntime();
+	({ SandboxTokenStore } = runtime.sandboxToken);
+	({ isSandboxAllowed } = runtime.sandboxGuard);
+});
 
 function fetchWithToken(baseUrl: string, path: string, token: string, opts: RequestInit = {}): Promise<Response> {
 	return fetch(`${baseUrl}${path}`, {
@@ -34,7 +44,6 @@ test.describe("Sandbox Token Scoping", () => {
 	});
 
 	test("SandboxTokenStore per-project register/lookup/remove lifecycle", async () => {
-		const { SandboxTokenStore } = await import("../../src/server/auth/sandbox-token.js");
 		const store = new SandboxTokenStore();
 
 		// Register returns a token for the project
@@ -60,7 +69,6 @@ test.describe("Sandbox Token Scoping", () => {
 	});
 
 	test("SandboxTokenStore session and goal tracking", async () => {
-		const { SandboxTokenStore } = await import("../../src/server/auth/sandbox-token.js");
 		const store = new SandboxTokenStore();
 
 		const token = store.register("project-1");
@@ -90,7 +98,6 @@ test.describe("Sandbox Token Scoping", () => {
 	});
 
 	test("sandbox guard allows correct endpoints (per-project model)", async () => {
-		const { isSandboxAllowed } = await import("../../src/server/auth/sandbox-guard.js");
 		const scope = {
 			projectId: "p1",
 			goalIds: new Set(["g1"]),
@@ -128,7 +135,6 @@ test.describe("Sandbox Token Scoping", () => {
 	});
 
 	test("sandbox guard blocks dangerous endpoints (per-project model)", async () => {
-		const { isSandboxAllowed } = await import("../../src/server/auth/sandbox-guard.js");
 		const scope = {
 			projectId: "p1",
 			goalIds: new Set(["g1"]),
@@ -169,7 +175,6 @@ test.describe("Sandbox Token Scoping", () => {
 	});
 
 	test("no goalIds blocks all goal endpoints", async () => {
-		const { isSandboxAllowed } = await import("../../src/server/auth/sandbox-guard.js");
 		const scope = {
 			projectId: "p1",
 			goalIds: new Set<string>(),

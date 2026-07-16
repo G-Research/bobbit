@@ -32,37 +32,75 @@ function clearAll() {
 }
 
 // Install / restore throwing Storage methods to simulate disabled/quota storage.
-// happy-dom's Storage instances carry their own methods (patching the prototype
-// is a no-op for them), so we shadow the methods on the exact instances the
-// store resolves via globalThis.{session,local}Storage and delete the overrides
-// to restore the prototype behaviour.
-let _broken = false;
-function targets(): any[] {
+// Record every patched target and its effective descriptor. Deleting overrides is
+// not sufficient: happy-dom's Storage proxy rejects deletion, and another test shim
+// may already have supplied an own method. Retaining the original target also avoids
+// missing an object whose global alias changes while the fault is installed.
+type StorageMethod = "setItem" | "getItem";
+type StorageOverride = {
+	target: Storage;
+	method: StorageMethod;
+	original: PropertyDescriptor;
+};
+let storageOverrides: StorageOverride[] = [];
+function effectiveDescriptor(target: Storage, method: StorageMethod): PropertyDescriptor {
+	let current: object | null = target;
+	while (current) {
+		const descriptor = Object.getOwnPropertyDescriptor(current, method);
+		if (descriptor) return descriptor;
+		current = Object.getPrototypeOf(current);
+	}
+	throw new Error(`Storage.${method} has no descriptor`);
+}
+function targets(): Storage[] {
 	// The store resolves storage via `globalThis.{session,local}Storage`; patch
 	// those exact instances (and the window aliases, which may or may not be the
 	// same object under vitest's populateGlobal).
-	return Array.from(new Set<any>([
+	return Array.from(new Set<Storage>([
 		(globalThis as any).sessionStorage, (globalThis as any).localStorage,
 		window.sessionStorage, window.localStorage,
 	].filter(Boolean)));
 }
 function breakStorage() {
-	if (_broken) return;
-	_broken = true;
-	const throwSet = () => { throw new Error("QuotaExceededError (simulated)"); };
-	const throwGet = () => { throw new Error("SecurityError (simulated)"); };
-	for (const s of targets()) {
-		Object.defineProperty(s, "setItem", { configurable: true, writable: true, value: throwSet });
-		Object.defineProperty(s, "getItem", { configurable: true, writable: true, value: throwGet });
+	if (storageOverrides.length > 0) return;
+	const throwingMethods: Record<StorageMethod, () => never> = {
+		setItem: () => { throw new Error("QuotaExceededError (simulated)"); },
+		getItem: () => { throw new Error("SecurityError (simulated)"); },
+	};
+	try {
+		for (const target of targets()) {
+			for (const method of Object.keys(throwingMethods) as StorageMethod[]) {
+				storageOverrides.push({
+					target,
+					method,
+					original: effectiveDescriptor(target, method),
+				});
+				Object.defineProperty(target, method, {
+					configurable: true,
+					writable: true,
+					value: throwingMethods[method],
+				});
+			}
+		}
+	} catch (error) {
+		restoreStorage();
+		throw error;
 	}
 }
 function restoreStorage() {
-	if (!_broken) return;
-	_broken = false;
-	for (const s of targets()) {
-		try { delete s.setItem; } catch { /* ignore */ }
-		try { delete s.getItem; } catch { /* ignore */ }
+	const overrides = storageOverrides.splice(0).reverse();
+	let cleanupError: unknown;
+	for (const { target, method, original } of overrides) {
+		try {
+			// Define the effective method as an own property. happy-dom's Storage proxy
+			// returns false from deleteProperty, so delete-based cleanup leaves the
+			// throwing fault installed for the rest of the worker.
+			Object.defineProperty(target, method, original);
+		} catch (error) {
+			cleanupError ??= error;
+		}
 	}
+	if (cleanupError) throw cleanupError;
 }
 
 const makeStore = (options: TransientDraftStoreOptions) => createTransientDraftStore<any>(options);
@@ -252,5 +290,11 @@ describe("TransientDraftStore storage failures degrade safely", () => {
 		expect(threw).toBe(false);
 		// With storage throwing, load degrades to null.
 		expect(loaded).toBeNull();
+
+		// Regression: happy-dom's Storage proxy rejects deleteProperty. Cleanup
+		// must restore working methods rather than leave the injected faults behind.
+		const recoveredStore = makeStore({ namespace: "cleanup" });
+		recoveredStore.save("k", { restored: true });
+		expect(recoveredStore.load("k")).toEqual({ restored: true });
 	});
 });

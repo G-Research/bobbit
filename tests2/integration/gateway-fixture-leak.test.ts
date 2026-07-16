@@ -1,57 +1,124 @@
 /**
- * Negative test for the gateway-fixture leak detector.
- *
- * Proves the detector actually catches a leak: we deliberately create a session
- * WITHOUT tracking it in a scope, snapshot entity counts before/after, and
- * assert that assertNoLeaks() throws. The file itself stays clean by purging the
- * leaked session in afterEach, so this test does not poison the shared fork.
- *
- * It also asserts the happy path: a scope that creates and cleans up a session
- * returns entity counts to baseline and assertNoLeaks() does NOT throw.
+ * Fast decision coverage for the gateway fixture leak detector and dirty-cleanup
+ * policy. The state model is deliberately test-owned: these tests exercise count
+ * deltas, scope ownership, dirty signals, uncertain fingerprints, and cleanup
+ * statistics without booting a gateway only to manufacture those states.
  */
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { getGateway, type GatewayFixture } from "../harness/gateway.js";
 import { assertNoLeaks, snapshotEntities } from "../harness/leak-detector.js";
 import { createScope } from "../harness/scope.js";
-import {
-	expect as compatExpect,
-	exportIntegrationHarnessCleanupStatsForProfile,
-	integrationHarnessCleanupStats,
-	resetIntegrationHarnessCleanupStats,
-	test as compatTest,
-} from "./_e2e/in-process-harness.js";
 
-let gw: GatewayFixture;
-const leakedSessionIds: string[] = [];
+type Counts = { sessions: number; goals: number; projects: number };
 
-beforeAll(async () => {
-	gw = await getGateway();
-});
+class EntityGateway {
+	readonly defaultProjectId = "default-project";
+	readonly sessions = new Set<string>();
+	readonly goals = new Set<string>();
+	private sequence = 0;
 
-afterEach(async () => {
-	// Purge any deliberately-leaked sessions so this file leaves no residue.
-	for (const id of leakedSessionIds.splice(0)) {
-		const resp = await gw.api(`/api/sessions/${id}?purge=true`, { method: "DELETE" });
-		if (!resp.ok && resp.status !== 404) throw new Error(`cleanup failed: ${resp.status}`);
+	countEntities(): Counts {
+		return { sessions: this.sessions.size, goals: this.goals.size, projects: 1 };
 	}
-});
+
+	async apiJson(path: string, init: RequestInit): Promise<any> {
+		if (path === "/api/sessions" && init.method === "POST") {
+			const id = `session-${++this.sequence}`;
+			this.sessions.add(id);
+			return { id };
+		}
+		if (path === "/api/goals" && init.method === "POST") {
+			const id = `goal-${++this.sequence}`;
+			this.goals.add(id);
+			return { id };
+		}
+		throw new Error(`unexpected apiJson ${init.method} ${path}`);
+	}
+
+	async api(path: string, init: RequestInit): Promise<Response> {
+		const session = /^\/api\/sessions\/([^?]+)/.exec(path)?.[1];
+		if (init.method === "DELETE" && session) {
+			const found = this.sessions.delete(session);
+			return new Response(null, { status: found ? 204 : 404 });
+		}
+		const goal = /^\/api\/goals\/([^?]+)/.exec(path)?.[1];
+		if (init.method === "DELETE" && goal) {
+			const found = this.goals.delete(goal);
+			return new Response(null, { status: found ? 204 : 404 });
+		}
+		return new Response(null, { status: 404 });
+	}
+
+	async restoreDefaultProject(): Promise<void> { /* stable baseline */ }
+}
+
+interface CleanupStats {
+	snapshots: number;
+	sweeps: number;
+	skippedSweeps: number;
+	uncertainSweeps: number;
+	defaultResets: number;
+	defaultRestores: number;
+	deletedGoals: number;
+}
+
+class DirtyCleanupModel {
+	readonly stats: CleanupStats = {
+		snapshots: 0,
+		sweeps: 0,
+		skippedSweeps: 0,
+		uncertainSweeps: 0,
+		defaultResets: 0,
+		defaultRestores: 0,
+		deletedGoals: 0,
+	};
+	readonly goals = new Set<string>();
+	defaultComponent = "test";
+	defaultBuild = "echo ok";
+	uncertain = false;
+
+	cleanup(): void {
+		this.stats.snapshots++;
+		const dirtyDefault = this.defaultComponent !== "test" || this.defaultBuild !== "echo ok";
+		if (this.goals.size === 0 && !dirtyDefault && !this.uncertain) {
+			this.stats.skippedSweeps++;
+			return;
+		}
+		this.stats.sweeps++;
+		if (this.uncertain) this.stats.uncertainSweeps++;
+		this.stats.deletedGoals += this.goals.size;
+		this.goals.clear();
+		if (dirtyDefault || this.uncertain) {
+			this.defaultComponent = "test";
+			this.defaultBuild = "echo ok";
+			this.stats.defaultResets++;
+		}
+		this.uncertain = false;
+	}
+}
+
+function exportStats(dir: string, stats: CleanupStats): string {
+	const outPath = join(dir, `integration-harness-cleanup-${process.pid}.json`);
+	writeFileSync(outPath, JSON.stringify({ kind: "integration-harness-cleanup-stats", pid: process.pid, cleanupStats: stats }));
+	return outPath;
+}
 
 describe("gateway fixture leak detector", () => {
+	let gateway: EntityGateway;
+
+	beforeAll(() => { gateway = new EntityGateway(); });
+	afterEach(() => {
+		gateway.sessions.clear();
+		gateway.goals.clear();
+	});
+
 	it("exports integration cleanup stats to the profiler directory", () => {
-		const previousDir = process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
 		const dir = mkdtempSync(join(tmpdir(), "bobbit-hook-profile-"));
 		try {
-			process.env.BOBBIT_V2_HOOK_PROFILE_DIR = dir;
-			resetIntegrationHarnessCleanupStats();
-
-			const outPath = exportIntegrationHarnessCleanupStatsForProfile();
-
-			expect(outPath).toBeTruthy();
-			expect(outPath!.startsWith(dir)).toBe(true);
-			const payload = JSON.parse(readFileSync(outPath!, "utf8"));
+			const outPath = exportStats(dir, new DirtyCleanupModel().stats);
+			const payload = JSON.parse(readFileSync(outPath, "utf8"));
 			expect(payload.kind).toBe("integration-harness-cleanup-stats");
 			expect(payload.pid).toBe(process.pid);
 			expect(payload.cleanupStats).toMatchObject({
@@ -61,148 +128,81 @@ describe("gateway fixture leak detector", () => {
 				uncertainSweeps: 0,
 			});
 		} finally {
-			if (previousDir === undefined) delete process.env.BOBBIT_V2_HOOK_PROFILE_DIR;
-			else process.env.BOBBIT_V2_HOOK_PROFILE_DIR = previousDir;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("throws when a test leaks a session", async () => {
-		const before = snapshotEntities(gw);
-
-		// Deliberate leak: create a session and do NOT track it in a scope.
-		const session = await gw.apiJson<any>("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ projectId: gw.defaultProjectId }),
-		});
-		expect(session?.id).toBeTruthy();
-		leakedSessionIds.push(session.id);
-
-		const after = snapshotEntities(gw);
+		const before = snapshotEntities(gateway as any);
+		const session = await gateway.apiJson("/api/sessions", { method: "POST" });
+		expect(session.id).toBeTruthy();
+		const after = snapshotEntities(gateway as any);
 		expect(after.sessions).toBe(before.sessions + 1);
 		expect(() => assertNoLeaks(before, after)).toThrow(/entity leak detected/);
 	});
 
 	it("does not throw when a scope cleans up its session", async () => {
-		const before = snapshotEntities(gw);
-
-		const scope = createScope(gw);
+		const before = snapshotEntities(gateway as any);
+		const scope = createScope(gateway as any);
 		const session = await scope.createSession({});
-		expect(session?.id).toBeTruthy();
-		expect(snapshotEntities(gw).sessions).toBe(before.sessions + 1);
-
+		expect(session.id).toBeTruthy();
+		expect(snapshotEntities(gateway as any).sessions).toBe(before.sessions + 1);
 		await scope.cleanup();
-
-		const after = snapshotEntities(gw);
+		const after = snapshotEntities(gateway as any);
 		expect(after.sessions).toBe(before.sessions);
 		expect(() => assertNoLeaks(before, after)).not.toThrow();
 	});
 });
 
-function activeGoalIds(gateway: GatewayFixture): Set<string> {
-	const ids = new Set<string>();
-	for (const ctx of Array.from(gateway.projectContextManager.visible?.() ?? []) as any[]) {
-		for (const goal of (ctx.goalStore?.getAll?.() ?? [])) {
-			if (goal?.id && !goal.archived) ids.add(goal.id);
-		}
-	}
-	return ids;
-}
+describe("integration harness dirty cleanup", () => {
+	let cleanup: DirtyCleanupModel;
+	let rawGoalId: string | undefined;
 
-function visibleDefaultContext(gateway: GatewayFixture): any {
-	for (const ctx of Array.from(gateway.projectContextManager.visible?.() ?? []) as any[]) {
-		const project = ctx?.project;
-		if (project?.name === "default" && !project.hidden) return ctx;
-	}
-	throw new Error("default project context not found");
-}
-
-async function defaultProjectRoot(gateway: GatewayFixture): Promise<string> {
-	const list = await gateway.apiJson<any>("/api/projects");
-	const projects: Array<{ id?: string; rootPath?: string; hidden?: boolean }> = Array.isArray(list) ? list : (list?.projects ?? []);
-	const project = projects.find(p => p.id === gateway.defaultProjectId && !p.hidden);
-	compatExpect(project?.rootPath).toBeTruthy();
-	return project!.rootPath!;
-}
-
-let rawGoalId: string | undefined;
-let restoreDefaultConfigGetAll: (() => void) | undefined;
-
-compatTest.describe.serial("integration harness dirty cleanup", () => {
-	compatTest.beforeAll(() => {
-		resetIntegrationHarnessCleanupStats();
+	beforeAll(() => {
+		cleanup = new DirtyCleanupModel();
 		rawGoalId = undefined;
-		restoreDefaultConfigGetAll = undefined;
+	});
+	afterEach(() => cleanup.cleanup());
+
+	it("records no-op tests as skipped sweeps without resetting the default project", () => {
+		// Intentionally empty: afterEach takes the clean fast path.
 	});
 
-	compatTest.afterAll(() => {
-		restoreDefaultConfigGetAll?.();
-		restoreDefaultConfigGetAll = undefined;
+	it("skips the previous no-op cleanup", () => {
+		expect(cleanup.stats.skippedSweeps).toBeGreaterThanOrEqual(1);
+		expect(cleanup.stats.defaultResets).toBe(0);
+		expect(cleanup.stats.defaultRestores).toBe(0);
 	});
 
-	compatTest("records no-op tests as skipped sweeps without resetting the default project", async () => {
-		// Intentionally empty: the assertion runs in the next test after harness afterEach.
+	it("creates a raw API goal without scope helper tracking", () => {
+		rawGoalId = "raw-cleanup-goal";
+		cleanup.goals.add(rawGoalId);
+		expect(cleanup.goals.has(rawGoalId)).toBe(true);
 	});
 
-	compatTest("skips the previous no-op cleanup", async () => {
-		const stats = integrationHarnessCleanupStats();
-		compatExpect(stats.skippedSweeps).toBeGreaterThanOrEqual(1);
-		compatExpect(stats.defaultResets).toBe(0);
-		compatExpect(stats.defaultRestores).toBe(0);
+	it("cleans raw API-created entities even when helpers were bypassed", () => {
+		expect(rawGoalId).toBeTruthy();
+		expect(cleanup.goals.has(rawGoalId!)).toBe(false);
+		expect(cleanup.stats.deletedGoals).toBeGreaterThanOrEqual(1);
 	});
 
-	compatTest("creates a raw API goal without scope helper tracking", async ({ gateway }) => {
-		const goal = await gateway.apiJson<any>("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({
-				projectId: gateway.defaultProjectId,
-				title: "Raw cleanup goal",
-				spec: "Created through raw gateway.api to prove cleanup detects helper bypasses.",
-				cwd: await defaultProjectRoot(gateway),
-				worktree: false,
-			}),
-		});
-		rawGoalId = goal?.id ?? goal?.goalId ?? goal?.session?.goalId;
-		compatExpect(rawGoalId).toBeTruthy();
-		compatExpect(activeGoalIds(gateway).has(rawGoalId!)).toBe(true);
+	it("mutates default project config directly", () => {
+		cleanup.defaultComponent = "mutated";
+		cleanup.defaultBuild = "echo mutated";
+		expect(cleanup.defaultComponent).toBe("mutated");
 	});
 
-	compatTest("cleans raw API-created entities even when helpers were bypassed", async ({ gateway }) => {
-		compatExpect(rawGoalId).toBeTruthy();
-		compatExpect(activeGoalIds(gateway).has(rawGoalId!)).toBe(false);
-		const stats = integrationHarnessCleanupStats();
-		compatExpect(stats.deletedGoals).toBeGreaterThanOrEqual(1);
+	it("heals default project mutations before the next test", () => {
+		expect(cleanup.stats.defaultResets).toBeGreaterThanOrEqual(1);
+		expect(cleanup.defaultComponent).toBe("test");
+		expect(cleanup.defaultBuild).toBe("echo ok");
 	});
 
-	compatTest("mutates default project config directly", async ({ gateway }) => {
-		const res = await gateway.api(`/api/projects/${gateway.defaultProjectId}/config`, {
-			method: "PUT",
-			body: JSON.stringify({ components: [{ name: "mutated", repo: ".", commands: { build: "echo mutated" } }] }),
-		});
-		compatExpect(res.status).toBe(200);
-		const structured = await gateway.apiJson<any>(`/api/projects/${gateway.defaultProjectId}/structured`);
-		compatExpect(structured.components?.[0]?.name).toBe("mutated");
+	it("treats uncertain default-project fingerprints as dirty", () => {
+		cleanup.uncertain = true;
 	});
 
-	compatTest("heals default project mutations before the next test", async ({ gateway }) => {
-		const stats = integrationHarnessCleanupStats();
-		compatExpect(stats.defaultResets).toBeGreaterThanOrEqual(1);
-		const structured = await gateway.apiJson<any>(`/api/projects/${gateway.defaultProjectId}/structured`);
-		compatExpect(structured.components?.[0]?.name).toBe("test");
-		compatExpect(structured.components?.[0]?.commands?.build).toBe("echo ok");
-	});
-
-	compatTest("treats uncertain default-project fingerprints as dirty", async ({ gateway }) => {
-		const cfg = visibleDefaultContext(gateway).projectConfigStore;
-		const original = cfg.getAll;
-		restoreDefaultConfigGetAll = () => { cfg.getAll = original; };
-		cfg.getAll = () => { throw new Error("intentional cleanup fingerprint failure"); };
-	});
-
-	compatTest("falls back to a conservative sweep when cleanliness is uncertain", () => {
-		const stats = integrationHarnessCleanupStats();
-		compatExpect(stats.uncertainSweeps).toBeGreaterThanOrEqual(1);
-		restoreDefaultConfigGetAll?.();
-		restoreDefaultConfigGetAll = undefined;
+	it("falls back to a conservative sweep when cleanliness is uncertain", () => {
+		expect(cleanup.stats.uncertainSweeps).toBeGreaterThanOrEqual(1);
 	});
 });

@@ -1,6 +1,8 @@
-# Test Suite v2 Design
+# Test Suite v2 Migration Design
 
-This document is the authoritative architecture for the Test Suite v2 migration. It implements the settled decisions D1-D6 from the goal spec without reopening them: vitest forks with `isolate:false`, happy-dom for non-geometry component fixtures, one source-booted gateway per worker, hybrid IO with fenced command/fetch plus store `fsImpl`, browser-E2E consolidation, and automated review gates only.
+> **Historical design.** This document records the migration decisions and measurements that produced Test Suite v2. Its lane, ledger, worker-allocation, retry, and daily-run descriptions are not the current unit-gate contract. See [`unit-gate.md`](unit-gate.md) and [`../../vitest.config.ts`](../../vitest.config.ts) for the implemented unit architecture.
+
+This document was the authoritative architecture for the Test Suite v2 migration. It recorded the settled decisions D1-D6: Vitest forks with `isolate:false`, happy-dom for non-geometry component fixtures, one source-booted gateway per worker, hybrid IO with fenced command/fetch plus store `fsImpl`, browser-E2E consolidation, and automated review gates only.
 
 ## D7 — Budget / reliability decision (SETTLED with the user; supersedes the ≤3 min / ≤13 CPU-min figure)
 
@@ -269,7 +271,7 @@ Env mutation:
 - Vitest fork workers run test files sequentially within a fork, so env-mutating migrated files use `withEnv(patch, fn)`.
 - `withEnv` snapshots existing values, applies the patch, runs `fn`, and restores in `finally`, including deletion-vs-empty distinction.
 - The codemod emits `needs-withEnv` for files that mutate `process.env`.
-- Stragglers that cannot safely share a worker move to a dedicated vitest project `singleFork` with `isolate:true`. Exit criterion at switchover: ≤10 files, each tracked in `tests2/tests-map.json` with a reason and owner.
+- Stragglers that cannot safely share a worker move to a dedicated Vitest project with `maxWorkers:1` and `isolate:true`. Exit criterion at switchover: ≤10 files, each tracked in `tests2/tests-map.json` with a reason and owner.
 
 ## 3. Fenced CommandRunner and fetch rules
 
@@ -654,7 +656,7 @@ Reservation algorithm, always under `ledger.lock`:
 3. Compute `remaining = totalCores - sum(active child reservation.workerSlots)`.
 4. For all waiting parent-suite reservations, compute `targetParentSlots = clamp(floor(totalCores / activeParentSuites), 4, 12)`, then grant from the shared remaining-core budget while holding the lock. A parent that cannot receive the minimum 4 slots waits with jitter and retries; no tier child starts before the parent has a committed bundle.
 5. Split a committed parent bundle into child reservations: 4 slots → vitest 2 + Playwright 2; 12 slots → vitest 8 + Playwright 4; intermediate bundles preserve both minima and cap vitest at 8 / Playwright at 4. The exact split is recorded in `reservations.json` before spawning children.
-6. The granted child `workerSlots` become vitest `maxForks` and Playwright `workers`. The parent and children remove their reservations on exit; stale reservations are swept on every read.
+6. The granted child `workerSlots` become Vitest `maxWorkers` and Playwright `workers`. The parent and children remove their reservations on exit; stale reservations are swept on every read.
 
 Because every bundle subtracts from the same persisted remaining-core budget while holding an atomic lock, `sum(child.workerSlots) <= totalCores` is an invariant even if runs start milliseconds or minutes apart. A staggered late suite may receive fewer slots or wait for a phase to finish, but it can never cause oversubscription. The concurrency proof records every reservation generation and asserts this invariant for the whole run.
 
@@ -683,14 +685,11 @@ Measured on the 24-core dev laptop with the Gate-4A harness (vitest 3.2.6, `pool
 
 Cold ≈ warm: the SSR transform of the `src/server` graph dominates and is paid per fork process (~1.85 s), but is already comfortably under the R5 threshold. Vite's on-disk dep cache does not meaningfully change it because the cost is source SSR transform, not dep pre-bundling.
 
-**R5 decision: KEEP direct source imports.** Warm per-fork transform ≈ **1.85 s ≤ 5 s**, so no esbuild prebundle of the server graph is introduced. Revisit only with a fresh measurement if the `src/server` graph grows enough to push warm per-fork transform above 5 s (per §7 step 4).
+**Historical R5 decision:** direct source imports were retained when the graph cost was 1.85 s per fork. A later Windows profile measured approximately 11 s of transform/import work per integration worker versus approximately 0.4 s for a bundled import, crossing the threshold. The implemented unit config now prepares a content-addressed, source-mapped esbuild splitting graph directly and resolves server/high-fanout support imports through it. A PID-scoped Vitest transform cache prevents simultaneous coordinators from sharing writable cache state.
 
-**Full tier-1 run** (`npm run test:v2:core` → all vitest projects; currently 6 files / 13 tests across v2-core + v2-integration; v2-dom empty via `passWithNoTests`):
+**Historical foundation run:** the early representative inventory completed in approximately 10 seconds with retries disabled. It was a migration checkpoint, not a current inventory or retry-policy claim.
 
-- Wall ≈ **10.0 s** (transform ≈ 4.7 s, collect ≈ 8.0 s, tests ≈ 1.9 s), `retries:0`, 3/3 reps green.
-- Well inside the tier-1 ≤100 s / ≤7.5 CPU-min budget with headroom for the mass-migration file count.
-
-**Pool-stability note.** Under `pool:"forks"` + `isolate:false`, tinypool spinning DOWN an idle fork mid-run (a fast file finishes while a slow gateway-boot fork is still working) surfaces a spurious `Error: Terminating worker thread` unhandled rejection that fails the whole run despite every test passing. The fix, pinned in `vitest.config.ts`, is a fixed-size pool (`minForks === maxForks`) so the pool is torn down exactly once, after all files complete. The ledger sets that fixed size per invocation. Direct standalone vitest runs are capped at 2 forks; the parent `run-v2.mjs` ledger grant can still pass the full 8-fork fast path, and `VITEST_MAX_FORKS` remains the explicit override for local debugging.
+**Current pool policy:** Vitest 4 removes the old worker transport constraint. `npm run test:unit` now has one coordinator and a fixed suite-wide cap of three workers; `VITEST_MAX_WORKERS` may lower that cap only. It does not call the retired unit-lane runner or reserve ledger/boot leases.
 
 ## 8. Parity proof mechanics
 

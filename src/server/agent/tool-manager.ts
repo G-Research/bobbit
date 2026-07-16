@@ -407,6 +407,7 @@ function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketR
 	return profile("loadToolDefinitions", () => _loadToolDefinitions(toolsDir, builtinToolsDir, marketRoots));
 }
 
+
 function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: MarketToolRoot[] = []): BaseToolInfo[] {
 	// Ordered layers, low→high priority. The builtin layer is lowest, the
 	// scope's own user `toolsDir` overlay is highest, market-pack tool roots sit

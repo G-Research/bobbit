@@ -16,6 +16,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 test.setTimeout(15_000);
 
@@ -46,9 +47,10 @@ test.describe("model-prompt byte equality", () => {
 	test("six representative inputs match the legacy algorithm", async () => {
 		// Import the new helpers via the dist build that the harness already loaded
 		// (the in-process harness imports from dist/server/...).
-		const { resolveSkillExpansions } = await import("../../src/server/skills/resolve-skill-expansions.js");
-		const { getSlashSkill, buildSlashSkillPrompt } = await import("../../src/server/skills/slash-skills.js");
-		const { buildActivationHeader } = await import("../../src/server/skills/skill-manifest.js");
+		const runtime = await loadServerTestRuntime();
+		const { resolveSkillExpansions } = runtime.resolveSkillExpansions;
+		const { getSlashSkill, buildSlashSkillPrompt } = runtime.slashSkills;
+		const { buildActivationHeader } = runtime.skillManifest;
 
 		// Legacy reference algorithm — copied verbatim from the pre-refactor
 		// handler.ts inline block. Any change here is a deliberate spec change.

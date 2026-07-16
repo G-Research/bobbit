@@ -4,11 +4,23 @@
 
 import { describe, it, beforeEach, afterAll } from "vitest";
 import assert from "node:assert";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { computeResourceLimits, getDockerResourceLimits, _resetDockerLimitsCache } from "../../src/server/agent/project-sandbox.js";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFileCb);
+function fakeDockerRunner(result: { stdout?: string; error?: Error }): { runner: CommandRunner; calls: string[][] } {
+	const calls: string[][] = [];
+	return {
+		calls,
+		runner: {
+			async execFile(file, args) {
+				assert.strictEqual(file, "docker");
+				calls.push([...args]);
+				if (result.error) throw result.error;
+				return { stdout: result.stdout ?? "", stderr: "" };
+			},
+		},
+	};
+}
 
 // ── computeResourceLimits (pure function) ──────────────────────────────────
 
@@ -100,28 +112,33 @@ describe("getDockerResourceLimits", () => {
 		_resetDockerLimitsCache();
 	});
 
-	it("caches the result across calls", async () => {
-		// First call populates the cache, second returns cached value
-		const result1 = await getDockerResourceLimits();
-		const result2 = await getDockerResourceLimits();
+	it("returns an object with cpus and memBytes when Docker is available", async () => {
+		const { runner, calls } = fakeDockerRunner({ stdout: "8 17179869184\n" });
 
-		// Both calls return the same object reference (cached)
-		assert.strictEqual(result1, result2);
+		const result = await getDockerResourceLimits(runner);
+
+		assert.deepStrictEqual(result, { cpus: 8, memBytes: 17_179_869_184 });
+		assert.deepStrictEqual(calls, [["info", "--format", "{{.NCPU}} {{.MemTotal}}"]]);
 	});
 
-	it("returns an object with cpus and memBytes when Docker is available", async () => {
-		// Check if Docker is available first
-		try {
-			await execFileAsync("docker", ["info", "--format", "{{.NCPU}}"], { timeout: 5_000 });
-		} catch {
-			// Docker not available — skip this test
-			return;
-		}
+	it("caches the result across calls", async () => {
+		const { runner, calls } = fakeDockerRunner({ stdout: "4 8589934592\n" });
 
-		const result = await getDockerResourceLimits();
-		if (result === null) return; // Docker info failed unexpectedly
+		const result1 = await getDockerResourceLimits(runner);
+		const result2 = await getDockerResourceLimits(runner);
 
-		assert.ok(typeof result.cpus === "number" && result.cpus > 0, `cpus should be positive, got ${result.cpus}`);
-		assert.ok(typeof result.memBytes === "number" && result.memBytes > 0, `memBytes should be positive, got ${result.memBytes}`);
+		assert.strictEqual(result1, result2);
+		assert.strictEqual(calls.length, 1);
+	});
+
+	it("returns and caches null when Docker info fails", async () => {
+		const { runner, calls } = fakeDockerRunner({ error: new Error("Docker unavailable") });
+
+		const result1 = await getDockerResourceLimits(runner);
+		const result2 = await getDockerResourceLimits(runner);
+
+		assert.strictEqual(result1, null);
+		assert.strictEqual(result2, null);
+		assert.strictEqual(calls.length, 1);
 	});
 });

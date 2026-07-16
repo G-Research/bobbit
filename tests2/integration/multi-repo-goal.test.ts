@@ -1,38 +1,44 @@
 /**
- * Multi-repo goal worktree set creation.
+ * Multi-repo goal API persistence.
  *
- * Verifies that creating a goal in a 3-repo project lands per-repo worktrees
- * under `<wtRoot>/<branchSlug>/<repo>/` for every distinct repo.
- *
- * See docs/design/multi-repo-components.md §5.3 / §9.2.
+ * Verifies that a goal can be created and retrieved in a project with three
+ * distinct component roots. Per-repository worktree fidelity lives in E2E;
+ * this tier-1 route case explicitly disables worktree provisioning.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base, registerProject } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
 
 let token: string;
+let restoreCommandRunner: (() => void) | undefined;
 const headers = () => ({ Authorization: `Bearer ${token}`, "Content-Type": "application/json" });
 
-function gitInit(dir: string): void {
+function componentDir(dir: string): void {
 	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet", "-b", "master"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
 	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: dir });
 }
 
-test.beforeAll(() => { token = readE2EToken(); });
+test.beforeAll(({ gateway }) => {
+	token = readE2EToken();
+	const runner = gateway.sessionManager.commandRunner as CommandRunner;
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	const reject = (): never => { throw new Error("multi-repo route fixture is intentionally non-git"); };
+	runner.execFile = async () => reject();
+	runner.execFileSync = () => reject();
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
+});
+
+test.afterAll(() => restoreCommandRunner?.());
 
 test("multi-repo goal creates per-repo worktrees", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-goal-"));
-	gitInit(path.join(root, "api"));
-	gitInit(path.join(root, "web"));
-	gitInit(path.join(root, "shared"));
+	componentDir(path.join(root, "api"));
+	componentDir(path.join(root, "web"));
+	componentDir(path.join(root, "shared"));
 
 	const projectName = `mr-goal-${Date.now()}`;
 	const project = await registerProject({
@@ -61,8 +67,9 @@ test("multi-repo goal creates per-repo worktrees", async () => {
 		},
 	});
 
-	// Create a goal scoped to this project; cwd points at one of the repos so
-	// isGitRepo() returns true and `goal.repoPath` is set.
+	// This tier-1 case covers project scoping and goal persistence. Real
+	// per-repository worktree behavior is covered by the E2E worktree tier, so
+	// explicitly disable worktree setup instead of constructing Git fixtures.
 	const goalRes = await fetch(`${base()}/api/goals`, {
 		method: "POST",
 		headers: headers(),
@@ -70,6 +77,7 @@ test("multi-repo goal creates per-repo worktrees", async () => {
 			title: "mr",
 			cwd: path.join(root, "api"),
 			team: false,
+			worktree: false,
 			projectId: project.id,
 		}),
 	});

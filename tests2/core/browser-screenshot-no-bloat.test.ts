@@ -21,16 +21,12 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import { describe, it, afterAll, beforeAll } from "vitest";
 import assert from "node:assert/strict";
-
-// The extension uses CommonJS `require("playwright")` at load time. Under tsx
-// ESM, `require` is not defined as a global. Provide one scoped to this test
-// file so the extension can resolve `playwright` from node_modules.
-if (typeof (globalThis as any).require !== "function") {
-	(globalThis as any).require = createRequire(import.meta.url);
-}
+import {
+	installBrowserTools,
+	type BrowserToolBackend,
+} from "../../defaults/tools/browser/extension.ts";
 
 // ───────────────────────── minimal ExtensionAPI stub ─────────────────────────
 
@@ -38,6 +34,68 @@ type Captured = {
 	tools: Map<string, any>;
 	shutdownHandlers: Array<() => Promise<void> | void>;
 };
+
+type FakeBrowserState = {
+	url: string;
+	viewport: { width: number; height: number };
+	lastScreenshot?: {
+		format: "png" | "jpeg";
+		fullPage: boolean;
+		viewport: { width: number; height: number };
+	};
+};
+
+function fakeImageBytes(format: "png" | "jpeg", size: number): Buffer {
+	const bytes = Buffer.alloc(size, 0x5a);
+	if (format === "jpeg") {
+		Buffer.from([0xff, 0xd8, 0xff, 0xe0]).copy(bytes);
+		Buffer.from([0xff, 0xd9]).copy(bytes, bytes.length - 2);
+	} else {
+		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+	}
+	return bytes;
+}
+
+function createFakeBrowserBackend(): { backend: BrowserToolBackend; state: FakeBrowserState } {
+	const state: FakeBrowserState = {
+		url: "about:blank",
+		viewport: { width: 960, height: 540 },
+	};
+
+	const screenshot = async (options: { type?: "png" | "jpeg"; fullPage?: boolean } = {}) => {
+		const format = options.type === "jpeg" ? "jpeg" : "png";
+		state.lastScreenshot = {
+			format,
+			fullPage: options.fullPage ?? false,
+			viewport: { ...state.viewport },
+		};
+		const size = state.viewport.width === 1920 && state.viewport.height === 1080 ? 1536 : 256;
+		return fakeImageBytes(format, size);
+	};
+
+	const locator = {
+		first() { return locator; },
+		screenshot,
+	};
+	const page = {
+		async goto(url: string) { state.url = url; },
+		async title() { return "Deterministic screenshot fixture"; },
+		async url() { return state.url; },
+		screenshot,
+		locator() { return locator; },
+		async setViewportSize(viewport: { width: number; height: number }) {
+			state.viewport = { ...viewport };
+		},
+	};
+
+	return {
+		state,
+		backend: {
+			async ensurePage() { return page as any; },
+			async cleanup() {},
+		},
+	};
+}
 
 function makeMockPi(captured: Captured): any {
 	return {
@@ -79,23 +137,12 @@ function makeMockPi(captured: Captured): any {
 
 const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), "browser-screenshot-test-"));
 const captured: Captured = { tools: new Map(), shutdownHandlers: [] };
+const fakeBrowser = createFakeBrowserBackend();
 
-// Dynamically import the extension (tsx handles the TS-by-URL import).
-const extensionUrl = new URL(
-	"../../defaults/tools/browser/extension.ts",
-	import.meta.url,
-).href;
-
-// Install the extension once for the whole file.
-beforeAll(async () => {
-	const mod: any = await import(extensionUrl);
-	const install = mod.default ?? mod.install;
-	assert.equal(typeof install, "function", "browser extension must export a default factory");
-	install(makeMockPi(captured));
-	assert.ok(
-		captured.tools.has("browser_screenshot"),
-		"browser_screenshot tool should be registered (is `playwright` installed?)",
-	);
+// Install the extension once with a deterministic in-memory browser backend.
+beforeAll(() => {
+	installBrowserTools(makeMockPi(captured), fakeBrowser.backend);
+	assert.ok(captured.tools.has("browser_screenshot"), "browser_screenshot tool should be registered");
 });
 
 afterAll(async () => {
@@ -257,6 +304,11 @@ describe("browser_screenshot does not duplicate base64 payload as text", () => {
 		const result: any = await runScreenshot({ includeBase64: true, fullPage: true });
 		const content = result?.content ?? [];
 
+		assert.deepEqual(fakeBrowser.state.lastScreenshot, {
+			format: "png",
+			fullPage: true,
+			viewport: { width: 1920, height: 1080 },
+		});
 		const images = imageBlocks(content);
 		assert.equal(images.length, 1, "expected exactly one image content block at 1920x1080");
 		assert.ok(

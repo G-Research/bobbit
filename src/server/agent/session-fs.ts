@@ -193,6 +193,7 @@ export async function sessionFileCopy(
 	dstCtx: SessionFsContext,
 	dstPath: string,
 	sandboxManager: SandboxManager | null,
+	fsImpl: Pick<typeof fs, "mkdirSync" | "copyFileSync"> = fs,
 ): Promise<void> {
 	const srcSandboxed = !!srcCtx.sandboxed;
 	const dstSandboxed = !!dstCtx.sandboxed;
@@ -200,8 +201,8 @@ export async function sessionFileCopy(
 	if (!srcSandboxed && !dstSandboxed) {
 		// Host → host
 		const dir = path.dirname(dstPath);
-		fs.mkdirSync(dir, { recursive: true });
-		fs.copyFileSync(srcPath, dstPath);
+		fsImpl.mkdirSync(dir, { recursive: true });
+		fsImpl.copyFileSync(srcPath, dstPath);
 		return;
 	}
 
