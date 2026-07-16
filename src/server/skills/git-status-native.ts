@@ -177,7 +177,7 @@ async function runHost(cwd: string, untracked: boolean, configuredBaseRef: strin
 		runGitStatus(["symbolic-ref", "refs/remotes/origin/HEAD"]),
 		runGitStatus(["rev-parse", "--verify", "refs/heads/master"]),
 		runGitStatus(["rev-parse", "--verify", "refs/heads/main"]),
-		runGit(porcelainArgs, cwd, undefined, PER_CALL_TIMEOUT_MS, false),
+		runGit(porcelainArgs, cwd, undefined, PER_CALL_TIMEOUT_MS, false, commandRunner),
 		runGitStatus(["rev-parse", "--abbrev-ref", "@{u}"]),
 	]);
 

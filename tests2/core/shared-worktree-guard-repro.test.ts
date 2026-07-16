@@ -14,16 +14,16 @@ guardProcessEnv();
  * both halves of the contract: shared paths survive and unshared paths remain
  * cleanable without launching Git.
  */
-import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 
-const fakeGitState = vi.hoisted(() => ({
+const fakeGitState = {
 	commands: [] as Array<{ args: string[]; cwd?: string }>,
-}));
+};
 
 const fakeGitRunner: CommandRunner = {
 	async execFile(command, args, options) {
@@ -38,29 +38,6 @@ const fakeGitRunner: CommandRunner = {
 		return { stdout: "", stderr: "" };
 	},
 };
-
-// Purge/archive cleanup currently reaches the gateway default directly rather
-// than the manager's injected runner. Redirect that boundary to the same stateful fake.
-vi.mock("../../src/server/gateway-deps.ts", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../../src/server/gateway-deps.ts")>();
-	const nodeFs = await import("node:fs");
-	return {
-		...actual,
-		realCommandRunner: {
-			async execFile(command: string, args: readonly string[], options?: { cwd?: string }) {
-				if (command !== "git") throw new Error(`unexpected command: ${command}`);
-				fakeGitState.commands.push({ args: [...args], cwd: options?.cwd });
-				if (args[0] === "worktree" && args[1] === "remove") {
-					nodeFs.rmSync(String(args[2]), { recursive: true, force: true });
-				}
-				return { stdout: "", stderr: "" };
-			},
-		},
-	};
-});
-
-process.env.BOBBIT_TEST_NO_PUSH = "1";
-process.env.BOBBIT_SKIP_NPM_CI = "1";
 
 // SessionManager is the single import root for this production module graph.
 // BOBBIT_DIR must be isolated before any server module loads because several
@@ -116,7 +93,7 @@ function makeSession(id: string, extra: Record<string, any>): any {
 }
 
 function makeManager(store: any, commandRunner: any = fakeGitRunner): any {
-	const manager: any = new SessionManager({ commandRunner });
+	const manager: any = new SessionManager({ commandRunner, remoteGitPolicy: { skipRemotePush: true } });
 	manager._testStore = store;
 	managers.push(manager);
 	return manager;
@@ -290,7 +267,10 @@ describe("shared worktree guard reproductions", () => {
 
 			const goalState = path.join(tmp, "goal-state");
 			const goalStore = new GoalStore(goalState);
-			const goalManager = new GoalManager(goalStore, undefined, undefined, { commandRunner: fakeGitRunner });
+			const goalManager = new GoalManager(goalStore, undefined, undefined, {
+				commandRunner: fakeGitRunner,
+				remotePolicy: { skipRemotePush: true },
+			});
 			goalManager.setLiveSessionResolver(() => [makeSession("live-api-owner", {
 				cwd: equivalentPath(apiWorktree),
 				branch: "session/live-api-owner",
@@ -393,6 +373,8 @@ function makePipelineContext(store: any, sessions: Map<string, any>): any {
 		configCascade: null,
 		costTracker: {},
 		store,
+		commandRunner: fakeGitRunner,
+		remoteGitPolicy: { skipRemotePush: true },
 		searchIndex: {},
 		sessions,
 		assemblePrompt: () => undefined,

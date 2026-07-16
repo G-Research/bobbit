@@ -976,7 +976,7 @@ export class GoalManager {
 					return Promise.resolve();
 				}
 				const repoPath = repo === "." ? goal.repoPath! : path.join(goal.repoPath!, repo);
-				return cleanupWorktree(repoPath, wt, goal.branch, true);
+				return cleanupWorktree(repoPath, wt, goal.branch, true, this.commandRunner, this.remotePolicy);
 			})).catch(() => { /* swallow — best-effort */ });
 		}
 		return archived;
