@@ -79,48 +79,72 @@ function parseToolRegistration(args) {
 	return { name, description, inputSchema, handler };
 }
 
-const extensionModuleCache = new Map();
-const extensionModuleLoadCounts = new Map();
+async function defaultExtensionVersion(filePath) {
+	const stat = fs.statSync(filePath);
+	return `${stat.size}:${stat.mtimeMs}`;
+}
 
-/** Test-only observability for the immutable extension-module cache. */
-export function __inProcessMockExtensionCacheStats(filePath) {
-	const prefix = `${filePath}:`;
-	const keys = [...extensionModuleCache.keys()].filter((key) => key.startsWith(prefix));
+async function defaultExtensionModuleLoader(filePath) {
+	if (!/\.tsx?$/i.test(filePath)) return import(pathToFileURL(filePath).href);
+	const ts = await import("typescript");
+	const source = fs.readFileSync(filePath, "utf-8");
+	const transpiled = ts.transpileModule(source, {
+		compilerOptions: { module: ts.ModuleKind.ES2020, target: ts.ScriptTarget.ES2020 },
+		fileName: filePath,
+	});
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mock-pi-ext-"));
+	const out = path.join(dir, path.basename(filePath).replace(/\.tsx?$/i, ".mjs"));
+	fs.writeFileSync(out, transpiled.outputText, "utf-8");
+	return import(pathToFileURL(out).href);
+}
+
+/**
+ * Creates an extension-module cache with injectable version and loading seams.
+ * Tests can own a cache and use deterministic in-memory modules; production-like
+ * mock runs retain the filesystem-backed defaults.
+ */
+export function createInProcessMockExtensionCache({
+	versionFor = defaultExtensionVersion,
+	loadModule = defaultExtensionModuleLoader,
+} = {}) {
+	const modules = new Map();
+	const loadCounts = new Map();
+
 	return {
-		entries: keys.length,
-		loads: keys.reduce((total, key) => total + (extensionModuleLoadCounts.get(key) || 0), 0),
+		async load(filePath) {
+			const version = await versionFor(filePath);
+			const key = `${filePath}:${version}`;
+			let loaded = modules.get(key);
+			if (loaded) return loaded;
+			loaded = Promise.resolve().then(() => loadModule(filePath));
+			modules.set(key, loaded);
+			loadCounts.set(key, (loadCounts.get(key) || 0) + 1);
+			try { return await loaded; }
+			catch (error) {
+				modules.delete(key);
+				loadCounts.delete(key);
+				throw error;
+			}
+		},
+		stats(filePath) {
+			const prefix = `${filePath}:`;
+			const keys = [...modules.keys()].filter((key) => key.startsWith(prefix));
+			return {
+				entries: keys.length,
+				loads: keys.reduce((total, key) => total + (loadCounts.get(key) || 0), 0),
+			};
+		},
 	};
 }
 
-async function importExtensionModule(filePath) {
-	const stat = fs.statSync(filePath);
-	const key = `${filePath}:${stat.size}:${stat.mtimeMs}`;
-	let loaded = extensionModuleCache.get(key);
-	if (loaded) return loaded;
-	loaded = (async () => {
-		if (!/\.tsx?$/i.test(filePath)) return import(pathToFileURL(filePath).href);
-		const ts = await import("typescript");
-		const source = fs.readFileSync(filePath, "utf-8");
-		const transpiled = ts.transpileModule(source, {
-			compilerOptions: { module: ts.ModuleKind.ES2020, target: ts.ScriptTarget.ES2020 },
-			fileName: filePath,
-		});
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mock-pi-ext-"));
-		const out = path.join(dir, path.basename(filePath).replace(/\.tsx?$/i, ".mjs"));
-		fs.writeFileSync(out, transpiled.outputText, "utf-8");
-		return import(pathToFileURL(out).href);
-	})();
-	extensionModuleCache.set(key, loaded);
-	extensionModuleLoadCounts.set(key, (extensionModuleLoadCounts.get(key) || 0) + 1);
-	try { return await loaded; }
-	catch (error) {
-		extensionModuleCache.delete(key);
-		extensionModuleLoadCounts.delete(key);
-		throw error;
-	}
+const sharedExtensionModuleCache = createInProcessMockExtensionCache();
+
+/** Test-only observability for the default immutable extension-module cache. */
+export function __inProcessMockExtensionCacheStats(filePath) {
+	return sharedExtensionModuleCache.stats(filePath);
 }
 
-async function loadMockPiExtensions(args = [], env = {}) {
+async function loadMockPiExtensions(args = [], env = {}, extensionCache = sharedExtensionModuleCache) {
 	const tools = new Map();
 	const toolCallHandlers = [];
 	const pi = {
@@ -141,7 +165,7 @@ async function loadMockPiExtensions(args = [], env = {}) {
 	for (const extensionPath of extensionArgs(args)) {
 		if (!shouldLoadInMock(extensionPath)) continue;
 		try {
-			const mod = await importExtensionModule(extensionPath);
+			const mod = await extensionCache.load(extensionPath);
 			const activate = typeof mod.default === "function" ? mod.default : mod.default?.default;
 			if (typeof activate === "function") {
 				// Generated guards capture gateway-owned child env during synchronous
@@ -194,7 +218,11 @@ export class InProcessMockBridge {
 		// not argv, so we pass cwd directly via opts.
 		const env = { ...process.env, ...(this.options.env || {}) };
 		const argModel = lastModelArg(this.options.args);
-		const mockPi = await loadMockPiExtensions(this.options.args, env);
+		const mockPi = await loadMockPiExtensions(
+			this.options.args,
+			env,
+			this.options.extensionModuleCache || sharedExtensionModuleCache,
+		);
 		this._agent = new MockAgentCore({
 			cwd: this.options.cwd || process.cwd(),
 			env,
