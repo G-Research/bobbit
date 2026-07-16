@@ -11,16 +11,38 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let sharedProjectId = "";
 let sharedProjectDir = "";
+let sharedProjectBaseline = "";
 
 function sharedProjectFixture(): { id: string; cleanup: () => void } {
 	return { id: sharedProjectId, cleanup: () => { /* reset by the suite afterEach */ } };
 }
+
+function sharedProjectYamlPath(): string {
+	return join(sharedProjectDir, ".bobbit", "config", "project.yaml");
+}
+
+test.beforeAll(async () => {
+	sharedProjectDir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-shared-"));
+	const project = await registerProject({
+		name: `comp-cfg-shared-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		rootPath: sharedProjectDir,
+		components: [{ name: "web", repo: "." }],
+		seedWorkflows: false,
+	});
+	sharedProjectId = project.id;
+	sharedProjectBaseline = readFileSync(sharedProjectYamlPath(), "utf-8");
+});
+
+test.afterAll(async () => {
+	await apiFetch(`/api/projects/${sharedProjectId}`, { method: "DELETE" }).catch(() => {});
+	try { rmSync(sharedProjectDir, { recursive: true, force: true }); } catch { /* ignore */ }
+});
 
 const LEGACY_QA_KEYS = [
 	"qa_start_command",
@@ -33,31 +55,12 @@ const LEGACY_QA_KEYS = [
 ] as const;
 
 test.describe("Component config map (REST API)", () => {
-	test.beforeAll(async () => {
-		sharedProjectDir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-shared-"));
-		const project = await registerProject({
-			name: `comp-cfg-shared-${Date.now()}`,
-			rootPath: sharedProjectDir,
-			components: [{ name: "web", repo: "." }],
-			seedWorkflows: false,
-		});
-		sharedProjectId = project.id;
-	});
-
 	test.afterEach(({ gateway }) => {
-		// Config cases share one registered project but never each other's mutable
-		// component state. This harness-exposed store seam persists the clean baseline.
-		const store = gateway.projectContextManager.getOrCreate(sharedProjectId)?.projectConfigStore;
-		if (!store) return;
-		// Per-test projects previously guaranteed an empty flat config. Restore that
-		// exact baseline as well as components so build_command cannot leak forward.
-		for (const key of Object.keys(store.getAll())) store.remove(key);
-		store.setComponents([{ name: "web", repo: "." }]);
-	});
-
-	test.afterAll(async () => {
-		await apiFetch(`/api/projects/${sharedProjectId}`, { method: "DELETE" }).catch(() => {});
-		try { rmSync(sharedProjectDir, { recursive: true, force: true }); } catch { /* ignore */ }
+		// Restore both the persisted YAML and the live store cache. Keeping the
+		// dedicated project outside this describe makes it part of the harness
+		// baseline instead of a per-test entity that the shared gateway sweeps.
+		writeFileSync(sharedProjectYamlPath(), sharedProjectBaseline);
+		gateway.projectContextManager.getOrCreate(sharedProjectId)?.projectConfigStore.reload();
 	});
 
 	test("PUT structured components[].config round-trips through GET", async () => {
