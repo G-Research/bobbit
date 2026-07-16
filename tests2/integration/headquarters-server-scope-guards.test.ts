@@ -6,7 +6,7 @@
 //
 // The projectless-session MCP fail-closed sub-behaviour is ported separately in
 // tests2/core/session-mcp-projectless-fail-closed.test.ts (pure unit).
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -31,28 +31,35 @@ function samePath(a: string, b: string): boolean {
 	return normalize(a) === normalize(b);
 }
 
-async function withGateway(fn: (gw: CustomGatewayHandle) => Promise<void>, prefix: string): Promise<void> {
-	const serverRoot = tmpDir(prefix);
-	const gw = await startCustomGateway({ serverRoot });
-	try {
-		await fn(gw);
-	} finally {
-		try { await gw.shutdown(); } finally { fs.rmSync(serverRoot, { recursive: true, force: true }); }
-	}
+let sharedGateway: CustomGatewayHandle;
+let sharedServerRoot: string;
+
+async function withSharedGateway(fn: (gw: CustomGatewayHandle) => Promise<void>): Promise<void> {
+	await fn(sharedGateway);
 }
 
 describe("Headquarters server-scope guards", () => {
+	beforeAll(async () => {
+		sharedServerRoot = tmpDir("bobbit-server-scope-assistants-");
+		sharedGateway = await startCustomGateway({ serverRoot: sharedServerRoot });
+	});
+
+	afterAll(async () => {
+		try { await sharedGateway?.shutdown(); }
+		finally { if (sharedServerRoot) fs.rmSync(sharedServerRoot, { recursive: true, force: true }); }
+	});
+
 	it("server-scope role assistant without cwd defaults to the Headquarters directory", async () => {
-		await withGateway(async (gw) => {
+		await withSharedGateway(async (gw) => {
 			const created = await gw.json("/api/sessions", { method: "POST", body: JSON.stringify({ assistantType: "role", worktree: false }) });
 			assert.equal(created.status, 201, JSON.stringify(created.body));
 			const hqDir = path.join(gw.serverRoot, ".bobbit", "headquarters");
 			assert.ok(samePath(created.body.cwd, hqDir), `expected role assistant cwd ${created.body.cwd} to default to Headquarters dir ${hqDir}`);
-		}, "bobbit-role-assistant-default-cwd-");
+		});
 	});
 
 	it("server-scope role assistant coerces an explicit cwd outside the Headquarters directory", async () => {
-		await withGateway(async (gw) => {
+		await withSharedGateway(async (gw) => {
 			// An existing on-disk dir outside HQ — the escape must be coerced back to
 			// the Headquarters directory, never rejected: server-scope assistants must
 			// always create successfully regardless of the caller-supplied cwd.
@@ -65,11 +72,11 @@ describe("Headquarters server-scope guards", () => {
 			} finally {
 				fs.rmSync(outside, { recursive: true, force: true });
 			}
-		}, "bobbit-role-assistant-outside-cwd-");
+		});
 	});
 
 	it("server-scope tool assistant coerces an explicit cwd outside the Headquarters directory", async () => {
-		await withGateway(async (gw) => {
+		await withSharedGateway(async (gw) => {
 			const outside = tmpDir("bobbit-tool-assistant-escape-");
 			try {
 				const created = await gw.json("/api/sessions", { method: "POST", body: JSON.stringify({ assistantType: "tool", worktree: false, cwd: outside }) });
@@ -79,22 +86,22 @@ describe("Headquarters server-scope guards", () => {
 			} finally {
 				fs.rmSync(outside, { recursive: true, force: true });
 			}
-		}, "bobbit-tool-assistant-outside-cwd-");
+		});
 	});
 
 	it("server-scope assistant accepts an explicit cwd inside the Headquarters directory", async () => {
-		await withGateway(async (gw) => {
+		await withSharedGateway(async (gw) => {
 			const hqSubdir = path.join(gw.serverRoot, ".bobbit", "headquarters", "workspace");
 			fs.mkdirSync(hqSubdir, { recursive: true });
 			const accepted = await gw.json("/api/sessions", { method: "POST", body: JSON.stringify({ assistantType: "role", worktree: false, cwd: hqSubdir }) });
 			assert.equal(accepted.status, 201, JSON.stringify(accepted.body));
 			assert.ok(samePath(accepted.body.cwd, hqSubdir), `expected role assistant cwd ${accepted.body.cwd} to be preserved inside Headquarters dir`);
-		}, "bobbit-role-assistant-inside-cwd-");
+		});
 	});
 
 	it("archive-bobbit through a symlink to the server root preserves Headquarters", async (ctx) => {
-		const serverRoot = tmpDir("bobbit-archive-real-root-");
-		const gw = await startCustomGateway({ serverRoot });
+		const gw = sharedGateway;
+		const serverRoot = gw.serverRoot;
 		const linkRoot = path.join(os.tmpdir(), `bobbit-archive-root-link-${process.pid}-${Date.now()}`);
 		let linked = false;
 		try {
@@ -118,11 +125,7 @@ describe("Headquarters server-scope guards", () => {
 			assert.equal(fs.existsSync(hqSentinel), true, "Headquarters state must survive archive via a symlinked server root");
 			assert.ok(archived.body.preservedPaths.includes("headquarters"), "archive manifest should record Headquarters as preserved");
 		} finally {
-			try { await gw.shutdown(); }
-			finally {
-				if (linked) { try { fs.rmSync(linkRoot, { recursive: true, force: true }); } catch { /* best-effort */ } }
-				fs.rmSync(serverRoot, { recursive: true, force: true });
-			}
+			if (linked) { try { fs.rmSync(linkRoot, { recursive: true, force: true }); } catch { /* best-effort */ } }
 		}
 	});
 });
