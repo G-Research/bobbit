@@ -72,15 +72,16 @@ async function spawnAgent(goalId: string, role: string, task: string): Promise<a
 // ---------------------------------------------------------------------------
 
 test.describe("Task git fields — new baseSha/headSha/branch fields", () => {
-	let goalId: string;
+	let goalId = "";
 
-	test.beforeAll(async () => {
-		const goal = await createGoal({ title: "git-fields-crud", team: true });
+	test.beforeEach(async () => {
+		const goal = await createGoal({ title: `git-fields-crud-${Date.now()}`, team: true });
 		goalId = goal.id;
 	});
 
-	test.afterAll(async () => {
-		await deleteGoal(goalId);
+	test.afterEach(async () => {
+		if (goalId) await deleteGoal(goalId);
+		goalId = "";
 	});
 
 	test("newly created task has no commitSha field", async () => {
@@ -142,20 +143,20 @@ test.describe("Task git fields — new baseSha/headSha/branch fields", () => {
 
 test.describe("Task git fields — team spawn auto-population", () => {
 	test.describe.configure({ mode: 'serial' });
-	let goalId: string;
+	let goalId = "";
 
-	test.beforeAll(async () => {
-		// Spawn skips worktree creation but still works.
-		// baseSha may be undefined (no git repo), but the test verifies the
-		// assign endpoint auto-populates from the TeamAgent record.
-		const goal = await createGoal({ title: "git-fields-spawn", team: true });
+	test.beforeEach(async () => {
+		// Spawn skips worktree creation but still works. Each test owns its team so
+		// the shared fork never observes a stale lead, agent, or task assignment.
+		const goal = await createGoal({ title: `git-fields-spawn-${Date.now()}`, team: true });
 		goalId = goal.id;
 		await startTeam(goalId);
 	});
 
-	test.afterAll(async () => {
-		await teardownTeam(goalId).catch(() => {});
-		await deleteGoal(goalId);
+	test.afterEach(async () => {
+		if (goalId) await teardownTeam(goalId).catch(() => {});
+		if (goalId) await deleteGoal(goalId);
+		goalId = "";
 	});
 
 	test("assigning a task to a spawned agent populates branch from TeamAgent", async () => {
@@ -200,7 +201,16 @@ test.describe("Task git fields — team spawn auto-population", () => {
 	});
 
 	test("task list endpoint returns tasks with new git fields", async () => {
-		// Fetch all tasks for the goal
+		const completedSeed = await createTask(goalId, { title: "list-completed-seed" });
+		await updateTask(completedSeed.id, { state: "in-progress" });
+		const completeResp = await updateTask(completedSeed.id, {
+			state: "complete",
+			headSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			resultSummary: "List seed complete",
+		});
+		expect(completeResp.status).toBe(200);
+
+		// Fetch all tasks for this test-owned goal.
 		const resp = await apiFetch(`/api/goals/${goalId}/tasks`);
 		expect(resp.status).toBe(200);
 		const body = await resp.json();
