@@ -68,6 +68,12 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		.replace(/\s+as\s+string\s*\|\s*undefined/g, "")
 		.replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
 
+	// The extracted production method now normalizes legacy provider-prefixed AIGW
+	// preferences before selecting or comparing them. Keep that dependency explicit
+	// in the eval harness and model one known migration; the normalizer itself has
+	// exhaustive models.json-backed coverage in aigw-wellknown-translate.test.ts.
+	const normalizeAigwModelString = (modelString: string) =>
+		modelString === "aigw/openai/legacy-model" ? "aigw/legacy-model" : modelString;
 	const applyModelString = async (rpc: any, modelString: string, opts: any = {}) => {
 		const slash = modelString.indexOf("/");
 		if (slash <= 0 || slash >= modelString.length - 1) {
@@ -104,6 +110,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 
 	// eslint-disable-next-line no-new-func
 	return new Function(
+		"normalizeAigwModelString",
 		"applyModelString",
 		"isSessionSelectableModelString",
 		"getAigwUrl",
@@ -116,6 +123,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"buildModelStateData",
 		`return async function tryAutoSelectModel(session) {${body}\n};`,
 	)(
+		normalizeAigwModelString,
 		applyModelString,
 		isSessionSelectableModelString,
 		getAigwUrl,
@@ -325,6 +333,18 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		);
 		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
 		assert.deepEqual(result.modelFiles, ["openai/fallback-session"]);
+	});
+
+	it("normalizes a legacy provider-prefixed AIGW default before selecting and persisting it", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: { "default.sessionModel": "aigw/openai/legacy-model" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["aigw", "legacy-model"]]);
+		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "legacy-model" }]);
+		assert.deepEqual(result.modelFiles, ["aigw/legacy-model"]);
+		assert.deepEqual(result.broadcastModels, [{ provider: "aigw", id: "legacy-model" }]);
 	});
 
 	it("enabled setting: malformed explicit default.sessionModel fails loudly and never chooses AIGW/hardcoded fallback", async () => {

@@ -272,11 +272,14 @@ describe("AI Gateway pricing metadata", () => {
 					!("thinkingLevelMap" in plainEntry),
 					"models without an input thinkingLevelMap must not get a fabricated one",
 				);
-				// Conservative default preserved for non-reasoning-effort models.
+				// GPT 5.2 has no explicit thinking-level map, but fallback discovery now
+				// intentionally routes OpenAI-family reasoning ids through Responses. That
+				// route opts into reasoning effort independently of advertised variants.
+				assert.equal(plainEntry.api, "openai-responses");
 				assert.equal(
 					plainEntry.compat?.supportsReasoningEffort,
-					false,
-					"plain non-GPT-5.6 model must keep supportsReasoningEffort:false (no fabricated opt-in)",
+					true,
+					"fallback OpenAI Responses models must enable reasoning effort even without a thinkingLevelMap",
 				);
 				// Other conservative gateway compat defaults must survive the GPT 5.6 opt-in.
 				assert.equal(lunaEntry.compat?.supportsStore, false, "GPT 5.6 must keep supportsStore:false");
