@@ -1,7 +1,6 @@
 /**
  * PATCH /api/staff/:id re-homes a staff record to a different project.
  */
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,16 +32,6 @@ function makeTempRoot(label: string): string {
 	return canonical(mkdtempSync(join(tmpdir(), `bobbit-staff-patch-${label}-`)));
 }
 
-function makeGitRepo(parent: string, name: string): string {
-	const repo = join(parent, name);
-	mkdirSync(repo, { recursive: true });
-	writeFileSync(join(repo, "README.md"), `# ${name}\n`);
-	execFileSync("git", ["init"], { cwd: repo, stdio: "pipe" });
-	execFileSync("git", ["add", "."], { cwd: repo, stdio: "pipe" });
-	execFileSync("git", ["-c", "user.name=E2E", "-c", "user.email=e2e@example.test", "commit", "-m", "init"], { cwd: repo, stdio: "pipe" });
-	return canonical(repo);
-}
-
 function makePlainDir(parent: string, name: string): string {
 	const dir = join(parent, name);
 	mkdirSync(dir, { recursive: true });
@@ -57,6 +46,28 @@ async function registerTempProject(name: string, rootPath: string): Promise<Proj
 	});
 	expect(resp.ok, `project registration failed: ${await resp.clone().text().catch(() => "")}`).toBeTruthy();
 	return await resp.json();
+}
+
+function seedProjectStaff(gateway: any, projectId: string, patch: Partial<any> = {}): any {
+	const ctx = gateway.sessionManager.getProjectContextManager().getOrCreate(projectId);
+	const now = Date.now();
+	const staff = {
+		id: randomUUID(),
+		name: `project-staff-${now}`,
+		description: "Project staff fixture",
+		systemPrompt: "Project prompt.",
+		cwd: patch.cwd,
+		state: "active",
+		triggers: [],
+		memory: "",
+		createdAt: now,
+		updatedAt: now,
+		projectId,
+		sandboxed: false,
+		...patch,
+	};
+	ctx.staffStore.put(staff);
+	return staff;
 }
 
 function seedLegacySystemStaff(gateway: any, patch: Partial<any> = {}): any {
@@ -103,36 +114,24 @@ test.describe("PATCH /api/staff/:id — project reassignment", () => {
 	test("reassigning from project A to project B resets cwd/worktree/session metadata", async ({ gateway }) => {
 		const root = makeTempRoot("reassign");
 		cleanupDirs.push(root);
-		const projectARoot = makeGitRepo(root, "project-a");
+		const projectARoot = makePlainDir(root, "project-a");
 		const projectBRoot = makePlainDir(root, "project-b");
 		const projA = await registerTempProject(`patch-a-${Date.now()}`, projectARoot);
 		const projB = await registerTempProject(`patch-b-${Date.now()}`, projectBRoot);
 		cleanupProjectIds.push(projA.id, projB.id);
 
-		const createResp = await apiFetch("/api/staff", {
-			method: "POST",
-			body: JSON.stringify({
-				name: `patch-staff-${Date.now()}`,
-				systemPrompt: "Stay project-scoped.",
-				cwd: projA.rootPath,
-				projectId: projA.id,
-			}),
+		// Reassignment semantics do not depend on provisioning a real Git worktree.
+		// Seed the persisted runtime fields that PATCH must clear at the store boundary.
+		const staff = seedProjectStaff(gateway, projA.id, {
+			cwd: projA.rootPath,
+			currentSessionId: "stale-project-session",
+			worktreePath: join(root, "project-a-wt"),
+			branch: "staff-stale-project",
+			repoPath: projA.rootPath,
+			repoWorktrees: { ".": join(root, "project-a-wt") },
 		});
-		expect(createResp.status).toBe(201);
-		const staff = await createResp.json();
 		cleanupStaffIds.push(staff.id);
 		expect(staff.projectId).toBe(projA.id);
-		expect(staff.worktreePath).toBeTruthy();
-		expect(staff.branch).toBeTruthy();
-
-		const initialSessionResp = await apiFetch(`/api/sessions/${staff.currentSessionId}`);
-		expect(initialSessionResp.status).toBe(200);
-		const initialSession = await initialSessionResp.json();
-		expect(initialSession.worktreePath).toBe(staff.worktreePath);
-		expect(initialSession.branch).toBe(staff.branch);
-		const persistedSession = gateway.sessionManager.getPersistedSession(staff.currentSessionId);
-		expect(persistedSession?.branch).toBe(staff.branch);
-		expect(normalisePath(persistedSession?.repoPath)).toBe(normalisePath(staff.repoPath ?? projA.rootPath));
 
 		const okResp = await apiFetch(`/api/staff/${staff.id}`, {
 			method: "PATCH",
