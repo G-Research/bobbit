@@ -6,21 +6,15 @@ import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 
 import type { CommandRunner, ExecFileResult } from "../../src/server/gateway-deps.ts";
 import { synthesiseWalkthroughCards, validateSynthesisedCards, type WalkthroughParsedFile } from "../../src/server/pr-walkthrough/card-synthesis.ts";
 import { normalizeGithubResolvedWalkthrough, resolveWalkthroughForTesting, setPrWalkthroughSynthesisAdapterForTesting } from "../../src/server/pr-walkthrough/routes.ts";
 import { WALKTHROUGH_STORE_SCHEMA_VERSION, WalkthroughStore } from "../../src/server/pr-walkthrough/walkthrough-store.ts";
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
-});
+import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 describe("PR walkthrough card synthesis", () => {
 	it("builds deterministic fallback phases and groups multiple diff blocks by path", async () => {
@@ -265,44 +259,46 @@ describe("PR walkthrough card synthesis", () => {
 
 describe("WalkthroughStore", () => {
 	it("persists schema-versioned walkthrough payloads by changeset id", async () => {
-		const dir = makeTempDir();
-		const store = new WalkthroughStore(dir);
 		const cards = await synthesiseWalkthroughCards(changeset(), [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])]);
+		withWalkthroughMemFs(() => {
+			const store = new WalkthroughStore(path.resolve("/memfs/walkthrough-store"));
+			const saved = store.save({ changesetId: "github:owner/repo#12:abcdef", changeset: changeset(), cards, warnings: [] });
+			const loaded = store.get("github:owner/repo#12:abcdef");
 
-		const saved = store.save({ changesetId: "github:owner/repo#12:abcdef", changeset: changeset(), cards, warnings: [] });
-		const loaded = store.get("github:owner/repo#12:abcdef");
-
-		assert.equal(saved.schemaVersion, WALKTHROUGH_STORE_SCHEMA_VERSION);
-		assert.equal(loaded?.changesetId, "github:owner/repo#12:abcdef");
-		assert.equal(loaded?.cards.length, cards.length);
-		assert.match(saved.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
+			assert.equal(saved.schemaVersion, WALKTHROUGH_STORE_SCHEMA_VERSION);
+			assert.equal(loaded?.changesetId, "github:owner/repo#12:abcdef");
+			assert.equal(loaded?.cards.length, cards.length);
+			assert.match(saved.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
+		});
 	});
 
-	it("ignores stale schema files and never persists auth tokens or raw headers", async () => {
-		const dir = makeTempDir();
-		const store = new WalkthroughStore(dir);
-		store.save({
-			changesetId: "local-a..b",
-			changeset: changeset(),
-			cards: [],
-			warnings: [],
-			export: {
-				enabled: true,
-				provider: "github",
-				token: "ghp_secret",
-				headers: { authorization: "Bearer secret" },
-				nested: { authHeaders: { authorization: "Bearer secret" } },
-			} as never,
+	it("ignores stale schema files and never persists auth tokens or raw headers", () => {
+		withWalkthroughMemFs((memfs) => {
+			const dir = path.resolve("/memfs/walkthrough-store");
+			const store = new WalkthroughStore(dir);
+			store.save({
+				changesetId: "local-a..b",
+				changeset: changeset(),
+				cards: [],
+				warnings: [],
+				export: {
+					enabled: true,
+					provider: "github",
+					token: "ghp_secret",
+					headers: { authorization: "Bearer secret" },
+					nested: { authHeaders: { authorization: "Bearer secret" } },
+				} as never,
+			});
+
+			const raw = JSON.stringify(store.get("local-a..b"));
+			assert.equal(raw.includes("ghp_secret"), false);
+			assert.equal(raw.includes("Bearer secret"), false);
+
+			const staleFile = path.join(dir, "pr-walkthrough", `v${WALKTHROUGH_STORE_SCHEMA_VERSION}`, `${Buffer.from("stale", "utf-8").toString("base64url")}.json`);
+			memfs.mkdirSync(path.dirname(staleFile), { recursive: true });
+			memfs.writeFileSync(staleFile, JSON.stringify({ schemaVersion: 0, changesetId: "stale", updatedAt: new Date().toISOString(), changeset: {}, cards: [], warnings: [] }), "utf-8");
+			assert.equal(store.get("stale"), null);
 		});
-
-		const raw = JSON.stringify(store.get("local-a..b"));
-		assert.equal(raw.includes("ghp_secret"), false);
-		assert.equal(raw.includes("Bearer secret"), false);
-
-		const file = path.join(dir, "pr-walkthrough", `v${WALKTHROUGH_STORE_SCHEMA_VERSION}`, `${Buffer.from("stale", "utf-8").toString("base64url")}.json`);
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		fs.writeFileSync(file, JSON.stringify({ schemaVersion: 0, changesetId: "stale", updatedAt: new Date().toISOString(), changeset: {}, cards: [], warnings: [] }), "utf-8");
-		assert.equal(store.get("stale"), null);
 	});
 });
 
@@ -341,16 +337,22 @@ function block(id: string, filePath: string, changedLines: number) {
 	};
 }
 
-function makeTempDir(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pr-walkthrough-store-"));
-	tempDirs.push(dir);
-	return dir;
+function withWalkthroughMemFs<T>(run: (memfs: MemFs) => T): T {
+	const memfs = createMemFs();
+	const mkdir = vi.spyOn(fs, "mkdirSync").mockImplementation(memfs.mkdirSync as typeof fs.mkdirSync);
+	const readFile = vi.spyOn(fs, "readFileSync").mockImplementation(memfs.readFileSync as typeof fs.readFileSync);
+	const writeFile = vi.spyOn(fs, "writeFileSync").mockImplementation(memfs.writeFileSync as typeof fs.writeFileSync);
+	try {
+		return run(memfs);
+	} finally {
+		writeFile.mockRestore();
+		readFile.mockRestore();
+		mkdir.mockRestore();
+	}
 }
 
 function makeRepoFixture(label: string): { cwd: string; baseSha: string; headSha: string } {
-	const cwd = makeTempDir();
-	fs.writeFileSync(path.join(cwd, ".walkthrough-label"), label, "utf-8");
-	return { cwd, baseSha: "a".repeat(40), headSha: "b".repeat(40) };
+	return { cwd: path.resolve("/virtual/walkthrough", label), baseSha: "a".repeat(40), headSha: "b".repeat(40) };
 }
 
 /**
@@ -378,7 +380,7 @@ function walkthroughGitRunner(calls: string[] = []): CommandRunner {
 			assert.equal(file, "git");
 			const cwd = String(options?.cwd ?? "");
 			calls.push(cwd);
-			const label = fs.readFileSync(path.join(cwd, ".walkthrough-label"), "utf-8");
+			const label = path.basename(cwd);
 			if (args[0] === "rev-parse") {
 				return { stdout: String(args.at(-1)).startsWith("a") ? `${"a".repeat(40)}\n` : `${"b".repeat(40)}\n`, stderr: "" };
 			}
@@ -392,7 +394,7 @@ function walkthroughGitRunner(calls: string[] = []): CommandRunner {
 			assert.ok(args.includes("diff"));
 			const cwd = String(options?.cwd ?? "");
 			calls.push(cwd);
-			const label = fs.readFileSync(path.join(cwd, ".walkthrough-label"), "utf-8");
+			const label = path.basename(cwd);
 			const child = new EventEmitter() as ChildProcess;
 			const stdout = new PassThrough();
 			const stderr = new PassThrough();
