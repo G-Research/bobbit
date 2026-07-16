@@ -14,13 +14,17 @@
 // preserving the existing one-level behaviour for normal `.claude/skills` dirs.
 //
 // Distinctive failure token: SKILL_AUTOCOMPLETE_GAP.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { scanSkillDir } from "../../src/server/skills/slash-skills.ts";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
-let tmpRoot: string;
+const ROOT = path.resolve("/memfs/scan-skill-nested");
+const PLUGINS_PARENT = path.join(ROOT, "plugins-parent");
+const PLUGIN_ROOT = path.join(ROOT, "my-plugin-root");
+const NORMAL_DIR = path.join(ROOT, "normal");
+let restoreFs: () => void;
 
 function writeSkill(dir: string, name: string, description: string): void {
 	const skillDir = path.join(dir, name);
@@ -32,20 +36,20 @@ function writeSkill(dir: string, name: string, description: string): void {
 	);
 }
 
-beforeEach(() => {
-	tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-scan-skill-nested-"));
+beforeAll(() => {
+	const scoped = installScopedMemFs(["existsSync", "mkdirSync", "readFileSync", "readdirSync", "writeFileSync"]);
+	restoreFs = scoped.restore;
+	writeSkill(path.join(PLUGINS_PARENT, "my-plugin", "skills"), "foo", "A nested plugin skill");
+	writeSkill(path.join(PLUGIN_ROOT, "skills"), "foo", "A plugin-root skill");
+	writeSkill(NORMAL_DIR, "bar", "A normal one-level skill");
 });
-afterEach(() => {
-	try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
-});
+
+afterAll(() => restoreFs());
 
 describe("scanSkillDir — nested Claude-plugin skill layout", () => {
 	it("discovers <plugins-parent>/<plugin>/skills/<name>/SKILL.md (source custom)", () => {
 		// Plugins-parent root: immediate children are plugin dirs, each with a skills/ subdir.
-		const pluginsParent = path.join(tmpRoot, "plugins-parent");
-		writeSkill(path.join(pluginsParent, "my-plugin", "skills"), "foo", "A nested plugin skill");
-
-		const skills = scanSkillDir(pluginsParent, "custom");
+		const skills = scanSkillDir(PLUGINS_PARENT, "custom");
 		const names = skills.map((s) => s.name);
 		expect(names, "SKILL_AUTOCOMPLETE_GAP: plugins-parent nested scan should discover foo").toContain("foo");
 		const foo = skills.find((s) => s.name === "foo");
@@ -54,10 +58,7 @@ describe("scanSkillDir — nested Claude-plugin skill layout", () => {
 
 	it("discovers <plugin-root>/skills/<name>/SKILL.md (source custom)", () => {
 		// Plugin root: the scan dir's immediate child is skills/.
-		const pluginRoot = path.join(tmpRoot, "my-plugin-root");
-		writeSkill(path.join(pluginRoot, "skills"), "foo", "A plugin-root skill");
-
-		const skills = scanSkillDir(pluginRoot, "custom");
+		const skills = scanSkillDir(PLUGIN_ROOT, "custom");
 		const names = skills.map((s) => s.name);
 		expect(names, "SKILL_AUTOCOMPLETE_GAP: plugin-root nested scan should discover foo").toContain("foo");
 		const foo = skills.find((s) => s.name === "foo");
@@ -67,10 +68,7 @@ describe("scanSkillDir — nested Claude-plugin skill layout", () => {
 	it("preserves existing one-level behaviour for normal <dir>/<name>/SKILL.md", () => {
 		// Regression guard: normal .claude/skills-style dir must keep resolving,
 		// and the new nested branches must NOT swallow or duplicate it.
-		const normalDir = path.join(tmpRoot, "normal");
-		writeSkill(normalDir, "bar", "A normal one-level skill");
-
-		const skills = scanSkillDir(normalDir, "custom");
+		const skills = scanSkillDir(NORMAL_DIR, "custom");
 		const names = skills.map((s) => s.name);
 		expect(names, "one-level normal-layout skill must still resolve").toContain("bar");
 		expect(names.filter((n) => n === "bar").length, "normal skill must not be duplicated").toBe(1);
