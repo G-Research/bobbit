@@ -739,6 +739,11 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 	};
 
 	writeModelsJson(data);
+	// The atomically persisted provider is now the active routing authority. Keep
+	// its admitted host set in memory so every later session activation can decide
+	// whether it needs the guard without re-reading models.json. Failed writes never
+	// reach this point and therefore cannot change active DNS behavior.
+	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(data.providers.aigw));
 	setBedrockEnvVars(aigwUrl);
 }
 
@@ -765,8 +770,12 @@ export function collectAigwProviderDnsHosts(provider: any): string[] {
  * keeps restored/sandboxed extension mounts stable across model refreshes.
  */
 export function writeAigwDnsGuardExtension(): string | undefined {
-	const provider = readModelsJson()?.providers?.aigw;
-	const hosts = collectAigwProviderDnsHosts(provider);
+	// startupAigwCheck() hydrates this set once from persisted routing, while
+	// writeAigwModelsJson()/removeAigwModelsJson() update it after atomic changes.
+	// Session setup is a hot path: reading and parsing models.json here made every
+	// non-AIGW activation pay synchronous I/O (and repeatedly log malformed test or
+	// recovery fixtures) merely to discover there was no guard to install.
+	const hosts = getAigwProviderDnsGuardHosts();
 	if (hosts.length === 0) return undefined;
 	const code = `import dns from "node:dns";
 import net from "node:net";
@@ -846,6 +855,9 @@ export function removeAigwModelsJson(): void {
 		delete data.providers.aigw;
 		writeModelsJson(data);
 	}
+	// Keep the in-memory activation decision aligned even when this lower-level
+	// helper is called directly. A failed persistence above throws before clearing.
+	replaceAigwProviderDnsGuardHosts([]);
 }
 
 // ── Startup internet check ─────────────────────────────────────────
@@ -955,7 +967,6 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 		try {
 			const models = await discoverAigwModels(existingUrl);
 			writeAigwModelsJson(existingUrl, models);
-			syncAigwProviderDnsGuardFromModelsJson();
 			normalizeAigwModelPreferences(prefs);
 			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
 		} catch (err: any) {
@@ -1810,10 +1821,9 @@ export async function configureAigw(baseUrl: string, prefs: PreferencesStore): P
 
 	// Persist generated routing atomically before preference migration. A failed
 	// discovery never reaches this point, preserving the previous models.json.
+	// The writer atomically persists routing and only then replaces the active DNS
+	// host set. Status/test discovery never calls it and cannot mutate behavior.
 	writeAigwModelsJson(normalizedUrl, models);
-	// Only the successfully admitted, atomically persisted configuration becomes
-	// active. Status/test discovery never mutates process-wide DNS behavior.
-	syncAigwProviderDnsGuardFromModelsJson();
 	prefs.set("aigw.url", normalizedUrl);
 	if (result.wellKnown?.model) seedDefaultModelsFromWellKnown(result.wellKnown, models, prefs);
 	normalizeAigwModelPreferences(prefs);
@@ -1827,7 +1837,6 @@ export function removeAigw(prefs: PreferencesStore): void {
 	prefs.remove("aigw.url");
 	prefs.remove("aigw.models");
 	removeAigwModelsJson();
-	replaceAigwProviderDnsGuardHosts([]);
 }
 
 /**
