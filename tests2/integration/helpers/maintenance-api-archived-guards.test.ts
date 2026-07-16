@@ -2,12 +2,12 @@ import { describe, it } from "vitest";
 import * as maintenance from "./maintenance-api-support.js";
 
 const {
-	test, expect, apiFetch, expectArchivedScanShape, expectArchivedCleanupShape,
-	existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, tmpdir, dirname, join,
+	expect, apiFetch, expectArchivedCleanupShape,
+	existsSync, mkdirSync, mkdtempSync, rmSync, tmpdir, dirname, join,
 	git, branchExists, normalizeTestPath, listedWorktreePaths, initGitRepo,
-	tryRemoveWorktree, tryDeleteBranches, tryDeleteBranch,
-	seedArchivedSessions, seedArchivedSession, removeSeededSessions,
-	findArchivedSession, findArchivedWorktreeItem, findArchivedWorktreeGroup,
+	tryRemoveWorktree, tryDeleteBranch,
+	seedArchivedSession, removeSeededSessions,
+	findArchivedSession,
 	getArchivedWorktreeScan, gateway
 } = maintenance;
 type SeededSession = maintenance.SeededSession;
