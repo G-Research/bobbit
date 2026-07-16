@@ -1,17 +1,17 @@
 import { afterAll, beforeAll, describe, it } from "vitest";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import { WorktreeInventoryService } from "../../src/server/agent/worktree-inventory.js";
+import { executeCleanupWorktreesRequest } from "../../src/server/maintenance/cleanup-worktrees-request.js";
 import * as maintenance from "./helpers/maintenance-api-support.js";
+import { MaintenanceGitModel } from "./helpers/maintenance-git-model.js";
 
 const {
-	test, expect, apiFetch, registerProject,
-	existsSync, mkdtempSync, rmSync, tmpdir, join,
-	expectNumberCounts, expectNumberMap, normalizeTestPath,
+	test, expect, apiFetch,
+	existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, tmpdir, join,
+	expectNumberCounts, expectNumberMap,
 	seedArchivedSession, removeSeededSessions, gateway,
 } = maintenance;
 const maintenanceOwner = maintenance.createMaintenanceApiFixture("maintenance-api");
-const {
-	listedWorktreePaths, branchExists, initGitRepo, git,
-	tryRemoveWorktree, tryDeleteBranch, maintenanceGit,
-} = maintenanceOwner;
 maintenanceOwner.registerMaintenanceHooks();
 
 const maintenanceBaseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-maintenance-shared-"));
@@ -90,24 +90,46 @@ test("POST /api/maintenance/cleanup-worktrees rejects malformed canonical cleanu
 });
 
 describe("cleanup-worktrees validation preserves one shared legacy orphan", () => {
-	const baseDir = maintenanceBaseDir;
+	const baseDir = join(maintenanceBaseDir, "validation-core");
 	const repoPath = join(baseDir, "repo");
 	const worktreePath = join(baseDir, "orphan-worktree");
 	const branch = `session/malformed-validation-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-	let projectId: string | undefined;
+	const validationGit = new MaintenanceGitModel("maintenance-api-malformed-validation");
+	const validationRunner: CommandRunner = {
+		async execFile(file, args, options) {
+			if (!/(^|[\\/])git(?:\.exe)?$/i.test(file)) throw new Error(`unexpected validation fixture executable: ${file}`);
+			const cwd = typeof options?.cwd === "string" ? options.cwd : repoPath;
+			return { stdout: validationGit.run(cwd, args), stderr: "" };
+		},
+	};
+	const emptySessionStore = { getArchived: () => [], getLive: () => [], get: () => undefined };
+	const emptyRecordStore = { getAll: () => [] };
+	const projectContext = {
+		project: { id: "maintenance-validation-project", name: "Maintenance validation", rootPath: repoPath },
+		projectConfigStore: { getComponents: () => [], get: () => undefined },
+		sessionStore: emptySessionStore,
+		goalStore: emptyRecordStore,
+		teamStore: emptyRecordStore,
+		staffStore: emptyRecordStore,
+	};
+	const validationInventory = new WorktreeInventoryService({
+		projectContextManager: { visible: () => [projectContext], all: () => [projectContext] } as any,
+		sessionManager: { listSessions: () => [], getAllWorktreePools: () => new Map() } as any,
+		commandRunner: validationRunner,
+	});
 	let baseline: Awaited<ReturnType<typeof snapshotLegacyOrphan>>;
 
+	const normalizePath = (value: string) => value.replace(/\\/g, "/").toLowerCase();
+
 	async function snapshotLegacyOrphan() {
-		const response = await apiFetch("/api/maintenance/orphaned-worktrees");
-		expect(response.status).toBe(200);
-		const body = await response.json();
-		const inventory = (body.worktrees as any[])
-			.map(item => ({ path: normalizeTestPath(item.path), branch: item.branch, repoPath: normalizeTestPath(item.repoPath) }))
+		const body = await validationInventory.legacyOrphanedWorktrees();
+		const inventory = body.worktrees
+			.map(item => ({ path: normalizePath(item.path), branch: item.branch, repoPath: normalizePath(item.repoPath) }))
 			.sort((a, b) => `${a.repoPath}:${a.path}:${a.branch}`.localeCompare(`${b.repoPath}:${b.path}:${b.branch}`));
 		return {
 			pathExists: existsSync(worktreePath),
-			branchExists: branchExists(repoPath, branch),
-			worktreePaths: listedWorktreePaths(repoPath).sort(),
+			branchExists: validationGit.branchExists(repoPath, branch),
+			worktreePaths: validationGit.listedWorktreePaths(repoPath).map(normalizePath).sort(),
 			inventory,
 		};
 	}
@@ -117,32 +139,31 @@ describe("cleanup-worktrees validation preserves one shared legacy orphan", () =
 	}
 
 	beforeAll(async () => {
-		initGitRepo(repoPath);
-		const project = await registerProject({ name: `cleanup validation ${Date.now()}`, rootPath: repoPath, seedWorkflows: false });
-		projectId = project.id;
-		git(repoPath, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+		mkdirSync(join(repoPath, ".git"), { recursive: true });
+		writeFileSync(join(repoPath, "README.md"), "# isolated maintenance validation fixture\n");
+		validationGit.registerRepo(repoPath);
+		validationGit.addWorktree(repoPath, worktreePath, branch);
 		baseline = await snapshotLegacyOrphan();
 		expect(baseline).toMatchObject({ pathExists: true, branchExists: true });
-		expect(baseline.worktreePaths).toContain(normalizeTestPath(worktreePath));
+		expect(baseline.worktreePaths).toContain(normalizePath(worktreePath));
 		expect(baseline.inventory).toContainEqual({
-			path: normalizeTestPath(worktreePath),
+			path: normalizePath(worktreePath),
 			branch,
-			repoPath: normalizeTestPath(repoPath),
+			repoPath: normalizePath(repoPath),
 		});
 	});
 
-	afterAll(async () => {
-		tryRemoveWorktree(repoPath, worktreePath);
-		tryDeleteBranch(repoPath, branch);
-		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-		maintenanceGit.forgetRepo(repoPath);
+	afterAll(() => {
+		validationGit.forgetRepo(repoPath);
+		validationGit.reset();
 	});
 
 	it("rejects itemIds without mode", async () => {
-		const malformed = await apiFetch("/api/maintenance/cleanup-worktrees", {
-			method: "POST",
-			body: JSON.stringify({ itemIds: ["canonical-selector-without-mode"] }),
-		});
+		const malformed = await executeCleanupWorktreesRequest(
+			{ itemIds: ["canonical-selector-without-mode"] },
+			true,
+			validationInventory,
+		);
 		expect(malformed.status).toBe(400);
 		await expectLegacyOrphanUnchanged("itemIds without mode");
 	});
@@ -157,10 +178,7 @@ describe("cleanup-worktrees validation preserves one shared legacy orphan", () =
 		] as const;
 
 		for (const invalidBody of invalidBodies) {
-			const malformed = await apiFetch("/api/maintenance/cleanup-worktrees", {
-				method: "POST",
-				body: JSON.stringify(invalidBody.value),
-			});
+			const malformed = await executeCleanupWorktreesRequest(invalidBody.value, true, validationInventory);
 			expect(malformed.status, invalidBody.label).toBe(400);
 			await expectLegacyOrphanUnchanged(invalidBody.label);
 		}
