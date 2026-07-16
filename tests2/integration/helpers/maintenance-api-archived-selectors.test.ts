@@ -1,17 +1,22 @@
 import { describe, it } from "vitest";
 import * as maintenance from "./maintenance-api-support.js";
+import type { MaintenanceGitSnapshot } from "./maintenance-git-model.js";
 
 const {
 	test, expect, apiFetch, expectArchivedCleanupShape,
 	existsSync, mkdirSync, mkdtempSync, rmSync, tmpdir, join,
-	git, branchExists, normalizeTestPath, listedWorktreePaths, initGitRepo,
-	tryRemoveWorktree, tryDeleteBranches,
+	normalizeTestPath,
 	seedArchivedSessions, removeSeededSessions,
 	findArchivedSession, findArchivedWorktreeItem,
-	getArchivedWorktreeScan, gateway, maintenanceGit,
+	getArchivedWorktreeScan, gateway,
 } = maintenance;
+const maintenanceOwner = maintenance.createMaintenanceApiFixture("archived-selectors");
+const {
+	git, branchExists, listedWorktreePaths, initGitRepo,
+	tryRemoveWorktree, tryDeleteBranches, maintenanceGit,
+} = maintenanceOwner;
 type SeededSession = maintenance.SeededSession;
-maintenance.registerMaintenanceHooks();
+maintenanceOwner.registerMaintenanceHooks();
 
 let baseDir: string;
 let repoPath: string;
@@ -35,6 +40,7 @@ let stale: SeededSession;
 let alreadyCleaned: SeededSession;
 let multiRepo: SeededSession;
 let guarded: SeededSession;
+let pristineGit: MaintenanceGitSnapshot;
 let scanSnapshot: any;
 let cleanupAllSnapshot: any;
 let cleanupSandboxSnapshot: any;
@@ -118,6 +124,8 @@ test.beforeAll(async () => {
 		});
 	}
 
+	// Capture only this file's fully registered repos, worktrees, and branches.
+	pristineGit = maintenanceGit.snapshot();
 	scanSnapshot = await getArchivedWorktreeScan("?includeAlreadyCleaned=1");
 	const cleanupAll = await apiFetch("/api/maintenance/cleanup-archived-session-worktrees", {
 		method: "POST",
@@ -140,6 +148,7 @@ test.beforeAll(async () => {
 
 test.afterAll(() => {
 	removeSeededSessions(seeded, liveSessionIds);
+	maintenanceGit.restore(pristineGit);
 	tryRemoveWorktree(repoPath, removablePath);
 	tryRemoveWorktree(repoPath, liveReferencedPath);
 	tryDeleteBranches(repoPath, [removableBranch, liveBranch, staleBranch, alreadyBranch, multiBranch]);

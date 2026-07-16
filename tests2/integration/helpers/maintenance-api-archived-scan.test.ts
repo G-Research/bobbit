@@ -1,17 +1,18 @@
 import { describe, it } from "vitest";
 import * as maintenance from "./maintenance-api-support.js";
+import type { MaintenanceGitSnapshot } from "./maintenance-git-model.js";
 
 const {
 	test, expect, apiFetch, expectArchivedScanShape, expectArchivedCleanupShape,
 	mkdirSync, mkdtempSync, rmSync, tmpdir, join,
-	git, initGitRepo,
-	tryRemoveWorktree, tryDeleteBranches,
 	seedArchivedSessions, removeSeededSessions,
 	findArchivedWorktreeItem, findArchivedWorktreeGroup,
 	getArchivedWorktreeScan, gateway
 } = maintenance;
+const maintenanceOwner = maintenance.createMaintenanceApiFixture("archived-scan");
+const { git, initGitRepo, tryRemoveWorktree, tryDeleteBranches, maintenanceGit } = maintenanceOwner;
 type SeededSession = maintenance.SeededSession;
-maintenance.registerMaintenanceHooks();
+maintenanceOwner.registerMaintenanceHooks();
 
 describe("archived session worktree maintenance", () => {
 	it("GET /api/maintenance/archived-session-worktrees returns sessions, flattened items, groups, presets, and additive counts", async () => {
@@ -32,6 +33,7 @@ describe("archived session worktree maintenance", () => {
 		const missingBranch = `archived-v2-missing-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 		const seeded: SeededSession[] = [];
 		let liveSessionId: string | undefined;
+		let pristineGit: MaintenanceGitSnapshot | undefined;
 		try {
 			initGitRepo(repoPath);
 			git(repoPath, ["worktree", "add", "-b", removableBranch, removablePath, "HEAD"]);
@@ -39,6 +41,7 @@ describe("archived session worktree maintenance", () => {
 			git(repoPath, ["branch", staleBranch, "HEAD"]);
 			git(repoPath, ["branch", missingBranch, "HEAD"]);
 			mkdirSync(stalePath, { recursive: true });
+			pristineGit = maintenanceGit.snapshot();
 
 			const [removable, noPath, missingRepo, sandbox, delegate, alreadyCleaned, stale, liveReferenced] = seedArchivedSessions(gateway(), [
 				{ baseDir, title: "V2 removable archived worktree", cwd: removablePath, repoPath, worktreePath: removablePath, branch: removableBranch },
@@ -109,9 +112,14 @@ describe("archived session worktree maintenance", () => {
 			expect(defaultScan.counts.alreadyCleaned).toBeGreaterThanOrEqual(1);
 		} finally {
 			removeSeededSessions(seeded, [liveSessionId]);
-			tryRemoveWorktree(repoPath, removablePath);
-			tryRemoveWorktree(repoPath, liveReferencedPath);
-			tryDeleteBranches(repoPath, [removableBranch, liveBranch, staleBranch, missingBranch]);
+			if (pristineGit) {
+				// Restore only this file's registered model before releasing its lease.
+				maintenanceGit.restore(pristineGit);
+				tryRemoveWorktree(repoPath, removablePath);
+				tryRemoveWorktree(repoPath, liveReferencedPath);
+				tryDeleteBranches(repoPath, [removableBranch, liveBranch, staleBranch, missingBranch]);
+				maintenanceGit.forgetRepo(repoPath);
+			}
 			rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
