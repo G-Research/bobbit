@@ -4,6 +4,7 @@
  * Tests verify session lifecycle (streaming/idle/abort) and tool invocations
  * (Bash, Write, Read, Edit) via the mock agent's deterministic responses.
  */
+import "./_e2e/fake-cmd-setup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -12,11 +13,11 @@ import {
 	createSession,
 	deleteSession,
 	connectWs,
-	waitForSessionStatus,
 	statusPredicate,
 	toolStartPredicate,
 	agentEndPredicate,
 } from "./_e2e/e2e-setup.js";
+import { attachLocalMockAgentClock, type LocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
 
 test.setTimeout(30_000);
 
@@ -26,29 +27,41 @@ test.setTimeout(30_000);
 
 test.describe("Session lifecycle", () => {
 	let sessionId: string;
-	test.afterEach(async () => { if (sessionId) { await deleteSession(sessionId); sessionId = ""; } });
+	let agentClock: LocalMockAgentClock;
+
+	test.beforeEach(async ({ gateway }) => {
+		sessionId = await createSession();
+		agentClock = attachLocalMockAgentClock(gateway, sessionId);
+	});
+	test.afterEach(async () => {
+		if (sessionId) await deleteSession(sessionId).catch(() => {});
+		sessionId = "";
+	});
 
 	test("prompt triggers streaming then idle @smoke", async () => {
-		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 		try {
+			const cursor = conn.messageCount();
+			const streaming = conn.waitForFrom(cursor, statusPredicate("streaming"));
+			const idle = conn.waitForFrom(cursor, statusPredicate("idle"));
 			conn.send({ type: "prompt", text: "Reply with just the word OK and nothing else." });
-			await conn.waitFor(statusPredicate("streaming"));
-			await conn.waitFor(statusPredicate("idle"));
+			await agentClock.advanceUntilSettled(streaming);
+			await agentClock.advanceUntilSettled(idle);
 		} finally {
 			conn.close();
 		}
 	});
 
 	test("abort stops a streaming session @smoke", async () => {
-		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 		try {
-			// Use STAY_BUSY to keep agent streaming until we abort
+			const cursor = conn.messageCount();
+			const streaming = conn.waitForFrom(cursor, statusPredicate("streaming"));
 			conn.send({ type: "prompt", text: "STAY_BUSY:2000 long essay" });
-			await conn.waitFor(statusPredicate("streaming"));
+			await agentClock.advanceUntilSettled(streaming);
+			const idle = conn.waitForFrom(conn.messageCount(), statusPredicate("idle"));
 			conn.send({ type: "abort" });
-			await conn.waitFor(statusPredicate("idle"));
+			await agentClock.advanceUntilSettled(idle);
 		} finally {
 			conn.close();
 		}
@@ -61,35 +74,29 @@ test.describe("Session lifecycle", () => {
 
 test.describe.serial("Agent tools", () => {
 	let sessionId: string;
+	let agentClock: LocalMockAgentClock;
 
-	test.beforeAll(async () => {
+	// A fresh mock instance per declaration prevents an unfinished prompt chain
+	// or abort controller from poisoning the next tool assertion in this fork.
+	test.beforeEach(async ({ gateway }) => {
 		sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
-
-		// Prime the session with a simple prompt
-		const conn = await connectWs(sessionId);
-		try {
-			conn.send({ type: "prompt", text: "Reply with just: ready" });
-			await conn.waitFor(agentEndPredicate());
-		} finally {
-			conn.close();
-		}
-
-		await waitForSessionStatus(sessionId, "idle");
+		agentClock = attachLocalMockAgentClock(gateway, sessionId);
 	});
-	test.afterAll(async () => {
-		if (sessionId) await deleteSession(sessionId);
+	test.afterEach(async () => {
+		if (sessionId) await deleteSession(sessionId).catch(() => {});
+		sessionId = "";
 	});
 
 	async function verifyToolUsed(prompt: string, toolName: string): Promise<void> {
-		await waitForSessionStatus(sessionId, "idle");
-
 		const conn = await connectWs(sessionId);
 		try {
+			const cursor = conn.messageCount();
+			const toolStarted = conn.waitForFrom(cursor, toolStartPredicate(toolName));
+			const agentEnded = conn.waitForFrom(cursor, agentEndPredicate());
 			conn.send({ type: "prompt", text: prompt });
-			const toolEvent = await conn.waitFor(toolStartPredicate(toolName));
+			const toolEvent = await agentClock.advanceUntilSettled(toolStarted);
 			expect(toolEvent.data.toolName.toLowerCase()).toBe(toolName.toLowerCase());
-			await conn.waitFor(agentEndPredicate());
+			await agentClock.advanceUntilSettled(agentEnded);
 		} finally {
 			conn.close();
 		}
