@@ -533,3 +533,38 @@ All three `npm run test:unit` processes started simultaneously.
 | 2026-07-16 | 3 | 583.38s | The same 3 `transcript-sanitizer` failures | Numerous breaches | **FAIL** |
 
 The transcript failures use a startup-global root, allowing simultaneous processes to interfere. Common heavy files also exceeded their solo budgets under concurrent disk and cache contention. Transcript-root injection and process-scoped cache investigation have been launched, together with six heavy-tail fixture optimizations. A new simultaneous 3x attempt is required after those changes.
+
+## Final qualification runs
+
+| Date | Attempt | Process / workers | Wall time | Result | Final tally |
+|---|---:|---|---:|---|---|
+| 2026-07-16 | 19 | One Vitest process / fixed 3 workers | 263.58s | **PASS** | 890 passed files, 4 skipped; 7,594 passed tests, 22 skipped; zero hard budget breaches |
+| 2026-07-16 | 20 | One Vitest process / fixed 3 workers | 268.37s | **FAIL** | Same inventory; sole `gate-diagnostics-cleanup` failure |
+| 2026-07-16 | 21 | One Vitest process / fixed 3 workers | 269.93s | **PASS** | 890 passed files, 4 skipped; 7,594 passed tests, 22 skipped; zero hard budget breaches |
+| 2026-07-16 | 22 | One Vitest process / fixed 3 workers | 271.79s | **PASS** | 890 passed files, 4 skipped; 7,594 passed tests, 22 skipped; zero hard budget breaches |
+
+Phase totals for the green runs:
+
+| Attempt | Transform | Setup | Import | Tests | Environment |
+|---:|---:|---:|---:|---:|---:|
+| 19 | 31.96s | 67.68s | 100.92s | 467.03s | 84.23s |
+| 21 | 24.58s | 65.53s | 100.73s | 484.37s | 83.58s |
+| 22 | 25.98s | 73.56s | 101.32s | 480.22s | 85.72s |
+
+Attempt 20 exposed one remaining shared-state defect: `inline-workflow-goal-flow` leaked `flow-alpha` and `flow-beta` into the default project, causing `gate-diagnostics-cleanup` to fail. The root mutator was isolated to its owned project and then passed 100 shuffled groups. Attempts 21 and 22 are the final consecutive qualifying solo runs: both were green below 300s with the hard 15s per-file budget green.
+
+A systematic state audit scanned all 740 `isolate:false` files. It found and fixed five cross-process temporary-path collisions, and a static path-ownership audit now guards against regressions.
+
+## Final simultaneous 3x proof
+
+Three `BOBBIT_UNIT_CONCURRENT_PROOF=1 npm run test:unit` processes were launched simultaneously. All used the default fixed three-worker configuration.
+
+| Date | Run | Wall time | Exit code | Final tally | Hard failures |
+|---|---:|---:|---:|---|---|
+| 2026-07-16 | 1 | 567.41s | `0` | 890 passed files, 4 skipped; 7,594 passed tests, 22 skipped | None |
+| 2026-07-16 | 2 | 567.44s | `0` | 890 passed files, 4 skipped; 7,594 passed tests, 22 skipped | None |
+| 2026-07-16 | 3 | 567.44s | `0` | 890 passed files, 4 skipped; 7,594 passed tests, 22 skipped | None |
+
+The proof runs reported contention-only budget overruns in 13, 13, and 15 files respectively. These diagnostics are expected in concurrent-proof mode and do not qualify as solo budget evidence; actual test and suite failures remained fatal. All three processes exited successfully with zero failed suites or tests.
+
+The acceptance evidence is satisfied: two consecutive qualifying solo runs completed below 300s, the three-process concurrent proof passed without failures, fixed three-worker execution was retained, and the hard solo file budget remained green. The `unit-stage-target` gate is ready to signal.
