@@ -4,9 +4,10 @@
 // processes. Worktree creation itself is covered by the dedicated Git suites.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { rebaseAgentTranscriptCwdMetadataFile } from "../../src/server/agent/transcript-sanitizer.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 import {
 	apiFetch,
 	createGoal,
@@ -74,19 +75,22 @@ function appendOldCwdMessageContentSentinels(jsonlPath: string, cwd: string, mar
 	return { userLine, assistantLine };
 }
 
-async function withGithubRemote<T>(gateway: any, run: () => Promise<T>): Promise<T> {
-	const runner = gateway.sessionManager.commandRunner;
-	const originalExecFile = runner.execFile;
-	runner.execFile = async (command: string, args: readonly string[]) => {
-		if (command === "git" && args.join(" ") === "remote get-url origin") {
-			return { stdout: "git@github.com:acme/widget.git\n", stderr: "" };
-		}
-		throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
-	};
+async function withGithubRemote<T>(gateway: any, cwd: string, run: () => Promise<T>): Promise<T> {
+	const expectedCwd = resolve(cwd);
+	const restore = installCommandRunnerInterceptor(gateway.sessionManager.commandRunner, {
+		label: `sidebar-github-remote:${expectedCwd}`,
+		async execFile(command, args, options, next) {
+			const commandCwd = typeof options?.cwd === "string" ? resolve(options.cwd) : resolve(process.cwd());
+			if (commandCwd === expectedCwd && command === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: "git@github.com:acme/widget.git\n", stderr: "" };
+			}
+			return next();
+		},
+	});
 	try {
 		return await run();
 	} finally {
-		runner.execFile = originalExecFile;
+		restore();
 	}
 }
 
@@ -104,18 +108,21 @@ async function withForkCreateSeam<T>(
 	run: (captures: ForkCapture[]) => Promise<T>,
 ): Promise<T> {
 	const sessionManager = gateway.sessionManager;
-	const runner = sessionManager.commandRunner;
-	const originalExecFile = runner.execFile;
 	const originalCreateSession = sessionManager.createSession;
 	const originalSetTitle = sessionManager.setTitle;
 	const captures: ForkCapture[] = [];
 
-	runner.execFile = async (command: string, args: readonly string[]) => {
-		if (command !== "git") throw new Error(`unexpected command: ${command}`);
-		if (args.join(" ") === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
-		if (args.join(" ") === "rev-parse --show-toplevel") return { stdout: `${repoPath}\n`, stderr: "" };
-		throw new Error(`unexpected git command: ${args.join(" ")}`);
-	};
+	const expectedRepoPath = resolve(repoPath);
+	const restoreCommandRunner = installCommandRunnerInterceptor(sessionManager.commandRunner, {
+		label: `sidebar-fork:${expectedRepoPath}`,
+		async execFile(command, args, options, next) {
+			const commandCwd = typeof options?.cwd === "string" ? resolve(options.cwd) : resolve(process.cwd());
+			if (commandCwd !== expectedRepoPath || command !== "git") return next();
+			if (args.join(" ") === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
+			if (args.join(" ") === "rev-parse --show-toplevel") return { stdout: `${repoPath}\n`, stderr: "" };
+			return next();
+		},
+	});
 	sessionManager.createSession = async (cwd: string, _agentArgs: unknown, _goalId: unknown, _assistantType: unknown, options: any) => {
 		const id = options.sessionId;
 		const resolvedCwd = options.worktreeOpts ? join(repoPath, `.fake-worktree-${id}`) : cwd;
@@ -141,7 +148,7 @@ async function withForkCreateSeam<T>(
 	try {
 		return await run(captures);
 	} finally {
-		runner.execFile = originalExecFile;
+		restoreCommandRunner();
 		sessionManager.createSession = originalCreateSession;
 		sessionManager.setTitle = originalSetTitle;
 		for (const capture of captures) rmSync(capture.clonedTranscript, { force: true });
@@ -196,7 +203,10 @@ function removeSyntheticSourceSession(gateway: any, projectId: string, sessionId
 
 test.describe.serial("sidebar actions server endpoints", () => {
 	test("GET /api/goals/:id/github-link returns PR, branch fallback, and unavailable states", async ({ gateway }) => {
-		const cwd = nonGitCwd();
+		const cwd = join(nonGitCwd(), `sidebar-github-${randomUUID()}`);
+		// The fenced runner validates repository structure before discovery. The
+		// remote/ref answers remain seam-owned, but the fixture is still repo-shaped.
+		mkdirSync(join(cwd, ".git"), { recursive: true });
 		const linkGoal = await createGoal({ title: `sidebar link ${Date.now()}`, cwd, worktree: false, team: false });
 		const noWorktreeGoal = await createGoal({ title: `sidebar no worktree ${Date.now()}`, cwd, worktree: false, team: false });
 		try {
@@ -219,7 +229,7 @@ test.describe.serial("sidebar actions server endpoints", () => {
 			gateway.sessionManager.prStatusStore.remove(linkGoal.id);
 			const branch = "feature/sidebar-actions";
 			gateway.sessionManager.getGoalStoreForProject(linkGoal.projectId).update(linkGoal.id, { branch });
-			const branchResp = await withGithubRemote(gateway, () => apiFetch(`/api/goals/${linkGoal.id}/github-link`));
+			const branchResp = await withGithubRemote(gateway, cwd, () => apiFetch(`/api/goals/${linkGoal.id}/github-link`));
 			expect(branchResp.status).toBe(200);
 			expect(await branchResp.json()).toMatchObject({
 				available: true,
@@ -229,6 +239,7 @@ test.describe.serial("sidebar actions server endpoints", () => {
 		} finally {
 			await deleteGoal(linkGoal.id);
 			await deleteGoal(noWorktreeGoal.id);
+			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
 });
