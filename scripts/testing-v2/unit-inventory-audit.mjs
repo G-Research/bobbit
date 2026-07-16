@@ -88,6 +88,114 @@ function childProcessValueImports(source, file) {
 	return violations;
 }
 
+const FILESYSTEM_MUTATORS = new Set([
+	"appendFile", "appendFileSync", "chmod", "chmodSync", "chown", "chownSync", "copyFile", "copyFileSync",
+	"cp", "cpSync", "createWriteStream", "link", "linkSync", "mkdir", "mkdirSync", "rename", "renameSync",
+	"rm", "rmSync", "rmdir", "rmdirSync", "symlink", "symlinkSync", "truncate", "truncateSync", "unlink",
+	"unlinkSync", "utimes", "utimesSync", "writeFile", "writeFileSync",
+]);
+
+function concurrentPathOwnershipViolations(source, file) {
+	const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+	const declarations = new Map();
+	const declarationNodes = new Map();
+	const calls = [];
+	const visit = (node) => {
+		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+			if (node.initializer) declarations.set(node.name.text, node.initializer);
+			declarationNodes.set(node.name.text, node);
+		} else if (ts.isBinaryExpression(node)
+			&& node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+			&& ts.isIdentifier(node.left)
+			&& !declarations.has(node.left.text)) {
+			declarations.set(node.left.text, node.right);
+		} else if (ts.isCallExpression(node)) calls.push(node);
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+
+	const textOf = (node) => node.getText(sourceFile);
+	const contains = (node, predicate) => {
+		let found = false;
+		const walk = (child) => {
+			if (predicate(child)) found = true;
+			else ts.forEachChild(child, walk);
+		};
+		walk(node);
+		return found;
+	};
+	const references = (node, name) => contains(node, (child) => ts.isIdentifier(child) && child.text === name);
+	const leafName = (expression) => {
+		if (ts.isIdentifier(expression)) return expression.text;
+		if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+		return "";
+	};
+	const emptyFacts = () => ({ hasDate: false, hasOwner: false, pathLike: false, sharedPath: false });
+	const memo = new Map();
+	let analyse;
+	const factsFor = (initializer, name = "", visiting = new Set()) => {
+		const directText = textOf(initializer);
+		const result = {
+			hasDate: contains(initializer, (node) => ts.isCallExpression(node)
+				&& ts.isPropertyAccessExpression(node.expression)
+				&& node.expression.expression.getText(sourceFile) === "Date"
+				&& node.expression.name.text === "now"),
+			hasOwner: contains(initializer, (node) => (ts.isCallExpression(node) && /^(?:mkdtempSync|randomUUID|uuid)$/i.test(leafName(node.expression)))
+				|| (ts.isPropertyAccessExpression(node) && node.expression.getText(sourceFile) === "process" && node.name.text === "pid")),
+			pathLike: /(?:^|\W)(?:join|resolve|tmpdir|mkdtempSync)\s*\(/.test(directText)
+				|| /(?:dir|root|path|cwd|file|worktree|report|tool)/i.test(name),
+			sharedPath: /(?:tmpdir\s*\(|(?:tmp|temp|worktree|report|tool))/i.test(directText),
+		};
+		for (const dependency of declarations.keys()) {
+			if (dependency === name || !references(initializer, dependency)) continue;
+			const inherited = analyse(dependency, visiting);
+			result.hasDate ||= inherited.hasDate;
+			result.hasOwner ||= inherited.hasOwner;
+			result.pathLike ||= inherited.pathLike;
+			result.sharedPath ||= inherited.sharedPath;
+		}
+		return result;
+	};
+	analyse = (name, visiting = new Set()) => {
+		if (memo.has(name)) return memo.get(name);
+		if (visiting.has(name) || !declarations.has(name)) return emptyFacts();
+		const result = factsFor(declarations.get(name), name, new Set(visiting).add(name));
+		memo.set(name, result);
+		return result;
+	};
+
+	const usedBy = (name, isSink) => calls.some((call) => isSink(leafName(call.expression))
+		&& call.arguments.some((argument) => references(argument, name)));
+	const mutated = (name) => usedBy(name, (callee) => FILESYSTEM_MUTATORS.has(callee)
+		|| /^(?:cleanup|remove)(?:Dir|Directory|File|Path|Root)?$/i.test(callee));
+	const externallyOwned = (name) => {
+		const initializer = declarations.get(name);
+		const directText = initializer ? textOf(initializer) : "";
+		return /Date\.now\s*\(/.test(directText)
+			&& /(?:tmpdir\s*\(|(?:tmp|temp|worktree|report|tool))/i.test(directText)
+			&& (/(?:^|\W)(?:join|resolve|tmpdir)\s*\(/.test(directText) || /(?:dir|root|path|cwd|file|worktree|report|tool)/i.test(name))
+			&& usedBy(name, (callee) => /^(?:(?:api|admin|rawApi)Fetch|registerProject|callTool)$/i.test(callee));
+	};
+	const isUnsafe = (facts) => facts.hasDate && !facts.hasOwner && facts.pathLike && facts.sharedPath;
+	const unsafeNames = [...declarations.keys()].filter((name) => isUnsafe(analyse(name)) && (mutated(name) || externallyOwned(name)));
+	const violation = (node, label) => {
+		const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+		return `${file}:${line} — concurrent isolate:false filesystem path ${label} uses Date.now() as its only owner token and is mutated or cleaned; use mkdtempSync, process.pid, randomUUID()/UUID, or place it beneath a clearly unique owner root`;
+	};
+	const violations = unsafeNames.map((name) => violation(declarationNodes.get(name) ?? declarations.get(name), JSON.stringify(name)));
+	for (const call of calls) {
+		const callee = leafName(call.expression);
+		if (!FILESYSTEM_MUTATORS.has(callee) && !/^(?:cleanup|remove)(?:Dir|Directory|File|Path|Root)?$/i.test(callee)) continue;
+		for (const argument of call.arguments) {
+			if (!/Date\.now\s*\(/.test(textOf(argument))
+				|| !isUnsafe(factsFor(argument))
+				|| unsafeNames.some((name) => references(argument, name))) continue;
+			violations.push(violation(argument, "expression"));
+		}
+	}
+	return violations;
+}
+
 const baseE2eSource = gitText(["show", `${mergeBase}:scripts/testing-v2/integration-e2e-files.mjs`]);
 const formerlyRelocatedE2e = e2ePaths(baseE2eSource);
 const requiredUnitFiles = gitText(["ls-tree", "-r", "--name-only", mergeBase, "--", "tests2/core", "tests2/dom", "tests2/integration"])
@@ -147,6 +255,8 @@ const mappedDeclarations = missingDeclarations.filter(({ file, name }) => mappin
 const unmappedDeclarations = missingDeclarations.filter(({ file, name }) => !mappingByBase.has(declarationKey(file, name)));
 const declarationSemanticsPreserved = unmappedDeclarations.length === 0 && invalidSemanticMappings.length === 0;
 const childProcessImports = currentUnit.flatMap((file) => childProcessValueImports(fs.readFileSync(file, "utf-8"), file));
+const concurrentPathViolations = [...execution.core, ...execution.integration]
+	.flatMap((file) => concurrentPathOwnershipViolations(fs.readFileSync(file, "utf-8"), file));
 const approvedE2e = [...APPROVED_E2E_VITEST_PATHS].sort();
 const e2eOwnershipExact = JSON.stringify(currentE2eVitestFiles) === JSON.stringify(approvedE2e);
 const scheduledInventoryPreserved = currentUnit.length + currentE2eVitestFiles.length === currentInventory.length;
@@ -168,6 +278,7 @@ const report = {
 	scheduledInventoryPreserved,
 	isolatedFiles: execution.isolated,
 	childProcessValueImports: childProcessImports,
+	concurrentPathOwnershipViolations: concurrentPathViolations,
 	baseStaticTestDeclarations: baseDeclarations,
 	currentStaticDeclarationsInBaseFiles: currentDeclarations,
 	allCurrentStaticTestDeclarations: allCurrentDeclarations,
@@ -188,7 +299,8 @@ const report = {
 		&& declarationSemanticsPreserved
 		&& scheduledInventoryPreserved
 		&& e2eOwnershipExact
-		&& childProcessImports.length === 0,
+		&& childProcessImports.length === 0
+		&& concurrentPathViolations.length === 0,
 };
 
 const json = `${JSON.stringify(report, null, 2)}\n`;
