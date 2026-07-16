@@ -77,16 +77,31 @@ async function withGrantServer(
 	responseForRequest: (count: number) => unknown,
 	run: (requestCount: () => number) => Promise<void>,
 ): Promise<void> {
-	const previousSessionId = process.env.BOBBIT_SESSION_ID;
+	const previousRuntime = {
+		sessionId: process.env.BOBBIT_SESSION_ID,
+		gatewayUrl: process.env.BOBBIT_GATEWAY_URL,
+		token: process.env.BOBBIT_TOKEN,
+	};
 	grantPolicy = responseForRequest;
 	grantRequestCount = 0;
+	// The generated guard captures all three values when it is activated. Keep
+	// this test-owned transport state installed for the complete async lifetime
+	// of the active guard so it never falls through to the developer's token dir.
 	process.env.BOBBIT_SESSION_ID = "tool-guard-test-session";
+	process.env.BOBBIT_GATEWAY_URL = "http://tool-guard.test";
+	process.env.BOBBIT_TOKEN = "tool-guard-test-token";
 	try {
 		await run(() => grantRequestCount);
 	} finally {
 		grantPolicy = undefined;
-		if (previousSessionId === undefined) delete process.env.BOBBIT_SESSION_ID;
-		else process.env.BOBBIT_SESSION_ID = previousSessionId;
+		for (const [name, value] of Object.entries({
+			BOBBIT_SESSION_ID: previousRuntime.sessionId,
+			BOBBIT_GATEWAY_URL: previousRuntime.gatewayUrl,
+			BOBBIT_TOKEN: previousRuntime.token,
+		})) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
 	}
 }
 
