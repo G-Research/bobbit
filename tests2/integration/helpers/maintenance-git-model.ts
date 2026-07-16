@@ -64,7 +64,11 @@ function commandError(args: readonly string[], cwd: string): Error & { code: num
  * exercising its production command-runner boundary and filesystem checks.
  */
 export class MaintenanceGitModel {
-	private readonly owner = Symbol("maintenance-git-model-owner");
+	private readonly owner: symbol;
+
+	constructor(ownerLabel = "maintenance-git-model-owner") {
+		this.owner = Symbol(ownerLabel);
+	}
 
 	reset(): void {
 		const state = globalState();
@@ -117,6 +121,10 @@ export class MaintenanceGitModel {
 
 		for (const source of snapshot.repos) {
 			const repoKey = key(source.root);
+			const occupied = state.repos.get(repoKey);
+			if (occupied && occupied.owner !== this.owner) {
+				throw new Error(`[maintenance-git-model] cannot restore repository owned by another fixture: ${source.root}`);
+			}
 			const worktrees = new Map<string, { path: string; branch: string }>();
 			for (const worktree of source.worktrees) {
 				const worktreeKey = key(worktree.path);
@@ -138,6 +146,9 @@ export class MaintenanceGitModel {
 		const repoRoot = resolve(root);
 		const repoKey = key(repoRoot);
 		const previous = state.repos.get(repoKey);
+		if (previous?.owner !== undefined && previous.owner !== this.owner) {
+			throw new Error(`[maintenance-git-model] repository already belongs to another fixture: ${repoRoot}`);
+		}
 		if (previous) {
 			for (const worktreePath of previous.worktrees.keys()) {
 				if (state.worktreeOwners.get(worktreePath) === repoKey) state.worktreeOwners.delete(worktreePath);
@@ -169,12 +180,13 @@ export class MaintenanceGitModel {
 
 	deleteBranches(root: string, branches: readonly string[]): void {
 		const repo = globalState().repos.get(key(root));
-		if (!repo) return;
+		if (!repo || repo.owner !== this.owner) return;
 		for (const branch of branches) repo.branches.delete(branch);
 	}
 
 	branchExists(root: string, branch: string): boolean {
-		return globalState().repos.get(key(root))?.branches.has(branch) ?? false;
+		const repo = globalState().repos.get(key(root));
+		return repo?.owner === this.owner && repo.branches.has(branch);
 	}
 
 	addWorktree(root: string, worktreePath: string, branch: string): void {
@@ -191,10 +203,11 @@ export class MaintenanceGitModel {
 		const state = globalState();
 		const repoKey = key(root);
 		const repo = state.repos.get(repoKey);
+		if (!repo || repo.owner !== this.owner) return;
 		const worktreeKey = key(worktreePath);
-		if (repo && worktreeKey !== repoKey) repo.worktrees.delete(worktreeKey);
+		if (worktreeKey !== repoKey) repo.worktrees.delete(worktreeKey);
 		if (state.worktreeOwners.get(worktreeKey) === repoKey) state.worktreeOwners.delete(worktreeKey);
-		this.deferRemovePath(worktreePath, repo?.owner ?? this.owner);
+		this.deferRemovePath(worktreePath, this.owner);
 	}
 
 	listedWorktreePaths(root: string): string[] {
@@ -204,7 +217,7 @@ export class MaintenanceGitModel {
 
 	run(rootOrWorktree: string, args: readonly string[]): string {
 		const cwd = resolve(rootOrWorktree);
-		const repo = this.findRepo(cwd);
+		const repo = this.findOwnedRepo(cwd);
 		if (!repo) throw commandError(args, cwd);
 		const [command, ...rest] = args;
 
@@ -266,13 +279,13 @@ export class MaintenanceGitModel {
 		state.modelInstallCounts.set(this.owner, (state.modelInstallCounts.get(this.owner) ?? 0) + 1);
 		const model = this;
 		const restoreDispatcher = installCommandRunnerInterceptor(runner, {
-			label: "maintenance-git-model",
+			label: `maintenance-git-model:${String(this.owner.description ?? "owner")}`,
 			async execFile(file, args, options, next) {
 				if (basename(file).replace(/\.exe$/i, "").toLowerCase() !== "git") return next();
 				const cwd = typeof options?.cwd === "string" ? options.cwd : process.cwd();
-				// Multiple integration files can share this gateway runner. Claim only
-				// paths registered by this facade; every other owner's command flows on.
-				if (!model.findRepo(resolve(cwd))) return next();
+				// Multiple integration files share one process-global model and runner.
+				// Each lease claims only repositories registered by its exact owner.
+				if (!model.findOwnedRepo(resolve(cwd))) return next();
 				return { stdout: model.run(cwd, args), stderr: "" };
 			},
 		});
@@ -330,16 +343,20 @@ export class MaintenanceGitModel {
 			.join("\n");
 	}
 
-	private findRepo(path: string): RepoState | undefined {
+	private findOwnedRepo(path: string): RepoState | undefined {
 		const state = globalState();
 		const pathKey = key(path);
 		const exactRepo = state.repos.get(pathKey);
-		if (exactRepo) return exactRepo;
+		if (exactRepo?.owner === this.owner) return exactRepo;
 		const directOwner = state.worktreeOwners.get(pathKey);
-		if (directOwner) return state.repos.get(directOwner);
+		if (directOwner) {
+			const directRepo = state.repos.get(directOwner);
+			if (directRepo?.owner === this.owner) return directRepo;
+		}
 
 		let best: { repo: RepoState; prefixLength: number } | undefined;
 		for (const [repoKey, repo] of state.repos) {
+			if (repo.owner !== this.owner) continue;
 			if (containsPath(repoKey, pathKey) && (!best || repoKey.length > best.prefixLength)) {
 				best = { repo, prefixLength: repoKey.length };
 			}
@@ -354,7 +371,7 @@ export class MaintenanceGitModel {
 
 	private requireRootRepo(path: string): RepoState {
 		const repo = globalState().repos.get(key(path));
-		if (!repo) throw new Error(`[maintenance-git-model] repository root is not registered: ${resolve(path)} (exists=${existsSync(path)})`);
+		if (!repo || repo.owner !== this.owner) throw new Error(`[maintenance-git-model] repository root is not registered for this owner: ${resolve(path)} (exists=${existsSync(path)})`);
 		return repo;
 	}
 }

@@ -10,6 +10,7 @@ import type { CommandRunner } from "../../../src/server/gateway-deps.js";
 import { copyGitTemplate } from "../../harness/git-template.js";
 import { test, expect } from "../_e2e/in-process-harness.js";
 import { readE2EToken, apiFetch as gatewayApiFetch, createSession, deleteSession, registerProject } from "../_e2e/e2e-setup.js";
+import { installMethodInterceptor } from "./command-runner-dispatcher.js";
 import { MaintenanceGitModel } from "./maintenance-git-model.js";
 
 export let maintenanceGateway: any;
@@ -19,46 +20,11 @@ export function gateway(): any {
 }
 let maintenanceProjectId: string;
 let maintenanceProjectContext: any;
-export const maintenanceGit = new MaintenanceGitModel();
+export const maintenanceGit = new MaintenanceGitModel("maintenance-api-support-default");
 
-type PersistenceInstallation = {
-	original: () => void;
-	replacement: () => void;
-	leases: Set<symbol>;
-};
-type MaintenanceHookGlobalState = {
-	persistenceInstallations: WeakMap<object, PersistenceInstallation>;
-};
-const MAINTENANCE_HOOK_STATE_KEY = Symbol.for("bobbit.tests2.maintenance-api-support.hooks");
-
-function maintenanceHookState(): MaintenanceHookGlobalState {
-	const scope = globalThis as typeof globalThis & { [MAINTENANCE_HOOK_STATE_KEY]?: MaintenanceHookGlobalState };
-	return scope[MAINTENANCE_HOOK_STATE_KEY] ??= { persistenceInstallations: new WeakMap() };
-}
-
-function suppressSessionStorePersistence(sessionStore: { saveNow?: () => void }): () => void {
+function suppressSessionStorePersistence(sessionStore: { saveNow?: () => void }, ownerLabel: string): () => void {
 	if (typeof sessionStore.saveNow !== "function") return () => {};
-	const state = maintenanceHookState();
-	let installation = state.persistenceInstallations.get(sessionStore);
-	if (!installation) {
-		installation = { original: sessionStore.saveNow, replacement: () => {}, leases: new Set() };
-		state.persistenceInstallations.set(sessionStore, installation);
-	}
-	if (sessionStore.saveNow !== installation.replacement) {
-		installation.original = sessionStore.saveNow;
-		sessionStore.saveNow = installation.replacement;
-	}
-	const lease = Symbol("maintenance-session-store-persistence-lease");
-	installation.leases.add(lease);
-	let restored = false;
-	return () => {
-		if (restored) return;
-		restored = true;
-		installation!.leases.delete(lease);
-		if (installation!.leases.size > 0) return;
-		if (sessionStore.saveNow === installation!.replacement) sessionStore.saveNow = installation!.original;
-		if (state.persistenceInstallations.get(sessionStore) === installation) state.persistenceInstallations.delete(sessionStore);
-	};
+	return installMethodInterceptor(sessionStore as { saveNow: () => void }, "saveNow", `maintenance-persistence:${ownerLabel}`, () => undefined);
 }
 
 /** Buffer every real HTTP response before returning it so fixture teardown cannot race an open body. */
@@ -72,12 +38,12 @@ async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response>
 	});
 }
 
-export function registerMaintenanceHooks(): void {
+export function registerMaintenanceHooks(model: MaintenanceGitModel = maintenanceGit, ownerLabel = "default"): void {
 	let restoreCommandRunner: (() => void) | undefined;
 	let restoreSessionStorePersistence: (() => void) | undefined;
 
 	test.beforeAll(({ gateway }) => {
-		maintenanceGit.reset();
+		model.reset();
 		readE2EToken();
 		maintenanceGateway = gateway;
 		maintenanceProjectId = gateway.defaultProjectId;
@@ -85,15 +51,15 @@ export function registerMaintenanceHooks(): void {
 		if (!maintenanceProjectId || !maintenanceProjectContext) throw new Error("maintenance fixture requires the stable default project context");
 		const commandRunner = (gateway.sessionManager as { commandRunner?: CommandRunner }).commandRunner;
 		if (!commandRunner) throw new Error("maintenance fixture requires the gateway command-runner seam");
-		restoreCommandRunner = maintenanceGit.install(commandRunner);
+		restoreCommandRunner = model.install(commandRunner);
 		const sessionStore = maintenanceProjectContext.sessionStore as { saveNow?: () => void };
-		restoreSessionStorePersistence = suppressSessionStorePersistence(sessionStore);
+		restoreSessionStorePersistence = suppressSessionStorePersistence(sessionStore, ownerLabel);
 	});
 
 	test.afterAll(() => {
 		restoreSessionStorePersistence?.();
 		restoreCommandRunner?.();
-		maintenanceGit.reset();
+		model.reset();
 	});
 }
 
@@ -316,61 +282,80 @@ function expectArchivedCleanupShape(body: any): void {
 	}
 }
 
+function gitWith(model: MaintenanceGitModel, repoPath: string, args: string[]): string {
+	return model.run(repoPath, args).trim();
+}
+
 function git(repoPath: string, args: string[]): string {
-	return maintenanceGit.run(repoPath, args).trim();
+	return gitWith(maintenanceGit, repoPath, args);
+}
+
+function branchExistsWith(model: MaintenanceGitModel, repoPath: string, branch: string): boolean {
+	return model.branchExists(repoPath, branch);
 }
 
 function branchExists(repoPath: string, branch: string): boolean {
-	return maintenanceGit.branchExists(repoPath, branch);
+	return branchExistsWith(maintenanceGit, repoPath, branch);
 }
 
 function normalizeTestPath(path: string): string {
 	return path.replace(/\\/g, "/").toLowerCase();
 }
 
+function listedWorktreePathsWith(model: MaintenanceGitModel, repoPath: string): string[] {
+	return model.listedWorktreePaths(repoPath).map(normalizeTestPath);
+}
+
 function listedWorktreePaths(repoPath: string): string[] {
-	return maintenanceGit.listedWorktreePaths(repoPath).map(normalizeTestPath);
+	return listedWorktreePathsWith(maintenanceGit, repoPath);
 }
 
 /** Seed Git bytes only where the template contract matters; command decisions stay in-memory. */
-function initGitRepo(path: string, copyTemplate = false): void {
+function initGitRepoWith(model: MaintenanceGitModel, path: string, copyTemplate = false): void {
 	if (copyTemplate) {
 		copyGitTemplate(path);
 	} else {
 		mkdirSync(join(path, ".git"), { recursive: true });
 		writeFileSync(join(path, "README.md"), "# maintenance fixture\n");
 	}
-	maintenanceGit.registerRepo(path);
+	model.registerRepo(path);
+}
+
+function initGitRepo(path: string, copyTemplate = false): void {
+	initGitRepoWith(maintenanceGit, path, copyTemplate);
+}
+
+function tryRemoveWorktreeWith(model: MaintenanceGitModel, repoPath: string, worktreePath: string): void {
+	model.removeWorktree(repoPath, worktreePath);
 }
 
 function tryRemoveWorktree(repoPath: string, worktreePath: string): void {
-	maintenanceGit.removeWorktree(repoPath, worktreePath);
+	tryRemoveWorktreeWith(maintenanceGit, repoPath, worktreePath);
+}
+
+function tryDeleteBranchesWith(model: MaintenanceGitModel, repoPath: string, branches: string[]): void {
+	model.deleteBranches(repoPath, branches);
 }
 
 function tryDeleteBranches(repoPath: string, branches: string[]): void {
-	maintenanceGit.deleteBranches(repoPath, branches);
+	tryDeleteBranchesWith(maintenanceGit, repoPath, branches);
+}
+
+function tryDeleteBranchWith(model: MaintenanceGitModel, repoPath: string, branch: string): void {
+	tryDeleteBranchesWith(model, repoPath, [branch]);
 }
 
 function tryDeleteBranch(repoPath: string, branch: string): void {
-	tryDeleteBranches(repoPath, [branch]);
+	tryDeleteBranchWith(maintenanceGit, repoPath, branch);
 }
 
 type ArchivedSessionOverrides = Partial<any> & { id?: string; title?: string; baseDir?: string };
 
 /** Keep ephemeral maintenance records in memory; persistence is covered by SessionStore tests. */
 function batchSessionStoreMutations(ctx: any, mutate: (store: any) => void): void {
-	const store = ctx.sessionStore as any;
-	const saveNow = store.saveNow;
-	if (typeof saveNow !== "function") {
-		mutate(store);
-		return;
-	}
-	store.saveNow = () => {};
-	try {
-		mutate(store);
-	} finally {
-		store.saveNow = saveNow;
-	}
+	// registerMaintenanceHooks holds a process-global persistence lease for the
+	// file, so mutations need no competing saveNow replacement here.
+	mutate(ctx.sessionStore);
 }
 
 function buildArchivedSession(overrides: ArchivedSessionOverrides = {}): SeededSession {
@@ -448,6 +433,20 @@ async function getArchivedWorktreeScan(query = ""): Promise<any> {
 	return body;
 }
 
+export function createMaintenanceApiFixture(ownerLabel: string) {
+	const model = new MaintenanceGitModel(`maintenance-api:${ownerLabel}`);
+	return {
+		maintenanceGit: model,
+		registerMaintenanceHooks: () => registerMaintenanceHooks(model, ownerLabel),
+		git: (repoPath: string, args: string[]) => gitWith(model, repoPath, args),
+		branchExists: (repoPath: string, branch: string) => branchExistsWith(model, repoPath, branch),
+		listedWorktreePaths: (repoPath: string) => listedWorktreePathsWith(model, repoPath),
+		initGitRepo: (path: string, copyTemplate = false) => initGitRepoWith(model, path, copyTemplate),
+		tryRemoveWorktree: (repoPath: string, worktreePath: string) => tryRemoveWorktreeWith(model, repoPath, worktreePath),
+		tryDeleteBranches: (repoPath: string, branches: string[]) => tryDeleteBranchesWith(model, repoPath, branches),
+		tryDeleteBranch: (repoPath: string, branch: string) => tryDeleteBranchWith(model, repoPath, branch),
+	};
+}
 
 export {
 	test, expect, registerProject, createSession, deleteSession,

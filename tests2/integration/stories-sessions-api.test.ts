@@ -11,33 +11,37 @@ import {
 	connectWs,
 	harnessDefaultProjectRoot,
 } from "./_e2e/e2e-setup.js";
+import { resolve } from "node:path";
+import { installCommandRunnerInterceptor, installMethodInterceptor } from "./helpers/command-runner-dispatcher.js";
 
 async function withWorktreeDecisionSeam<T>(gateway: any, repoRoot: string, run: (capture: { cwd?: string; options?: any }) => Promise<T>): Promise<T> {
 	const sessionManager = gateway.sessionManager;
-	const runner = sessionManager.commandRunner;
-	const originalExecFile = runner.execFile;
-	const originalCreateSession = sessionManager.createSession;
-	const originalGetSessionStore = sessionManager.getSessionStore;
+	const expectedRoot = resolve(repoRoot);
 	const capture: { cwd?: string; options?: any } = {};
-	runner.execFile = async (command: string, args: readonly string[]) => {
-		if (command !== "git") throw new Error(`unexpected command: ${command}`);
-		if (args.join(" ") === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
-		if (args.join(" ") === "rev-parse --show-toplevel") return { stdout: `${repoRoot}\n`, stderr: "" };
-		if (args.join(" ") === "rev-parse --verify HEAD") return { stdout: `${"d".repeat(40)}\n`, stderr: "" };
-		throw new Error(`unexpected git command: ${args.join(" ")}`);
-	};
-	sessionManager.createSession = async (cwd: string, _args: unknown, _goalId: unknown, _assistantType: unknown, options: any) => {
+	const releaseRunner = installCommandRunnerInterceptor(sessionManager.commandRunner, {
+		label: `stories-worktree-git:${expectedRoot}`,
+		async execFile(command, args, options, next) {
+			const cwd = typeof options?.cwd === "string" ? resolve(options.cwd) : resolve(process.cwd());
+			if (cwd !== expectedRoot || !/^(?:git|git\.exe)$/i.test(command)) return next();
+			if (args.join(" ") === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
+			if (args.join(" ") === "rev-parse --show-toplevel") return { stdout: `${repoRoot}\n`, stderr: "" };
+			if (args.join(" ") === "rev-parse --verify HEAD") return { stdout: `${"d".repeat(40)}\n`, stderr: "" };
+			throw new Error(`unexpected git command for ${expectedRoot}: ${args.join(" ")}`);
+		},
+	});
+	const releaseCreate = installMethodInterceptor(sessionManager, "createSession", `stories-worktree-create:${expectedRoot}`, async (args, next) => {
+		const [cwd, , , , rawOptions] = args;
+		if (typeof cwd !== "string" || resolve(cwd) !== expectedRoot) return next(...args);
+		const options = rawOptions as { projectId?: string } | undefined;
 		capture.cwd = cwd;
 		capture.options = options;
-		return { id: "session-worktree-decision", cwd, status: "preparing", projectId: options.projectId };
-	};
-	sessionManager.getSessionStore = () => ({ update: () => true });
+		return { id: "session-worktree-decision", cwd, status: "preparing", projectId: options?.projectId };
+	});
 	try {
 		return await run(capture);
 	} finally {
-		runner.execFile = originalExecFile;
-		sessionManager.createSession = originalCreateSession;
-		sessionManager.getSessionStore = originalGetSessionStore;
+		releaseCreate();
+		releaseRunner();
 	}
 }
 
@@ -106,8 +110,6 @@ test.describe("Session story API invariants", () => {
 
 	test("S-09/S-10: renamed title and session properties persist", async ({ gateway }) => {
 		const fixture = seedLiveStorySession(gateway);
-		const originalUpdateModelNameFile = gateway.sessionManager.updateModelNameFile;
-		gateway.sessionManager.updateModelNameFile = () => {};
 		try {
 			const patchResp = await apiFetch(`/api/sessions/${fixture.sessionId}`, {
 				method: "PATCH",
@@ -146,7 +148,6 @@ test.describe("Session story API invariants", () => {
 				connection.close();
 			}
 		} finally {
-			gateway.sessionManager.updateModelNameFile = originalUpdateModelNameFile;
 			fixture.cleanup();
 		}
 	});
