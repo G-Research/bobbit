@@ -199,6 +199,7 @@ export class InProcessMockBridge {
 			cwd: this.options.cwd || process.cwd(),
 			env,
 			initialModel: argModel || this.options.initialModel,
+			sleep: this.options.sleep,
 			onEvent: (evt) => this._emit(evt),
 			mockPiTools: mockPi.tools,
 			mockPiToolCallHandlers: mockPi.toolCallHandlers,
@@ -295,6 +296,12 @@ export class InProcessMockBridge {
 
 	getMessages() {
 		return this.sendCommand({ type: "get_messages" });
+	}
+
+	/** Inject an abortable delay for this agent. Omit it to restore real time. */
+	setSleep(sleep) {
+		this.options.sleep = sleep;
+		this._agent?.setSleep(sleep);
 	}
 
 	async stop() {
