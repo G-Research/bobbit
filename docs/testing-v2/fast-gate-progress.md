@@ -436,3 +436,29 @@ Phase totals:
 One file exceeded the 15s tier-1 budget: `gate-status-cache-ws` completed in 67.683s.
 
 Attempt 12 remains the first qualifying green run. Attempt 14 was killed after Vitest emitted its summary. Both newly exposed shared-gateway tests are being fully isolated.
+
+## Solo attempt 15
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 15 | One Vitest process / 3 workers | 286.88s | **FAIL** | `.profiles/testing-v2/fast-gate-run15.log` | 2 failed files, 888 passed, 4 skipped; 3 failed tests, 7,586 passed, 22 skipped |
+
+The run remained below the 300s wall-time target, but failed these files:
+
+- `gate-signal-reminder` — the cached commit SHA was unknown.
+- `maintenance-api-archived-selectors` — the expected archived-selector branches were absent.
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 26.54s |
+| Setup | 70.65s |
+| Import | 98.61s |
+| Tests | 526.64s |
+| Environment | 91.61s |
+| **Summed** | **814.05s** |
+
+One file exceeded the 15s tier-1 budget: `preview-mount-route` completed in 15.287s.
+
+The proposal, gate-status, story, PR, and validation isolations all passed. The final three fixes have been launched.
