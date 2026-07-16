@@ -218,12 +218,42 @@ function normalizeComparablePath(hostPath: string): string {
 	return path.resolve(hostPath).replace(/[\\/]+$/, "");
 }
 
-const trustedExactSessionFiles = new Set<string>();
+export interface TranscriptRootPolicy {
+	/** Trusted active, historical, and legacy agent sessions roots. */
+	readonly sessionsRoots: () => readonly string[];
+}
 
-function isWithinTrustedSessionsRoot(hostPath: string): boolean {
+/**
+ * Create an isolated transcript path policy. The policy owns its exact-file
+ * trust declarations, so callers can scope validation to a gateway or test
+ * fixture without mutating startup agent-directory state.
+ */
+export function createTranscriptRootPolicy(
+	sessionsRoots: readonly string[] | (() => readonly string[]),
+): TranscriptRootPolicy {
+	const fixedRoots = typeof sessionsRoots === "function" ? null : Object.freeze([...sessionsRoots]);
+	const resolveRoots = typeof sessionsRoots === "function" ? sessionsRoots : () => fixedRoots!;
+	const policy = Object.freeze({ sessionsRoots: resolveRoots });
+	trustedExactSessionFilesByPolicy.set(policy, new Set());
+	return policy;
+}
+
+const trustedExactSessionFilesByPolicy = new WeakMap<TranscriptRootPolicy, Set<string>>();
+const defaultTranscriptRootPolicy = createTranscriptRootPolicy(trustedAgentSessionsRoots);
+
+function trustedExactSessionFiles(rootPolicy: TranscriptRootPolicy): Set<string> {
+	let files = trustedExactSessionFilesByPolicy.get(rootPolicy);
+	if (!files) {
+		files = new Set();
+		trustedExactSessionFilesByPolicy.set(rootPolicy, files);
+	}
+	return files;
+}
+
+function isWithinTrustedSessionsRoot(hostPath: string, rootPolicy: TranscriptRootPolicy): boolean {
 	if (!hostPath || hasTraversalSegment(hostPath)) return false;
 	const resolved = path.resolve(hostPath);
-	return trustedAgentSessionsRoots().some(root => isStrictlyInside(path.resolve(root), resolved));
+	return rootPolicy.sessionsRoots().some(root => isStrictlyInside(path.resolve(root), resolved));
 }
 
 /**
@@ -233,28 +263,34 @@ function isWithinTrustedSessionsRoot(hostPath: string): boolean {
  * with recognizable transcript content; they never become sanitizer write or
  * purge-delete targets.
  */
-export function trustPersistedAgentSessionFile(filePath: string | null | undefined): void {
-	const rootSafe = resolveSafeSessionsPath(filePath ?? "");
+export function trustPersistedAgentSessionFile(
+	filePath: string | null | undefined,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): void {
+	const rootSafe = resolveSafeSessionsPath(filePath ?? "", rootPolicy);
 	if (rootSafe) {
-		trustedExactSessionFiles.add(normalizeComparablePath(rootSafe));
+		trustedExactSessionFiles(rootPolicy).add(normalizeComparablePath(rootSafe));
 		return;
 	}
 	const readable = validateReadableOutsideTranscriptFile(filePath);
 	if (!readable) return;
-	trustedExactSessionFiles.add(normalizeComparablePath(readable));
+	trustedExactSessionFiles(rootPolicy).add(normalizeComparablePath(readable));
 }
 
-function isTrustedExactSessionFile(filePath: string): boolean {
-	return trustedExactSessionFiles.has(normalizeComparablePath(filePath));
+function isTrustedExactSessionFile(filePath: string, rootPolicy: TranscriptRootPolicy): boolean {
+	return trustedExactSessionFiles(rootPolicy).has(normalizeComparablePath(filePath));
 }
 
-export function resolveReadablePersistedAgentSessionFile(filePath: string | null | undefined): string | null {
+export function resolveReadablePersistedAgentSessionFile(
+	filePath: string | null | undefined,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): string | null {
 	if (!filePath || hasTraversalSegment(filePath)) return null;
 	if (!path.isAbsolute(filePath) && !/^[A-Za-z]:[\\/]/.test(filePath)) return null;
-	const rootSafe = resolveSafeSessionsPath(filePath);
+	const rootSafe = resolveSafeSessionsPath(filePath, rootPolicy);
 	if (rootSafe) return rootSafe;
 	const realPath = realpathRegularJsonlFile(path.resolve(filePath));
-	if (!realPath || !isTrustedExactSessionFile(realPath)) return null;
+	if (!realPath || !isTrustedExactSessionFile(realPath, rootPolicy)) return null;
 	return realPath;
 }
 
@@ -322,11 +358,14 @@ function isTranscriptShape(entry: unknown): boolean {
  * manager. Does NOT touch the filesystem — see `resolveSafeSessionsPath` for
  * the symlink/TOCTOU-resistant variant used on the real I/O path.
  */
-export function isWithinAgentSessionsDir(hostPath: string): boolean {
+export function isWithinAgentSessionsDir(
+	hostPath: string,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): boolean {
 	if (!hostPath || hasTraversalSegment(hostPath)) return false;
 	const resolved = path.resolve(hostPath);
-	if (isTrustedExactSessionFile(resolved)) return true;
-	return isWithinTrustedSessionsRoot(resolved);
+	if (isTrustedExactSessionFile(resolved, rootPolicy)) return true;
+	return isWithinTrustedSessionsRoot(resolved, rootPolicy);
 }
 
 /**
@@ -345,7 +384,10 @@ export function isWithinAgentSessionsDir(hostPath: string): boolean {
  * caller opens with `O_NOFOLLOW` (where available) so a symlink swapped in after
  * this check is still not followed.
  */
-export function resolveSafeSessionsPath(hostPath: string): string | null {
+export function resolveSafeSessionsPath(
+	hostPath: string,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): string | null {
 	if (!hostPath) return null;
 	const segments = hostPath.replace(/\\/g, "/").split("/");
 	if (segments.includes("..")) return null;
@@ -360,7 +402,7 @@ export function resolveSafeSessionsPath(hostPath: string): string | null {
 	}
 
 	let insideTrustedRoot = false;
-	for (const root of trustedAgentSessionsRoots()) {
+	for (const root of rootPolicy.sessionsRoots()) {
 		try {
 			const rootReal = fs.realpathSync(path.resolve(root));
 			if (isInsideOrEqual(rootReal, parentReal)) {
@@ -421,6 +463,7 @@ export async function sanitizeAgentTranscriptFile(
 	ctx: SessionFsContext,
 	filePath: string,
 	sandboxManager: SandboxManager | null,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
 ): Promise<number> {
 	return transformAgentTranscriptFile(
 		ctx,
@@ -429,6 +472,7 @@ export async function sanitizeAgentTranscriptFile(
 		sanitizeTranscriptContent,
 		"sanitize",
 		(file, rewritten) => `Un-poisoned ${rewritten} blank-text user message(s) in ${file}`,
+		rootPolicy,
 	);
 }
 
@@ -444,6 +488,7 @@ export async function rebaseAgentTranscriptCwdMetadataFile(
 	filePath: string,
 	sandboxManager: SandboxManager | null,
 	options: RebaseTranscriptCwdMetadataOptions,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
 ): Promise<number> {
 	return transformAgentTranscriptFile(
 		ctx,
@@ -452,6 +497,7 @@ export async function rebaseAgentTranscriptCwdMetadataFile(
 		(content) => rebaseTranscriptCwdMetadataContent(content, options),
 		"cwd metadata rebase",
 		(file, rewritten) => `Rebased ${rewritten} runtime cwd metadata record(s) in ${file}`,
+		rootPolicy,
 	);
 }
 
@@ -462,6 +508,7 @@ async function transformAgentTranscriptFile(
 	transform: (content: string) => SanitizeResult,
 	operation: string,
 	logMessage: (filePath: string, rewritten: number) => string,
+	rootPolicy: TranscriptRootPolicy,
 ): Promise<number> {
 	try {
 		// Resolve the host-side path. Non-sandboxed: filePath is already a host
@@ -476,8 +523,8 @@ async function transformAgentTranscriptFile(
 		let writableRealPath: string | null = null;
 		let readAllowed = true;
 		if (!ctx.sandboxed) {
-			writableRealPath = resolveSafeSessionsPath(hostPath);
-			readAllowed = writableRealPath !== null || resolveReadablePersistedAgentSessionFile(hostPath) !== null;
+			writableRealPath = resolveSafeSessionsPath(hostPath, rootPolicy);
+			readAllowed = writableRealPath !== null || resolveReadablePersistedAgentSessionFile(hostPath, rootPolicy) !== null;
 			if (!readAllowed) {
 				console.warn(`[transcript-sanitizer] Refusing to access path outside agent sessions dir: ${hostPath} (from ${filePath})`);
 				return 0;
@@ -494,7 +541,7 @@ async function transformAgentTranscriptFile(
 		// (TOCTOU) and write with O_NOFOLLOW so a symlink swapped in after the
 		// check is not followed. A malformed/hostile agentSessionFile must never
 		// let us clobber an arbitrary file.
-		const realPath = writableRealPath ?? resolveSafeSessionsPath(hostPath);
+		const realPath = resolveSafeSessionsPath(hostPath, rootPolicy);
 		if (realPath === null) {
 			console.warn(`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${hostPath} (from ${filePath})`);
 			return 0;
