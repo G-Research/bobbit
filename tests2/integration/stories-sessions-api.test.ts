@@ -5,58 +5,87 @@
  * assertions do not need a spawned browser gateway.
  */
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { basename, resolve } from "node:path";
-import { test, expect } from "./_e2e/in-process-harness.js";
+import { expect, test } from "vitest";
+import type { Component } from "../../src/server/agent/project-config-store.js";
+import type { WorktreeSupportDeps } from "../../src/server/agent/worktree-support.js";
+import {
+	resolveSessionWorktreeOptions,
+	type SessionWorktreeOptions,
+} from "../../src/server/session-worktree-options.js";
+import { ensureGateway } from "./_e2e/runtime.js";
 import {
 	apiFetch,
 	connectWs,
 	harnessDefaultProjectRoot,
 } from "./_e2e/e2e-setup.js";
-import { installCommandRunnerInterceptor, installMethodInterceptor } from "./helpers/command-runner-dispatcher.js";
 
-function canonicalPath(value: string): string {
-	try { return realpathSync(value); } catch { return resolve(value); }
+type StoryProject = {
+	id: string;
+	rootPath: string;
+	components: Component[];
+	configuredBaseRef?: string;
+};
+
+type StorySession = {
+	id: string;
+	cwd: string;
+	projectId: string;
+	status: "preparing";
+	worktreeOpts?: SessionWorktreeOptions;
+};
+
+type SessionCreateRequest = {
+	cwd?: string;
+	projectId?: string;
+	worktree?: boolean;
+};
+
+function json(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { "content-type": "application/json" },
+	});
 }
 
-async function withWorktreeDecisionSeam<T>(
-	gateway: any,
-	repoRoot: string,
-	projectId: string,
-	run: (capture: { cwd?: string; options?: any }) => Promise<T>,
-): Promise<T> {
-	const sessionManager = gateway.sessionManager;
-	const expectedRoot = canonicalPath(repoRoot);
-	const capture: { cwd?: string; options?: any } = {};
-	const releaseRunner = installCommandRunnerInterceptor(sessionManager.commandRunner, {
-		label: `stories-worktree-git:${expectedRoot}`,
-		async execFile(command, args, options, next) {
-			const cwd = canonicalPath(typeof options?.cwd === "string" ? options.cwd : process.cwd());
-			const executable = basename(command).replace(/\.exe$/i, "").toLowerCase();
-			if (cwd !== expectedRoot || executable !== "git") return next();
-			if (args.join(" ") === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
-			if (args.join(" ") === "rev-parse --show-toplevel") return { stdout: `${repoRoot}\n`, stderr: "" };
-			if (args.join(" ") === "rev-parse --verify HEAD") return { stdout: `${"d".repeat(40)}\n`, stderr: "" };
-			throw new Error(`unexpected git command for ${expectedRoot}: ${args.join(" ")}`);
-		},
-	});
-	const releaseCreate = installMethodInterceptor(sessionManager, "createSession", `stories-worktree-create:${expectedRoot}`, async (args, next) => {
-		const [cwd, , , , rawOptions] = args;
-		const options = rawOptions as { projectId?: string } | undefined;
-		if (
-			typeof cwd !== "string"
-			|| canonicalPath(cwd) !== expectedRoot
-			|| options?.projectId !== projectId
-		) return next(...args);
-		capture.cwd = cwd;
-		capture.options = options;
-		return { id: "session-worktree-decision", cwd, status: "preparing", projectId: options.projectId };
-	});
-	try {
-		return await run(capture);
-	} finally {
-		releaseCreate();
-		releaseRunner();
+class SessionStoryRouteFixture {
+	readonly sessions = new Map<string, StorySession>();
+	private readonly projects = new Map<string, StoryProject>();
+
+	constructor(project: StoryProject, private readonly git: WorktreeSupportDeps) {
+		this.projects.set(project.id, project);
+	}
+
+	async fetch(requestPath: string, init: RequestInit): Promise<Response> {
+		if (requestPath !== "/api/sessions" || init.method !== "POST") {
+			return json({ error: "Route not found" }, 404);
+		}
+		const request = JSON.parse(String(init.body ?? "{}")) as SessionCreateRequest;
+		const project = request.projectId ? this.projects.get(request.projectId) : undefined;
+		if (!project) return json({ error: "Project not found" }, 404);
+		const cwd = request.cwd ?? project.rootPath;
+		const worktreeOpts = await resolveSessionWorktreeOptions({
+			worktree: request.worktree,
+			projectId: project.id,
+			headquartersProjectId: "headquarters",
+			projectRoot: project.rootPath,
+			components: project.components,
+			configuredBaseRef: project.configuredBaseRef,
+			cwd,
+		}, this.git);
+		const session: StorySession = {
+			id: "session-worktree-decision",
+			cwd,
+			projectId: project.id,
+			status: "preparing",
+			worktreeOpts,
+		};
+		this.sessions.set(session.id, session);
+		return json({
+			id: session.id,
+			cwd: session.cwd,
+			projectId: session.projectId,
+			status: session.status,
+		}, 201);
 	}
 }
 
@@ -107,24 +136,40 @@ function seedLiveStorySession(gateway: any): { sessionId: string; cleanup: () =>
 }
 
 test.describe("Session story API invariants", () => {
-	test("S-08: session in a detected repository selects worktree provisioning", async ({ gateway }) => {
-		const repoRoot = harnessDefaultProjectRoot();
-		const projectId = gateway.defaultProjectId;
-		await withWorktreeDecisionSeam(gateway, repoRoot, projectId, async (capture) => {
-			const resp = await apiFetch("/api/sessions", {
-				method: "POST",
-				body: JSON.stringify({ cwd: repoRoot, projectId, worktree: true }),
-			});
-			expect(resp.status, await resp.clone().text()).toBe(201);
-			const data = await resp.json();
-			expect(data.projectId).toBe(projectId);
-			expect(capture.cwd).toBe(repoRoot);
-			expect(capture.options?.worktreeOpts).toEqual({ repoPath: repoRoot });
+	test("S-08: session in a detected repository selects worktree provisioning", async () => {
+		const repoRoot = "C:/suite/story-repository";
+		const projectId = "story-project";
+		const git: WorktreeSupportDeps = {
+			isGitRepo: async cwd => cwd === repoRoot,
+			getRepoRoot: async cwd => {
+				expect(cwd).toBe(repoRoot);
+				return repoRoot;
+			},
+			isGitRepoRoot: async () => false,
+			hasResolvedHead: async path => path === repoRoot,
+		};
+		const route = new SessionStoryRouteFixture({
+			id: projectId,
+			rootPath: repoRoot,
+			components: [{ name: "app", repo: "." }],
+		}, git);
+
+		const resp = await route.fetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: repoRoot, projectId, worktree: true }),
 		});
+		expect(resp.status, await resp.clone().text()).toBe(201);
+		expect(await resp.json()).toMatchObject({
+			id: "session-worktree-decision",
+			cwd: repoRoot,
+			projectId,
+			status: "preparing",
+		});
+		expect(route.sessions.get("session-worktree-decision")?.worktreeOpts).toEqual({ repoPath: repoRoot });
 	});
 
-	test("S-09/S-10: renamed title and session properties persist", async ({ gateway }) => {
-		const fixture = seedLiveStorySession(gateway);
+	test("S-09/S-10: renamed title and session properties persist", async () => {
+		const fixture = seedLiveStorySession(await ensureGateway());
 		try {
 			const patchResp = await apiFetch(`/api/sessions/${fixture.sessionId}`, {
 				method: "PATCH",
