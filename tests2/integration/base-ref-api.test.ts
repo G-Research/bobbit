@@ -7,8 +7,9 @@
  * checks batched: the in-process integration cleanup runs after every test, so
  * splitting pure scenario permutations here materially increases suite time.
  */
+import { describe, it } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, readE2EToken, base, registerProject as registerProjectShared } from "./_e2e/e2e-setup.js";
+import { readE2EToken, base } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -21,6 +22,7 @@ let gitProjectId = "";
 let multiProjectId = "";
 let warningProjectId = "";
 let warningRoot = "";
+let fixtureGateway: any;
 const cleanupRoots: string[] = [];
 const cleanupProjectIds: string[] = [];
 const originDevelopRepos = new Set<string>();
@@ -83,12 +85,17 @@ function fakeOriginRef(repo: string, branch: string): void {
 	if (branch === "develop") originDevelopRepos.add(path.resolve(repo));
 }
 
-async function registerProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<string> {
-	// Delegate to the shared helper which canonicalizes rootPath (handles the
-	// macOS /var → /private/var tmpdir symlink) and sets acceptCanonical:true.
-	const proj = await registerProjectShared({ name: `${name}-${++nameCounter}`, rootPath, components, seedWorkflows: false });
-	cleanupProjectIds.push(proj.id);
-	return proj.id;
+function registerProject(gateway: any, name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): string {
+	// Base-ref coverage starts at the config route, not project creation. Author
+	// the three project contexts directly so registration cannot add HTTP,
+	// remote-detection, or cleanup latency to this decision matrix.
+	const pcm = gateway.projectContextManager;
+	const project = pcm.getRegistry().register(`${name}-${++nameCounter}`, rootPath, { acceptCanonical: true });
+	const ctx = pcm.getOrCreate(project.id);
+	if (!ctx) throw new Error(`failed to create test-owned project context ${project.id}`);
+	ctx.projectConfigStore.setComponents(components ?? [{ name, repo: "." }]);
+	cleanupProjectIds.push(project.id);
+	return project.id;
 }
 
 async function put(id: string, body: Record<string, unknown>): Promise<{ status: number; json: any }> {
@@ -112,12 +119,13 @@ function expectBaseRefUnset(config: any): void {
 	expect(config.base_ref === undefined || config.base_ref === "").toBe(true);
 }
 
-test.beforeAll(async () => {
+test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
+	fixtureGateway = gateway;
 	await installCannedGitRunner();
 
 	const gitRoot = fixtureRepo("shared-git", { originDevelop: true });
-	gitProjectId = await registerProject("baseref-git", gitRoot);
+	gitProjectId = registerProject(gateway, "baseref-git", gitRoot);
 
 	const multiRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-"));
 	cleanupRoots.push(multiRoot);
@@ -128,7 +136,8 @@ test.beforeAll(async () => {
 	copyTemplateRepo(repoB);
 	copyTemplateRepo(repoC);
 	fakeOriginRef(repoA, "develop");
-	multiProjectId = await registerProject(
+	multiProjectId = registerProject(
+		gateway,
 		"baseref-multi",
 		multiRoot,
 		[
@@ -141,7 +150,7 @@ test.beforeAll(async () => {
 	warningRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-warning-"));
 	cleanupRoots.push(warningRoot);
 	fs.mkdirSync(path.join(warningRoot, "docs"), { recursive: true });
-	warningProjectId = await registerProject("baseref-warning", warningRoot, [{ name: "docs", repo: "docs" }]);
+	warningProjectId = registerProject(gateway, "baseref-warning", warningRoot, [{ name: "docs", repo: "docs" }]);
 });
 
 test.afterEach(({ gateway }) => {
@@ -152,20 +161,21 @@ test.afterEach(({ gateway }) => {
 	store?.remove("sandbox");
 });
 
-test.afterAll(async () => {
+test.afterAll(() => {
+	const pcm = fixtureGateway?.projectContextManager;
+	const registry = pcm?.getRegistry();
 	for (const id of cleanupProjectIds.splice(0).reverse()) {
-		await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+		pcm?.remove(id);
+		try { registry?.remove(id); } catch { /* already removed */ }
 	}
 	for (const root of cleanupRoots) cleanupDir(root);
 	restoreCommandRunner?.();
 });
 
-// These tests register projects and mutate project config through one in-process
-// gateway. Keep this file serial to avoid extra gateway workers/retries on Windows.
-test.describe.configure({ mode: "serial" });
-
-test.describe("base_ref API validation", () => {
-	test("persists remote refs, clears empty values, and accepts local/whitespace refs", async () => {
+// Suite-owned project contexts and the canned runner make each declaration
+// deterministic without the compatibility harness's per-test entity sweep.
+describe("base_ref API validation", () => {
+	it("persists remote refs, clears empty values, and accepts local/whitespace refs", async () => {
 		const remoteSet = await put(gitProjectId, { base_ref: "origin/develop" });
 		expect(remoteSet.status, JSON.stringify(remoteSet.json)).toBe(200);
 		expect((await get(gitProjectId)).base_ref).toBe("origin/develop");
@@ -182,7 +192,7 @@ test.describe("base_ref API validation", () => {
 		expect(whitespaceUnset.status, JSON.stringify(whitespaceUnset.json)).toBe(200);
 	});
 
-	test("rejects git-backed tag refs and sandboxed local refs with route error strings", async () => {
+	it("rejects git-backed tag refs and sandboxed local refs with route error strings", async () => {
 		const tag = await put(gitProjectId, { base_ref: "v1.2.3" });
 		expect(tag.status).toBe(400);
 		expect(tag.json).toEqual({
@@ -200,7 +210,7 @@ test.describe("base_ref API validation", () => {
 		});
 	});
 
-	test("multi-repo: missing ref in subset of components returns 400 with structured details[]", async () => {
+	it("multi-repo: missing ref in subset of components returns 400 with structured details[]", async () => {
 		const r = await put(multiProjectId, { base_ref: "origin/develop" });
 		expect(r.status).toBe(400);
 		expect(r.json.field).toBe("base_ref");
@@ -214,7 +224,7 @@ test.describe("base_ref API validation", () => {
 		}
 	});
 
-	test("non-git component paths skip validation unless base_ref is present, then return warnings", async () => {
+	it("non-git component paths skip validation unless base_ref is present, then return warnings", async () => {
 		const skip = await put(warningProjectId, { build_command: "echo build" });
 		expect(skip.status, JSON.stringify(skip.json)).toBe(200);
 
