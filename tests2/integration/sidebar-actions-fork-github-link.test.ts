@@ -2,19 +2,17 @@
 //
 // This file exercises the REST decision boundaries without provisioning Git
 // processes. Worktree creation itself is covered by the dedicated Git suites.
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { rebaseAgentTranscriptCwdMetadataFile } from "../../src/server/agent/transcript-sanitizer.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,
-	createSession,
 	deleteGoal,
-	deleteSession,
+	harnessDefaultProjectRoot,
 	nonGitCwd,
-	registerProject,
 } from "./_e2e/e2e-setup.js";
 
 function seedSessionTranscript(gateway: any, sessionId: string, entries: unknown[]): string {
@@ -146,24 +144,54 @@ async function withForkCreateSeam<T>(
 		runner.execFile = originalExecFile;
 		sessionManager.createSession = originalCreateSession;
 		sessionManager.setTitle = originalSetTitle;
+		for (const capture of captures) rmSync(capture.clonedTranscript, { force: true });
 	}
 }
 
-function seedSyntheticSourceWorktree(gateway: any, sessionId: string, projectId: string, sourceWorktree: string, repoPath: string): void {
+function seedSyntheticSourceSession(
+	gateway: any,
+	projectId: string,
+	repoPath: string,
+	sourceWorktree: string,
+): string {
+	const sessionId = `sidebar-fork-${randomUUID()}`;
+	const now = Date.now();
 	mkdirSync(sourceWorktree, { recursive: true });
-	const session = gateway.sessionManager.getSession(sessionId);
-	if (!session) throw new Error(`source session ${sessionId} missing`);
-	session.cwd = sourceWorktree;
-	session.worktreePath = sourceWorktree;
-	session.repoPath = repoPath;
-	session.branch = `session/${sessionId.slice(0, 8)}`;
-	const ctx = gateway.sessionManager.getProjectContextManager().getOrCreate(projectId);
-	ctx.sessionStore.update(sessionId, {
+	const session = {
+		id: sessionId,
+		title: "Sidebar fork source",
+		cwd: sourceWorktree,
+		worktreePath: sourceWorktree,
+		repoPath,
+		branch: `session/${sessionId.slice(0, 8)}`,
+		projectId,
+		status: "idle",
+		createdAt: now,
+		lastActivity: now,
+	};
+	const sessionManager = gateway.sessionManager;
+	const ctx = sessionManager.getProjectContextManager().getOrCreate(projectId);
+	// The fork route only observes live/persisted source metadata. Seed that
+	// boundary directly instead of booting an agent process that the seam never uses.
+	sessionManager.sessions.set(sessionId, session);
+	ctx.sessionStore.put({
+		id: sessionId,
+		title: session.title,
 		cwd: sourceWorktree,
 		worktreePath: sourceWorktree,
 		repoPath,
 		branch: session.branch,
+		agentSessionFile: "",
+		createdAt: now,
+		lastActivity: now,
+		projectId,
 	});
+	return sessionId;
+}
+
+function removeSyntheticSourceSession(gateway: any, projectId: string, sessionId: string): void {
+	gateway.sessionManager.sessions.delete(sessionId);
+	gateway.sessionManager.getProjectContextManager().getOrCreate(projectId).sessionStore.remove(sessionId);
 }
 
 test.describe.serial("sidebar actions server endpoints", () => {
@@ -206,73 +234,57 @@ test.describe.serial("sidebar actions server endpoints", () => {
 });
 
 test.describe.serial("fork worktree choice", () => {
-	let baseDir = "";
 	let repoPath = "";
 	let projectId = "";
-	let sourceIds: string[] = [];
+	let sourceId = "";
+	let sourceWorktree = "";
 
-	test.beforeEach(async () => {
-		baseDir = mkdtempSync(join(realpathSync(tmpdir()), `bobbit-v2-fork-seam-${process.pid}-`));
-		repoPath = join(baseDir, "repo");
-		mkdirSync(repoPath, { recursive: true });
-		projectId = (await registerProject({ name: `fork-seam-${process.pid}-${Date.now()}`, rootPath: repoPath, seedWorkflows: false })).id;
-		sourceIds = [];
+	test.beforeEach(async ({ gateway }) => {
+		repoPath = harnessDefaultProjectRoot();
+		projectId = gateway.defaultProjectId;
+		sourceWorktree = join(repoPath, `.sidebar-fork-source-${randomUUID()}`);
+		sourceId = seedSyntheticSourceSession(gateway, projectId, repoPath, sourceWorktree);
 	});
 
-	test.afterEach(async () => {
-		for (const sourceId of sourceIds) await deleteSession(sourceId).catch(() => {});
-		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-		if (baseDir) rmSync(baseDir, { recursive: true, force: true });
-		baseDir = "";
-		repoPath = "";
-		projectId = "";
-		sourceIds = [];
+	test.afterEach(async ({ gateway }) => {
+		if (sourceId) removeSyntheticSourceSession(gateway, projectId, sourceId);
+		if (sourceWorktree) rmSync(sourceWorktree, { recursive: true, force: true });
+		sourceId = "";
+		sourceWorktree = "";
 	});
 
 	test("newWorktree selects repo provisioning while reuse selects the source cwd", async ({ gateway }) => {
-		const sourceId = await createSession({ cwd: repoPath, projectId });
-		sourceIds.push(sourceId);
-		const sourceWorktree = join(repoPath, `.synthetic-source-worktree-${sourceId}`);
-		seedSyntheticSourceWorktree(gateway, sourceId, projectId, sourceWorktree, repoPath);
 		seedSessionTranscript(gateway, sourceId, [transcriptMessage(`fork-${sourceId}`, "FORK_WT_MARKER")]);
 
-		try {
-			await withForkCreateSeam(gateway, repoPath, async (captures) => {
-				const freshResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
-					method: "POST",
-					body: JSON.stringify({ newWorktree: true }),
-				});
-				expect(freshResp.status, await freshResp.clone().text()).toBe(201);
-				const fresh = await freshResp.json();
-				expect(fresh.title).toMatch(/^Fork: /);
-				expect(fresh.projectId).toBe(projectId);
-				expect(fresh.cwd).not.toBe(sourceWorktree);
-
-				const reuseResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
-					method: "POST",
-					body: JSON.stringify({ newWorktree: false }),
-				});
-				expect(reuseResp.status, await reuseResp.clone().text()).toBe(201);
-				const reuse = await reuseResp.json();
-				expect(reuse.projectId).toBe(projectId);
-				expect(reuse.cwd).toBe(sourceWorktree);
-
-				expect(captures).toHaveLength(2);
-				expect(captures[0].requestedCwd).toBe(repoPath);
-				expect(captures[0].options.worktreeOpts).toEqual({ repoPath });
-				expect(captures[1].requestedCwd).toBe(sourceWorktree);
-				expect(captures[1].options.worktreeOpts).toBeUndefined();
+		await withForkCreateSeam(gateway, repoPath, async (captures) => {
+			const freshResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
+				method: "POST",
+				body: JSON.stringify({ newWorktree: true }),
 			});
-		} finally {
-			await deleteSession(sourceId);
-		}
+			expect(freshResp.status, await freshResp.clone().text()).toBe(201);
+			const fresh = await freshResp.json();
+			expect(fresh.title).toMatch(/^Fork: /);
+			expect(fresh.projectId).toBe(projectId);
+			expect(fresh.cwd).not.toBe(sourceWorktree);
+
+			const reuseResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
+				method: "POST",
+				body: JSON.stringify({ newWorktree: false }),
+			});
+			expect(reuseResp.status, await reuseResp.clone().text()).toBe(201);
+			const reuse = await reuseResp.json();
+			expect(reuse.projectId).toBe(projectId);
+			expect(reuse.cwd).toBe(sourceWorktree);
+
+			expect(captures).toHaveLength(2);
+			expect(captures[0].requestedCwd).toBe(repoPath);
+			expect(captures[0].options.worktreeOpts).toEqual({ repoPath });
+			expect(captures[1].requestedCwd).toBe(sourceWorktree);
+			expect(captures[1].options.worktreeOpts).toBeUndefined();
+		});
 	});
 
 	test("newWorktree rebases cloned runtime cwd metadata off a stale source cwd", async ({ gateway }) => {
-		const sourceId = await createSession({ cwd: repoPath, projectId });
-		sourceIds.push(sourceId);
-		const sourceWorktree = join(repoPath, `.synthetic-stale-${sourceId}`);
-		seedSyntheticSourceWorktree(gateway, sourceId, projectId, sourceWorktree, repoPath);
 		const marker = `FORK_STALE_CWD_${Date.now()}`;
 		const sourceJsonl = seedSessionTranscript(gateway, sourceId, [
 			transcriptMessage(`${marker}-prompt`, `${marker} hello from stale source`),
@@ -280,30 +292,26 @@ test.describe.serial("fork worktree choice", () => {
 		ensureStaleRuntimeCwdMetadata(sourceJsonl, sourceWorktree, sourceId);
 		const { userLine, assistantLine } = appendOldCwdMessageContentSentinels(sourceJsonl, sourceWorktree, marker);
 
-		try {
-			await withForkCreateSeam(gateway, repoPath, async (captures) => {
-				const forkResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
-					method: "POST",
-					body: JSON.stringify({ newWorktree: true }),
-				});
-				expect(forkResp.status, await forkResp.clone().text()).toBe(201);
-				expect(captures).toHaveLength(1);
-				const capture = captures[0];
-				expect(capture.options.preExistingAgentSessionOldCwds).toContain(sourceWorktree);
-				expect(existsSync(capture.clonedTranscript)).toBe(true);
-
-				const clonedText = readFileSync(capture.clonedTranscript, "utf8");
-				expect(clonedText).toContain(marker);
-				expect(clonedText).toContain(userLine);
-				expect(clonedText).toContain(assistantLine);
-				const runtimeRecords = readRuntimeCwdRecords(capture.clonedTranscript);
-				expect(runtimeRecords).not.toContainEqual({ type: "system", cwd: sourceWorktree });
-				expect(runtimeRecords).not.toContainEqual({ type: "session", cwd: sourceWorktree });
-				expect(runtimeRecords).toContainEqual({ type: "system", cwd: capture.resolvedCwd });
-				expect(runtimeRecords).toContainEqual({ type: "session", cwd: capture.resolvedCwd });
+		await withForkCreateSeam(gateway, repoPath, async (captures) => {
+			const forkResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
+				method: "POST",
+				body: JSON.stringify({ newWorktree: true }),
 			});
-		} finally {
-			await deleteSession(sourceId);
-		}
+			expect(forkResp.status, await forkResp.clone().text()).toBe(201);
+			expect(captures).toHaveLength(1);
+			const capture = captures[0];
+			expect(capture.options.preExistingAgentSessionOldCwds).toContain(sourceWorktree);
+			expect(existsSync(capture.clonedTranscript)).toBe(true);
+
+			const clonedText = readFileSync(capture.clonedTranscript, "utf8");
+			expect(clonedText).toContain(marker);
+			expect(clonedText).toContain(userLine);
+			expect(clonedText).toContain(assistantLine);
+			const runtimeRecords = readRuntimeCwdRecords(capture.clonedTranscript);
+			expect(runtimeRecords).not.toContainEqual({ type: "system", cwd: sourceWorktree });
+			expect(runtimeRecords).not.toContainEqual({ type: "session", cwd: sourceWorktree });
+			expect(runtimeRecords).toContainEqual({ type: "system", cwd: capture.resolvedCwd });
+			expect(runtimeRecords).toContainEqual({ type: "session", cwd: capture.resolvedCwd });
+		});
 	});
 });
