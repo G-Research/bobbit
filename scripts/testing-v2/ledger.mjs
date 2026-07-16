@@ -832,41 +832,6 @@ export function reserveWorkerSlots(kind, opts = {}) {
 	return { workerSlots: record.workerSlots, release, reservationId: record.id, parentRunId: runId, managedByParent: false };
 }
 
-/**
- * Reserve a fair vitest budget for the unit-lane orchestrator. The reservation
- * is shared by all lane processes, and run-unit-lanes distributes every granted
- * worker across core/integration/DOM without exceeding this single ledger entry.
- *
- * Precedence mirrors reserveWorkerSlots:
- *   • under a parent (BOBBIT_V2_LEDGER_PARENT + BOBBIT_V2_SLOTS_VITEST): reuse the
- *     parent grant with a no-op release — preserves run-v2.mjs ledger behavior and
- *     never double-registers.
- *   • standalone: reserve ONE vitest reservation sized to the fair grant (capped at
- *     VITEST_CAP). Each spawned lane then re-uses THIS grant via the parent-grant
- *     env with its own per-lane cap, so it stays the run's single ledger entry.
- */
-export function reserveVitestLaneBudget(opts = {}) {
-	const parentRunId = process.env.BOBBIT_V2_LEDGER_PARENT;
-	// Under a parent orchestrator: reuse the pre-committed grant, no re-register.
-	if (parentRunId && process.env.BOBBIT_V2_SLOTS_VITEST != null && process.env.BOBBIT_V2_SLOTS_VITEST !== "") {
-		const workerSlots = Math.max(1, Number(process.env.BOBBIT_V2_SLOTS_VITEST) || 1);
-		return { workerSlots, release: () => {}, reservationId: `${parentRunId}:vitest`, parentRunId, managedByParent: true };
-	}
-	// Standalone: reserve one vitest reservation for the whole lane orchestrator.
-	const { parentRunId: runId, records, heartbeat } = reserveBundle(["vitest"], opts);
-	const record = records[0];
-	let released = false;
-	const onExit = () => release();
-	const release = () => {
-		if (released) return;
-		released = true;
-		process.off("exit", onExit);
-		releaseRecords([record.id], heartbeat, opts);
-	};
-	process.once("exit", onExit);
-	return { workerSlots: record.workerSlots, release, reservationId: record.id, parentRunId: runId, managedByParent: false };
-}
-
 export function readLedger(opts = {}) {
 	const cores = totalCores(opts);
 	if (!existsSync(reservationsPath())) return { totalCores: cores, generation: 0, reservations: [] };

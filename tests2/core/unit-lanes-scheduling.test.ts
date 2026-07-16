@@ -1,7 +1,10 @@
 // Pins the replacement for the deleted lane scheduler: the unit stage is one
 // direct Vitest process with a fixed, environment-lowerable worker cap.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, extname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
 
 type ProjectConfig = {
@@ -23,10 +26,68 @@ type LoadedConfig = {
 	default: { test: { projects: ProjectConfig[] } };
 };
 
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const CONFIG_PATH = resolve(REPO_ROOT, "vitest.config.ts");
+const HARNESS_ROOT = resolve(REPO_ROOT, "tests2", "harness");
+const LEDGER_PATH = resolve(REPO_ROOT, "scripts", "testing-v2", "ledger.mjs");
 const packageJson = JSON.parse(
 	readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
 ) as { scripts: Record<string, string> };
-const configSource = readFileSync(new URL("../../vitest.config.ts", import.meta.url), "utf8");
+const configSource = readFileSync(CONFIG_PATH, "utf8");
+
+function resolveSourceImport(importer: string, specifier: string): string | undefined {
+	if (!specifier.startsWith(".")) return undefined;
+	const base = resolve(dirname(importer), specifier);
+	const extension = extname(base);
+	const withoutExtension = extension ? base.slice(0, -extension.length) : base;
+	const candidates = [
+		...(extension === ".js" ? [`${withoutExtension}.ts`, `${withoutExtension}.tsx`, base] : []),
+		...(extension === ".mjs" ? [`${withoutExtension}.mts`, base] : []),
+		...(extension === ".cjs" ? [`${withoutExtension}.cts`, base] : []),
+		...(!extension ? [base, `${base}.ts`, `${base}.tsx`, `${base}.mts`, `${base}.mjs`, `${base}.js`] : []),
+		join(base, "index.ts"),
+		join(base, "index.mts"),
+		join(base, "index.mjs"),
+	];
+	return candidates.find((candidate) => {
+		try { return existsSync(candidate) && statSync(candidate).isFile(); } catch { return false; }
+	});
+}
+
+function runtimeImportSpecifiers(file: string): string[] {
+	const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+	const specifiers: string[] = [];
+	const visit = (node: ts.Node): void => {
+		if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+			specifiers.push(node.moduleSpecifier.text);
+		} else if (
+			ts.isCallExpression(node)
+			&& node.expression.kind === ts.SyntaxKind.ImportKeyword
+			&& node.arguments.length === 1
+			&& ts.isStringLiteral(node.arguments[0])
+		) {
+			specifiers.push(node.arguments[0].text);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(source);
+	return specifiers;
+}
+
+function collectSourceDependencyGraph(roots: string[]): Set<string> {
+	const visited = new Set<string>();
+	const pending = [...roots];
+	while (pending.length) {
+		const file = pending.pop()!;
+		if (visited.has(file)) continue;
+		visited.add(file);
+		for (const specifier of runtimeImportSpecifiers(file)) {
+			const dependency = resolveSourceImport(file, specifier);
+			if (dependency && !visited.has(dependency)) pending.push(dependency);
+		}
+	}
+	return visited;
+}
 const originalE2eFlag = process.env.BOBBIT_V2_E2E_VITEST;
 const originalWorkerFlag = process.env.VITEST_MAX_WORKERS;
 let normal: LoadedConfig;
@@ -80,6 +141,27 @@ describe("direct unit-stage scheduling", () => {
 			configImports.filter((specifier) => /run-unit-lanes|ledger/i.test(specifier)),
 			[],
 			"the direct unit config must not import deleted lane or ledger orchestration",
+		);
+	});
+
+	it("keeps the unit config and harness dependency graph free of ledger boot leases", () => {
+		const harnessRoots = readdirSync(HARNESS_ROOT, { withFileTypes: true })
+			.filter((entry) => entry.isFile() && /\.(?:ts|mts|mjs)$/.test(entry.name))
+			.map((entry) => join(HARNESS_ROOT, entry.name));
+		const graph = collectSourceDependencyGraph([CONFIG_PATH, ...harnessRoots]);
+		assert.ok(graph.has(CONFIG_PATH), "the unit config must be an inspected graph root");
+		assert.ok(graph.has(resolve(HARNESS_ROOT, "gateway.ts")), "the tier-1 gateway must be an inspected graph root");
+		assert.deepEqual(
+			[...graph].filter((file) => file === LEDGER_PATH).map((file) => relative(REPO_ROOT, file)),
+			[],
+			"unit config/harness runtime dependencies must not reach the cross-tier ledger",
+		);
+
+		const gatewaySource = readFileSync(resolve(HARNESS_ROOT, "gateway.ts"), "utf8");
+		assert.doesNotMatch(
+			gatewaySource,
+			/acquireGatewayBootLease|bootLease|scripts\/testing-v2\/ledger/,
+			"tier-1 gateway boot must not acquire or release a cross-process lease",
 		);
 	});
 
