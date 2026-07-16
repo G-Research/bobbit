@@ -83,5 +83,273 @@
       }
     ],
     "rationale": "This is a direct semantic rename: the current assertion still proves parent grant reuse and explicitly checks that no duplicate ledger reservation is registered."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "POST /api/maintenance/cleanup-worktrees rejects itemIds without mode without cleaning legacy orphans",
+    "current": [
+      {
+        "file": "tests2/integration/maintenance-api.test.ts",
+        "name": "rejects itemIds without mode"
+      }
+    ],
+    "rationale": "The renamed test remains the itemIds-without-mode validation case and compares the shared legacy orphan's path, branch, worktree list, and API inventory with its beforeAll baseline, preserving the original non-destruction assertion while avoiding a per-test fixture rebuild."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "POST /api/maintenance/cleanup-worktrees rejects non-object bodies without cleaning legacy orphans",
+    "current": [
+      {
+        "file": "tests2/integration/maintenance-api.test.ts",
+        "name": "rejects every non-object body"
+      }
+    ],
+    "rationale": "The renamed table-driven test sends every original non-object body shape and verifies the shared legacy orphan snapshot is unchanged after each rejection, retaining the full validation and non-destruction semantics without rebuilding the fixture."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "archived session worktree maintenance",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "GET /api/maintenance/archived-session-worktrees returns sessions, flattened items, groups, presets, and additive counts"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "scan exposes UX dispositions, reason categories, groups, and selection presets"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "POST /api/maintenance/cleanup-archived-session-worktrees validates request shape"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "scan and selected cleanup remove archived worktree while preserving archived session visibility"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "already-cleaned archived worktrees are hidden by default and stale selected cleanup is non-destructive"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "branch deletion is blocked when another archived record in the same repo references the branch"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "stale archived paths do not inherit git metadata from another worktree on the same branch"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "stale existing directories with colliding basenames are non-actionable"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "worktree key selectors must match the supplied session id"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "mode all cleans only safe candidates and leaves ineligible archived records untouched"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "sandbox container paths are skipped instead of treated as host worktrees"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "multi-repo archived sessions expose one worktree row per repoWorktrees entry"
+      },
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "scan skips archived worktree paths still referenced by a live session"
+      }
+    ],
+    "rationale": "The original archived-worktree suite was split by behavior into scan, cleanup, guard, and selector files. Its thirteen child declarations are the precise static semantic owners of the original suite wrapper and collectively retain the complete suite coverage."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "GET /api/maintenance/archived-session-worktrees returns sessions, flattened items, groups, presets, and additive counts",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "GET /api/maintenance/archived-session-worktrees returns sessions, flattened items, groups, presets, and additive counts"
+      }
+    ],
+    "rationale": "This scan-shape declaration moved unchanged into the focused archived-scan suite and continues to validate the complete response shape."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "scan exposes UX dispositions, reason categories, groups, and selection presets",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "scan exposes UX dispositions, reason categories, groups, and selection presets"
+      }
+    ],
+    "rationale": "This declaration and its behavioral matrix moved unchanged into the focused archived-scan suite, preserving disposition, reason, group, and preset coverage."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "POST /api/maintenance/cleanup-archived-session-worktrees validates request shape",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+        "name": "POST /api/maintenance/cleanup-archived-session-worktrees validates request shape"
+      }
+    ],
+    "rationale": "This request-validation declaration moved unchanged into the archived-scan suite and still covers missing mode, mixed selectors, empty selected mode, invalid all-mode selectors, and valid all mode."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "scan and selected cleanup remove archived worktree while preserving archived session visibility",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "scan and selected cleanup remove archived worktree while preserving archived session visibility"
+      }
+    ],
+    "rationale": "This end-to-end cleanup declaration moved unchanged into the focused archived-cleanup suite and retains worktree removal, branch deletion, response accounting, and archived-session visibility assertions."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "already-cleaned archived worktrees are hidden by default and stale selected cleanup is non-destructive",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "already-cleaned archived worktrees are hidden by default and stale selected cleanup is non-destructive"
+      }
+    ],
+    "rationale": "This declaration moved unchanged into the archived-cleanup suite and preserves default filtering, diagnostic visibility, stale selection accounting, and branch non-destruction checks."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "branch deletion is blocked when another archived record in the same repo references the branch",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+        "name": "branch deletion is blocked when another archived record in the same repo references the branch"
+      }
+    ],
+    "rationale": "This shared-branch safety declaration moved unchanged into the archived-cleanup suite and still verifies cleanup removes only the worktree while retaining the referenced branch."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "stale archived paths do not inherit git metadata from another worktree on the same branch",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "stale archived paths do not inherit git metadata from another worktree on the same branch"
+      }
+    ],
+    "rationale": "This path-association guard declaration moved unchanged into the focused archived-guards suite and continues to prove the active worktree and shared branch are untouched."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "stale existing directories with colliding basenames are non-actionable",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "stale existing directories with colliding basenames are non-actionable"
+      }
+    ],
+    "rationale": "This basename-collision guard declaration moved unchanged into the archived-guards suite and retains scan classification, cleanup rejection, and filesystem/branch preservation assertions."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "worktree key selectors must match the supplied session id",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+        "name": "worktree key selectors must match the supplied session id"
+      }
+    ],
+    "rationale": "This selector integrity declaration moved unchanged into the archived-guards suite and still verifies mismatched session IDs are reported as invalid selections without deleting the worktree or branch."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "mode all cleans only safe candidates and leaves ineligible archived records untouched",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "mode all cleans only safe candidates and leaves ineligible archived records untouched"
+      }
+    ],
+    "rationale": "This all-mode selection declaration moved unchanged into the focused archived-selectors suite and retains the removable, live-referenced, sandbox, stale, and already-cleaned outcome matrix."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "sandbox container paths are skipped instead of treated as host worktrees",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "sandbox container paths are skipped instead of treated as host worktrees"
+      }
+    ],
+    "rationale": "This container-path safety declaration moved unchanged into the archived-selectors suite and preserves scan classification plus non-actionable cleanup-result coverage."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "multi-repo archived sessions expose one worktree row per repoWorktrees entry",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "multi-repo archived sessions expose one worktree row per repoWorktrees entry"
+      }
+    ],
+    "rationale": "This multi-repository projection declaration moved unchanged into the archived-selectors suite and retains per-repository paths, metadata, statuses, and selection-category assertions."
+  },
+  {
+    "baseFile": "tests2/integration/maintenance-api.test.ts",
+    "baseName": "scan skips archived worktree paths still referenced by a live session",
+    "current": [
+      {
+        "file": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+        "name": "scan skips archived worktree paths still referenced by a live session"
+      }
+    ],
+    "rationale": "This live-reference guard declaration moved unchanged into the archived-selectors suite and continues to require the ineligible referenced-record classification and non-actionable selection flags."
+  },
+  {
+    "baseFile": "tests2/integration/pr-walkthrough-api.test.ts",
+    "baseName": "POST resolve returns real local diff cards",
+    "current": [
+      {
+        "file": "tests2/integration/pr-walkthrough-api.test.ts",
+        "name": "POST resolve returns local diff cards from the injected git boundary"
+      }
+    ],
+    "rationale": "The renamed test replaces process-backed Git setup with the injected git-diff boundary while preserving the local changeset ID, provider, files-changed count, card count, and changed-file diff-block assertions."
+  },
+  {
+    "baseFile": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+    "baseName": "newWorktree=true allocates a distinct worktree/branch; newWorktree=false reuses the source worktree",
+    "current": [
+      {
+        "file": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+        "name": "newWorktree selects repo provisioning while reuse selects the source cwd"
+      }
+    ],
+    "rationale": "The replacement moves allocation behind the fork-create seam but retains both decisions: newWorktree requests repository worktree provisioning and yields a cwd distinct from the source, while reuse omits worktree options and keeps the source cwd."
+  },
+  {
+    "baseFile": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+    "baseName": "newWorktree=true rebases cloned runtime cwd metadata off a stale source worktree",
+    "current": [
+      {
+        "file": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+        "name": "newWorktree rebases cloned runtime cwd metadata off a stale source cwd"
+      }
+    ],
+    "rationale": "The seam-based rename preserves the stale-runtime regression: cloned transcript content remains intact, stale system/session cwd records disappear, and both records are rewritten to the newly resolved cwd."
+  },
+  {
+    "baseFile": "tests2/integration/stories-sessions-api.test.ts",
+    "baseName": "S-08: session in git repo gets a worktree",
+    "current": [
+      {
+        "file": "tests2/integration/stories-sessions-api.test.ts",
+        "name": "S-08: session in a detected repository selects worktree provisioning"
+      }
+    ],
+    "rationale": "The renamed story replaces real Git provisioning with the route decision seam while preserving the repository-detection contract: a worktree-enabled session request succeeds for the project and passes the detected repository as worktree provisioning options."
   }
 ]
