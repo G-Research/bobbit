@@ -66,6 +66,8 @@ function serverSourceFiles(repoRoot) {
  */
 function testSupportSourceFiles(repoRoot) {
 	const roots = [
+		join(repoRoot, "tests", "helpers"),
+		join(repoRoot, "tests", "e2e", "test-utils"),
 		join(repoRoot, "tests2", "harness"),
 		join(repoRoot, "tests2", "core", "helpers"),
 		join(repoRoot, "tests2", "dom", "_setup"),
@@ -76,8 +78,42 @@ function testSupportSourceFiles(repoRoot) {
 		.filter((file) => !/\.(?:test|spec)\.ts$/.test(file));
 }
 
+/**
+ * Explicit high-fanout browser entries proven safe in the isolated DOM project.
+ * Keep this narrow: the full web graph contains mock-sensitive modules and
+ * Vite-only boundaries that must continue through Vitest's source runner.
+ */
+function webSourceFiles(repoRoot) {
+	return [
+		join(repoRoot, "src", "app", "state.ts"),
+		join(repoRoot, "src", "ui", "lazy", "safe-markdown-block.ts"),
+		join(repoRoot, "src", "ui", "components", "GitStatusWidget.ts"),
+	].filter(existsSync);
+}
+
+/** Tool extension modules imported directly by tier-1 tests without module mocks. */
+function toolSupportSourceFiles(repoRoot) {
+	return [
+		join(repoRoot, "defaults", "tools", "proposals", "extension.ts"),
+		join(repoRoot, "defaults", "tools", "agent", "extension.ts"),
+		join(repoRoot, "defaults", "tools", "html", "snapshot.ts"),
+		join(repoRoot, "defaults", "tools", "skills", "extension.ts"),
+		join(repoRoot, "defaults", "tools", "ask", "extension.ts"),
+		join(repoRoot, "defaults", "tools", "browser", "extension.ts"),
+		join(repoRoot, "defaults", "tools", "images", "extension.ts"),
+		join(repoRoot, "defaults", "tools", "html", "extension.ts"),
+		join(repoRoot, "defaults", "tools", "team", "extension.ts"),
+		join(repoRoot, "defaults", "tools", "_shared", "gateway.ts"),
+	].filter(existsSync);
+}
+
 function prebundleSourceEntries(repoRoot) {
-	return [...serverSourceFiles(repoRoot), ...testSupportSourceFiles(repoRoot)];
+	return [
+		...serverSourceFiles(repoRoot),
+		...webSourceFiles(repoRoot),
+		...toolSupportSourceFiles(repoRoot),
+		...testSupportSourceFiles(repoRoot),
+	];
 }
 
 const BUNDLED_SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
@@ -214,6 +250,9 @@ function sourceUrlPlugin(repoRoot) {
 	const sourceRoots = [
 		normalizeServerSourcePath(join(repoRoot, "src", "server")) + "/",
 		...webSourceRoots,
+		normalizeServerSourcePath(join(repoRoot, "defaults", "tools")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests", "helpers")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests", "e2e", "test-utils")) + "/",
 		normalizeServerSourcePath(join(repoRoot, "tests2", "harness")) + "/",
 		normalizeServerSourcePath(join(repoRoot, "tests2", "core", "helpers")) + "/",
 		normalizeServerSourcePath(join(repoRoot, "tests2", "dom", "_setup")) + "/",
@@ -431,6 +470,11 @@ function manifestKeyForSource(sourcePath, repoRoot, entries) {
 	let key = normalizeServerSourcePath(relativeSource);
 	if (windowsPath) key = key.toLowerCase();
 	const supported = key.startsWith("src/server/")
+		|| key.startsWith("src/app/")
+		|| key.startsWith("src/ui/")
+		|| key.startsWith("defaults/tools/")
+		|| key.startsWith("tests/helpers/")
+		|| key.startsWith("tests/e2e/test-utils/")
 		|| key.startsWith("tests2/harness/")
 		|| key.startsWith("tests2/core/helpers/")
 		|| key.startsWith("tests2/dom/_setup/")
@@ -460,7 +504,7 @@ export function serverPrebundleExternalPattern(prebundle) {
  * returned by ensureServerTestPrebundle(). The plugin also externalizes emitted
  * entries through Vitest so Node and loadServerTestRuntime share one ESM cache.
  */
-export function serverPrebundleResolver(prebundle, { repoRoot = REPO_ROOT } = {}) {
+export function serverPrebundleResolver(prebundle, { repoRoot = REPO_ROOT, webEntries = true } = {}) {
 	const manifestPath = typeof prebundle === "string" ? prebundle : prebundle?.manifestPath;
 	if (!manifestPath) throw new Error("[server-prebundle] resolver requires a prebundle result or manifest path");
 	const cacheDir = dirname(manifestPath);
@@ -490,13 +534,16 @@ export function serverPrebundleResolver(prebundle, { repoRoot = REPO_ROOT } = {}
 			if (!sourcePath) return null;
 			const key = manifestKeyForSource(sourcePath, repoRoot, entries);
 			if (!key) return null;
+			const webEntry = key.startsWith("src/app/") || key.startsWith("src/ui/");
+			if (webEntry && !webEntries) return null;
 			const output = entries[key];
+			const isolatedModule = key.startsWith("tests2/dom/_setup/") || webEntry;
 			return {
 				id: pathToFileURL(join(cacheDir, ...output.split("/"))).href,
-				// DOM setup must execute against every fresh happy-dom environment.
-				// Keep its bundled graph inside Vitest's isolated module runner rather
-				// than sharing Node's evaluated ESM namespace across test files.
-				external: !key.startsWith("tests2/dom/_setup/"),
+				// DOM setup and the narrow web graph must execute against every fresh
+				// happy-dom environment. Worker-safe support entries share Node ESM
+				// identity; node projects keep web sources mockable through Vitest.
+				external: !isolatedModule,
 				moduleSideEffects: true,
 			};
 		},
