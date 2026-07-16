@@ -11,7 +11,12 @@ type RepoState = {
 type RunnerRestore = () => void;
 
 function key(path: string): string {
-	return normalize(resolve(path)).toLowerCase();
+	const normalized = normalize(resolve(path)).replace(/\\/g, "/");
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function containsPath(parent: string, candidate: string): boolean {
+	return candidate === parent || candidate.startsWith(`${parent}/`);
 }
 
 function commandError(args: readonly string[], cwd: string): Error & { code: number; stderr: string } {
@@ -31,9 +36,20 @@ export class MaintenanceGitModel {
 	private readonly repos = new Map<string, RepoState>();
 	private readonly worktreeOwners = new Map<string, string>();
 
+	reset(): void {
+		this.repos.clear();
+		this.worktreeOwners.clear();
+	}
+
 	registerRepo(root: string): void {
 		const repoRoot = resolve(root);
 		const repoKey = key(repoRoot);
+		const previous = this.repos.get(repoKey);
+		if (previous) {
+			for (const worktreePath of previous.worktrees.keys()) {
+				if (this.worktreeOwners.get(worktreePath) === repoKey) this.worktreeOwners.delete(worktreePath);
+			}
+		}
 		this.repos.set(repoKey, {
 			root: repoRoot,
 			branches: new Set(["master"]),
@@ -46,44 +62,47 @@ export class MaintenanceGitModel {
 		const repoKey = key(root);
 		const repo = this.repos.get(repoKey);
 		if (!repo) return;
-		for (const worktreePath of repo.worktrees.keys()) this.worktreeOwners.delete(worktreePath);
+		for (const worktreePath of repo.worktrees.keys()) {
+			if (this.worktreeOwners.get(worktreePath) === repoKey) this.worktreeOwners.delete(worktreePath);
+		}
 		this.repos.delete(repoKey);
 	}
 
 	addBranch(root: string, branch: string): void {
-		this.requireRepo(root).branches.add(branch);
+		this.requireRootRepo(root).branches.add(branch);
 	}
 
 	deleteBranches(root: string, branches: readonly string[]): void {
-		const repo = this.findRepo(root);
+		const repo = this.repos.get(key(root));
 		if (!repo) return;
 		for (const branch of branches) repo.branches.delete(branch);
 	}
 
 	branchExists(root: string, branch: string): boolean {
-		return this.findRepo(root)?.branches.has(branch) ?? false;
+		return this.repos.get(key(root))?.branches.has(branch) ?? false;
 	}
 
 	addWorktree(root: string, worktreePath: string, branch: string): void {
-		const repo = this.requireRepo(root);
+		const repo = this.requireRootRepo(root);
 		const worktreeKey = key(worktreePath);
 		repo.branches.add(branch);
 		repo.worktrees.set(worktreeKey, { path: resolve(worktreePath), branch });
 		this.worktreeOwners.set(worktreeKey, key(repo.root));
 		mkdirSync(worktreePath, { recursive: true });
-		writeFileSync(resolve(worktreePath, ".git"), `gitdir: ${resolve(repo.root, ".git", "worktrees", worktreeKey.split(/[\\/]/).pop() ?? "worktree")}\n`);
+		writeFileSync(resolve(worktreePath, ".git"), `gitdir: ${resolve(repo.root, ".git", "worktrees", worktreeKey.split("/").pop() ?? "worktree")}\n`);
 	}
 
 	removeWorktree(root: string, worktreePath: string): void {
-		const repo = this.findRepo(root);
+		const repoKey = key(root);
+		const repo = this.repos.get(repoKey);
 		const worktreeKey = key(worktreePath);
-		if (repo && worktreeKey !== key(repo.root)) repo.worktrees.delete(worktreeKey);
-		this.worktreeOwners.delete(worktreeKey);
+		if (repo && worktreeKey !== repoKey) repo.worktrees.delete(worktreeKey);
+		if (this.worktreeOwners.get(worktreeKey) === repoKey) this.worktreeOwners.delete(worktreeKey);
 		rmSync(worktreePath, { recursive: true, force: true });
 	}
 
 	listedWorktreePaths(root: string): string[] {
-		const repo = this.requireRepo(root);
+		const repo = this.requireRootRepo(root);
 		return [...repo.worktrees.values()].map(worktree => worktree.path);
 	}
 
@@ -164,24 +183,28 @@ export class MaintenanceGitModel {
 
 	private findRepo(path: string): RepoState | undefined {
 		const pathKey = key(path);
+		const exactRepo = this.repos.get(pathKey);
+		if (exactRepo) return exactRepo;
 		const directOwner = this.worktreeOwners.get(pathKey);
 		if (directOwner) return this.repos.get(directOwner);
-		let best: RepoState | undefined;
-		for (const repo of this.repos.values()) {
-			const repoKey = key(repo.root);
-			if (pathKey === repoKey || pathKey.startsWith(`${repoKey}\\`) || pathKey.startsWith(`${repoKey}/`)) {
-				if (!best || repo.root.length > best.root.length) best = repo;
+
+		let best: { repo: RepoState; prefixLength: number } | undefined;
+		for (const [repoKey, repo] of this.repos) {
+			if (containsPath(repoKey, pathKey) && (!best || repoKey.length > best.prefixLength)) {
+				best = { repo, prefixLength: repoKey.length };
 			}
 			for (const worktreeKey of repo.worktrees.keys()) {
-				if (pathKey === worktreeKey || pathKey.startsWith(`${worktreeKey}\\`) || pathKey.startsWith(`${worktreeKey}/`)) return repo;
+				if (containsPath(worktreeKey, pathKey) && (!best || worktreeKey.length > best.prefixLength)) {
+					best = { repo, prefixLength: worktreeKey.length };
+				}
 			}
 		}
-		return best;
+		return best?.repo;
 	}
 
-	private requireRepo(path: string): RepoState {
-		const repo = this.findRepo(path);
-		if (!repo) throw new Error(`[maintenance-git-model] repository is not registered: ${resolve(path)} (exists=${existsSync(path)})`);
+	private requireRootRepo(path: string): RepoState {
+		const repo = this.repos.get(key(path));
+		if (!repo) throw new Error(`[maintenance-git-model] repository root is not registered: ${resolve(path)} (exists=${existsSync(path)})`);
 		return repo;
 	}
 }

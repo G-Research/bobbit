@@ -1,3 +1,4 @@
+import { afterAll, beforeAll, describe, it } from "vitest";
 import * as maintenance from "./helpers/maintenance-api-support.js";
 
 const {
@@ -80,7 +81,7 @@ test("POST /api/maintenance/cleanup-worktrees rejects malformed canonical cleanu
 	expect(await legacyShape.json()).toHaveProperty("cleaned");
 });
 
-test.describe("cleanup-worktrees validation preserves one shared legacy orphan", () => {
+describe("cleanup-worktrees validation preserves one shared legacy orphan", () => {
 	const baseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-cleanup-validation-"));
 	const repoPath = join(baseDir, "repo");
 	const worktreePath = join(baseDir, "orphan-worktree");
@@ -107,7 +108,7 @@ test.describe("cleanup-worktrees validation preserves one shared legacy orphan",
 		expect(await snapshotLegacyOrphan(), label).toEqual(baseline);
 	}
 
-	test.beforeAll(async () => {
+	beforeAll(async () => {
 		initGitRepo(repoPath, true);
 		const project = await registerProject({ name: `cleanup validation ${Date.now()}`, rootPath: repoPath, seedWorkflows: false });
 		projectId = project.id;
@@ -122,7 +123,7 @@ test.describe("cleanup-worktrees validation preserves one shared legacy orphan",
 		});
 	});
 
-	test.afterAll(async () => {
+	afterAll(async () => {
 		tryRemoveWorktree(repoPath, worktreePath);
 		tryDeleteBranch(repoPath, branch);
 		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
@@ -130,7 +131,7 @@ test.describe("cleanup-worktrees validation preserves one shared legacy orphan",
 		rmSync(baseDir, { recursive: true, force: true });
 	});
 
-	test("rejects itemIds without mode", async () => {
+	it("rejects itemIds without mode", async () => {
 		const malformed = await apiFetch("/api/maintenance/cleanup-worktrees", {
 			method: "POST",
 			body: JSON.stringify({ itemIds: ["canonical-selector-without-mode"] }),
@@ -139,7 +140,7 @@ test.describe("cleanup-worktrees validation preserves one shared legacy orphan",
 		await expectLegacyOrphanUnchanged("itemIds without mode");
 	});
 
-	test("rejects every non-object body", async () => {
+	it("rejects every non-object body", async () => {
 		const invalidBodies = [
 			{ label: "array", value: [] },
 			{ label: "string", value: "legacy-orphaned" },
