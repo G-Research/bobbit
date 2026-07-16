@@ -41,7 +41,7 @@ function attachConsoleListener(p: import("playwright").Page) {
 	});
 }
 
-async function ensurePage(): Promise<import("playwright").Page> {
+async function ensureRealPage(): Promise<import("playwright").Page> {
 	if (page && !page.isClosed()) {
 		if (page !== currentListenerPage) attachConsoleListener(page);
 		return page;
@@ -99,15 +99,25 @@ function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	});
 }
 
-export default function (pi: ExtensionAPI) {
-	// Try to load playwright — silently skip tool registration if unavailable
-	try {
-		playwrightMod = require("playwright");
-	} catch {
-		// playwright not installed — skip native browser tools.
-		// MCP playwright extension provides equivalent functionality when configured.
-		return;
+export interface BrowserToolBackend {
+	ensurePage(): Promise<import("playwright").Page>;
+	cleanup(): Promise<void>;
+}
+
+export function installBrowserTools(pi: ExtensionAPI, backend?: BrowserToolBackend) {
+	// Production lazily loads Playwright. Tests can inject a deterministic backend
+	// so contract coverage never launches a browser process.
+	if (!backend) {
+		try {
+			playwrightMod = require("playwright");
+		} catch {
+			// playwright not installed — skip native browser tools.
+			// MCP playwright extension provides equivalent functionality when configured.
+			return;
+		}
 	}
+	const ensurePage = backend?.ensurePage ?? ensureRealPage;
+	const cleanup = backend?.cleanup ?? cleanupBrowser;
 
 	// Per-install (per-session) state. Screenshot spill dirs are tracked here so
 	// cleanup only ever deletes dirs created by *this* session's tool calls,
@@ -117,7 +127,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Clean up browser + this session's screenshot spill dirs on shutdown.
 	pi.on("session_shutdown", async () => {
-		await cleanupBrowser();
+		await cleanup();
 		for (const dir of qaScreenshotDirs) {
 			try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 		}
@@ -186,9 +196,12 @@ export default function (pi: ExtensionAPI) {
 			const url = await p.url();
 			const title = await p.title();
 
-			const content: Array<{type: string, mimeType?: string, data?: string, text?: string}> = [
+			const content: Array<
+				| { type: "image"; mimeType: string; data: string }
+				| { type: "text"; text: string }
+			> = [
 				{
-					type: "image" as const,
+					type: "image",
 					mimeType,
 					data: base64,
 				},
@@ -432,3 +445,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 }
+
+export default installBrowserTools;
