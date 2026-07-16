@@ -11,7 +11,7 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
@@ -51,9 +51,12 @@ test.describe("Bug 3: Project registration upsert (idempotent)", () => {
 	let projectRootPath: string;
 
 	test.beforeAll(() => {
-		// Create a real directory to use as project root
-		projectRootPath = join(tmpdir(), `bobbit-e2e-project-${Date.now()}`);
-		mkdirSync(projectRootPath, { recursive: true });
+		// Create a real directory to use as project root.
+		projectRootPath = mkdtempSync(join(tmpdir(), "bobbit-e2e-project-"));
+	});
+
+	test.afterAll(() => {
+		try { rmSync(projectRootPath, { recursive: true, force: true }); } catch { /* ignore */ }
 	});
 
 	test("registering the same rootPath twice with upsert returns existing project", async () => {
@@ -87,17 +90,26 @@ test.describe("Bug 3b: Config write atomicity", () => {
 	let projectId: string;
 	let projectRootPath: string;
 
-	test.beforeAll(async () => {
-		projectRootPath = join(tmpdir(), `bobbit-e2e-config-${Date.now()}`);
-		mkdirSync(projectRootPath, { recursive: true });
+	test.beforeEach(async () => {
+		projectRootPath = mkdtempSync(join(tmpdir(), "bobbit-e2e-config-"));
 
 		const resp = await apiFetch("/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "config-test", rootPath: projectRootPath }),
+			body: JSON.stringify({
+				name: `config-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+				rootPath: projectRootPath,
+				__e2e_seed_skip__: true,
+			}),
 		});
-		// May be 201 or 200 depending on whether Bug 1 fix is in place
+		// May be 201 or 200 depending on whether Bug 1 fix is in place.
 		const project = await resp.json();
 		projectId = project.id;
+	});
+
+	test.afterEach(async () => {
+		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		try { rmSync(projectRootPath, { recursive: true, force: true }); } catch { /* ignore */ }
+		projectId = "";
 	});
 
 	test("PUT config with one invalid key should write nothing (atomic)", async () => {
