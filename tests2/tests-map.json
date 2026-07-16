@@ -21,8 +21,53 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/aigw-wellknown-config-atomic.test.ts",
+      "reason": "Unit coverage for atomic AIGW models/configuration failure behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/aigw-wellknown-discovery.test.ts",
+      "reason": "Unit coverage for guarded fallback discovery and bounded, header-filtered one-hop well-known payload resolution.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/aigw-wellknown-dns-admission.test.ts",
+      "reason": "Unit coverage for provider DNS admission, shared deadlines, and active-host lifecycle cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/aigw-wellknown-dns-guard.test.ts",
+      "reason": "Unit coverage for generated connection-time DNS rebinding guard behavior on direct lookups and real requests.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/aigw-wellknown-persistence.test.ts",
+      "reason": "Unit coverage for authoritative models.json persistence and conservative legacy ID migration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/aigw-wellknown-translate.test.ts",
-      "reason": "Unit coverage for well-known-first AIGW discovery, safe one-hop payload resolution, provider-specific routing, unique bare IDs, metadata and pricing units, conservative migration, authoritative persistence, fallback routing, and default-model seeding.",
+      "reason": "Unit coverage for provider-specific translation, filtering, unique bare IDs, metadata and pricing units, URL validation, and default-model seeding.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
