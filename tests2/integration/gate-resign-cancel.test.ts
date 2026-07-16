@@ -1,5 +1,11 @@
+// This suite owns command-step cancellation bookkeeping, not OS process
+// fidelity. Opt into the non-spawning runner before the gateway singleton is
+// imported and booted.
+import "./_e2e/fake-cmd-setup.js";
+
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connectWs, type WsConnection } from "./_e2e/e2e-setup.js";
+import type { ManualClock } from "../harness/clock.js";
 
 /**
  * E2E test for gate re-signal cancellation.
@@ -20,6 +26,23 @@ import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connect
 
 const SLOW_WORKFLOW_ID = `test-slow-${Date.now()}`;
 
+async function settleCancellation<T>(clock: ManualClock, promise: Promise<T>, maxVirtualMs = 1000): Promise<T> {
+	let settled = false;
+	let value: T | undefined;
+	let failure: unknown;
+	void promise.then(
+		(result) => { settled = true; value = result; },
+		(error) => { settled = true; failure = error; },
+	);
+	for (let advanced = 0; !settled && advanced < maxVirtualMs; advanced += 25) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		clock.advance(25);
+	}
+	if (failure) throw failure;
+	if (!settled) throw new Error(`cancellation event did not settle after ${maxVirtualMs}ms of virtual time`);
+	return value as T;
+}
+
 /** Create a workflow with a slow verification command for testing cancellation. */
 async function createSlowWorkflow(): Promise<void> {
 	const res = await apiFetch("/api/workflows", {
@@ -38,8 +61,8 @@ async function createSlowWorkflow(): Promise<void> {
 							name: "Slow check",
 							type: "command",
 							// Delay long enough to re-signal before it finishes.
-						// 500ms comfortably exceeds the WS roundtrip + cancellation latency
-						// (we send the next signal immediately on `gate_verification_started`).
+							// 500ms comfortably exceeds the WS roundtrip + cancellation latency
+							// (we send the next signal immediately on `gate_verification_started`).
 							run: 'node -e "setTimeout(()=>{console.log(\'done\');process.exit(0)},500)"',
 						},
 					],
@@ -83,7 +106,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 		await deleteSlowWorkflow();
 	});
 
-	test("re-signaling a gate cancels the previous verification", async () => {
+	test("re-signaling a gate cancels the previous verification", async ({ gateway }) => {
 		// 1. Create a goal with the slow workflow
 		const goal = await createGoal({
 			title: `Re-signal Cancel Test ${Date.now()}`,
@@ -126,8 +149,14 @@ test.describe("Gate Re-signal Cancellation", () => {
 			expect(firstVerification).toBeTruthy();
 			expect(firstVerification.overallStatus).toBe("running");
 
-			// 5. Re-signal the same gate (second signal)
+			// 5. Re-signal the same gate (second signal). Subscribe before the
+			// request, then settle the cancellation through the gateway manual clock.
 			const cursor2 = conn.messageCount();
+			const cancelled1 = conn.waitForFrom(
+				cursor2,
+				(m) => m.type === "gate_verification_complete" && m.signalId === signal1Id && m.status === "cancelled",
+				10_000,
+			);
 			const signal2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "Signal v2" }),
@@ -137,13 +166,9 @@ test.describe("Gate Re-signal Cancellation", () => {
 			const signal2Id = signal2Data.signal.id;
 			expect(signal2Id).not.toBe(signal1Id);
 
-			// 6. Wait for old verification to be cancelled via WS event
-			//    (signal 1's cancellation is broadcast as gate_verification_complete/cancelled)
-			await conn.waitForFrom(
-				cursor2,
-				(m) => m.type === "gate_verification_complete" && m.signalId === signal1Id && m.status === "cancelled",
-				10_000,
-			);
+			// 6. Signal 1's cancellation is broadcast as
+			// gate_verification_complete/cancelled without a wall-clock sleep.
+			await settleCancellation(gateway.clock, cancelled1);
 
 			// Confirm old verification is no longer in active list
 			const activeAfterResignal = await getActiveVerifications(goalId);
@@ -175,7 +200,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 		}
 	});
 
-	test("triple re-signal — only final signal determines outcome", async () => {
+	test("triple re-signal — only final signal determines outcome", async ({ gateway }) => {
 		const goal = await createGoal({
 			title: `Triple Re-signal Test ${Date.now()}`,
 			workflowId: SLOW_WORKFLOW_ID,
@@ -210,12 +235,18 @@ test.describe("Gate Re-signal Cancellation", () => {
 
 			// Signal 2 (cancels signal 1)
 			const c2 = conn.messageCount();
+			const cancelled1 = conn.waitForFrom(
+				c2,
+				(m) => m.type === "gate_verification_complete" && m.signalId === signal1Id && m.status === "cancelled",
+				10_000,
+			);
 			const s2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "Signal v2" }),
 			});
 			expect(s2Res.status).toBe(201);
 			const signal2Id = (await s2Res.json()).signal.id;
+			await settleCancellation(gateway.clock, cancelled1);
 
 			// Wait for signal 2's verification to start (event-driven)
 			await conn.waitForFrom(
@@ -226,12 +257,18 @@ test.describe("Gate Re-signal Cancellation", () => {
 
 			// Signal 3 (cancels signal 2)
 			const c3 = conn.messageCount();
+			const cancelled2 = conn.waitForFrom(
+				c3,
+				(m) => m.type === "gate_verification_complete" && m.signalId === signal2Id && m.status === "cancelled",
+				10_000,
+			);
 			const s3Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "Signal v3" }),
 			});
 			expect(s3Res.status).toBe(201);
 			const signal3Id = (await s3Res.json()).signal.id;
+			await settleCancellation(gateway.clock, cancelled2);
 
 			// Event-driven: wait for signal 3's verification to actually start.
 			// This replaces the previous `pollUntil` on /verifications/active,

@@ -1,11 +1,8 @@
 /**
- * vitest setupFile for the `v2-integration-fake` project ONLY.
- *
- * Sets a fork-local flag BEFORE any test file (and therefore before the
- * per-fork gateway singleton boots), so tests2/harness/gateway.ts injects the
- * non-spawning fake verification command-step runner. This project runs in its
- * own dedicated fork (see vitest.config.ts), so the flag never leaks into the
- * real-runner forks used by the default v2-integration project.
+ * Side-effect opt-in for tier-1 specs that own command-step bookkeeping rather
+ * than OS process fidelity. Import this module before in-process-harness.ts so
+ * the fork-local flag is set before the gateway singleton boots and injects the
+ * non-spawning verification command-step runner.
  */
 (globalThis as { __BOBBIT_V2_FAKE_CMD_STEP__?: boolean }).__BOBBIT_V2_FAKE_CMD_STEP__ = true;
 
