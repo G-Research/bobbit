@@ -372,3 +372,41 @@ Transform plus import consumed 86.60s of the 730.19s summed phase time (11.86%),
 No file exceeded the 15s tier-1 budget. The slowest file completed in 12.672s.
 
 All newly isolated sidebar, commit, Node, story, and budget tests passed. The final two shared routes are being isolated.
+
+## Solo attempt 12
+
+| Date | Attempt | Process / workers | Wall time | Result | Final tally |
+|---|---:|---|---:|---|---|
+| 2026-07-16 | 12 | One Vitest process / 3 workers | 281.36s | **PASS** | 890 passed files, 4 skipped; 7,589 passed tests, 22 skipped; zero failures or budget breaches |
+
+This was the first qualifying green run: the suite passed below the 300s wall-time target with no failed files, failed tests, or tier-1 budget breaches.
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 28.24s |
+| Setup | 64.15s |
+| Import | 92.40s |
+| Tests | 527.45s |
+| Environment | 86.43s |
+| **Summed** | **798.67s** |
+
+## Solo attempt 13
+
+| Date | Attempt | Process / workers | Wall time | Result | Final tally |
+|---|---:|---|---:|---|---|
+| 2026-07-16 | 13 | One Vitest process / 3 workers | 262.42s | **FAIL** | 1 failed file and test; 889 passed files, 4 skipped; 7,588 passed tests, 22 skipped; zero budget breaches |
+
+The immediate follow-up run remained below the 300s wall-time target, but `stories-sessions-api` S-08 failed because `worktreeOpts` was undefined. S-08 is the final shared seam, and full isolation has been launched.
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 7.85s |
+| Setup | 59.90s |
+| Import | 79.47s |
+| Tests | 491.28s |
+| Environment | 85.17s |
+| **Summed** | **723.67s** |
