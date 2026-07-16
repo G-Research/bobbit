@@ -21,6 +21,16 @@ const DOM_WEB_ENTRIES = [
 	"src/ui/lazy/safe-markdown-block.ts",
 	"src/ui/components/GitStatusWidget.ts",
 ];
+// Regression chain from the node-only plan suite. A DOM transform cached for
+// this graph used to redirect state.ts to the eager browser bundle; that bundle
+// could then reach the side-panel/proposal workspace cycle and evaluate window
+// before the node test installed its mocks/shims.
+const NODE_WINDOW_IMPORT_CHAIN = [
+	["src/app/state.ts", "src/app/goal-dashboard-plan-tab.ts"],
+	["src/app/proposal-workspace-actions.ts", "src/app/proposal-registry.ts"],
+	["src/app/side-panel-workspace.ts", "src/app/proposal-workspace-actions.ts"],
+	["src/app/state.ts", "src/app/side-panel-workspace.ts"],
+];
 const TOOL_ENTRIES = [
 	"defaults/tools/proposals/extension.ts",
 	"defaults/tools/agent/extension.ts",
@@ -64,6 +74,17 @@ function graphSourceMapContains(manifest, cacheDir, sourceEntry) {
 	});
 }
 
+function resolverCacheKey(plugin) {
+	let generator;
+	plugin.configureVitest({
+		experimental_defineCacheKeyGenerator(value) {
+			generator = value;
+		},
+	});
+	assert.equal(typeof generator, "function", `${plugin.name} must define a Vitest cache key`);
+	return generator();
+}
+
 const testSources = walkTestFiles(join(REPO_ROOT, "tests2")).map((testFile) => ({
 	testFile,
 	source: readFileSync(testFile, "utf8"),
@@ -94,6 +115,23 @@ const prebundle = await ensureServerTestPrebundle();
 const manifest = JSON.parse(readFileSync(prebundle.manifestPath, "utf8"));
 const domResolver = serverPrebundleResolver(prebundle);
 const nodeResolver = serverPrebundleResolver(prebundle, { webEntries: false });
+
+assert.notEqual(nodeResolver.name, domResolver.name, "Node and DOM resolver profiles must be distinct");
+assert.notEqual(
+	resolverCacheKey(nodeResolver),
+	resolverCacheKey(domResolver),
+	"Node transforms must never reuse DOM transforms that eagerly resolve browser entries",
+);
+
+for (const [sourceEntry, importerEntry] of NODE_WINDOW_IMPORT_CHAIN) {
+	const request = join(REPO_ROOT, sourceEntry.replace(/\.ts$/, ".js"));
+	const importer = join(REPO_ROOT, importerEntry);
+	assert.equal(
+		nodeResolver.resolveId(request, importer),
+		null,
+		`${importerEntry} -> ${sourceEntry} must stay in Vitest's node runner for mocks and window safety`,
+	);
+}
 
 for (const sourceEntry of [...SUPPORT_ENTRIES, ...DOM_WEB_ENTRIES, ...TOOL_ENTRIES]) {
 	const output = manifest.entries[sourceEntry];
@@ -126,5 +164,6 @@ assert.equal(domSetup.external, false, "DOM decorators must execute in every iso
 
 console.log(
 	`[server-prebundle-perf-pin] ${SUPPORT_ENTRIES.length + DOM_WEB_ENTRIES.length + TOOL_ENTRIES.length} entries, `
-	+ `${supportImportEdges + webImportEdges + toolImportEdges} repeated tier-1 import edges, project isolation and source maps pinned`,
+	+ `${supportImportEdges + webImportEdges + toolImportEdges} repeated tier-1 import edges, `
+	+ `node/DOM cache isolation, window-safe node import chain, and source maps pinned`,
 );

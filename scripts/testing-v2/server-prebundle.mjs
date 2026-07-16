@@ -517,17 +517,24 @@ export function serverPrebundleResolver(prebundle, { repoRoot = REPO_ROOT, webEn
 		}),
 	);
 	const externalPattern = serverPrebundleExternalPattern(manifestPath);
+	const resolverProfile = webEntries ? "dom" : "node";
 	return {
-		name: "bobbit-server-prebundle-resolver",
+		// Project-local plugins share the artifact but not transform semantics:
+		// DOM resolves the narrow browser panel while Node must leave it to
+		// Vitest so vi.mock hoisting and module-load globals remain effective.
+		name: `bobbit-server-prebundle-resolver-${resolverProfile}`,
 		enforce: "pre",
 		config() {
 			return { test: { server: { deps: { external: [externalPattern] } } } };
 		},
 		configureVitest(context) {
-			// Vitest hashes plugin names but cannot see resolver closure options.
-			// Include the content-addressed graph key so a newly published bundle
-			// can never reuse a transformed test that imports an older entry URL.
-			context.experimental_defineCacheKeyGenerator(() => `bobbit-server-prebundle:${manifest.key}`);
+			// Vitest cannot see resolver closure options when hashing plugins. Keep
+			// Node and DOM transforms in separate cache namespaces: reusing a DOM
+			// transform in v2-core can rewrite state.ts to its eager browser bundle,
+			// bypassing node-side mocks and evaluating window at module load.
+			context.experimental_defineCacheKeyGenerator(
+				() => `bobbit-server-prebundle:${manifest.key}:${resolverProfile}`,
+			);
 		},
 		resolveId(source, importer) {
 			const sourcePath = resolveSourceCandidate(source, importer, repoRoot);

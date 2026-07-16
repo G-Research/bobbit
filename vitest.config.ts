@@ -90,7 +90,9 @@ export default defineConfig({
 				},
 			},
 			{
-				plugins: prebundlePlugins(),
+				// Only the isolated happy-dom project may resolve eager browser entries;
+				// node projects use a distinct resolver and transform-cache profile.
+				plugins: prebundlePlugins({ webEntries: true }),
 				test: {
 					...shared,
 					name: "v2-dom",
