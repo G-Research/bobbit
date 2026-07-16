@@ -11,6 +11,7 @@ import {
 	APPROVED_E2E_VITEST_PATHS,
 	loadVitestExecutionMap,
 } from "./test-map-execution.mjs";
+import { readOptionalGitPath } from "./unit-inventory-git.mjs";
 
 const args = process.argv.slice(2);
 const valueAfter = (flag) => {
@@ -25,11 +26,16 @@ const execution = loadVitestExecutionMap();
 const currentUnit = [...execution.unit];
 const currentE2eVitestFiles = [...execution.e2e];
 const currentInventory = [...execution.all];
-const mergeBase = execFileSync("git", ["merge-base", "HEAD", upstream], { encoding: "utf-8" }).trim();
 
 function gitText(gitArgs) {
-	return execFileSync("git", gitArgs, { encoding: "utf-8", maxBuffer: 32 * 1024 * 1024 });
+	return execFileSync("git", gitArgs, {
+		encoding: "utf-8",
+		maxBuffer: 32 * 1024 * 1024,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
 }
+
+const mergeBase = gitText(["merge-base", "HEAD", upstream]).trim();
 
 function e2ePaths(source) {
 	return [...source.matchAll(/"(tests2\/integration\/[^"]+\.test\.ts)"/g)].map((match) => match[1]);
@@ -196,7 +202,8 @@ function concurrentPathOwnershipViolations(source, file) {
 	return violations;
 }
 
-const baseE2eSource = gitText(["show", `${mergeBase}:scripts/testing-v2/integration-e2e-files.mjs`]);
+const historicalE2ePath = "scripts/testing-v2/integration-e2e-files.mjs";
+const baseE2eSource = readOptionalGitPath(gitText, { path: historicalE2ePath, revision: mergeBase });
 const formerlyRelocatedE2e = e2ePaths(baseE2eSource);
 const requiredUnitFiles = gitText(["ls-tree", "-r", "--name-only", mergeBase, "--", "tests2/core", "tests2/dom", "tests2/integration"])
 	.trim().split(/\r?\n/).filter((file) => /\.test\.ts$/.test(file));
