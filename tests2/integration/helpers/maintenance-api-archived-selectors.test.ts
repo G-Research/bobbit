@@ -144,7 +144,8 @@ test.afterAll(() => {
 	tryRemoveWorktree(repoPath, liveReferencedPath);
 	tryDeleteBranches(repoPath, [removableBranch, liveBranch, staleBranch, alreadyBranch, multiBranch]);
 	tryDeleteBranches(packageRepoPath, [multiBranch]);
-	maintenanceGit.reset();
+	maintenanceGit.forgetRepo(packageRepoPath);
+	maintenanceGit.forgetRepo(repoPath);
 	if (baseDir) rmSync(baseDir, { recursive: true, force: true });
 });
 

@@ -4,11 +4,40 @@ import type { CommandRunner, ExecFileOptions, ExecFileResult } from "../../../sr
 
 type RepoState = {
 	root: string;
+	owner: symbol;
 	branches: Set<string>;
 	worktrees: Map<string, { path: string; branch: string }>;
 };
 
 type RunnerRestore = () => void;
+type DeferredPath = { path: string; owner: symbol };
+type RunnerInstallation = {
+	originalExecFile: CommandRunner["execFile"];
+	wrapper: CommandRunner["execFile"];
+	owners: Set<symbol>;
+};
+type MaintenanceGitGlobalState = {
+	repos: Map<string, RepoState>;
+	worktreeOwners: Map<string, string>;
+	deferredPaths: Map<string, DeferredPath[]>;
+	deferredSequence: number;
+	runnerInstallations: WeakMap<CommandRunner, RunnerInstallation>;
+	modelInstallCounts: Map<symbol, number>;
+};
+
+const GLOBAL_STATE_KEY = Symbol.for("bobbit.tests2.maintenance-git-model.state");
+
+function globalState(): MaintenanceGitGlobalState {
+	const scope = globalThis as typeof globalThis & { [GLOBAL_STATE_KEY]?: MaintenanceGitGlobalState };
+	return scope[GLOBAL_STATE_KEY] ??= {
+		repos: new Map(),
+		worktreeOwners: new Map(),
+		deferredPaths: new Map(),
+		deferredSequence: 0,
+		runnerInstallations: new WeakMap(),
+		modelInstallCounts: new Map(),
+	};
+}
 
 export type MaintenanceGitSnapshot = {
 	repos: Array<{
@@ -41,51 +70,69 @@ function commandError(args: readonly string[], cwd: string): Error & { code: num
  * exercising its production command-runner boundary and filesystem checks.
  */
 export class MaintenanceGitModel {
-	private readonly repos = new Map<string, RepoState>();
-	private readonly worktreeOwners = new Map<string, string>();
-	private readonly deferredPaths = new Map<string, string[]>();
-	private deferredSequence = 0;
+	private readonly owner = Symbol("maintenance-git-model-owner");
 
 	reset(): void {
-		this.repos.clear();
-		this.worktreeOwners.clear();
-		this.deferredPaths.clear();
-		this.deferredSequence = 0;
+		const state = globalState();
+		// A duplicate prebundle entry can construct another facade for the same
+		// process-wide model. Never clear this facade's repositories while any
+		// maintenance file using it still has the gateway runner installed.
+		if ((state.modelInstallCounts.get(this.owner) ?? 0) > 0) return;
+		for (const [repoKey, repo] of state.repos) {
+			if (repo.owner !== this.owner) continue;
+			for (const worktreeKey of repo.worktrees.keys()) {
+				if (state.worktreeOwners.get(worktreeKey) === repoKey) state.worktreeOwners.delete(worktreeKey);
+			}
+			state.repos.delete(repoKey);
+		}
+		for (const [pathKey, deferred] of state.deferredPaths) {
+			const retained = deferred.filter(item => item.owner !== this.owner);
+			for (const item of deferred) {
+				if (item.owner === this.owner) rmSync(item.path, { recursive: true, force: true });
+			}
+			if (retained.length > 0) state.deferredPaths.set(pathKey, retained);
+			else state.deferredPaths.delete(pathKey);
+		}
 	}
 
 	snapshot(): MaintenanceGitSnapshot {
 		return {
-			repos: [...this.repos.values()].map(repo => ({
-				root: repo.root,
-				branches: [...repo.branches],
-				worktrees: [...repo.worktrees.values()].map(worktree => ({ ...worktree })),
-			})),
+			repos: [...globalState().repos.values()]
+				.filter(repo => repo.owner === this.owner)
+				.map(repo => ({
+					root: repo.root,
+					branches: [...repo.branches],
+					worktrees: [...repo.worktrees.values()].map(worktree => ({ ...worktree })),
+				})),
 		};
 	}
 
-	/** Restore command-visible state and cheaply resurrect worktrees renamed by cleanup. */
+	/** Restore only this facade's state; other maintenance files may still be active. */
 	restore(snapshot: MaintenanceGitSnapshot): void {
+		const state = globalState();
 		const expectedPaths = new Set(snapshot.repos.flatMap(repo => repo.worktrees.map(worktree => key(worktree.path))));
-		for (const repo of this.repos.values()) {
+		for (const [repoKey, repo] of state.repos) {
+			if (repo.owner !== this.owner) continue;
 			for (const worktree of repo.worktrees.values()) {
 				const worktreeKey = key(worktree.path);
-				if (worktreeKey !== key(repo.root) && !expectedPaths.has(worktreeKey)) this.deferRemovePath(worktree.path);
+				if (worktreeKey !== repoKey && !expectedPaths.has(worktreeKey)) this.deferRemovePath(worktree.path, this.owner);
+				if (state.worktreeOwners.get(worktreeKey) === repoKey) state.worktreeOwners.delete(worktreeKey);
 			}
+			state.repos.delete(repoKey);
 		}
 
-		this.repos.clear();
-		this.worktreeOwners.clear();
 		for (const source of snapshot.repos) {
 			const repoKey = key(source.root);
 			const worktrees = new Map<string, { path: string; branch: string }>();
 			for (const worktree of source.worktrees) {
 				const worktreeKey = key(worktree.path);
-				if (!existsSync(worktree.path)) this.restoreDeferredPath(source.root, worktree.path);
+				if (!existsSync(worktree.path)) this.restoreDeferredPath(source.root, worktree.path, this.owner);
 				worktrees.set(worktreeKey, { ...worktree });
-				this.worktreeOwners.set(worktreeKey, repoKey);
+				state.worktreeOwners.set(worktreeKey, repoKey);
 			}
-			this.repos.set(repoKey, {
+			state.repos.set(repoKey, {
 				root: source.root,
+				owner: this.owner,
 				branches: new Set(source.branches),
 				worktrees,
 			});
@@ -93,30 +140,33 @@ export class MaintenanceGitModel {
 	}
 
 	registerRepo(root: string): void {
+		const state = globalState();
 		const repoRoot = resolve(root);
 		const repoKey = key(repoRoot);
-		const previous = this.repos.get(repoKey);
+		const previous = state.repos.get(repoKey);
 		if (previous) {
 			for (const worktreePath of previous.worktrees.keys()) {
-				if (this.worktreeOwners.get(worktreePath) === repoKey) this.worktreeOwners.delete(worktreePath);
+				if (state.worktreeOwners.get(worktreePath) === repoKey) state.worktreeOwners.delete(worktreePath);
 			}
 		}
-		this.repos.set(repoKey, {
+		state.repos.set(repoKey, {
 			root: repoRoot,
+			owner: this.owner,
 			branches: new Set(["master"]),
 			worktrees: new Map([[repoKey, { path: repoRoot, branch: "master" }]]),
 		});
-		this.worktreeOwners.set(repoKey, repoKey);
+		state.worktreeOwners.set(repoKey, repoKey);
 	}
 
 	forgetRepo(root: string): void {
+		const state = globalState();
 		const repoKey = key(root);
-		const repo = this.repos.get(repoKey);
-		if (!repo) return;
+		const repo = state.repos.get(repoKey);
+		if (!repo || repo.owner !== this.owner) return;
 		for (const worktreePath of repo.worktrees.keys()) {
-			if (this.worktreeOwners.get(worktreePath) === repoKey) this.worktreeOwners.delete(worktreePath);
+			if (state.worktreeOwners.get(worktreePath) === repoKey) state.worktreeOwners.delete(worktreePath);
 		}
-		this.repos.delete(repoKey);
+		state.repos.delete(repoKey);
 	}
 
 	addBranch(root: string, branch: string): void {
@@ -124,13 +174,13 @@ export class MaintenanceGitModel {
 	}
 
 	deleteBranches(root: string, branches: readonly string[]): void {
-		const repo = this.repos.get(key(root));
+		const repo = globalState().repos.get(key(root));
 		if (!repo) return;
 		for (const branch of branches) repo.branches.delete(branch);
 	}
 
 	branchExists(root: string, branch: string): boolean {
-		return this.repos.get(key(root))?.branches.has(branch) ?? false;
+		return globalState().repos.get(key(root))?.branches.has(branch) ?? false;
 	}
 
 	addWorktree(root: string, worktreePath: string, branch: string): void {
@@ -138,18 +188,19 @@ export class MaintenanceGitModel {
 		const worktreeKey = key(worktreePath);
 		repo.branches.add(branch);
 		repo.worktrees.set(worktreeKey, { path: resolve(worktreePath), branch });
-		this.worktreeOwners.set(worktreeKey, key(repo.root));
+		globalState().worktreeOwners.set(worktreeKey, key(repo.root));
 		mkdirSync(worktreePath, { recursive: true });
 		writeFileSync(resolve(worktreePath, ".git"), `gitdir: ${resolve(repo.root, ".git", "worktrees", worktreeKey.split("/").pop() ?? "worktree")}\n`);
 	}
 
 	removeWorktree(root: string, worktreePath: string): void {
+		const state = globalState();
 		const repoKey = key(root);
-		const repo = this.repos.get(repoKey);
+		const repo = state.repos.get(repoKey);
 		const worktreeKey = key(worktreePath);
 		if (repo && worktreeKey !== repoKey) repo.worktrees.delete(worktreeKey);
-		if (this.worktreeOwners.get(worktreeKey) === repoKey) this.worktreeOwners.delete(worktreeKey);
-		this.deferRemovePath(worktreePath);
+		if (state.worktreeOwners.get(worktreeKey) === repoKey) state.worktreeOwners.delete(worktreeKey);
+		this.deferRemovePath(worktreePath, repo?.owner ?? this.owner);
 	}
 
 	listedWorktreePaths(root: string): string[] {
@@ -217,38 +268,78 @@ export class MaintenanceGitModel {
 	}
 
 	install(runner: CommandRunner): RunnerRestore {
-		const originalExecFile = runner.execFile;
-		runner.execFile = async (file: string, args: readonly string[], options?: ExecFileOptions): Promise<ExecFileResult> => {
-			if (basename(file).replace(/\.exe$/i, "").toLowerCase() !== "git") return originalExecFile.call(runner, file, args, options);
-			const cwd = typeof options?.cwd === "string" ? options.cwd : process.cwd();
-			return { stdout: this.run(cwd, args), stderr: "" };
+		const state = globalState();
+		let installation = state.runnerInstallations.get(runner);
+		if (!installation) {
+			installation = {
+				originalExecFile: runner.execFile,
+				wrapper: undefined as unknown as CommandRunner["execFile"],
+				owners: new Set(),
+			};
+			installation.wrapper = async (file: string, args: readonly string[], options?: ExecFileOptions): Promise<ExecFileResult> => {
+				if (basename(file).replace(/\.exe$/i, "").toLowerCase() !== "git") {
+					return installation!.originalExecFile.call(runner, file, args, options);
+				}
+				const cwd = typeof options?.cwd === "string" ? options.cwd : process.cwd();
+				return { stdout: this.run(cwd, args), stderr: "" };
+			};
+			state.runnerInstallations.set(runner, installation);
+		}
+		if (runner.execFile !== installation.wrapper) {
+			// Install against the runner object retained by createGateway. If a
+			// neighbouring file temporarily wrapped it, preserve that layer as the
+			// fallback instead of restoring an obsolete function later.
+			installation.originalExecFile = runner.execFile;
+			runner.execFile = installation.wrapper;
+		}
+		const lease = Symbol("maintenance-git-runner-lease");
+		installation.owners.add(lease);
+		state.modelInstallCounts.set(this.owner, (state.modelInstallCounts.get(this.owner) ?? 0) + 1);
+
+		let restored = false;
+		return () => {
+			if (restored) return;
+			restored = true;
+			installation!.owners.delete(lease);
+			const remaining = (state.modelInstallCounts.get(this.owner) ?? 1) - 1;
+			if (remaining > 0) state.modelInstallCounts.set(this.owner, remaining);
+			else state.modelInstallCounts.delete(this.owner);
+			if (installation!.owners.size > 0) return;
+			if (runner.execFile === installation!.wrapper) runner.execFile = installation!.originalExecFile;
+			if (state.runnerInstallations.get(runner) === installation) state.runnerInstallations.delete(runner);
 		};
-		return () => { runner.execFile = originalExecFile; };
 	}
 
-	private deferRemovePath(targetPath: string): void {
+	private deferRemovePath(targetPath: string, owner: symbol): void {
 		if (!existsSync(targetPath)) return;
+		const state = globalState();
 		const targetKey = key(targetPath);
-		const deferredPath = `${targetPath}.bobbit-removed-${process.pid}-${++this.deferredSequence}`;
+		const deferredPath = `${targetPath}.bobbit-removed-${process.pid}-${++state.deferredSequence}`;
 		try {
 			renameSync(targetPath, deferredPath);
-			const paths = this.deferredPaths.get(targetKey) ?? [];
-			paths.push(deferredPath);
-			this.deferredPaths.set(targetKey, paths);
+			const paths = state.deferredPaths.get(targetKey) ?? [];
+			paths.push({ path: deferredPath, owner });
+			state.deferredPaths.set(targetKey, paths);
 		} catch {
 			rmSync(targetPath, { recursive: true, force: true });
 		}
 	}
 
-	private restoreDeferredPath(repoRoot: string, worktreePath: string): void {
+	private restoreDeferredPath(repoRoot: string, worktreePath: string, owner: symbol): void {
+		const state = globalState();
 		const worktreeKey = key(worktreePath);
-		const deferred = this.deferredPaths.get(worktreeKey);
+		const deferred = state.deferredPaths.get(worktreeKey);
 		while (deferred?.length) {
-			const candidate = deferred.pop()!;
-			if (!existsSync(candidate)) continue;
+			let candidateIndex = -1;
+			for (let index = deferred.length - 1; index >= 0; index--) {
+				if (deferred[index].owner === owner) { candidateIndex = index; break; }
+			}
+			if (candidateIndex < 0) break;
+			const [candidate] = deferred.splice(candidateIndex, 1);
+			if (!existsSync(candidate.path)) continue;
 			mkdirSync(resolve(worktreePath, ".."), { recursive: true });
-			renameSync(candidate, worktreePath);
-			if (deferred.length === 0) this.deferredPaths.delete(worktreeKey);
+			renameSync(candidate.path, worktreePath);
+			if (deferred.length === 0) state.deferredPaths.delete(worktreeKey);
 			return;
 		}
 		mkdirSync(worktreePath, { recursive: true });
@@ -262,14 +353,15 @@ export class MaintenanceGitModel {
 	}
 
 	private findRepo(path: string): RepoState | undefined {
+		const state = globalState();
 		const pathKey = key(path);
-		const exactRepo = this.repos.get(pathKey);
+		const exactRepo = state.repos.get(pathKey);
 		if (exactRepo) return exactRepo;
-		const directOwner = this.worktreeOwners.get(pathKey);
-		if (directOwner) return this.repos.get(directOwner);
+		const directOwner = state.worktreeOwners.get(pathKey);
+		if (directOwner) return state.repos.get(directOwner);
 
 		let best: { repo: RepoState; prefixLength: number } | undefined;
-		for (const [repoKey, repo] of this.repos) {
+		for (const [repoKey, repo] of state.repos) {
 			if (containsPath(repoKey, pathKey) && (!best || repoKey.length > best.prefixLength)) {
 				best = { repo, prefixLength: repoKey.length };
 			}
@@ -283,7 +375,7 @@ export class MaintenanceGitModel {
 	}
 
 	private requireRootRepo(path: string): RepoState {
-		const repo = this.repos.get(key(path));
+		const repo = globalState().repos.get(key(path));
 		if (!repo) throw new Error(`[maintenance-git-model] repository root is not registered: ${resolve(path)} (exists=${existsSync(path)})`);
 		return repo;
 	}

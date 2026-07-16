@@ -21,6 +21,46 @@ let maintenanceProjectId: string;
 let maintenanceProjectContext: any;
 export const maintenanceGit = new MaintenanceGitModel();
 
+type PersistenceInstallation = {
+	original: () => void;
+	replacement: () => void;
+	leases: Set<symbol>;
+};
+type MaintenanceHookGlobalState = {
+	persistenceInstallations: WeakMap<object, PersistenceInstallation>;
+};
+const MAINTENANCE_HOOK_STATE_KEY = Symbol.for("bobbit.tests2.maintenance-api-support.hooks");
+
+function maintenanceHookState(): MaintenanceHookGlobalState {
+	const scope = globalThis as typeof globalThis & { [MAINTENANCE_HOOK_STATE_KEY]?: MaintenanceHookGlobalState };
+	return scope[MAINTENANCE_HOOK_STATE_KEY] ??= { persistenceInstallations: new WeakMap() };
+}
+
+function suppressSessionStorePersistence(sessionStore: { saveNow?: () => void }): () => void {
+	if (typeof sessionStore.saveNow !== "function") return () => {};
+	const state = maintenanceHookState();
+	let installation = state.persistenceInstallations.get(sessionStore);
+	if (!installation) {
+		installation = { original: sessionStore.saveNow, replacement: () => {}, leases: new Set() };
+		state.persistenceInstallations.set(sessionStore, installation);
+	}
+	if (sessionStore.saveNow !== installation.replacement) {
+		installation.original = sessionStore.saveNow;
+		sessionStore.saveNow = installation.replacement;
+	}
+	const lease = Symbol("maintenance-session-store-persistence-lease");
+	installation.leases.add(lease);
+	let restored = false;
+	return () => {
+		if (restored) return;
+		restored = true;
+		installation!.leases.delete(lease);
+		if (installation!.leases.size > 0) return;
+		if (sessionStore.saveNow === installation!.replacement) sessionStore.saveNow = installation!.original;
+		if (state.persistenceInstallations.get(sessionStore) === installation) state.persistenceInstallations.delete(sessionStore);
+	};
+}
+
 /** Buffer every real HTTP response before returning it so fixture teardown cannot race an open body. */
 async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	const response = await gatewayApiFetch(path, opts);
@@ -47,11 +87,7 @@ export function registerMaintenanceHooks(): void {
 		if (!commandRunner) throw new Error("maintenance fixture requires the gateway command-runner seam");
 		restoreCommandRunner = maintenanceGit.install(commandRunner);
 		const sessionStore = maintenanceProjectContext.sessionStore as { saveNow?: () => void };
-		if (typeof sessionStore.saveNow === "function") {
-			const saveNow = sessionStore.saveNow;
-			sessionStore.saveNow = () => {};
-			restoreSessionStorePersistence = () => { sessionStore.saveNow = saveNow; };
-		}
+		restoreSessionStorePersistence = suppressSessionStorePersistence(sessionStore);
 	});
 
 	test.afterAll(() => {
