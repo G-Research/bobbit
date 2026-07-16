@@ -462,6 +462,15 @@
       }
     },
     {
+      "path": "tests2/core/test-map-execution.test.ts",
+      "reason": "Focused contract coverage that explicit runner, tier, project, and isolated-reason metadata matches physical test paths and the two approved Vitest E2E owners.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/pi-ai-browser-boundary.test.ts",
       "reason": "Pi 0.80 browser import boundary canary: src/app/pi-ai-lazy.ts must keep runtime streaming imports lazy/provider-specific and use only package-exported @earendil-works/pi-ai/providers/* subpaths, while preserving the no bare pi-ai runtime import invariant.",
       "execution": {
