@@ -6,50 +6,29 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { afterAll, beforeEach, describe, it } from "vitest";
+import { afterAll, describe, it as vitestIt, type TestContext } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { withEnv } from "../harness/with-env.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-session-recovery-agent-dir-"));
 const projectRoot = path.join(tmpRoot, "project");
 const tmpHome = path.join(tmpRoot, "home");
 const activeAgentDir = path.join(tmpRoot, "active-agent");
 const historicalAgentDir = path.join(tmpRoot, "historical-agent");
-const previousEnv = {
-	BOBBIT_AGENT_DIR: process.env.BOBBIT_AGENT_DIR,
-	BOBBIT_DIR: process.env.BOBBIT_DIR,
-	HOME: process.env.HOME,
-	USERPROFILE: process.env.USERPROFILE,
+const testEnv = {
+	BOBBIT_AGENT_DIR: activeAgentDir,
+	BOBBIT_DIR: path.join(tmpRoot, ".bobbit"),
+	HOME: tmpHome,
+	USERPROFILE: tmpHome,
 };
 
 const bobbitDirModule = await import("../../src/server/bobbit-dir.ts");
 const previousProjectRoot = bobbitDirModule.getProjectRoot();
 const { SessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
 const { formatAgentTimestamp, slugifyCwd } = await import("../../src/server/agent/agent-session-path.ts");
-
-// Re-assert the environment and startup-pinned agent-dir state before every
-// test. With isolate:false, sibling files reset the shared agent-dir singleton;
-// per-test setup makes this suite independent of collection and hook ordering.
-beforeEach(async () => {
-	fs.mkdirSync(projectRoot, { recursive: true });
-	fs.mkdirSync(tmpHome, { recursive: true });
-	fs.mkdirSync(sessionsRoot(activeAgentDir), { recursive: true });
-	fs.mkdirSync(sessionsRoot(historicalAgentDir), { recursive: true });
-	process.env.BOBBIT_AGENT_DIR = activeAgentDir;
-	process.env.BOBBIT_DIR = path.join(tmpRoot, ".bobbit");
-	process.env.HOME = tmpHome;
-	process.env.USERPROFILE = tmpHome;
-	bobbitDirModule.setProjectRoot(projectRoot);
-	bobbitDirModule.resetAgentDirStateForTests();
-	bobbitDirModule.initializeAgentDirRuntime({
-		env: process.env,
-		projectRoot,
-		stateDir: path.join(tmpRoot, ".bobbit", "state"),
-	});
-	await recordHistoryIfAvailable(historicalAgentDir);
-});
 
 const managers: any[] = [];
 
@@ -136,14 +115,40 @@ function samePath(actual: string | null, expected: string): void {
 	assert.equal(actual?.replace(/\\/g, "/"), expected.replace(/\\/g, "/"));
 }
 
+async function withAgentDirEnv(run: (context: TestContext) => void | Promise<void>, context: TestContext): Promise<void> {
+	// Reproduce a shared fork where another module resolved the host home before
+	// this test scopes HOME/USERPROFILE; the legacy-root assertions must still pass.
+	void os.homedir();
+	await withEnv(testEnv, async () => {
+		bobbitDirModule.setProjectRoot(projectRoot);
+		bobbitDirModule.resetAgentDirStateForTests();
+		try {
+			fs.mkdirSync(projectRoot, { recursive: true });
+			fs.mkdirSync(tmpHome, { recursive: true });
+			fs.mkdirSync(sessionsRoot(activeAgentDir), { recursive: true });
+			fs.mkdirSync(sessionsRoot(historicalAgentDir), { recursive: true });
+			bobbitDirModule.initializeAgentDirRuntime({
+				env: process.env,
+				projectRoot,
+				stateDir: path.join(tmpRoot, ".bobbit", "state"),
+			});
+			await recordHistoryIfAvailable(historicalAgentDir);
+			await run(context);
+		} finally {
+			while (managers.length > 0) cleanupManager(managers.pop());
+			bobbitDirModule.resetAgentDirStateForTests();
+			bobbitDirModule.setProjectRoot(previousProjectRoot);
+		}
+	});
+}
+
+// Keep literal `it(...)` declarations for the inventory audit while scoping
+// every test body to its own environment and singleton lifecycle.
+function it(name: string, run: (context: TestContext) => void | Promise<void>): void {
+	vitestIt(name, (context) => withAgentDirEnv(run, context));
+}
+
 afterAll(() => {
-	while (managers.length > 0) cleanupManager(managers.pop());
-	for (const [key, value] of Object.entries(previousEnv)) {
-		if (value === undefined) delete process.env[key];
-		else process.env[key] = value;
-	}
-	bobbitDirModule.setProjectRoot(previousProjectRoot);
-	bobbitDirModule.resetAgentDirStateForTests();
 	fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
