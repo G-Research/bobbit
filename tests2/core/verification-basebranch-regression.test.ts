@@ -2,15 +2,19 @@
 // Source: tests/verification-basebranch-regression.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { test } from "vitest";
+import { afterAll, beforeAll, test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { inspect } from "node:util";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
+import { installScopedMemoryFs } from "./helpers/scoped-memory-fs.ts";
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
+let restoreFs: (() => void) | undefined;
+beforeAll(() => { restoreFs = installScopedMemoryFs(); });
+afterAll(() => { restoreFs?.(); });
 
 function makeTempStateDir(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-basebranch-regression-"));
