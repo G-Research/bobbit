@@ -12,7 +12,6 @@ import { afterEach, beforeAll, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
@@ -71,15 +70,35 @@ afterEach(() => {
 	}
 });
 
-function makeCommittedRepo(label: string): string {
+function makeRepoMarker(label: string): string {
 	const repo = makeTmpDir(`hq-no-worktree-${label}-`);
-	execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
-	execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repo, stdio: "ignore" });
-	execFileSync("git", ["config", "user.name", "Test User"], { cwd: repo, stdio: "ignore" });
+	fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
 	fs.writeFileSync(path.join(repo, "README.md"), "# test\n", "utf-8");
-	execFileSync("git", ["add", "README.md"], { cwd: repo, stdio: "ignore" });
-	execFileSync("git", ["commit", "-m", "initial"], { cwd: repo, stdio: "ignore" });
 	return repo;
+}
+
+function makeGitRepoRunner(repo: string): { runner: any; commands: string[] } {
+	const commands: string[] = [];
+	return {
+		commands,
+		runner: {
+			execFile: async (command: string, args: readonly string[], options?: { cwd?: string }) => {
+				assert.equal(command, "git");
+				assert.equal(path.resolve(options?.cwd ?? ""), path.resolve(repo));
+				commands.push(args.join(" "));
+				if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+					return { stdout: "true\n", stderr: "" };
+				}
+				if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+					return { stdout: `${repo}\n`, stderr: "" };
+				}
+				if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "HEAD") {
+					return { stdout: "fake-head\n", stderr: "" };
+				}
+				throw new Error(`unexpected fake Git command: ${args.join(" ")}`);
+			},
+		},
+	};
 }
 
 function makeBridge(overrides: Record<string, any> = {}): any {
@@ -108,9 +127,10 @@ function makeBridge(overrides: Record<string, any> = {}): any {
 
 describe("Headquarters no-worktree runtime", () => {
 	it("forces Headquarters goals to ready no-worktree state even inside a git repo", async () => {
-		const repo = makeCommittedRepo("goal-hq");
+		const repo = makeRepoMarker("goal-hq");
+		const git = makeGitRepoRunner(repo);
 		const goalStore = new GoalStore(makeTmpDir("hq-goal-store-"));
-		const goalManager = new GoalManager(goalStore);
+		const goalManager = new GoalManager(goalStore, undefined, undefined, { commandRunner: git.runner });
 
 		const goal = await goalManager.createGoal("HQ requested worktree", repo, {
 			projectId: HEADQUARTERS_PROJECT_ID,
@@ -123,12 +143,14 @@ describe("Headquarters no-worktree runtime", () => {
 		assert.equal(goal.repoPath, undefined);
 		assert.equal(goal.branch, undefined);
 		assert.equal(goal.worktreePath, undefined);
+		assert.deepEqual(git.commands, [], "Headquarters goal creation must short-circuit before Git detection");
 	});
 
 	it("keeps normal project goal worktree preparation unchanged", async () => {
-		const repo = makeCommittedRepo("goal-normal");
+		const repo = makeRepoMarker("goal-normal");
+		const git = makeGitRepoRunner(repo);
 		const goalStore = new GoalStore(makeTmpDir("normal-goal-store-"));
-		const goalManager = new GoalManager(goalStore);
+		const goalManager = new GoalManager(goalStore, undefined, undefined, { commandRunner: git.runner });
 
 		const goal = await goalManager.createGoal("Normal requested worktree", repo, {
 			projectId: "normal-project",
@@ -140,27 +162,35 @@ describe("Headquarters no-worktree runtime", () => {
 		assert.equal(path.resolve(goal.repoPath ?? ""), path.resolve(repo));
 		assert.match(goal.branch ?? "", /^goal\//);
 		assert.ok(goal.worktreePath?.includes("-wt"));
+		assert.deepEqual(git.commands, [
+			"rev-parse --is-inside-work-tree",
+			"rev-parse --show-toplevel",
+			"rev-parse --verify HEAD",
+		]);
 	});
 
 	it("does not initialize a worktree pool for Headquarters", () => {
-		const repo = makeCommittedRepo("pool");
-		const manager: any = new SessionManager();
+		const repo = makeRepoMarker("pool");
+		const git = makeGitRepoRunner(repo);
+		const manager: any = new SessionManager({ commandRunner: git.runner });
 		managers.push(manager);
 
 		manager.initWorktreePoolForProject(HEADQUARTERS_PROJECT_ID, repo, undefined, 2);
 
 		assert.equal(manager.getWorktreePool(HEADQUARTERS_PROJECT_ID), null);
 		assert.equal(manager.getAllWorktreePools().has(HEADQUARTERS_PROJECT_ID), false);
+		assert.deepEqual(git.commands, [], "Headquarters pool initialization must short-circuit before Git detection");
 	});
 
 	it("ignores Headquarters session worktree and sandbox branch requests", async () => {
-		const repo = makeCommittedRepo("session");
+		const repo = makeRepoMarker("session");
+		const git = makeGitRepoRunner(repo);
 		let capturedOptions: any;
 		registerRpcBridgeFactory((options: any) => {
 			capturedOptions = options;
 			return makeBridge();
 		});
-		const manager: any = new SessionManager();
+		const manager: any = new SessionManager({ commandRunner: git.runner });
 		managers.push(manager);
 
 		const session = await manager.createSession(headquartersRoot, [], undefined, undefined, {
@@ -183,6 +213,7 @@ describe("Headquarters no-worktree runtime", () => {
 		assert.equal(session.repoPath, undefined);
 		assert.equal(session.worktreePushPolicy, undefined);
 		assert.equal(capturedOptions.cwd, headquartersRoot);
+		assert.deepEqual(git.commands, [], "Headquarters session creation must short-circuit before Git detection");
 	});
 
 	it("creates Headquarters staff without a worktree even when requested", async () => {
