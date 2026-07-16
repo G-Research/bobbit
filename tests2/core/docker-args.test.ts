@@ -6,15 +6,47 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import { buildDockerRunArgs } from "../../src/server/agent/docker-args.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
+import {
+	initializeAgentDirState,
+	resetAgentDirStateForTests,
+	setProjectRoot,
+} from "../../src/server/bobbit-dir.ts";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+
+const FIXTURE_ROOT = path.resolve("/memfs/docker-args");
+let fixtureSequence = 0;
+let restoreFs: () => void;
+
+beforeAll(() => {
+	const scoped = installScopedMemFs([
+		"chmodSync", "existsSync", "mkdirSync", "readFileSync", "renameSync", "rmSync",
+		"statSync", "symlinkSync", "writeFileSync",
+	]);
+	restoreFs = scoped.restore;
+	process.env.BOBBIT_DIR = path.join(FIXTURE_ROOT, "headquarters");
+	process.env.BOBBIT_SECRETS_DIR = path.join(FIXTURE_ROOT, "secrets");
+	process.env.BOBBIT_AGENT_DIR = path.join(FIXTURE_ROOT, "agent");
+	delete process.env.PI_CODING_AGENT_DIR;
+	resetAgentDirStateForTests();
+	setProjectRoot(path.join(FIXTURE_ROOT, "project"));
+	initializeAgentDirState({ env: process.env, projectRoot: path.join(FIXTURE_ROOT, "project") });
+});
+
+afterAll(() => restoreFs());
+
+function fixtureDir(label: string): string {
+	const dir = path.join(FIXTURE_ROOT, `${label}-${fixtureSequence++}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
 
 const NOOP_COMMAND_RUNNER: CommandRunner = {
 	async execFile() { return { stdout: "", stderr: "" }; },
@@ -107,7 +139,7 @@ describe("buildDockerRunArgs", () => {
 	});
 
 	it("mounts the google-code-assist state subdir so sandboxed agents can load the provider extension", () => {
-		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-gca-"));
+		const stateDir = fixtureDir("gca");
 		try {
 			const args = buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test",
@@ -133,7 +165,7 @@ describe("buildDockerRunArgs", () => {
 	});
 
 	it("mounts generated extension state subdirs READ-ONLY so a compromised sandbox cannot tamper with reused source", () => {
-		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-generated-ext-ro-"));
+		const stateDir = fixtureDir("generated-ext-ro");
 		try {
 			const args = buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test",
@@ -165,7 +197,7 @@ describe("buildDockerRunArgs", () => {
 
 	it("mounts config tools, builtin tools, and builtin first-party pack roots read-only", () => {
 		const previousBuiltinPacksDir = process.env.BOBBIT_BUILTIN_PACKS_DIR;
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-pack-mounts-"));
+		const root = fixtureDir("pack-mounts");
 		const builtinToolsDir = path.join(root, "defaults", "tools");
 		const builtinPacksDir = path.join(root, "builtin-packs", "market-packs");
 		fs.mkdirSync(builtinToolsDir, { recursive: true });
@@ -187,7 +219,7 @@ describe("buildDockerRunArgs", () => {
 	});
 
 	it("mounts the configured active agent sessions and models but never host auth.json", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-agent-dir-"));
+		const root = fixtureDir("agent-dir");
 		const agentDir = path.join(root, "active-agent");
 		const stateDir = path.join(root, "state");
 		fs.mkdirSync(agentDir, { recursive: true });
@@ -244,7 +276,7 @@ describe("buildDockerRunArgs", () => {
 	});
 
 	it("mounts a sanitized remote-less clone source without exposing project-local agent auth", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-clone-source-"));
+		const root = fixtureDir("clone-source");
 		const projectDir = path.join(root, "project");
 		const stateDir = path.join(projectDir, ".bobbit", "state");
 		const agentDir = path.join(projectDir, ".bobbit", "agent");
@@ -314,13 +346,7 @@ describe("buildDockerRunArgs", () => {
 });
 
 async function configureAgentDirForDockerTest(agentDir: string, projectRoot: string): Promise<void> {
-	const mod = await import("../../src/server/bobbit-dir.ts") as Record<string, any>;
-	const reset = mod.resetAgentDirStateForTests || mod.resetAgentDirRuntimeForTests;
-	if (typeof reset === "function") reset();
-	if (typeof mod.setProjectRoot === "function") mod.setProjectRoot(projectRoot);
-	if (typeof mod.initializeAgentDirState === "function") {
-		mod.initializeAgentDirState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
-	} else if (typeof mod.initializeAgentDirRuntimeState === "function") {
-		mod.initializeAgentDirRuntimeState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
-	}
+	resetAgentDirStateForTests();
+	setProjectRoot(projectRoot);
+	initializeAgentDirState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
 }
