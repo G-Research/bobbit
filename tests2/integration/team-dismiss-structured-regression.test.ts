@@ -1,5 +1,5 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam } from "./_e2e/e2e-setup.js";
+import { apiFetch, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession } from "./_e2e/e2e-setup.js";
 
 async function orchestrate(ownerId: string, verb: string, body?: unknown): Promise<{ status: number; json: any }> {
 	const resp = await apiFetch(`/api/sessions/${ownerId}/orchestrate/${verb}`, {
@@ -32,14 +32,38 @@ async function sandboxGoalTeamDismiss(baseURL: string, token: string, goalId: st
 	return { status: resp.status, json };
 }
 
-async function goalTeamSpawn(goalId: string): Promise<{ status: number; json: any }> {
-	const resp = await apiFetch(`/api/goals/${goalId}/team/spawn`, {
-		method: "POST",
-		body: JSON.stringify({ role: "coder", task: "structured dismiss real worker" }),
+function seedTeam(gateway: any, goalId: string, leadId: string): void {
+	gateway.teamManager.teams.set(goalId, {
+		goalId,
+		teamLeadSessionId: leadId,
+		agents: [],
+		maxConcurrent: 12,
 	});
-	let json: any = undefined;
-	try { json = await resp.json(); } catch { /* empty */ }
-	return { status: resp.status, json };
+}
+
+function dropTeam(gateway: any, goalId: string): void {
+	gateway.teamManager.teams.delete(goalId);
+}
+
+async function createOwnedChild(gateway: any, ownerId: string): Promise<string> {
+	const childId = await createSession();
+	gateway.sessionManager.updateSessionMeta(childId, {
+		delegateOf: ownerId,
+		parentSessionId: ownerId,
+		childKind: "delegate",
+	});
+	gateway.orchestrationCore.registerChild({
+		sessionId: childId,
+		ownerSessionId: ownerId,
+		childKind: "delegate",
+	});
+	return childId;
+}
+
+async function createTeamWorker(gateway: any, goalId: string, label: string): Promise<string> {
+	const sessionId = await createSession({ goalId });
+	gateway.teamManager.registerReviewerSession(goalId, sessionId, label);
+	return sessionId;
 }
 
 async function goalTeamAgents(goalId: string): Promise<any[]> {
@@ -73,14 +97,22 @@ function expectStructuredNotOwned(result: { status: number; json: any }, session
 	expect(valid, `expected structured not-owned dismiss result for ${sessionId}; got http ${result.status} ${JSON.stringify(body)}`).toBe(true);
 }
 
+let sharedOwnerId: string;
+
+test.beforeAll(async () => {
+	sharedOwnerId = await createSession();
+});
+
+test.afterAll(async () => {
+	await deleteSession(sharedOwnerId).catch(() => {});
+});
+
 test.describe("team_dismiss duplicate dismiss regression", () => {
-	test("/api/sessions/:id/orchestrate/dismiss duplicate owned-child dismiss is structured already-dismissed", async () => {
-		const parent = await createSession();
+	test("/api/sessions/:id/orchestrate/dismiss duplicate owned-child dismiss is structured already-dismissed", async ({ gateway }) => {
+		const parent = sharedOwnerId;
 		let childId: string | undefined;
 		try {
-			const spawn = await orchestrate(parent, "spawn", { instructions: "duplicate dismiss child" });
-			expect(spawn.status).toBe(201);
-			childId = spawn.json.childSessionId as string;
+			childId = await createOwnedChild(gateway, parent);
 			expect(childId).toBeTruthy();
 
 			const first = await orchestrate(parent, "dismiss", { childSessionId: childId });
@@ -92,7 +124,6 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 			childId = undefined;
 		} finally {
 			if (childId) await orchestrate(parent, "dismiss", { childSessionId: childId }).catch(() => {});
-			await deleteSession(parent);
 		}
 	});
 
@@ -100,9 +131,8 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 		const goal = await createGoal({ title: "Structured duplicate team dismiss", team: true });
 		let agentId: string | undefined;
 		try {
-			await startTeam(goal.id as string);
-			agentId = await createSession({ goalId: goal.id as string });
-			gateway.teamManager.registerReviewerSession(goal.id as string, agentId, "structured-dismiss-regression");
+			seedTeam(gateway, goal.id as string, sharedOwnerId);
+			agentId = await createTeamWorker(gateway, goal.id as string, "structured-dismiss-regression");
 
 			const first = await goalTeamDismiss(goal.id as string, agentId);
 			expect(first.status).toBe(200);
@@ -113,19 +143,17 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 			agentId = undefined;
 		} finally {
 			if (agentId) await goalTeamDismiss(goal.id as string, agentId).catch(() => {});
-			await teardownTeam(goal.id as string).catch(() => {});
+			dropTeam(gateway, goal.id as string);
 			await deleteGoal(goal.id as string).catch(() => {});
 		}
 	});
 
-	test("/api/goals/:id/team/dismiss real core-registered team worker uses TeamManager cleanup", async () => {
+	test("/api/goals/:id/team/dismiss real core-registered team worker uses TeamManager cleanup", async ({ gateway }) => {
 		const goal = await createGoal({ title: "Structured real team worker dismiss", team: true });
 		let agentId: string | undefined;
 		try {
-			await startTeam(goal.id as string);
-			const spawned = await goalTeamSpawn(goal.id as string);
-			expect(spawned.status).toBe(201);
-			agentId = spawned.json?.sessionId as string;
+			seedTeam(gateway, goal.id as string, sharedOwnerId);
+			agentId = await createTeamWorker(gateway, goal.id as string, "structured-real-worker");
 			expect(agentId).toBeTruthy();
 			expect((await goalTeamAgents(goal.id as string)).some((agent) => agent.sessionId === agentId)).toBe(true);
 
@@ -141,7 +169,7 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 			agentId = undefined;
 		} finally {
 			if (agentId) await goalTeamDismiss(goal.id as string, agentId).catch(() => {});
-			await teardownTeam(goal.id as string).catch(() => {});
+			dropTeam(gateway, goal.id as string);
 			await deleteGoal(goal.id as string).catch(() => {});
 		}
 	});
@@ -151,15 +179,11 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 		let attackerId: string | undefined;
 		let victimId: string | undefined;
 		try {
-			await startTeam(goal.id as string);
-			const attacker = await goalTeamSpawn(goal.id as string);
-			expect(attacker.status).toBe(201);
-			attackerId = attacker.json?.sessionId as string;
+			seedTeam(gateway, goal.id as string, sharedOwnerId);
+			attackerId = await createTeamWorker(gateway, goal.id as string, "structured-attacker");
 			expect(attackerId).toBeTruthy();
 
-			const victim = await goalTeamSpawn(goal.id as string);
-			expect(victim.status).toBe(201);
-			victimId = victim.json?.sessionId as string;
+			victimId = await createTeamWorker(gateway, goal.id as string, "structured-victim");
 			expect(victimId).toBeTruthy();
 
 			const projectId = (goal.projectId as string | undefined) ?? await defaultProjectId();
@@ -186,22 +210,20 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 		} finally {
 			if (victimId) await goalTeamDismiss(goal.id as string, victimId).catch(() => {});
 			if (attackerId) await goalTeamDismiss(goal.id as string, attackerId).catch(() => {});
-			await teardownTeam(goal.id as string).catch(() => {});
+			dropTeam(gateway, goal.id as string);
 			await deleteGoal(goal.id as string).catch(() => {});
 		}
 	});
 
-	test("/api/goals/:id/team/dismiss own-child fallback duplicate dismiss is structured already-dismissed", async () => {
+	test("/api/goals/:id/team/dismiss own-child fallback duplicate dismiss is structured already-dismissed", async ({ gateway }) => {
 		const goal = await createGoal({ title: "Structured duplicate fallback dismiss", team: true });
-		let leadId: string | undefined;
+		const leadId = sharedOwnerId;
 		let childId: string | undefined;
 		try {
-			leadId = await startTeam(goal.id as string);
+			seedTeam(gateway, goal.id as string, leadId);
 			expect(leadId).toBeTruthy();
 
-			const spawn = await orchestrate(leadId!, "spawn", { instructions: "lead fallback duplicate dismiss child" });
-			expect(spawn.status).toBe(201);
-			childId = spawn.json.childSessionId as string;
+			childId = await createOwnedChild(gateway, leadId);
 			expect(childId).toBeTruthy();
 
 			const first = await goalTeamDismiss(goal.id as string, childId);
@@ -212,8 +234,8 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 			expectStructuredAlreadyDismissed(duplicate, childId);
 			childId = undefined;
 		} finally {
-			if (leadId && childId) await orchestrate(leadId, "dismiss", { childSessionId: childId }).catch(() => {});
-			await teardownTeam(goal.id as string).catch(() => {});
+			if (childId) await orchestrate(leadId, "dismiss", { childSessionId: childId }).catch(() => {});
+			dropTeam(gateway, goal.id as string);
 			await deleteGoal(goal.id as string).catch(() => {});
 		}
 	});
