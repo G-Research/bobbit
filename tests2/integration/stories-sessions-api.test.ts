@@ -5,24 +5,35 @@
  * assertions do not need a spawned browser gateway.
  */
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	connectWs,
 	harnessDefaultProjectRoot,
 } from "./_e2e/e2e-setup.js";
-import { resolve } from "node:path";
 import { installCommandRunnerInterceptor, installMethodInterceptor } from "./helpers/command-runner-dispatcher.js";
 
-async function withWorktreeDecisionSeam<T>(gateway: any, repoRoot: string, run: (capture: { cwd?: string; options?: any }) => Promise<T>): Promise<T> {
+function canonicalPath(value: string): string {
+	try { return realpathSync(value); } catch { return resolve(value); }
+}
+
+async function withWorktreeDecisionSeam<T>(
+	gateway: any,
+	repoRoot: string,
+	projectId: string,
+	run: (capture: { cwd?: string; options?: any }) => Promise<T>,
+): Promise<T> {
 	const sessionManager = gateway.sessionManager;
-	const expectedRoot = resolve(repoRoot);
+	const expectedRoot = canonicalPath(repoRoot);
 	const capture: { cwd?: string; options?: any } = {};
 	const releaseRunner = installCommandRunnerInterceptor(sessionManager.commandRunner, {
 		label: `stories-worktree-git:${expectedRoot}`,
 		async execFile(command, args, options, next) {
-			const cwd = typeof options?.cwd === "string" ? resolve(options.cwd) : resolve(process.cwd());
-			if (cwd !== expectedRoot || !/^(?:git|git\.exe)$/i.test(command)) return next();
+			const cwd = canonicalPath(typeof options?.cwd === "string" ? options.cwd : process.cwd());
+			const executable = basename(command).replace(/\.exe$/i, "").toLowerCase();
+			if (cwd !== expectedRoot || executable !== "git") return next();
 			if (args.join(" ") === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
 			if (args.join(" ") === "rev-parse --show-toplevel") return { stdout: `${repoRoot}\n`, stderr: "" };
 			if (args.join(" ") === "rev-parse --verify HEAD") return { stdout: `${"d".repeat(40)}\n`, stderr: "" };
@@ -31,11 +42,15 @@ async function withWorktreeDecisionSeam<T>(gateway: any, repoRoot: string, run: 
 	});
 	const releaseCreate = installMethodInterceptor(sessionManager, "createSession", `stories-worktree-create:${expectedRoot}`, async (args, next) => {
 		const [cwd, , , , rawOptions] = args;
-		if (typeof cwd !== "string" || resolve(cwd) !== expectedRoot) return next(...args);
 		const options = rawOptions as { projectId?: string } | undefined;
+		if (
+			typeof cwd !== "string"
+			|| canonicalPath(cwd) !== expectedRoot
+			|| options?.projectId !== projectId
+		) return next(...args);
 		capture.cwd = cwd;
 		capture.options = options;
-		return { id: "session-worktree-decision", cwd, status: "preparing", projectId: options?.projectId };
+		return { id: "session-worktree-decision", cwd, status: "preparing", projectId: options.projectId };
 	});
 	try {
 		return await run(capture);
@@ -95,7 +110,7 @@ test.describe("Session story API invariants", () => {
 	test("S-08: session in a detected repository selects worktree provisioning", async ({ gateway }) => {
 		const repoRoot = harnessDefaultProjectRoot();
 		const projectId = gateway.defaultProjectId;
-		await withWorktreeDecisionSeam(gateway, repoRoot, async (capture) => {
+		await withWorktreeDecisionSeam(gateway, repoRoot, projectId, async (capture) => {
 			const resp = await apiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ cwd: repoRoot, projectId, worktree: true }),
