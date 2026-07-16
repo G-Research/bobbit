@@ -267,3 +267,31 @@ Transform plus import consumed 128.63s. This is 15.43% of the 833.80s summed pha
 One file exceeded the 15s tier-1 budget: `headquarters-server-scope-guards` completed in 17.636s.
 
 The main maintenance suite, archived cleanup and guard suites, and all failures from earlier attempts passed. Only the final maintenance owner facades and sidebar dispatcher scope remain; fixes have been launched.
+
+## Solo attempt 8
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 8 | One Vitest process / 3 workers | 264.24s | **FAIL** | `.profiles/testing-v2/fast-gate-run8.log` | 2 failed files, 888 passed, 4 skipped; 1 failed test, 7,579 passed, 22 skipped |
+
+The run remained below the 300s wall-time target, but failed these files:
+
+- `plan-archived-children` — suite module load failed with `window is not defined` from the UI prebundle in the Node environment.
+- `stories-sessions` — S-08 failed because `worktreeOpts` was undefined.
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 7.00s |
+| Setup | 62.89s |
+| Import | 87.54s |
+| Tests | 489.26s |
+| Environment | 86.05s |
+| **Summed** | **732.74s** |
+
+Transform plus import consumed 94.54s of the 732.74s summed phase time (12.90%), below the 15% target.
+
+One file exceeded the 15s tier-1 budget: `bg-process-persistence` completed in 18.320s.
+
+All maintenance, sidebar, and prior order failures passed. Fixes for the two failures and the budget breach have been launched.
