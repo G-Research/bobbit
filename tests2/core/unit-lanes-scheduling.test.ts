@@ -17,12 +17,18 @@ type ProjectConfig = {
 		retry: number;
 		include: string[];
 		setupFiles?: string[];
+		experimental: {
+			fsModuleCache: boolean;
+			fsModuleCachePath: string;
+		};
 	};
 };
 
 type LoadedConfig = {
 	FIXED_UNIT_WORKERS: number;
+	VITEST_MODULE_CACHE_ROOT: string;
 	resolveMaxWorkers: (env?: NodeJS.ProcessEnv) => number;
+	resolveVitestModuleCachePath: (pid?: number) => string;
 	default: { test: { projects: ProjectConfig[] } };
 };
 
@@ -181,6 +187,19 @@ describe("direct unit-stage scheduling", () => {
 				`invalid worker request ${JSON.stringify(invalid)} must retain the fixed cap`,
 			);
 		}
+	});
+
+	it("uses one process-scoped transform cache across this run's projects and forks", () => {
+		const thisProcessCache = normal.resolveVitestModuleCachePath(process.pid);
+		const anotherProcessCache = normal.resolveVitestModuleCachePath(process.pid + 1);
+		assert.notEqual(thisProcessCache, anotherProcessCache, "simultaneous Vitest parents must never share writable cache files");
+		assert.equal(dirname(thisProcessCache), normal.VITEST_MODULE_CACHE_ROOT);
+		assert.match(thisProcessCache.replaceAll("\\", "/"), /\/process-\d+$/);
+		assert.deepEqual(
+			projects(normal).map(({ experimental }) => experimental),
+			Array.from({ length: 4 }, () => ({ fsModuleCache: true, fsModuleCachePath: thisProcessCache })),
+			"every project and its worker forks must reuse the parent process namespace",
+		);
 	});
 
 	it("keeps retry three across exactly four normal projects", () => {

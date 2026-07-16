@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { defineConfig } from "vitest/config";
 import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
@@ -13,7 +14,20 @@ export function resolveMaxWorkers(env: NodeJS.ProcessEnv = process.env): number 
 		: FIXED_UNIT_WORKERS;
 }
 
+export const VITEST_MODULE_CACHE_ROOT = join(".profiles", "testing-v2", "vitest-module-cache");
+
+/**
+ * One Vitest parent owns one cache namespace. Its projects and worker forks
+ * share transformed modules, while simultaneous Vitest parents never race on
+ * the same metadata, temporary files, or atomic-rename destinations.
+ */
+export function resolveVitestModuleCachePath(pid: number = process.pid): string {
+	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`invalid Vitest process id: ${pid}`);
+	return join(VITEST_MODULE_CACHE_ROOT, `process-${pid}`);
+}
+
 const MAX_WORKERS = resolveMaxWorkers();
+const MODULE_CACHE_PATH = resolveVitestModuleCachePath();
 const execution = loadVitestExecutionMap();
 const shared = {
 	pool: "forks" as const,
@@ -27,12 +41,12 @@ const shared = {
 	teardownTimeout: 30_000,
 	// Vitest's cache key covers source, project environment, transform plugins,
 	// config dependencies, lockfile state, NODE_ENV, and coverage instrumentation.
-	// It stores transformed code only (never evaluated module state), so isolated
-	// DOM/env suites keep fresh globals while repeated and concurrent runs avoid
-	// paying the TypeScript transform tax. Cache publication is atomic.
+	// It stores transformed code only (never evaluated module state). All projects
+	// and forks in this run share the process namespace; other Vitest processes use
+	// separate namespaces so their cache writes cannot contend or replace ours.
 	experimental: {
 		fsModuleCache: true,
-		fsModuleCachePath: ".profiles/testing-v2/vitest-module-cache",
+		fsModuleCachePath: MODULE_CACHE_PATH,
 	},
 };
 const tier1SetupFiles = ["tests2/harness/tier1-spawn-guard.ts"];
@@ -59,7 +73,7 @@ const prebundlePlugins = (options: { webEntries?: boolean } = {}) => [
 console.log(
 	`[vitest.config] maxWorkers=${MAX_WORKERS} (fixed cap ${FIXED_UNIT_WORKERS}${
 		process.env.VITEST_MAX_WORKERS ? "; lowered by VITEST_MAX_WORKERS when valid" : ""
-	})`,
+	}); moduleCache=${MODULE_CACHE_PATH}`,
 );
 
 export default defineConfig({
