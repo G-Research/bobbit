@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import { apiFetch, createSession, registerProject } from "./_e2e/e2e-setup.js";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 
 type GitFixtureRefs = {
 	cwd: string;
@@ -13,11 +14,6 @@ type GitFixtureRefs = {
 	sessionId: string;
 	baseSha: string;
 	headSha: string;
-};
-
-type CommandRunnerState = {
-	execFile: (...args: any[]) => any;
-	spawn: (...args: any[]) => any;
 };
 
 const BASE_SHA = "a".repeat(40);
@@ -40,45 +36,49 @@ const LOCAL_DIFF = [
 	"",
 ].join("\n");
 
-function installFakeGitAndGhProbes(gateway: any): () => void {
-	const runner = gateway.sessionManager.commandRunner as CommandRunnerState;
-	const original = { execFile: runner.execFile, spawn: runner.spawn };
-	runner.execFile = async (command: string, args: readonly string[]) => {
-		if (command === "gh") throw new Error("[pr-walkthrough-api] gh unavailable in tier-1");
-		if (command !== "git") throw new Error(`[pr-walkthrough-api] ${command} unavailable in tier-1`);
-		if (args[0] === "rev-parse" && args.includes("--verify")) {
-			const requested = args.join(" ");
-			if (requested.includes(BASE_SHA)) return { stdout: `${BASE_SHA}\n`, stderr: "" };
-			if (requested.includes(HEAD_SHA)) return { stdout: `${HEAD_SHA}\n`, stderr: "" };
-		}
-		if (args.includes("--shortstat")) return { stdout: " 2 files changed, 2 insertions(+)\n", stderr: "" };
-		if (args.includes("--name-status")) return { stdout: "M\tREADME.md\nA\tsrc/feature.ts\n", stderr: "" };
-		if (args[0] === "diff") return { stdout: LOCAL_DIFF, stderr: "" };
-		throw new Error(`unexpected fake git command: ${args.join(" ")}`);
-	};
-	runner.spawn = (command: string, args: readonly string[]) => {
-		if (command !== "git" || args[0] !== "diff") throw new Error(`unexpected fake spawn: ${command} ${args.join(" ")}`);
-		const child = new EventEmitter() as any;
-		child.stdout = new PassThrough();
-		child.stderr = new PassThrough();
-		child.kill = () => true;
-		queueMicrotask(() => {
-			child.stdout.end(Buffer.from(LOCAL_DIFF));
-			child.stderr.end();
-			child.emit("close", 0, null);
-		});
-		return child;
-	};
-	return () => {
-		runner.execFile = original.execFile;
-		runner.spawn = original.spawn;
-	};
+function installFakeGitAndGhProbes(gateway: any, fixtureCwd: string): () => void {
+	const expectedCwd = resolve(fixtureCwd);
+	const owns = (cwd: unknown): boolean => typeof cwd === "string" && resolve(cwd) === expectedCwd;
+	return installCommandRunnerInterceptor(gateway.sessionManager.commandRunner, {
+		label: `pr-walkthrough:${expectedCwd}`,
+		async execFile(command, args, options, next) {
+			if (!owns(options?.cwd)) return next();
+			if (command === "gh") throw new Error("[pr-walkthrough-api] gh unavailable in tier-1");
+			if (command !== "git") return next();
+			if (args[0] === "rev-parse" && args.includes("--verify")) {
+				const requested = args.join(" ");
+				if (requested.includes(BASE_SHA)) return { stdout: `${BASE_SHA}\n`, stderr: "" };
+				if (requested.includes(HEAD_SHA)) return { stdout: `${HEAD_SHA}\n`, stderr: "" };
+			}
+			if (args.includes("--shortstat")) return { stdout: " 2 files changed, 2 insertions(+)\n", stderr: "" };
+			if (args.includes("--name-status")) return { stdout: "M\tREADME.md\nA\tsrc/feature.ts\n", stderr: "" };
+			if (args[0] === "diff") return { stdout: LOCAL_DIFF, stderr: "" };
+			throw new Error(`unexpected fake git command: ${args.join(" ")}`);
+		},
+		spawn(command, args, options, next) {
+			if (!owns(options?.cwd)) return next();
+			if (command !== "git" || args[0] !== "diff") throw new Error(`unexpected fake spawn: ${command} ${args.join(" ")}`);
+			const child = new EventEmitter() as any;
+			child.stdout = new PassThrough();
+			child.stderr = new PassThrough();
+			child.kill = () => true;
+			queueMicrotask(() => {
+				child.stdout.end(Buffer.from(LOCAL_DIFF));
+				child.stderr.end();
+				child.emit("close", 0, null);
+			});
+			return child;
+		},
+	});
 }
 
-async function createLocalFixture(gateway: any): Promise<GitFixtureRefs> {
+async function createLocalFixture(gateway: any, onCwdReady: (cwd: string) => void): Promise<GitFixtureRefs> {
 	const root = join(gateway.bobbitDir, "pr-walkthrough-api", `${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	const cwd = join(root, "repo");
-	mkdirSync(cwd, { recursive: true });
+	// The fenced command boundary validates repository structure before any
+	// delegated discovery. Keep the fixture truthful even though refs are canned.
+	mkdirSync(join(cwd, ".git"), { recursive: true });
+	onCwdReady(cwd);
 	const project = await registerProject({
 		name: `pr-walkthrough-api-${Math.random().toString(36).slice(2)}`,
 		rootPath: root,
@@ -131,11 +131,12 @@ test.describe("PR walkthrough REST API", () => {
 	let restoreCommandRunner: (() => void) | undefined;
 
 	test.beforeEach(async ({ gateway }) => {
-		restoreCommandRunner = installFakeGitAndGhProbes(gateway);
 		try {
-			fixture = await createLocalFixture(gateway);
+			fixture = await createLocalFixture(gateway, cwd => {
+				restoreCommandRunner = installFakeGitAndGhProbes(gateway, cwd);
+			});
 		} catch (error) {
-			restoreCommandRunner();
+			restoreCommandRunner?.();
 			restoreCommandRunner = undefined;
 			throw error;
 		}

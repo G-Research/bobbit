@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, normalize, resolve } from "node:path";
-import type { CommandRunner, ExecFileOptions, ExecFileResult } from "../../../src/server/gateway-deps.js";
+import type { CommandRunner } from "../../../src/server/gateway-deps.js";
+import { installCommandRunnerInterceptor } from "./command-runner-dispatcher.js";
 
 type RepoState = {
 	root: string;
@@ -11,17 +12,11 @@ type RepoState = {
 
 type RunnerRestore = () => void;
 type DeferredPath = { path: string; owner: symbol };
-type RunnerInstallation = {
-	originalExecFile: CommandRunner["execFile"];
-	wrapper: CommandRunner["execFile"];
-	owners: Set<symbol>;
-};
 type MaintenanceGitGlobalState = {
 	repos: Map<string, RepoState>;
 	worktreeOwners: Map<string, string>;
 	deferredPaths: Map<string, DeferredPath[]>;
 	deferredSequence: number;
-	runnerInstallations: WeakMap<CommandRunner, RunnerInstallation>;
 	modelInstallCounts: Map<symbol, number>;
 };
 
@@ -34,7 +29,6 @@ function globalState(): MaintenanceGitGlobalState {
 		worktreeOwners: new Map(),
 		deferredPaths: new Map(),
 		deferredSequence: 0,
-		runnerInstallations: new WeakMap(),
 		modelInstallCounts: new Map(),
 	};
 }
@@ -269,44 +263,28 @@ export class MaintenanceGitModel {
 
 	install(runner: CommandRunner): RunnerRestore {
 		const state = globalState();
-		let installation = state.runnerInstallations.get(runner);
-		if (!installation) {
-			installation = {
-				originalExecFile: runner.execFile,
-				wrapper: undefined as unknown as CommandRunner["execFile"],
-				owners: new Set(),
-			};
-			installation.wrapper = async (file: string, args: readonly string[], options?: ExecFileOptions): Promise<ExecFileResult> => {
-				if (basename(file).replace(/\.exe$/i, "").toLowerCase() !== "git") {
-					return installation!.originalExecFile.call(runner, file, args, options);
-				}
-				const cwd = typeof options?.cwd === "string" ? options.cwd : process.cwd();
-				return { stdout: this.run(cwd, args), stderr: "" };
-			};
-			state.runnerInstallations.set(runner, installation);
-		}
-		if (runner.execFile !== installation.wrapper) {
-			// Install against the runner object retained by createGateway. If a
-			// neighbouring file temporarily wrapped it, preserve that layer as the
-			// fallback instead of restoring an obsolete function later.
-			installation.originalExecFile = runner.execFile;
-			runner.execFile = installation.wrapper;
-		}
-		const lease = Symbol("maintenance-git-runner-lease");
-		installation.owners.add(lease);
 		state.modelInstallCounts.set(this.owner, (state.modelInstallCounts.get(this.owner) ?? 0) + 1);
+		const model = this;
+		const restoreDispatcher = installCommandRunnerInterceptor(runner, {
+			label: "maintenance-git-model",
+			async execFile(file, args, options, next) {
+				if (basename(file).replace(/\.exe$/i, "").toLowerCase() !== "git") return next();
+				const cwd = typeof options?.cwd === "string" ? options.cwd : process.cwd();
+				// Multiple integration files can share this gateway runner. Claim only
+				// paths registered by this facade; every other owner's command flows on.
+				if (!model.findRepo(resolve(cwd))) return next();
+				return { stdout: model.run(cwd, args), stderr: "" };
+			},
+		});
 
 		let restored = false;
 		return () => {
 			if (restored) return;
 			restored = true;
-			installation!.owners.delete(lease);
+			restoreDispatcher();
 			const remaining = (state.modelInstallCounts.get(this.owner) ?? 1) - 1;
 			if (remaining > 0) state.modelInstallCounts.set(this.owner, remaining);
 			else state.modelInstallCounts.delete(this.owner);
-			if (installation!.owners.size > 0) return;
-			if (runner.execFile === installation!.wrapper) runner.execFile = installation!.originalExecFile;
-			if (state.runnerInstallations.get(runner) === installation) state.runnerInstallations.delete(runner);
 		};
 	}
 

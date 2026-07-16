@@ -2,8 +2,10 @@
 // boot, regardless of which of these integration files Vitest imports first.
 import { resetAndInstallFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
 
+import { resolve } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 
 const DO_NOT_POLL_PATTERN = /Verification is running asynchronously|Do not poll|gate_status|gate_inspect|Go idle|wait for the server/i;
 
@@ -63,19 +65,21 @@ async function waitForGoalSetupReady(goalId: string): Promise<any> {
 	throw new Error(`goal ${goalId} setup did not become ready within 100 event-loop turns`);
 }
 
-function fakeGateCommitSha(gateway: any, sha = "0123456789abcdef0123456789abcdef01234567"): () => void {
+function fakeGateCommitSha(gateway: any, cwd: string, sha = "0123456789abcdef0123456789abcdef01234567"): () => void {
 	// createGateway installs one CommandRunner object process-wide; TeamManager
-	// retains that same DI object. Script only the route's read-only commit probe
-	// so cache coverage needs neither a git subprocess nor a repository fixture.
-	const runner = gateway.teamManager.commandRunner;
-	const original = runner.execFile;
-	runner.execFile = async function (file: string, args: readonly string[], options?: unknown) {
-		if (/^(?:git|git\.exe)$/i.test(file) && args.length === 2 && args[0] === "rev-parse" && args[1] === "HEAD") {
-			return { stdout: sha, stderr: "" };
-		}
-		return original.call(this, file, args, options);
-	};
-	return () => { runner.execFile = original; };
+	// and the gate route retain that exact DI object. The owner-scoped dispatcher
+	// prevents a neighboring Git suite's teardown from restoring over this probe.
+	const expectedCwd = resolve(cwd);
+	return installCommandRunnerInterceptor(gateway.teamManager.commandRunner, {
+		label: `gate-commit:${expectedCwd}`,
+		async execFile(file, args, options, next) {
+			const commandCwd = typeof options?.cwd === "string" ? resolve(options.cwd) : resolve(process.cwd());
+			if (/^(?:git|git\.exe)$/i.test(file) && commandCwd === expectedCwd && args.length === 2 && args[0] === "rev-parse" && args[1] === "HEAD") {
+				return { stdout: sha, stderr: "" };
+			}
+			return next();
+		},
+	});
 }
 
 function expectUiSignalShapePreserved(body: any, expected: { goalId: string; gateId: string; status: string; stepNames: string[] }): void {
@@ -145,9 +149,11 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		]);
 
 		const commitSha = "0123456789abcdef0123456789abcdef01234567";
-		const restoreCommitSha = fakeGateCommitSha(gateway, commitSha);
 		const goal = await createGoal({ title: `Gate Signal Reminder Cache ${Date.now()}`, workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
+		const gateCwd = goal.worktreePath ?? goal.cwd;
+		if (typeof gateCwd !== "string") throw new Error(`cached gate fixture has no cwd: ${JSON.stringify(goal)}`);
+		const restoreCommitSha = fakeGateCommitSha(gateway, gateCwd, commitSha);
 		try {
 			await waitForGoalSetupReady(goalId);
 			const firstBody = await signalGate(goalId, "cached-gate");
