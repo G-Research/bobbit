@@ -1,17 +1,16 @@
 #!/usr/bin/env node
 /**
- * Audits the current unit inventory against the branch merge base.
- *
- * Performance work may add tests or rearrange them between unit sub-projects,
- * but every merge-base core/DOM/integration file—including the twelve files
- * formerly relocated to E2E—must remain in the unit gate. Static declaration
- * names are reported as a review aid; parameterised tests can collect more than
- * one runtime test per call.
+ * Audit the complete Vitest inventory, explicit execution ownership, declaration
+ * semantics, the two approved E2E owners, and the tier-1 subprocess boundary.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
+import {
+	APPROVED_E2E_VITEST_PATHS,
+	loadVitestExecutionMap,
+} from "./test-map-execution.mjs";
 
 const args = process.argv.slice(2);
 const valueAfter = (flag) => {
@@ -22,12 +21,10 @@ const upstream = valueAfter("--upstream") ?? "origin/master";
 const outputPath = valueAfter("--json");
 const semanticMapPath = path.join("scripts", "testing-v2", "unit-declaration-semantic-map.json");
 const semanticMappings = JSON.parse(fs.readFileSync(semanticMapPath, "utf-8"));
-const testsMap = JSON.parse(fs.readFileSync(path.join("tests2", "tests-map.json"), "utf-8"));
-const currentE2eVitestFiles = (testsMap.entries ?? [])
-	.filter((entry) => (entry.tier ?? entry.bucket) === "daily" && entry.method === "vitest-e2e")
-	.map((entry) => entry.v2Path ?? entry.file)
-	.filter(Boolean)
-	.sort();
+const execution = loadVitestExecutionMap();
+const currentUnit = [...execution.unit];
+const currentE2eVitestFiles = [...execution.e2e];
+const currentInventory = [...execution.all];
 const mergeBase = execFileSync("git", ["merge-base", "HEAD", upstream], { encoding: "utf-8" }).trim();
 
 function gitText(gitArgs) {
@@ -36,15 +33,6 @@ function gitText(gitArgs) {
 
 function e2ePaths(source) {
 	return [...source.matchAll(/"(tests2\/integration\/[^"]+\.test\.ts)"/g)].map((match) => match[1]);
-}
-
-function currentTestFiles(root, out = []) {
-	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-		const file = path.join(root, entry.name);
-		if (entry.isDirectory()) currentTestFiles(file, out);
-		else if (/\.test\.ts$/.test(entry.name)) out.push(file.split(path.sep).join("/"));
-	}
-	return out;
 }
 
 function staticTestNames(source, file) {
@@ -66,18 +54,47 @@ function staticTestNames(source, file) {
 	return names;
 }
 
+function childProcessValueImports(source, file) {
+	const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+	const violations = [];
+	const isChildProcess = (node) => node && ts.isStringLiteralLike(node)
+		&& (node.text === "node:child_process" || node.text === "child_process");
+	const lineOf = (node) => sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+	const add = (node, kind) => violations.push(`${file}:${lineOf(node)} — ${kind}`);
+	const visit = (node) => {
+		if (ts.isImportDeclaration(node) && isChildProcess(node.moduleSpecifier)) {
+			const clause = node.importClause;
+			const hasValueBinding = !clause
+				|| (!clause.isTypeOnly && (
+					Boolean(clause.name)
+					|| !clause.namedBindings
+					|| ts.isNamespaceImport(clause.namedBindings)
+					|| clause.namedBindings.elements.some((element) => !element.isTypeOnly)
+				));
+			if (hasValueBinding) add(node, "value import from child_process");
+		} else if (ts.isImportEqualsDeclaration(node)
+			&& ts.isExternalModuleReference(node.moduleReference)
+			&& isChildProcess(node.moduleReference.expression)) {
+			add(node, "import-equals from child_process");
+		} else if (ts.isExportDeclaration(node) && isChildProcess(node.moduleSpecifier) && !node.isTypeOnly) {
+			add(node, "value re-export from child_process");
+		} else if (ts.isCallExpression(node) && node.arguments.length > 0 && isChildProcess(node.arguments[0])) {
+			if (node.expression.kind === ts.SyntaxKind.ImportKeyword) add(node, "dynamic import of child_process");
+			else if (ts.isIdentifier(node.expression) && node.expression.text === "require") add(node, "require of child_process");
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return violations;
+}
+
 const baseE2eSource = gitText(["show", `${mergeBase}:scripts/testing-v2/integration-e2e-files.mjs`]);
 const formerlyRelocatedE2e = e2ePaths(baseE2eSource);
 const requiredUnitFiles = gitText(["ls-tree", "-r", "--name-only", mergeBase, "--", "tests2/core", "tests2/dom", "tests2/integration"])
 	.trim().split(/\r?\n/).filter((file) => /\.test\.ts$/.test(file));
-const currentUnit = [
-	...currentTestFiles("tests2/core"),
-	...currentTestFiles("tests2/dom"),
-	...currentTestFiles("tests2/integration"),
-];
-const missingFiles = requiredUnitFiles.filter((file) => !currentUnit.includes(file));
-const addedFiles = currentUnit.filter((file) => !requiredUnitFiles.includes(file));
-const restoredFormerE2eFiles = formerlyRelocatedE2e.filter((file) => currentUnit.includes(file));
+const missingFiles = requiredUnitFiles.filter((file) => !currentInventory.includes(file));
+const addedFiles = currentInventory.filter((file) => !requiredUnitFiles.includes(file));
+const restoredFormerE2eFiles = formerlyRelocatedE2e.filter((file) => currentInventory.includes(file));
 
 let baseDeclarations = 0;
 let currentDeclarations = 0;
@@ -97,7 +114,7 @@ for (const file of requiredUnitFiles) {
 }
 let allCurrentDeclarations = 0;
 const currentNamesByFile = new Map();
-for (const file of currentUnit) {
+for (const file of currentInventory) {
 	const names = staticTestNames(fs.readFileSync(file, "utf-8"), file);
 	currentNamesByFile.set(file, names);
 	allCurrentDeclarations += names.length;
@@ -114,12 +131,8 @@ for (const mapping of semanticMappings) {
 		continue;
 	}
 	mappingByBase.set(key, mapping);
-	if (!missingKeys.has(key)) {
-		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — stale mapping; base declaration is not missing`);
-	}
-	if (!mapping.rationale?.trim()) {
-		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — missing rationale`);
-	}
+	if (!missingKeys.has(key)) invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — stale mapping; base declaration is not missing`);
+	if (!mapping.rationale?.trim()) invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — missing rationale`);
 	if (!Array.isArray(mapping.current) || mapping.current.length === 0) {
 		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — no current semantic owner`);
 		continue;
@@ -133,18 +146,28 @@ for (const mapping of semanticMappings) {
 const mappedDeclarations = missingDeclarations.filter(({ file, name }) => mappingByBase.has(declarationKey(file, name)));
 const unmappedDeclarations = missingDeclarations.filter(({ file, name }) => !mappingByBase.has(declarationKey(file, name)));
 const declarationSemanticsPreserved = unmappedDeclarations.length === 0 && invalidSemanticMappings.length === 0;
+const childProcessImports = currentUnit.flatMap((file) => childProcessValueImports(fs.readFileSync(file, "utf-8"), file));
+const approvedE2e = [...APPROVED_E2E_VITEST_PATHS].sort();
+const e2eOwnershipExact = JSON.stringify(currentE2eVitestFiles) === JSON.stringify(approvedE2e);
+const scheduledInventoryPreserved = currentUnit.length + currentE2eVitestFiles.length === currentInventory.length;
 
 const report = {
 	mergeBase,
 	upstream,
 	requiredMergeBaseUnitFiles: requiredUnitFiles.length,
-	currentUnitFiles: currentUnit.length,
+	currentVitestInventoryFiles: currentInventory.length,
+	scheduledUnitFiles: currentUnit.length,
+	scheduledE2eVitestFiles: currentE2eVitestFiles.length,
 	missingRequiredUnitFiles: missingFiles,
 	addedUnitFiles: addedFiles,
 	formerlyRelocatedE2eFiles: formerlyRelocatedE2e.length,
 	restoredFormerE2eFiles: restoredFormerE2eFiles.length,
-	currentE2eExclusions: currentE2eVitestFiles.length,
+	approvedE2eVitestFiles: approvedE2e,
 	currentE2eVitestFiles,
+	e2eOwnershipExact,
+	scheduledInventoryPreserved,
+	isolatedFiles: execution.isolated,
+	childProcessValueImports: childProcessImports,
 	baseStaticTestDeclarations: baseDeclarations,
 	currentStaticDeclarationsInBaseFiles: currentDeclarations,
 	allCurrentStaticTestDeclarations: allCurrentDeclarations,
@@ -162,7 +185,10 @@ const report = {
 	declarationSemanticsPreserved,
 	inventoryPreserved: missingFiles.length === 0
 		&& restoredFormerE2eFiles.length === formerlyRelocatedE2e.length
-		&& declarationSemanticsPreserved,
+		&& declarationSemanticsPreserved
+		&& scheduledInventoryPreserved
+		&& e2eOwnershipExact
+		&& childProcessImports.length === 0,
 };
 
 const json = `${JSON.stringify(report, null, 2)}\n`;
