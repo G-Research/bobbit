@@ -6,11 +6,12 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, onTestFinished } from "vitest";
+import { afterAll, beforeAll, describe, it, onTestFinished, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
+import { validateAgentDirTarget } from "../../src/server/agent-dir-config.js";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 
 type ValidationResult = {
@@ -19,23 +20,35 @@ type ValidationResult = {
 	error?: { code?: string; message?: string; resolvedPath?: string };
 };
 
-async function loadValidationFn(): Promise<(input: string, projectRoot: string, commandRunner: CommandRunner) => Promise<ValidationResult> | ValidationResult> {
-	for (const specifier of ["../../src/server/agent-dir-config.ts", "../../src/server/bobbit-dir.ts"]) {
-		try {
-			const mod = await import(/* @vite-ignore */ specifier) as Record<string, any>;
-			if (typeof mod.validateAgentDirTarget === "function") {
-				return (input, projectRoot, commandRunner) => mod.validateAgentDirTarget(input, projectRoot, commandRunner);
-			}
-		} catch (err: any) {
-			if (err?.code === "ERR_MODULE_NOT_FOUND" || /Cannot find module/.test(String(err?.message))) continue;
-			throw err;
-		}
+const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+const fsSpies: Array<{ mockRestore(): void }> = [];
+let fixtureSequence = 0;
+
+beforeAll(() => {
+	for (const name of [
+		"accessSync", "existsSync", "mkdirSync", "readFileSync", "readdirSync", "realpathSync",
+		"rmSync", "statSync", "symlinkSync", "unlinkSync", "writeFileSync",
+	] as const) {
+		fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
 	}
-	throw new Error("validateAgentDirTarget must be exported");
+});
+
+afterAll(() => fsSpies.forEach(spy => spy.mockRestore()));
+
+async function loadValidationFn(): Promise<(input: string, projectRoot: string, commandRunner: CommandRunner) => Promise<ValidationResult> | ValidationResult> {
+	return validateAgentDirTarget;
 }
 
 function makeGitProject(prefix: string): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const dir = path.resolve("/memfs/agent-dir-validation", `${prefix}${fixtureSequence++}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+function makeOutsideRoot(prefix: string): string {
+	const dir = path.resolve("/memfs/agent-dir-validation-outside", `${prefix}${fixtureSequence++}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
 }
 
 function fakeGitRoot(projectRoot: string): CommandRunner {
@@ -131,7 +144,7 @@ describe("validateAgentDirTarget", () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-symlink-inside-");
 		const insideTarget = path.join(projectRoot, "credentials", "agent");
-		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-symlink-outside-"));
+		const outsideRoot = makeOutsideRoot("symlink-");
 		onTestFinished(() => {
 			cleanup(projectRoot);
 			cleanup(outsideRoot);
@@ -156,7 +169,7 @@ describe("validateAgentDirTarget", () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-symlink-mkdir-project-");
 		const insideParent = path.join(projectRoot, "credentials");
-		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-symlink-mkdir-outside-"));
+		const outsideRoot = makeOutsideRoot("symlink-mkdir-");
 		onTestFinished(() => {
 			cleanup(projectRoot);
 			cleanup(outsideRoot);
@@ -182,7 +195,7 @@ describe("validateAgentDirTarget", () => {
 	it("creates outside-worktree targets and verifies read/write access", async () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-project-");
-		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-outside-"));
+		const outsideRoot = makeOutsideRoot("writable-");
 		onTestFinished(() => {
 			cleanup(projectRoot);
 			cleanup(outsideRoot);
@@ -201,7 +214,7 @@ describe("validateAgentDirTarget", () => {
 	it("returns structured errors for empty paths and file targets", async () => {
 		const validate = await loadValidationFn();
 		const projectRoot = makeGitProject("bobbit-agent-dir-validation-errors-");
-		const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-validation-file-"));
+		const outsideRoot = makeOutsideRoot("file-");
 		onTestFinished(() => {
 			cleanup(projectRoot);
 			cleanup(outsideRoot);

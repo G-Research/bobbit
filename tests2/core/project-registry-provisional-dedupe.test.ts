@@ -1,18 +1,40 @@
 // Ported from tests/project-registry-provisional-dedupe.test.ts (straggler-coverage
 // -triage GENUINE-LOSS: registerProvisional reuse/immutability). Faithful port —
 // same assertions, vitest.
-import { test } from "vitest";
+import { afterAll, beforeAll, test, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
 
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 import {
   HEADQUARTERS_PROJECT_ID,
   ProjectRegistry,
   SpecialProjectMutationError,
   SYSTEM_PROJECT_ID,
 } from "../../src/server/agent/project-registry.js";
+
+const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+const fsSpies: Array<{ mockRestore(): void }> = [];
+let fixtureSequence = 0;
+
+beforeAll(() => {
+  for (const name of [
+    "accessSync", "existsSync", "mkdirSync", "readFileSync", "readdirSync",
+    "realpathSync", "renameSync", "rmSync", "rmdirSync", "statSync",
+    "statfsSync", "writeFileSync",
+  ] as const) {
+    fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
+  }
+});
+
+afterAll(() => fsSpies.forEach(spy => spy.mockRestore()));
+
+function makeTmpDir(label: string): string {
+  const dir = path.resolve("/memfs/project-registry-provisional", `${label}${fixtureSequence++}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 function readStoredProjects(stateDir: string): Array<{ id: string; rootPath: string; provisional?: boolean; hidden?: boolean }> {
   return JSON.parse(fs.readFileSync(path.join(stateDir, "projects.json"), "utf-8"));
