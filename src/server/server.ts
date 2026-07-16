@@ -9952,6 +9952,7 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(body.url, preferencesStore);
+			await sandboxManager?.refreshAgentModelMounts();
 			invalidateModelCache();
 			sessionManager.invalidateAigwModelCache();
 			broadcastPreferencesChanged();
@@ -9965,6 +9966,7 @@ async function handleApiRoute(
 	// DELETE /api/aigw/configure — remove aigw config
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
 		removeAigw(preferencesStore);
+		await sandboxManager?.refreshAgentModelMounts();
 		invalidateModelCache();
 		sessionManager.invalidateAigwModelCache();
 		broadcastPreferencesChanged();
@@ -9997,6 +9999,7 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(aigwUrl, preferencesStore);
+			await sandboxManager?.refreshAgentModelMounts();
 			invalidateModelCache();
 			sessionManager.invalidateAigwModelCache();
 			broadcastPreferencesChanged();

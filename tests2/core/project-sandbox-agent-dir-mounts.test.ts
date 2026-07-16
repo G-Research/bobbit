@@ -5,7 +5,8 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { ProjectSandbox, getAgentDirMountStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
+import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
+import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
 
 type Call = string | [string, string];
 
@@ -29,6 +30,7 @@ function requiredStateMounts(stateDir: string) {
 		mount(path.join(stateDir, "html-snapshots"), "/bobbit-state/html-snapshots"),
 		mount(path.join(stateDir, "google-code-assist"), "/bobbit-state/google-code-assist", false, "ro"),
 		mount(path.join(stateDir, "tool-result-error-bridge"), "/bobbit-state/tool-result-error-bridge", false, "ro"),
+		mount(path.join(stateDir, "aigw-dns-guard"), "/bobbit-state/aigw-dns-guard", false, "ro"),
 	];
 }
 
@@ -86,6 +88,30 @@ describe("ProjectSandbox agent-dir mount staleness", () => {
 		assert.match(result.reason ?? "", /still has an agent models\.json mount/i);
 	});
 
+	it("detects an atomically replaced models.json inode by comparing mounted content", () => {
+		assert.equal(getModelsJsonContentStaleness('{"models":["new"]}', '{"models":["new"]}').stale, false);
+		const stale = getModelsJsonContentStaleness('{"models":["new"]}', '{"models":["old"]}');
+		assert.equal(stale.stale, true);
+		assert.match(stale.reason ?? "", /atomically published host file/);
+	});
+
+	it("recreates a live container and emits normal recovery events after atomic model publication", async () => {
+		const sandbox = makeSandbox();
+		const calls: Call[] = [];
+		const events: string[] = [];
+		(sandbox as any).containerId = "old-container-id";
+		(sandbox as any)._status = "ready";
+		(sandbox as any)._removeContainer = async (containerId: string) => { calls.push(["remove", containerId]); };
+		(sandbox as any)._initContainer = async () => { calls.push("create"); (sandbox as any).containerId = "new-container-id"; };
+		sandbox.onHealthEvent((event) => events.push(`${event.type}:${event.containerId}`));
+
+		await sandbox.refreshAgentModelMount();
+
+		assert.deepEqual(calls, [["remove", "old-container-id"], "create"]);
+		assert.deepEqual(events, ["container-died:old-container-id", "container-recovered:new-container-id"]);
+		assert.equal(sandbox.getStatus().status, "ready");
+	});
+
 	it("recreates an existing project container before reconnecting when agent-dir mounts are stale", async () => {
 		const sandbox = makeSandbox();
 		const calls: Call[] = [];
@@ -101,6 +127,22 @@ describe("ProjectSandbox agent-dir mount staleness", () => {
 
 		assert.deepEqual(calls, [["remove", "old-container-id"], "create", "init"]);
 		assert.equal((sandbox as any).containerId, "new-container-id");
+	});
+});
+
+describe("SandboxManager atomic model refresh", () => {
+	it("refreshes every ready container once and leaves non-ready containers for normal recovery", async () => {
+		const manager = new SandboxManager();
+		const calls: string[] = [];
+		(manager as any).sandboxes = new Map([
+			["ready-a", { getStatus: () => ({ status: "ready" }), refreshAgentModelMount: async () => { calls.push("ready-a"); } }],
+			["error", { getStatus: () => ({ status: "error" }), refreshAgentModelMount: async () => { calls.push("error"); } }],
+			["ready-b", { getStatus: () => ({ status: "ready" }), refreshAgentModelMount: async () => { calls.push("ready-b"); } }],
+		]);
+
+		await manager.refreshAgentModelMounts();
+
+		assert.deepEqual(calls.sort(), ["ready-a", "ready-b"]);
 	});
 });
 
@@ -133,6 +175,14 @@ describe("ProjectSandbox state mount staleness", () => {
 
 		assert.equal(result.stale, true);
 		assert.match(result.reason ?? "", /tool-result-error-bridge/);
+	});
+
+	it("marks pre-upgrade containers stale when the AIGW DNS guard mount is missing", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir).filter((m) => m.Destination !== "/bobbit-state/aigw-dns-guard");
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /aigw-dns-guard/);
 	});
 
 	it("recreates an existing project container before reconnecting when required state mounts are stale", async () => {

@@ -204,6 +204,18 @@ export class SandboxManager {
 		return this.sandboxes.has(projectId);
 	}
 
+	/**
+	 * Rebind immutable models.json file mounts after atomic host publication.
+	 * Each ready project container is recreated in parallel; named volumes and
+	 * the standard container-recovery/session-respawn lifecycle preserve work.
+	 */
+	async refreshAgentModelMounts(): Promise<void> {
+		const refreshes = [...this.sandboxes.values()]
+			.filter((sandbox) => sandbox.getStatus().status === "ready")
+			.map((sandbox) => sandbox.refreshAgentModelMount());
+		await Promise.all(refreshes);
+	}
+
 	/** Get stats for all sandboxes. */
 	getStats(): SandboxManagerStats {
 		const containers: ContainerState[] = [];

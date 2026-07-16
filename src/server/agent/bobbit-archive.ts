@@ -57,6 +57,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/tool-result-error-bridge/", // src/server/agent/tool-result-error-bridge-extension.ts
 	"state/provider-bridge/",     // src/server/agent/provider-bridge-extension.ts
 	"state/google-code-assist/",  // src/server/agent/google-code-assist-provider-extension.ts
+	"state/aigw-dns-guard/",      // src/server/agent/aigw-manager.ts
 	"state/mcp-extensions/",      // src/server/agent/tool-activation.ts, rpc-bridge.ts
 	"state/html-snapshots/",      // server.ts
 	"state/gate-diagnostics/",    // src/server/agent/gate-diagnostics-cleanup.ts

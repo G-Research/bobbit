@@ -15,7 +15,6 @@
 import http from "node:http";
 import https from "node:https";
 import dnsCallback from "node:dns";
-import dns from "node:dns/promises";
 import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
@@ -935,6 +934,9 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 	if (existingUrl) {
 		console.log("[aigw] AI Gateway already configured:", existingUrl);
 		setBedrockEnvVars(existingUrl);
+		// A skip/unreachable startup keeps the last persisted routing active. Load
+		// its admitted host set before any spawned process or gateway-side request.
+		syncAigwProviderDnsGuardFromModelsJson();
 		// Users with a local aigw are typically offline; probe the public
 		// internet once and wire PI_OFFLINE accordingly. The probe is short
 		// (≤4s) and runs in parallel with no other startup work below.
@@ -953,6 +955,7 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 		try {
 			const models = await discoverAigwModels(existingUrl);
 			writeAigwModelsJson(existingUrl, models);
+			syncAigwProviderDnsGuardFromModelsJson();
 			normalizeAigwModelPreferences(prefs);
 			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
 		} catch (err: any) {
@@ -1091,6 +1094,7 @@ function structurallyValidateTarget(raw: string, configuredOrigin: string): URL 
 }
 
 type DnsLookup = typeof dnsCallback.lookup;
+const originalGatewayDnsLookup = dnsCallback.lookup.bind(dnsCallback) as DnsLookup;
 
 /**
  * Wrap DNS lookup so every connection to an approved cross-origin provider
@@ -1131,25 +1135,29 @@ export function createAigwGuardedLookup(guardedHosts: ReadonlySet<string>, origi
 const guardedProviderHosts = new Set<string>();
 let gatewayDnsGuardInstalled = false;
 
-function registerProviderDnsGuard(target: URL, configuredOrigin: string): void {
-	const hostname = target.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-	if (target.origin === configuredOrigin || net.isIP(hostname)) return;
-	guardedProviderHosts.add(hostname);
-	if (gatewayDnsGuardInstalled) return;
-	gatewayDnsGuardInstalled = true;
-	const originalLookup = dnsCallback.lookup.bind(dnsCallback) as DnsLookup;
-	dnsCallback.lookup = createAigwGuardedLookup(guardedProviderHosts, originalLookup);
+/** Replace, rather than append to, the active AIGW connection-time DNS policy. */
+export function replaceAigwProviderDnsGuardHosts(hosts: Iterable<string>): void {
+	guardedProviderHosts.clear();
+	for (const host of hosts) {
+		const normalized = host.replace(/^\[|\]$/g, "").toLowerCase();
+		if (normalized && !net.isIP(normalized)) guardedProviderHosts.add(normalized);
+	}
+	if (!gatewayDnsGuardInstalled) {
+		gatewayDnsGuardInstalled = true;
+		dnsCallback.lookup = createAigwGuardedLookup(guardedProviderHosts, originalGatewayDnsLookup);
+	}
+}
+
+export function getAigwProviderDnsGuardHosts(): string[] {
+	return [...guardedProviderHosts].sort();
+}
+
+function syncAigwProviderDnsGuardFromModelsJson(): void {
+	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(readModelsJson()?.providers?.aigw));
 }
 
 function validateProviderBaseTarget(raw: string, configuredOrigin: string): URL | null {
-	const target = structurallyValidateTarget(raw, configuredOrigin);
-	if (!target) return null;
-	// Cross-origin DNS names stay as hostnames for TLS. Both the gateway process
-	// and every spawned Pi process install a lookup guard which validates and pins
-	// the answers used by each actual connection; a one-time discovery lookup is
-	// deliberately not treated as authorization for a later request.
-	registerProviderDnsGuard(target, configuredOrigin);
-	return target;
+	return structurallyValidateTarget(raw, configuredOrigin);
 }
 
 interface ValidatedTarget {
@@ -1157,14 +1165,46 @@ interface ValidatedTarget {
 	lookup?: (...args: any[]) => void;
 }
 
-async function validateAndPinTarget(raw: string, configuredOrigin: string): Promise<ValidatedTarget | null> {
+function lookupAllBeforeDeadline(hostname: string, deadline: number, lookupImpl: DnsLookup): Promise<Array<{ address: string; family: number }>> {
+	const remaining = deadline - Date.now();
+	if (remaining <= 0) return Promise.reject(new Error("Discovery deadline exceeded"));
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			reject(new Error("Discovery deadline exceeded"));
+		}, remaining);
+		try {
+			(lookupImpl as any)(hostname, { all: true, verbatim: true }, (error: Error | null, answers: Array<{ address: string; family: number }>) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (error) reject(error);
+				else resolve(Array.isArray(answers) ? answers.map((entry) => ({ address: entry.address, family: entry.family })) : []);
+			});
+		} catch (error) {
+			if (!settled) {
+				settled = true;
+				clearTimeout(timer);
+				reject(error);
+			}
+		}
+	});
+}
+
+async function validateAndPinTarget(
+	raw: string,
+	configuredOrigin: string,
+	deadline: number,
+	lookupImpl: DnsLookup = originalGatewayDnsLookup,
+): Promise<ValidatedTarget | null> {
 	const url = structurallyValidateTarget(raw, configuredOrigin);
 	if (!url) return null;
 	if (url.origin === configuredOrigin || net.isIP(url.hostname)) return { url };
 	let addresses: Array<{ address: string; family: number }>;
 	try {
-		addresses = (await dns.lookup(url.hostname, { all: true, verbatim: true }))
-			.map((entry) => ({ address: entry.address, family: entry.family }));
+		addresses = await lookupAllBeforeDeadline(url.hostname, deadline, lookupImpl);
 	} catch {
 		return null;
 	}
@@ -1205,7 +1245,7 @@ async function httpGetJson(
 	deadline: number,
 	extraHeaders?: Record<string, string>,
 ): Promise<any> {
-	const validated = await validateAndPinTarget(target, configuredOrigin);
+	const validated = await validateAndPinTarget(target, configuredOrigin, deadline);
 	if (!validated) throw new Error("Discovery target was rejected");
 	const remaining = deadline - Date.now();
 	if (remaining <= 0) throw new Error("Discovery deadline exceeded");
@@ -1538,12 +1578,16 @@ export function readOpencodeWellKnownToken(gatewayUrl: string): string | undefin
  *   treated as the config.
  */
 export async function fetchWellKnownConfig(baseUrl: string, timeoutMs = WELL_KNOWN_DEADLINE_MS): Promise<WellKnownConfig | null> {
+	const deadline = Date.now() + Math.min(Math.max(timeoutMs, 1), WELL_KNOWN_DEADLINE_MS);
+	return fetchWellKnownConfigBeforeDeadline(baseUrl, deadline);
+}
+
+async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: number): Promise<WellKnownConfig | null> {
 	let gateway: URL;
 	try { gateway = normalizeHttpUrl(baseUrl); }
 	catch { return null; }
 	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(gateway.href)) return null;
 	if (runtimeFlags.skipAigwDiscovery) return null;
-	const deadline = Date.now() + Math.min(Math.max(timeoutMs, 1), WELL_KNOWN_DEADLINE_MS);
 	const wellKnownUrl = new URL("/.well-known/opencode", gateway.origin).href;
 	const token = readOpencodeWellKnownToken(gateway.href);
 	const authHeader: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
@@ -1594,19 +1638,34 @@ async function resolveWellKnownPayload(
 	}
 }
 
-async function filterValidatedProviderUrls(config: WellKnownConfig, configuredOrigin: string): Promise<WellKnownConfig> {
-	const entries: Array<[string, WkProvider]> = [];
-	for (const [name, provider] of Object.entries(config.provider ?? {})) {
-		if (!provider || typeof provider.options?.baseURL !== "string") continue;
+export async function filterValidatedProviderUrls(
+	config: WellKnownConfig,
+	configuredOrigin: string,
+	deadline: number,
+	lookupImpl: DnsLookup = originalGatewayDnsLookup,
+): Promise<WellKnownConfig> {
+	const disabled = new Set(Array.isArray(config.disabled_providers) ? config.disabled_providers : []);
+	const candidates = Object.entries(config.provider ?? {}).flatMap(([name, provider]) => {
+		if (!provider || disabled.has(name) || typeof provider.options?.baseURL !== "string") return [];
 		const target = validateProviderBaseTarget(provider.options.baseURL, configuredOrigin);
-		if (!target) continue;
-		// Discovery admission resolves public DNS now, while the installed runtime
-		// lookup guard independently re-resolves, validates, and pins the answers
-		// used for every later connection.
-		if (target.origin !== configuredOrigin && !net.isIP(target.hostname)) {
-			if (!await validateAndPinTarget(target.href, configuredOrigin)) continue;
+		return target ? [{ name, provider, target }] : [];
+	});
+	// Resolve distinct DNS names concurrently. One slow or duplicated provider can
+	// consume only the remaining shared discovery budget, never N × DNS timeout.
+	const admissions = new Map<string, Promise<boolean>>();
+	for (const { target } of candidates) {
+		if (target.origin === configuredOrigin || net.isIP(target.hostname)) continue;
+		const hostname = target.hostname.toLowerCase();
+		if (!admissions.has(hostname)) {
+			admissions.set(hostname, validateAndPinTarget(target.href, configuredOrigin, deadline, lookupImpl).then(Boolean));
 		}
-		entries.push([name, provider]);
+	}
+	const entries: Array<[string, WkProvider]> = [];
+	for (const { name, provider, target } of candidates) {
+		const admitted = target.origin === configuredOrigin || net.isIP(target.hostname)
+			? true
+			: await admissions.get(target.hostname.toLowerCase());
+		if (admitted) entries.push([name, provider]);
 	}
 	return { ...config, provider: Object.fromEntries(entries) };
 }
@@ -1656,9 +1715,10 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 		throw new Error("External AI Gateway discovery is disabled in tests");
 	}
 
-	const fetchedWellKnown = await fetchWellKnownConfig(url);
+	const discoveryDeadline = Date.now() + WELL_KNOWN_DEADLINE_MS;
+	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline);
 	if (fetchedWellKnown && fetchedWellKnown.provider) {
-		const wellKnown = await filterValidatedProviderUrls(fetchedWellKnown, gateway.origin);
+		const wellKnown = await filterValidatedProviderUrls(fetchedWellKnown, gateway.origin, discoveryDeadline);
 		return { models: translateWellKnown(wellKnown, url), wellKnown };
 	}
 
@@ -1751,6 +1811,9 @@ export async function configureAigw(baseUrl: string, prefs: PreferencesStore): P
 	// Persist generated routing atomically before preference migration. A failed
 	// discovery never reaches this point, preserving the previous models.json.
 	writeAigwModelsJson(normalizedUrl, models);
+	// Only the successfully admitted, atomically persisted configuration becomes
+	// active. Status/test discovery never mutates process-wide DNS behavior.
+	syncAigwProviderDnsGuardFromModelsJson();
 	prefs.set("aigw.url", normalizedUrl);
 	if (result.wellKnown?.model) seedDefaultModelsFromWellKnown(result.wellKnown, models, prefs);
 	normalizeAigwModelPreferences(prefs);
@@ -1764,6 +1827,7 @@ export function removeAigw(prefs: PreferencesStore): void {
 	prefs.remove("aigw.url");
 	prefs.remove("aigw.models");
 	removeAigwModelsJson();
+	replaceAigwProviderDnsGuardHosts([]);
 }
 
 /**

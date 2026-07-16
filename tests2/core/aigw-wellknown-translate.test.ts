@@ -13,10 +13,11 @@ guardProcessEnv();
 import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import http from "node:http";
+import dnsCallback from "node:dns";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = path.join(HERE, "fixtures", "wellknown-opencode.json");
@@ -34,6 +35,11 @@ const {
 	normalizeWellKnownCost,
 	createAigwGuardedLookup,
 	collectAigwProviderDnsHosts,
+	filterValidatedProviderUrls,
+	getAigwProviderDnsGuardHosts,
+	replaceAigwProviderDnsGuardHosts,
+	removeAigw,
+	writeAigwDnsGuardExtension,
 } = await import("../../src/server/agent/aigw-manager.ts");
 const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.js");
 
@@ -401,6 +407,95 @@ function startDiscoveryServer(
 		close: () => new Promise<void>((done) => server.close(() => done())),
 	})));
 }
+
+describe("AIGW DNS guard lifecycle", () => {
+	afterEach(() => replaceAigwProviderDnsGuardHosts([]));
+
+	it("does not activate rejected or merely translated provider hosts", async () => {
+		replaceAigwProviderDnsGuardHosts(["active.example"]);
+		translateWellKnown({ provider: { candidate: {
+			npm: "@ai-sdk/openai", options: { baseURL: "https://candidate.example/v1" }, models: { model: {} },
+		} } }, GATEWAY);
+		assert.deepEqual(getAigwProviderDnsGuardHosts(), ["active.example"]);
+
+		const privateLookup = ((_hostname: string, _options: any, callback: any) => callback(null, [
+			{ address: "169.254.169.254", family: 4 },
+		])) as any;
+		const admitted = await filterValidatedProviderUrls({ provider: { candidate: {
+			options: { baseURL: "https://candidate.example/v1" }, models: { model: {} },
+		} } }, new URL(GATEWAY).origin, Date.now() + 250, privateLookup);
+		assert.deepEqual(admitted.provider, {});
+		assert.deepEqual(getAigwProviderDnsGuardHosts(), ["active.example"], "rejected discovery must not change active DNS behavior");
+	});
+
+	it("replaces and clears the active host set on removal", () => {
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-aigw-remove-"));
+		const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
+		try {
+			process.env.BOBBIT_AGENT_DIR = agentDir;
+			resetAgentDirStateForTests();
+			replaceAigwProviderDnsGuardHosts(["old.example"]);
+			replaceAigwProviderDnsGuardHosts(["new.example"]);
+			assert.deepEqual(getAigwProviderDnsGuardHosts(), ["new.example"]);
+			removeAigw({ remove() {} } as any);
+			assert.deepEqual(getAigwProviderDnsGuardHosts(), []);
+		} finally {
+			if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
+			resetAgentDirStateForTests();
+			fs.rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("bounds and consolidates provider DNS admission by the shared deadline", async () => {
+		let lookups = 0;
+		const hangingLookup = ((_hostname: string, _options: any, _callback: any) => { lookups++; }) as any;
+		const config = {
+			disabled_providers: ["disabled"],
+			provider: {
+				first: { options: { baseURL: "https://slow.example/one" }, models: {} },
+				second: { options: { baseURL: "https://slow.example/two" }, models: {} },
+				disabled: { options: { baseURL: "https://disabled-slow.example/v1" }, models: {} },
+			},
+		};
+		const started = Date.now();
+		const admitted = await filterValidatedProviderUrls(config, new URL(GATEWAY).origin, Date.now() + 40, hangingLookup);
+		assert.deepEqual(admitted.provider, {});
+		assert.equal(lookups, 1, "duplicate provider hostnames share one DNS admission");
+		assert.ok(Date.now() - started < 500, "DNS admission must stop at the shared deadline");
+	});
+
+	it("writes and loads the generated guard extension from content-addressed state", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-aigw-guard-"));
+		const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
+		const previousBobbitDir = process.env.BOBBIT_DIR;
+		const originalLookup = dnsCallback.lookup;
+		try {
+			process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
+			process.env.BOBBIT_DIR = path.join(root, "headquarters");
+			resetAgentDirStateForTests();
+			writeAigwModelsJson(GATEWAY, [{
+				id: "model", wireId: "model", name: "Model", api: "openai-responses",
+				baseUrl: "https://api.vendor.example/v1", upstreamProvider: "vendor",
+				reasoning: false, input: ["text"], contextWindow: 1, maxTokens: 1,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			}]);
+			const extension = writeAigwDnsGuardExtension();
+			assert.ok(extension && fs.existsSync(extension));
+			assert.match(extension!, /aigw-dns-guard/);
+			const loaded = await import(`${pathToFileURL(extension!).href}?test=${Date.now()}`);
+			assert.equal(typeof loaded.default, "function");
+		} finally {
+			dnsCallback.lookup = originalLookup;
+			if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
+			if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = previousBobbitDir;
+			resetAgentDirStateForTests();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("well-known bounded one-hop resolution", () => {
 	afterEach(() => {
