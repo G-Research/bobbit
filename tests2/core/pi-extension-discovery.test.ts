@@ -2,11 +2,11 @@
 // Source: tests/pi-extension-discovery.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { fs as memoryFs, vol } from "memfs";
 import {
 	discoverPiExtensionTools as discoverPiExtensionToolsReal,
 	discoverPiExtensionToolsSync as discoverPiExtensionToolsSyncReal,
@@ -22,18 +22,30 @@ import {
 	loadPiExtensionContributionsWithDiscoverySync,
 } from "../../src/server/agent/pi-extension-contributions.js";
 
-let suiteRoot: string;
-let sourceRoot: string;
-let sharedProbeCwd: string;
+const suiteRoot = path.resolve("/memfs/pi-extension-discovery");
+const sourceRoot = path.join(suiteRoot, "pi-extensions", "test-pack");
+const sharedProbeCwd = path.join(suiteRoot, "probe-runtime");
+const fsSpies: Array<{ mockRestore(): void }> = [];
 let tempId = 0;
+
 beforeAll(() => {
-	suiteRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-discovery-suite-"));
-	sourceRoot = path.join(suiteRoot, "pi-extensions", "test-pack");
-	sharedProbeCwd = path.join(suiteRoot, "probe-runtime");
+	vol.reset();
+	// Discovery deliberately uses node:fs in production. Redirect that same static
+	// module object to memfs for this suite so the path/hash/confinement decisions
+	// run unchanged without creating Defender-scanned NTFS trees under contention.
+	for (const method of [
+		"existsSync", "mkdirSync", "readFileSync", "writeFileSync", "readdirSync",
+		"statSync", "lstatSync", "realpathSync", "rmSync", "symlinkSync",
+	] as const) {
+		fsSpies.push(vi.spyOn(fs, method).mockImplementation((memoryFs[method] as any).bind(memoryFs)) as any);
+	}
 	fs.mkdirSync(sourceRoot, { recursive: true });
 	fs.mkdirSync(sharedProbeCwd, { recursive: true });
 });
-afterAll(() => { fs.rmSync(suiteRoot, { recursive: true, force: true }); });
+afterAll(() => {
+	vol.reset();
+	for (const spy of fsSpies.reverse()) spy.mockRestore();
+});
 
 type FakeProbeOutcome =
 	| { status: "ok"; tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }> }
