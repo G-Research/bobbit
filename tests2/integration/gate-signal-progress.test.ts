@@ -28,9 +28,13 @@
  * The marker `GATE_SIGNAL_PROGRESS_RACE` appears in every assertion
  * message so a regression surfaces clearly in CI logs.
  */
+// Every spec that can boot this fork's process-global gateway opts into the
+// command-step fake before importing the shared harness. This keeps runner
+// selection independent of Vitest's file import order.
+import { resetFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
 // A deterministic "slow" command that keeps the gate's phase-0 step
 // running for ~3s — long enough to catch the in-flight active state
@@ -128,18 +132,25 @@ async function waitForSignalVerificationStatus(
 	gateId: string,
 	signalId: string,
 	targetStatus: string,
-	timeoutMs = 15_000,
 ): Promise<any> {
-	return pollUntil(async () => {
+	// Fake command completions are queued on the event loop. Yield bounded turns
+	// instead of sleeping/polling on wall time; each turn also prevents scripted
+	// events from leaking into the next test in this shared gateway fork.
+	for (let turn = 0; turn < 100; turn++) {
 		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
 		expect(res.status).toBe(200);
 		const body = await res.json();
 		const signal = body.signals?.find((s: any) => s.id === signalId);
-		return signal?.verification?.status === targetStatus ? signal : null;
-	}, { timeoutMs, intervalMs: 50, label: `signal ${signalId} verification=${targetStatus}` });
+		if (signal?.verification?.status === targetStatus) return signal;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	throw new Error(`signal ${signalId} did not reach verification=${targetStatus} within 100 event-loop turns`);
 }
 
 test.describe("Gate-signal step enumeration race (verification-progress race)", () => {
+	test.beforeEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+	test.afterEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+
 	test("persisted gate-store steps[] matches POST response within the same scheduler tick — GATE_SIGNAL_PROGRESS_RACE", async () => {
 		const workflowId = makeWorkflowId();
 		await createTestWorkflow(workflowId);
