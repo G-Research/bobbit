@@ -43,7 +43,7 @@ const coverage = {
 
 const prebundle = await serverPrebundle.ensureServerTestPrebundle();
 process.env.BOBBIT_V2_SERVER_PREBUNDLE = prebundle.bundlePath;
-const prebundleResolver = serverPrebundle.serverPrebundleResolver(prebundle);
+const prebundleResolver = () => serverPrebundle.serverPrebundleResolver(prebundle);
 
 console.log(
 	`[vitest.config] maxWorkers=${MAX_WORKERS} (fixed cap ${FIXED_UNIT_WORKERS}${
@@ -52,13 +52,13 @@ console.log(
 );
 
 export default defineConfig({
-	plugins: [prebundleResolver],
 	test: {
 		...shared,
 		reporters: ["default", new UnitFileBudgetReporter()],
 		coverage,
 		projects: [
 			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
+				plugins: [prebundleResolver()],
 				test: {
 					...shared,
 					name: "v2-e2e-vitest",
@@ -69,6 +69,7 @@ export default defineConfig({
 				},
 			}] : []),
 			{
+				plugins: [prebundleResolver()],
 				test: {
 					...shared,
 					name: "v2-core",
@@ -78,6 +79,7 @@ export default defineConfig({
 				},
 			},
 			{
+				plugins: [prebundleResolver()],
 				test: {
 					...shared,
 					name: "v2-dom",
@@ -89,6 +91,7 @@ export default defineConfig({
 				},
 			},
 			{
+				plugins: [prebundleResolver()],
 				test: {
 					...shared,
 					name: "v2-integration",
@@ -100,6 +103,7 @@ export default defineConfig({
 				},
 			},
 			{
+				plugins: [prebundleResolver()],
 				test: {
 					...shared,
 					name: "v2-isolated",
