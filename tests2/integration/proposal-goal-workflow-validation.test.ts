@@ -132,8 +132,10 @@ test.describe("goal proposal — workflow validation @smoke", () => {
 	});
 
 	afterAll(async () => {
-		parent.remove();
-		await releaseSharedProposalSession(gw, validationProjectId, deleteSession);
+		try { parent?.remove(); } catch { /* setup may have stopped before the parent was fully registered */ }
+		if (gw && validationProjectId) {
+			await releaseSharedProposalSession(gw, validationProjectId, deleteSession);
+		}
 	});
 
 	async function withTeamLeadParent(

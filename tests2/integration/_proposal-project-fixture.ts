@@ -67,8 +67,32 @@ const projectsByGateway = new WeakMap<object, Map<string, ProposalProjectFixture
 const sessionsByGateway = new WeakMap<object, Map<string, Promise<string>>>();
 
 /**
- * Registers one immutable proposal-test project per gateway/key. Its root lives
- * under the gateway fixture, so gateway shutdown owns cleanup and context close.
+ * Resolve the ProjectContextManager wired into the live SessionManager. The
+ * server's project/session routes use this exact manager and its registry;
+ * reaching through the separately exposed gateway field can cross module
+ * identities when the server runtime is prebundled.
+ */
+function routeProjectContexts(gateway: any): any {
+	const contexts = gateway.sessionManager?.getProjectContextManager?.();
+	if (!contexts) throw new Error("proposal fixture could not resolve the route-visible project context manager");
+	return contexts;
+}
+
+async function waitForAuthoritativeProject(gateway: any, projectId: string): Promise<void> {
+	let lastStatus = 0;
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const response = await gateway.api(`/api/projects/${encodeURIComponent(projectId)}`);
+		lastStatus = response.status;
+		if (response.status === 200) return;
+		await new Promise(resolve => setTimeout(resolve, 10));
+	}
+	throw new Error(`proposal fixture project ${projectId} was not route-visible (last status ${lastStatus})`);
+}
+
+/**
+ * Registers one immutable proposal-test project per gateway/key through the
+ * route-visible ProjectContext manager. Its root lives under the gateway
+ * fixture, so gateway shutdown owns cleanup and context close.
  */
 export function registerProposalProject(
 	gateway: any,
@@ -90,7 +114,7 @@ export function registerProposalProject(
 	fs.mkdirSync(rootPath, { recursive: true });
 	fs.writeFileSync(path.join(rootPath, "README.md"), `# ${opts.key}\n`);
 
-	const contexts = gateway.projectContextManager;
+	const contexts = routeProjectContexts(gateway);
 	const registry = contexts.getRegistry();
 	const project = registry.register(`proposal-${opts.key}`, rootPath, { acceptCanonical: true });
 	const context = contexts.getOrCreate(project.id);
@@ -116,7 +140,10 @@ export function sharedProposalSession(
 	}
 	let session = sessions.get(projectId);
 	if (!session) {
-		session = create();
+		// The session route resolves against its own registry. Prove that lookup
+		// observes the fixture before attempting creation, rather than racing a
+		// direct helper registry identity under the prebundle.
+		session = waitForAuthoritativeProject(gateway, projectId).then(create);
 		sessions.set(projectId, session);
 	}
 	return session;
@@ -131,7 +158,15 @@ export async function releaseSharedProposalSession(
 	const session = sessions?.get(projectId);
 	if (!session) return;
 	sessions!.delete(projectId);
-	await dispose(await session);
+	let sessionId: string;
+	try {
+		sessionId = await session;
+	} catch {
+		// A beforeAll failure may leave only a rejected creation promise. Cleanup
+		// must not replace the authoritative setup failure in that partial state.
+		return;
+	}
+	if (sessionId) await dispose(sessionId);
 }
 
 function proposalStateDir(gateway: any): string {
@@ -214,7 +249,7 @@ export function createProposalParent(
 	gateway: any,
 	project: ProposalProjectFixture,
 ): { id: string; record: any; remove(): void } {
-	const context = gateway.projectContextManager.getOrCreate(project.id);
+	const context = routeProjectContexts(gateway).getOrCreate(project.id);
 	if (!context) throw new Error(`proposal fixture missing project context ${project.id}`);
 	const now = Date.now();
 	const id = randomUUID();
