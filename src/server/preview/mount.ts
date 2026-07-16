@@ -28,6 +28,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { realClock, type Clock, type TimerHandle } from "../gateway-deps.js";
 
 /** Same shape as `VALID_SESSION_ID` in `server.ts` (UUID v4-style). */
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -88,9 +89,17 @@ export class PreviewMountError extends Error {
 // ──────────────────────────────────────────────────────────────────────────
 
 let _previewRootOverride: string | undefined;
+let mountFs: typeof fs = fs;
+
 export function setPreviewRootForTesting(dir: string | undefined): void {
 	_previewRootOverride = dir;
 }
+
+/** Swap the preview filesystem for a test double. Always reset after the test. */
+export function setPreviewFsForTesting(fsImpl: typeof fs | undefined): void {
+	mountFs = fsImpl ?? fs;
+}
+
 function previewRoot(): string {
 	return _previewRootOverride ?? path.join(bobbitStateDir(), "preview");
 }
@@ -205,7 +214,7 @@ function compileGlobSegment(segment: string): RegExp {
 export function mountDir(sessionId: string): string {
 	validateSessionId(sessionId);
 	const dir = path.join(previewRoot(), sessionId);
-	fs.mkdirSync(dir, { recursive: true });
+	mountFs.mkdirSync(dir, { recursive: true });
 	return dir;
 }
 
@@ -221,15 +230,15 @@ export function writeInline(sessionId: string, html: string, entry?: string): Mo
 
 	// Atomic write: temp file + rename within the same directory.
 	const tmp = path.join(dir, `.${safeEntry}.tmp-${process.pid}-${Date.now()}`);
-	fs.writeFileSync(tmp, html, "utf-8");
+	mountFs.writeFileSync(tmp, html, "utf-8");
 	try {
-		fs.renameSync(tmp, target);
+		mountFs.renameSync(tmp, target);
 	} catch (err) {
-		try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+		try { mountFs.unlinkSync(tmp); } catch { /* ignore */ }
 		throw err;
 	}
 
-	const stat = fs.statSync(target);
+	const stat = mountFs.statSync(target);
 	return {
 		url: `/preview/${sessionId}/${safeEntry}`,
 		path: target,
@@ -278,14 +287,14 @@ export function mountFile(
 	const srcDir = path.dirname(srcFile);
 	let srcRoot: string;
 	try {
-		srcRoot = fs.realpathSync(srcDir);
+		srcRoot = mountFs.realpathSync(srcDir);
 	} catch {
 		throw new PreviewMountError(404, "srcFile parent not found");
 	}
 
 	let entryStat: fs.Stats;
 	try {
-		entryStat = fs.statSync(srcFile);
+		entryStat = mountFs.statSync(srcFile);
 	} catch {
 		throw new PreviewMountError(404, "srcFile not found");
 	}
@@ -304,7 +313,7 @@ export function mountFile(
 
 	// Resolve the entry's realpath up-front so we can detect symlink escape.
 	const entryReal = (() => {
-		try { return fs.realpathSync(srcFile); } catch { return srcFile; }
+		try { return mountFs.realpathSync(srcFile); } catch { return srcFile; }
 	})();
 	if (!isContained(entryReal, srcRoot) && entryReal !== path.join(srcRoot, entry)) {
 		// Entry's realpath escapes its declared dir (symlink escape on the entry).
@@ -317,7 +326,7 @@ export function mountFile(
 	// same sid (we accept last-writer-wins; no cross-call locking).
 	const tmpName = `.${sessionId}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
 	const tmpRoot = path.join(previewRoot(), tmpName);
-	fs.mkdirSync(tmpRoot, { recursive: true });
+	mountFs.mkdirSync(tmpRoot, { recursive: true });
 
 	const resolvedAssets: Set<string> = new Set();
 
@@ -336,15 +345,15 @@ export function mountFile(
 				for (const rel of matches) {
 					const abs = path.join(srcRoot, rel);
 					let real: string;
-					try { real = fs.realpathSync(abs); } catch { continue; }
+					try { real = mountFs.realpathSync(abs); } catch { continue; }
 					if (!isContained(real, srcRoot)) {
 						throw new PreviewMountError(403, `Asset escapes source tree: ${rel}`);
 					}
 					let st: fs.Stats;
-					try { st = fs.statSync(real); } catch { continue; }
+					try { st = mountFs.statSync(real); } catch { continue; }
 					if (!st.isFile()) continue;
 					const dst = path.join(tmpRoot, rel);
-					fs.mkdirSync(path.dirname(dst), { recursive: true });
+					mountFs.mkdirSync(path.dirname(dst), { recursive: true });
 					copyOneFile(real, dst);
 					resolvedAssets.add(rel.split(path.sep).join("/"));
 				}
@@ -359,7 +368,7 @@ export function mountFile(
 				}
 				let real: string;
 				try {
-					real = fs.realpathSync(abs);
+					real = mountFs.realpathSync(abs);
 				} catch {
 					throw new PreviewMountError(404, `Asset '${rel}' not found`);
 				}
@@ -367,14 +376,14 @@ export function mountFile(
 					throw new PreviewMountError(403, `Asset symlink escapes source tree: ${rel}`);
 				}
 				let st: fs.Stats;
-				try { st = fs.statSync(real); } catch {
+				try { st = mountFs.statSync(real); } catch {
 					throw new PreviewMountError(404, `Asset '${rel}' not found`);
 				}
 				if (!st.isFile()) {
 					throw new PreviewMountError(404, `Asset '${rel}' is not a regular file`);
 				}
 				const dst = path.join(tmpRoot, rel);
-				fs.mkdirSync(path.dirname(dst), { recursive: true });
+				mountFs.mkdirSync(path.dirname(dst), { recursive: true });
 				copyOneFile(real, dst);
 				resolvedAssets.add(rel);
 			}
@@ -391,19 +400,19 @@ export function mountFile(
 	} catch (err) {
 		// Staging failed — destRoot is untouched if we hadn't reached the
 		// swap yet. Either way, drop the tmp dir.
-		try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+		try { mountFs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 		throw err;
 	}
 
 	// Clean up the now-empty tmp dir.
-	try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+	try { mountFs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 
 	const target = path.join(destRoot, entry);
-	if (!fs.existsSync(target)) {
+	if (!mountFs.existsSync(target)) {
 		throw new PreviewMountError(500, "Entry file missing after swap");
 	}
 
-	const stat = fs.statSync(target);
+	const stat = mountFs.statSync(target);
 	return {
 		url: `/preview/${sessionId}/${entry}`,
 		path: target,
@@ -430,22 +439,22 @@ export function contentHashForMount(sessionId: string): string {
  */
 function moveContents(srcDir: string, dstDir: string): void {
 	let entries: fs.Dirent[];
-	try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
+	try { entries = mountFs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
 	for (const ent of entries) {
 		const from = path.join(srcDir, ent.name);
 		const to = path.join(dstDir, ent.name);
 		try {
-			fs.renameSync(from, to);
+			mountFs.renameSync(from, to);
 		} catch {
 			// Cross-device or destination clash — copy then remove source.
-			try { fs.rmSync(to, { recursive: true, force: true }); } catch { /* ignore */ }
+			try { mountFs.rmSync(to, { recursive: true, force: true }); } catch { /* ignore */ }
 			if (ent.isDirectory()) {
-				fs.mkdirSync(to, { recursive: true });
+				mountFs.mkdirSync(to, { recursive: true });
 				moveContents(from, to);
-				try { fs.rmdirSync(from); } catch { /* ignore */ }
+				try { mountFs.rmdirSync(from); } catch { /* ignore */ }
 			} else {
 				copyOneFile(from, to);
-				try { fs.unlinkSync(from); } catch { /* ignore */ }
+				try { mountFs.unlinkSync(from); } catch { /* ignore */ }
 			}
 		}
 	}
@@ -455,7 +464,7 @@ export function removeMount(sessionId: string): void {
 	if (!sessionId || !VALID_SESSION_ID.test(sessionId)) return;
 	const dir = path.join(previewRoot(), sessionId);
 	try {
-		fs.rmSync(dir, { recursive: true, force: true });
+		mountFs.rmSync(dir, { recursive: true, force: true });
 	} catch {
 		/* idempotent */
 	}
@@ -471,25 +480,33 @@ interface WatcherEntry {
 }
 const _watchers = new Map<string, WatcherEntry>();
 
-export function watchMount(sessionId: string, onChange: () => void): () => void {
+export interface WatchMountOptions {
+	clock?: Clock;
+	/** Test observation hook fired when the underlying filesystem reports a change. */
+	onFsEvent?: () => void;
+}
+
+export function watchMount(sessionId: string, onChange: () => void, options?: WatchMountOptions): () => void {
 	validateSessionId(sessionId);
 	const dir = mountDir(sessionId);
 
 	let entry = _watchers.get(sessionId);
 	if (!entry) {
 		const subscribers = new Set<() => void>();
-		let timer: NodeJS.Timeout | null = null;
+		const clock = options?.clock ?? realClock;
+		let timer: TimerHandle | undefined;
 		const fire = () => {
-			timer = null;
+			timer = undefined;
 			for (const fn of subscribers) {
 				try { fn(); } catch (err) { console.error("[preview/mount] subscriber threw", err); }
 			}
 		};
 		const debounced = () => {
-			if (timer) return;
-			timer = setTimeout(fire, 50);
+			options?.onFsEvent?.();
+			if (timer !== undefined) return;
+			timer = clock.setTimeout(fire, 50);
 		};
-		const watcher = fs.watch(dir, { recursive: true }, debounced);
+		const watcher = mountFs.watch(dir, { recursive: true }, debounced);
 		watcher.on("error", err => {
 			console.warn(`[preview/mount] watch error for ${sessionId}: ${err}`);
 		});
@@ -497,7 +514,7 @@ export function watchMount(sessionId: string, onChange: () => void): () => void 
 			subscribers,
 			close: () => {
 				try { watcher.close(); } catch { /* ignore */ }
-				if (timer) { clearTimeout(timer); timer = null; }
+				if (timer !== undefined) { clock.clearTimeout(timer); timer = undefined; }
 			},
 		};
 		_watchers.set(sessionId, entry);
@@ -525,7 +542,7 @@ function hashMountDirectory(root: string): string {
 	for (const rel of listMountFiles(root)) {
 		hash.update(rel, "utf-8");
 		hash.update("\0");
-		hash.update(fs.readFileSync(path.join(root, ...rel.split("/"))));
+		hash.update(mountFs.readFileSync(path.join(root, ...rel.split("/"))));
 		hash.update("\0");
 	}
 	return hash.digest("hex");
@@ -535,7 +552,7 @@ function listMountFiles(root: string): string[] {
 	const out: string[] = [];
 	const walk = (dir: string, prefix: string) => {
 		let entries: fs.Dirent[];
-		try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+		try { entries = mountFs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 		for (const ent of entries) {
 			const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
 			const abs = path.join(dir, ent.name);
@@ -548,12 +565,12 @@ function listMountFiles(root: string): string[] {
 }
 
 function copyOneFile(src: string, dst: string): void {
-	try { fs.unlinkSync(dst); } catch { /* ignore */ }
+	try { mountFs.unlinkSync(dst); } catch { /* ignore */ }
 	try {
-		fs.linkSync(src, dst);
+		mountFs.linkSync(src, dst);
 	} catch {
 		try {
-			fs.copyFileSync(src, dst);
+			mountFs.copyFileSync(src, dst);
 		} catch (err) {
 			throw new PreviewMountError(500, `Copy failed: ${(err as Error).message}`);
 		}
@@ -583,7 +600,7 @@ function expandGlob(srcRoot: string, spec: string): string[] {
 			const candAbs = cand === "" ? srcRoot : path.join(srcRoot, cand);
 			if (wildcard) {
 				let entries: fs.Dirent[];
-				try { entries = fs.readdirSync(candAbs, { withFileTypes: true }); } catch { continue; }
+				try { entries = mountFs.readdirSync(candAbs, { withFileTypes: true }); } catch { continue; }
 				for (const ent of entries) {
 					if (!re!.test(ent.name)) continue;
 					if (isFinalSeg(i)) {
@@ -597,7 +614,7 @@ function expandGlob(srcRoot: string, spec: string): string[] {
 			} else {
 				const childAbs = path.join(candAbs, seg);
 				let st: fs.Stats;
-				try { st = fs.statSync(childAbs); } catch { continue; }
+				try { st = mountFs.statSync(childAbs); } catch { continue; }
 				if (isFinalSeg(i)) {
 					if (st.isFile()) next.push(cand === "" ? seg : `${cand}/${seg}`);
 				} else if (st.isDirectory()) {
@@ -614,14 +631,14 @@ function expandGlob(srcRoot: string, spec: string): string[] {
 function wipeContents(dir: string): void {
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
+		entries = mountFs.readdirSync(dir, { withFileTypes: true });
 	} catch {
 		return;
 	}
 	for (const ent of entries) {
 		const abs = path.join(dir, ent.name);
 		try {
-			fs.rmSync(abs, { recursive: true, force: true });
+			mountFs.rmSync(abs, { recursive: true, force: true });
 		} catch { /* ignore */ }
 	}
 }
