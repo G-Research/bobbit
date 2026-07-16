@@ -2,12 +2,12 @@
 //
 // This file exercises the REST decision boundaries without provisioning Git
 // processes. Worktree creation itself is covered by the dedicated Git suites.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { rebaseAgentTranscriptCwdMetadataFile } from "../../src/server/agent/transcript-sanitizer.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
+import { installCommandRunnerInterceptor, installMethodInterceptor } from "./helpers/command-runner-dispatcher.js";
 import {
 	apiFetch,
 	createGoal,
@@ -75,18 +75,48 @@ function appendOldCwdMessageContentSentinels(jsonlPath: string, cwd: string, mar
 	return { userLine, assistantLine };
 }
 
-async function withGithubRemote<T>(gateway: any, cwd: string, run: () => Promise<T>): Promise<T> {
-	const expectedCwd = resolve(cwd);
-	const restore = installCommandRunnerInterceptor(gateway.sessionManager.commandRunner, {
-		label: `sidebar-github-remote:${expectedCwd}`,
+function canonicalPath(value: string): string {
+	try { return realpathSync(value); } catch { return resolve(value); }
+}
+
+function isGitExecutable(command: string): boolean {
+	return basename(command).replace(/\.exe$/i, "").toLowerCase() === "git";
+}
+
+function commandCwd(options: { cwd?: unknown } | undefined): string {
+	return canonicalPath(typeof options?.cwd === "string" ? options.cwd : process.cwd());
+}
+
+function installSidebarGitBoundary(
+	gateway: any,
+	label: string,
+	repoPath: string,
+	cwdAliases: readonly string[],
+	githubRemote = false,
+): () => void {
+	const canonicalRepo = canonicalPath(repoPath);
+	const ownedCwds = new Set(cwdAliases.map(canonicalPath));
+	ownedCwds.add(canonicalRepo);
+
+	// API routes retain the SessionManager's injected CommandRunner object. Lease
+	// that exact dependency instead of patching realCommandRunner or another facade.
+	return installCommandRunnerInterceptor(gateway.sessionManager.commandRunner, {
+		label: `${label}:${canonicalRepo}`,
 		async execFile(command, args, options, next) {
-			const commandCwd = typeof options?.cwd === "string" ? resolve(options.cwd) : resolve(process.cwd());
-			if (commandCwd === expectedCwd && command === "git" && args.join(" ") === "remote get-url origin") {
+			if (!isGitExecutable(command) || !ownedCwds.has(commandCwd(options))) return next();
+			const invocation = args.join(" ");
+			if (invocation === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
+			if (invocation === "rev-parse --show-toplevel") return { stdout: `${repoPath}\n`, stderr: "" };
+			if (githubRemote && invocation === "remote get-url origin") {
 				return { stdout: "git@github.com:acme/widget.git\n", stderr: "" };
 			}
 			return next();
 		},
 	});
+}
+
+async function withGithubRemote<T>(gateway: any, cwd: string, run: () => Promise<T>): Promise<T> {
+	const restore = installSidebarGitBoundary(gateway, "sidebar-github-remote", cwd, [cwd], true);
 	try {
 		return await run();
 	} finally {
@@ -104,26 +134,39 @@ type ForkCapture = {
 
 async function withForkCreateSeam<T>(
 	gateway: any,
+	sourceId: string,
 	repoPath: string,
 	run: (captures: ForkCapture[]) => Promise<T>,
 ): Promise<T> {
 	const sessionManager = gateway.sessionManager;
-	const originalCreateSession = sessionManager.createSession;
-	const originalSetTitle = sessionManager.setTitle;
+	const source = sessionManager.getSession(sourceId);
+	const persisted = sessionManager.getPersistedSession(sourceId);
+	if (!source || !persisted) throw new Error(`source session ${sourceId} missing`);
+	const sourceProjectId = persisted.projectId;
+	const cwdAliases = [
+		repoPath,
+		harnessDefaultProjectRoot(),
+		source.cwd,
+		source.worktreePath,
+		source.repoPath,
+		persisted.cwd,
+		persisted.worktreePath,
+		persisted.repoPath,
+	].filter((value): value is string => typeof value === "string" && value.length > 0);
+	const ownedCwds = new Set(cwdAliases.map(canonicalPath));
 	const captures: ForkCapture[] = [];
 
-	const expectedRepoPath = resolve(repoPath);
-	const restoreCommandRunner = installCommandRunnerInterceptor(sessionManager.commandRunner, {
-		label: `sidebar-fork:${expectedRepoPath}`,
-		async execFile(command, args, options, next) {
-			const commandCwd = typeof options?.cwd === "string" ? resolve(options.cwd) : resolve(process.cwd());
-			if (commandCwd !== expectedRepoPath || command !== "git") return next();
-			if (args.join(" ") === "rev-parse --is-inside-work-tree") return { stdout: "true\n", stderr: "" };
-			if (args.join(" ") === "rev-parse --show-toplevel") return { stdout: `${repoPath}\n`, stderr: "" };
-			return next();
-		},
-	});
-	sessionManager.createSession = async (cwd: string, _agentArgs: unknown, _goalId: unknown, _assistantType: unknown, options: any) => {
+	const restoreCommandRunner = installSidebarGitBoundary(gateway, "sidebar-fork", repoPath, cwdAliases);
+	const restoreCreateSession = installMethodInterceptor(sessionManager, "createSession", `sidebar-fork-create:${sourceId}`, async (args, next) => {
+		const [cwd, , , , rawOptions] = args;
+		const options = rawOptions as any;
+		if (
+			typeof cwd !== "string"
+			|| !ownedCwds.has(canonicalPath(cwd))
+			|| options?.projectId !== sourceProjectId
+			|| typeof options?.sessionId !== "string"
+		) return next(...args);
+
 		const id = options.sessionId;
 		const resolvedCwd = options.worktreeOpts ? join(repoPath, `.fake-worktree-${id}`) : cwd;
 		mkdirSync(resolvedCwd, { recursive: true });
@@ -143,14 +186,17 @@ async function withForkCreateSeam<T>(
 			clonedTranscript: options.preExistingAgentSessionFile,
 		});
 		return { id, cwd: resolvedCwd, status: "idle", projectId: options.projectId };
-	};
-	sessionManager.setTitle = () => {};
+	});
+	const restoreSetTitle = installMethodInterceptor(sessionManager, "setTitle", `sidebar-fork-title:${sourceId}`, (args, next) => {
+		const [sessionId] = args;
+		return captures.some(capture => capture.id === sessionId) ? undefined : next(...args);
+	});
 	try {
 		return await run(captures);
 	} finally {
+		restoreSetTitle();
+		restoreCreateSession();
 		restoreCommandRunner();
-		sessionManager.createSession = originalCreateSession;
-		sessionManager.setTitle = originalSetTitle;
 		for (const capture of captures) rmSync(capture.clonedTranscript, { force: true });
 	}
 }
@@ -204,9 +250,10 @@ function removeSyntheticSourceSession(gateway: any, projectId: string, sessionId
 test.describe.serial("sidebar actions server endpoints", () => {
 	test("GET /api/goals/:id/github-link returns PR, branch fallback, and unavailable states", async ({ gateway }) => {
 		const cwd = join(nonGitCwd(), `sidebar-github-${randomUUID()}`);
-		// The fenced runner validates repository structure before discovery. The
-		// remote/ref answers remain seam-owned, but the fixture is still repo-shaped.
-		mkdirSync(join(cwd, ".git"), { recursive: true });
+		// Keep the fake repo structurally truthful; the route-visible seam owns only
+		// discovery output and never relies on a process-wide Git implementation.
+		mkdirSync(join(cwd, ".git", "objects"), { recursive: true });
+		writeFileSync(join(cwd, ".git", "HEAD"), "ref: refs/heads/feature/sidebar-actions\n");
 		const linkGoal = await createGoal({ title: `sidebar link ${Date.now()}`, cwd, worktree: false, team: false });
 		const noWorktreeGoal = await createGoal({ title: `sidebar no worktree ${Date.now()}`, cwd, worktree: false, team: false });
 		try {
@@ -267,7 +314,7 @@ test.describe.serial("fork worktree choice", () => {
 	test("newWorktree selects repo provisioning while reuse selects the source cwd", async ({ gateway }) => {
 		seedSessionTranscript(gateway, sourceId, [transcriptMessage(`fork-${sourceId}`, "FORK_WT_MARKER")]);
 
-		await withForkCreateSeam(gateway, repoPath, async (captures) => {
+		await withForkCreateSeam(gateway, sourceId, repoPath, async (captures) => {
 			const freshResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
 				method: "POST",
 				body: JSON.stringify({ newWorktree: true }),
@@ -303,7 +350,7 @@ test.describe.serial("fork worktree choice", () => {
 		ensureStaleRuntimeCwdMetadata(sourceJsonl, sourceWorktree, sourceId);
 		const { userLine, assistantLine } = appendOldCwdMessageContentSentinels(sourceJsonl, sourceWorktree, marker);
 
-		await withForkCreateSeam(gateway, repoPath, async (captures) => {
+		await withForkCreateSeam(gateway, sourceId, repoPath, async (captures) => {
 			const forkResp = await apiFetch(`/api/sessions/${sourceId}/fork`, {
 				method: "POST",
 				body: JSON.stringify({ newWorktree: true }),
