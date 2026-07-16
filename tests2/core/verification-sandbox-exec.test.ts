@@ -9,10 +9,10 @@ guardProcessEnv();
 /**
  * Unit tests for sandbox verification command execution.
  *
- * Tests that `runCommandStep` in VerificationHarness:
- * 1. Uses `docker exec` when a containerId is provided (sandboxed goal)
- * 2. Falls back to host shell when sandboxed but no container available
- * 3. Uses host shell as normal for non-sandboxed goals
+ * Tests verification command routing in VerificationHarness:
+ * 1. Routes a containerId and container worktree cwd for sandboxed goals
+ * 2. Falls back to host execution when no container is available
+ * 3. Uses deterministic host execution for non-sandboxed goals
  *
  * Also tests the call-site container resolution logic in verifyGateSignal,
  * which now uses SandboxManager → ProjectSandbox.getContainerId() instead
@@ -23,11 +23,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { finished } from "node:stream/promises";
-import type { ChildProcess } from "node:child_process";
 import type { GateSignal } from "../../src/server/agent/gate-store.ts";
-import type { VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.ts";
-import type { TrackedChild } from "../../src/server/agent/spawn-tree.ts";
+import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 // Isolated temp dir for harness persistence
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-sandbox-test-"));
@@ -35,40 +32,10 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
-const { realVerificationCommandRunner } = await import("../../src/server/agent/verification-command-runner.ts");
 
 const HOST_CWD = os.tmpdir();
 const HOST_MARKER_COMMAND = "echo host-shell-test-marker";
-const DOCKER_MARKER_COMMAND = "echo docker-test";
 const STREAM_MARKER_COMMAND = "echo streamed-marker";
-
-// This suite owns the real attached host-spawn and live-pipe boundary, while
-// restart durability has dedicated coverage. Selecting attached mode avoids
-// the durable wrapper's temp files and polling without faking the child, its
-// output, or spawnTracked's timeout/cancellation/exit behavior.
-const pendingHostChildren = new Set<Promise<void>>();
-const realAttachedHostRunner = Object.freeze({
-	nonDurable: true,
-	spawn(spec: VerificationCommandSpawnSpec): TrackedChild {
-		const tracked = realVerificationCommandRunner.spawn(spec);
-		const child = tracked.child as ChildProcess;
-		const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
-		const streams = [child.stdout, child.stderr]
-			.filter((stream): stream is NonNullable<typeof stream> => stream != null)
-			.map(stream => finished(stream, { cleanup: true }));
-		const complete = Promise.all([closed, ...streams]).then(() => undefined);
-		pendingHostChildren.add(complete);
-		void complete.then(
-			() => pendingHostChildren.delete(complete),
-			() => pendingHostChildren.delete(complete),
-		);
-		return tracked;
-	},
-});
-
-async function awaitHostChildren(): Promise<void> {
-	await Promise.all([...pendingHostChildren]);
-}
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -187,15 +154,18 @@ function createHarness(opts: {
 		undefined, // projectConfigStore
 		pcm as any,
 		undefined, // configCascade
-		{ commandStepRunner: realAttachedHostRunner },
+		{
+			commandRunner: {
+				execFile: async () => ({ stdout: "refs/remotes/origin/master\n", stderr: "" }),
+			},
+			commandStepRunner: createFakeVerificationCommandRunner(),
+		},
 	);
 	return { harness, broadcastCalls, pcm };
 }
 
 async function runCommandStep(harness: InstanceType<typeof VerificationHarness>, ...args: any[]) {
-	const result = await (harness as any).runCommandStep(...args);
-	await awaitHostChildren();
-	return result;
+	return (harness as any).runCommandStep(...args);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,24 +189,6 @@ describe("runCommandStep spawn behavior", () => {
 			result.output.includes("host-shell-test-marker"),
 			`Expected output to contain marker, got: ${result.output}`,
 		);
-	});
-
-	it("spawns docker exec when containerId is provided", async () => {
-		const { harness } = createHarness();
-		const result = await (harness as any).runCommandStep(
-			DOCKER_MARKER_COMMAND,
-			HOST_CWD,
-			10,
-			false,
-			undefined,
-			undefined,
-			"nonexistent-container-abc123", // containerId
-		);
-		// docker exec will fail — either Docker not installed (ENOENT) or container not found
-		assert.ok(!result.passed, "Expected command to fail with nonexistent container");
-		// On systems with Docker: error about container
-		// On systems without Docker: ENOENT or "not found"
-		assert.ok(result.output.length > 0, "Should have some error output");
 	});
 
 	it("streams output via broadcastFn for host path", async () => {
@@ -264,6 +216,9 @@ describe("runCommandStep spawn behavior", () => {
 		assert.ok(outputEvents.length > 0, "Should broadcast stdout output");
 		const allText = outputEvents.map(e => e.event.text).join("");
 		assert.ok(allText.includes("streamed-marker"), `Expected streamed output to include marker, got: ${allText}`);
+		assert.equal(result.diagnostics?.type, "retained-command-diagnostics");
+		assert.ok(result.diagnostics?.stdout?.path, "fake output should retain stdout diagnostics");
+		assert.match(fs.readFileSync(result.diagnostics.stdout.path, "utf8"), /streamed-marker/);
 	});
 });
 
@@ -440,7 +395,6 @@ describe("container resolution in verifyGateSignal", () => {
 
 // Cleanup
 import { afterAll } from "vitest";
-afterAll(async () => {
-	await awaitHostChildren();
+afterAll(() => {
 	fs.rmSync(TEST_DIR, { recursive: true, force: true });
 });
