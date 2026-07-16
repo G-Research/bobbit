@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
-import { discoverAigwModels } from "./aigw-manager.js";
+import { discoverAigwModels, normalizeAigwModelString } from "./aigw-manager.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { completeModelText } from "./model-completion.js";
 import { getAvailableModels, modelRecencyRank, type ApiModel } from "./model-registry.js";
@@ -234,6 +234,10 @@ async function resolveGatewayModelId(baseUrl: string, strippedId: string, fetchI
 
 /**
  * Generate title via the AI Gateway using OpenAI-compatible chat completions.
+ *
+ * This legacy path is used only for automatic Claude fallback when no explicit
+ * naming preference exists. Explicit AIGW models resolve through ApiModel and
+ * completeModelText(), preserving Responses, Converse, or completions routing.
  */
 async function generateViaGateway(aigwUrl: string, modelId: string, preview: string, thinkingLevel?: string, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	const baseUrl = aigwUrl.replace(/\/+$/, "");
@@ -307,13 +311,14 @@ async function getOptionModels(options: TitleGenOptions): Promise<ApiModel[]> {
 }
 
 async function findConfiguredModel(pref: string, options: TitleGenOptions): Promise<{ provider: string; modelId: string; model?: ApiModel } | null> {
-	const slash = pref.indexOf("/");
-	if (slash <= 0 || slash >= pref.length - 1) {
+	const normalizedPref = normalizeAigwModelString(pref);
+	const slash = normalizedPref.indexOf("/");
+	if (slash <= 0 || slash >= normalizedPref.length - 1) {
 		console.warn(`[title-gen] Malformed namingModel preference: "${pref}", ignoring`);
 		return null;
 	}
-	const provider = pref.slice(0, slash);
-	const modelId = pref.slice(slash + 1);
+	const provider = normalizedPref.slice(0, slash);
+	const modelId = normalizedPref.slice(slash + 1);
 	const models = await getOptionModels(options);
 	return { provider, modelId, model: models.find(m => m.provider === provider && m.id === modelId) };
 }
@@ -450,25 +455,17 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 		return null;
 	}
 
-	// If a naming model is configured, respect its provider. AI Gateway models
-	// still use the gateway path; direct/custom models use pi-ai. Title
-	// generation is intentionally forced to thinking=off for cost and latency.
+	// Every explicit model, including AIGW Responses/Converse/completions, routes
+	// through the resolved registry model and pi-ai. Never guess the legacy root
+	// chat endpoint for an explicit AIGW preference.
 	if (options?.namingModel) {
 		const configured = await findConfiguredModel(options.namingModel, options);
-		if (configured) {
-			if (configured.provider === "aigw" && options.aigwUrl) {
-				return generateViaGateway(options.aigwUrl, configured.modelId, preview, "off", fetchImpl);
-			}
-			if (configured.model) {
-				const userPrompt = `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`;
-				const systemPrompt = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
-				return generateViaConfiguredDirectModel(configured.model, userPrompt, systemPrompt, options);
-			}
-			if (configured.provider === "anthropic") {
-				return generateViaAnthropic(preview, "off", configured.modelId, fetchImpl);
-			}
-			console.warn(`[title-gen] Naming model "${options.namingModel}" is not available; falling back`);
+		if (configured?.model) {
+			const userPrompt = `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`;
+			const systemPrompt = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
+			return generateViaConfiguredDirectModel(configured.model, userPrompt, systemPrompt, options);
 		}
+		console.warn(`[title-gen] Naming model "${options.namingModel}" is not available; falling back`);
 	}
 
 	// Gateway configured but no explicit naming model - auto-select a low-cost
@@ -656,19 +653,11 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 
 	if (options?.namingModel) {
 		const configured = await findConfiguredModel(options.namingModel, options);
-		if (configured) {
-			if (configured.provider === "aigw" && options.aigwUrl) {
-				return generateGoalSummaryViaGateway(options.aigwUrl, configured.modelId, goalTitle);
-			}
-			if (configured.model) {
-				const userPrompt = `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:`;
-				return generateViaConfiguredDirectModel(configured.model, userPrompt, GOAL_SUMMARY_SYSTEM, options);
-			}
-			if (configured.provider === "anthropic") {
-				return generateGoalSummaryViaAnthropic(goalTitle, configured.modelId);
-			}
-			console.warn(`[title-gen] Naming model "${options.namingModel}" is not available for goal summary; falling back`);
+		if (configured?.model) {
+			const userPrompt = `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:`;
+			return generateViaConfiguredDirectModel(configured.model, userPrompt, GOAL_SUMMARY_SYSTEM, options);
 		}
+		console.warn(`[title-gen] Naming model "${options.namingModel}" is not available for goal summary; falling back`);
 	}
 
 	// Gateway configured but no explicit naming model - auto-select a low-cost

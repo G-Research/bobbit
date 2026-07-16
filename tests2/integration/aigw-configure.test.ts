@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { apiFetch } from "./_e2e/e2e-setup.js";
+import { configureAigwRuntimeFlags } from "../../src/server/agent/aigw-manager.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
@@ -58,6 +59,13 @@ function expectSingleBobbitUserAgent(record: RecordedRequest | undefined): void 
 
 function lastRecordedRequest(path: string): RecordedRequest | undefined {
 	return [...recordedRequests].reverse().find((record) => record.url === path);
+}
+
+async function readRequestJson(req: http.IncomingMessage): Promise<any> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of req) chunks.push(Buffer.from(chunk));
+	const text = Buffer.concat(chunks).toString("utf-8");
+	return text ? JSON.parse(text) : {};
 }
 
 test.beforeAll(async () => {
@@ -119,9 +127,11 @@ test.describe("AI Gateway Configure Flow", () => {
 		expect(data.models).toHaveLength(3);
 		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
 
-		// Verify model IDs — Claude models get prefix stripped (Bedrock API)
+		// Verify model IDs — Claude models get prefix stripped (Bedrock API); gpt-5.2
+		// is a reasoning model so the option-1 fix routes it to openai-responses with
+		// a BARE wire id ("openai/gpt-5.2" → "gpt-5.2").
 		const ids = data.models.map((m: any) => m.id);
-		expect(ids).toContain("openai/gpt-5.2");
+		expect(ids).toContain("gpt-5.2");
 		expect(ids).toContain("us.anthropic.claude-sonnet-4-6");
 		expect(ids).toContain("gresearch/qwen3-coder-480b-a35b");
 	});
@@ -164,7 +174,7 @@ test.describe("AI Gateway Configure Flow", () => {
 		});
 		const data = await res.json();
 
-		const gpt = data.models.find((m: any) => m.id === "openai/gpt-5.2");
+		const gpt = data.models.find((m: any) => m.id === "gpt-5.2");
 		expect(gpt).toBeTruthy();
 		expect(gpt.contextWindow).toBe(400_000);
 		expect(gpt.input).toContain("image");
@@ -227,6 +237,91 @@ test.describe("AI Gateway Configure Flow", () => {
 		// aigw.models is no longer cached in preferences — models are discovered fresh via GET /api/models
 	});
 
+	test("/api/models/test probes well-known openai-responses models on their per-provider baseUrl", async () => {
+		const requests: Array<{ method?: string; url?: string; body?: any }> = [];
+		const server = http.createServer(async (req, res) => {
+			let body: any | undefined;
+			if (req.method === "POST") body = await readRequestJson(req);
+			requests.push({ method: req.method, url: req.url, body });
+			res.setHeader("Content-Type", "application/json");
+			if (req.url?.startsWith("/.well-known/opencode")) {
+				res.end(JSON.stringify({
+					provider: {
+						openai: {
+							npm: "@ai-sdk/openai",
+							options: { baseURL: `http://127.0.0.1:${wellKnownPort}/openai/v1` },
+							models: { "gpt-5.5": { name: "gpt-5.5", reasoning: true, limit: { context: 272000, output: 128000 } } },
+						},
+						"aws-mantle": {
+							npm: "@ai-sdk/openai",
+							options: { baseURL: `http://127.0.0.1:${wellKnownPort}/aws/openai/v1` },
+							models: { "openai.gpt-5.5": { name: "openai.gpt-5.5", reasoning: true, limit: { context: 272000, output: 128000 } } },
+						},
+					},
+				}));
+				return;
+			}
+			if (req.url === "/openai/v1/responses" || req.url === "/aws/openai/v1/responses") {
+				res.end(JSON.stringify({ id: "resp_test", status: "completed", object: "response" }));
+				return;
+			}
+			if (req.url === "/v1/models") {
+				res.end(JSON.stringify({ data: [{ id: "openai/gpt-5.5" }, { id: "aws/openai.gpt-5.5" }] }));
+				return;
+			}
+			res.writeHead(400);
+			res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+		});
+		let wellKnownPort = 0;
+		await new Promise<void>((resolve) => {
+			server.listen(0, "127.0.0.1", () => {
+				wellKnownPort = (server.address() as any).port;
+				resolve();
+			});
+		});
+		try {
+			configureAigwRuntimeFlags({ skipAigwDiscovery: false });
+			const configureRes = await apiFetch("/api/aigw/configure", {
+				method: "POST",
+				body: JSON.stringify({ url: `http://127.0.0.1:${wellKnownPort}` }),
+			});
+			expect(configureRes.status).toBe(200);
+			const configureData = await configureRes.json();
+			const configuredOpenAi = configureData.models.find((m: any) => m.id === "openai.gpt-5.5");
+			expect(configuredOpenAi?.upstreamProvider).toBe("aws-mantle");
+
+			const testRes = await apiFetch("/api/models/test", {
+				method: "POST",
+				body: JSON.stringify({ pref: "aigw/openai.gpt-5.5" }),
+			});
+			expect(testRes.status).toBe(200);
+			const data = await testRes.json();
+			expect(data.ok).toBe(true);
+			expect(data.modelResolved).toBe("openai.gpt-5.5");
+
+			const responseProbe = requests.find((r) => r.method === "POST" && r.url === "/aws/openai/v1/responses");
+			expect(responseProbe).toBeTruthy();
+			expect(responseProbe!.body).toMatchObject({
+				model: "openai.gpt-5.5",
+				max_output_tokens: 16,
+				input: "Reply with OK",
+			});
+
+			const legacyPrefRes = await apiFetch("/api/models/test", {
+				method: "POST",
+				body: JSON.stringify({ pref: "aigw/openai/gpt-5.5" }),
+			});
+			expect(legacyPrefRes.status).toBe(200);
+			const legacyPrefData = await legacyPrefRes.json();
+			expect(legacyPrefData.ok).toBe(true);
+			expect(legacyPrefData.modelResolved).toBe("gpt-5.5");
+			expect(requests.some((r) => r.method === "POST" && r.url === "/v1/chat/completions")).toBe(false);
+		} finally {
+			configureAigwRuntimeFlags({ skipAigwDiscovery: true });
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	});
+
 	test("/api/models returns aigw Claude IDs with prefix stripped (regression: model picker silently fails)", async () => {
 		// Regression test for the bug where picking a Claude model served by the
 		// AI Gateway via the prompt model picker appeared to succeed but actually
@@ -265,10 +360,12 @@ test.describe("AI Gateway Configure Flow", () => {
 		expect(claude.id).not.toContain("/");
 		expect(claude.api).toBe("bedrock-converse-stream");
 
-		// Non-Claude aigw models keep their original ID (including any slash)
+		// gpt-5.2 is a reasoning model → option-1 routes it to openai-responses on
+		// the dedicated /openai/v1 subpath with a BARE wire id (no provider prefix).
 		const gpt = aigwModels.find((m: any) => m.id.includes("gpt"));
 		expect(gpt).toBeTruthy();
-		expect(gpt.id).toBe("openai/gpt-5.2");
+		expect(gpt.id).toBe("gpt-5.2");
+		expect(gpt.api).toBe("openai-responses");
 
 		const qwen = aigwModels.find((m: any) => m.id.includes("qwen"));
 		expect(qwen).toBeTruthy();

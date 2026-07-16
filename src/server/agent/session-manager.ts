@@ -71,7 +71,7 @@ import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from ".
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
-import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
+import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
@@ -5792,13 +5792,19 @@ export class SessionManager {
 		// redundant initial `model_change` event with its hardcoded default.
 		// Prefer the persisted model if known (avoids surprising changes after
 		// restart); fall back to role/preference resolution.
-		const psPersistedModel = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined;
+		const psPersistedModel = ps.modelProvider && ps.modelId ? normalizeAigwModelString(`${ps.modelProvider}/${ps.modelId}`) : undefined;
 		// Keep an explicit, still-runnable persisted pin (incl. authenticated Code
 		// Assist), but fall back to role/pref resolution when the persisted model is
 		// no longer spawn-pinnable — e.g. a Code Assist model whose Google credential
 		// was removed/expired, which Pi could not resolve as `--model`.
 		if (psPersistedModel && isSpawnPinnableModelString(psPersistedModel)) {
 			bridgeOptions.initialModel = psPersistedModel;
+			const slash = psPersistedModel.indexOf("/");
+			const normalizedProvider = psPersistedModel.slice(0, slash);
+			const normalizedModelId = psPersistedModel.slice(slash + 1);
+			if (normalizedProvider !== ps.modelProvider || normalizedModelId !== ps.modelId) {
+				this.resolveStoreForSession(ps.id).update(ps.id, { modelProvider: normalizedProvider, modelId: normalizedModelId });
+			}
 		} else {
 			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
@@ -6840,11 +6846,17 @@ export class SessionManager {
 			// `isSpawnPinnableModelString` additionally screens out Code Assist when
 			// no Google credential is present (unauthenticated `google-gemini-cli/*`
 			// would fail to resolve as Pi's `--model`).
-			if (m && /^[^/]+\/.+$/.test(m) && isSpawnPinnableModelString(m)) return m;
+			if (m && /^[^/]+\/.+$/.test(m)) {
+				const normalized = normalizeAigwModelString(m);
+				if (isSpawnPinnableModelString(normalized)) return normalized;
+			}
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref) && isSpawnPinnableModelString(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref)) {
+			const normalized = normalizeAigwModelString(pref);
+			if (isSpawnPinnableModelString(normalized)) return normalized;
+		}
 		return undefined;
 	}
 
@@ -6890,10 +6902,16 @@ export class SessionManager {
 	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
 		if (role) {
 			const m = this.resolveRoleModelValue(role, projectId);
-			if (m && /^[^/]+\/.+$/.test(m) && isSpawnPinnableModelString(m)) return m;
+			if (m && /^[^/]+\/.+$/.test(m)) {
+				const normalized = normalizeAigwModelString(m);
+				if (isSpawnPinnableModelString(normalized)) return normalized;
+			}
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref) && isSpawnPinnableModelString(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref)) {
+			const normalized = normalizeAigwModelString(pref);
+			if (isSpawnPinnableModelString(normalized)) return normalized;
+		}
 		return undefined;
 	}
 
@@ -6903,7 +6921,8 @@ export class SessionManager {
 		// and hard-fails on mismatch.
 		const spawnPinned = !!session.spawnPinnedModel;
 		const allowSessionModelFallback = this.preferencesStore?.get("allowSessionModelFallback") === true;
-		const fallbackSessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		const rawFallbackSessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		const fallbackSessionModel = rawFallbackSessionModel ? normalizeAigwModelString(rawFallbackSessionModel) : rawFallbackSessionModel;
 
 		// Spawn-pinned models are explicit selections too (restore/respawn persisted
 		// model, role/default pin from initial setup, or caller-supplied initialModel).
@@ -6911,7 +6930,7 @@ export class SessionManager {
 		// pinned model is stale or unavailable, never fall through to role/default
 		// resolution, AIGW discovery, or SDK/provider defaults; with the opt-in policy
 		// try only default.sessionModel.
-		const pinnedModel = session.spawnPinnedModel;
+		const pinnedModel = session.spawnPinnedModel ? normalizeAigwModelString(session.spawnPinnedModel) : session.spawnPinnedModel;
 		if (pinnedModel) {
 			const safePinnedModel = sanitizeModelErrorText(pinnedModel);
 			let pinnedModelError;
@@ -6981,7 +7000,8 @@ export class SessionManager {
 		// 0. Role override (highest explicit precedence). If it fails, never fall
 		// through to discovery/provider defaults. With the opt-in policy, try only
 		// default.sessionModel as the controlled fallback target.
-		const roleModel = this.resolveRoleModel(session);
+		const rawRoleModel = this.resolveRoleModel(session);
+		const roleModel = rawRoleModel ? normalizeAigwModelString(rawRoleModel) : rawRoleModel;
 		if (roleModel) {
 			const safeRoleModel = sanitizeModelErrorText(roleModel);
 			let roleModelError;
@@ -6993,7 +7013,7 @@ export class SessionManager {
 						sessionManager: this,
 						sessionId: session.id,
 						contextLabel: `role.${session.role}.model`,
-						skipSetModel: spawnPinned && session.spawnPinnedModel === roleModel,
+						skipSetModel: spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === roleModel,
 					});
 					this._writeModelNameFile(session.id, roleModel);
 					const slash = roleModel.indexOf("/");
@@ -7026,7 +7046,7 @@ export class SessionManager {
 							sessionManager: this,
 							sessionId: session.id,
 							contextLabel: "default.sessionModel fallback",
-							skipSetModel: spawnPinned && session.spawnPinnedModel === fallbackSessionModel,
+							skipSetModel: spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === fallbackSessionModel,
 						});
 						this._writeModelNameFile(session.id, fallbackSessionModel);
 						const slash = fallbackSessionModel.indexOf("/");
@@ -7055,7 +7075,8 @@ export class SessionManager {
 		// default.sessionModel itself is not fallback-eligible: any malformed,
 		// non-session-selectable, unavailable, or read-back-mismatched value fails
 		// loudly and never falls through to AIGW or provider defaults.
-		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
+		const rawSessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
+		const sessionModelPref = rawSessionModelPref ? normalizeAigwModelString(rawSessionModelPref) : rawSessionModelPref;
 		if (sessionModelPref) {
 			const safeSessionModelPref = sanitizeModelErrorText(sessionModelPref);
 			if (!isSessionSelectableModelString(sessionModelPref)) {
@@ -7064,7 +7085,7 @@ export class SessionManager {
 			const slash = sessionModelPref.indexOf("/");
 			const provider = sessionModelPref.slice(0, slash);
 			const modelId = sessionModelPref.slice(slash + 1);
-			const preSpawnPinned = spawnPinned && session.spawnPinnedModel === sessionModelPref;
+			const preSpawnPinned = spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === sessionModelPref;
 			try {
 				// Route through applyModelString to preserve the hard-fail-on-mismatch
 				// contract (read-back via getState()) regardless of whether we skipped
@@ -7748,7 +7769,7 @@ export class SessionManager {
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
-				? `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`
+				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
 				: undefined;
 		// See spawn path: skip a persisted pin that is no longer spawn-pinnable
 		// (e.g. unauthenticated Code Assist) so the respawn falls back cleanly.

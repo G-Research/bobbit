@@ -120,10 +120,18 @@ async function withMockAigw<T>(models: AigwModelPayload[], fn: (mock: MockAigw) 
 }
 
 describe("AI Gateway pricing metadata", () => {
+	// NOTE (well-known migration): discoverAigwModels is now well-known-first. When
+	// the mock gateway has no /.well-known/opencode (these mocks 404/500 it), the
+	// probe returns null and we fall back to /v1/models — so the recorded request
+	// list now begins with "/.well-known/opencode". Additionally, the MINIMAL
+	// option-1 fallback fix routes OpenAI-family *reasoning* ids (gpt-5.2, gpt-5.6-*)
+	// to openai-responses on the dedicated /openai/v1 subpath with a BARE wire id
+	// (e.g. "openai/gpt-5.2" → "gpt-5.2"), so these assertions match the bare id and
+	// the openai-responses api. Pricing/thinkingLevelMap coverage is preserved.
 	it("converts /v1/models pricing to per-million costs in discoverAigwModels output", async () => {
 		await withMockAigw([pricedOpenAiModel()], async (mock) => {
 			const models = await discoverAigwModels(mock.url);
-			const aigwModel = models.find((m: any) => m.id === "openai/gpt-5.2") as any;
+			const aigwModel = models.find((m: any) => (m.wireId ?? m.id) === "gpt-5.2") as any;
 
 			assert.ok(aigwModel, "expected mocked AIGW model to appear in discoverAigwModels output");
 			assert.deepEqual(
@@ -133,8 +141,8 @@ describe("AI Gateway pricing metadata", () => {
 			);
 			assert.deepEqual(
 				mock.requests(),
-				["/v1/models"],
-				"AIGW pricing discovery must not call unavailable aggregate usage/cost endpoints",
+				["/.well-known/opencode", "/v1/models"],
+				"AIGW discovery probes well-known first, then falls back to the model list endpoint (no aggregate usage/cost endpoints)",
 			);
 		});
 	});
@@ -152,7 +160,7 @@ describe("AI Gateway pricing metadata", () => {
 				assert.ok(model, `expected ${id} to be returned from discovery`);
 				assert.deepEqual(model.cost, ZERO_COST, `${id} should use the safe zero-cost fallback`);
 			}
-			assert.deepEqual(mock.requests(), ["/v1/models"]);
+			assert.deepEqual(mock.requests(), ["/.well-known/opencode", "/v1/models"]);
 		});
 	});
 
@@ -166,7 +174,7 @@ describe("AI Gateway pricing metadata", () => {
 			invalidateModelCache();
 
 			const models = await getAvailableModels(prefs as any);
-			const aigwModel = models.find((m) => m.provider === "aigw" && m.id === "openai/gpt-5.2");
+			const aigwModel = models.find((m) => m.provider === "aigw" && m.id === "gpt-5.2");
 
 			assert.ok(aigwModel, "expected mocked AIGW model to appear in getAvailableModels output");
 			assert.deepEqual(
@@ -176,8 +184,8 @@ describe("AI Gateway pricing metadata", () => {
 			);
 			assert.deepEqual(
 				mock.requests(),
-				["/v1/models"],
-				"AIGW pricing cost discovery must only call the model list endpoint, not aggregate usage/cost endpoints",
+				["/.well-known/opencode", "/v1/models"],
+				"AIGW pricing cost discovery probes well-known then the model list endpoint (no aggregate usage/cost endpoints)",
 			);
 		} finally {
 			invalidateModelCache();
@@ -201,16 +209,17 @@ describe("AI Gateway pricing metadata", () => {
 
 				const data = readModelsJson(tmpAgentDir);
 				const persistedModels = data.providers.aigw.models;
-				const openAiEntry = persistedModels.find((m: any) => m.id === "openai/gpt-5.2");
+				const openAiEntry = persistedModels.find((m: any) => m.id === "gpt-5.2");
 				const claudeEntry = persistedModels.find((m: any) => m.id === "us.anthropic.claude-sonnet-4-5-v1:0");
 
 				assert.ok(openAiEntry, "expected non-Claude AIGW entry in models.json");
 				assert.ok(claudeEntry, "expected Claude AIGW entry to be persisted with Bedrock-stripped id");
-				assert.equal(openAiEntry.api ?? "openai-completions", "openai-completions");
+				// gpt-5.2 is a reasoning model → option-1 routes it to openai-responses.
+				assert.equal(openAiEntry.api, "openai-responses");
 				assert.equal(claudeEntry.api, "bedrock-converse-stream");
 				assert.deepEqual(openAiEntry.cost, GPT_52_COST, "non-Claude generated model entry should preserve discovered cost");
 				assert.deepEqual(claudeEntry.cost, CLAUDE_COST, "Claude Bedrock-routed generated model entry should preserve discovered cost");
-				assert.deepEqual(mock.requests(), ["/v1/models"]);
+				assert.deepEqual(mock.requests(), ["/.well-known/opencode", "/v1/models"]);
 			} finally {
 				await mock.close();
 			}
@@ -230,7 +239,7 @@ describe("AI Gateway pricing metadata", () => {
 			const mock = await startMockAigw([pricedGpt56Model(), pricedOpenAiModel()]);
 			try {
 				const discoveredModels = await discoverAigwModels(mock.url);
-				const luna = discoveredModels.find((m: any) => m.id === "openai/gpt-5.6-luna") as any;
+				const luna = discoveredModels.find((m: any) => (m.wireId ?? m.id) === "gpt-5.6-luna") as any;
 				assert.ok(luna, "expected discovery to return the routed GPT 5.6 model");
 				assert.deepEqual(
 					luna.thinkingLevelMap,
@@ -242,8 +251,8 @@ describe("AI Gateway pricing metadata", () => {
 
 				const data = readModelsJson(tmpAgentDir);
 				const persistedModels = data.providers.aigw.models;
-				const lunaEntry = persistedModels.find((m: any) => m.id === "openai/gpt-5.6-luna");
-				const plainEntry = persistedModels.find((m: any) => m.id === "openai/gpt-5.2");
+				const lunaEntry = persistedModels.find((m: any) => m.id === "gpt-5.6-luna");
+				const plainEntry = persistedModels.find((m: any) => m.id === "gpt-5.2");
 
 				assert.ok(lunaEntry, "expected routed GPT 5.6 entry in models.json");
 				assert.deepEqual(
@@ -275,7 +284,7 @@ describe("AI Gateway pricing metadata", () => {
 				assert.equal(lunaEntry.compat?.supportsUsageInStreaming, false, "GPT 5.6 must keep supportsUsageInStreaming:false");
 				assert.equal(lunaEntry.compat?.supportsStrictMode, false, "GPT 5.6 must keep supportsStrictMode:false");
 				assert.equal(lunaEntry.compat?.maxTokensField, "max_tokens", "GPT 5.6 must keep maxTokensField:max_tokens");
-				assert.deepEqual(mock.requests(), ["/v1/models"]);
+				assert.deepEqual(mock.requests(), ["/.well-known/opencode", "/v1/models"]);
 			} finally {
 				await mock.close();
 			}
