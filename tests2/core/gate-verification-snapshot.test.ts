@@ -2,12 +2,13 @@
 // Source: tests/gate-verification-snapshot.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { afterAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { installScopedMemoryFs } from "./helpers/scoped-memory-fs.ts";
 import { GateArtifactResolutionError, buildArtifactLookup, resolveArtifactFromLookup } from "../../src/server/gate-artifacts.ts";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "../../src/server/gate-verification-snapshot.ts";
 import {
@@ -20,9 +21,15 @@ import {
 const tempDirs: string[] = [];
 let sharedArtifactFixtureDir: string | undefined;
 let sharedLiveLogPath: string | undefined;
+let restoreFs: (() => void) | undefined;
+
+beforeAll(() => {
+	restoreFs = installScopedMemoryFs();
+});
 
 afterAll(() => {
 	for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+	restoreFs?.();
 });
 
 function makeTempDir(): string {
@@ -39,8 +46,9 @@ function makeSharedLiveLog(): string {
 	if (sharedLiveLogPath) return sharedLiveLogPath;
 	const dir = makeTempDir();
 	sharedLiveLogPath = path.join(dir, "shared-live.log");
-	// The head drives bounded full-mode selection; the suffix drives tail mode.
-	fs.writeFileSync(sharedLiveLogPath, `${lines("full-mode-line", 100_000)}\n${lines("live-line", 100_000)}\n`);
+	// Just over the 256 KiB read cap: the head drives bounded full-mode
+	// selection, while the suffix drives the line-aware tail selection.
+	fs.writeFileSync(sharedLiveLogPath, `${lines("full-mode-line", 15_000)}\n${lines("live-line", 10_000)}\n`);
 	return sharedLiveLogPath;
 }
 
@@ -371,7 +379,7 @@ describe("gate verification retained diagnostics compactness", () => {
 			selectionOptions: { mode: "full" },
 			artifacts: Array.from({ length: artifactCount }, (_, i) => ({
 				relativePath: `test-results/failing-case-${String(i + 1).padStart(3, "0")}/error-context.md`,
-				content: `# Error Context\n${marker}-${i + 1}\n${"artifact body ".repeat(500)}\n`,
+				content: `# Error Context\n${marker}-${i + 1}\n${"artifact body ".repeat(20)}\n`,
 			})),
 		});
 		const json = JSON.stringify(snapshot);
@@ -517,9 +525,9 @@ describe("gate verification active live command log reads", () => {
 		const step = snapshot.steps[0];
 
 		assert.equal(step.status, "running");
-		assert.match(step.output ?? "", /live-line-99981/);
-		assert.match(step.output ?? "", /live-line-100000/);
-		assert.doesNotMatch(step.output ?? "", /live-line-99980/);
+		assert.match(step.output ?? "", /live-line-9981/);
+		assert.match(step.output ?? "", /live-line-10000/);
+		assert.doesNotMatch(step.output ?? "", /live-line-9980/);
 		assert.doesNotMatch(step.output ?? "", /live-line-1\b/);
 		assert.equal(step.selection?.mode, "tail");
 		assert.equal(step.selection?.truncated, true);
@@ -531,7 +539,7 @@ describe("gate verification active live command log reads", () => {
 		const step = snapshot.steps[0];
 
 		assert.match(step.output ?? "", /full-mode-line-1\b/);
-		assert.doesNotMatch(step.output ?? "", /full-mode-line-100000\b/);
+		assert.doesNotMatch(step.output ?? "", /full-mode-line-15000\b/);
 		assert.equal(step.selection?.truncated, true);
 		assert.match(step.selection?.truncationReason ?? "", /live log read bounded to first \d+ bytes before selection/);
 	});
