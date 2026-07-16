@@ -323,3 +323,24 @@ Transform plus import consumed 119.97s. This is 15.35% of the 781.36s summed pha
 No file exceeded the 15s tier-1 budget. The slowest file completed in 11.985s.
 
 All Node UI, story, maintenance, and budget failures passed. The two remaining failures indicate residual shared-route facade interference; both files are being converted to isolated route/core tests.
+
+## Solo attempt 10
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 10 | One Vitest process / 3 workers | 274.10s | **FAIL** | `.profiles/testing-v2/fast-gate-run10.log` | 890 passed files, 4 skipped; 7,589 passed tests, 22 skipped; zero failed files or tests |
+
+This was the first full run in which all logical tests passed. It remained below the 300s wall-time target, and all prior order-dependent failures are resolved. The run failed only because the budget reporter detected one file above the 15s tier-1 limit.
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 26.49s |
+| Setup | 68.69s |
+| Import | 99.03s |
+| Tests | 499.93s |
+| Environment | 86.68s |
+| **Summed** | **780.82s** |
+
+The sole budget breach was `headquarters-state-migration` at 18.525s. Optimization has been launched.
