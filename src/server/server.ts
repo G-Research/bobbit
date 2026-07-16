@@ -37,7 +37,7 @@ import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
-import { PrStatusStore } from "./agent/pr-status-store.js";
+import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
 import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -553,7 +553,7 @@ import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
-import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
+import { launchSidebarSessionFork, resolveGoalGithubLink } from "./sidebar-actions.js";
 import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData, seedModelDefaultsFromLegacy } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -11894,40 +11894,23 @@ async function handleApiRoute(
 	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
 	if (goalGithubLinkMatch && req.method === "GET") {
 		const goalId = goalGithubLinkMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) { json({ available: false, reason: "goal-not-found" } satisfies GoalGithubLinkResponse); return; }
-		if (!hasGoalGitWorktree(goal)) { json({ available: false, reason: "no-worktree", message: noWorktreeGoalGitMessage(goal) } satisfies GoalGithubLinkResponse); return; }
-
-		const cached = prStatusStore.get(goalId);
-		if (cached?.url) {
-			json({ available: true, kind: "pr", url: cached.url } satisfies GoalGithubLinkResponse);
-			return;
-		}
-
-		if (goal.branch && fs.existsSync(goal.cwd)) {
-			const fresh = await getCachedPrStatus(goal.cwd, goal.branch, process.cwd()).catch(() => null);
-			if (fresh?.url) {
-				prStatusStore.set(goalId, fresh);
-				json({ available: true, kind: "pr", url: fresh.url } satisfies GoalGithubLinkResponse);
-				return;
-			}
-		}
-
-		if (!goal.branch) { json({ available: false, reason: "no-branch" } satisfies GoalGithubLinkResponse); return; }
-
-		const remoteCwd = goal.repoPath || goal.cwd;
-		try {
-			const { stdout } = await serverCommandRunner.execFile("git", ["remote", "get-url", "origin"], {
-				cwd: remoteCwd,
-				encoding: "utf-8",
-				timeout: 5_000,
-			});
-			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(String(stdout).trim()), goal.branch);
-			if (!branchUrl) { json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse); return; }
-			json({ available: true, kind: "branch", url: branchUrl } satisfies GoalGithubLinkResponse);
-		} catch {
-			json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse);
-		}
+		json(await resolveGoalGithubLink<PersistedGoal, PrStatusEntry>(goalId, {
+			getGoal: getGoalAcrossProjects,
+			hasGitWorktree: hasGoalGitWorktree,
+			noWorktreeMessage: noWorktreeGoalGitMessage,
+			getCachedPr: id => prStatusStore.get(id),
+			getFreshPr: (cwd, branch) => getCachedPrStatus(cwd, branch, process.cwd()),
+			setCachedPr: (id, pr) => prStatusStore.set(id, pr),
+			pathExists: fs.existsSync,
+			getOriginRemote: async cwd => {
+				const { stdout } = await serverCommandRunner.execFile("git", ["remote", "get-url", "origin"], {
+					cwd,
+					encoding: "utf-8",
+					timeout: 5_000,
+				});
+				return stripTokenFromGitUrl(String(stdout).trim());
+			},
+		}));
 		return;
 	}
 
@@ -12439,29 +12422,6 @@ async function handleApiRoute(
 		}
 
 		const projCwd = projectRegistry.get(projectId)!.rootPath;
-		// Worktree choice:
-		//  • newWorktree=true  → create a fresh worktree/branch off the project repo
-		//    (or a plain project-root session when the project isn't a git repo),
-		//    matching the Continue-Archived flow.
-		//  • newWorktree=false → reuse the source's existing worktree directly. Two
-		//    live sessions intentionally share the tree, so we deliberately do NOT
-		//    register worktree metadata on the fork — terminating either session
-		//    must never tear down the shared worktree/branch.
-		let sessionCwd: string;
-		let worktreeOpts: { repoPath: string } | undefined;
-		if (newWorktree) {
-			sessionCwd = projCwd;
-			try {
-				if (await isGitRepo(projCwd, serverCommandRunner)) worktreeOpts = { repoPath: await getRepoRoot(projCwd, serverCommandRunner) };
-			} catch { /* not a git repo — plain project-root session */ }
-		} else {
-			// Prefer the source's own cwd when it has no worktree so a standalone
-			// non-worktree session keeps its working directory instead of landing
-			// in the project root.
-			sessionCwd = ps.worktreePath || ps.cwd || projCwd;
-			worktreeOpts = undefined;
-		}
-
 		const forkId = randomUUID();
 		// Use the project root for the cloned `.jsonl` slug (same as /continue);
 		// worktree-backed sessions rotate to the final cwd-derived file after the
@@ -12485,60 +12445,76 @@ async function handleApiRoute(
 			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
 		}
 
-		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath, source.cwd]
-			.filter((v): v is string => typeof v === "string" && v.length > 0)));
-		const createOpts: any = {
-			sessionId: forkId,
-			projectId,
-			sandboxed: !!ps.sandboxed,
-			worktreeOpts,
-			preExistingAgentSessionFile: destJsonl,
-			preExistingAgentSessionOldCwds: oldTranscriptCwds,
-			taskId: ps.taskId,
-			reattemptGoalId: ps.reattemptGoalId,
-			staffId: ps.staffId,
-			allowedTools: ps.allowedTools,
-		};
-		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
-		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
-			createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
-		}
-
-		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
-		if (staff) {
-			createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager, resolveRoleForProject);
-			createOpts.roleName = staff.roleId;
-			createOpts.accessory = staff.accessory;
-			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
-		} else {
-			const role = ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
-			if (role) {
-				const opts = roleCreateOptions(role);
-				if (createOpts.initialModel) delete opts.initialModel;
-				Object.assign(createOpts, opts);
-			} else if (ps.role) {
-				createOpts.role = ps.role;
-				createOpts.roleName = ps.role;
-				if (ps.accessory) createOpts.accessory = ps.accessory;
-			} else if (ps.accessory) {
-				createOpts.accessory = ps.accessory;
-			}
-		}
-
 		try {
-			const fork = await sessionManager.createSession(sessionCwd, undefined, ps.goalId, ps.assistantType, createOpts);
-			const baseTitle = (ps.title || source.title || "session").trim() || "session";
-			const title = `Fork: ${baseTitle}`;
-			sessionManager.setTitle(fork.id, title, { markGenerated: true });
-			if (ps.staffId) fork.staffId = ps.staffId;
-
-			json({
-				id: fork.id,
-				cwd: fork.cwd,
-				status: fork.status,
+			const launched = await launchSidebarSessionFork({
+				forkId,
 				projectId,
-				goalId: ps.goalId,
-				title,
+				projectRoot: projCwd,
+				destJsonl,
+				newWorktree,
+				source,
+				persisted: ps,
+			}, {
+				resolveNewWorktreeRepoPath: async projectRoot => {
+					try {
+						return await isGitRepo(projectRoot, serverCommandRunner)
+							? await getRepoRoot(projectRoot, serverCommandRunner)
+							: undefined;
+					} catch {
+						return undefined;
+					}
+				},
+				buildCreateOptions: ({ worktreeOpts, oldTranscriptCwds }) => {
+					const createOpts: any = {
+						sessionId: forkId,
+						projectId,
+						sandboxed: !!ps.sandboxed,
+						worktreeOpts,
+						preExistingAgentSessionFile: destJsonl,
+						preExistingAgentSessionOldCwds: oldTranscriptCwds,
+						taskId: ps.taskId,
+						reattemptGoalId: ps.reattemptGoalId,
+						staffId: ps.staffId,
+						allowedTools: ps.allowedTools,
+					};
+					if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+					if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+						createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
+					}
+
+					const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+					if (staff) {
+						createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager, resolveRoleForProject);
+						createOpts.roleName = staff.roleId;
+						createOpts.accessory = staff.accessory;
+						createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+					} else {
+						const role = ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
+						if (role) {
+							const opts = roleCreateOptions(role);
+							if (createOpts.initialModel) delete opts.initialModel;
+							Object.assign(createOpts, opts);
+						} else if (ps.role) {
+							createOpts.role = ps.role;
+							createOpts.roleName = ps.role;
+							if (ps.accessory) createOpts.accessory = ps.accessory;
+						} else if (ps.accessory) {
+							createOpts.accessory = ps.accessory;
+						}
+					}
+					return createOpts;
+				},
+				createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
+				setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
+			});
+			if (ps.staffId) launched.fork.staffId = ps.staffId;
+			json({
+				id: launched.fork.id,
+				cwd: launched.fork.cwd,
+				status: launched.fork.status,
+				projectId: launched.projectId,
+				goalId: launched.goalId,
+				title: launched.title,
 			}, 201);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
