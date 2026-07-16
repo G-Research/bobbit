@@ -1,8 +1,8 @@
 // v2-native — focused contract coverage for explicit tests-map execution ownership.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
 	executionForMaterializedPath,
 	loadVitestExecutionMap,
@@ -25,20 +25,23 @@ const MATERIALIZED_PATHS = [
 	"tests2/core/marketplace-install.test.ts",
 	"tests2/core/team-manager.test.ts",
 ] as const;
-const roots: string[] = [];
+let root: string;
+let mapPath: string;
 
-afterEach(() => {
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+beforeAll(() => {
+	root = mkdtempSync(join(tmpdir(), "bobbit-map-"));
+	for (const area of ["core", "dom", "integration"]) {
+		mkdirSync(join(root, "tests2", area), { recursive: true });
+	}
+	for (const path of MATERIALIZED_PATHS) writeFileSync(join(root, path), "", "utf8");
+	mapPath = join(root, "tests2", "tests-map.json");
+});
+
+afterAll(() => {
+	rmSync(root, { recursive: true, force: true });
 });
 
 function makeFixture(): { root: string; mapPath: string; map: TestMap } {
-	const root = mkdtempSync(join(tmpdir(), "bobbit-test-map-execution-"));
-	roots.push(root);
-	for (const path of MATERIALIZED_PATHS) {
-		const absolute = join(root, path);
-		mkdirSync(dirname(absolute), { recursive: true });
-		writeFileSync(absolute, "export {};\n", "utf8");
-	}
 	const map: TestMap = {
 		v2Native: MATERIALIZED_PATHS.map((path) => ({
 			path,
@@ -47,13 +50,12 @@ function makeFixture(): { root: string; mapPath: string; map: TestMap } {
 		})),
 		entries: [],
 	};
-	const mapPath = join(root, "tests2", "tests-map.json");
 	writeMap(mapPath, map);
 	return { root, mapPath, map };
 }
 
-function writeMap(mapPath: string, map: TestMap): void {
-	writeFileSync(mapPath, `${JSON.stringify(map, null, 2)}\n`, "utf8");
+function writeMap(target: string, map: TestMap): void {
+	writeFileSync(target, JSON.stringify(map), "utf8");
 }
 
 function record(map: TestMap, path: string): TestRecord {

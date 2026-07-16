@@ -3,17 +3,40 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+	bobbitConfigDir,
+	bobbitDir,
+	bobbitStateDir,
+	headquartersDir,
+	normalProjectBobbitDir,
+	setProjectRoot,
+} from "../../src/server/bobbit-dir.ts";
+import { ConfigCascade } from "../../src/server/agent/config-cascade.ts";
+import { ProjectContext } from "../../src/server/agent/project-context.ts";
+import {
+	HEADQUARTERS_PROJECT_ID,
+	HEADQUARTERS_PROJECT_NAME,
+	ProjectRegistry,
+	SYSTEM_PROJECT_ID,
+} from "../../src/server/agent/project-registry.ts";
 
-const HEADQUARTERS_PROJECT_ID = "headquarters";
-const HEADQUARTERS_PROJECT_NAME = "Headquarters";
+let fixtureRoot: string;
 
-function mkTemp(label: string): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-hq-${label}-`));
+beforeAll(() => {
+	fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-hq-"));
+});
+
+afterAll(() => {
+	fs.rmSync(fixtureRoot, { recursive: true, force: true });
+});
+
+function fixturePath(label: string): string {
+	return path.join(fixtureRoot, label);
 }
 
 function minimalProject(id: string, name: string, rootPath: string, extra: Record<string, unknown> = {}) {
@@ -48,8 +71,7 @@ function withEnv<T>(updates: Record<string, string | undefined>, fn: () => T): T
 
 describe("Headquarters storage and config aliasing", () => {
 	it("bobbit-dir helpers split Headquarters from normal same-root project storage", async () => {
-		const serverRoot = mkTemp("server-root");
-		const { setProjectRoot, headquartersDir, bobbitDir, bobbitStateDir, bobbitConfigDir, normalProjectBobbitDir } = await import("../../src/server/bobbit-dir.ts");
+		const serverRoot = fixturePath("server-root");
 
 		withEnv({ BOBBIT_DIR: undefined, BOBBIT_PI_DIR: undefined }, () => {
 			setProjectRoot(serverRoot);
@@ -62,10 +84,9 @@ describe("Headquarters storage and config aliasing", () => {
 	});
 
 	it("BOBBIT_DIR and BOBBIT_PI_DIR override the Headquarters directory itself", async () => {
-		const serverRoot = mkTemp("override-root");
-		const custom = mkTemp("custom-hq");
-		const legacy = mkTemp("legacy-hq");
-		const { setProjectRoot, headquartersDir, bobbitStateDir, bobbitConfigDir } = await import("../../src/server/bobbit-dir.ts");
+		const serverRoot = fixturePath("override-root");
+		const custom = fixturePath("custom-hq");
+		const legacy = fixturePath("legacy-hq");
 		setProjectRoot(serverRoot);
 
 		withEnv({ BOBBIT_DIR: custom, BOBBIT_PI_DIR: legacy }, () => {
@@ -82,9 +103,8 @@ describe("Headquarters storage and config aliasing", () => {
 	});
 
 	it("ProjectContext stores Headquarters under Headquarters dir and normal same-root projects under <root>/.bobbit", async () => {
-		const serverRoot = mkTemp("context-root");
-		const { setProjectRoot, bobbitDir, bobbitStateDir, bobbitConfigDir } = await import("../../src/server/bobbit-dir.ts");
-		const { ProjectContext } = await import("../../src/server/agent/project-context.ts");
+		const serverRoot = fixturePath("context-root");
+		fs.mkdirSync(serverRoot, { recursive: true });
 
 		withEnv({ BOBBIT_DIR: undefined, BOBBIT_PI_DIR: undefined }, () => {
 			setProjectRoot(serverRoot);
@@ -104,8 +124,6 @@ describe("Headquarters storage and config aliasing", () => {
 	});
 
 	it("ConfigCascade treats projectId=headquarters as server scope for roles, tools, and tool policies", async () => {
-		const { ConfigCascade } = await import("../../src/server/agent/config-cascade.ts");
-
 		const serverRole = {
 			name: "hq-role",
 			label: "Server HQ Role",
@@ -185,14 +203,12 @@ describe("Headquarters storage and config aliasing", () => {
 
 describe("ProjectRegistry Headquarters ordering", () => {
 	it("ensureHeadquartersProject creates stable Headquarters as a reorderable project", async () => {
-		const { ProjectRegistry, SYSTEM_PROJECT_ID } = await import("../../src/server/agent/project-registry.ts");
-		const stateDir = mkTemp("registry-state");
-		const configDir = mkTemp("registry-config");
-		const serverRoot = mkTemp("registry-root");
+		const stateDir = fixturePath("registry-state");
+		const configDir = fixturePath("registry-config");
+		const serverRoot = fixturePath("registry-root");
 		const hqRoot = path.join(serverRoot, ".bobbit", "headquarters");
 		const systemRoot = path.join(stateDir, "system-project");
-		fs.mkdirSync(systemRoot, { recursive: true });
-		fs.mkdirSync(hqRoot, { recursive: true });
+		for (const dir of [stateDir, configDir, systemRoot, hqRoot]) fs.mkdirSync(dir, { recursive: true });
 
 		const registry = new ProjectRegistry(stateDir);
 		registry.registerSystemProject(systemRoot);
@@ -208,7 +224,9 @@ describe("ProjectRegistry Headquarters ordering", () => {
 		assert.equal(hq.position, 0, "Headquarters participates in user-controlled ordering (anchored first only by default)");
 
 		const sameRootNormal = registry.register("Server Root Normal", serverRoot, { acceptCanonical: true });
-		const b = registry.register("B", mkTemp("registry-b"), { acceptCanonical: true });
+		const bRoot = fixturePath("registry-b");
+		fs.mkdirSync(bRoot, { recursive: true });
+		const b = registry.register("B", bRoot, { acceptCanonical: true });
 		// Headquarters is now a first-class reorderable project and MUST be included
 		// in the reorder payload alongside the normal projects.
 		const reordered = registry.setVisibleOrder([b.id, HEADQUARTERS_PROJECT_ID, sameRootNormal.id]);
