@@ -7,21 +7,24 @@
  * a smoke path for the separate goal route.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
-import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
+import { apiFetch, createGoal, createSession, defaultProjectId, harnessDefaultProjectRoot } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 
-const cleanupRoots: string[] = [];
 const targetCommits = new Map<string, { sha: string; marker: string }>();
 let restoreCommandRunner: (() => void) | undefined;
+let sharedRoot = "";
+let sessionRoot = "";
+let goalRoot = "";
+let projectId = "";
+let sessionId = "";
+let goalId = "";
 
-function fixtureRepo(prefix: string): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-commit-diff-${prefix}-`));
+function fixtureRepo(projectRoot: string, name: string): string {
+	const root = path.join(projectRoot, name);
+	fs.mkdirSync(root, { recursive: true });
 	fs.writeFileSync(path.join(root, "tracked.txt"), "base\n");
-	cleanupRoots.push(root);
 	return root;
 }
 
@@ -89,10 +92,6 @@ function byPath(files: any[], p: string): any {
 	return files.find(f => f.path === p);
 }
 
-async function safeRm(dir: string): Promise<void> {
-	await awaitableRm(dir, { onFinalFailure: () => {} });
-}
-
 function cleanupDir(dir: string): void {
 	try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* ignore */ }
 }
@@ -140,13 +139,44 @@ async function expectSessionCommitDiffValidation(endpoint: string, targetSha: st
 	expect((await invalidCommitResp.json()).error).toBe("Invalid commit");
 }
 
-test.beforeAll(({ gateway }) => {
+test.beforeAll(async ({ gateway }) => {
 	installCannedGitRunner(gateway);
+	projectId = (await defaultProjectId())!;
+	const workspaceRoot = path.join(harnessDefaultProjectRoot(), ".e2e-workspaces");
+	fs.mkdirSync(workspaceRoot, { recursive: true });
+	sharedRoot = fs.mkdtempSync(path.join(workspaceRoot, "commit-diff-"));
+	sessionRoot = fixtureRepo(sharedRoot, "session");
+	goalRoot = fixtureRepo(sharedRoot, "goal");
+	commitTargetChanges(sessionRoot);
+	commitTargetChanges(goalRoot, "base\ngoal commit scoped marker\n");
+
+	sessionId = await createSession({ cwd: sessionRoot, projectId });
+	const goal = await createGoal({
+		title: "Commit file diff API goal",
+		cwd: goalRoot,
+		worktree: false,
+		autoStartTeam: false,
+		projectId,
+	});
+	goalId = String(goal.id);
+	const goalStore = gateway.projectContextManager.getOrCreate(projectId)?.goalStore;
+	expect(goalStore?.update(goalId, {
+		branch: "master",
+		worktreePath: goalRoot,
+		setupStatus: "ready",
+	})).toBe(true);
 });
 
-test.afterAll(() => {
+test.afterAll(async ({ gateway }) => {
+	const context = projectId ? gateway.projectContextManager.getOrCreate(projectId) : undefined;
+	if (sessionId) {
+		await gateway.sessionManager.terminateSession(sessionId).catch(() => {});
+		await gateway.sessionManager.purgeArchivedSession(sessionId).catch(() => {});
+	}
+	if (goalId) await context?.goalManager.deleteGoal(goalId).catch(() => {});
 	restoreCommandRunner?.();
-	for (const root of cleanupRoots) cleanupDir(root);
+	targetCommits.clear();
+	if (sharedRoot) cleanupDir(sharedRoot);
 });
 
 // Shared gateway state and the injected command runner are intentionally serial.
@@ -154,59 +184,21 @@ test.describe.configure({ mode: "serial" });
 
 test.describe("commit file diff API", () => {
 	test("session commits include changed files and commit-scoped git-diff", async () => {
-		const root = fixtureRepo("session");
-		const targetSha = commitTargetChanges(root);
-		const project = await registerProject({ name: `commit-diff-session-${Date.now()}`, rootPath: root, seedWorkflows: false });
-		const sessionId = await createSession({ cwd: root, projectId: project.id });
-		try {
-			await expectSessionCommitDiffValidation(`/api/sessions/${sessionId}`, targetSha);
+		const targetSha = targetCommits.get(path.resolve(sessionRoot))!.sha;
+		await expectSessionCommitDiffValidation(`/api/sessions/${sessionId}`, targetSha);
 
-			const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
-			expect(sessionResp.status).toBe(200);
-			const sessionCwd = (await sessionResp.json()).cwd;
-			fs.writeFileSync(path.join(sessionCwd, "tracked.txt"), "base\nworktree marker\n");
-			const worktreeResp = await apiFetch(`/api/sessions/${sessionId}/git-diff?file=${encodeURIComponent("tracked.txt")}`);
-			expect(worktreeResp.status).toBe(200);
-			expect((await worktreeResp.json()).diff).toContain("+worktree marker");
-		} finally {
-			await deleteSession(sessionId).catch(() => {});
-			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
-			await safeRm(root);
-		}
+		const sessionResp = await apiFetch(`/api/sessions/${sessionId}`);
+		expect(sessionResp.status).toBe(200);
+		const sessionCwd = (await sessionResp.json()).cwd;
+		fs.writeFileSync(path.join(sessionCwd, "tracked.txt"), "base\nworktree marker\n");
+		const worktreeResp = await apiFetch(`/api/sessions/${sessionId}/git-diff?file=${encodeURIComponent("tracked.txt")}`);
+		expect(worktreeResp.status).toBe(200);
+		expect((await worktreeResp.json()).diff).toContain("+worktree marker");
 	});
 
-	test("goal commits include changed files and commit-scoped git-diff", async ({ gateway }) => {
-		const root = fixtureRepo("goal");
-		const goalTargetSha = commitTargetChanges(root, "base\ngoal commit scoped marker\n");
-		const project = await registerProject({ name: `commit-diff-goal-${Date.now()}`, rootPath: root, seedWorkflows: false });
-		let goalId: string | undefined;
-		try {
-			// Commit-route coverage does not depend on asynchronous worktree
-			// provisioning. Create a no-worktree goal, then attach the canned Git
-			// fixture through the harness store seam. This preserves the goal route's
-			// parser/response behavior without an unrelated readiness timeout whose
-			// cleanup could delete the repo while provisioning was still running.
-			const goal = await createGoal({
-				title: "Commit file diff API goal",
-				cwd: root,
-				worktree: false,
-				autoStartTeam: false,
-				projectId: project.id,
-			});
-			goalId = String(goal.id);
-			const goalStore = gateway.projectContextManager.getOrCreate(project.id)?.goalStore;
-			expect(goalStore?.update(goalId, {
-				branch: "master",
-				worktreePath: root,
-				setupStatus: "ready",
-			})).toBe(true);
-
-			await expectTargetCommitSummary(`/api/goals/${goalId}`, goalTargetSha);
-			await expectCommitDiff(`/api/goals/${goalId}`, goalTargetSha, "tracked.txt", "goal commit scoped marker");
-		} finally {
-			if (goalId) await deleteGoal(goalId).catch(() => {});
-			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
-			await safeRm(root);
-		}
+	test("goal commits include changed files and commit-scoped git-diff", async () => {
+		const goalTargetSha = targetCommits.get(path.resolve(goalRoot))!.sha;
+		await expectTargetCommitSummary(`/api/goals/${goalId}`, goalTargetSha);
+		await expectCommitDiff(`/api/goals/${goalId}`, goalTargetSha, "tracked.txt", "goal commit scoped marker");
 	});
 });
