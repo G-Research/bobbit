@@ -13,10 +13,11 @@ import {
 	agentEndPredicate,
 	defaultProjectId,
 } from "./_e2e/e2e-setup.js";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 
+let ownerRoot: string;
 let secondProjectId: string;
 let secondProjectCwd: string;
 let skillDir: string;
@@ -29,8 +30,10 @@ const SKILL_NAME = "cross-project-skill";
 const SKILL_MARKER = "CROSS_PROJECT_SKILL_EXPANDED_MARKER_12345";
 
 test.beforeAll(async () => {
-	// 1. Create a temp directory for the second project
-	secondProjectCwd = join(tmpdir(), `bobbit-e2e-skill-project-${Date.now()}`);
+	// 1. Create a process-owned root so concurrent Vitest parents cannot share
+	// or clean up one another's project and skill fixtures.
+	ownerRoot = mkdtempSync(join(tmpdir(), "bobbit-e2e-skill-"));
+	secondProjectCwd = join(ownerRoot, "project");
 	mkdirSync(secondProjectCwd, { recursive: true });
 
 	// 2. Create a skill directory structure inside a custom config dir
@@ -50,7 +53,7 @@ ${SKILL_MARKER}
 	const projResp = await apiFetch("/api/projects", {
 		method: "POST",
 		body: JSON.stringify({
-			name: `e2e-skill-expansion-${Date.now()}`,
+			name: `e2e-skill-expansion-${basename(ownerRoot)}`,
 			rootPath: secondProjectCwd,
 			__e2e_seed_skip__: true,
 		}),
@@ -98,7 +101,7 @@ test.afterAll(async () => {
 	if (secondProjectSessionId) await apiFetch(`/api/sessions/${secondProjectSessionId}`, { method: "DELETE" }).catch(() => {});
 	if (defaultSessionId) await apiFetch(`/api/sessions/${defaultSessionId}`, { method: "DELETE" }).catch(() => {});
 	if (secondProjectId) await apiFetch(`/api/projects/${secondProjectId}`, { method: "DELETE" }).catch(() => {});
-	try { rmSync(secondProjectCwd, { recursive: true, force: true }); } catch { /* ignore */ }
+	try { rmSync(ownerRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 test.describe("Slash skill expansion mismatch", () => {
