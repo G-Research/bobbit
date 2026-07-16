@@ -20,14 +20,9 @@ guardProcessEnv();
  *   3. Branch presence — `neverPolicies = {}` literal appears iff no never-tool
  *      was supplied (same sanity check for `askPolicies`).
  */
-import fs from "node:fs";
-import http from "node:http";
-import type { AddressInfo } from "node:net";
-import os from "node:os";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { describe, it } from "vitest";
 import ts from "typescript";
 
 import {
@@ -35,62 +30,63 @@ import {
 	type ToolPolicyEntry,
 } from "../../src/server/agent/tool-guard-extension.ts";
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tgx-"));
-
-afterAll(() => {
-	try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
-});
-
 type GuardPi = { on: (event: string, cb: (event: any) => Promise<any>) => void };
+type GuardFactory = (pi: GuardPi) => void;
 
-async function importGeneratedGuard(source: string, name: string): Promise<(pi: GuardPi) => void> {
-	const transpiled = ts.transpileModule(source, {
+const require = createRequire(import.meta.url);
+let grantPolicy: ((count: number) => unknown) | undefined;
+let grantRequestCount = 0;
+
+function transpileGuard(source: string): ReturnType<typeof ts.transpileModule> {
+	return ts.transpileModule(source, {
 		compilerOptions: {
 			module: ts.ModuleKind.CommonJS,
 			target: ts.ScriptTarget.ES2020,
 		},
 		reportDiagnostics: true,
 	});
-	const errors = (transpiled.diagnostics ?? []).filter(
-		(d) => d.category === ts.DiagnosticCategory.Error,
-	);
+}
+
+function evaluateCommonJs(source: string, requestGrant: () => Promise<unknown>): GuardFactory {
+	const transpiled = transpileGuard(source);
+	const errors = (transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
 	assert.equal(errors.length, 0);
-	const file = path.join(tmpDir, `tool-guard-runtime-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.cjs`);
-	fs.writeFileSync(file, transpiled.outputText, "utf-8");
-	const mod = await import(pathToFileURL(file).href);
-	assert.equal(typeof mod.default, "function");
-	return mod.default;
+	const module = { exports: {} as { default?: GuardFactory } };
+	new Function("module", "exports", "require", "requestGrant", transpiled.outputText)(module, module.exports, require, requestGrant);
+	assert.equal(typeof module.exports.default, "function");
+	return module.exports.default!;
+}
+
+function withInjectedGrantTransport(source: string): string {
+	const start = source.indexOf("      const mod = url.protocol");
+	const endMarker = "      const r = result;";
+	const end = source.indexOf(endMarker, start);
+	assert.ok(start >= 0 && end > start, "generated guard transport block changed");
+	return `${source.slice(0, start)}      const result = await requestGrant(JSON.parse(body));\n\n${source.slice(end)}`;
+}
+
+async function importGeneratedGuard(source: string, _name: string): Promise<GuardFactory> {
+	return evaluateCommonJs(withInjectedGrantTransport(source), async () => {
+		grantRequestCount += 1;
+		assert.ok(grantPolicy, "grant policy must be installed before invoking an ask guard");
+		return grantPolicy(grantRequestCount);
+	});
 }
 
 async function withGrantServer(
 	responseForRequest: (count: number) => unknown,
 	run: (requestCount: () => number) => Promise<void>,
 ): Promise<void> {
-	let requests = 0;
-	const server = http.createServer((req, res) => {
-		req.resume();
-		requests += 1;
-		res.setHeader("Content-Type", "application/json");
-		res.end(JSON.stringify(responseForRequest(requests)));
-	});
-	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-	const address = server.address() as AddressInfo;
-	const previousGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
-	const previousToken = process.env.BOBBIT_TOKEN;
 	const previousSessionId = process.env.BOBBIT_SESSION_ID;
-	process.env.BOBBIT_GATEWAY_URL = `http://127.0.0.1:${address.port}`;
-	process.env.BOBBIT_TOKEN = "test-token";
+	grantPolicy = responseForRequest;
+	grantRequestCount = 0;
 	process.env.BOBBIT_SESSION_ID = "tool-guard-test-session";
 	try {
-		await run(() => requests);
+		await run(() => grantRequestCount);
 	} finally {
-		if (previousGatewayUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
-		else process.env.BOBBIT_GATEWAY_URL = previousGatewayUrl;
-		if (previousToken === undefined) delete process.env.BOBBIT_TOKEN;
-		else process.env.BOBBIT_TOKEN = previousToken;
+		grantPolicy = undefined;
 		if (previousSessionId === undefined) delete process.env.BOBBIT_SESSION_ID;
 		else process.env.BOBBIT_SESSION_ID = previousSessionId;
-		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
 }
 
@@ -175,11 +171,10 @@ describe("generateToolGuardExtension", () => {
 				assert.equal(errors.length, 0, `Expected no error diagnostics, got:\n${msg}`);
 			});
 
-			it("transpiled module loads and default-exports a function", async () => {
-				const file = path.join(tmpDir, `tool-guard-${v.name}.cjs`);
-				fs.writeFileSync(file, transpiled.outputText, "utf-8");
-				const mod = await import(pathToFileURL(file).href);
-				assert.equal(typeof mod.default, "function");
+			it("transpiled module loads and default-exports a function", () => {
+				const module = { exports: {} as { default?: GuardFactory } };
+				new Function("module", "exports", "require", transpiled.outputText)(module, module.exports, require);
+				assert.equal(typeof module.exports.default, "function");
 			});
 
 			it("neverPolicies branch presence matches input", () => {
