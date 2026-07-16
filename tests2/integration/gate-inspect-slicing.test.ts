@@ -1,3 +1,7 @@
+// This suite exercises retained diagnostics through the non-spawning command-step
+// seam. The setup must run before the gateway fixture module is evaluated.
+import "./_e2e/fake-cmd-setup.js";
+
 import fs from "node:fs";
 import path from "node:path";
 
@@ -5,16 +9,53 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, defaultProjectStateDir, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
-const VERIFY_LOG_CMD = `node -e "for (let i=1;i<=160;i++) console.log((i===125?'ERROR failed sentinel line '+i:'noise line '+i))"`;
+function fakeNodeCommand(statements: string[]): string {
+	return `node -e "${statements.join(";")}"`;
+}
+
+const VERIFY_LOG_CMD = fakeNodeCommand(Array.from({ length: 160 }, (_, i) => {
+	const line = i + 1;
+	return `console.log('${line === 125 ? "ERROR failed sentinel line" : "noise line"} ${line}')`;
+}));
 const RETAINED_DIAGNOSTICS_MARKER = "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER stack frame";
-const FAILED_RETAINED_DIAGNOSTICS_CMD = `node -e "for (let i=1;i<=80;i++) console.log('prelude line '+i+' '+ 'x'.repeat(100)); console.log('${RETAINED_DIAGNOSTICS_MARKER}'); for (let i=81;i<=260;i++) console.log('tail line '+i+' '+ 'y'.repeat(100)); process.exit(1)"`;
+const FAILED_RETAINED_DIAGNOSTICS_CMD = fakeNodeCommand([
+	...Array.from({ length: 80 }, (_, i) => `console.log('prelude line ${i + 1} ${"x".repeat(100)}')`),
+	`console.log('${RETAINED_DIAGNOSTICS_MARKER}')`,
+	...Array.from({ length: 180 }, (_, i) => `console.log('tail line ${i + 81} ${"y".repeat(100)}')`),
+	"process.exit(1)",
+]);
 const PLAYWRIGHT_ERROR_CONTEXT_MARKER = "PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER";
-const PLAYWRIGHT_STYLE_ARTIFACT_CMD = `node -e "const fs=require('fs'),path=require('path'); const dir=path.join('test-results','retain-artifact-fixture'); fs.mkdirSync(dir,{recursive:true}); const body=['# Instructions','You are given a Playwright error context.','','## Test failure','${PLAYWRIGHT_ERROR_CONTEXT_MARKER}','locator(\\\"text=Missing\\\") failed after retry',...Array.from({length:2600},(_,i)=>'artifact detail line '+(i+1)+' '+ 'z'.repeat(40))].join('\\n'); fs.writeFileSync(path.join(dir,'error-context.md'),body); fs.writeFileSync(path.join(dir,'trace.zip'),'trace placeholder'); fs.writeFileSync(path.join(dir,'screenshot.png'),'png placeholder'); console.error('PLAYWRIGHT_STYLE_FAILURE_SUMMARY: expect(locator).toBeVisible failed; see test-results/retain-artifact-fixture/error-context.md'); process.exit(1)"`;
+const PLAYWRIGHT_STYLE_FAILURE_SUMMARY = "PLAYWRIGHT_STYLE_FAILURE_SUMMARY: expect(locator).toBeVisible failed; see test-results/retain-artifact-fixture/error-context.md";
+const PLAYWRIGHT_STYLE_ARTIFACT_CMD = fakeNodeCommand([
+	`console.error('${PLAYWRIGHT_STYLE_FAILURE_SUMMARY}')`,
+	"process.exit(1)",
+]);
 const RETAINED_LOG_CAP_MARKER = "RETAINED_GATE_DIAGNOSTICS_CAP_MARKER";
-const HUGE_RETAINED_LOG_CHUNKS = 3072;
+const HUGE_RETAINED_LOG_CHUNKS = 96;
 const HUGE_RETAINED_LOG_CHUNK_BYTES = 2048;
 const HUGE_RETAINED_LOG_EMITTED_BYTES = HUGE_RETAINED_LOG_CHUNKS * ("CAP-FILL ".length + HUGE_RETAINED_LOG_CHUNK_BYTES + 1);
-const HUGE_RETAINED_LOG_CMD = `node -e "const chunk='CAP-FILL '+ 'x'.repeat(${HUGE_RETAINED_LOG_CHUNK_BYTES})+'\\n'; for (let i=0;i<${HUGE_RETAINED_LOG_CHUNKS};i++) process.stdout.write(chunk); console.error('${RETAINED_LOG_CAP_MARKER}'); process.exit(1)"`;
+const HUGE_RETAINED_LOG_CMD = fakeNodeCommand([
+	...Array.from({ length: HUGE_RETAINED_LOG_CHUNKS }, () => `console.log('CAP-FILL ${"x".repeat(HUGE_RETAINED_LOG_CHUNK_BYTES)}')`),
+	`console.error('${RETAINED_LOG_CAP_MARKER}')`,
+	"process.exit(1)",
+]);
+
+function seedPlaywrightStyleArtifacts(cwd: string): void {
+	const dir = path.join(cwd, "test-results", "retain-artifact-fixture");
+	fs.mkdirSync(dir, { recursive: true });
+	const body = [
+		"# Instructions",
+		"You are given a Playwright error context.",
+		"",
+		"## Test failure",
+		PLAYWRIGHT_ERROR_CONTEXT_MARKER,
+		"locator(\"text=Missing\") failed after retry",
+		...Array.from({ length: 2600 }, (_, i) => `artifact detail line ${i + 1} ${"z".repeat(40)}`),
+	].join("\n");
+	fs.writeFileSync(path.join(dir, "error-context.md"), body);
+	fs.writeFileSync(path.join(dir, "trace.zip"), "trace placeholder");
+	fs.writeFileSync(path.join(dir, "screenshot.png"), "png placeholder");
+}
 
 function makeWorkflowId(): string {
 	return `gate-inspect-slicing-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -178,17 +219,6 @@ function findFiles(root: string, predicate: (file: string) => boolean): string[]
 	};
 	visit(root);
 	return matches;
-}
-
-function findFilesContaining(root: string, marker: string): string[] {
-	return findFiles(root, (file) => {
-		try {
-			return fs.readFileSync(file, "utf8").includes(marker);
-		} catch {
-			// Binary or transient files are irrelevant for this marker search.
-			return false;
-		}
-	});
 }
 
 function findPersistedGateStoreDir(root: string, goalId: string): string | undefined {
@@ -374,6 +404,7 @@ test.describe("gate inspect slicing", () => {
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Inspect Playwright Artifacts ${Date.now()}`, workflowId, cwd });
 		try {
+			seedPlaywrightStyleArtifacts(cwd);
 			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
 			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
 
@@ -453,12 +484,10 @@ test.describe("gate inspect slicing", () => {
 			expect(byPath.text).not.toContain("# Instructions");
 			expect(byPath.selection).toMatchObject({ mode: "slice", range: { from: 1, to: 4 } });
 
-			const stateMarkerFiles = findFilesContaining(await defaultProjectStateDir(), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
-				.filter(file => !file.endsWith("gates.json"));
 			expect(
-				stateMarkerFiles,
-				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: error-context.md content must be copied under Bobbit state outside gates.json so worktree cleanup/restart does not destroy diagnostics. This focused E2E covers the host-visible command cwd path; Docker sandbox transfer needs manual/docker coverage.",
-			).not.toEqual([]);
+				fs.readFileSync(artifact.path, "utf8"),
+				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: retained artifact metadata must resolve to the copied error-context after the original worktree artifact is removed.",
+			).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
@@ -472,6 +501,7 @@ test.describe("gate inspect slicing", () => {
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Inspect Artifact Selection ${Date.now()}`, workflowId, cwd });
 		try {
+			seedPlaywrightStyleArtifacts(cwd);
 			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
 			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
 
@@ -558,6 +588,7 @@ test.describe("gate inspect slicing", () => {
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Status Compact Diagnostics ${Date.now()}`, workflowId, cwd });
 		try {
+			seedPlaywrightStyleArtifacts(cwd);
 			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
 			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
 
@@ -589,9 +620,8 @@ test.describe("gate inspect slicing", () => {
 			expect(explicitJson).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 			expect(explicit.steps[0].diagnostics.artifacts.files[0]).not.toHaveProperty("content");
 
-			const stateMarkerFiles = findFilesContaining(await defaultProjectStateDir(), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
-				.filter(file => !file.endsWith("gates.json"));
-			expect(stateMarkerFiles).not.toEqual([]);
+			const retainedArtifact = explicit.steps[0].diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
+			expect(fs.readFileSync(retainedArtifact.path, "utf8")).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);

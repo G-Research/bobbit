@@ -8,3 +8,8 @@
  * real-runner forks used by the default v2-integration project.
  */
 (globalThis as { __BOBBIT_V2_FAKE_CMD_STEP__?: boolean }).__BOBBIT_V2_FAKE_CMD_STEP__ = true;
+
+// Retained-log cap behavior does not need multi-megabyte subprocess output.
+// Keeping the cap small lets fake-runner suites exercise identical truncation
+// metadata with a bounded in-memory scripted chunk.
+process.env.BOBBIT_RETAINED_LOG_MAX_BYTES ??= String(128 * 1024);

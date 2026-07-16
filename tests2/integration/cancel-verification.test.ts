@@ -1,5 +1,8 @@
 /**
- * E2E API tests for cancel verification endpoint.
+ * Tier-1 API tests for the cancel-verification endpoint. The integration
+ * project injects the non-spawning fake command-step runner: these assertions
+ * cover API state, idempotency, cancellation bookkeeping, and re-signal
+ * behavior without claiming OS process-tree fidelity.
  *
  * Tests:
  * 1. Cancel a running verification via POST /api/goals/:goalId/gates/:gateId/cancel-verification
@@ -23,7 +26,7 @@ function makeSlowWorkflowId(): string {
 	return `test-cancel-verif-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Create a per-test workflow with a slow verification command so we can cancel mid-flight. */
+/** Create a per-test workflow whose scripted fake step remains cancellable. */
 async function createSlowWorkflow(): Promise<{ workflowId: string; projectId: string }> {
 	const projectId = await defaultProjectId();
 	if (!projectId) throw new Error("cancel-verification requires a default project");
@@ -117,9 +120,8 @@ async function pollUntil<T>(
 	return captured!;
 }
 
-// These tests intentionally start cancellable verification commands. Keep them
-// serial so a broad E2E run does not stack multiple slow child processes and
-// verification-harness state transitions in the same hot window.
+// Keep the stateful cancellation cases serial so cleanup and re-signal
+// transitions cannot overlap in the shared verification harness.
 test.describe.configure({ mode: "serial" });
 
 test.describe("Cancel Verification API", () => {
