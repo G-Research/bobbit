@@ -1,6 +1,11 @@
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { basename } from "node:path";
 import type * as ChildProcess from "node:child_process";
+import { beforeEach } from "vitest";
+import {
+	__setToolModuleLoadProbeBaselineForTesting,
+	type ToolModuleLoadProbe,
+} from "../../src/server/agent/tool-extension-preflight.js";
 import { prepareGitTemplate } from "./git-template.js";
 
 const DISABLE_ENV = "BOBBIT_TIER1_SPAWN_GUARD_DISABLE";
@@ -89,9 +94,23 @@ export function isTier1SpawnGuardInstalled(): boolean {
 	return state().installed;
 }
 
-// Vitest loads this module as a setup file. Build the one allowed git template
-// first, then close every subprocess API before test modules are collected.
+const tier1ModuleLoadProbe: ToolModuleLoadProbe = () => undefined;
+
+/**
+ * Accept extensions after the in-process import-graph checks in tier 1.
+ * Runtime module execution remains production's default outside this setup.
+ */
+export function installTier1ToolModuleLoadProbe(): void {
+	__setToolModuleLoadProbeBaselineForTesting(tier1ModuleLoadProbe);
+}
+
+// Vitest loads this module as a setup file. Install the no-spawn preflight
+// baseline immediately and before every test: isolate:false files share module
+// state, while focused resilience tests may temporarily install an override.
+// Build the one allowed git template before closing every subprocess API.
 if (process.env[DISABLE_ENV] !== "1") {
+	installTier1ToolModuleLoadProbe();
+	beforeEach(installTier1ToolModuleLoadProbe);
 	await prepareGitTemplate();
 	installTier1SpawnGuard();
 }

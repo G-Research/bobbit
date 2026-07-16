@@ -1,5 +1,13 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createTier1SpawnGuardController } from "../harness/tier1-spawn-guard.js";
+import {
+	__setToolModuleLoadProbeBaselineForTesting,
+	__setToolModuleLoadProbeForTesting,
+	preflightConfigExtensionFile,
+} from "../../src/server/agent/tool-extension-preflight.js";
+import { createTier1SpawnGuardController, installTier1ToolModuleLoadProbe } from "../harness/tier1-spawn-guard.js";
 
 const APIS = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"] as const;
 type Api = (typeof APIS)[number];
@@ -70,5 +78,33 @@ describe("tier-1 spawn guard policy", () => {
 		expect(() => target.spawn("git", [])).toThrow(/blocked child_process\.spawn/);
 		ownerRestore();
 		expect(guard.isInstalled()).toBe(false);
+	});
+
+	it("restores the no-spawn tool preflight baseline after focused overrides", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "tier1-tool-preflight-"));
+		try {
+			const groupDir = "custom";
+			const extension = "extension.ts";
+			fs.mkdirSync(path.join(root, groupDir), { recursive: true });
+			fs.writeFileSync(path.join(root, groupDir, extension), "export default function extension() { return {}; }\n");
+			const preflight = () => preflightConfigExtensionFile({ toolName: "custom", groupDir, baseDir: root, extension });
+
+			installTier1ToolModuleLoadProbe();
+			__setToolModuleLoadProbeForTesting(() => "focused failure");
+			expect(preflight()?.message).toContain("focused failure");
+
+			__setToolModuleLoadProbeForTesting(undefined);
+			expect(preflight()).toBeUndefined();
+
+			__setToolModuleLoadProbeForTesting(() => "stale override");
+			installTier1ToolModuleLoadProbe();
+			expect(preflight()).toBeUndefined();
+
+			__setToolModuleLoadProbeBaselineForTesting(undefined);
+			expect(preflight()?.message).toMatch(/tier1-spawn-guard.*child_process\.spawnSync/);
+		} finally {
+			installTier1ToolModuleLoadProbe();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
