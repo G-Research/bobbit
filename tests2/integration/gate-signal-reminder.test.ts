@@ -1,6 +1,6 @@
 // Opt into the non-spawning command-step runner before the shared gateway can
 // boot, regardless of which of these integration files Vitest imports first.
-import { resetFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+import { resetAndInstallFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
@@ -94,8 +94,8 @@ function expectUiSignalShapePreserved(body: any, expected: { goalId: string; gat
 }
 
 test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () => {
-	test.beforeEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
-	test.afterEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+	test.beforeEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
+	test.afterEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
 
 	test("async verification response includes top-level agentReminder while preserving the UI signal shape", async () => {
 		const wf = workflowId("gate-signal-reminder-async");

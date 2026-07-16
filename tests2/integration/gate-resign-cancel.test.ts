@@ -1,7 +1,10 @@
 // This suite owns command-step cancellation bookkeeping, not OS process
 // fidelity. Opt into the non-spawning runner before the gateway singleton is
 // imported and booted.
-import { resetFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+import {
+	resetAndInstallFakeCommandStepTestState,
+	trackFakeCommandStepConnection,
+} from "./_e2e/fake-cmd-setup.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connectWs, type WsConnection } from "./_e2e/e2e-setup.js";
@@ -26,7 +29,7 @@ import type { ManualClock } from "../harness/clock.js";
 
 const SLOW_WORKFLOW_ID = `test-slow-${Date.now()}`;
 
-async function settleCancellation<T>(clock: ManualClock, promise: Promise<T>, maxVirtualMs = 1000): Promise<T> {
+async function settleWithClock<T>(clock: ManualClock, promise: Promise<T>, maxVirtualMs = 1000): Promise<T> {
 	let settled = false;
 	let value: T | undefined;
 	let failure: unknown;
@@ -39,7 +42,7 @@ async function settleCancellation<T>(clock: ManualClock, promise: Promise<T>, ma
 		clock.advance(25);
 	}
 	if (failure) throw failure;
-	if (!settled) throw new Error(`cancellation event did not settle after ${maxVirtualMs}ms of virtual time`);
+	if (!settled) throw new Error(`fake command-step event did not settle after ${maxVirtualMs}ms of virtual time`);
 	return value as T;
 }
 
@@ -97,8 +100,8 @@ async function getSignals(goalId: string, gateId: string): Promise<any[]> {
 test.describe("Gate Re-signal Cancellation", () => {
 	// The scripted delay creates an observable in-flight state without a process.
 	test.setTimeout(60_000);
-	test.beforeEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
-	test.afterEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+	test.beforeEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
+	test.afterEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
 
 	test.beforeAll(async () => {
 		await createSlowWorkflow();
@@ -123,7 +126,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 		let conn: WsConnection | undefined;
 
 		try {
-			conn = await connectWs(sessionId);
+			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
 
 			// 2. Signal the gate — starts verification with the 2s command.
 			// Capture WS cursor BEFORE the POST so waitForFrom is race-safe
@@ -170,7 +173,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 
 			// 6. Signal 1's cancellation is broadcast as
 			// gate_verification_complete/cancelled without a wall-clock sleep.
-			await settleCancellation(gateway.clock, cancelled1);
+			await settleWithClock(gateway.clock, cancelled1);
 
 			// Confirm old verification is no longer in active list
 			const activeAfterResignal = await getActiveVerifications(goalId);
@@ -178,11 +181,11 @@ test.describe("Gate Re-signal Cancellation", () => {
 
 			// 7. Wait for the gate to pass via WS event (from signal 2's cursor to
 			//    ensure we match the NEW status_changed event, not a stale one).
-			const wsMsg = await conn.waitForFrom(
+			const wsMsg = await settleWithClock(gateway.clock, conn.waitForFrom(
 				cursor2,
 				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
 				20_000,
-			);
+			));
 
 			// 8. Gate status should be determined by the new signal (passed, since command exits 0)
 			expect(wsMsg.status).toBe("passed");
@@ -216,7 +219,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 		let conn: WsConnection | undefined;
 
 		try {
-			conn = await connectWs(sessionId);
+			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
 
 			// Signal 1 — capture cursor before each POST so waitForFrom matches
 			// ONLY events produced by the action (race-safe, no stale-event match).
@@ -248,7 +251,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 			});
 			expect(s2Res.status).toBe(201);
 			const signal2Id = (await s2Res.json()).signal.id;
-			await settleCancellation(gateway.clock, cancelled1);
+			await settleWithClock(gateway.clock, cancelled1);
 
 			// Wait for signal 2's verification to start (event-driven)
 			await conn.waitForFrom(
@@ -270,7 +273,7 @@ test.describe("Gate Re-signal Cancellation", () => {
 			});
 			expect(s3Res.status).toBe(201);
 			const signal3Id = (await s3Res.json()).signal.id;
-			await settleCancellation(gateway.clock, cancelled2);
+			await settleWithClock(gateway.clock, cancelled2);
 
 			// Event-driven: wait for signal 3's verification to actually start.
 			// This replaces the previous `pollUntil` on /verifications/active,
@@ -290,11 +293,11 @@ test.describe("Gate Re-signal Cancellation", () => {
 
 			// Wait for the gate to pass via WS event (from signal 3's cursor so
 			// we only match the outcome produced by the final verification).
-			const wsMsg = await conn.waitForFrom(
+			const wsMsg = await settleWithClock(gateway.clock, conn.waitForFrom(
 				c3,
 				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
 				20_000,
-			);
+			));
 			expect(wsMsg.status).toBe("passed");
 
 			// Verify no stale verifications remain active
