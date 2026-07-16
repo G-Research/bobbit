@@ -1665,11 +1665,12 @@ function parseCommitLogWithFiles(output: string): CommitInfo[] {
 	return commits;
 }
 
-async function getCommitsWithFiles(
+export async function getCommitsWithFiles(
 	cwd: string,
 	rangeArgs: string[],
 	timeout = 5000,
 	containerId?: string,
+	commandRunner?: CommandRunner,
 ): Promise<CommitInfo[]> {
 	// One real Git process returns metadata, statuses, renames, and numstat for
 	// the whole page. The former N-commit fan-out launched `cat-file` + `show`
@@ -1682,7 +1683,7 @@ async function getCommitsWithFiles(
 		"--numstat",
 		"--find-renames",
 		...rangeArgs,
-	], cwd, timeout, containerId);
+	], cwd, timeout, containerId, commandRunner);
 	return parseCommitLogWithFiles(output);
 }
 
@@ -1735,7 +1736,7 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
-async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
+export async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
 	let hasHead = true;
 	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId, commandRunner); } catch { hasHead = false; }
 
@@ -11747,21 +11748,21 @@ async function handleApiRoute(
 		try {
 			let primaryBranch = "master";
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", goal.cwd);
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", goal.cwd, 5000, undefined, commandRunner);
 				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
 			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", goal.cwd); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", goal.cwd); primaryBranch = "main"; } catch { /* keep default */ } }
+				try { await execGit("git rev-parse --verify refs/heads/master", goal.cwd, 5000, undefined, commandRunner); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", goal.cwd, 5000, undefined, commandRunner); primaryBranch = "main"; } catch { /* keep default */ } }
 			}
 
 			let rangeSpec = `-${limit} ${branch}`;
 			if (branch !== primaryBranch && branch !== "HEAD") {
 				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, goal.cwd); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
-				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, goal.cwd, 5000, undefined, commandRunner); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd, 5000, undefined, commandRunner); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const commits = await getCommitsWithFiles(goal.cwd, rangeSpec.split(" ").filter(Boolean));
+			const commits = await getCommitsWithFiles(goal.cwd, rangeSpec.split(" ").filter(Boolean), 5000, undefined, commandRunner);
 			json({ commits });
 		} catch (e: any) {
 			json({ error: "Failed to read git log", detail: e.message }, 500);
@@ -14211,11 +14212,11 @@ async function handleApiRoute(
 		if (!cid && !fs.existsSync(cwd)) { json({ commits: [] }); return; }
 		try {
 			let branch = '';
-			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd, 5000, cid); }
+			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd, 5000, cid, commandRunner); }
 			catch { json({ commits: [] }); return; }
 
 			let hasUpstream = false;
-			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid); hasUpstream = true; } catch {}
+			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid, commandRunner); hasUpstream = true; } catch {}
 
 			const limit = 50;
 			const direction = url.searchParams.get('direction'); // 'behind' to show incoming commits
@@ -14225,14 +14226,14 @@ async function handleApiRoute(
 				// Compare against origin/<primary>
 				let primaryBranch = 'master';
 				try {
-					const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd, 5000, cid);
+					const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd, 5000, cid, commandRunner);
 					primaryBranch = remoteHead.replace('refs/remotes/origin/', '');
 				} catch {
-					try { await execGit('git rev-parse --verify refs/heads/master', cwd, 5000, cid); primaryBranch = 'master'; }
-					catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd, 5000, cid); primaryBranch = 'main'; } catch {} }
+					try { await execGit('git rev-parse --verify refs/heads/master', cwd, 5000, cid, commandRunner); primaryBranch = 'master'; }
+					catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd, 5000, cid, commandRunner); primaryBranch = 'main'; } catch {} }
 				}
 				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch {}
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid, commandRunner); primaryRef = `origin/${primaryBranch}`; } catch {}
 				rangeSpec = direction === 'behind' ? `HEAD..${primaryRef}` : `${primaryRef}..HEAD`;
 			} else {
 				rangeSpec = direction === 'behind' && hasUpstream
@@ -14240,7 +14241,7 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const commits = await getCommitsWithFiles(cwd, rangeSpec.split(" ").filter(Boolean), 10000, cid);
+			const commits = await getCommitsWithFiles(cwd, rangeSpec.split(" ").filter(Boolean), 10000, cid, commandRunner);
 
 			json({ commits });
 		} catch (e: any) {
