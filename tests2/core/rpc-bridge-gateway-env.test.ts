@@ -6,13 +6,17 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { resolveDirectGatewayEnv } from "../../src/server/agent/rpc-bridge.ts";
+import { installMemoryFs } from "./helpers/memory-fs-spies.js";
+import type { MemFs } from "../harness/mem-fs.js";
+
+let memoryFs: MemFs;
+let restoreFs: () => void;
+let fixtureSequence = 0;
 
 // Hermetic isolation: `resolveDirectGatewayEnv` reads `process.env.BOBBIT_GATEWAY_URL`
 // as a fallback. On a dev box (or CI) where the shell exports that var — and its
@@ -39,10 +43,17 @@ afterAll(() => {
 	}
 });
 
+beforeEach(() => {
+	({ fs: memoryFs, restore: restoreFs } = installMemoryFs());
+});
+
+afterEach(() => restoreFs());
+
 function tmpStateDirWith(gatewayUrl: string | null): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gw-env-"));
+	const dir = path.resolve("/memfs/gateway-env", String(fixtureSequence++));
+	memoryFs.mkdirSync(dir, { recursive: true });
 	if (gatewayUrl !== null) {
-		fs.writeFileSync(path.join(dir, "gateway-url"), gatewayUrl, "utf-8");
+		memoryFs.writeFileSync(path.join(dir, "gateway-url"), gatewayUrl, "utf-8");
 	}
 	return dir;
 }

@@ -1,12 +1,22 @@
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { resolveWorktreeSupport } from "../../src/server/agent/worktree-support.js";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import { createFencedCommandRunner } from "../harness/fenced-command-runner.js";
+import { installMemoryFs } from "./helpers/memory-fs-spies.js";
+import type { MemFs } from "../harness/mem-fs.js";
+
+let memoryFs: MemFs;
+let restoreFs: () => void;
+let fixtureSequence = 0;
+
+beforeEach(() => {
+	({ fs: memoryFs, restore: restoreFs } = installMemoryFs());
+});
+
+afterEach(() => restoreFs());
 
 function unexpectedDelegate(): CommandRunner {
 	return {
@@ -17,17 +27,17 @@ function unexpectedDelegate(): CommandRunner {
 }
 
 function makeFixtureRoot(prefix: string): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-	onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
+	const root = path.resolve("/memfs/command-runner-fence", `${prefix}${fixtureSequence++}`);
+	memoryFs.mkdirSync(root, { recursive: true });
 	return root;
 }
 
 function makeRepositoryMetadata(root: string): { repo: string; bare: string } {
 	const repo = path.join(root, "repo");
 	const bare = path.join(root, "bare.git");
-	fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
-	fs.mkdirSync(path.join(bare, "objects"), { recursive: true });
-	fs.writeFileSync(path.join(bare, "HEAD"), "ref: refs/heads/master\n");
+	memoryFs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+	memoryFs.mkdirSync(path.join(bare, "objects"), { recursive: true });
+	memoryFs.writeFileSync(path.join(bare, "HEAD"), "ref: refs/heads/master\n");
 	return { repo, bare };
 }
 
@@ -66,17 +76,17 @@ describe("fenced command runner", () => {
 		expect(() => runner.execFileSync!("git", ["status", "--short"], { cwd })).toThrow(/skipped read-only git status/);
 		expect(asyncDelegations).toBe(0);
 		expect(syncDelegations).toBe(0);
-		expect(fs.existsSync(path.join(cwd, ".git"))).toBe(false);
+		expect(memoryFs.existsSync(path.join(cwd, ".git"))).toBe(false);
 
 		await expect(runner.execFile("git", ["init"], { cwd })).rejects.toThrow("delegated async command");
 		expect(asyncDelegations).toBe(1);
-		expect(fs.existsSync(path.join(cwd, ".git"))).toBe(false);
+		expect(memoryFs.existsSync(path.join(cwd, ".git"))).toBe(false);
 	});
 
 	it("threads injected runners through worktree and verification branch discovery", async () => {
 		const cwd = makeFixtureRoot("bobbit-runner-threading-");
 		const stateDir = path.join(cwd, "state");
-		fs.mkdirSync(stateDir);
+		memoryFs.mkdirSync(stateDir);
 		const calls: string[] = [];
 		const runner: CommandRunner = {
 			execFile: async (file, args) => {
