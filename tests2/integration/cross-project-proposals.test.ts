@@ -25,17 +25,19 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test, expect } from "./_e2e/in-process-harness.js";
+import { expect } from "./_e2e/in-process-harness.js";
+import { afterAll, beforeAll, describe, test } from "vitest";
 import {
 	apiFetch,
 	rawApiFetch,
 	createSession,
-	deleteSession,
+	deleteSession as deleteE2ESession,
 	createGoal,
 	deleteGoal,
-	defaultProjectId,
-	registerProject,
+	ensureGateway,
 } from "./_e2e/e2e-setup.js";
+import { TEST_DEFAULT_COMPONENT, testWorkflows } from "../../tests/e2e/seed-workflows.js";
+import { registerProposalProject, removeProposalProject } from "./_proposal-project-fixture.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const SYSTEM_PROJECT_ID = "system";
@@ -83,50 +85,72 @@ const VALID_ARGS: Record<string, Record<string, unknown>> = {
 	staff: { name: "xproj-staff", prompt: "help out" },
 };
 
-test.describe("cross-project proposal seed @smoke", () => {
-	let sid: string;
-	let targetProjectId: string;
-	let defaultPid: string;
+let gateway: any;
+let sourceProjectId: string;
+let sourceSessionId: string;
+let targetProjectId: string;
+let injectTargetProjectId: string;
 
-	test.beforeAll(async () => {
-		sid = await createSession();
-		defaultPid = (await defaultProjectId())!;
-		const project = await registerProject({
-			name: `xproj-target-${Date.now()}`,
-			rootPath: projectDir("target"),
-			seedWorkflows: false,
-		});
-		targetProjectId = project.id;
-		// The default project already carries the harness workflows (feature,
-		// general, …). Give the target a DISTINCT workflow so §2/§e can prove the
-		// goal validation resolves against the target, not the session's project.
-		const cfg = await apiFetch(`/api/projects/${targetProjectId}/config`, {
-			method: "PUT",
-			body: JSON.stringify({
-				components: [{ name: "test", repo: ".", commands: { build: "echo ok" } }],
-				workflows: TARGET_WORKFLOWS,
-			}),
-		});
-		expect(cfg.status, `seed target workflows: ${await cfg.text()}`).toBe(200);
+async function createSourceSession(): Promise<string> {
+	return sourceSessionId;
+}
+
+async function deleteSession(sessionId: string): Promise<void> {
+	if (sessionId !== sourceSessionId) await deleteE2ESession(sessionId);
+}
+
+async function clearSourceProposals(...types: string[]): Promise<void> {
+	await Promise.all(types.map(type =>
+		apiFetch(`/api/sessions/${sourceSessionId}/proposal/${type}`, { method: "DELETE" }),
+	));
+}
+
+beforeAll(async () => {
+	gateway = await ensureGateway();
+	const source = registerProposalProject(gateway, {
+		name: `xproj-source-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		rootPath: projectDir("source"),
+		components: [TEST_DEFAULT_COMPONENT],
+		workflows: testWorkflows(),
 	});
+	sourceProjectId = source.id;
+	sourceSessionId = await createSession({ projectId: sourceProjectId });
 
-	test.afterAll(async () => {
-		await deleteSession(sid);
-		for (const dir of cleanupRoots.splice(0)) {
-			try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
-		}
+	// The suite-owned targets have deliberately disjoint workflow stores.
+	const target = registerProposalProject(gateway, {
+		name: `xproj-target-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		rootPath: projectDir("target"),
+		components: [{ name: "test", repo: ".", commands: { build: "echo ok" } }],
+		workflows: TARGET_WORKFLOWS,
 	});
+	targetProjectId = target.id;
 
+	injectTargetProjectId = target.id;
+});
+
+afterAll(async () => {
+	await deleteE2ESession(sourceSessionId);
+	await removeProposalProject(gateway, targetProjectId);
+	await removeProposalProject(gateway, sourceProjectId);
+	for (const dir of cleanupRoots.splice(0)) {
+		try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+	}
+});
+
+describe("cross-project proposal seed @smoke", () => {
+	// Each declaration clears the draft types it owns before reuse, preventing
+	// proposal state from crossing boundaries without provisioning more sessions.
 	// ── (a) omitted projectId → session's project ──────────────────────
 	test("(a) omitted projectId stamps the session project for goal/role/tool/staff", async () => {
-		const s = await createSession();
+		await clearSourceProposals("goal", "role", "tool", "staff");
+		const s = await createSourceSession();
 		try {
 			for (const type of ["goal", "role", "tool", "staff"] as const) {
 				const args = type === "goal" ? { title: "Def Goal", spec: "body\n", workflow: "feature" } : VALID_ARGS[type];
 				const r = await seed(s, type, args);
 				expect(r.status, `${type} omitted seed: ${await r.clone().text()}`).toBe(200);
 				const fields = await seededFields(s, type);
-				expect(fields?.projectId, `${type} default stamp`).toBe(defaultPid);
+				expect(fields?.projectId, `${type} default stamp`).toBe(sourceProjectId);
 			}
 		} finally {
 			await deleteSession(s);
@@ -159,7 +183,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 
 	// ── (b) explicit valid cross-project ───────────────────────────────
 	test("(b) explicit valid cross-project projectId is accepted and stamped for goal/role/tool/staff", async () => {
-		const s = await createSession();
+		await clearSourceProposals("goal", "role", "tool", "staff");
+		const s = await createSourceSession();
 		try {
 			for (const type of ["goal", "role", "tool", "staff"] as const) {
 				const r = await seed(s, type, { ...VALID_ARGS[type], projectId: targetProjectId });
@@ -173,7 +198,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 	});
 
 	test("(b) explicit valid cross-project projectId is accepted for propose_project", async () => {
-		const s = await createSession();
+		await clearSourceProposals("project");
+		const s = await createSourceSession();
 		try {
 			const r = await seed(s, "project", { name: "X-Proj Edit", root_path: "/tmp/xproj", projectId: targetProjectId });
 			expect(r.status, `project cross-project seed: ${await r.clone().text()}`).toBe(200);
@@ -189,7 +215,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 	// explicit projectId does not require root_path (the server already knows
 	// it); a brand-new CREATE (no projectId) still requires root_path.
 	test("propose_project with explicit registered projectId seeds WITHOUT root_path (edit)", async () => {
-		const s = await createSession();
+		await clearSourceProposals("project");
+		const s = await createSourceSession();
 		try {
 			const r = await seed(s, "project", { name: "Edit Existing", projectId: targetProjectId });
 			expect(r.status, `project edit seed (no root_path): ${await r.clone().text()}`).toBe(200);
@@ -202,7 +229,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 	});
 
 	test("propose_project with NO projectId and NO root_path is rejected (create requires root_path)", async () => {
-		const s = await createSession();
+		await clearSourceProposals("project");
+		const s = await createSourceSession();
 		try {
 			const r = await seed(s, "project", { name: "New No Root" });
 			// A missing required field is caught by writeProposalFile's serialize
@@ -221,7 +249,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 	});
 
 	test("propose_project brand-new with name + root_path preserves absent projectId (create)", async () => {
-		const s = await createSession();
+		await clearSourceProposals("project");
+		const s = await createSourceSession();
 		try {
 			const r = await seed(s, "project", { name: "Brand New Create", root_path: "/tmp/brand-new-create" });
 			expect(r.status, `project create seed: ${await r.clone().text()}`).toBe(200);
@@ -248,7 +277,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 
 	// ── (c) explicit unknown → 422 UNKNOWN_PROJECT ─────────────────────
 	test("(c) explicit unknown projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff", async () => {
-		const s = await createSession();
+		await clearSourceProposals("goal", "role", "tool", "staff");
+		const s = await createSourceSession();
 		try {
 			for (const type of ["goal", "role", "tool", "staff"] as const) {
 				const r = await seed(s, type, { ...VALID_ARGS[type], projectId: "does-not-exist-project" });
@@ -267,7 +297,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 	// a user-facing cross-project target. The system→headquarters mapping is for
 	// the OMITTED default only; an EXPLICIT `system` must be rejected.
 	test("(c') explicit hidden `system` projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff", async () => {
-		const s = await createSession();
+		await clearSourceProposals("goal", "role", "tool", "staff");
+		const s = await createSourceSession();
 		try {
 			for (const type of ["goal", "role", "tool", "staff"] as const) {
 				const r = await seed(s, type, { ...VALID_ARGS[type], projectId: SYSTEM_PROJECT_ID });
@@ -285,7 +316,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 
 	// ── (d) explicit projectId is preserved for acceptance resolution ─
 	test("(d) unknown projectId stays explicit at seed for acceptance-time rejection", async () => {
-		const s = await createSession();
+		await clearSourceProposals("project");
+		const s = await createSourceSession();
 		try {
 			const r = await seed(s, "project", { name: "Explicit Unknown", root_path: "/tmp/explicit-unknown", projectId: "not-registered-target" });
 			expect(r.status, `project explicit-unknown seed: ${await r.clone().text()}`).toBe(200);
@@ -311,7 +343,8 @@ test.describe("cross-project proposal seed @smoke", () => {
 
 	// ── (e) goal workflow validated against the TARGET project ─────────
 	test("(e) goal workflow is validated against the target project's workflows", async () => {
-		const s = await createSession();
+		await clearSourceProposals("goal");
+		const s = await createSourceSession();
 		try {
 			// The target has `target-only` but NOT `feature`; the session's default
 			// project has `feature` but NOT `target-only`.
@@ -346,45 +379,45 @@ test.describe("cross-project proposal seed @smoke", () => {
  * a same-project check (parent.projectId === enrichedArgs.projectId); cross-project
  * goals stay top-level. The same-project / no-explicit-target path is unchanged.
  */
-test.describe("team-lead parent inject vs cross-project target (PR #1005) @smoke", () => {
+describe("team-lead parent inject vs cross-project target (PR #1005) @smoke", () => {
 	let gw: any;
 	let leadSid: string;
 	let parentGoalId: string;
-	let injectTargetProjectId: string;
+	let originalRole: unknown;
+	let originalTeamGoalId: unknown;
 
-	test.beforeAll(async ({ gateway }) => {
+	beforeAll(async () => {
 		gw = gateway;
-		// A spawn-capable parent goal in the SESSION's (default) project.
-		const defaultPid = (await defaultProjectId())!;
+
+		// A spawn-capable parent goal in the suite-owned source project.
 		const parent = await createGoal({
 			title: `xproj-inject-parent ${Date.now()}`,
 			workflowId: "feature",
 			subgoalsAllowed: true,
-			projectId: defaultPid,
+			projectId: sourceProjectId,
 		});
 		parentGoalId = parent.id as string;
 
-		// A DIFFERENT registered project with NO workflows, so goal-workflow
-		// validation is skipped for the cross-project draft and this test isolates
-		// the parent-inject guard alone.
-		const project = await registerProject({
-			name: `xproj-inject-target-${Date.now()}`,
-			rootPath: projectDir("inject-target"),
-			seedWorkflows: false,
-		});
-		injectTargetProjectId = project.id;
+		// The target's own workflow is supplied below, keeping workflow validation
+		// independent while the assertion isolates the parent-injection boundary.
 
-		// Promote the session to a team-lead whose team goal is the spawn-capable
-		// parent. getSession returns the live SessionInfo; mutate role/teamGoalId in
-		// place (mirrors a real team-lead session as seen by the seed handler).
-		leadSid = await createSession();
+		// Promote a dedicated source-project session to team lead. Save the live
+		// fields so even a failed assertion cannot bleed this mutation into cleanup.
+		leadSid = await createSession({ projectId: sourceProjectId });
 		const sess = gw.sessionManager.getSession(leadSid);
 		expect(sess, "team-lead session must be live in the manager").toBeTruthy();
+		originalRole = sess.role;
+		originalTeamGoalId = sess.teamGoalId;
 		sess.role = "team-lead";
 		sess.teamGoalId = parentGoalId;
 	});
 
-	test.afterAll(async () => {
+	afterAll(async () => {
+		const sess = gw?.sessionManager.getSession(leadSid);
+		if (sess) {
+			sess.role = originalRole;
+			sess.teamGoalId = originalTeamGoalId;
+		}
 		await deleteSession(leadSid);
 		await deleteGoal(parentGoalId);
 	});
@@ -397,7 +430,7 @@ test.describe("team-lead parent inject vs cross-project target (PR #1005) @smoke
 	});
 
 	test("(cross-project) team-lead goal proposal stays TOP-LEVEL (no parent inject)", async () => {
-		const r = await seed(leadSid, "goal", { title: "Cross-Proj Child", spec: "body\n", projectId: injectTargetProjectId });
+		const r = await seed(leadSid, "goal", { title: "Cross-Proj Child", spec: "body\n", workflow: "target-only", projectId: injectTargetProjectId });
 		expect(r.status, `cross-project team-lead seed: ${await r.clone().text()}`).toBe(200);
 		const fields = await seededFields(leadSid, "goal");
 		expect(fields?.projectId, "cross-project stamp").toBe(injectTargetProjectId);
