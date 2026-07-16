@@ -138,3 +138,36 @@ Per-file budget outliers:
 | `sandbox-security` | 15.734s |
 
 This run preceded the newly merged session, Docker, proposal, gate, maintenance, and core fixes. Fixes for the four failed files and residual module-tax work have been launched.
+
+## Solo attempt 4
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 4 | One Vitest process / 3 workers | 285.22s | **FAIL** | `.profiles/testing-v2/fast-gate-run4.log` | 5 failed files, 885 passed, 4 skipped; 12 failed tests, 7,575 passed, 24 skipped |
+
+This was the first full run below the 300s wall-time target.
+
+Failed files:
+
+- `maintenance-api`
+- `maintenance-api-archived-cleanup`
+- `maintenance-api-archived-guards`
+- `maintenance-api-archived-scan`
+- `tool-guard-extension`
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 25.47s |
+| Setup | 65.45s |
+| Import | 100.47s |
+| Tests | 538.15s |
+| Environment | 83.60s |
+| **Summed** | **813.14s** |
+
+Transform plus import consumed 125.94s of the 813.14s summed phase time (15.49%), narrowly above the 15% target. A warm rerun is expected to reduce this ratio.
+
+No file exceeded the 15s tier-1 budget. The slowest file, `preview-token-cost`, completed in 14.035s.
+
+The remaining failures point to a shared-helper prebundle identity/runner issue in the maintenance suites and a token-reader state leak in `tool-guard-extension`. Fixes for both issues have been launched.
