@@ -24,7 +24,7 @@
  *   - target project with no workflows resolvable     → 200 (validation skipped)
  */
 import { expect } from "./_e2e/in-process-harness.js";
-import { afterAll, beforeAll, describe, test } from "vitest";
+import { afterAll, beforeAll, test } from "vitest";
 import { apiFetch, createSession, deleteSession, ensureGateway } from "./_e2e/e2e-setup.js";
 import {
 	MINIMAL_PROPOSAL_WORKFLOWS,
@@ -108,7 +108,7 @@ async function expectMissingWorkflow(r: Response): Promise<void> {
 	expect(String(b.message)).toMatch(/general/);
 }
 
-describe("goal proposal — workflow validation @smoke", () => {
+test.describe("goal proposal — workflow validation @smoke", () => {
 	let sid: string;
 	let gw: any;
 	let validationProjectId: string;

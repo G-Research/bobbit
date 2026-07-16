@@ -4,7 +4,7 @@
  * agent process, or real elapsed-time window is needed to exercise queue order,
  * fan-out, drain, abort, and error-cap behavior.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, it, test, vi } from "vitest";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
@@ -84,7 +84,7 @@ beforeAll(() => {
 afterEach(() => manager.sessions.clear());
 afterAll(() => manager.sessions.clear());
 
-describe("Queue E2E", () => {
+test.describe("Queue E2E", () => {
 	it("receives queue_update on connect (initially empty)", () => {
 		const conn = client();
 		const { value } = session({ clients: [conn] });
