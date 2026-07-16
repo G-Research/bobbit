@@ -4,7 +4,7 @@
  * gateway/session construction and real elapsed-time waits while preserving
  * ownership, ordering, queued-state, timeout, and rendering contracts.
  */
-import { describe, expect, it } from "vitest";
+import { expect, it, test } from "vitest";
 import {
 	OrchestrationCore,
 	isSettledStatus,
@@ -102,7 +102,7 @@ async function chunkedWait(core: OrchestrationCore, ownerId: string, childIds: s
 	}
 }
 
-describe("team_wait — first-settled + status line", () => {
+test.describe("team_wait — first-settled + status line", () => {
 	it("returns on the first idle child, lists the rest, and instructs to call again", async () => {
 		const { child, waitFirst } = fixture();
 		child("busy", "pending");
@@ -152,7 +152,7 @@ describe("team_wait — first-settled + status line", () => {
 	});
 });
 
-describe("team_wait — timeout + terminal handling", () => {
+test.describe("team_wait — timeout + terminal handling", () => {
 	it("a streaming child does not satisfy the wait and times out as a terminal status (no rejection)", async () => {
 		const { child, waitFirst } = fixture();
 		child("busy", "timeout");

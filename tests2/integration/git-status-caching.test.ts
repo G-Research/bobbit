@@ -167,7 +167,7 @@ test.describe("git-status server cache + single-flight", () => {
 		expect(serverModule.__getGitStatusInvocationCount()).toBe(1);
 	});
 
-	test("forced TTL expiry re-runs git", async () => {
+	test("TTL expiry re-runs git after 750ms", async () => {
 		const before = serverModule.__getGitStatusInvocationCount();
 		const r1 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 		expect(r1.status).toBe(200);

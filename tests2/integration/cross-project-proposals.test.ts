@@ -23,7 +23,7 @@
  *   (e) goal workflow validated against the TARGET project's workflows
  */
 import { expect } from "./_e2e/in-process-harness.js";
-import { afterAll, beforeAll, describe, test } from "vitest";
+import { afterAll, beforeAll, test } from "vitest";
 import {
 	apiFetch,
 	createSession,
@@ -107,7 +107,7 @@ afterAll(async () => {
 	await releaseSharedProposalSession(gateway, sourceProjectId, deleteE2ESession);
 });
 
-describe("cross-project proposal seed @smoke", () => {
+test.describe("cross-project proposal seed @smoke", () => {
 	// Each declaration clears the draft types it owns before reuse, preventing
 	// proposal state from crossing boundaries without provisioning more sessions.
 	// ── (a) omitted projectId → session's project ──────────────────────
@@ -338,7 +338,7 @@ describe("cross-project proposal seed @smoke", () => {
  * a same-project check (parent.projectId === enrichedArgs.projectId); cross-project
  * goals stay top-level. The same-project / no-explicit-target path is unchanged.
  */
-describe("team-lead parent inject vs cross-project target (PR #1005) @smoke", () => {
+test.describe("team-lead parent inject vs cross-project target (PR #1005) @smoke", () => {
 	let parent: ReturnType<typeof createProposalParent>;
 
 	beforeAll(() => {
