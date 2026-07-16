@@ -1,60 +1,135 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import http from "node:http";
-import os from "node:os";
-import path from "node:path";
-import type { AddressInfo } from "node:net";
 
 import { generateToolGuardExtension } from "../../src/server/agent/tool-guard-extension.ts";
 import {
 	InProcessMockBridge,
-	__inProcessMockExtensionCacheStats,
+	createInProcessMockExtensionCache,
 } from "../../tests/e2e/in-process-mock-bridge.mjs";
+
+type RecordedRequest = { path: string; authorization: string };
+
+type GuardHarness = ReturnType<typeof createGuardHarness>;
+
+const pathApi = {
+	join: (...parts: string[]) => parts.join("/").replace(/\/+/g, "/"),
+};
+const osApi = { homedir: () => "/home/bobbit-test" };
+
+function createGuardHarness() {
+	const files = new Map<string, string>();
+	const versions = new Map<string, string>();
+	const requests: RecordedRequest[] = [];
+	const memoryFs = {
+		readFileSync(filePath: unknown) {
+			const normalized = String(filePath);
+			const contents = files.get(normalized);
+			if (contents !== undefined) return contents;
+			throw Object.assign(new Error(`ENOENT: no such file or directory, open '${normalized}'`), { code: "ENOENT" });
+		},
+	};
+	const httpModule = {
+		request(url: URL, options: { headers?: Record<string, string> }, onResponse: (response: unknown) => void) {
+			return {
+				on() { return this; },
+				write() {},
+				end() {
+					requests.push({
+						path: url.pathname,
+						authorization: String(options.headers?.Authorization ?? ""),
+					});
+					queueMicrotask(() => onResponse({
+						on(event: string, handler: (value?: string) => void) {
+							if (event === "data") handler(JSON.stringify({ granted: false, reason: "canary denial" }));
+							if (event === "end") handler();
+							return this;
+						},
+					}));
+				},
+			};
+		},
+	};
+	const cache = createInProcessMockExtensionCache({
+		versionFor: async (filePath: string) => versions.get(filePath) ?? "missing",
+		loadModule: async (filePath: string) => compileGuardModule(
+			files.get(filePath) ?? "",
+			memoryFs,
+			httpModule,
+		),
+	});
+
+	return {
+		cache,
+		requests,
+		setGuard(filePath: string, source: string, version = "1") {
+			files.set(filePath, source);
+			versions.set(filePath, version);
+		},
+	};
+}
+
+function compileGuardModule(
+	source: string,
+	memoryFs: { readFileSync(filePath: unknown): string },
+	httpModule: unknown,
+) {
+	const transformed = source
+		.replace('import * as fs from "node:fs";\n', "")
+		.replace('import * as path from "node:path";\n', "")
+		.replace('import * as os from "node:os";\n', "")
+		.replace("export default function(pi) {", "return function(pi) {")
+		.replace(
+			'url.protocol === "https:" ? await import("node:https") : await import("node:http")',
+			'url.protocol === "https:" ? httpModules.https : httpModules.http',
+		);
+	if (!transformed.trimStart().startsWith("return function(pi) {") || transformed.includes("await import(")) {
+		throw new Error("Generated tool guard shape changed; update the in-memory loader");
+	}
+	const activate = Function("fs", "path", "os", "httpModules", transformed)(
+		memoryFs,
+		pathApi,
+		osApi,
+		{ http: httpModule, https: httpModule },
+	);
+	return { default: activate };
+}
+
+function makeBridge(
+	harness: GuardHarness,
+	guardPath: string,
+	env: Record<string, string>,
+) {
+	return new InProcessMockBridge({
+		args: ["--extension", guardPath],
+		env,
+		extensionModuleCache: harness.cache,
+	});
+}
 
 describe("in-process mock shared tool-guard module", () => {
 	it("keeps session identity and token isolated for later and concurrent callbacks", async () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-shared-guard-canary-"));
-		const guardDir = path.join(tmp, "state", "tool-guard", "shared-policy");
-		const guardPath = path.join(guardDir, "guard.ts");
-		fs.mkdirSync(guardDir, { recursive: true });
-		fs.writeFileSync(guardPath, generateToolGuardExtension(
+		const harness = createGuardHarness();
+		const guardPath = "/state/tool-guard/shared-policy/guard.ts";
+		harness.setGuard(guardPath, generateToolGuardExtension(
 			"not-embedded",
 			{ guarded_probe: { policy: "ask", group: "canary" } },
 			[],
-		), "utf8");
+		));
 
-		const requests: Array<{ path: string; authorization: string }> = [];
-		const server = http.createServer((req, res) => {
-			requests.push({
-				path: req.url ?? "",
-				authorization: String(req.headers.authorization ?? ""),
-			});
-			req.resume();
-			res.setHeader("Content-Type", "application/json");
-			res.end(JSON.stringify({ granted: false, reason: "canary denial" }));
+		const makeSessionBridge = (sessionId: string, token: string) => makeBridge(harness, guardPath, {
+			BOBBIT_DIR: "/bobbit",
+			BOBBIT_GATEWAY_URL: "http://gateway.test",
+			BOBBIT_SESSION_ID: sessionId,
+			BOBBIT_TOKEN: token,
 		});
-		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-		const port = (server.address() as AddressInfo).port;
-		const gatewayUrl = `http://127.0.0.1:${port}`;
-
-		const makeBridge = (sessionId: string, token: string) => new InProcessMockBridge({
-			args: ["--extension", guardPath],
-			env: {
-				BOBBIT_DIR: tmp,
-				BOBBIT_GATEWAY_URL: gatewayUrl,
-				BOBBIT_SESSION_ID: sessionId,
-				BOBBIT_TOKEN: token,
-			},
-		});
-		const first = makeBridge("session-first", "token-first");
-		const second = makeBridge("session-second", "token-second");
+		const first = makeSessionBridge("session-first", "token-first");
+		const second = makeSessionBridge("session-second", "token-second");
 
 		try {
-			// Concurrent activation must share the immutable transpiled module while
-			// invoking its factory once per session to create isolated closures.
+			// Concurrent activation must share the immutable module while invoking
+			// its factory once per session to create isolated closures.
 			await Promise.all([first.start(), second.start()]);
-			assert.deepEqual(__inProcessMockExtensionCacheStats(guardPath), { entries: 1, loads: 1 });
+			assert.deepEqual(harness.cache.stats(guardPath), { entries: 1, loads: 1 });
 
 			const firstHandler = (first as any)._agent.mockPiToolCallHandlers[0];
 			const secondHandler = (second as any)._agent.mockPiToolCallHandlers[0];
@@ -65,7 +140,7 @@ describe("in-process mock shared tool-guard module", () => {
 			// the other activation's process-global env.
 			await firstHandler({ toolName: "guarded_probe" });
 			await secondHandler({ toolName: "guarded_probe" });
-			assert.deepEqual(requests.slice(0, 2), [
+			assert.deepEqual(harness.requests.slice(0, 2), [
 				{ path: "/api/sessions/session-first/tool-grant-request", authorization: "Bearer token-first" },
 				{ path: "/api/sessions/session-second/tool-grant-request", authorization: "Bearer token-second" },
 			]);
@@ -76,40 +151,48 @@ describe("in-process mock shared tool-guard module", () => {
 				secondHandler({ toolName: "guarded_probe" }),
 			]);
 			assert.deepEqual(
-				requests.slice(2).sort((a, b) => a.path.localeCompare(b.path)),
+				harness.requests.slice(2).sort((a, b) => a.path.localeCompare(b.path)),
 				[
 					{ path: "/api/sessions/session-first/tool-grant-request", authorization: "Bearer token-first" },
 					{ path: "/api/sessions/session-second/tool-grant-request", authorization: "Bearer token-second" },
 				],
 			);
+
+			// A changed caller-owned version key must load a fresh declaration while
+			// leaving the already-activated session closures untouched.
+			harness.setGuard(guardPath, generateToolGuardExtension(
+				"not-embedded",
+				{ guarded_probe: { policy: "ask", group: "canary" } },
+				[],
+			), "2");
+			const refreshed = makeSessionBridge("session-refreshed", "token-refreshed");
+			await refreshed.start();
+			assert.deepEqual(harness.cache.stats(guardPath), { entries: 2, loads: 2 });
+			await refreshed.stop();
 		} finally {
 			await Promise.all([first.stop(), second.stop()]);
-			await new Promise<void>((resolve) => server.close(() => resolve()));
-			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});
 
 	it("activates never policies without gateway credentials and fails ask policies closed", async () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-credentialless-guard-canary-"));
-		const guardDir = path.join(tmp, "state", "tool-guard", "credentialless-policy");
-		const guardPath = path.join(guardDir, "guard.ts");
-		fs.mkdirSync(guardDir, { recursive: true });
-		fs.writeFileSync(guardPath, generateToolGuardExtension(
+		const harness = createGuardHarness();
+		const guardPath = "/state/tool-guard/credentialless-policy/guard.ts";
+		harness.setGuard(guardPath, generateToolGuardExtension(
 			"not-embedded",
 			{
 				forbidden_probe: { policy: "never", group: "canary" },
 				guarded_probe: { policy: "ask", group: "canary" },
 			},
 			[],
-		), "utf8");
+		));
 
 		const previousGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
 		const previousToken = process.env.BOBBIT_TOKEN;
 		delete process.env.BOBBIT_GATEWAY_URL;
 		delete process.env.BOBBIT_TOKEN;
-		const bridge = new InProcessMockBridge({
-			args: ["--extension", guardPath],
-			env: { BOBBIT_DIR: tmp, BOBBIT_SESSION_ID: "credentialless-session" },
+		const bridge = makeBridge(harness, guardPath, {
+			BOBBIT_DIR: "/credentialless",
+			BOBBIT_SESSION_ID: "credentialless-session",
 		});
 		try {
 			await bridge.start();
@@ -125,7 +208,6 @@ describe("in-process mock shared tool-guard module", () => {
 			else process.env.BOBBIT_GATEWAY_URL = previousGatewayUrl;
 			if (previousToken === undefined) delete process.env.BOBBIT_TOKEN;
 			else process.env.BOBBIT_TOKEN = previousToken;
-			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});
 });
