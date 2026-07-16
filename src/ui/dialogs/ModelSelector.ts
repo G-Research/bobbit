@@ -259,7 +259,7 @@ export class ModelSelector extends DialogBase {
 		if (this.searchQuery) {
 			filteredModels = filteredModels.filter(({ provider, id, model }) => {
 				const searchTokens = this.searchQuery.toLowerCase().split(/\s+/).filter((t) => t);
-				const searchText = `${provider} ${id} ${model.name}`.toLowerCase();
+				const searchText = `${provider} ${model.upstreamProvider ?? ""} ${id} ${model.name}`.toLowerCase();
 				return searchTokens.every((token) => searchText.includes(token));
 			});
 		}
@@ -372,6 +372,8 @@ export class ModelSelector extends DialogBase {
 						const isCurrent = modelsAreEqual(this.currentModel, model);
 						const isSelected = index === this.selectedIndex;
 						const hasKey = model.authenticated ?? false;
+						const providerBadge = provider === "aigw" && model.upstreamProvider ? model.upstreamProvider : provider;
+						const providerTitle = provider === "aigw" && model.upstreamProvider ? `AIGW provider: ${model.upstreamProvider}` : provider;
 						const sessionUnavailable = this.isSessionUnavailable(model);
 						const dimmed = sessionUnavailable || !hasKey;
 						const rowTitle = sessionUnavailable
@@ -403,7 +405,7 @@ export class ModelSelector extends DialogBase {
 									<div class="flex items-center gap-1.5">
 										${sessionUnavailable ? Badge("Account only", "secondary") : ""}
 										${!hasKey && !sessionUnavailable ? html`<span class="text-muted-foreground" title=${"Authentication required"}>${icon(KeyRound, "sm")}</span>` : ""}
-										${Badge(provider, "outline")}
+										<span title=${providerTitle}>${Badge(providerBadge, "outline")}</span>
 									</div>
 								</div>
 								<div class="flex items-center justify-between text-xs text-muted-foreground">

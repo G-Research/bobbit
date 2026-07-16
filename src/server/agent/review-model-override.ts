@@ -16,6 +16,7 @@
  */
 
 import { isSessionSelectableModelString } from "./google-code-assist.js";
+import { normalizeAigwModelString } from "./aigw-manager.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
 
 interface ModelShape { id?: string; provider?: string }
@@ -113,13 +114,14 @@ function sanitizedError(err: unknown): Error {
 }
 
 function parseModelString(modelString: string, label: string): { provider: string; modelId: string } {
-	const slash = modelString.indexOf("/");
-	if (slash <= 0 || slash >= modelString.length - 1) {
+	const normalizedModelString = normalizeAigwModelString(modelString);
+	const slash = normalizedModelString.indexOf("/");
+	if (slash <= 0 || slash >= normalizedModelString.length - 1) {
 		throw new Error(
 			`malformed ${label}: "${modelString}" (expected "<provider>/<modelId>")`,
 		);
 	}
-	return { provider: modelString.slice(0, slash), modelId: modelString.slice(slash + 1) };
+	return { provider: normalizedModelString.slice(0, slash), modelId: normalizedModelString.slice(slash + 1) };
 }
 
 function validateControlledFallbackTarget(selectedModel: string, fallbackModel: string | undefined): string {

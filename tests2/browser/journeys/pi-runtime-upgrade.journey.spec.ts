@@ -113,6 +113,82 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 		}
 	});
 
+	test("AIGW provenance is searchable, badges stay stable, and bare preference survives reload", async ({ page }) => {
+		const aigwId = "gpt-5.6-sol";
+		const models = [
+			{
+				id: aigwId,
+				name: "GPT 5.6 Sol",
+				provider: "aigw",
+				upstreamProvider: "aws-mantle",
+				api: "openai-responses",
+				baseUrl: "https://203.0.113.1/openai/v1",
+				contextWindow: 272000,
+				maxTokens: 128000,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 },
+				authenticated: true,
+			},
+			{
+				id: "gpt-4o",
+				name: "GPT 4o",
+				provider: "openai",
+				api: "openai-completions",
+				baseUrl: "https://api.openai.com/v1",
+				contextWindow: 128000,
+				maxTokens: 16384,
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+				authenticated: true,
+			},
+		];
+		await page.route("**/api/models", async (route) => {
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(models) });
+		});
+
+		try {
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": null }),
+			});
+			await openModelsSettings(page);
+			let sessionRow = page.locator('[data-testid="model-row"][data-row-label="Session"]').first();
+			await sessionRow.locator('button[title="Choose model"]').click();
+			const search = page.getByPlaceholder("Search models...");
+			await search.fill("aws-mantle");
+			const aigwItem = page.locator("[data-model-item]").filter({ hasText: aigwId }).first();
+			await expect(aigwItem).toBeVisible({ timeout: 15_000 });
+			await expect(aigwItem.locator('[title="AIGW provider: aws-mantle"]')).toContainText("aws-mantle");
+
+			await search.fill("gpt-4o");
+			const openAiItem = page.locator("[data-model-item]").filter({ hasText: "gpt-4o" }).first();
+			await expect(openAiItem).toBeVisible();
+			await expect(openAiItem.locator('[title="openai"]')).toContainText("openai");
+			await expect(openAiItem).not.toContainText("aws-mantle");
+
+			await search.fill("aws-mantle");
+			await aigwItem.click();
+			await expect(sessionRow.locator('button[title="Choose model"]')).toContainText(aigwId, { timeout: 15_000 });
+			await expect(sessionRow).toContainText("aws-mantle");
+			const saved = await (await apiFetch("/api/preferences")).json();
+			expect(saved["default.sessionModel"]).toBe(`aigw/${aigwId}`);
+
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToHash(page, "#/settings/system/models");
+			sessionRow = page.locator('[data-testid="model-row"][data-row-label="Session"]').first();
+			await expect(sessionRow.locator('button[title="Choose model"]')).toContainText(aigwId, { timeout: 20_000 });
+			await expect(sessionRow).toContainText("aws-mantle");
+		} finally {
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": null }),
+			});
+			await page.unroute("**/api/models");
+		}
+	});
+
 	test("provider key settings use browser-safe pi-ai server routes", async ({ page }) => {
 		const providersResponse = page.waitForResponse(
 			(response) => response.url().includes("/api/pi-ai/providers") && response.request().method() === "GET" && response.ok(),

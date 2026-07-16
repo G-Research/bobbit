@@ -9,6 +9,7 @@ export type AigwModelEntry = {
 	contextWindow: number;
 	maxTokens: number;
 	reasoning: boolean;
+	upstreamProvider?: string;
 };
 
 /**
@@ -56,7 +57,7 @@ export class AigwModelsDialog extends DialogBase {
 			<div class="p-6 pb-4 border-b border-border flex-shrink-0">
 				${DialogHeader({ title: "Available Gateway Models" })}
 				<p class="text-xs text-muted-foreground mt-2">
-					Raw model IDs as reported by the AI Gateway's <code>/v1/models</code> endpoint.
+					Gateway models with their upstream provider when reported by opencode well-known discovery.
 				</p>
 			</div>
 			<div class="flex-1 overflow-y-auto" data-testid="aigw-models-list">
@@ -73,6 +74,7 @@ export class AigwModelsDialog extends DialogBase {
 											${m.reasoning
 												? html`<span class="px-1.5 py-0.5 rounded bg-secondary">Reasoning</span>`
 												: ""}
+											${m.upstreamProvider ? html`<span class="px-1.5 py-0.5 rounded bg-secondary">${m.upstreamProvider}</span>` : ""}
 											<span>${this.formatTokens(m.contextWindow)} ctx</span>
 										</div>
 									</div>

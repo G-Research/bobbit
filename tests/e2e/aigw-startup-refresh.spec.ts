@@ -235,7 +235,9 @@ test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () =>
 			expect(data.providers.aigw.headers["User-Agent"]).toBe(EXPECTED_USER_AGENT);
 
 			const ids = data.providers.aigw.models.map((m: any) => m.id);
-			expect(ids).toContain("openai/gpt-5.2");
+			// gpt-5.2 is a reasoning model → the option-1 fallback routes it to
+			// openai-responses with a BARE wire id ("openai/gpt-5.2" → "gpt-5.2").
+			expect(ids).toContain("gpt-5.2");
 			expect(ids).toContain("us.anthropic.claude-sonnet-4-6"); // Claude prefix stripped
 			expect(mock.hits()).toBeGreaterThan(0);
 			expectSingleBobbitUserAgent(mock.requests().find((record) => record.url === "/v1/models"));

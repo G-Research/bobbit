@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/aigw-wellknown-translate.test.ts",
+      "reason": "Unit coverage for well-known-first AIGW discovery, safe one-hop payload resolution, provider-specific routing, unique bare IDs, metadata and pricing units, conservative migration, authoritative persistence, fallback routing, and default-model seeding.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/unit-inventory-git.test.ts",
       "reason": "Pins the unit inventory audit's optional historical migration source policy with an injected Git reader: the exact absent-path-at-revision error returns empty text while unrelated Git failures remain fatal, without spawning a subprocess.",
       "execution": {
@@ -499,7 +508,7 @@
     },
     {
       "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
-      "reason": "Pi 0.80.6 browser journey coverage: pins the user-facing GPT 5.6 catalog (gpt-5.6-luna/sol/terra) exposed through /api/models and selectable in the settings model selector, browser-safe pi-ai provider/key-test routes, and session reload/restore after transcript parsing.",
+      "reason": "Pi 0.80.6 and AIGW browser journey coverage: pins GPT 5.6 catalog selection, upstream-provider badge/search, stable non-AIGW labels, bare AIGW preference persistence across reload, browser-safe pi-ai provider/key-test routes, and session reload/restore after transcript parsing.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

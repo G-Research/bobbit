@@ -28,6 +28,8 @@ export interface ApiModel {
 	provider: string;
 	api: string;
 	baseUrl?: string;
+	/** For AIGW models, the upstream well-known provider key (e.g. openai, aws-mantle). */
+	upstreamProvider?: string;
 	contextWindow: number;
 	maxTokens: number;
 	reasoning: boolean;
@@ -323,12 +325,44 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 			const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
 			const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
 			for (const m of aigwModels) {
+				// AUTHORITATIVE path: a model carrying both `api` and `baseUrl` came from
+				// well-known discovery (or the fallback option-1 OpenAI-responses fix).
+				// Trust those fields verbatim and DON'T re-derive via inferMeta — the
+				// id/baseUrl/api must match writeAigwModelsJson (which emits the bare
+				// wireId) so `set_model`'s strict-equality match keeps working.
+				if (m.api && m.baseUrl) {
+					const wireId = m.wireId ?? m.id;
+					results.push({
+						id: wireId,
+						name: m.name,
+						provider: "aigw",
+						...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
+						api: m.api,
+						baseUrl: m.baseUrl,
+						contextWindow: m.contextWindow || 0,
+						maxTokens: m.maxTokens || 0,
+						reasoning: m.reasoning || false,
+						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
+						input: m.input || ["text"],
+						cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						...(m.compat ? { compat: m.compat as Record<string, unknown> } : {}),
+						authenticated: true,
+					});
+					continue;
+				}
+				// ── Fallback heuristic path (no authoritative api/baseUrl) ──
+				// Claude models get their provider prefix stripped and are routed
+				// through bedrock-converse-stream by configureAigw() when writing
+				// models.json. The agent's rpc `set_model` does a strict equality match
+				// against that file, so the IDs we return here MUST match the stripped
+				// form — otherwise picking a Claude model from the UI silently fails.
 				const normalizedId = isClaudeModel(m.id) ? stripPrefix(m.id) : m.id;
 				const meta = inferMeta(normalizedId);
 				results.push({
 					id: normalizedId,
 					name: m.name,
 					provider: "aigw",
+					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
 					api: isClaudeModel(m.id) ? "bedrock-converse-stream" : (m.api || "openai-completions"),
 					baseUrl: aigwUrl,
 					contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),

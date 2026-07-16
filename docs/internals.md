@@ -1704,6 +1704,105 @@ The converted `cost` values flow through two surfaces:
 - `GET /api/models` returns them in each `ApiModel.cost` entry so the UI and server model registry see non-zero AIGW pricing when the gateway provides it.
 - `writeAigwModelsJson()` persists them on generated `providers.aigw.models[]` entries in the active agent directory's `models.json`, including both OpenAI-compatible models and Claude models routed through Bedrock Converse. Agent subprocesses can then compute usage cost locally from token-count usage data. See [Configurable agent directory](configurable-agent-directory.md).
 
+### Well-known-driven discovery (openai-responses routing)
+
+Model discovery is **well-known-first**. Instead of hand-rolling routing from `/v1/models` + `inferMeta` id heuristics, `discoverAigwModels()` first consults the gateway's authoritative opencode config at `{gatewayOrigin}/.well-known/opencode`. This is the same contract opencode itself uses, so Bobbit inherits opencode's per-provider routing decisions rather than guessing them. When the well-known config is present it is the source of truth; the legacy heuristic path is only a fallback.
+
+**Why this exists.** On this gateway the `gpt-5.6-sol` / GPT 5.6 family reject function tools combined with `reasoning_effort` on `/v1/chat/completions`:
+
+```
+400 Function tools with reasoning_effort are not supported for gpt-5.6-sol
+in /v1/chat/completions. To use function tools, use /v1/responses or set
+reasoning_effort to 'none'.
+```
+
+Bobbit historically routed every non-Claude model through pi-ai's `openai-completions` (chat/completions), which triggers exactly that 400. opencode avoids it because its `openai` provider uses the Responses API (`/v1/responses`), where reasoning and function tools coexist. Consuming the well-known config lets Bobbit route the same way.
+
+#### Discovery flow and fallback
+
+`discoverAigwModels()` resolves `/.well-known/opencode` against the configured **origin root** (the well-known document never lives under `/v1`). `fetchWellKnownConfig()` returns `null` — triggering the legacy `/v1/models` + `inferMeta` fallback — on HTTP/network/JSON errors, redirects, invalid URLs, timeout, an over-1 MiB body, unsafe targets, excessive indirection, or test-network guards. The initial and optional remote fetch share one eight-second deadline.
+
+The payload resolver accepts raw configs, a top-level `config` wrapper, or exactly one `remote_config` hop. A second unresolved `remote_config` is rejected. A valid `provider` object is authoritative even when filtering leaves zero models, so disabled, unwhitelisted, collided-away, or invalid providers are never repopulated from `/v1/models`. Configure reuses the resolved config and does not fetch it a second time.
+
+Remote and provider URLs must be absolute HTTP(S), without credentials or fragments. The exact configured gateway origin may use HTTP and internal addresses. Cross-origin remote targets require HTTPS and public DNS answers; loopback, private, link-local, carrier-grade NAT, multicast, unspecified, reserved/documentation, IPv4-mapped private, and metadata addresses are rejected. DNS answers are validated and pinned for the discovery connection while TLS still verifies the original hostname. Redirects are not followed. Provider routes are persisted for a separate pi-ai process, which cannot inherit Bobbit's pinned lookup, so mutable cross-origin DNS names are rejected rather than left open to rebinding; exact-origin routes and public literal HTTPS addresses are accepted.
+
+The inherited Bobbit bearer token is sent only to the configured origin. A same-origin remote may replace it with an explicitly declared Authorization header; cross-origin requests receive only explicitly declared remote headers. Hop-by-hop, `Host`, `Content-Length`, proxy, and `User-Agent` headers are dropped, and Bobbit supplies the canonical user agent. Bodies, credentials, and remote headers are never logged.
+
+#### Auth token
+
+The well-known GET sends a best-effort bearer token (for quota/attribution — a dummy currently works, but the real token is preferred). `readOpencodeWellKnownToken()` resolves it in priority order:
+
+1. `AIGW_OPENCODE_TOKEN` env var.
+2. opencode `auth.json` (`~/.local/share/opencode/auth.json` or `~/.config/opencode/auth.json`): a `type:"wellknown"` entry keyed by the gateway URL or host; the token is read from `entry.key ?? entry.token`.
+3. none — the request proceeds without an `Authorization` header.
+
+Token resolution is fully guarded and never throws.
+
+#### Provider adapter → pi-ai `api`
+
+`translateWellKnown()` maps each provider's npm adapter to a pi-ai `api`. Unknown adapters fall back to the conservative `openai-completions`:
+
+| provider | `npm` adapter | `options.baseURL` subpath | pi-ai `api` | endpoint |
+|---|---|---|---|---|
+| `openai` | `@ai-sdk/openai` | `…/openai/v1` | `openai-responses` | Responses (`/responses`) |
+| `aws` | `@ai-sdk/amazon-bedrock` | `…/aws` | `bedrock-converse-stream` | Bedrock Converse |
+| `aws-mantle` | `@ai-sdk/openai` | `…/aws/openai/v1` | `openai-responses` | Responses |
+| `gresearch` | `@ai-sdk/openai-compatible` | `…/gresearch/v1` | `openai-completions` | chat/completions |
+
+`@ai-sdk/openai` → `openai-responses` is the fix: the OpenAI SDK appends `/responses` to `options.baseURL`, so `…/openai/v1` becomes `…/openai/v1/responses`, the one endpoint where reasoning + tools coexist.
+
+#### Why per-provider baseURLs matter
+
+Each provider's `options.baseURL` becomes the **per-model `baseUrl`**, which pi-ai uses directly as the SDK `baseURL`. This is essential because the per-provider subpaths and the multiplexed `/v1` root differ in two ways:
+
+- **Endpoint semantics** — only `…/openai/v1` speaks the Responses API; the `/v1` root Bobbit historically targeted only speaks chat/completions.
+- **Model id form** — subpath ids are **bare** (`gpt-5.6-sol`), whereas the multiplexed `/v1` root needs the `openai/` prefix. The bare id is tracked as `wireId` (the value `writeAigwModelsJson()` emits as the models.json `id`), kept distinct from the Bobbit-facing `id`.
+
+The SDK's `baseURL`-plus-`/responses` behaviour is exactly why the baseURL must end in `…/openai/v1` and not the bare origin.
+
+#### Filters and per-model metadata
+
+When the well-known config is present, `translateWellKnown()` applies hard filters and never falls back to `inferMeta` guessing:
+
+- `disabled_providers` — drops whole providers.
+- per-provider `whitelist` — drops any model id not listed.
+- missing or invalid provider `options.baseURL` — drops that provider without abandoning the authoritative config.
+
+Bare IDs are unique. If multiple eligible providers advertise the same ID, the provider named by top-level `config.model` wins for that ID; otherwise the first provider in object insertion order wins. Provenance remains in `upstreamProvider` rather than being synthesized into the model ID.
+
+Per-model fields are mapped straight across:
+
+| well-known field | Bobbit `AigwModel` field |
+|---|---|
+| `variants` keys | `thinkingLevelMap` (identity per tier; reasoning models also get `off:"none"`) |
+| `limit.context` | `contextWindow` |
+| `limit.output` | `maxTokens` |
+| `modalities.input` | `input` (filtered to `text`/`image`) |
+| `reasoning` | `reasoning` |
+| `cost` | `cost` via `normalizeWellKnownCost()` |
+
+`buildThinkingLevelMap()` only keeps recognized effort tiers (`minimal/none/low/medium/high/xhigh/max`) and adds `off:"none"` for reasoning models so the responses/completions adapters emit `reasoning_effort:"none"` in the no-effort case — the tool-compatible path the gateway wants.
+
+`normalizeWellKnownCost()` is distinct from the legacy `/v1/models` normalizer. Well-known `cost` is already denominated in **USD per 1M tokens** under `{input,output,cache_read,cache_write}`, so the fields map directly (with `cache_read`/`cache_write` defaulting to the same `input * 0.1` / `input * 1.25` heuristics when omitted). The legacy `normalizeAigwPricing()` instead takes USD **per token** under `{prompt,completion}` and scales up by 1M.
+
+`compat.supportsReasoningEffort` is set `true` only for the OpenAI-style endpoints (`openai-responses` / `openai-completions`) and left undefined for `bedrock-converse-stream` (Bedrock ignores compat). Because `@ai-sdk/openai` now routes to `openai-responses`, the forbidden tools+`reasoning_effort`-on-chat/completions combination can no longer occur.
+
+#### Default-model seeding
+
+`seedDefaultModelsFromWellKnown()` seeds `default.sessionModel`, `default.reviewModel`, and `default.namingModel` from the top-level `config.model` (form `provider:id`, e.g. `aws:us.anthropic.claude-opus-4-6`) into Bobbit's `aigw/<id>` form. It only writes an unset/empty preference and only when both provider provenance and bare ID match the deduplicated discovered model.
+
+Legacy `aigw/<upstream>/<id>` preferences are conservatively migrated to `aigw/<id>` only when models.json proves the bare candidate is unique and compatible. Exact, missing, malformed, ambiguous, and unknown multi-segment IDs are preserved. Restored session pins are migrated and persisted. Explicit AIGW naming models resolve through `ApiModel` and `completeModelText()`, so Responses, Converse, and completions routes are retained for both session titles and goal summaries. The legacy root-chat path is limited to automatic Claude fallback when no explicit naming model exists.
+
+#### Fallback path (option-1 fix)
+
+When the well-known config is absent, the legacy `/v1/models` + `inferMeta` path still applies the minimal routing fix: OpenAI-family reasoning ids (`gpt-*` / `o[1-9]`, excluding Claude) are routed to `openai-responses` on `${origin}/openai/v1` with a **bare `wireId`**, so tools + reasoning don't 400 on the chat/completions root. Because the emitted id is bare, the registry and models.json ids for these models are bare (e.g. `gpt-5.6-luna`). Other non-Claude models stay on `openai-completions`, and Claude is remapped to `bedrock-converse-stream` downstream.
+
+#### Probes and cache behavior
+
+`/api/models/test` probes the resolved route only: Responses models use `{baseUrl}/responses` with `max_output_tokens`; completions models use `{baseUrl}/chat/completions`; Converse and future native APIs go through pi-ai. A failed probe is not retried against another endpoint. `/api/aigw/test` remains a discovery/reachability check.
+
+Cold authoritative discovery makes one request, fallback makes the well-known and `/v1/models` requests, and one-hop remote discovery makes two requests within the shared deadline. Configure reuses discovery output. The existing five-second registry and sixty-second SessionManager caches remain unchanged.
+
 ### Generated `providers.aigw.headers`
 
 `writeAigwModelsJson()` writes the AI Gateway provider into the active agent directory's `models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:

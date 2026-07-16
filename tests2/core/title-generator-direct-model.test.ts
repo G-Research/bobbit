@@ -110,6 +110,9 @@ describe("title generation with non-AI-Gateway naming models", () => {
 		// completeModelText resolves auth.json (via globalAuthPath()) under it.
 		resetAgentDirStateForTests();
 		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "openai-codex": { type: "oauth", access: "codex-oauth-token" } }));
+		// Ambient OPENAI_API_KEY would short-circuit resolveProviderApiKey before auth.json, masking the OAuth-credential path under test.
+		const prevOpenAiKey = process.env.OPENAI_API_KEY;
+		delete process.env.OPENAI_API_KEY;
 		const calls: any[] = [];
 		try {
 			await completeModelText({ ...directModel, provider: "openai-codex", api: "openai-codex-responses" }, undefined, {
@@ -121,6 +124,8 @@ describe("title generation with non-AI-Gateway naming models", () => {
 			});
 			assert.equal(calls[0].options.apiKey, "codex-oauth-token");
 		} finally {
+			if (prevOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+			else process.env.OPENAI_API_KEY = prevOpenAiKey;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
