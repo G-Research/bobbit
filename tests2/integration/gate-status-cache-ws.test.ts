@@ -1,62 +1,78 @@
-import { expect } from "./_e2e/in-process-harness.js";
-import { test } from "./_e2e/in-process-harness.js";
+import { describe, expect, it } from "vitest";
+import path from "node:path";
+import { GateStore } from "../../src/server/agent/gate-store.js";
+import { GoalStore } from "../../src/server/agent/goal-store.js";
 import {
-	apiFetch,
-	createSession,
-	deleteSession,
-	createGoal,
-	deleteGoal,
-	connectWs,
-} from "./_e2e/e2e-setup.js";
+	broadcastGateStatusChanged,
+	wireGateStatusGenerationInvalidation,
+	type GateStatusChangedEvent,
+} from "../../src/server/gate-status-broadcast.js";
+import { createManualClock, type ManualClock } from "../harness/clock.js";
+import { createMemFs } from "../harness/mem-fs.js";
+
+// Preserve the migrated Playwright declaration identity without importing the
+// gateway-backed compatibility harness.
+const test = Object.assign(it, { describe });
+
+class FakeSocketSubscriber {
+	readonly messages: GateStatusChangedEvent[] = [];
+
+	constructor(private readonly clock: ManualClock) {}
+
+	send(payload: string): void {
+		this.clock.setTimeout(() => {
+			this.messages.push(JSON.parse(payload) as GateStatusChangedEvent);
+		}, 0);
+	}
+}
+
+class FakeGoalEventHub {
+	private readonly subscribers = new Map<string, Set<FakeSocketSubscriber>>();
+
+	subscribe(goalId: string, subscriber: FakeSocketSubscriber): void {
+		const goalSubscribers = this.subscribers.get(goalId) ?? new Set<FakeSocketSubscriber>();
+		goalSubscribers.add(subscriber);
+		this.subscribers.set(goalId, goalSubscribers);
+	}
+
+	readonly broadcast = (goalId: string, event: GateStatusChangedEvent): void => {
+		const payload = JSON.stringify(event);
+		for (const subscriber of this.subscribers.get(goalId) ?? []) subscriber.send(payload);
+	};
+}
 
 test.describe("Gate status WebSocket broadcast", () => {
-	test("gate_status_changed is broadcast when a gate passes", async () => {
-		let sessionId: string | undefined;
-		let goalId: string | undefined;
-		let conn: Awaited<ReturnType<typeof connectWs>> | undefined;
+	test("gate_status_changed is broadcast when a gate passes", () => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-status-cache-ws");
+		memfs.mkdirSync(stateDir, { recursive: true });
+		const gateStore = new GateStore(stateDir, memfs);
+		const goalStore = new GoalStore(stateDir, memfs);
+		const clock = createManualClock(1_700_000_000_000);
+		const hub = new FakeGoalEventHub();
+		const matchingSocket = new FakeSocketSubscriber(clock);
+		const unrelatedSocket = new FakeSocketSubscriber(clock);
+		const goalId = "goal-gate-status-broadcast";
+		const gateId = "design-doc";
 
-		try {
-			// Create a goal with the "general" workflow, then attach a matching
-			// goal-session socket. Goal broadcasts intentionally skip unrelated
-			// regular sessions.
-			const goal = await createGoal({ title: `WS Gate Test ${Date.now()}`, workflowId: "general" });
-			goalId = goal.id;
-			sessionId = await createSession({ goalId });
-			conn = await connectWs(sessionId);
+		hub.subscribe(goalId, matchingSocket);
+		hub.subscribe("another-goal", unrelatedSocket);
+		wireGateStatusGenerationInvalidation(gateStore, goalStore);
+		gateStore.initGatesForGoal(goalId, [gateId]);
+		const generationBeforePass = goalStore.getGeneration();
 
-			// Signal the design-doc gate (no dependencies, has LLM review that auto-passes with mock agent)
-			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					content: "# Design\n\nApproach: test approach\n\nFiles: src/test.ts\n\nCriteria: it works",
-				}),
-			});
-			expect(signalResp.status).toBe(201);
+		gateStore.updateGateStatus(goalId, gateId, "passed");
+		const event = broadcastGateStatusChanged(hub.broadcast, goalId, gateId, "passed");
 
-			// Wait for gate_status_changed WS message
-			const wsMsg = await conn!.waitFor(
-				(m) =>
-					m.type === "gate_status_changed" &&
-					m.goalId === goalId &&
-					m.gateId === "design-doc" &&
-					m.status === "passed",
-				15_000,
-			);
+		// The production GateStore callback invalidates conditional goal-list
+		// reads synchronously; socket delivery is then driven without a real wait.
+		expect(goalStore.getGeneration()).toBe(generationBeforePass + 1);
+		expect(gateStore.getGate(goalId, gateId)?.status).toBe("passed");
+		expect(matchingSocket.messages).toEqual([]);
+		clock.advance(0);
 
-			expect(wsMsg.type).toBe("gate_status_changed");
-			expect(wsMsg.goalId).toBe(goalId);
-			expect(wsMsg.gateId).toBe("design-doc");
-			expect(wsMsg.status).toBe("passed");
-
-			// Verify via REST API that the gate is actually passed
-			const gateResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc`);
-			expect(gateResp.status).toBe(200);
-			const gateData = await gateResp.json();
-			expect(gateData.status).toBe("passed");
-		} finally {
-			conn?.close();
-			if (goalId) await deleteGoal(goalId);
-			if (sessionId) await deleteSession(sessionId);
-		}
+		expect(event).toEqual({ type: "gate_status_changed", goalId, gateId, status: "passed" });
+		expect(matchingSocket.messages).toEqual([event]);
+		expect(unrelatedSocket.messages).toEqual([]);
 	});
 });
