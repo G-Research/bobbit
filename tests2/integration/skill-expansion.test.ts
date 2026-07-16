@@ -13,13 +13,17 @@ import {
 	agentEndPredicate,
 	defaultProjectId,
 } from "./_e2e/e2e-setup.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let secondProjectId: string;
 let secondProjectCwd: string;
 let skillDir: string;
+let secondProjectSessionId: string;
+let secondProjectSessionCwd: string;
+let defaultSessionId: string;
+let defaultSessionCwd: string;
 
 const SKILL_NAME = "cross-project-skill";
 const SKILL_MARKER = "CROSS_PROJECT_SKILL_EXPANDED_MARKER_12345";
@@ -48,6 +52,7 @@ ${SKILL_MARKER}
 		body: JSON.stringify({
 			name: `e2e-skill-expansion-${Date.now()}`,
 			rootPath: secondProjectCwd,
+			__e2e_seed_skip__: true,
 		}),
 	});
 	expect(projResp.status).toBe(201);
@@ -64,69 +69,62 @@ ${SKILL_MARKER}
 		body: JSON.stringify({ config_directories: configDirs }),
 	});
 	expect(putResp.status).toBe(200);
+
+	// The assertions are read-only apart from one prompt turn. Provision the two
+	// worktree-free sessions once instead of repeating full entity registration in
+	// each case; the file-level teardown remains the isolation boundary.
+	const secondSessionResp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({
+			cwd: secondProjectCwd,
+			projectId: secondProjectId,
+			worktree: false,
+		}),
+	});
+	expect(secondSessionResp.status).toBe(201);
+	({ id: secondProjectSessionId, cwd: secondProjectSessionCwd } = await secondSessionResp.json());
+
+	const defaultSessionResp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ cwd: nonGitCwd(), worktree: false }),
+	});
+	expect(defaultSessionResp.status).toBe(201);
+	({ id: defaultSessionId, cwd: defaultSessionCwd } = await defaultSessionResp.json());
 });
 
 test.afterAll(async () => {
-	// The second project is created in this FILE-level beforeAll (before the
-	// describe's fileBaseline snapshot), so the harness per-file sweep treats it
-	// as baseline and never deletes it. Without this cleanup it leaks into the
-	// next file's baseline on the shared fork and trips the leak detector there
-	// (e.g. project-reorder-api's clearVisibleProjects removes it → projects:-1).
+	// These are file-level fixtures, so the per-test scope deliberately does not
+	// own them. Delete children before their project, then remove the temp tree.
+	if (secondProjectSessionId) await apiFetch(`/api/sessions/${secondProjectSessionId}`, { method: "DELETE" }).catch(() => {});
+	if (defaultSessionId) await apiFetch(`/api/sessions/${defaultSessionId}`, { method: "DELETE" }).catch(() => {});
 	if (secondProjectId) await apiFetch(`/api/projects/${secondProjectId}`, { method: "DELETE" }).catch(() => {});
+	try { rmSync(secondProjectCwd, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 test.describe("Slash skill expansion mismatch", () => {
 	test("autocomplete requires projectId to find non-default project skills", async () => {
-		// Create a session in the second project
-		const sessResp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({
-				cwd: secondProjectCwd,
-				projectId: secondProjectId,
-				worktree: false,
-			}),
-		});
-		expect(sessResp.status).toBe(201);
-		const { id: sessionId, cwd: sessionCwd } = await sessResp.json();
+		// WITHOUT projectId — project-scoped autocomplete rejects instead of
+		// inferring scope from cwd.
+		const respWithout = await apiFetch(
+			`/api/slash-skills?cwd=${encodeURIComponent(secondProjectSessionCwd)}`,
+		);
+		expect(respWithout.status).toBe(400);
+		const bodyWithout = await respWithout.json().catch(() => ({}));
+		expect(String(bodyWithout.code ?? bodyWithout.error ?? "").toLowerCase()).toContain("project");
 
-		try {
-			// WITHOUT projectId — project-scoped autocomplete rejects instead of
-			// inferring scope from cwd.
-			const respWithout = await apiFetch(
-				`/api/slash-skills?cwd=${encodeURIComponent(sessionCwd)}`,
-			);
-			expect(respWithout.status).toBe(400);
-			const bodyWithout = await respWithout.json().catch(() => ({}));
-			expect(String(bodyWithout.code ?? bodyWithout.error ?? "").toLowerCase()).toContain("project");
-
-			// WITH projectId — the API resolves the correct per-project config
-			// store and finds the skill. This is what the fixed UI sends.
-			const respWith = await apiFetch(
-				`/api/slash-skills?cwd=${encodeURIComponent(sessionCwd)}&projectId=${encodeURIComponent(secondProjectId)}`,
-			);
-			expect(respWith.status).toBe(200);
-			const dataWith = await respWith.json();
-			const namesWith = dataWith.skills.map((s: any) => s.name);
-			expect(namesWith).toContain(SKILL_NAME);
-		} finally {
-			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
-		}
+		// WITH projectId — the API resolves the correct per-project config
+		// store and finds the skill. This is what the fixed UI sends.
+		const respWith = await apiFetch(
+			`/api/slash-skills?cwd=${encodeURIComponent(secondProjectSessionCwd)}&projectId=${encodeURIComponent(secondProjectId)}`,
+		);
+		expect(respWith.status).toBe(200);
+		const dataWith = await respWith.json();
+		const namesWith = dataWith.skills.map((s: any) => s.name);
+		expect(namesWith).toContain(SKILL_NAME);
 	});
 
 	test("WS handler expands skill using session.projectId", async () => {
-		// Create a session in the second project
-		const sessResp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({
-				cwd: secondProjectCwd,
-				projectId: secondProjectId,
-				worktree: false,
-			}),
-		});
-		expect(sessResp.status).toBe(201);
-		const { id: sessionId } = await sessResp.json();
-
-		const conn = await connectWs(sessionId);
+		const conn = await connectWs(secondProjectSessionId);
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
@@ -162,35 +160,21 @@ test.describe("Slash skill expansion mismatch", () => {
 			await conn.waitFor(agentEndPredicate());
 		} finally {
 			conn.close();
-			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
 	test("default project session does NOT see non-default project skills", async () => {
-		// Create a session in the default project (no explicit projectId)
-		const defaultCwd = nonGitCwd();
-		const sessResp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: defaultCwd, worktree: false }),
-		});
-		expect(sessResp.status).toBe(201);
-		const { id: sessionId, cwd: sessionCwd } = await sessResp.json();
+		// Fetch slash-skills for the default project
+		const defaultProject = await defaultProjectId();
+		expect(defaultProject).toBeTruthy();
+		const resp = await apiFetch(
+			`/api/slash-skills?cwd=${encodeURIComponent(defaultSessionCwd)}&projectId=${encodeURIComponent(defaultProject!)}`,
+		);
+		expect(resp.status).toBe(200);
+		const data = await resp.json();
+		const names = data.skills.map((s: any) => s.name);
 
-		try {
-			// Fetch slash-skills for the default project
-			const defaultProject = await defaultProjectId();
-			expect(defaultProject).toBeTruthy();
-			const resp = await apiFetch(
-				`/api/slash-skills?cwd=${encodeURIComponent(sessionCwd)}&projectId=${encodeURIComponent(defaultProject!)}`,
-			);
-			expect(resp.status).toBe(200);
-			const data = await resp.json();
-			const names = data.skills.map((s: any) => s.name);
-
-			// The cross-project skill should NOT appear in the default project
-			expect(names).not.toContain(SKILL_NAME);
-		} finally {
-			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
-		}
+		// The cross-project skill should NOT appear in the default project
+		expect(names).not.toContain(SKILL_NAME);
 	});
 });
