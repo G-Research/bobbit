@@ -35,7 +35,9 @@ function toPosixPath(file) {
  */
 export function normalizeServerSourcePath(file) {
 	const withoutQuery = file.replace(/[?#].*$/, "");
-	const normalized = toPosixPath(withoutQuery);
+	const normalized = toPosixPath(withoutQuery)
+		.replace(/^\/@fs\/(?=[A-Za-z]:\/)/, "")
+		.replace(/^\/(?=[A-Za-z]:\/)/, "");
 	return /^[A-Za-z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
 }
 
@@ -54,6 +56,26 @@ function walkFiles(root, filter = /\.(?:ts|js|json)$/) {
 
 function serverSourceFiles(repoRoot) {
 	return walkFiles(join(repoRoot, "src", "server"), /\.(?:ts|js)$/);
+}
+
+/**
+ * Shared tier-1 support modules are imported by hundreds of test files. Making
+ * them split entries avoids asking every Vitest project to transform the same
+ * helper graph while keeping test files themselves under Vitest (for mock
+ * hoisting, collection, and coverage).
+ */
+function testSupportSourceFiles(repoRoot) {
+	const roots = [
+		join(repoRoot, "tests2", "harness"),
+		join(repoRoot, "tests2", "core", "helpers"),
+		join(repoRoot, "tests2", "integration", "_e2e"),
+	];
+	return roots.flatMap((root) => existsSync(root) ? walkFiles(root, /\.ts$/) : [])
+		.filter((file) => !/\.(?:test|spec)\.ts$/.test(file));
+}
+
+function prebundleSourceEntries(repoRoot) {
+	return [...serverSourceFiles(repoRoot), ...testSupportSourceFiles(repoRoot)];
 }
 
 const BUNDLED_SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
@@ -115,7 +137,7 @@ export function computeServerPrebundleKey(repoRoot = REPO_ROOT) {
 	const hash = createHash("sha256");
 	const runtimeEntry = join(repoRoot, "tests2", "harness", "server-runtime-entry.ts");
 	const files = [
-		...bundledRepoSourceFiles(repoRoot, [runtimeEntry, ...serverSourceFiles(repoRoot)]),
+		...bundledRepoSourceFiles(repoRoot, [runtimeEntry, ...prebundleSourceEntries(repoRoot)]),
 		join(repoRoot, "tsconfig.server.json"),
 		join(repoRoot, "package-lock.json"),
 		fileURLToPath(import.meta.url),
@@ -182,11 +204,19 @@ export function validateServerPrebundle(dir, key) {
 	}
 }
 
-function sourceUrlPlugin() {
+function sourceUrlPlugin(repoRoot) {
+	const sourceRoots = [
+		normalizeServerSourcePath(join(repoRoot, "src", "server")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests2", "harness")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests2", "core", "helpers")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests2", "integration", "_e2e")) + "/",
+	];
 	return {
 		name: "bobbit-source-import-meta-url",
 		setup(buildApi) {
-			buildApi.onLoad({ filter: /[\\/]src[\\/]server[\\/].*\.(?:ts|js)$/ }, async (args) => {
+			buildApi.onLoad({ filter: /\.(?:ts|js)$/ }, async (args) => {
+				const normalized = normalizeServerSourcePath(args.path);
+				if (!sourceRoots.some((root) => normalized.startsWith(root))) return undefined;
 				const source = readFileSync(args.path, "utf8");
 				const transformed = await transform(source, {
 					loader: args.path.endsWith(".ts") ? "ts" : "js",
@@ -318,7 +348,7 @@ export async function ensureServerTestPrebundle({ repoRoot = REPO_ROOT, cacheRoo
 		mkdirSync(tempDir, { recursive: true });
 		try {
 			const runtimeEntry = join(repoRoot, "tests2", "harness", "server-runtime-entry.ts");
-			const sourceEntries = serverSourceFiles(repoRoot);
+			const sourceEntries = prebundleSourceEntries(repoRoot);
 			const entryPoints = Object.fromEntries(
 				[runtimeEntry, ...sourceEntries].map((source) => [entryName(source, repoRoot), source]),
 			);
@@ -339,7 +369,7 @@ export async function ensureServerTestPrebundle({ repoRoot = REPO_ROOT, cacheRoo
 				sourcesContent: true,
 				metafile: true,
 				logLevel: "silent",
-				plugins: [sourceUrlPlugin()],
+				plugins: [sourceUrlPlugin(repoRoot)],
 			});
 			const manifest = buildManifest({ key, repoRoot, tempDir, metafile: buildResult.metafile, runtimeEntry });
 			const serverKey = "src/server/server.ts";
@@ -370,21 +400,29 @@ export async function ensureServerTestPrebundle({ repoRoot = REPO_ROOT, cacheRoo
 function resolveSourceCandidate(source, importer, repoRoot) {
 	const request = source.replace(/[?#].*$/, "");
 	if (request.startsWith("file:")) return fileURLToPath(request);
-	if (/^[A-Za-z]:[\\/]/.test(request)) return request;
+	const normalizedRequest = normalizeServerSourcePath(request);
+	if (/^[A-Za-z]:\//.test(normalizedRequest)) return normalizedRequest;
 	if (isAbsolute(request)) return request;
 	if (!request.startsWith(".")) return undefined;
-	const importerPath = importer?.startsWith("file:") ? fileURLToPath(importer) : importer?.replace(/[?#].*$/, "");
+	const rawImporter = importer?.startsWith("file:") ? fileURLToPath(importer) : importer?.replace(/[?#].*$/, "");
+	const importerPath = rawImporter ? normalizeServerSourcePath(rawImporter) : undefined;
 	return resolve(importerPath ? dirname(importerPath) : repoRoot, request);
 }
 
 function manifestKeyForSource(sourcePath, repoRoot, entries) {
-	const windowsPath = /^[A-Za-z]:[\\/]/.test(sourcePath) || /^[A-Za-z]:[\\/]/.test(repoRoot);
+	const normalizedSourcePath = normalizeServerSourcePath(sourcePath);
+	const normalizedRepoRoot = normalizeServerSourcePath(repoRoot);
+	const windowsPath = /^[A-Za-z]:\//.test(normalizedSourcePath) || /^[A-Za-z]:\//.test(normalizedRepoRoot);
 	let relativeSource;
-	if (windowsPath) relativeSource = win32.relative(repoRoot, sourcePath);
-	else relativeSource = relative(repoRoot, sourcePath);
+	if (windowsPath) relativeSource = win32.relative(normalizedRepoRoot, normalizedSourcePath);
+	else relativeSource = relative(normalizedRepoRoot, normalizedSourcePath);
 	let key = normalizeServerSourcePath(relativeSource);
 	if (windowsPath) key = key.toLowerCase();
-	if (!key.startsWith("src/server/")) return undefined;
+	const supported = key.startsWith("src/server/")
+		|| key.startsWith("tests2/harness/")
+		|| key.startsWith("tests2/core/helpers/")
+		|| key.startsWith("tests2/integration/_e2e/");
+	if (!supported) return undefined;
 	if (entries[key]) return key;
 	if (extname(key) === ".js") {
 		const tsKey = `${key.slice(0, -3)}.ts`;
