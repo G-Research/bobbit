@@ -703,6 +703,42 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/integration/helpers/maintenance-api-archived-cleanup.test.ts",
+      "reason": "Split integration coverage for archived maintenance cleanup behavior using the shared non-spawning maintenance model.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/helpers/maintenance-api-archived-guards.test.ts",
+      "reason": "Split integration coverage for archived maintenance validation and non-destruction guards.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/helpers/maintenance-api-archived-scan.test.ts",
+      "reason": "Split integration coverage for archived maintenance scan and inventory behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/helpers/maintenance-api-archived-selectors.test.ts",
+      "reason": "Split integration coverage for archived maintenance selector and item targeting behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
