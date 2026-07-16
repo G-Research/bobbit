@@ -1,6 +1,6 @@
 // Select the fork-local fake runner before either harness import can boot the
 // process-global gateway; file collection order must not select the real runner.
-import { resetFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+import { resetAndInstallFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
 
 import { expect } from "./_e2e/in-process-harness.js";
 import { test } from "./_e2e/in-process-harness.js";
@@ -48,8 +48,8 @@ async function waitForActive(goalId: string): Promise<void> {
 }
 
 test.describe("authoritative gate status summary", () => {
-	test.beforeEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
-	test.afterEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+	test.beforeEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
+	test.afterEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
 
 	test("summary reports active verification from VerificationHarness state", async () => {
 		const projectId = await defaultProjectId();

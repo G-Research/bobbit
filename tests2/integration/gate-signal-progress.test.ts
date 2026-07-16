@@ -31,10 +31,11 @@
 // Every spec that can boot this fork's process-global gateway opts into the
 // command-step fake before importing the shared harness. This keeps runner
 // selection independent of Vitest's file import order.
-import { resetFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+import { resetAndInstallFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
+import type { ManualClock } from "../harness/clock.js";
 
 // A deterministic "slow" command that keeps the gate's phase-0 step
 // running for ~3s — long enough to catch the in-flight active state
@@ -128,28 +129,30 @@ async function createFailingTestWorkflow(workflowId: string): Promise<void> {
 }
 
 async function waitForSignalVerificationStatus(
+	clock: ManualClock,
 	goalId: string,
 	gateId: string,
 	signalId: string,
 	targetStatus: string,
 ): Promise<any> {
-	// Fake command completions are queued on the event loop. Yield bounded turns
-	// instead of sleeping/polling on wall time; each turn also prevents scripted
-	// events from leaking into the next test in this shared gateway fork.
+	// The shared fake runner is clock-driven. Advance due completions before each
+	// bounded scheduler yield so this result never depends on the previous file's
+	// runner implementation.
 	for (let turn = 0; turn < 100; turn++) {
+		clock.advance(0);
+		await new Promise<void>((resolve) => setImmediate(resolve));
 		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
 		expect(res.status).toBe(200);
 		const body = await res.json();
 		const signal = body.signals?.find((s: any) => s.id === signalId);
 		if (signal?.verification?.status === targetStatus) return signal;
-		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 	throw new Error(`signal ${signalId} did not reach verification=${targetStatus} within 100 event-loop turns`);
 }
 
 test.describe("Gate-signal step enumeration race (verification-progress race)", () => {
-	test.beforeEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
-	test.afterEach(async ({ gateway }) => resetFakeCommandStepTestState(gateway.clock));
+	test.beforeEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
+	test.afterEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
 
 	test("persisted gate-store steps[] matches POST response within the same scheduler tick — GATE_SIGNAL_PROGRESS_RACE", async () => {
 		const workflowId = makeWorkflowId();
@@ -313,7 +316,7 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 		}
 	});
 
-	test("terminal downstream phase skips persist explicit skipped status and phase — GATE_SIGNAL_PHASE_STATUS", async () => {
+	test("terminal downstream phase skips persist explicit skipped status and phase — GATE_SIGNAL_PHASE_STATUS", async ({ gateway }) => {
 		const workflowId = makeWorkflowId();
 		await createFailingTestWorkflow(workflowId);
 		const goal = await createGoal({
@@ -331,7 +334,7 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 			const postBody = await postResp.json();
 			const signalId: string = postBody.signal.id;
 
-			const signal = await waitForSignalVerificationStatus(goalId, "failing-multi", signalId, "failed");
+			const signal = await waitForSignalVerificationStatus(gateway.clock, goalId, "failing-multi", signalId, "failed");
 			const steps = signal.verification.steps ?? [];
 
 			expect(
