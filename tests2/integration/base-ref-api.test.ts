@@ -9,13 +9,13 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, readE2EToken, base, registerProject as registerProjectShared } from "./_e2e/e2e-setup.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 let token: string;
-let templateRepo = "";
+let restoreCommandRunner: (() => void) | undefined;
 let nameCounter = 0;
 let gitProjectId = "";
 let multiProjectId = "";
@@ -23,29 +23,44 @@ let warningProjectId = "";
 let warningRoot = "";
 const cleanupRoots: string[] = [];
 const cleanupProjectIds: string[] = [];
+const originDevelopRepos = new Set<string>();
 
 const headers = () => ({
 	Authorization: `Bearer ${token}`,
 	"Content-Type": "application/json",
 });
 
-function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf-8", windowsHide: true }).trim();
+function createFakeRepo(dir: string): void {
+	fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+	fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/master\n");
+	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
 }
 
-function createTemplateRepo(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-template-"));
-	git(dir, "init", "--quiet");
-	git(dir, "config", "user.email", "test@bobbit.local");
-	git(dir, "config", "user.name", "test");
-	git(dir, "config", "commit.gpgsign", "false");
-	git(dir, "checkout", "--quiet", "-B", "master");
-	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	git(dir, "add", ".");
-	git(dir, "commit", "--quiet", "-m", "init");
-	git(dir, "branch", "develop");
-	git(dir, "tag", "v1.2.3");
-	return dir;
+function cannedGit(cwd: string, args: readonly string[]): string {
+	const key = args.join(" ");
+	if (key === "rev-parse --show-toplevel") return cwd;
+	if (key === "rev-parse --is-inside-work-tree") return "true";
+	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master" || key === "rev-parse --verify develop") return "a".repeat(40);
+	if (key === "rev-parse --verify refs/tags/v1.2.3") return "b".repeat(40);
+	if (key === "rev-parse --verify origin/develop" && originDevelopRepos.has(path.resolve(cwd))) return "a".repeat(40);
+	if (args[0] === "remote" && args[1] === "get-url") throw new Error("no remote");
+	throw new Error(`missing canned git result (${cwd}): ${key}`);
+}
+
+async function installCannedGitRunner(): Promise<void> {
+	const runtime = await loadServerTestRuntime();
+	const runner = runtime.gatewayDeps.realCommandRunner;
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	runner.execFile = async (file, args, options) => {
+		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return { stdout: cannedGit(String(options?.cwd ?? ""), args), stderr: "" };
+	};
+	runner.execFileSync = (file, args, options) => {
+		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return cannedGit(String(options?.cwd ?? ""), args);
+	};
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
 }
 
 function cleanupDir(dir: string): void {
@@ -53,26 +68,19 @@ function cleanupDir(dir: string): void {
 }
 
 function copyTemplateRepo(root: string): void {
-	fs.cpSync(templateRepo, root, { recursive: true });
+	createFakeRepo(root);
 }
 
 function fixtureRepo(prefix: string, opts?: { originDevelop?: boolean }): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-baseref-${prefix}-`));
-	fs.rmSync(root, { recursive: true, force: true });
 	copyTemplateRepo(root);
 	cleanupRoots.push(root);
 	if (opts?.originDevelop) fakeOriginRef(root, "develop");
 	return root;
 }
 
-/** Create a "fake" `origin/<branch>` remote tracking ref by writing a loose ref.
- *  Cheaper than scaffolding a real remote — `git rev-parse --verify origin/<branch>`
- *  resolves to whatever commit we point it at. */
-function fakeOriginRef(repo: string, branch: string, sha?: string): void {
-	const headSha = sha ?? git(repo, "rev-parse", "HEAD");
-	const refPath = path.join(repo, ".git", "refs", "remotes", "origin", branch);
-	fs.mkdirSync(path.dirname(refPath), { recursive: true });
-	fs.writeFileSync(refPath, headSha + "\n");
+function fakeOriginRef(repo: string, branch: string): void {
+	if (branch === "develop") originDevelopRepos.add(path.resolve(repo));
 }
 
 async function registerProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<string> {
@@ -106,7 +114,7 @@ function expectBaseRefUnset(config: any): void {
 
 test.beforeAll(async () => {
 	token = readE2EToken();
-	templateRepo = createTemplateRepo();
+	await installCannedGitRunner();
 
 	const gitRoot = fixtureRepo("shared-git", { originDevelop: true });
 	gitProjectId = await registerProject("baseref-git", gitRoot);
@@ -149,7 +157,7 @@ test.afterAll(async () => {
 		await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
 	}
 	for (const root of cleanupRoots) cleanupDir(root);
-	if (templateRepo) cleanupDir(templateRepo);
+	restoreCommandRunner?.();
 });
 
 // These tests register projects and mutate project config through one in-process

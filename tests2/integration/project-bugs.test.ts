@@ -12,9 +12,25 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
+
+let restoreCommandRunner: (() => void) | undefined;
+
+test.beforeAll(({ gateway }) => {
+	const runner = gateway.sessionManager.commandRunner as CommandRunner;
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	const reject = (file: string): never => {
+		throw new Error(`non-git project fixture does not execute ${basename(file)}`);
+	};
+	runner.execFile = async file => reject(file);
+	runner.execFileSync = file => reject(file);
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
+});
+
+test.afterAll(() => restoreCommandRunner?.());
 
 test.describe("Bug 1: Fresh folder has zero projects (no implicit default)", () => {
 	test("gateway starts with an empty project list", async () => {
@@ -133,19 +149,15 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 	let projectId: string;
 
 	test.beforeAll(async () => {
-		// Create a real git repo with a subdirectory structure:
-		//   <repoDir>/
-		//     packages/my-app/    <-- project rootPath
-		//       package.json
+		// The sole assertion in this block remains skipped until the production
+		// subdirectory-worktree contract is implemented. Keep only the directory
+		// shape needed to register its project; constructing a Git repository here
+		// would add subprocess cost without executing or covering Git behavior.
 		repoDir = join(tmpdir(), `bobbit-e2e-subrepo-${Date.now()}`);
 		subdirPath = join(repoDir, "packages", "my-app");
 		mkdirSync(subdirPath, { recursive: true });
 		writeFileSync(join(subdirPath, "package.json"), JSON.stringify({ name: "my-app" }));
 		writeFileSync(join(repoDir, "README.md"), "# Monorepo\n");
-
-		execFileSync("git", ["init"], { cwd: repoDir, stdio: "pipe" });
-		execFileSync("git", ["add", "."], { cwd: repoDir, stdio: "pipe" });
-		execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir, stdio: "pipe" });
 
 		// Register a project at the subdirectory (not the repo root)
 		const resp = await apiFetch("/api/projects", {

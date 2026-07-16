@@ -1,9 +1,10 @@
 /**
- * API E2E — representative commit-file metadata and commit-scoped diff routes.
+ * Representative commit-file metadata and commit-scoped diff routes.
  *
- * The suite uses one copied git template so route coverage does not pay repeated
- * git init/config/initial-commit setup. Session coverage exercises the full
- * validation matrix; goal coverage is a smoke path for the separate goal route.
+ * Git command results are injected through the gateway CommandRunner so parser,
+ * route, validation, session, and goal behavior stay covered without spawning
+ * Git. Session coverage exercises the full validation matrix; goal coverage is
+ * a smoke path for the separate goal route.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
@@ -11,48 +12,77 @@ import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
 
-let templateRepo = "";
 const cleanupRoots: string[] = [];
-
-function git(cwd: string, args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).trim();
-}
-
-function commitTargetChanges(root: string, trackedContent = "base\ncommit scoped marker\n"): string {
-	fs.writeFileSync(path.join(root, "tracked.txt"), trackedContent);
-	fs.writeFileSync(path.join(root, "added.txt"), "added marker\n");
-	fs.rmSync(path.join(root, "delete-me.txt"));
-	git(root, ["mv", "rename-old.txt", "rename-new.txt"]);
-	git(root, ["add", "."]);
-	git(root, ["commit", "--quiet", "-m", "target commit"]);
-	return git(root, ["rev-parse", "HEAD"]);
-}
-
-function createTemplateRepo(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-commit-diff-template-"));
-	git(root, ["init", "--quiet"]);
-	git(root, ["checkout", "--quiet", "-B", "master"]);
-	git(root, ["config", "user.email", "test@bobbit.local"]);
-	git(root, ["config", "user.name", "Commit Diff Test"]);
-	git(root, ["config", "core.autocrlf", "false"]);
-	git(root, ["config", "commit.gpgsign", "false"]);
-
-	fs.writeFileSync(path.join(root, "tracked.txt"), "base\n");
-	fs.writeFileSync(path.join(root, "delete-me.txt"), "delete me\n");
-	fs.writeFileSync(path.join(root, "rename-old.txt"), "rename me\n");
-	git(root, ["add", "."]);
-	git(root, ["commit", "--quiet", "-m", "initial"]);
-	return root;
-}
+const targetCommits = new Map<string, { sha: string; marker: string }>();
+let restoreCommandRunner: (() => void) | undefined;
 
 function fixtureRepo(prefix: string): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-commit-diff-${prefix}-`));
-	fs.rmSync(root, { recursive: true, force: true });
-	fs.cpSync(templateRepo, root, { recursive: true });
+	fs.writeFileSync(path.join(root, "tracked.txt"), "base\n");
 	cleanupRoots.push(root);
 	return root;
+}
+
+function commitTargetChanges(root: string, trackedContent = "base\ncommit scoped marker\n"): string {
+	const marker = trackedContent.includes("goal commit") ? "goal commit scoped marker" : "commit scoped marker";
+	const sha = marker.startsWith("goal") ? "2222222222222222222222222222222222222222" : "1111111111111111111111111111111111111111";
+	targetCommits.set(path.resolve(root), { sha, marker });
+	return sha;
+}
+
+function cannedGit(cwd: string, args: readonly string[]): string {
+	const target = targetCommits.get(path.resolve(cwd));
+	const key = args.join(" ");
+	if (key === "rev-parse --show-toplevel") return cwd;
+	if (key === "rev-parse --abbrev-ref HEAD") return "master";
+	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master") return target?.sha ?? "0".repeat(40);
+	if (key.startsWith("rev-parse --abbrev-ref ") || key.startsWith("symbolic-ref ")) throw new Error("no upstream");
+	if (args[0] === "cat-file" && args[1] === "-e") {
+		if (target && args[2] === `${target.sha}^{commit}`) return "";
+		throw new Error("unknown commit");
+	}
+	if (args[0] === "log") {
+		if (!target) return "";
+		return [
+			`\x1e${target.sha}\x1f${target.sha.slice(0, 7)}\x1ftarget commit\x1fCommit Diff Test\x1f2026-01-01T00:00:00.000Z`,
+			":100644 100644 0000000 0000000 M\ttracked.txt",
+			":000000 100644 0000000 0000000 A\tadded.txt",
+			":100644 000000 0000000 0000000 D\tdelete-me.txt",
+			":100644 100644 0000000 0000000 R100\trename-old.txt\trename-new.txt",
+			"1\t1\ttracked.txt",
+		].join("\n");
+	}
+	if (args[0] === "show" && args.includes("--name-status")) {
+		if (!target || !args.includes(target.sha)) throw new Error("unknown commit");
+		return "M\ttracked.txt\nA\tadded.txt\nD\tdelete-me.txt\nR100\trename-old.txt\trename-new.txt";
+	}
+	if (args[0] === "show" && target && args.includes(target.sha)) {
+		const file = args.at(-1);
+		if (file === "rename-new.txt") return "diff --git a/rename-old.txt b/rename-new.txt\nsimilarity index 100%\nrename from rename-old.txt\nrename to rename-new.txt";
+		return `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n+${target.marker}`;
+	}
+	if (args[0] === "diff" && args.includes("tracked.txt")) {
+		return "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n+worktree marker";
+	}
+	if (args[0] === "worktree" || args[0] === "branch") return "";
+	throw new Error(`unexpected canned git command: ${key}`);
+}
+
+function installCannedGitRunner(gateway: any): void {
+	const runner = gateway.sessionManager.commandRunner as CommandRunner;
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	runner.execFile = async (file, args, options) => {
+		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return { stdout: cannedGit(String(options?.cwd ?? ""), args), stderr: "" };
+	};
+	runner.execFileSync = (file, args, options) => {
+		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return cannedGit(String(options?.cwd ?? ""), args);
+	};
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
 }
 
 function byPath(files: any[], p: string): any {
@@ -110,16 +140,16 @@ async function expectSessionCommitDiffValidation(endpoint: string, targetSha: st
 	expect((await invalidCommitResp.json()).error).toBe("Invalid commit");
 }
 
-test.beforeAll(() => {
-	templateRepo = createTemplateRepo();
+test.beforeAll(({ gateway }) => {
+	installCannedGitRunner(gateway);
 });
 
 test.afterAll(() => {
+	restoreCommandRunner?.();
 	for (const root of cleanupRoots) cleanupDir(root);
-	if (templateRepo) cleanupDir(templateRepo);
 });
 
-// Shared gateway state and copied git fixtures are intentionally kept serial.
+// Shared gateway state and the injected command runner are intentionally serial.
 test.describe.configure({ mode: "serial" });
 
 test.describe("commit file diff API", () => {
@@ -152,9 +182,9 @@ test.describe("commit file diff API", () => {
 		let goalId: string | undefined;
 		try {
 			// Commit-route coverage does not depend on asynchronous worktree
-			// provisioning. Create a no-worktree goal, then attach the already-real
-			// Git fixture through the harness store seam. This preserves the goal
-			// route's real Git behavior without an unrelated readiness timeout whose
+			// provisioning. Create a no-worktree goal, then attach the canned Git
+			// fixture through the harness store seam. This preserves the goal route's
+			// parser/response behavior without an unrelated readiness timeout whose
 			// cleanup could delete the repo while provisioning was still running.
 			const goal = await createGoal({
 				title: "Commit file diff API goal",
