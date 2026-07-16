@@ -11,12 +11,12 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 let sharedProjectId = "";
 let sharedProjectDir = "";
+let postProjectDir = "";
 let sharedProjectBaseline = "";
 
 function sharedProjectFixture(): { id: string; cleanup: () => void } {
@@ -27,8 +27,12 @@ function sharedProjectYamlPath(): string {
 	return join(sharedProjectDir, ".bobbit", "config", "project.yaml");
 }
 
-test.beforeAll(async () => {
-	sharedProjectDir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-shared-"));
+test.beforeAll(async ({ gateway }) => {
+	const fixtureRoot = join(gateway.bobbitDir, "component-config-fixtures");
+	sharedProjectDir = join(fixtureRoot, "shared");
+	postProjectDir = join(fixtureRoot, "post");
+	mkdirSync(sharedProjectDir, { recursive: true });
+	mkdirSync(postProjectDir, { recursive: true });
 	const project = await registerProject({
 		name: `comp-cfg-shared-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		rootPath: sharedProjectDir,
@@ -41,7 +45,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
 	await apiFetch(`/api/projects/${sharedProjectId}`, { method: "DELETE" }).catch(() => {});
-	try { rmSync(sharedProjectDir, { recursive: true, force: true }); } catch { /* ignore */ }
+	try { rmSync(join(sharedProjectDir, ".."), { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 const LEGACY_QA_KEYS = [
@@ -183,7 +187,7 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("POST /api/projects with components[].config round-trips through GET /structured", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-"));
+		const dir = postProjectDir;
 		let projectId: string | undefined;
 		try {
 			const components = [
@@ -216,7 +220,6 @@ test.describe("Component config map (REST API)", () => {
 			expect(web.config, "components[].config must round-trip through POST /api/projects").toEqual(components[0].config);
 		} finally {
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 		}
 	});
 
@@ -309,43 +312,33 @@ test.describe("Component config map (REST API)", () => {
 	});
 
 	test("POST /api/projects rejects components[].config with non-string values", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-bad-"));
-		try {
-			const res = await apiFetch("/api/projects", {
-				method: "POST",
-				body: JSON.stringify({
-					name: `comp-cfg-post-bad-${Date.now()}`,
-					rootPath: dir,
-					components: [{ name: "web", repo: ".", config: { qa_max_scenarios: 5 } }],
-				}),
-			});
-			expect(res.status).toBe(400);
-			const body = await res.json();
-			expect(body.error).toMatch(/must be string/);
-		} finally {
-			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-		}
+		const res = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({
+				name: `comp-cfg-post-bad-${Date.now()}`,
+				rootPath: postProjectDir,
+				components: [{ name: "web", repo: ".", config: { qa_max_scenarios: 5 } }],
+			}),
+		});
+		expect(res.status).toBe(400);
+		const body = await res.json();
+		expect(body.error).toMatch(/must be string/);
 	});
 
 	test("POST /api/projects rejects components[].config with > 100 entries", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-toomany-"));
-		try {
-			const cfg: Record<string, string> = {};
-			for (let i = 0; i <= 100; i++) cfg[`k${i}`] = String(i);
-			const res = await apiFetch("/api/projects", {
-				method: "POST",
-				body: JSON.stringify({
-					name: `comp-cfg-post-toomany-${Date.now()}`,
-					rootPath: dir,
-					components: [{ name: "web", repo: ".", config: cfg }],
-				}),
-			});
-			expect(res.status).toBe(400);
-			const body = await res.json();
-			expect(body.error).toMatch(/too many entries/);
-		} finally {
-			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-		}
+		const cfg: Record<string, string> = {};
+		for (let i = 0; i <= 100; i++) cfg[`k${i}`] = String(i);
+		const res = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({
+				name: `comp-cfg-post-toomany-${Date.now()}`,
+				rootPath: postProjectDir,
+				components: [{ name: "web", repo: ".", config: cfg }],
+			}),
+		});
+		expect(res.status).toBe(400);
+		const body = await res.json();
+		expect(body.error).toMatch(/too many entries/);
 	});
 
 	test("GET /api/projects/:id/config strips legacy top-level qa_* keys", async () => {
