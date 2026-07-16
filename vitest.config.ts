@@ -1,7 +1,7 @@
-import type { PluginOption } from "vite";
 import { defineConfig } from "vitest/config";
 import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
+import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
 
 /** Fixed suite-wide cap. The environment may lower it, never raise it. */
 export const FIXED_UNIT_WORKERS = 3;
@@ -43,9 +43,7 @@ const coverage = {
 
 const prebundle = await serverPrebundle.ensureServerTestPrebundle();
 process.env.BOBBIT_V2_SERVER_PREBUNDLE = prebundle.bundlePath;
-const resolverFactory = (serverPrebundle as typeof serverPrebundle & {
-	serverPrebundleResolver?: () => PluginOption;
-}).serverPrebundleResolver;
+const prebundleResolver = serverPrebundle.serverPrebundleResolver(prebundle);
 
 console.log(
 	`[vitest.config] maxWorkers=${MAX_WORKERS} (fixed cap ${FIXED_UNIT_WORKERS}${
@@ -54,64 +52,64 @@ console.log(
 );
 
 export default defineConfig({
-	...(resolverFactory ? { plugins: [resolverFactory()] } : {}),
+	plugins: [prebundleResolver],
 	test: {
-			...shared,
-			reporters: ["default", "./tests2/harness/unit-file-budget-reporter.ts"],
-			coverage,
-			projects: [
-				...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
-					test: {
-						...shared,
-						name: "v2-e2e-vitest",
-						environment: "node",
-						isolate: true,
-						maxWorkers: 1,
-						include: execution.e2e,
-					},
-				}] : []),
-				{
-					test: {
-						...shared,
-						name: "v2-core",
-						environment: "node",
-						setupFiles: tier1SetupFiles,
-						include: execution.core,
-					},
+		...shared,
+		reporters: ["default", new UnitFileBudgetReporter()],
+		coverage,
+		projects: [
+			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
+				test: {
+					...shared,
+					name: "v2-e2e-vitest",
+					environment: "node",
+					isolate: true,
+					maxWorkers: 1,
+					include: execution.e2e,
 				},
-				{
-					test: {
-						...shared,
-						name: "v2-dom",
-						environment: "happy-dom",
-						pool: "threads" as const,
-						isolate: true,
-						setupFiles: tier1SetupFiles,
-						include: execution.dom,
-					},
+			}] : []),
+			{
+				test: {
+					...shared,
+					name: "v2-core",
+					environment: "node",
+					setupFiles: tier1SetupFiles,
+					include: execution.core,
 				},
-				{
-					test: {
-						...shared,
-						name: "v2-integration",
-						environment: "node",
-						setupFiles: tier1SetupFiles,
-						include: execution.integration,
-						testTimeout: 60_000,
-						hookTimeout: 90_000,
-					},
+			},
+			{
+				test: {
+					...shared,
+					name: "v2-dom",
+					environment: "happy-dom",
+					pool: "threads" as const,
+					isolate: true,
+					setupFiles: tier1SetupFiles,
+					include: execution.dom,
 				},
-				{
-					test: {
-						...shared,
-						name: "v2-isolated",
-						environment: "node",
-						isolate: true,
-						maxWorkers: 1,
-						setupFiles: tier1SetupFiles,
-						include: execution.isolated,
-					},
+			},
+			{
+				test: {
+					...shared,
+					name: "v2-integration",
+					environment: "node",
+					setupFiles: tier1SetupFiles,
+					include: execution.integration,
+					testTimeout: 60_000,
+					hookTimeout: 90_000,
 				},
+			},
+			{
+				test: {
+					...shared,
+					name: "v2-isolated",
+					environment: "node",
+					isolate: true,
+					maxWorkers: 1,
+					setupFiles: tier1SetupFiles,
+					include: execution.isolated,
+				},
+			},
 		],
 	},
 });
