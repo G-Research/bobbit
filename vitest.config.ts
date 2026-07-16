@@ -1,10 +1,6 @@
 import { defineConfig } from "vitest/config";
 import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
-import {
-	ensureServerTestPrebundle,
-	serverPrebundleExternalPattern,
-	serverPrebundleResolver,
-} from "./scripts/testing-v2/server-prebundle.mjs";
+import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
 import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
 
 /** Fixed suite-wide cap. The environment may lower it, never raise it. */
@@ -45,10 +41,9 @@ const coverage = {
 	],
 };
 
-const prebundle = await ensureServerTestPrebundle();
+const prebundle = await serverPrebundle.ensureServerTestPrebundle();
 process.env.BOBBIT_V2_SERVER_PREBUNDLE = prebundle.bundlePath;
-const prebundleResolver = serverPrebundleResolver(prebundle);
-const prebundleExternal = serverPrebundleExternalPattern(prebundle);
+const prebundleResolver = serverPrebundle.serverPrebundleResolver(prebundle);
 
 console.log(
 	`[vitest.config] maxWorkers=${MAX_WORKERS} (fixed cap ${FIXED_UNIT_WORKERS}${
@@ -62,11 +57,6 @@ export default defineConfig({
 		...shared,
 		reporters: ["default", new UnitFileBudgetReporter()],
 		coverage,
-		server: {
-			deps: {
-				external: [prebundleExternal],
-			},
-		},
 		projects: [
 			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
 				test: {
