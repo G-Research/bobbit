@@ -156,13 +156,13 @@ function runVitestCoverage() {
 		? join(REPO_ROOT, "node_modules", ".bin", "vitest.cmd")
 		: join(REPO_ROOT, "node_modules", ".bin", "vitest");
 	console.log("\n[coverage-delta] Running vitest with V8 coverage (HEAVY ~90s+)…");
-	// Scope: v2-core + v2-core-isolated + v2-dom. The v2-integration project boots
+	// Scope: v2-core + v2-isolated + v2-dom. The v2-integration project boots
 	// a real gateway per fork and is unstable under V8 coverage instrumentation
 	// (ERR_IPC_CHANNEL_CLOSED); its src/server coverage is measured separately by
 	// parity.mjs. This scope covers all src/app + src/ui (browser) code plus the
 	// server-logic units — the browser-consolidation question — and matches the
 	// committed per-file baseline. Override with BOBBIT_COVERAGE_PROJECTS if needed.
-	const projects = (process.env.BOBBIT_COVERAGE_PROJECTS || "v2-core,v2-core-isolated,v2-dom")
+	const projects = (process.env.BOBBIT_COVERAGE_PROJECTS || "v2-core,v2-isolated,v2-dom")
 		.split(",").map((p) => p.trim()).filter(Boolean);
 	const projectArgs = projects.flatMap((p) => ["--project", p]);
 	const result = spawnSync(

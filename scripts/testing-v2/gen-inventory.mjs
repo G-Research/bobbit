@@ -17,15 +17,16 @@
  * same JSON out (stable sort by file).
  *
  * Buckets:  v2-core | v2-dom | v2-integration | v2-browser | daily
- * Methods:  codemod | adapter | rewrite | retire-with-mapping | relocate
+ * Methods:  codemod | adapter | rewrite | retire-with-mapping | relocate | vitest-e2e
  */
-import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
 	census,
 	readRepoFile,
 	REPO_ROOT,
 } from "./lib-census.mjs";
+import { executionForMaterializedPath } from "./test-map-execution.mjs";
 
 // ---------------------------------------------------------------------------
 // Smoke-journey catalogue. Every retired e2e/ui browser spec is consolidated
@@ -280,13 +281,29 @@ export const DAILY_OVERRIDES = new Map([
 	["tests/e2e/mcp-tool-permission.spec.ts", "Spawns a real MCP subprocess to exercise tool permissions."],
 ]);
 
+// Exactly two Vitest suites retain real process/filesystem fidelity in e2e:v2.
+// Their materialized v2 paths are pinned again by test-map-execution.mjs.
+const VITEST_E2E_OVERRIDES = new Map([
+	["tests/marketplace-install.test.ts", "Real marketplace git/MCP installation fidelity runs in the E2E Vitest project; seam-based decisions remain in tier 1."],
+	["tests/team-manager.test.ts", "Real TeamManager git/worktree/process fidelity runs in the E2E Vitest project; seam-based decisions remain in tier 1."],
+]);
+
 // Contract tests that boot a real gateway -> integration; others -> core.
 const CONTRACT_INTEGRATION = new Set([
 	"tests/contract/gate-verification.test.ts", // createTestGateway() boots a gateway
 ]);
 
 function classify(file) {
-	// 1. Explicit audit overrides win first.
+	// 1. The two approved Vitest E2E owners win over ordinary core classification.
+	if (VITEST_E2E_OVERRIDES.has(file)) {
+		return {
+			bucket: "daily",
+			method: "vitest-e2e",
+			replacement: [],
+			rationale: VITEST_E2E_OVERRIDES.get(file),
+		};
+	}
+	// 2. Explicit audit overrides win next.
 	if (CLASSIFICATION_OVERRIDES.has(file)) {
 		return CLASSIFICATION_OVERRIDES.get(file);
 	}
@@ -380,23 +397,46 @@ function classify(file) {
 }
 
 function main() {
-	const files = census();
-	const entries = files.map((file) => ({ file, ...classify(file) }));
+	const outDir = join(REPO_ROOT, "tests2");
+	const mapPath = join(outDir, "tests-map.json");
+	const existing = existsSync(mapPath) ? JSON.parse(readFileSync(mapPath, "utf8")) : {};
+	const existingByFile = new Map((existing.entries ?? []).map((entry) => [entry.file, entry]));
+	const liveCensus = new Set(census());
+	// The reconciled map is also the historical migration ledger: legacy sources
+	// are deleted after porting, so regeneration must retain their ownership rows.
+	const addedFiles = [...liveCensus].filter((file) => !existingByFile.has(file)).sort();
+	const files = [...existingByFile.keys(), ...addedFiles];
+	const entries = files.map((file) => {
+		const reconciled = existingByFile.get(file);
+		const mustRefresh = !reconciled
+			|| VITEST_E2E_OVERRIDES.has(file)
+			|| file === "tests/pi-extension-discovery.test.ts";
+		const classification = mustRefresh ? classify(file) : {};
+		const entry = reconciled
+			? { ...reconciled, ...classification }
+			: { file, ...classification };
+		if (entry.v2Path) entry.execution = executionForMaterializedPath(entry.v2Path);
+		return entry;
+	});
+	const v2Native = (existing.v2Native ?? []).map((entry) => ({
+		...entry,
+		execution: executionForMaterializedPath(entry.path),
+	}));
 
 	const out = {
-		$schema: "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, journeys, entries[] }",
-		generatedBy: "scripts/testing-v2/gen-inventory.mjs",
-		note: "DO NOT hand-edit blindly — re-run `node scripts/testing-v2/gen-inventory.mjs`. Curated overrides live in the generator (CLASSIFICATION_OVERRIDES / DAILY_OVERRIDES / CONTRACT_INTEGRATION / JOURNEY_RULES).",
+		$schema: "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
+		generatedBy: "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
+		note: "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
 		censusTotal: entries.length,
 		buckets: countBy(entries, "bucket"),
 		methods: countBy(entries, "method"),
-		journeys: JOURNEYS,
+		v2Native,
+		journeys: existing.journeys ?? JOURNEYS,
 		entries,
 	};
 
-	const outDir = join(REPO_ROOT, "tests2");
 	mkdirSync(outDir, { recursive: true });
-	writeFileSync(join(outDir, "tests-map.json"), JSON.stringify(out, null, "\t") + "\n", "utf8");
+	writeFileSync(mapPath, JSON.stringify(out, null, 2) + "\n", "utf8");
 
 	console.log(`Wrote tests2/tests-map.json — ${entries.length} entries`);
 	for (const [k, v] of Object.entries(out.buckets)) console.log(`  ${k}: ${v}`);
