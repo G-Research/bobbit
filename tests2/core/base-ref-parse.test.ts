@@ -11,12 +11,9 @@
  *
  * Run via `node --test --test-force-exit` (npm run test:unit).
  */
-import { describe, it, afterAll } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import {
 	parseBaseRef,
 	parseLsRemoteSymref,
@@ -25,25 +22,19 @@ import {
 	resolveBaseRefWithExec,
 } from "../../src/server/skills/git.ts";
 
-function rmDir(p: string): void {
-	try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
+function fakeGitRunner(run: (args: readonly string[]) => string): CommandRunner {
+	return {
+		execFile: async (file, args) => {
+			assert.equal(file, "git");
+			return { stdout: run(args), stderr: "" };
+		},
+	};
 }
 
-function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf-8", windowsHide: true }).trim();
-}
-
-function makeTempRepo(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-base-ref-"));
-	git(root, "init", "-q");
-	git(root, "config", "user.email", "test@example.com");
-	git(root, "config", "user.name", "Test");
-	git(root, "config", "commit.gpgsign", "false");
-	git(root, "checkout", "-q", "-b", "master");
-	fs.writeFileSync(path.join(root, "README.md"), "init\n");
-	git(root, "add", "README.md");
-	git(root, "commit", "-q", "-m", "init");
-	return root;
+function unexpectedGitRunner(): CommandRunner {
+	return fakeGitRunner((args) => {
+		throw new Error(`unexpected git call: ${args.join(" ")}`);
+	});
 }
 
 describe("parseBaseRef", () => {
@@ -137,58 +128,52 @@ describe("parseLsRemoteSymref", () => {
 });
 
 describe("refExistsInRepo", () => {
-	const cleanup: string[] = [];
-	afterAll(() => { for (const d of cleanup) rmDir(d); });
-
 	it("returns true for an existing local branch ref", async () => {
-		const repo = makeTempRepo();
-		cleanup.push(repo);
-		assert.equal(await refExistsInRepo(repo, "master"), true);
+		const calls: string[][] = [];
+		const runner = fakeGitRunner((args) => {
+			calls.push([...args]);
+			return "a".repeat(40);
+		});
+		assert.equal(await refExistsInRepo("/repo", "master", runner), true);
+		assert.deepEqual(calls, [["rev-parse", "--verify", "master"]]);
 	});
 
 	it("returns false for a missing ref", async () => {
-		const repo = makeTempRepo();
-		cleanup.push(repo);
-		assert.equal(await refExistsInRepo(repo, "origin/develop"), false);
+		const runner = fakeGitRunner(() => { throw new Error("unknown revision"); });
+		assert.equal(await refExistsInRepo("/repo", "origin/develop", runner), false);
 	});
 
 	it("returns false (never throws) for a non-existent repo path", async () => {
-		assert.equal(await refExistsInRepo("/nonexistent/path", "master"), false);
+		const runner = fakeGitRunner(() => { throw new Error("not a git repository"); });
+		assert.equal(await refExistsInRepo("/nonexistent/path", "master", runner), false);
 	});
 });
 
 describe("resolveBaseRef (host)", () => {
-	const cleanup: string[] = [];
-	afterAll(() => { for (const d of cleanup) rmDir(d); });
-
 	it("configured non-empty short-circuits parseBaseRef (no exec)", async () => {
-		// We pass a non-existent repo path. If the host resolver tried to
-		// consult git on disk, `git symbolic-ref` would fail; since the
-		// configured value is non-empty, the fallback is never invoked.
-		const result = await resolveBaseRef("/nonexistent/path", "origin/develop");
+		const result = await resolveBaseRef("/nonexistent/path", "origin/develop", unexpectedGitRunner());
 		assert.deepEqual(result, { ref: "origin/develop", branch: "develop", isRemote: true });
 	});
 
 	it("configured = '' in a temp repo with no remote → falls back to HEAD sentinel", async () => {
-		const repo = makeTempRepo();
-		cleanup.push(repo);
-		const result = await resolveBaseRef(repo, "");
-		// No `origin` remote → `symbolic-ref refs/remotes/origin/HEAD` fails →
-		// `resolveRemotePrimary` returns the literal "HEAD" sentinel.
-		assert.equal(result.ref, "HEAD");
-		assert.equal(result.branch, "HEAD");
-		assert.equal(result.isRemote, false);
+		const calls: string[][] = [];
+		const runner = fakeGitRunner((args) => {
+			calls.push([...args]);
+			throw new Error("no origin/HEAD");
+		});
+		const result = await resolveBaseRef("/repo", "", runner);
+		assert.deepEqual(calls, [["symbolic-ref", "refs/remotes/origin/HEAD"]]);
+		assert.deepEqual(result, { ref: "HEAD", branch: "HEAD", isRemote: false });
 	});
 
 	it("configured = undefined behaves identically to ''", async () => {
-		const repo = makeTempRepo();
-		cleanup.push(repo);
-		const result = await resolveBaseRef(repo, undefined);
+		const runner = fakeGitRunner(() => { throw new Error("no origin/HEAD"); });
+		const result = await resolveBaseRef("/repo", undefined, runner);
 		assert.equal(result.ref, "HEAD");
 	});
 
 	it("local configured value returns the local branch without consulting git", async () => {
-		const result = await resolveBaseRef("/nonexistent/path", "master");
+		const result = await resolveBaseRef("/nonexistent/path", "master", unexpectedGitRunner());
 		assert.deepEqual(result, { ref: "master", branch: "master", isRemote: false });
 	});
 });
