@@ -1,6 +1,6 @@
-// Bundled as one content-addressed integration-test runtime. Namespace exports
-// preserve module identity for stateful server singletons shared by the gateway
-// fixture and identity-sensitive integration tests.
+// Umbrella entry in the content-addressed, split server prebundle. Direct
+// src/server entries and this namespace facade share emitted chunks, preserving
+// stateful module identity across gateway fixtures and direct tier-1 imports.
 export * as server from "../../src/server/server.js";
 export * as gatewayDeps from "../../src/server/gateway-deps.js";
 export * as aigwManager from "../../src/server/agent/aigw-manager.js";
