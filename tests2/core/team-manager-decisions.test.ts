@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it, vi } from "vitest";
 import { TeamManager, type TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
+import { createManualClock } from "../harness/clock.ts";
 
 interface MockGoal {
 	id: string;
@@ -95,13 +95,41 @@ function makeSessionManager(goals: Map<string, MockGoal>) {
 	};
 }
 
-function makeConfig(): TeamManagerConfig {
+function makeConfig(goals: Map<string, MockGoal>): TeamManagerConfig {
 	const roles = new Map<string, any>([
 		["team-lead", { name: "team-lead", label: "Team Lead", promptTemplate: "Lead {{GOAL_BRANCH}} as {{AGENT_ID}}", toolPolicies: {}, accessory: "crown" }],
 		["coder", { name: "coder", label: "Coder", promptTemplate: "Code {{GOAL_BRANCH}} as {{AGENT_ID}}", toolPolicies: { read: "allow", edit: "allow" }, accessory: "headphones" }],
 		["reviewer", { name: "reviewer", label: "Reviewer", promptTemplate: "Review {{GOAL_BRANCH}} as {{AGENT_ID}}", toolPolicies: { read: "allow" }, accessory: "monocle" }],
 	]);
+	const persistedTeams = new Map<string, any>();
+	const context = {
+		goalStore: {
+			get: (id: string) => goals.get(id),
+			getAll: () => [...goals.values()],
+		},
+		goalManager: {
+			updateGoal: async (id: string, patch: Partial<MockGoal>) => {
+				const goal = goals.get(id);
+				if (!goal) return false;
+				Object.assign(goal, patch);
+				return true;
+			},
+			listLiveGoals: () => [...goals.values()],
+		},
+		teamStore: {
+			getAll: () => [...persistedTeams.values()],
+			put: (entry: any) => persistedTeams.set(entry.goalId, structuredClone(entry)),
+			remove: (id: string) => persistedTeams.delete(id),
+		},
+		sessionStore: { getAll: () => [], update: vi.fn() },
+		taskStore: {},
+		gateStore: {},
+	};
 	return {
+		projectContextManager: {
+			all: () => [context],
+			getContextForGoal: (id: string) => goals.has(id) ? context : undefined,
+		} as any,
 		roleStore: {
 			get: (name: string) => roles.get(name),
 			getAll: () => [...roles.values()],
@@ -123,13 +151,12 @@ function makeConfig(): TeamManagerConfig {
 	};
 }
 
-const managers: Array<{ manager: TeamManager; stateDir: string }> = [];
+const managers: TeamManager[] = [];
 
 function makeTeam(goals: Map<string, MockGoal>) {
-	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-team-decisions-"));
 	const sessions = makeSessionManager(goals);
-	const manager = new TeamManager(sessions as any, makeConfig(), stateDir);
-	managers.push({ manager, stateDir });
+	const manager = new TeamManager(sessions as any, makeConfig(goals), undefined, createManualClock());
+	managers.push(manager);
 	return { manager, sessions };
 }
 
@@ -139,12 +166,7 @@ function addGoal(overrides: Partial<MockGoal> = {}) {
 }
 
 afterEach(() => {
-	for (const { manager, stateDir } of managers.splice(0)) {
-		manager.stopStuckSweep();
-		for (const timer of (manager as any).idleNudgeTimers.values()) clearTimeout(timer);
-		for (const timer of (manager as any).noWorkersNudgeTimers.values()) clearTimeout(timer);
-		fs.rmSync(stateDir, { recursive: true, force: true });
-	}
+	for (const manager of managers.splice(0)) manager.dispose();
 });
 
 describe("TeamManager seam decisions", () => {
