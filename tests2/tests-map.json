@@ -676,6 +676,33 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/marketplace-install-decisions.test.ts",
+      "reason": "Tier-1 seam-based marketplace routing, validation, source-store, gitRunner, and MCP gateway decision coverage retained alongside the real-fidelity E2E owner.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/team-manager-decisions.test.ts",
+      "reason": "Tier-1 seam-based TeamManager spawn validation, role/authz, unpublished-branch, dismiss, completion, and persistence decision coverage retained alongside the real-fidelity E2E owner.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/unit-file-budget-reporter.test.ts",
+      "reason": "Pins the 15-second tier-1 file budget reporter boundary, aggregation, retry accounting, E2E exclusion, and Windows path rendering.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
