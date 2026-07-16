@@ -1,138 +1,168 @@
-// Pins the Vitest 4 unit-lane scheduler: three concurrent suites on a 24-core
-// box each reserve eight workers, start core/integration/DOM immediately, and
-// distribute the whole grant as 3+4+1 without bypassing the shared ledger.
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+// Pins the replacement for the deleted lane scheduler: the unit stage is one
+// direct Vitest process with a fixed, environment-lowerable worker cap.
 import assert from "node:assert/strict";
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { readFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, it, vi } from "vitest";
 
-const origEnv = {
-	TEMP: process.env.TEMP,
-	TMP: process.env.TMP,
-	TMPDIR: process.env.TMPDIR,
-	BOBBIT_V2_TOTAL_CORES: process.env.BOBBIT_V2_TOTAL_CORES,
-	BOBBIT_V2_LEDGER_PARENT: process.env.BOBBIT_V2_LEDGER_PARENT,
-	BOBBIT_V2_SLOTS_VITEST: process.env.BOBBIT_V2_SLOTS_VITEST,
+type ProjectConfig = {
+	test: {
+		name: string;
+		environment: string;
+		pool: string;
+		isolate: boolean;
+		maxWorkers: number;
+		retry: number;
+		include: string[];
+		setupFiles?: string[];
+	};
 };
-let isolatedTmp: string;
 
-async function loadLedger() {
-	return (await import("../../scripts/testing-v2/ledger.mjs")) as any;
+type LoadedConfig = {
+	FIXED_UNIT_WORKERS: number;
+	resolveMaxWorkers: (env?: NodeJS.ProcessEnv) => number;
+	default: { test: { projects: ProjectConfig[] } };
+};
+
+const packageJson = JSON.parse(
+	readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+) as { scripts: Record<string, string> };
+const configSource = readFileSync(new URL("../../vitest.config.ts", import.meta.url), "utf8");
+const originalE2eFlag = process.env.BOBBIT_V2_E2E_VITEST;
+const originalWorkerFlag = process.env.VITEST_MAX_WORKERS;
+let normal: LoadedConfig;
+let withNonExactE2eFlag: LoadedConfig;
+let withE2e: LoadedConfig;
+
+function restoreEnvironment(): void {
+	if (originalE2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
+	else process.env.BOBBIT_V2_E2E_VITEST = originalE2eFlag;
+	if (originalWorkerFlag === undefined) delete process.env.VITEST_MAX_WORKERS;
+	else process.env.VITEST_MAX_WORKERS = originalWorkerFlag;
 }
-async function loadLanes() {
-	return (await import("../../scripts/testing-v2/run-unit-lanes.mjs")) as any;
+
+async function loadConfig(e2eFlag?: string): Promise<LoadedConfig> {
+	if (e2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
+	else process.env.BOBBIT_V2_E2E_VITEST = e2eFlag;
+	delete process.env.VITEST_MAX_WORKERS;
+	vi.resetModules();
+	return await import("../../vitest.config.ts") as LoadedConfig;
 }
 
-const jobs = [
-	{ name: "core", weight: 2 },
-	{ name: "core-fidelity", weight: 1 },
-	{ name: "integration-1", weight: 1 },
-	{ name: "integration-2", weight: 1 },
-	{ name: "integration-3", weight: 1 },
-	{ name: "dom", weight: 2 },
-];
+beforeAll(async () => {
+	try {
+		normal = await loadConfig();
+		withNonExactE2eFlag = await loadConfig("true");
+		withE2e = await loadConfig("1");
+	} finally {
+		restoreEnvironment();
+		vi.resetModules();
+	}
+});
 
-describe("unit-lanes orchestrator scheduling", () => {
-	beforeAll(() => {
-		isolatedTmp = mkdtempSync(join(tmpdir(), "unit-lanes-sched-"));
-		process.env.TEMP = isolatedTmp;
-		process.env.TMP = isolatedTmp;
-		process.env.TMPDIR = isolatedTmp;
-		process.env.BOBBIT_V2_TOTAL_CORES = "24";
-		delete process.env.BOBBIT_V2_LEDGER_PARENT;
-		delete process.env.BOBBIT_V2_SLOTS_VITEST;
-	});
-	afterAll(() => {
-		for (const [k, v] of Object.entries(origEnv)) {
-			if (v === undefined) delete (process.env as any)[k];
-			else (process.env as any)[k] = v;
-		}
-		try { rmSync(isolatedTmp, { recursive: true, force: true }); } catch { /* best-effort */ }
-	});
+afterAll(restoreEnvironment);
 
-	it("allocates eight workers across core, fidelity, three integration shards, and DOM", async () => {
-		const { planLaneWorkers } = await loadLanes();
-		const plan = planLaneWorkers({ grant: 8, jobs });
-		assert.deepEqual(plan.workers, { core: 2, "core-fidelity": 1, "integration-1": 1, "integration-2": 1, "integration-3": 1, dom: 2 });
-		assert.equal(plan.maxConcurrent, 6, "all six unit jobs must start immediately");
-		assert.equal(plan.used, 8, "the full reservation must do useful work");
-	});
+function projects(config: LoadedConfig): ProjectConfig["test"][] {
+	return config.default.test.projects.map((project) => project.test);
+}
 
-	it("keeps concurrent orchestrator logs in independent run directories", async () => {
-		const { resolveUnitLaneLogDir } = await loadLanes();
-		const repoRoot = join(isolatedTmp, "repo");
-		const first = resolveUnitLaneLogDir({ repoRoot, runToken: "101-1000" });
-		const second = resolveUnitLaneLogDir({ repoRoot, runToken: "202-1000" });
-		assert.notEqual(first, second);
-		assert.equal(first, join(repoRoot, ".profiles", "unit-lanes", "run-101-1000"));
+describe("direct unit-stage scheduling", () => {
+	it("runs test:unit as one direct Vitest command with no lane or ledger import", () => {
 		assert.equal(
-			resolveUnitLaneLogDir({ repoRoot, override: "custom-logs", runToken: "ignored" }),
-			join(repoRoot, "custom-logs"),
+			packageJson.scripts["test:unit"],
+			"vitest run --config vitest.config.ts --silent=passed-only",
+		);
+		assert.doesNotMatch(packageJson.scripts["test:unit"], /run-unit-lanes|ledger/i);
+
+		const configImports = [...configSource.matchAll(/from\s+["']([^"']+)["']/g)]
+			.map((match) => match[1]);
+		assert.ok(configImports.length > 0, "the config import boundary must be inspectable");
+		assert.deepEqual(
+			configImports.filter((specifier) => /run-unit-lanes|ledger/i.test(specifier)),
+			[],
+			"the direct unit config must not import deleted lane or ledger orchestration",
 		);
 	});
 
-	it("never oversubscribes a grant and queues only when fewer workers than jobs exist", async () => {
-		const { planLaneWorkers } = await loadLanes();
-		for (const grant of [1, 2, 3, 4, 6, 8, 12]) {
-			const plan = planLaneWorkers({ grant, jobs });
-			const allocated = Object.values(plan.workers).reduce((sum: number, n: any) => sum + Number(n), 0);
-			if (grant >= jobs.length) {
-				assert.equal(allocated, grant, `grant=${grant} must be fully allocated`);
-				assert.equal(plan.maxConcurrent, jobs.length, `grant=${grant} must not queue a lane`);
-			} else {
-				assert.equal(plan.maxConcurrent, grant, `grant=${grant} can run only ${grant} one-worker lane(s)`);
-			}
+	it("fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only", () => {
+		assert.equal(normal.FIXED_UNIT_WORKERS, 3);
+		const resolve = normal.resolveMaxWorkers;
+		assert.equal(resolve({}), 3);
+		assert.equal(resolve({ VITEST_MAX_WORKERS: "1" }), 1);
+		assert.equal(resolve({ VITEST_MAX_WORKERS: "2.9" }), 2);
+		assert.equal(resolve({ VITEST_MAX_WORKERS: "3.9" }), 3);
+		assert.equal(resolve({ VITEST_MAX_WORKERS: "4" }), 3);
+		assert.equal(resolve({ VITEST_MAX_WORKERS: "999" }), 3);
+		for (const invalid of ["", "0", "0.9", "-1", "NaN", "Infinity", "workers"]) {
+			assert.equal(
+				resolve({ VITEST_MAX_WORKERS: invalid }),
+				3,
+				`invalid worker request ${JSON.stringify(invalid)} must retain the fixed cap`,
+			);
 		}
 	});
 
-	it("grants three staggered standalone unit suites eight workers each with no queue", async () => {
-		const ledger = await loadLedger();
-		const reservations: any[] = [];
-		try {
-			for (let i = 0; i < 3; i++) {
-				reservations.push(ledger.reserveVitestLaneBudget({ coalesceMs: 0, totalCores: 24 }));
-			}
-			assert.deepEqual(reservations.map((r) => r.workerSlots), [8, 8, 8]);
-			const snap = ledger.readLedger({ totalCores: 24 });
-			assert.equal(snap.reservations.length, 3);
-			assert.equal(snap.reservations.reduce((sum: number, r: any) => sum + r.workerSlots, 0), 24);
-
-			const { planLaneWorkers } = await loadLanes();
-			for (const reservation of reservations) {
-				assert.equal(planLaneWorkers({ grant: reservation.workerSlots, jobs }).maxConcurrent, 6);
-			}
-		} finally {
-			for (const reservation of reservations.reverse()) reservation.release();
-		}
+	it("keeps retry three across exactly four normal projects", () => {
+		const actual = projects(normal);
+		assert.deepEqual(
+			actual.map(({ name }) => name),
+			["v2-core", "v2-dom", "v2-integration", "v2-isolated"],
+		);
+		assert.deepEqual(
+			actual.map(({ name, environment, pool, isolate, maxWorkers, retry }) => ({
+				name,
+				environment,
+				pool,
+				isolate,
+				maxWorkers,
+				retry,
+			})),
+			[
+				{ name: "v2-core", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 3 },
+				{ name: "v2-dom", environment: "happy-dom", pool: "threads", isolate: true, maxWorkers: 3, retry: 3 },
+				{ name: "v2-integration", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 3 },
+				{ name: "v2-isolated", environment: "node", pool: "forks", isolate: true, maxWorkers: 1, retry: 3 },
+			],
+		);
 	});
 
-	it("gives direct Vitest the same ledger-governed cap as the lane orchestrator", async () => {
-		const ledger = await loadLedger();
-		const direct = ledger.reserveWorkerSlots("vitest", { coalesceMs: 0, totalCores: 24 });
-		try {
-			assert.equal(direct.workerSlots, 8);
-			const snap = ledger.readLedger({ totalCores: 24 });
-			assert.equal(snap.reservations.length, 1);
-			assert.equal(snap.reservations[0].workerSlots, 8);
-		} finally {
-			direct.release();
-		}
-	});
+	it("adds only the exact isolated E2E project when explicitly enabled", () => {
+		const normalNames = ["v2-core", "v2-dom", "v2-integration", "v2-isolated"];
+		assert.deepEqual(
+			projects(withNonExactE2eFlag).map(({ name }) => name),
+			normalNames,
+			"only the exact flag value 1 may enable the E2E project",
+		);
 
-	it("reuses a parent grant without registering a second ledger entry", async () => {
-		const ledger = await loadLedger();
-		process.env.BOBBIT_V2_LEDGER_PARENT = "parent-test";
-		process.env.BOBBIT_V2_SLOTS_VITEST = "8";
-		try {
-			const child = ledger.reserveVitestLaneBudget({ coalesceMs: 0, totalCores: 24 });
-			assert.equal(child.managedByParent, true);
-			assert.equal(child.workerSlots, 8);
-			assert.equal(ledger.readLedger({ totalCores: 24 }).reservations.length, 0);
-			child.release();
-		} finally {
-			delete process.env.BOBBIT_V2_LEDGER_PARENT;
-			delete process.env.BOBBIT_V2_SLOTS_VITEST;
-		}
+		const actual = projects(withE2e);
+		assert.deepEqual(
+			actual.map(({ name }) => name),
+			["v2-e2e-vitest", ...normalNames],
+		);
+		const e2e = actual[0];
+		assert.deepEqual(
+			{
+				name: e2e.name,
+				environment: e2e.environment,
+				pool: e2e.pool,
+				isolate: e2e.isolate,
+				maxWorkers: e2e.maxWorkers,
+				retry: e2e.retry,
+				include: e2e.include,
+				setupFiles: e2e.setupFiles,
+			},
+			{
+				name: "v2-e2e-vitest",
+				environment: "node",
+				pool: "forks",
+				isolate: true,
+				maxWorkers: 1,
+				retry: 3,
+				include: [
+					"tests2/core/marketplace-install.test.ts",
+					"tests2/core/team-manager.test.ts",
+				],
+				setupFiles: undefined,
+			},
+		);
 	});
 });
