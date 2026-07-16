@@ -1,49 +1,38 @@
-// This suite exercises retained diagnostics through the non-spawning command-step
-// seam. The setup must run before the gateway fixture module is evaluated.
-import "./_e2e/fake-cmd-setup.js";
-
+// Gate-inspect is an HTTP selection contract, not a command-process fidelity
+// suite. It seeds completed signals and retained diagnostics directly so shared
+// integration forks never wait on an executor selected by another spec.
 import fs from "node:fs";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, defaultProjectStateDir, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import type { GatewayFixture } from "../harness/gateway.js";
+import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
-function fakeNodeCommand(statements: string[]): string {
-	return `node -e "${statements.join(";")}"`;
-}
-
-const VERIFY_LOG_CMD = fakeNodeCommand(Array.from({ length: 160 }, (_, i) => {
+const VERIFY_LOG_OUTPUT = Array.from({ length: 160 }, (_, i) => {
 	const line = i + 1;
-	return `console.log('${line === 125 ? "ERROR failed sentinel line" : "noise line"} ${line}')`;
-}));
+	return `${line === 125 ? "ERROR failed sentinel line" : "noise line"} ${line}`;
+}).join("\n");
 const RETAINED_DIAGNOSTICS_MARKER = "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER stack frame";
-const FAILED_RETAINED_DIAGNOSTICS_CMD = fakeNodeCommand([
-	...Array.from({ length: 80 }, (_, i) => `console.log('prelude line ${i + 1} ${"x".repeat(100)}')`),
-	`console.log('${RETAINED_DIAGNOSTICS_MARKER}')`,
-	...Array.from({ length: 180 }, (_, i) => `console.log('tail line ${i + 81} ${"y".repeat(100)}')`),
-	"process.exit(1)",
-]);
+const FAILED_RETAINED_DIAGNOSTICS_OUTPUT = [
+	...Array.from({ length: 80 }, (_, i) => `prelude line ${i + 1} ${"x".repeat(100)}`),
+	RETAINED_DIAGNOSTICS_MARKER,
+	...Array.from({ length: 180 }, (_, i) => `tail line ${i + 81} ${"y".repeat(100)}`),
+].join("\n");
 const PLAYWRIGHT_ERROR_CONTEXT_MARKER = "PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER";
 const PLAYWRIGHT_STYLE_FAILURE_SUMMARY = "PLAYWRIGHT_STYLE_FAILURE_SUMMARY: expect(locator).toBeVisible failed; see test-results/retain-artifact-fixture/error-context.md";
-const PLAYWRIGHT_STYLE_ARTIFACT_CMD = fakeNodeCommand([
-	`console.error('${PLAYWRIGHT_STYLE_FAILURE_SUMMARY}')`,
-	"process.exit(1)",
-]);
 const RETAINED_LOG_CAP_MARKER = "RETAINED_GATE_DIAGNOSTICS_CAP_MARKER";
+const RETAINED_LOG_CAP_BYTES = 128 * 1024;
 const HUGE_RETAINED_LOG_CHUNKS = 96;
 const HUGE_RETAINED_LOG_CHUNK_BYTES = 2048;
 const HUGE_RETAINED_LOG_EMITTED_BYTES = HUGE_RETAINED_LOG_CHUNKS * ("CAP-FILL ".length + HUGE_RETAINED_LOG_CHUNK_BYTES + 1);
-const HUGE_RETAINED_LOG_CMD = fakeNodeCommand([
-	...Array.from({ length: HUGE_RETAINED_LOG_CHUNKS }, () => `console.log('CAP-FILL ${"x".repeat(HUGE_RETAINED_LOG_CHUNK_BYTES)}')`),
-	`console.error('${RETAINED_LOG_CAP_MARKER}')`,
-	"process.exit(1)",
-]);
+const CAPPED_RETAINED_LOG_OUTPUT = Array.from(
+	{ length: HUGE_RETAINED_LOG_CHUNKS },
+	() => `CAP-FILL ${"x".repeat(HUGE_RETAINED_LOG_CHUNK_BYTES)}`,
+).join("\n").slice(0, RETAINED_LOG_CAP_BYTES);
 
-function seedPlaywrightStyleArtifacts(cwd: string): void {
-	const dir = path.join(cwd, "test-results", "retain-artifact-fixture");
-	fs.mkdirSync(dir, { recursive: true });
-	const body = [
+function playwrightErrorContext(): string {
+	return [
 		"# Instructions",
 		"You are given a Playwright error context.",
 		"",
@@ -52,9 +41,6 @@ function seedPlaywrightStyleArtifacts(cwd: string): void {
 		"locator(\"text=Missing\") failed after retry",
 		...Array.from({ length: 2600 }, (_, i) => `artifact detail line ${i + 1} ${"z".repeat(40)}`),
 	].join("\n");
-	fs.writeFileSync(path.join(dir, "error-context.md"), body);
-	fs.writeFileSync(path.join(dir, "trace.zip"), "trace placeholder");
-	fs.writeFileSync(path.join(dir, "screenshot.png"), "png placeholder");
 }
 
 function makeWorkflowId(): string {
@@ -90,31 +76,31 @@ async function createInspectWorkflow(workflowId: string): Promise<void> {
 				{
 					id: "verify-gate",
 					name: "Verification Gate",
-					verify: [{ name: "Large command output", type: "command", run: VERIFY_LOG_CMD }],
+					verify: [{ name: "Large command output", type: "command", run: "true" }],
 				},
 				{
 					id: "multi-verify-gate",
 					name: "Multi Verification Gate",
 					verify: [
-						{ name: "build", type: "command", run: `node -e "console.log('build ok line')"` },
-						{ name: "unit", type: "command", run: VERIFY_LOG_CMD },
-						{ name: "lint", type: "command", run: `node -e "console.log('lint ok line')"` },
+						{ name: "build", type: "command", run: "true" },
+						{ name: "unit", type: "command", run: "true" },
+						{ name: "lint", type: "command", run: "true" },
 					],
 				},
 				{
 					id: "failed-retained-diagnostics-gate",
 					name: "Failed Retained Diagnostics Gate",
-					verify: [{ name: "failing verbose command", type: "command", run: FAILED_RETAINED_DIAGNOSTICS_CMD }],
+					verify: [{ name: "failing verbose command", type: "command", run: "false" }],
 				},
 				{
 					id: "playwright-artifacts-gate",
 					name: "Playwright Artifacts Gate",
-					verify: [{ name: "playwright-style failure", type: "command", run: PLAYWRIGHT_STYLE_ARTIFACT_CMD }],
+					verify: [{ name: "playwright-style failure", type: "command", run: "false" }],
 				},
 				{
 					id: "huge-retained-log-gate",
 					name: "Huge Retained Log Gate",
-					verify: [{ name: "huge retained log failure", type: "command", run: HUGE_RETAINED_LOG_CMD }],
+					verify: [{ name: "huge retained log failure", type: "command", run: "false" }],
 				},
 				{ id: "signals-gate", name: "Signals Gate", content: true },
 			],
@@ -129,49 +115,220 @@ async function deleteInspectWorkflow(workflowId: string): Promise<void> {
 	await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => undefined);
 }
 
-async function signalGate(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
-		method: "POST",
-		body: JSON.stringify(body),
-	});
-	if (res.status !== 201) {
-		throw new Error(`signal ${gateId} failed: ${res.status} ${await res.text().catch(() => "")}`);
-	}
-	return res.json();
+interface SeededStep {
+	name: string;
+	passed: boolean;
+	stdout?: string;
+	stderr?: string;
+	compactOutput?: string;
+	truncated?: boolean;
+	artifacts?: boolean;
 }
 
-async function waitForSignalVerificationStatus(
+const fakeCmdGlobal = globalThis as { __BOBBIT_V2_FAKE_CMD_STEP__?: boolean };
+let gatewayFixture: GatewayFixture;
+let originalCommandStepRunner: unknown;
+let originalRetainedLogCap: string | undefined;
+let originalFakeCmdFlag: boolean | undefined;
+let hadFakeCmdFlag = false;
+let signalSequence = 0;
+
+test.beforeAll(({ gateway }) => {
+	gatewayFixture = gateway;
+	const verificationHarness = gateway.teamManager.verificationHarness;
+	if (!verificationHarness) throw new Error("verification harness was not wired before gate-inspect setup");
+	originalCommandStepRunner = verificationHarness.commandStepRunner;
+	originalRetainedLogCap = process.env.BOBBIT_RETAINED_LOG_MAX_BYTES;
+	hadFakeCmdFlag = Object.prototype.hasOwnProperty.call(fakeCmdGlobal, "__BOBBIT_V2_FAKE_CMD_STEP__");
+	originalFakeCmdFlag = fakeCmdGlobal.__BOBBIT_V2_FAKE_CMD_STEP__;
+	process.env.BOBBIT_RETAINED_LOG_MAX_BYTES = String(RETAINED_LOG_CAP_BYTES);
+	fakeCmdGlobal.__BOBBIT_V2_FAKE_CMD_STEP__ = true;
+	// The fork may already have booted for a neighbouring integration file. Swap
+	// the live harness seam instead of relying on import evaluation order.
+	verificationHarness.commandStepRunner = createFakeVerificationCommandRunner();
+	gateway.clock.advance(0);
+});
+
+test.afterAll(({ gateway }) => {
+	const verificationHarness = gateway.teamManager.verificationHarness;
+	if (verificationHarness && originalCommandStepRunner !== undefined) {
+		verificationHarness.commandStepRunner = originalCommandStepRunner;
+	}
+	if (originalRetainedLogCap === undefined) delete process.env.BOBBIT_RETAINED_LOG_MAX_BYTES;
+	else process.env.BOBBIT_RETAINED_LOG_MAX_BYTES = originalRetainedLogCap;
+	if (hadFakeCmdFlag) fakeCmdGlobal.__BOBBIT_V2_FAKE_CMD_STEP__ = originalFakeCmdFlag;
+	else delete fakeCmdGlobal.__BOBBIT_V2_FAKE_CMD_STEP__;
+});
+
+function seededStepsForGate(gateId: string): { status: "passed" | "failed"; steps: SeededStep[] } {
+	switch (gateId) {
+		case "verify-gate":
+			return { status: "passed", steps: [{ name: "Large command output", passed: true, stdout: VERIFY_LOG_OUTPUT }] };
+		case "multi-verify-gate":
+			return {
+				status: "passed",
+				steps: [
+					{ name: "build", passed: true, stdout: "build ok line" },
+					{ name: "unit", passed: true, stdout: VERIFY_LOG_OUTPUT },
+					{ name: "lint", passed: true, stdout: "lint ok line" },
+				],
+			};
+		case "failed-retained-diagnostics-gate":
+			return {
+				status: "failed",
+				steps: [{
+					name: "failing verbose command",
+					passed: false,
+					stdout: FAILED_RETAINED_DIAGNOSTICS_OUTPUT,
+					compactOutput: "tail line 260",
+				}],
+			};
+		case "playwright-artifacts-gate":
+			return {
+				status: "failed",
+				steps: [{
+					name: "playwright-style failure",
+					passed: false,
+					stderr: PLAYWRIGHT_STYLE_FAILURE_SUMMARY,
+					compactOutput: PLAYWRIGHT_STYLE_FAILURE_SUMMARY,
+					artifacts: true,
+				}],
+			};
+		case "huge-retained-log-gate":
+			return {
+				status: "failed",
+				steps: [{
+					name: "huge retained log failure",
+					passed: false,
+					stdout: CAPPED_RETAINED_LOG_OUTPUT,
+					stderr: RETAINED_LOG_CAP_MARKER,
+					compactOutput: RETAINED_LOG_CAP_MARKER,
+					truncated: true,
+				}],
+			};
+		default:
+			return { status: "passed", steps: [] };
+	}
+}
+
+function logMetadata(filePath: string, text: string, truncated = false): Record<string, unknown> {
+	const metadata: Record<string, unknown> = {
+		path: filePath,
+		bytes: Buffer.byteLength(text, "utf8"),
+		lines: text.length ? text.split("\n").length : 0,
+	};
+	if (truncated) {
+		metadata.truncated = true;
+		metadata.truncationReason = `retained log capped at ${RETAINED_LOG_CAP_BYTES} bytes`;
+	}
+	return metadata;
+}
+
+async function seedStepDiagnostics(
 	goalId: string,
 	gateId: string,
 	signalId: string,
-	status: "passed" | "failed",
-): Promise<void> {
-	let lastStatuses = "unavailable";
-	try {
-		await pollUntil(async () => {
-			const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
-			const body = await res.json();
-			const signals = Array.isArray(body.signals) ? body.signals : [];
-			lastStatuses = signals
-				.map((s: any) => `${s.id}:${s.verification?.status ?? "missing"}`)
-				.join(", ") || "none";
-			const postedSignal = signals.find((s: any) => s.id === signalId);
-			return postedSignal?.verification?.status === status ? postedSignal : null;
-		}, { timeoutMs: 45_000, intervalMs: 100, label: `${gateId} signal ${signalId} verification ${status}` });
-	} catch (err) {
-		throw new Error(`${(err as Error).message}; last signal statuses: ${lastStatuses}`);
+	stepIndex: number,
+	step: SeededStep,
+): Promise<any> {
+	const stateDir = await defaultProjectStateDir();
+	const baseDir = path.join(stateDir, "gate-diagnostics", goalId, gateId, signalId, `${String(stepIndex).padStart(2, "0")}-${step.name.replace(/[^A-Za-z0-9._-]/g, "_")}`);
+	fs.rmSync(baseDir, { recursive: true, force: true });
+	fs.mkdirSync(baseDir, { recursive: true });
+	const diagnostics: any = {
+		type: "retained-command-diagnostics",
+		baseDir,
+		createdAt: gatewayFixture.clock.now(),
+	};
+	if (step.stdout !== undefined) {
+		const stdoutPath = path.join(baseDir, "stdout.log");
+		fs.writeFileSync(stdoutPath, step.stdout);
+		diagnostics.stdout = logMetadata(stdoutPath, step.stdout, step.truncated);
 	}
+	if (step.stderr !== undefined) {
+		const stderrPath = path.join(baseDir, "stderr.log");
+		fs.writeFileSync(stderrPath, step.stderr);
+		diagnostics.stderr = logMetadata(stderrPath, step.stderr);
+	}
+	if (step.truncated) {
+		diagnostics.truncated = true;
+		diagnostics.truncationReason = `retained log capped at ${RETAINED_LOG_CAP_BYTES} bytes`;
+	}
+	if (step.artifacts) {
+		const relativeRoot = path.join("test-results", "retain-artifact-fixture");
+		const retainedRoot = path.join(baseDir, "artifacts", relativeRoot);
+		fs.mkdirSync(retainedRoot, { recursive: true });
+		const files = [
+			{ name: "error-context.md", body: playwrightErrorContext(), contentType: "text/markdown" },
+			{ name: "trace.zip", body: "trace placeholder", contentType: "application/zip" },
+			{ name: "screenshot.png", body: "png placeholder", contentType: "image/png" },
+		];
+		diagnostics.artifacts = files.map(file => {
+			const retainedPath = path.join(retainedRoot, file.name);
+			fs.writeFileSync(retainedPath, file.body);
+			const relativePath = path.join(relativeRoot, file.name).replace(/\\/g, "/");
+			return {
+				path: retainedPath,
+				relativePath,
+				sourcePath: path.join(nonGitCwd(), relativePath),
+				bytes: Buffer.byteLength(file.body, "utf8"),
+				kind: "test-results",
+				contentType: file.contentType,
+			};
+		});
+	}
+	return diagnostics;
+}
+
+async function seedSignal(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
+	const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
+	if (!context) throw new Error(`missing project context for goal ${goalId}`);
+	const gateStore = context.gateStore;
+	const fixture = seededStepsForGate(gateId);
+	const signalId = `gate-inspect-${process.pid}-${++signalSequence}`;
+	const steps = await Promise.all(fixture.steps.map(async (step, index) => ({
+		name: step.name,
+		type: "command",
+		passed: step.passed,
+		status: step.passed ? "passed" : "failed",
+		output: step.compactOutput ?? step.stdout ?? step.stderr ?? "",
+		duration_ms: 0,
+		diagnostics: await seedStepDiagnostics(goalId, gateId, signalId, index, step),
+	})));
+	const content = typeof body.content === "string" ? body.content : undefined;
+	const signal = {
+		id: signalId,
+		gateId,
+		goalId,
+		sessionId: "gate-inspect-fixture",
+		timestamp: gatewayFixture.clock.now() + signalSequence,
+		commitSha: "fixture",
+		content,
+		contentVersion: content === undefined ? undefined : (gateStore.getGate(goalId, gateId)?.signals.length ?? 0) + 1,
+		verification: { status: fixture.status, steps },
+	};
+	gateStore.recordSignal(signal);
+	if (content !== undefined) gateStore.updateGateContent(goalId, gateId, content, signal.contentVersion);
+	gateStore.updateGateStatus(goalId, gateId, fixture.status);
+	// Flush any same-tick gateway observations deterministically; no polling or
+	// host timer is involved in this fixture.
+	gatewayFixture.clock.advance(0);
+	return { signal: { id: signalId } };
 }
 
 async function signalAndWait(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
-	const signal = await signalGate(goalId, gateId, body);
-	await waitForSignalVerificationStatus(goalId, gateId, signal.signal.id, "passed");
+	const signal = await seedSignal(goalId, gateId, body);
+	const stored = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+		.getGate(goalId, gateId)?.signals.find((entry: any) => entry.id === signal.signal.id);
+	if (stored?.verification?.status !== "passed") throw new Error(`seeded ${gateId} did not pass`);
 	return signal;
 }
 
 async function signalAndWaitFailed(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
-	const signal = await signalGate(goalId, gateId, body);
-	await waitForSignalVerificationStatus(goalId, gateId, signal.signal.id, "failed");
+	const signal = await seedSignal(goalId, gateId, body);
+	const stored = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+		.getGate(goalId, gateId)?.signals.find((entry: any) => entry.id === signal.signal.id);
+	if (stored?.verification?.status !== "failed") throw new Error(`seeded ${gateId} did not fail`);
 	return signal;
 }
 
@@ -234,8 +391,6 @@ function findPersistedGateStoreDir(root: string, goalId: string): string | undef
 }
 
 test.describe("gate inspect slicing", () => {
-	test.setTimeout(60_000);
-
 	test("preserves existing content inspect shape while defaulting to a bounded tail", async () => {
 		await withGoal(async (goalId) => {
 			const post = await signalAndWait(goalId, "content-gate", { content: contentLines(120) });
@@ -404,7 +559,6 @@ test.describe("gate inspect slicing", () => {
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Inspect Playwright Artifacts ${Date.now()}`, workflowId, cwd });
 		try {
-			seedPlaywrightStyleArtifacts(cwd);
 			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
 			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
 
@@ -501,7 +655,6 @@ test.describe("gate inspect slicing", () => {
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Inspect Artifact Selection ${Date.now()}`, workflowId, cwd });
 		try {
-			seedPlaywrightStyleArtifacts(cwd);
 			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
 			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
 
@@ -588,7 +741,6 @@ test.describe("gate inspect slicing", () => {
 		await createInspectWorkflow(workflowId);
 		const goal = await createGoal({ title: `Gate Status Compact Diagnostics ${Date.now()}`, workflowId, cwd });
 		try {
-			seedPlaywrightStyleArtifacts(cwd);
 			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
 			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
 
