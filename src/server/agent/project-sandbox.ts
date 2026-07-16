@@ -60,6 +60,12 @@ export interface StateDirMountExpectation {
 	stateDir: string;
 }
 
+export function getModelsJsonContentStaleness(hostContent: string, containerContent: string): AgentDirMountStalenessResult {
+	return hostContent === containerContent
+		? { stale: false }
+		: { stale: true, reason: "container agent models.json content does not match the atomically published host file" };
+}
+
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
 	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
@@ -332,6 +338,7 @@ export class ProjectSandbox {
 	private _healthInterval: ReturnType<typeof setInterval> | null = null;
 	private _healthListeners: Array<(event: SandboxHealthEvent) => void> = [];
 	private _recovering = false;
+	private _modelRefreshPromise: Promise<void> | null = null;
 	private readonly commandRunner: CommandRunner;
 	private readonly clock: Clock;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -727,6 +734,38 @@ export class ProjectSandbox {
 			if (diagEnabled) {
 				getCpuDiagnostics().recordTimer("project-sandbox:healthCheck", performance.now() - diagStart, counters);
 			}
+		}
+	}
+
+	/**
+	 * Recreate the container after an atomic host models.json publication.
+	 * Docker file bind mounts retain the replaced inode while a container is
+	 * running; recreation remounts the current inode. Named workspace/worktree
+	 * volumes survive, and the normal recovery event respawns live sessions.
+	 */
+	async refreshAgentModelMount(): Promise<void> {
+		if (this._modelRefreshPromise) return this._modelRefreshPromise;
+		if (!this.containerId || this._status !== "ready") return;
+		const refresh = (async () => {
+			const oldContainerId = this.containerId!;
+			this._recovering = true;
+			this._status = "error";
+			this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
+			try {
+				await this._removeContainer(oldContainerId);
+				this.containerId = null;
+				await this.init();
+				this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
+				console.log(`[project-sandbox] Refreshed atomic agent models mount for project ${this.options.projectId}`);
+			} finally {
+				this._recovering = false;
+			}
+		})();
+		this._modelRefreshPromise = refresh;
+		try {
+			await refresh;
+		} finally {
+			if (this._modelRefreshPromise === refresh) this._modelRefreshPromise = null;
 		}
 	}
 
@@ -1142,8 +1181,23 @@ export class ProjectSandbox {
 			const result = getAgentDirMountStaleness(mounts, expected);
 			if (result.stale && result.reason) {
 				console.warn(`[project-sandbox] Container ${containerId.substring(0, 12)} ${result.reason}`);
+				return true;
 			}
-			return result.stale;
+			if (expected.modelsJsonExists) {
+				try {
+					const hostContent = fs.readFileSync(expected.modelsJson, "utf-8");
+					const containerContent = await this._dockerExec(containerId, ["cat", CONTAINER_AGENT_MODELS_JSON], { timeout: 5_000 });
+					const contentResult = getModelsJsonContentStaleness(hostContent, containerContent);
+					if (contentResult.stale) {
+						console.warn(`[project-sandbox] Container ${containerId.substring(0, 12)} ${contentResult.reason}`);
+						return true;
+					}
+				} catch {
+					// A stopped container will remount the current host path when started;
+					// inability to exec is therefore not itself proof of stale content.
+				}
+			}
+			return false;
 		} catch (err: any) {
 			console.warn(`[project-sandbox] Could not inspect agent-dir mounts for container ${containerId.substring(0, 12)}; keeping existing container: ${err?.message || err}`);
 			return false;

@@ -42,6 +42,7 @@ export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = 
 	{ sub: "html-snapshots" },
 	{ sub: "google-code-assist", readOnly: true },
 	{ sub: "tool-result-error-bridge", readOnly: true },
+	{ sub: "aigw-dns-guard", readOnly: true },
 ];
 
 export interface DockerRunConfig {
@@ -237,8 +238,8 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
 	//
-	// Generated extension state dirs (`google-code-assist` and
-	// `tool-result-error-bridge`) hold content-addressed pi-coding-agent
+	// Generated extension state dirs (`google-code-assist`,
+	// `tool-result-error-bridge`, and `aigw-dns-guard`) hold content-addressed pi-coding-agent
 	// extensions loaded via `--extension`. remapArgsForContainer rewrites their
 	// host paths to `/bobbit-state/<subdir>/...`; those container paths only
 	// resolve if the subdirs are bind-mounted here. They contain only generated
@@ -249,8 +250,8 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// mount would let a compromised sandbox tamper with content-addressed source
 	// reused by later sessions. The `:ro` flag closes that hole at the kernel
 	// mount level; the gateway also revalidates cached contents before reuse as
-	// defense-in-depth (see google-code-assist-provider-extension.ts and
-	// tool-result-error-bridge-extension.ts).
+	// defense-in-depth (see google-code-assist-provider-extension.ts,
+	// tool-result-error-bridge-extension.ts, and aigw-manager.ts).
 	if (stateDir) {
 		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 			const hostPath = path.join(stateDir, sub);

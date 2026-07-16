@@ -65,6 +65,16 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 		assert.equal(hostPath, expected);
 	});
 
+	it("translates the AIGW DNS guard extension path", () => {
+		const containerPath = "/bobbit-state/aigw-dns-guard/abc123/guard.ts";
+		const hostPath = containerPathToHost(containerPath);
+		const expected = process.platform === "win32"
+			? "C:\\Users\\test\\project\\.bobbit\\state\\aigw-dns-guard\\abc123\\guard.ts"
+			: "/home/test/project/.bobbit/state/aigw-dns-guard/abc123/guard.ts";
+		assert.equal(hostPath, expected);
+		assert.equal(hostPathToContainer(hostPath), containerPath);
+	});
+
 	it("does NOT translate /bobbit-state root files (not mounted)", () => {
 		// sessions.json is at the state dir root — intentionally not exposed to containers
 		const containerPath = "/bobbit-state/sessions.json";
