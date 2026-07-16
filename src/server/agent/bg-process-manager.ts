@@ -49,6 +49,19 @@ const CONTAINER_BG_ROOT = "/tmp/bobbit-bg";
 
 // ── Injectable OS / docker surface (so unit tests need no real processes) ──
 
+export type BgProcessFileSystem = Pick<
+	typeof fs,
+	| "closeSync"
+	| "mkdirSync"
+	| "openSync"
+	| "readFileSync"
+	| "readSync"
+	| "renameSync"
+	| "statSync"
+	| "unlinkSync"
+	| "writeFileSync"
+>;
+
 export interface BgEnv {
 	/** host pid liveness — `process.kill(pid, 0)`. */
 	isHostPidAlive(pid: number): boolean;
@@ -495,6 +508,7 @@ export class BgProcessManager {
 		tailerFactory: TailerFactory = defaultTailerFactory,
 		env: BgEnv = defaultEnv,
 		private readonly clock: Clock = realClock,
+		private readonly fileSystem: BgProcessFileSystem = fs,
 	) {
 		this.clientsProvider = clientsProvider;
 		this.spawnFn = spawnFn;
@@ -525,7 +539,7 @@ export class BgProcessManager {
 		const id = `bg-${this.nextId++}`;
 		const store = this.store(sessionId);
 		const paths = this.computePaths(sessionId, id, containerId, store);
-		try { fs.mkdirSync(path.dirname(paths.logFile), { recursive: true }); } catch { /* ignore */ }
+		try { this.fileSystem.mkdirSync(path.dirname(paths.logFile), { recursive: true }); } catch { /* ignore */ }
 
 		const child = this.spawnFn(command, cwd, containerId, paths);
 		if (!containerId && typeof child.unref === "function") child.unref();
@@ -714,17 +728,17 @@ export class BgProcessManager {
 	/** Atomic (tmp+rename) full rewrite of the durable combined projection from the capped buffer. */
 	private writeProjection(bg: BgProcess): void {
 		try {
-			fs.mkdirSync(path.dirname(bg.paths.logFile), { recursive: true });
+			this.fileSystem.mkdirSync(path.dirname(bg.paths.logFile), { recursive: true });
 			const body = bg.log.map(e => `${e.ts}\t${e.stream === "stderr" ? "err" : "out"}\t${e.text}`).join("\n");
 			const tmp = `${bg.paths.logFile}.tmp`;
-			fs.writeFileSync(tmp, body, "utf-8");
-			fs.renameSync(tmp, bg.paths.logFile);
+			this.fileSystem.writeFileSync(tmp, body, "utf-8");
+			this.fileSystem.renameSync(tmp, bg.paths.logFile);
 		} catch { /* best-effort */ }
 	}
 
 	private loadProjection(bg: BgProcess): boolean {
 		let raw: string;
-		try { raw = fs.readFileSync(bg.paths.logFile, "utf-8"); } catch { return false; }
+		try { raw = this.fileSystem.readFileSync(bg.paths.logFile, "utf-8"); } catch { return false; }
 		bg.log = []; bg.stdout = []; bg.stderr = []; bg._logBytes = 0;
 		for (const line of raw.split("\n")) {
 			if (!line) continue;
@@ -837,7 +851,7 @@ export class BgProcessManager {
 	private readStatus(bg: BgProcess): string | null {
 		// Host snapshot first (mirrored for docker; written directly for host).
 		try {
-			const s = fs.readFileSync(bg.paths.statusSnapshot, "utf-8");
+			const s = this.fileSystem.readFileSync(bg.paths.statusSnapshot, "utf-8");
 			if (s.trim().length > 0) return s;
 		} catch { /* not present */ }
 		if (bg.paths.inContainer && bg.containerId) {
@@ -853,7 +867,7 @@ export class BgProcessManager {
 			const r = this.env.dockerCli(["exec", bg.containerId, "cat", bg.paths.containerPid!]);
 			if (r.code === 0) content = r.stdout;
 		} else {
-			try { content = fs.readFileSync(bg.paths.pidFile, "utf-8"); } catch { /* none */ }
+			try { content = this.fileSystem.readFileSync(bg.paths.pidFile, "utf-8"); } catch { /* none */ }
 		}
 		if (!content) return null;
 		const parts = content.split("\n").map(s => s.trim()).filter(s => s.length > 0);
@@ -883,7 +897,7 @@ export class BgProcessManager {
 		}
 		const file = stream === "stdout" ? bg.paths.outSpool : bg.paths.errSpool;
 		let size: number;
-		try { size = fs.statSync(file).size; } catch { return null; }
+		try { size = this.fileSystem.statSync(file).size; } catch { return null; }
 		let off = fromOffset;
 		if (size < off) off = 0; // §6.2 rebase
 		if (size <= off) return { text: "", newOffset: size };
@@ -891,13 +905,13 @@ export class BgProcessManager {
 		// bytes beyond the retained window and advance the offset to size.
 		if (size - off > MAX_LOG_BYTES) off = size - MAX_LOG_BYTES;
 		try {
-			const fd = fs.openSync(file, "r");
+			const fd = this.fileSystem.openSync(file, "r");
 			try {
 				const len = size - off;
 				const buf = Buffer.alloc(len);
-				const read = fs.readSync(fd, buf, 0, len, off);
+				const read = this.fileSystem.readSync(fd, buf, 0, len, off);
 				return { text: buf.subarray(0, read).toString("utf-8"), newOffset: off + read };
-			} finally { fs.closeSync(fd); }
+			} finally { this.fileSystem.closeSync(fd); }
 		} catch { return null; }
 	}
 
@@ -911,10 +925,10 @@ export class BgProcessManager {
 
 	private mirrorStatusSnapshot(bg: BgProcess, exitCode: number): void {
 		try {
-			fs.mkdirSync(path.dirname(bg.paths.statusSnapshot), { recursive: true });
+			this.fileSystem.mkdirSync(path.dirname(bg.paths.statusSnapshot), { recursive: true });
 			const tmp = `${bg.paths.statusSnapshot}.tmp`;
-			fs.writeFileSync(tmp, `${exitCode}\n`, "utf-8");
-			fs.renameSync(tmp, bg.paths.statusSnapshot);
+			this.fileSystem.writeFileSync(tmp, `${exitCode}\n`, "utf-8");
+			this.fileSystem.renameSync(tmp, bg.paths.statusSnapshot);
 		} catch { /* best-effort */ }
 	}
 
@@ -926,7 +940,7 @@ export class BgProcessManager {
 			}
 		} else {
 			for (const f of [bg.paths.outSpool, bg.paths.errSpool]) {
-				try { fs.unlinkSync(f); } catch { /* already gone */ }
+				try { this.fileSystem.unlinkSync(f); } catch { /* already gone */ }
 			}
 		}
 	}
@@ -1267,7 +1281,7 @@ export class BgProcessManager {
 	private purgeFiles(bg: BgProcess): void {
 		for (const f of [bg.paths.logFile, bg.paths.statusSnapshot, bg.paths.outSpool, bg.paths.errSpool, bg.paths.pidFile]) {
 			if (!f) continue;
-			try { fs.unlinkSync(f); } catch { /* already gone */ }
+			try { this.fileSystem.unlinkSync(f); } catch { /* already gone */ }
 		}
 		if (bg.paths.inContainer && bg.containerId) {
 			this.env.dockerCli(["exec", bg.containerId, "rm", "-f",
