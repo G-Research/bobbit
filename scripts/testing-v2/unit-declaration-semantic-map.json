@@ -16,10 +16,10 @@
     "current": [
       {
         "file": "tests2/core/unit-lanes-scheduling.test.ts",
-        "name": "never oversubscribes a grant and queues only when fewer workers than jobs exist"
+        "name": "fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only"
       }
     ],
-    "rationale": "The replacement checks every planned job allocation against the grant and therefore retains the per-process/no-oversubscription bound under the six-job scheduler."
+    "rationale": "The lane-specific per-process bound is now owned by the single Vitest process's fixed three-worker cap. The replacement exercises default, fractional, invalid, and above-cap requests to prove no environment value can raise that bound."
   },
   {
     "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
@@ -27,10 +27,14 @@
     "current": [
       {
         "file": "tests2/core/unit-lanes-scheduling.test.ts",
-        "name": "never oversubscribes a grant and queues only when fewer workers than jobs exist"
+        "name": "fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only"
+      },
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "keeps retry three across exactly four normal projects"
       }
     ],
-    "rationale": "The replacement directly sums active job workers and asserts the total never exceeds the ledger grant, preserving the instantaneous-fork invariant for the current heterogeneous lane plan."
+    "rationale": "There is no longer a grant multiplied across concurrent lane processes. The fixed-cap assertion and each normal project's resolved maxWorkers now preserve the original instantaneous-process bound directly in the four-project single-process model."
   },
   {
     "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
@@ -38,10 +42,14 @@
     "current": [
       {
         "file": "tests2/core/unit-lanes-scheduling.test.ts",
-        "name": "never oversubscribes a grant and queues only when fewer workers than jobs exist"
+        "name": "runs test:unit as one direct Vitest command with no lane or ledger import"
+      },
+      {
+        "file": "tests2/core/unit-lanes-scheduling.test.ts",
+        "name": "fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only"
       }
     ],
-    "rationale": "The obsolete fixed three-lane reproduction became the low-grant branch of the generalized scheduler test, which still proves constrained grants queue jobs rather than oversubscribing."
+    "rationale": "The obsolete serial-lane failure mode is structurally removed: test:unit launches one Vitest process rather than feeding a ledger grant into a lane scheduler, while the replacement cap test pins three workers instead of the former two-worker throttle."
   },
   {
     "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
@@ -49,14 +57,14 @@
     "current": [
       {
         "file": "tests2/core/unit-lanes-scheduling.test.ts",
-        "name": "allocates eight workers across core, fidelity, three integration shards, and DOM"
+        "name": "runs test:unit as one direct Vitest command with no lane or ledger import"
       },
       {
         "file": "tests2/core/unit-lanes-scheduling.test.ts",
-        "name": "grants three staggered standalone unit suites eight workers each with no queue"
+        "name": "keeps retry three across exactly four normal projects"
       }
     ],
-    "rationale": "The original three-lane fairness proof is superseded by the exact six-job topology plus the three-suite 24-core no-queue assertion; together they preserve and strengthen immediate concurrent start."
+    "rationale": "The direct Vitest command now schedules the four explicit projects internally, replacing cross-process lane concurrency. These declarations pin both the single-process entrypoint and the complete normal project topology that retains parallel unit execution."
   },
   {
     "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
@@ -64,14 +72,14 @@
     "current": [
       {
         "file": "tests2/core/unit-lanes-scheduling.test.ts",
-        "name": "gives direct Vitest the same ledger-governed cap as the lane orchestrator"
+        "name": "runs test:unit as one direct Vitest command with no lane or ledger import"
       },
       {
         "file": "tests2/core/unit-lanes-scheduling.test.ts",
-        "name": "grants three staggered standalone unit suites eight workers each with no queue"
+        "name": "fixes the unit cap at three and lets VITEST_MAX_WORKERS lower it only"
       }
     ],
-    "rationale": "The replacement asserts both the exact eight-worker fair reservation and parity between direct Vitest and the lane orchestrator, excluding the former single-process throttle."
+    "rationale": "The unit stage no longer reserves any ledger budget. Its replacement semantics are the direct no-ledger command and the deterministic three-worker cap, which jointly replace fair-grant selection without reintroducing the old throttle."
   },
   {
     "baseFile": "tests2/core/unit-lanes-scheduling.test.ts",
@@ -79,10 +87,10 @@
     "current": [
       {
         "file": "tests2/core/unit-lanes-scheduling.test.ts",
-        "name": "reuses a parent grant without registering a second ledger entry"
+        "name": "runs test:unit as one direct Vitest command with no lane or ledger import"
       }
     ],
-    "rationale": "This is a direct semantic rename: the current assertion still proves parent grant reuse and explicitly checks that no duplicate ledger reservation is registered."
+    "rationale": "Parent-grant reuse is intentionally absent from the new unit path because test:unit bypasses lane and ledger orchestration entirely. The replacement pins that architectural boundary through the exact direct command and import audit."
   },
   {
     "baseFile": "tests2/integration/maintenance-api.test.ts",
