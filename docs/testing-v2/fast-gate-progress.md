@@ -99,3 +99,42 @@ Major per-file budget outliers:
 | `cross-project-proposals` | 15.362s |
 
 The failures indicate fake command-runner and gateway-boot import-order problems, compounded by shared-state contamination between suites.
+
+## Solo attempt 3
+
+| Date | Attempt | Process / workers | Wall time | Result | Run log | Final tally |
+|---|---:|---|---:|---|---|---|
+| 2026-07-16 | 3 | One Vitest process / 3 workers | 473.28s | **FAIL** | `.profiles/testing-v2/fast-gate-run3.log` | 4 failed files, 886 passed, 4 skipped; 6 failed tests, 7,579 passed, 26 skipped |
+
+Failed files:
+
+- `cpu-diagnostics`
+- `commit-file-diffs-api`
+- `gate-signal-reminder`
+- `pr-walkthrough-api`
+
+Phase totals:
+
+| Phase | Time |
+|---|---:|
+| Transform | 132.58s |
+| Setup | 94.02s |
+| Import | 199.25s |
+| Tests | 937.65s |
+| Environment | 101.18s |
+| **Summed** | **1,464.68s** |
+
+Transform plus import consumed 331.83s of the 1,464.68s summed phase time (22.66%), above the 15% target.
+
+Per-file budget outliers:
+
+| File | Duration |
+|---|---:|
+| `session-manager-pi-extension-args` | 20.246s |
+| `docker-args` | 18.881s |
+| `proposal-goal-workflow-validation` | 17.921s |
+| `sandbox-codex-auth` | 16.920s |
+| `gate-verification-snapshot` | 16.037s |
+| `sandbox-security` | 15.734s |
+
+This run preceded the newly merged session, Docker, proposal, gate, maintenance, and core fixes. Fixes for the four failed files and residual module-tax work have been launched.
