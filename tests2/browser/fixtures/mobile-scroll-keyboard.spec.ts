@@ -14,6 +14,25 @@ async function waitForStick(page: import("@playwright/test").Page, expected: boo
 	);
 }
 
+/** Append one message and observe its layout growth and completed bottom re-pin. */
+async function appendMessageAtBottom(page: import("@playwright/test").Page, text: string) {
+	const previousHeight = await page.evaluate(
+		() => document.getElementById("scroll-container")!.scrollHeight,
+	);
+	await page.evaluate((message) => (window as any).__addMessage(message), text);
+	await page.waitForFunction(
+		(priorHeight) => {
+			const el = document.getElementById("scroll-container")!;
+			return el.scrollHeight > priorHeight
+				&& el.scrollHeight - el.scrollTop - el.clientHeight < 5;
+		},
+		previousHeight,
+	);
+	// The stable sample also lets the resulting scroll event update the sticky
+	// flag before the next append, avoiding a later growth being misclassified.
+	await waitForStableScroll(page, SCROLLER);
+}
+
 test.describe("Stick-to-bottom scroll behavior", () => {
 	test.use({ viewport: { width: 375, height: 667 } }); // iPhone SE
 
@@ -29,11 +48,7 @@ test.describe("Stick-to-bottom scroll behavior", () => {
 		// outcome of each append: the ResizeObserver re-pin brings us back to
 		// the bottom before the next message lands.
 		for (let i = 0; i < 5; i++) {
-			await page.evaluate((n) => (window as any).__addMessage(`New ${n}`), i);
-			await page.waitForFunction(() => {
-				const el = document.getElementById("scroll-container")!;
-				return el.scrollHeight - el.scrollTop - el.clientHeight < 5;
-			});
+			await appendMessageAtBottom(page, `New ${i}`);
 		}
 
 		const state1 = await page.evaluate(() => (window as any).__getState());
