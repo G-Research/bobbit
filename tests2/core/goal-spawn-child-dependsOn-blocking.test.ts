@@ -121,7 +121,7 @@ async function makeHarness(): Promise<Harness> {
 	};
 	// Patch mergeChild to a clean success (no real git ops).
 	(goalManager as any).mergeChild = async (_parentId: string, _childId: string) => {
-		return { merged: true, alreadyMerged: false, conflict: false, pushed: false, output: "" } as any;
+		return { merged: true, alreadyMerged: false, conflict: false, output: "" } as any;
 	};
 	// archiveGoalAfterMerge stamps state=complete + archived; uses store ops only.
 
