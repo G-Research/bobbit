@@ -123,21 +123,14 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 
 		const branch: string = readyGoal.branch;
 
-		const lsBefore = await pollUntil(async () => {
-			const { stdout } = await execFileAsync(
-				"git", ["ls-remote", "--heads", bareRepo, branch],
-				{ encoding: "utf-8" },
-			);
-			return stdout.includes(branch) ? stdout : null;
-		}, { timeoutMs: 30_000, intervalMs: 500, label: `goal branch ${branch} pushed to origin` });
-		expect(lsBefore, `branch ${branch} should have been pushed`).toContain(branch);
-
-		await runFixtureCommand("git", ["push", "origin", "--delete", branch], { cwd: workRepo });
-		const { stdout: lsAfterPredelete } = await execFileAsync(
+		const { stdout: lsBeforeArchive } = await execFileAsync(
 			"git", ["ls-remote", "--heads", bareRepo, branch],
 			{ encoding: "utf-8" },
 		);
-		expect(lsAfterPredelete, `branch ${branch} should have been pre-deleted from origin`).not.toContain(branch);
+		expect(
+			lsBeforeArchive,
+			`lifecycle-created goal branch ${branch} must remain unpublished before archive`,
+		).not.toContain(branch);
 
 		const originalWarn = console.warn;
 		const warnings: string[] = [];
