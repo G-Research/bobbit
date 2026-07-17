@@ -12,7 +12,9 @@ import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import "../../components/LiveTimer.js";
 import "../../components/VerificationOutputModal.js";
 import { ansiToHtml, hasAnsi } from "../../utils/ansi.js";
+import { GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE } from "../../../app/gate-status-events.js";
 import { getVerificationEventKey } from "../../../app/verification-event-bus.js";
+import "../../components/SignoffReviewLauncher.js";
 import {
 	type DelegateCardEntry,
 	statusColor,
@@ -41,6 +43,9 @@ type InitialVerificationStep = {
 	startedAt?: number;
 	sessionId?: string;
 	timeout?: VerificationTimeoutInfo;
+	awaitingHuman?: boolean;
+	humanLabel?: string;
+	humanPrompt?: string;
 };
 
 interface VerificationStep {
@@ -53,6 +58,9 @@ interface VerificationStep {
 	startedAt: number;
 	sessionId?: string;
 	timeout?: VerificationTimeoutInfo;
+	awaitingHuman?: true;
+	humanLabel?: string;
+	humanPrompt?: string;
 }
 
 function normalizeStepStatus(step: Partial<InitialVerificationStep>, fallback: VerificationStepStatus = "running"): VerificationStepStatus {
@@ -76,6 +84,7 @@ function normalizeStepStatus(step: Partial<InitialVerificationStep>, fallback: V
 function mapVerificationStep(step: InitialVerificationStep, fallback: VerificationStepStatus = "running"): VerificationStep {
 	const status = normalizeStepStatus(step, fallback);
 	const durationMs = step.durationMs ?? step.duration_ms;
+	const isAwaitingHuman = step.type === "human-signoff" && status === "running" && step.awaitingHuman === true;
 	return {
 		name: step.name,
 		type: step.type,
@@ -86,6 +95,26 @@ function mapVerificationStep(step: InitialVerificationStep, fallback: Verificati
 		startedAt: step.startedAt || (durationMs && durationMs > 0 ? Date.now() - durationMs : status === "running" ? Date.now() : 0),
 		sessionId: step.sessionId,
 		timeout: step.timeout,
+		...(isAwaitingHuman ? {
+			awaitingHuman: true as const,
+			humanLabel: step.humanLabel,
+			humanPrompt: step.humanPrompt,
+		} : {}),
+	};
+}
+
+function clearAwaitingHuman(step: VerificationStep): VerificationStep {
+	const { awaitingHuman: _awaitingHuman, humanLabel: _humanLabel, humanPrompt: _humanPrompt, ...cleared } = step;
+	return cleared;
+}
+
+function preserveAwaitingHuman(next: VerificationStep, previous: VerificationStep | undefined): VerificationStep {
+	if (next.type !== "human-signoff" || next.status !== "running" || !previous || previous.name !== next.name || previous.awaitingHuman !== true) return next;
+	return {
+		...next,
+		awaitingHuman: true,
+		humanLabel: previous.humanLabel,
+		humanPrompt: previous.humanPrompt,
 	};
 }
 
@@ -219,6 +248,7 @@ export class GateVerificationLive extends LitElement {
 		this._abortCtrl = new AbortController();
 		const signal = this._abortCtrl.signal;
 		document.addEventListener("gate-verification-event", (e) => this._onEvent(e), { signal });
+		window.addEventListener(GATE_STATUS_CLIENT_EVENT, (e) => this._onClientGateEvent(e), { signal });
 		// Reconcile when the tab regains visibility or connectivity returns — a
 		// verification may have died (or completed) while the tab was hidden or
 		// the WS was dropped, and no completion event will be replayed.
@@ -327,7 +357,7 @@ export class GateVerificationLive extends LitElement {
 							(v: any) => v.signalId === this.signalId
 						);
 						if (active) hasLiveActive = true;
-						if (active?.steps?.length) {
+						if (Array.isArray(active?.steps)) {
 							activeSteps = active.steps.map((s: InitialVerificationStep) => mapVerificationStep(s, "running"));
 							this.currentPhase = active.currentPhase ?? 0;
 						}
@@ -343,7 +373,7 @@ export class GateVerificationLive extends LitElement {
 				// transient network blip, not a dead verification.
 				if (activeFetchOk && !hasLiveActive) {
 					this.steps = (signal.verification.steps || []).map((s: InitialVerificationStep) => {
-						const mapped = mapVerificationStep(s, "failed");
+						const mapped = clearAwaitingHuman(mapVerificationStep(s, "failed"));
 						// Any residual running/waiting step is no longer progressing.
 						if (mapped.status === "running" || mapped.status === "waiting") mapped.status = "blocked";
 						return mapped;
@@ -355,11 +385,17 @@ export class GateVerificationLive extends LitElement {
 				}
 
 				const signalSteps = (signal.verification.steps || []) as InitialVerificationStep[];
-				if (!activeSteps?.length && signalSteps.some(hasExplicitStepStatus)) {
-					activeSteps = signalSteps.map((s) => mapVerificationStep(s, "running"));
+				if (activeSteps === undefined && signalSteps.some(hasExplicitStepStatus)) {
+					activeSteps = signalSteps.map((s, index) => {
+						const mapped = mapVerificationStep(s, "running");
+						// Gate data is a safe status fallback, but only the active endpoint is
+						// authoritative for sign-off markers. Preserve event state when that
+						// endpoint failed instead of hiding a valid launcher on a network blip.
+						return preserveAwaitingHuman(mapped, this.steps[index]);
+					});
 				}
 
-				if (activeSteps?.length) {
+				if (activeSteps !== undefined) {
 					this.steps = activeSteps;
 					this.overallStatus = "running";
 					// Seed _stepOutputs from API so modal has initial content.
@@ -373,6 +409,23 @@ export class GateVerificationLive extends LitElement {
 		} catch {
 			// Silently ignore fetch errors — this is a best-effort reconciliation
 		}
+	}
+
+	private _clearAwaitingHuman(detail: any): void {
+		const stepIndex = typeof detail?.stepIndex === "number" ? detail.stepIndex : -1;
+		const stepName = typeof detail?.stepName === "string" ? detail.stepName : "";
+		const updated = this.steps.map((step, index) => {
+			if ((stepIndex >= 0 ? index !== stepIndex : step.name !== stepName) || !step.awaitingHuman) return step;
+			return clearAwaitingHuman(step);
+		});
+		if (updated.some((step, index) => step !== this.steps[index])) this.steps = updated;
+	}
+
+	private _onClientGateEvent(e: Event): void {
+		const detail = (e as CustomEvent).detail;
+		if (!detail || detail.type !== HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE) return;
+		if (detail.goalId !== this.goalId || detail.gateId !== this.gateId || detail.signalId !== this.signalId) return;
+		this._clearAwaitingHuman(detail);
 	}
 
 	private _onEvent(e: Event) {
@@ -434,12 +487,39 @@ export class GateVerificationLive extends LitElement {
 				this.requestUpdate();
 				break;
 			}
+			case "gate_verification_awaiting_human": {
+				const idx = detail.stepIndex as number;
+				if (!Number.isInteger(idx) || idx < 0) break;
+				let updated = [...this.steps];
+				while (updated.length <= idx) {
+					updated.push({ name: `Step ${updated.length + 1}`, type: "unknown", status: "waiting", startedAt: 0 });
+				}
+				const existing = updated[idx];
+				updated[idx] = {
+					...existing,
+					name: typeof detail.stepName === "string" ? detail.stepName : existing.name,
+					type: "human-signoff",
+					status: "running",
+					startedAt: existing.startedAt || Date.now(),
+					awaitingHuman: true,
+					humanLabel: typeof detail.label === "string"
+						? detail.label
+						: typeof detail.humanLabel === "string" ? detail.humanLabel : undefined,
+					humanPrompt: typeof detail.prompt === "string"
+						? detail.prompt
+						: typeof detail.humanPrompt === "string" ? detail.humanPrompt : undefined,
+				};
+				this.steps = updated;
+				this.overallStatus = "running";
+				this._startReconcileLoop();
+				break;
+			}
 			case "gate_verification_step_complete": {
 				const idx = detail.stepIndex as number;
 				if (idx >= 0 && idx < this.steps.length) {
 					const updated = [...this.steps];
 					updated[idx] = {
-						...updated[idx],
+						...clearAwaitingHuman(updated[idx]),
 						status: normalizeStepStatus({ status: detail.status }, "failed"),
 						durationMs: detail.durationMs,
 						output: detail.output,
@@ -485,7 +565,12 @@ export class GateVerificationLive extends LitElement {
 				}
 				break;
 			}
+			case HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE: {
+				this._clearAwaitingHuman(detail);
+				break;
+			}
 			case "gate_verification_complete": {
+				this.steps = this.steps.map(clearAwaitingHuman);
 				this.overallStatus = detail.status || "passed";
 				this._stopReconcileLoop();
 				this.requestUpdate();
@@ -641,6 +726,13 @@ export class GateVerificationLive extends LitElement {
 		const isRunningCommand = step.status === "running" && step.type === "command";
 		const marker = step.status === "timeout" ? timeoutInfo(step.timeout) : undefined;
 		const canChangeTimeout = !!marker && !!this.goalId && !!this.gateId && !!step.name;
+		const canStartReview = this.overallStatus === "running"
+			&& step.type === "human-signoff"
+			&& step.awaitingHuman === true
+			&& !!this.goalId
+			&& !!this.gateId
+			&& !!this.signalId
+			&& !!step.name;
 		const statusLabel = step.status === "timeout" ? "Timed out" : step.status;
 
 		const typeBadgeCls = step.type === "command"
@@ -672,6 +764,15 @@ export class GateVerificationLive extends LitElement {
 					${marker
 						? html`<span data-timeout-timing class="text-xs text-muted-foreground tabular-nums">${formatTimeoutTiming(marker)}</span>`
 						: shouldRenderDuration(step) ? renderDuration(entry) : nothing}
+					${canStartReview ? html`
+						<signoff-review-launcher .target=${{
+							goalId: this.goalId,
+							gateId: this.gateId,
+							signalId: this.signalId,
+							stepName: step.name,
+							stepLabel: step.humanLabel || step.name,
+						}}></signoff-review-launcher>
+					` : nothing}
 					${canChangeTimeout ? html`
 						<button
 							type="button"
