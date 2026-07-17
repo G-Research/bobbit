@@ -80,14 +80,16 @@ The active `gate_inspect(section="verification")` snapshot applies `awaitingHuma
 | Shared `gate_status` card | Uses the same `GateVerificationLive` component for its latest active verification, so it follows the same event and reconciliation lifecycle as `gate_signal`. |
 | Active `gate_inspect(section="verification")` card | Shows **Start Review** only when the server snapshot carries the active step's explicit `awaitingHuman: true` marker. Inspecting an older signal does not revive its action. |
 
+Live reconciliation treats the active-verifications endpoint as authoritative for whether a matching verification still exists. A successful response with no matching entry marks persisted running state stale and removes sign-off actionability. A matching active entry with an empty `steps` array still confirms that the verification is alive, but carries no replacement step data, so it does not erase event-seeded or already rendered rows. Failed REST requests also leave current live state intact, because a network failure is not evidence that the verification or sign-off ended.
+
 ### Shared handoff contract
 
 On **Start Review**, the shared launcher:
 
 1. Disables the button, marks it busy, and changes its label to **Opening…**.
-2. Fetches `/api/goals/:goalId/gates/:gateId/signals` and selects the signal whose `id` exactly matches `signalId`.
+2. Fetches `/api/goals/:goalId/gates/:gateId/signals` and selects the signal whose `id` exactly matches `signalId`. The response may also include `goalTitle` and `gateName` display metadata.
 3. Uses the signal's submitted `content` as the review markdown. Missing or whitespace-only content becomes `No content was attached to this sign-off signal.`
-4. Builds `Sign-off: <goal> / <gate> / <step>` from human-readable goal, gate, and step metadata when available, falling back to their identifiers. The goal widget adds the first eight characters of the signal id only when otherwise-identical pending titles need disambiguation.
+4. Builds `Sign-off: <goal> / <gate> / <step>`. Display metadata already supplied by the launcher takes precedence; otherwise the helper uses `goalTitle` and `gateName` from the signal-history response, then falls back to stable goal and gate identifiers. The step uses its human label when supplied, then its step name. The goal widget adds the first eight characters of the signal id only when otherwise-identical pending titles need disambiguation.
 5. Dispatches `bobbit-open-review-document` with the title, markdown, and this source:
 
    ```ts

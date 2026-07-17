@@ -514,6 +514,8 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 | `GET` | `/api/goals/:id/gates` | List gates for a goal |
 | `GET` | `/api/goals/:id/gates/:gateId` | Get gate detail (status, signals, definition) |
 | `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, or signal history) |
+| `GET` | `/api/goals/:id/gates/:gateId/signals` | Return signal history plus optional human-readable goal and gate names. See [Signal history endpoint](#signal-history-endpoint). |
+| `GET` | `/api/goals/:id/verifications/active` | Return the goal's in-flight verification snapshots for live UI reconciliation. |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
 | `POST` | `/api/goals/:id/gates/:gateId/reset` | Reset the gate plus transitive downstream dependents to `pending`; preserves signal history. See [Gate reset endpoint](#gate-reset-endpoint). |
 | `POST` | `/api/goals/:id/gates/:gateId/bypass` | **Human-only.** Force a not-yet-passed gate to `bypassed` (`{ whyBypassed, whoAmI, isInitiatedByHuman: true }`); persists a synthetic audit signal. Never advertised to agents. See [Gate bypass endpoint](#gate-bypass-endpoint). |
@@ -1520,6 +1522,20 @@ A completed or cached signal may include terminal rows such as:
 ```
 
 Skipped rows are intentional non-runs and are ignored by aggregate pass calculation; consumers should render them distinctly instead of inferring pass/fail from `passed` alone.
+
+### Signal history endpoint
+
+**`GET /api/goals/:id/gates/:gateId/signals`** returns the gate's complete stored signal history. The response also carries display metadata so identifier-only clients, such as gate-card sign-off launchers, can present readable review titles without making separate goal and workflow requests.
+
+```json
+{
+  "signals": [{ "id": "sig-22", "content": "# Release candidate", "timestamp": 1775853741666 }],
+  "goalTitle": "Ship release",
+  "gateName": "Human approval"
+}
+```
+
+`signals` is always present. `goalTitle` is included when the goal has a non-empty title, and `gateName` when the gate definition has a non-empty display name; either metadata field may be omitted. Consumers should prefer display names already present in their local context, then use this response metadata, and finally fall back to stable goal and gate identifiers. The signal history remains the content source of truth: launchers must select the exact signal by `id` rather than assuming the latest history row.
 
 ### Sign-off endpoint
 
