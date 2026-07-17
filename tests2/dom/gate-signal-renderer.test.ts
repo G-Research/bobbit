@@ -2,11 +2,11 @@ import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/gate-signal-renderer.spec.ts (v2-dom tier).
-// Renders the REAL GateSignalRenderer via lit into a happy-dom container,
-// replacing the esbuild-bundled file:// fixture. The gate-verification-live
-// custom element is stubbed exactly as the legacy entry did.
-import { afterEach, describe, expect, it } from "vitest";
+// Renders the real GateSignalRenderer, GateVerificationLive, and shared
+// SignoffReviewLauncher together under happy-dom.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
+import { GATE_STATUS_CLIENT_EVENT } from "../../src/app/gate-status-events.js";
 import { GateSignalRenderer } from "../../src/ui/tools/renderers/GateToolRenderers.js";
 // Statically import the real <gate-verification-live> so the module (and its
 // LiveTimer side-effect define) is evaluated synchronously while happy-dom's
@@ -34,6 +34,8 @@ async function renderSignal(params: any, data: any) {
 	const live = container.querySelector("gate-verification-live") as any;
 	if (live?.updateComplete) await live.updateComplete;
 	return {
+		container,
+		live,
 		text: container.textContent || "",
 		hasLive: !!live,
 		goalId: live?.goalId || "",
@@ -44,7 +46,42 @@ async function renderSignal(params: any, data: any) {
 	};
 }
 
-afterEach(() => { document.body.innerHTML = ""; });
+function jsonResponse(body: any, status = 200): Response {
+	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+async function settleLive(live: any): Promise<void> {
+	await live.updateComplete;
+	const launcher = live.querySelector("signoff-review-launcher") as any;
+	if (launcher?.updateComplete) await launcher.updateComplete;
+	await live.updateComplete;
+}
+
+let eventSeq = 0;
+
+function verificationEvent(type: string, overrides: Record<string, unknown> = {}): CustomEvent {
+	return new CustomEvent("gate-verification-event", {
+		detail: {
+			type,
+			goalId: "goal-live",
+			gateId: "human-approval",
+			signalId: "signal-live",
+			seq: ++eventSeq,
+			...overrides,
+		},
+	});
+}
+
+beforeEach(() => {
+	eventSeq = 0;
+	localStorage.clear();
+	vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({}, 404)));
+});
+
+afterEach(() => {
+	document.body.innerHTML = "";
+	vi.unstubAllGlobals();
+});
 
 describe("GateSignalRenderer", () => {
 	it("renders live gate signal UI without exposing the top-level agent reminder", async () => {
@@ -88,4 +125,179 @@ describe("GateSignalRenderer", () => {
 			expect(result.initialSteps).toEqual(terminalSteps);
 		});
 	}
+
+	it("shows Start Review only for an active human-signoff row with the authoritative marker", async () => {
+		const { live } = await renderSignal({ gate_id: "human-approval" }, {
+			signal: {
+				id: "signal-live",
+				goalId: "goal-live",
+				status: "running",
+				steps: [
+					{ name: "actionable", type: "human-signoff", status: "running", awaitingHuman: true, humanLabel: "Approve release" },
+					{ name: "queued", type: "human-signoff", status: "waiting", awaitingHuman: true },
+					{ name: "unmarked", type: "human-signoff", status: "running", output: "Awaiting human approval" },
+					{ name: "false-marker", type: "human-signoff", status: "running", awaitingHuman: false },
+					{ name: "wrong-type", type: "llm-review", status: "running", awaitingHuman: true },
+					{ name: "completed", type: "human-signoff", status: "passed", awaitingHuman: true },
+				],
+			},
+		});
+		await settleLive(live);
+
+		const launchers = live.querySelectorAll("signoff-review-launcher");
+		expect(launchers).toHaveLength(1);
+		expect((launchers[0] as any).target).toEqual({
+			goalId: "goal-live",
+			gateId: "human-approval",
+			signalId: "signal-live",
+			stepName: "actionable",
+			stepLabel: "Approve release",
+		});
+		expect(launchers[0].querySelectorAll("button")).toHaveLength(1);
+		expect(launchers[0].querySelector("button")?.getAttribute("aria-label")).toBe("Start review: Approve release");
+	});
+
+	it("launches the exact review document through the shared launcher and exposes loading, failure, and retry", async () => {
+		let resolveFetch!: (response: Response) => void;
+		const fetchMock = vi.fn((_input?: RequestInfo | URL) => new Promise<Response>((resolve) => { resolveFetch = resolve; }));
+		vi.stubGlobal("fetch", fetchMock);
+		const openEvents: any[] = [];
+		const onOpen = (event: Event) => openEvents.push((event as CustomEvent).detail);
+		window.addEventListener("bobbit-open-review-document", onOpen);
+
+		try {
+			const { live } = await renderSignal({ gate_id: "human-approval" }, {
+				signal: {
+					id: "signal-live", goalId: "goal-live", status: "running",
+					steps: [{ name: "approve-release", type: "human-signoff", status: "running", awaitingHuman: true, humanLabel: "Approve release" }],
+				},
+			});
+			await settleLive(live);
+			const launcher = live.querySelector("signoff-review-launcher") as any;
+			const button = launcher.querySelector("button") as HTMLButtonElement;
+			button.click();
+			await launcher.updateComplete;
+
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(fetchMock.mock.calls[0][0]).toBe(`${window.location.origin}/api/goals/goal-live/gates/human-approval/signals`);
+			expect(button.disabled).toBe(true);
+			expect(button.getAttribute("aria-busy")).toBe("true");
+			expect(button.textContent).toContain("Opening…");
+			button.click();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+
+			resolveFetch(jsonResponse({ error: "unavailable" }, 503));
+			for (let i = 0; i < 10 && !launcher.querySelector('[role="alert"]'); i++) {
+				await Promise.resolve();
+				await launcher.updateComplete;
+			}
+			expect(openEvents).toHaveLength(0);
+			expect(launcher.querySelector("button")?.disabled).toBe(false);
+			expect(launcher.querySelector('[role="alert"]')?.textContent).toBe("Couldn’t open review. Try again.");
+
+			fetchMock.mockImplementationOnce(async () => jsonResponse({
+				signals: [{ id: "signal-live", content: "## Release\n\nPlease verify this exact submission." }],
+			}));
+			(launcher.querySelector("button") as HTMLButtonElement).click();
+			for (let i = 0; i < 10 && openEvents.length === 0; i++) {
+				await Promise.resolve();
+				await launcher.updateComplete;
+			}
+			expect(openEvents).toEqual([{
+				title: "Sign-off: goal-live / human-approval / Approve release",
+				markdown: "## Release\n\nPlease verify this exact submission.",
+				source: {
+					kind: "verification-signoff-markdown",
+					goalId: "goal-live",
+					gateId: "human-approval",
+					signalId: "signal-live",
+					stepName: "approve-release",
+					stepLabel: "Approve release",
+				},
+			}]);
+			expect(launcher.querySelector('[role="alert"]')).toBeNull();
+		} finally {
+			window.removeEventListener("bobbit-open-review-document", onOpen);
+		}
+	});
+
+	it("adds the launcher from an awaiting event and removes it on every matching resolution event", async () => {
+		const { live } = await renderSignal({ gate_id: "human-approval" }, {
+			signal: {
+				id: "signal-live", goalId: "goal-live", status: "running",
+				steps: [{ name: "approve-release", type: "human-signoff", status: "running" }],
+			},
+		});
+		expect(live.querySelector("signoff-review-launcher")).toBeNull();
+
+		document.dispatchEvent(verificationEvent("gate_verification_awaiting_human", {
+			stepIndex: 0, stepName: "approve-release", label: "Approve release", prompt: "Read carefully",
+		}));
+		await settleLive(live);
+		expect((live.querySelector("signoff-review-launcher") as any).target.stepLabel).toBe("Approve release");
+
+		document.dispatchEvent(verificationEvent("gate_verification_step_complete", {
+			stepIndex: 1, stepName: "different-step", status: "passed",
+		}));
+		await settleLive(live);
+		expect(live.querySelector("signoff-review-launcher")).toBeTruthy();
+		document.dispatchEvent(verificationEvent("gate_verification_step_complete", {
+			stepIndex: 0, stepName: "approve-release", status: "passed",
+		}));
+		await settleLive(live);
+		expect(live.querySelector("signoff-review-launcher")).toBeNull();
+
+		document.dispatchEvent(verificationEvent("gate_verification_awaiting_human", { stepIndex: 0, stepName: "approve-release" }));
+		await settleLive(live);
+		expect(live.querySelector("signoff-review-launcher")).toBeTruthy();
+		window.dispatchEvent(new CustomEvent(GATE_STATUS_CLIENT_EVENT, { detail: {
+			type: "gate_verification_signoff_resolved",
+			goalId: "goal-live", gateId: "human-approval", signalId: "signal-live", stepName: "approve-release", stepIndex: 0,
+		} }));
+		await settleLive(live);
+		expect(live.querySelector("signoff-review-launcher")).toBeNull();
+
+		document.dispatchEvent(verificationEvent("gate_verification_awaiting_human", { stepIndex: 0, stepName: "approve-release" }));
+		await settleLive(live);
+		document.dispatchEvent(verificationEvent("gate_verification_complete", { status: "passed" }));
+		await settleLive(live);
+		expect(live.querySelector("signoff-review-launcher")).toBeNull();
+	});
+
+	it("uses the active REST snapshot as the authoritative add/remove reconciliation source", async () => {
+		let activeSteps: any[] = [{
+			name: "approve-release", type: "human-signoff", status: "running",
+			awaitingHuman: true, humanLabel: "Approve reconciled release", humanPrompt: "Inspect it",
+		}];
+		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url.endsWith("/verifications/active")) {
+				return jsonResponse({ verifications: [{ signalId: "signal-live", currentPhase: 0, steps: activeSteps }] });
+			}
+			return jsonResponse({ signals: [{
+				id: "signal-live",
+				verification: { status: "running", steps: [{ name: "approve-release", type: "human-signoff", status: "running" }] },
+			}] });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { live } = await renderSignal({ gate_id: "human-approval" }, {
+			signal: {
+				id: "signal-live", goalId: "goal-live", status: "running",
+				steps: [{ name: "approve-release", type: "human-signoff", status: "running" }],
+			},
+		});
+
+		await live._fetchAndReconcile();
+		await settleLive(live);
+		expect((live.querySelector("signoff-review-launcher") as any).target.stepLabel).toBe("Approve reconciled release");
+
+		activeSteps = [{
+			name: "approve-release", type: "human-signoff", status: "running",
+			output: "Awaiting human approval, but the structured marker was resolved",
+		}];
+		await live._fetchAndReconcile();
+		await settleLive(live);
+		expect(live.querySelector("signoff-review-launcher")).toBeNull();
+		expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/verifications/active"))).toBe(true);
+	});
 });
