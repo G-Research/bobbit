@@ -337,17 +337,8 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderRemoteStatus() {
-        // Publishing a non-primary session branch is always an explicit action.
-        // Do not infer publication intent from upstream counters or base_ref:
-        // either may describe the comparison baseline rather than a matching
-        // remote work branch.
-        if (!this.isOnPrimary) {
-            if (!this.sessionId) return nothing;
-            return html`<div class="text-muted-foreground" data-testid="git-manual-publication">
-                Remote publication is manual.
-                ${this._renderPushButton()}
-            </div>`;
-        }
+        // Remote status and controls are only relevant on the primary branch.
+        if (!this.isOnPrimary) return nothing;
 
         // On primary branch only: show ahead/behind remote (edge case)
         if (this.ahead > 0 && this.behind > 0) {
