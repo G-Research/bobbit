@@ -362,7 +362,7 @@ test.describe("Journey: Prompt Stats", () => {
 			const statsBar = page.getByTestId("session-stats-bar");
 			await expect(statsBar).toBeVisible({ timeout: 15_000 });
 			await expect(statsBar).toContainText("mock-model", { timeout: 20_000 });
-			const contextSpan = page.locator("span[title*='Context:']");
+			const contextSpan = statsBar.locator("span[title*='Context:']");
 			await expect(contextSpan).toBeVisible({ timeout: 15_000 });
 			await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
 			await expect(contextSpan).toHaveAttribute("title", /Context:.*tokens/, { timeout: 10_000 });

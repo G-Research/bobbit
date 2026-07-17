@@ -21,8 +21,10 @@ operation-dispatched surface split into three tools by privilege:
 - **`bobbit_admin`** — config + destructive maintenance (highest privilege).
 
 Each tool takes an `operation` discriminator plus operation-specific params
-(validated with TypeBox). Non-list reads return the gateway JSON unchanged;
-`bobbit_read` list operations return bounded pages with pagination metadata.
+(validated with TypeBox). The implemented agent tools return operation-specific
+compact projections by default; `verbose: true` restores the processed full
+payload, with conservative paging limits where applicable. REST responses remain
+unchanged. See [Bobbit tool verbosity guards](bobbit-tool-verbosity-guards.md).
 Failures surface the gateway `{ error, code }` shape.
 
 ## 2. Resolved decisions (decided — do not re-litigate)

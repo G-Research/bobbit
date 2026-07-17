@@ -9,6 +9,15 @@ guardProcessEnv();
 import { describe, it, beforeAll, afterAll, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import registerAgentExtension from "../../defaults/tools/agent/extension.ts";
+import {
+	activeContextHeavyFlags,
+	CONTEXT_HEAVY_ERROR_CODE,
+	CONTEXT_HEAVY_FLAGS,
+	CONTEXT_HEAVY_LIMIT,
+	CONTEXT_HEAVY_LIMIT_GUIDANCE,
+	contextHeavyLimitError,
+	formatContextHeavyLimitGuidance,
+} from "../../defaults/tools/_shared/context-heavy-guard.ts";
 
 type ExecuteFn = (
 	toolCallId: string,
@@ -36,7 +45,70 @@ function makeStubApi(): { api: any; getExecute: () => ExecuteFn } {
 	};
 }
 
-describe("read_session extension include_tool_results defaults", () => {
+function parseToolError(result: any): { error: string; code: string } {
+	assert.equal(result.isError, true);
+	assert.equal(result.details, undefined);
+	assert.equal(result.content?.length, 1);
+	return JSON.parse(result.content[0].text);
+}
+
+describe("shared context-heavy guard", () => {
+	it("centralizes the cap and deterministic per-tool flag classification", () => {
+		assert.equal(CONTEXT_HEAVY_LIMIT, 10);
+		assert.equal(CONTEXT_HEAVY_ERROR_CODE, "CONTEXT_HEAVY_LIMIT_REQUIRED");
+		assert.deepEqual(CONTEXT_HEAVY_FLAGS, {
+			bobbit_read: ["verbose"],
+			bobbit_orchestrate: ["verbose"],
+			bobbit_admin: ["verbose"],
+			read_session: ["verbose", "include_tool_results"],
+		});
+		assert.deepEqual(
+			activeContextHeavyFlags("read_session", {
+				include_tool_results: true,
+				verbose: true,
+			}),
+			["verbose", "include_tool_results"],
+		);
+	});
+
+	it("activates flags only for boolean true and skips non-pageable operations", () => {
+		assert.deepEqual(activeContextHeavyFlags("bobbit_read", { verbose: "true" }), []);
+		assert.deepEqual(activeContextHeavyFlags("bobbit_read", { verbose: 1 }), []);
+		assert.deepEqual(activeContextHeavyFlags("bobbit_read", { verbose: false }), []);
+		assert.equal(contextHeavyLimitError("bobbit_admin", { verbose: true }, false), undefined);
+	});
+
+	it.each([undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 11, "10"])(
+		"rejects an unsafe raw explicit limit (%s)",
+		(limit) => {
+			const error = contextHeavyLimitError("read_session", { verbose: true, limit }, true);
+			assert.equal(error?.code, CONTEXT_HEAVY_ERROR_CODE);
+			assert.equal(error?.error, formatContextHeavyLimitGuidance(["verbose"]));
+		},
+	);
+
+	it.each([1, CONTEXT_HEAVY_LIMIT])("accepts an explicit integer limit of %s", (limit) => {
+		assert.equal(
+			contextHeavyLimitError("read_session", { include_tool_results: true, limit }, true),
+			undefined,
+		);
+	});
+
+	it("formats every active flag and all canonical recovery guidance", () => {
+		const message = formatContextHeavyLimitGuidance(["verbose", "include_tool_results"]);
+		assert.equal(
+			message,
+			"You should not typically pull this much data from the API. " +
+				"Context-heavy flag(s) `verbose`, `include_tool_results` require an explicit limit at or below 10. " +
+				"Call again with limit <= 10 and fetch in smaller batches only if you REALLY need full verbosity. " +
+				"Keep an eye on token consumption.",
+		);
+		assert.match(CONTEXT_HEAVY_LIMIT_GUIDANCE, /\{flags\}/);
+		assert.equal((CONTEXT_HEAVY_LIMIT_GUIDANCE.match(/\{cap\}/g) ?? []).length, 2);
+	});
+});
+
+describe("read_session extension context-heavy guard", () => {
 	let execute: ExecuteFn;
 	const envBackup: Record<string, string | undefined> = {};
 	let realFetch: typeof globalThis.fetch;
@@ -79,18 +151,78 @@ describe("read_session extension include_tool_results defaults", () => {
 		}
 	});
 
-	it("sends include_tool_results=0 by default", async () => {
-		await execute("toolu_READ", { session_id: "target-session", offset: 0, limit: 1 });
+	it("keeps ordinary reads at their existing defaults", async () => {
+		const result = await execute("toolu_READ", { session_id: "target-session" });
+		assert.notEqual(result.isError, true);
 		assert.equal(seenUrls.length, 1);
 		const url = new URL(seenUrls[0]);
 		assert.equal(url.pathname, "/api/sessions/target-session/transcript");
+		assert.equal(url.searchParams.has("limit"), false);
+		assert.equal(url.searchParams.has("verbose"), false);
 		assert.equal(url.searchParams.get("include_tool_results"), "0");
 	});
 
-	it("sends include_tool_results=1 on explicit opt-in", async () => {
-		await execute("toolu_READ", { session_id: "target-session", include_tool_results: true });
+	it.each([
+		["verbose", { verbose: true }],
+		["include_tool_results", { include_tool_results: true }],
+	] as const)("rejects %s without an explicit limit before fetching", async (flag, heavyParams) => {
+		const result = await execute("toolu_READ", {
+			session_id: "target-session",
+			...heavyParams,
+		});
+		const error = parseToolError(result);
+		assert.equal(seenUrls.length, 0);
+		assert.equal(error.code, CONTEXT_HEAVY_ERROR_CODE);
+		assert.equal(error.error, formatContextHeavyLimitGuidance([flag]));
+		assert.match(error.error, /should not typically pull this much data/i);
+		assert.match(error.error, /fetch in smaller batches/i);
+		assert.match(error.error, /REALLY need full verbosity/);
+		assert.match(error.error, /token consumption/i);
+	});
+
+	it.each([
+		["verbose", { verbose: true }],
+		["include_tool_results", { include_tool_results: true }],
+	] as const)("rejects %s above the conservative cap before fetching", async (flag, heavyParams) => {
+		const result = await execute("toolu_READ", {
+			session_id: "target-session",
+			limit: CONTEXT_HEAVY_LIMIT + 1,
+			...heavyParams,
+		});
+		const error = parseToolError(result);
+		assert.equal(seenUrls.length, 0);
+		assert.equal(error.code, CONTEXT_HEAVY_ERROR_CODE);
+		assert.equal(error.error, formatContextHeavyLimitGuidance([flag]));
+	});
+
+	it("names both active flags in canonical order", async () => {
+		const result = await execute("toolu_READ", {
+			session_id: "target-session",
+			include_tool_results: true,
+			verbose: true,
+		});
+		const error = parseToolError(result);
+		assert.equal(seenUrls.length, 0);
+		assert.equal(
+			error.error,
+			formatContextHeavyLimitGuidance(["verbose", "include_tool_results"]),
+		);
+	});
+
+	it.each([
+		["verbose", { verbose: true }, "1", "0"],
+		["include_tool_results", { include_tool_results: true }, null, "1"],
+	] as const)("allows %s at the cap and forwards it unchanged", async (_flag, heavyParams, verbose, toolResults) => {
+		const result = await execute("toolu_READ", {
+			session_id: "target-session",
+			limit: CONTEXT_HEAVY_LIMIT,
+			...heavyParams,
+		});
+		assert.notEqual(result.isError, true);
 		assert.equal(seenUrls.length, 1);
 		const url = new URL(seenUrls[0]);
-		assert.equal(url.searchParams.get("include_tool_results"), "1");
+		assert.equal(url.searchParams.get("limit"), String(CONTEXT_HEAVY_LIMIT));
+		assert.equal(url.searchParams.get("verbose"), verbose);
+		assert.equal(url.searchParams.get("include_tool_results"), toolResults);
 	});
 });

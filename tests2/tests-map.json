@@ -417,6 +417,15 @@
       }
     },
     {
+      "path": "tests2/core/bobbit-tool-verbosity.test.ts",
+      "reason": "Acceptance coverage for compact-by-default Bobbit projections, bounded verbose reads, structured no-fetch limit guidance, unchanged costs, nonpaged verbose mutations/admin calls, and projection-catalogue drift.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/bobbit-tool-archive-filtering.test.ts",
       "reason": "Reproducing tests for the Hide Archived Lists goal: bobbit_read list_sessions/list_goals/search must hide archived primary rows and archive-only enrichment by default while preserving explicit archive opt-ins; pins SearchService default includeArchived=false.",
       "execution": {
