@@ -32,7 +32,7 @@ enableTsWorkerResolver();
  *   4. restore/respawn (cwd already container-internal) does NOT re-dispatch.
  * No Docker required — the sandbox + stores are stubbed.
  */
-import { beforeAll, describe, it, vi } from "vitest";
+import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -46,12 +46,6 @@ import type { PackContributionRegistry } from "../../src/server/extension-host/p
 import { makeTmpDir } from "../../tests/helpers/tmp.js";
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
-
-// With pool:"forks" + isolate:false, another file's env guard can restore
-// NODE_OPTIONS after this module is collected but before its worker starts. Re-add
-// the .js→.ts resolver at run time so module-host-bootstrap.ts can resolve its
-// confinement-loader.js source import. This is test process isolation, not a wait.
-beforeAll(() => { enableTsWorkerResolver(); });
 
 // A valid admin token must be >= 64 chars (see src/server/auth/token.ts
 // readToken()). The previous fixture wrote a short "admin-token" that
@@ -268,6 +262,11 @@ describe("applySandboxWiring — goalProvisioned marker actually writes host-sid
 			});
 
 			const bridgeOptions: any = { env: {}, cwd: hostWorktree };
+			// Re-add the worker resolver immediately before the production invocation.
+			// Under pool:"forks" + isolate:false, a sibling file's env guard can restore
+			// NODE_OPTIONS after collection or a file-level beforeAll. Keeping this next
+			// to ModuleHost worker creation makes the test independent of file ordering.
+			enableTsWorkerResolver();
 			const ok = await sm.applySandboxWiring(bridgeOptions, "sess-fs", {
 				projectId: "proj-1",
 				goalId: "goal-g1",

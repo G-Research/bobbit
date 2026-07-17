@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
 
 function e2eTempRoot(): string {
 	if (existsSync("/.dockerenv")) return "/tmp";
@@ -51,6 +52,12 @@ function prepareV2RuntimeCaches(): void {
 	process.env.BOBBIT_E2E_PWTEST_CACHE_DIR = runCacheRoot;
 	mkdirSync(runCacheRoot, { recursive: true });
 	mkdirSync(transformCacheDir, { recursive: true });
+	// Warm-start the per-run transform cache from the last published snapshot
+	// (`<base>/pwtest-transform-cache-v2/latest`). Entries are content-hashed so
+	// reuse is safe; per-run dirs only isolate WRITES. Fail-open: any copy error
+	// just means a cold cache. The matching publish happens in
+	// tests2/browser-global-teardown.ts.
+	seedTransformCacheForRunDir(runCacheRoot);
 }
 
 prepareV2RuntimeCaches();
@@ -116,7 +123,7 @@ export default {
 		["json", { outputFile: ".profiles/testing-v2/budgets/playwright-report.json" }],
 	] as Array<[string, unknown?]>,
 	globalSetup: "./tests2/browser-global-setup.ts",
-	globalTeardown: "./tests/e2e/e2e-teardown.ts",
+	globalTeardown: "./tests2/browser-global-teardown.ts",
 	use: {
 		video: "off",
 		trace: "off",

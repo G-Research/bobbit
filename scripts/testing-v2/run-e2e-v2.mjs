@@ -167,12 +167,14 @@ async function runGroupA(specs) {
 	if (specs.length === 0) return { label: "A/node", code: 0, wallMs: 0, skipped: true };
 	// tsx --test, force-exit so lingering handles never hang the lane.
 	// RESOURCE CAP: node:test defaults to ~CPU-count concurrent FILES. These are
-	// worktree/pool/sandbox specs that each boot a gateway AND create git worktrees
-	// whose setup runs `npm ci` — running many at once spawns a SWARM of concurrent
-	// npm ci + gateway boots that can exhaust the box (suspected cause of the
-	// crash + interrupted-npm-ci node_modules corruption on 2026-07-08). Serialise
-	// by default (override with E2E_V2_NODE_CONCURRENCY).
-	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "1";
+	// worktree/pool/sandbox specs that each boot a gateway AND create git worktrees.
+	// Worktree setup does NOT run `npm ci` here (verified 2026-07-16): every
+	// worktree-provisioning Group A test sets BOBBIT_SKIP_NPM_CI=1, and the rest
+	// never configure an npm-ci setup command — so the per-file cost is a gateway
+	// boot plus git worktree creation, not an npm-ci swarm. Default to 2 concurrent
+	// files to cut wall time while keeping gateway-boot load modest (override with
+	// E2E_V2_NODE_CONCURRENCY).
+	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "2";
 	const args = ["--test", "--test-force-exit", `--test-concurrency=${nodeConc}`, ...specs];
 	return run(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", ...args], {
 		env: { ...EXTERNAL_FREE_ENV, NODE_ENV: "test" },

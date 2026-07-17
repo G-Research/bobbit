@@ -198,8 +198,9 @@ test.describe("Bg process pill animations", () => {
 		await lastPill.locator("[data-pill-toggle]").click();
 		await lastPill.locator("[data-remove]").click();
 
-		// Wait for animation to complete (150ms + buffer)
-		await page.waitForTimeout(300);
+		// The observable outcome of the 150ms dismiss animation completing is
+		// the pill leaving the DOM — toHaveCount polls until then.
+		await expect(page.locator("[data-pill-strip] bg-process-pill")).toHaveCount(2);
 		// Also wait for rAF re-render
 		await waitForMeasurement(page);
 
@@ -274,9 +275,13 @@ test.describe("Bg process pill animations", () => {
 		await lastPill.locator("[data-pill-toggle]").click();
 		await lastPill.locator("[data-remove]").click();
 
-		// Wait for the dismiss animation (150ms) + re-render
-		await page.waitForTimeout(400);
+		// The observable outcome of the dismiss animation (150ms) + re-render
+		// is the MutationObserver seeing the pill-promoted class — poll for it.
 		await waitForMeasurement(page);
+		await expect.poll(
+			async () => await page.evaluate(() => (window as any).__sawPromoted),
+			{ timeout: 5_000, message: "pill-promoted class was never observed after dismiss" },
+		).toBe(true);
 
 		// Check whether pill-promoted was observed
 		const sawPromoted = await page.evaluate(() => (window as any).__sawPromoted);
