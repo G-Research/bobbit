@@ -22,6 +22,7 @@
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { contextHeavyLimitError } from "../_shared/context-heavy-guard.js";
 import { readGatewayCreds, apiCall, apiCallDetailed } from "./gateway.js";
 
 // ── Types ──
@@ -310,23 +311,30 @@ const extension: ExtensionFactory = (pi) => {
 			"read_session - Read another session's transcript with pagination and regex filtering.",
 		promptGuidelines: [
 			"Default omits tool result bodies; use include_tool_results:true only for narrow, deliberate raw-output reads",
+			"verbose:true or include_tool_results:true requires an explicit limit <= 10; fetch additional raw content in smaller batches and watch token use",
 			"Use verbose:true for full message blocks; it still omits tool results unless include_tool_results:true is also set",
 			"Tail with offset:-N, limit:N (e.g. -20, 20 for the last 20 messages)",
-			"Find specific events with pattern (regex). Combine pattern/context/offset/limit first, then opt into include_tool_results:true for the small window you need.",
-			"Use context:1..5 to expand each pattern match by ±N neighbours",
+			"Find specific events with pattern (regex), then use context:1..5 to expand matches by ±N neighbours",
 		],
 		parameters: Type.Object({
 			session_id: Type.String(),
 			offset: Type.Optional(Type.Number({ description: "Default 0. Negative indexes from end." })),
-			limit: Type.Optional(Type.Number({ description: "Default 20, clamped to [1, 200]." })),
+			limit: Type.Optional(Type.Number({ description: "Default 20; heavy flags require explicit 1..10." })),
 			pattern: Type.Optional(Type.String({ description: "Regex filter on message text and tool blocks." })),
 			case_sensitive: Type.Optional(Type.Boolean()),
 			context: Type.Optional(Type.Number({ description: "Expand each match by ±N neighbours (0..5)." })),
-			verbose: Type.Optional(Type.Boolean({ description: "Return full content blocks instead of summaries." })),
-			include_tool_results: Type.Optional(Type.Boolean({ description: "Include raw tool result bodies; default false returns metadata placeholders." })),
+			verbose: Type.Optional(Type.Boolean({ description: "Full content blocks; requires explicit limit <= 10." })),
+			include_tool_results: Type.Optional(Type.Boolean({ description: "Raw tool results; default false. Requires explicit limit <= 10." })),
 		}),
 
 		async execute(_toolCallId, params) {
+			const guardError = contextHeavyLimitError(
+				"read_session",
+				params as Record<string, unknown>,
+				true,
+			);
+			if (guardError) return fail(JSON.stringify(guardError));
+
 			let result: { ok: boolean; status: number; body: any };
 			try {
 				result = await callReadSessionEndpoint(params as ReadSessionParams);

@@ -478,7 +478,7 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 	return order.map((n) => winner.get(n)!);
 }
 
-/** Recursively copy a directory. */
+/** Recursively copy a directory, overwriting matching files while retaining extras. */
 export function copyDirRecursive(src: string, dest: string): void {
 	if (!fs.existsSync(src)) return;
 	fs.mkdirSync(dest, { recursive: true });
@@ -491,6 +491,20 @@ export function copyDirRecursive(src: string, dest: string): void {
 			fs.copyFileSync(srcPath, destPath);
 		}
 	}
+}
+
+/**
+ * Copy a tool group together with sibling modules shared across tool groups.
+ *
+ * Config overrides execute from their copied location, so a group importing
+ * `../_shared/*` is incomplete unless the shared module tree travels with it.
+ * Use the same merge/overwrite behavior as the group copy: matching shipped
+ * files refresh, while unrelated target-only files remain intact for other
+ * customized groups.
+ */
+export function copyToolGroupWithSharedDependencies(sourceToolsDir: string, targetToolsDir: string, groupDir: string): void {
+	copyDirRecursive(path.join(sourceToolsDir, groupDir), path.join(targetToolsDir, groupDir));
+	copyDirRecursive(path.join(sourceToolsDir, "_shared"), path.join(targetToolsDir, "_shared"));
 }
 
 /**
@@ -1100,9 +1114,8 @@ export class ToolManager {
 		// If the tool is from builtins, copy the entire group to config dir first
 		let filePath = base.filePath;
 		if (base.baseDir === this.builtinToolsDir && base.groupDir && this.builtinToolsDir) {
-			const srcGroup = path.join(this.builtinToolsDir, base.groupDir);
 			const destGroup = path.join(this.toolsDir, base.groupDir);
-			copyDirRecursive(srcGroup, destGroup);
+			copyToolGroupWithSharedDependencies(this.builtinToolsDir, this.toolsDir, base.groupDir);
 			// Update filePath to point to the new copy
 			const relPath = path.relative(path.join(base.baseDir, base.groupDir), base.filePath);
 			filePath = path.join(destGroup, relPath);

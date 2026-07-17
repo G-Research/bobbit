@@ -1,14 +1,14 @@
 name: bobbit_orchestrate
 description: "Mutate gateway runtime: goals, sessions, tasks, gates, staff, team lifecycle. Hidden unless enabled."
 summary: "Mutate gateway runtime state (goals/sessions/…)"
-params: [operation, goalId?, sessionId?, taskId?, gateId?, projectId?, title?, type?, state?, name?, staffId?, cascade?, body?]
+params: [operation, goalId?, sessionId?, taskId?, gateId?, projectId?, title?, type?, state?, name?, staffId?, cascade?, body?, verbose?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Bobbit
 grantPolicy: never
 docs: |-
-  Gateway-wide runtime mutations addressed by explicit id (create/update/archive goals, sessions, tasks, gates, staff, team lifecycle). Hidden unless a role/project/user policy enables the `Bobbit` group. Complements the current-goal `task_*`/`gate_*`/`team_*` tools — it does not replace them.
+  Gateway-wide runtime mutations addressed by explicit id. Successful responses are compact by default; `verbose: true` returns full gateway JSON. Hidden unless a role/project/user policy enables the `Bobbit` group.
 detail_docs: >-
   ## Purpose
 
@@ -26,6 +26,11 @@ detail_docs: >-
 
 
   - `operation` — which mutation to run (catalogue below).
+
+  - `verbose` — full successful gateway JSON instead of the default compact
+  projection. Current operations are non-paged, so no `limit` is required. Any
+  future paged operation will require an explicit `limit <= 10`; fetch full data
+  in small batches and watch token consumption.
 
   - Ids: `goalId`, `sessionId`, `taskId`, `gateId`, `projectId`, `staffId`
   (staff deletion id).

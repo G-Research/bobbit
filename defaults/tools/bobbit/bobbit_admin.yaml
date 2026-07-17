@@ -1,14 +1,14 @@
 name: bobbit_admin
 description: "Config + destructive maintenance: project config, provider keys, marketplace, overrides, cleanup, restart."
 summary: "Gateway config + destructive maintenance"
-params: [operation, projectId?, workflowId?, name?, rootPath?, provider?, scope?, action?, config?, body?]
+params: [operation, projectId?, workflowId?, name?, rootPath?, provider?, scope?, action?, config?, body?, verbose?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Bobbit
 grantPolicy: never
 docs: |-
-  Highest-privilege gateway surface: project config, provider keys, custom providers / AI gateway, marketplace install/update/uninstall, tool/role/workflow overrides, destructive maintenance cleanup, sandbox image build, and harness restart/shutdown. Hidden unless a role/project/user policy enables the `Bobbit` group.
+  Highest-privilege gateway surface for config and destructive maintenance. Successful responses are compact by default; `verbose: true` returns full gateway JSON. Hidden unless a role/project/user policy enables the `Bobbit` group.
 detail_docs: >-
   ## Purpose
 
@@ -27,6 +27,11 @@ detail_docs: >-
 
 
   - `operation` — which admin action to run (catalogue below).
+
+  - `verbose` — full successful gateway JSON instead of the default compact
+  projection. Current operations are non-paged, so no `limit` is required. Any
+  future paged operation will require an explicit `limit <= 10`; fetch full data
+  in small batches and watch token consumption.
 
   - `projectId`, `workflowId`, `name` (tool/role/project), `rootPath`
   (`create_project`), `provider`, `key`, `scope` (`server`|`project`),
