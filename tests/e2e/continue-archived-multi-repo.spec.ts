@@ -7,9 +7,10 @@ import { test, expect } from "./in-process-harness.js";
 import { agentEndPredicate, apiFetch, connectWs, registerProject } from "./e2e-setup.js";
 import { awaitableRm, pollUntil } from "./test-utils/cleanup.js";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join, normalize } from "node:path";
+import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
 
 // Exercise the same host-side pool path normal worktree sessions use, while
 // still accepting the cold createWorktreeSet fallback if the pool is empty.
@@ -27,18 +28,18 @@ async function sendPromptAndWait(id: string, text: string): Promise<void> {
 	}
 }
 
-function initRepo(repoPath: string): void {
-	mkdirSync(repoPath, { recursive: true });
-	execFileSync("git", ["init", "--initial-branch=master"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: repoPath, stdio: "pipe" });
+// Repos come from the immutable committed template (master + README.md +
+// .gitattributes + one commit); nothing here asserts on tree contents.
+async function initRepo(repoPath: string): Promise<void> {
+	await prepareGitTemplate();
+	copyGitTemplate(repoPath);
 }
 
-function branchExists(repoPath: string, branch: string): boolean {
+// attempts: 1 — a missing branch is an accepted outcome for this probe;
+// retrying would only change timing, not semantics.
+async function branchExists(repoPath: string, branch: string): Promise<boolean> {
 	try {
-		execFileSync("git", ["rev-parse", "--verify", `refs/heads/${branch}`], { cwd: repoPath, stdio: "pipe" });
+		await runFixtureCommand("git", ["rev-parse", "--verify", `refs/heads/${branch}`], { cwd: repoPath, attempts: 1 });
 		return true;
 	} catch {
 		return false;
@@ -116,8 +117,8 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 
 		try {
 			mkdirSync(rootPath, { recursive: true });
-			initRepo(apiRepo);
-			initRepo(webRepo);
+			await initRepo(apiRepo);
+			await initRepo(webRepo);
 			expect(existsSync(join(rootPath, ".git")), "project root must be a non-git multi-repo container").toBe(false);
 
 			const project = await registerProject({
@@ -152,8 +153,8 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 			expect(existsSync(srcRec.worktreePath), "source worktree container should exist before archive").toBe(true);
 			expect(existsSync(join(srcRec.worktreePath, "api")), "source api worktree should exist before archive").toBe(true);
 			expect(existsSync(join(srcRec.worktreePath, "web")), "source web worktree should exist before archive").toBe(true);
-			expect(branchExists(apiRepo, srcRec.branch), "source branch should exist in api repo").toBe(true);
-			expect(branchExists(webRepo, srcRec.branch), "source branch should exist in web repo").toBe(true);
+			expect(await branchExists(apiRepo, srcRec.branch), "source branch should exist in api repo").toBe(true);
+			expect(await branchExists(webRepo, srcRec.branch), "source branch should exist in web repo").toBe(true);
 
 			const transcriptMarker = `MULTI_REPO_CONTINUE_ARCHIVED_MARKER_${Date.now()}`;
 			await sendPromptAndWait(srcId, `${transcriptMarker} hello from multi-repo source`);
@@ -199,8 +200,8 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 			expect(existsSync(newRec.worktreePath), "continued worktree container should exist").toBe(true);
 			expect(existsSync(join(newRec.worktreePath, "api")), "continued api worktree should exist").toBe(true);
 			expect(existsSync(join(newRec.worktreePath, "web")), "continued web worktree should exist").toBe(true);
-			expect(branchExists(apiRepo, newRec.branch), "continued branch should exist in api repo").toBe(true);
-			expect(branchExists(webRepo, newRec.branch), "continued branch should exist in web repo").toBe(true);
+			expect(await branchExists(apiRepo, newRec.branch), "continued branch should exist in api repo").toBe(true);
+			expect(await branchExists(webRepo, newRec.branch), "continued branch should exist in web repo").toBe(true);
 
 			const sessionsDir = globalAgentSessionsDir();
 			const projectSlugFile = findClonedJsonl(join(sessionsDir, `--${slugifyCwd(rootPath)}--`), newId);

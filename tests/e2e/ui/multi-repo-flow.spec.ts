@@ -12,27 +12,25 @@ import { openApp } from "./ui-helpers.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
 
-function gitInit(dir: string): void {
-	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
-	fs.writeFileSync(path.join(dir, "README.md"), "fixture\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: dir });
+// Base repo comes from the immutable committed template (master + README.md +
+// .gitattributes + one commit); the bare-clone origin wiring stays real git.
+async function gitInit(dir: string): Promise<void> {
+	await prepareGitTemplate();
+	copyGitTemplate(dir);
 	// Ensure an `origin` exists so worktree push targets resolve. Fake it via
 	// a bare clone alongside.
 	const bare = `${dir}-bare`;
-	execFileSync("git", ["clone", "--bare", "--quiet", dir, bare], { stdio: "pipe" });
-	execFileSync("git", ["remote", "add", "origin", bare], { cwd: dir });
+	await runFixtureCommand("git", ["clone", "--bare", "--quiet", dir, bare]);
+	await runFixtureCommand("git", ["remote", "add", "origin", bare], { cwd: dir });
 }
 
 async function registerMultiRepoProject(): Promise<{ id: string; rootPath: string; cleanup: () => void }> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-ui-"));
-	gitInit(path.join(root, "api"));
-	gitInit(path.join(root, "web"));
+	await gitInit(path.join(root, "api"));
+	await gitInit(path.join(root, "web"));
 	fs.mkdirSync(path.join(root, "shared"), { recursive: true });  // data-only repo
 
 	const res = await apiFetch("/api/projects", {

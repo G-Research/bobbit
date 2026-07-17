@@ -415,7 +415,8 @@ test.describe("PI-08: Image paste edge cases", () => {
 			}));
 		});
 
-		// Small delay to ensure no async handler fires
+		// Deliberate fixed wait: asserting NO async paste handler fires for
+		// non-image content — there is no completion signal to await.
 		await page.waitForTimeout(200);
 		const count = await page.evaluate(() => (window as any).getAttachments().length);
 		expect(count).toBe(0);

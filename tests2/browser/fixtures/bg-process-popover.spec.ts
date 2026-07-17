@@ -50,8 +50,16 @@ test.describe("BgProcessPill inside More popover", () => {
 		// Click the dismiss (✕) button on a popover pill (hidden pill "old-1")
 		await page.locator("[data-pill-dismiss='old-1']").click();
 
-		// Wait for any async handling — animation would take 300ms if it played
-		await page.waitForTimeout(500);
+		// The observable outcome (post-fix) is the dismiss callback firing and
+		// _dismissingId being cleared — poll for that state instead of sleeping
+		// past a hypothetical 300ms animation.
+		await expect.poll(
+			async () => await page.evaluate(() =>
+				((window as any).__dismissCalls as string[]).includes("old-1")
+				&& (window as any).__dismissingId === null,
+			),
+			{ timeout: 5_000, message: "dismiss callback never fired / _dismissingId not cleared for popover pill" },
+		).toBe(true);
 
 		// BUG: The dismiss callback is never called because:
 		// 1. handlePillDismiss sets __dismissingId and expects animationend
