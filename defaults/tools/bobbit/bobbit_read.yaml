@@ -1,14 +1,14 @@
 name: bobbit_read
 description: "Read-only gateway introspection: goals, sessions, projects, tasks, gates, search, maintenance probes."
 summary: "Read gateway state (goals/sessions/projects/…)"
-params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, includeArchived?, view?, probe?]
+params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, includeArchived?, view?, probe?, verbose?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Bobbit
 grantPolicy: allow
 docs: |-
-  Read-only, gateway-wide introspection. Pick an `operation` and pass its required ids. Addresses entities by explicit id (not the current goal), so it complements — never replaces — `task_list`/`gate_list`. List-style operations return bounded pages by default with pagination metadata.
+  Read-only, gateway-wide introspection. Pick an `operation` and pass its required ids. Responses are compact by default; `verbose: true` restores full gateway JSON, with an explicit `limit <= 10` required for paged operations. Addresses entities by explicit id (not the current goal), so it complements — never replaces — `task_list`/`gate_list`.
 detail_docs: >-
   ## Purpose
 
@@ -29,6 +29,11 @@ detail_docs: >-
 
 
   - `operation` — which read to run (see the catalogue below).
+
+  - `verbose` — full successful gateway JSON instead of the default compact
+  projection. On paged operations it requires an explicit `limit` from 1 to 10;
+  fetch further full data in small batches and watch token consumption. Cost
+  operations are already small and remain unchanged in compact mode.
 
   - Ids: `goalId`, `sessionId`, `taskId`, `projectId`, `workflowId` — supply the
   ones the chosen operation requires.
@@ -204,8 +209,7 @@ detail_docs: >-
   `sessions`), `expired_archives`, `orphaned_index_rows` (`?projectId`, paged
   `sample`), `worktrees`, `archived_session_worktrees` (paged `worktrees`),
   `worktree_pool` (`?projectId`), `sandbox_pool`, `sandbox_status`
-  (`?projectId`), `search_stats` (`?projectId`). Scalar/stat probes return
-  unchanged unless they include a large array key.
+  (`?projectId`), `search_stats` (`?projectId`).
 
 
   ## Overlap policy (use the dedicated tool instead)
@@ -219,8 +223,11 @@ detail_docs: >-
 
   ## Notes / Gotchas
 
-  - List-style operations are bounded by default and include `pagination`.
-  Non-list operations return the gateway JSON unchanged.
+  - Successful responses use compact, operation-specific projections by default:
+  ids, state, errors, recency, action fields, and pagination remain available;
+  long text is previewed and embedded workflow snapshots are omitted. Pass
+  `verbose: true` for full JSON. Paged verbose reads fail before fetch unless
+  `limit` is explicitly 1–10.
 
   - On failure, the tool surfaces `{ error, code }` as one readable line
   including the HTTP status.
