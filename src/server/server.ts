@@ -524,7 +524,8 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
+import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
@@ -9925,6 +9926,25 @@ async function handleApiRoute(
 
 	// ── AI Gateway ──
 
+	/**
+	 * Complete the observable side effects of an already-committed AIGW models
+	 * publication. Cache invalidation and client notification are independent of
+	 * Docker remount recovery: a remount failure must not make the durable config
+	 * mutation look rolled back or leave the UI/caches on the previous models.
+	 */
+	async function finalizeAigwPublication(): Promise<{ remountPending: boolean }> {
+		invalidateModelCache();
+		sessionManager.invalidateAigwModelCache();
+		broadcastPreferencesChanged();
+		try {
+			await sandboxManager?.refreshAgentModelMounts();
+			return { remountPending: false };
+		} catch (error: any) {
+			console.error("[aigw] Models/configuration committed; sandbox remount is pending normal recovery:", error?.message || error);
+			return { remountPending: true };
+		}
+	}
+
 	// GET /api/aigw/status — check if aigw is configured
 	if (url.pathname === "/api/aigw/status" && req.method === "GET") {
 		const aigwUrl = getAigwUrl(preferencesStore);
@@ -9951,9 +9971,8 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(body.url, preferencesStore);
-			invalidateModelCache();
-			broadcastPreferencesChanged();
-			json({ ok: true, models });
+			const remount = await finalizeAigwPublication();
+			json({ ok: true, models, ...(remount.remountPending ? { remountPending: true } : {}) });
 		} catch (err: any) {
 			jsonError(502, err, { error: `Failed to configure AI Gateway: ${err.message}` });
 		}
@@ -9963,9 +9982,8 @@ async function handleApiRoute(
 	// DELETE /api/aigw/configure — remove aigw config
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
 		removeAigw(preferencesStore);
-		invalidateModelCache();
-		broadcastPreferencesChanged();
-		json({ ok: true });
+		const remount = await finalizeAigwPublication();
+		json({ ok: true, ...(remount.remountPending ? { remountPending: true } : {}) });
 		return;
 	}
 
@@ -9994,9 +10012,8 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(aigwUrl, preferencesStore);
-			invalidateModelCache();
-			broadcastPreferencesChanged();
-			json({ models });
+			const remount = await finalizeAigwPublication();
+			json({ models, ...(remount.remountPending ? { remountPending: true } : {}) });
 		} catch (err: any) {
 			jsonError(502, err);
 		}
@@ -10018,8 +10035,10 @@ async function handleApiRoute(
 			json({ ok: false, error: "Malformed pref — expected 'provider/modelId'" }, 400);
 			return;
 		}
-		const provider = pref.slice(0, slash);
-		const modelId = pref.slice(slash + 1);
+		const normalizedPref = normalizeAigwModelString(pref);
+		const normalizedSlash = normalizedPref.indexOf("/");
+		const provider = normalizedPref.slice(0, normalizedSlash);
+		const modelId = normalizedPref.slice(normalizedSlash + 1);
 		try {
 			const models = await getAvailableModels(preferencesStore);
 			const resolved = models.find((m) => m.provider === provider && m.id === modelId);
@@ -10041,57 +10060,58 @@ async function handleApiRoute(
 				return;
 			}
 			const baseUrl = aigwUrl.replace(/\/+$/, "");
-			const chatUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
-
-			// The aigw registry strips the provider prefix (e.g. "aws/") from Claude
-			// model IDs; reconstruct the full ID by querying the gateway's /v1/models.
-			let sendId = modelId;
-			try {
-				const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-				const r = await fetchImpl(modelsUrl, { signal: AbortSignal.timeout(5000) });
-				if (r.ok) {
-					const data = await r.json() as { data?: Array<{ id: string }> };
-					if (Array.isArray(data.data)) {
-						const exact = data.data.find((m) => m.id === modelId);
-						if (exact) sendId = exact.id;
-						else {
-							const match = data.data.find((m) => {
-								const idx = m.id.indexOf("/");
-								return idx >= 0 && m.id.slice(idx + 1) === modelId;
-							});
-							if (match) sendId = match.id;
-						}
-					}
-				}
-			} catch {
-				/* keep sendId = modelId — gateway will reject if wrong */
+			const modelBaseUrl = (resolved.baseUrl || baseUrl).replace(/\/+$/, "");
+			if (resolved.api !== "openai-responses" && resolved.api !== "openai-completions") {
+				// Converse and future provider-native APIs must be exercised through
+				// pi-ai; never relabel them as a root chat-completions request.
+				const result = await testModelPreference(preferencesStore, normalizedPref);
+				json(result, result.status || (result.ok ? 200 : 502));
+				return;
 			}
 			const started = Date.now();
 			try {
-				const resp = await fetchImpl(chatUrl, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({
-						model: sendId,
-						max_tokens: 5,
-						messages: [
-							{ role: "user", content: "Reply with OK" },
-						],
-					}),
-					signal: AbortSignal.timeout(15000),
-				});
+				let resp: Response;
+				let modelResolved = modelId;
+				if (resolved.api === "openai-responses") {
+					// Well-known AIGW entries may expose multiple OpenAI-compatible
+					// providers for the same model family (e.g. /openai/v1 and
+					// /aws/openai/v1). Probe the model's authoritative per-provider
+					// Responses endpoint instead of the multiplexed /v1/chat/completions
+					// root; otherwise models like openai.gpt-5.5 falsely fail the flask.
+					resp = await fetchImpl(`${modelBaseUrl}/responses`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders() },
+						body: JSON.stringify({
+							model: modelId,
+							max_output_tokens: 16,
+							input: "Reply with OK",
+						}),
+						signal: AbortSignal.timeout(15000),
+					});
+				} else {
+					resp = await fetchImpl(`${modelBaseUrl}/chat/completions`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders() },
+						body: JSON.stringify({
+							model: modelId,
+							max_tokens: 16,
+							messages: [{ role: "user", content: "Reply with OK" }],
+						}),
+						signal: AbortSignal.timeout(15000),
+					});
+				}
 				const latencyMs = Date.now() - started;
 				if (!resp.ok) {
 					const errText = (await resp.text().catch(() => "")).slice(0, 300);
-					json({ ok: false, modelResolved: sendId, latencyMs, error: `Gateway ${resp.status}: ${errText || resp.statusText}` });
+					json({ ok: false, modelResolved, latencyMs, error: `Gateway ${resp.status}: ${errText || resp.statusText}` });
 					return;
 				}
 				// Best-effort parse; we don't require specific text content—just a successful round-trip.
 				await resp.json().catch(() => ({}));
-				json({ ok: true, modelResolved: sendId, latencyMs });
+				json({ ok: true, modelResolved, latencyMs });
 			} catch (err: any) {
 				const latencyMs = Date.now() - started;
-				json({ ok: false, modelResolved: sendId, latencyMs, error: err?.message || "Request failed" });
+				json({ ok: false, modelResolved: modelId, latencyMs, error: err?.message || "Request failed" });
 			}
 		} catch (err: any) {
 			jsonError(500, err, { ok: false, error: err?.message || "Test failed" });

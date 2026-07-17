@@ -133,6 +133,7 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 |---|---|
 | [Getting Started](docs/getting-started.md) | First session walkthrough and key concepts |
 | [Features](docs/features.md) | Detailed feature reference |
+| [AI Gateway Routing](docs/ai-gateway-routing.md) | Gateway setup, model discovery, provider routes, and operations |
 | [Headquarters](docs/headquarters.md) | Built-in server/default workspace |
 | [Support Assistant](docs/support-assistant.md) | Built-in HQ agent that answers Bobbit questions and applies changes |
 | [Architecture](docs/architecture.md) | System design, layers, and dependencies |

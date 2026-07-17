@@ -1,14 +1,15 @@
 /**
- * E2E tests for sandbox container resilience — process_exit event handling.
- *
- * Tests:
- * 1. `process_exit` event transitions session to `terminated` (no Docker needed)
- *
- * Docker-dependent tests (container health monitor, session recovery, worktree
- * branches) have been moved to sandbox-recovery-docker.spec.ts and run via
- * `npm run test:manual` instead.
+ * E2E tests for sandbox container resilience — process_exit event handling
+ * plus the narrow live-Docker models.json inode-remount contract.
  */
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test, expect } from "./in-process-harness.js";
+import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
+import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
+import { isDockerAvailable } from "./test-utils/docker.js";
 import {
 	apiFetch,
 	nonGitCwd,
@@ -18,7 +19,67 @@ import {
 } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------
-// Test 1: process_exit event handling (no Docker required)
+// Live Docker inode-remount contract. The v2 E2E runner reports this file as
+// Docker-gated, while this case self-skips only when no usable daemon is
+// reachable. With Docker available, every container and remount assertion runs.
+// ---------------------------------------------------------------------------
+
+test.describe("atomic models.json bind mount", () => {
+	test("ProjectSandbox recreation remounts the atomically published inode", async () => {
+		test.skip(!isDockerAvailable(), "Docker not available");
+		test.setTimeout(60_000);
+		const root = mkdtempSync(path.join(tmpdir(), "bobbit-model-remount-"));
+		const modelsJson = path.join(root, "models.json");
+		const replacement = path.join(root, "models.next.json");
+		const prefix = `bobbit-remount-${process.pid}-${Date.now()}`;
+		let activeName = `${prefix}-0`;
+		let activeId = "";
+		const createContainer = (name: string): string => execFileSync("docker", [
+			"run", "-d", "--name", name,
+			"-v", `${toDockerPath(modelsJson)}:/tmp/models.json:ro`,
+			"bobbit-agent", "sh", "-c", "while true; do sleep 3600; done",
+		], { encoding: "utf-8", timeout: 30_000 }).trim();
+		const readMounted = (containerId: string): string => execFileSync(
+			"docker", ["exec", containerId, "cat", "/tmp/models.json"],
+			{ encoding: "utf-8", timeout: 10_000 },
+		).trim();
+		try {
+			writeFileSync(modelsJson, '{"generation":0}\n');
+			activeId = createContainer(activeName);
+			expect(readMounted(activeId)).toBe('{"generation":0}');
+
+			writeFileSync(replacement, '{"generation":1}\n');
+			renameSync(replacement, modelsJson);
+			// Docker still exposes the old bound inode until recreation.
+			expect(readMounted(activeId)).toBe('{"generation":0}');
+
+			const sandbox = new ProjectSandbox({
+				projectId: `${prefix}-project`,
+				projectDir: root,
+				repoUrl: "https://example.test/repo.git",
+				image: "bobbit-agent",
+			});
+			(sandbox as any).containerId = activeId;
+			(sandbox as any)._status = "ready";
+			(sandbox as any)._initContainer = async () => {
+				activeName = `${prefix}-1`;
+				activeId = createContainer(activeName);
+				(sandbox as any).containerId = activeId;
+			};
+
+			await sandbox.refreshAgentModelMount();
+			expect(readMounted(await sandbox.getContainerId())).toBe('{"generation":1}');
+		} finally {
+			for (const suffix of ["0", "1"]) {
+				try { execFileSync("docker", ["rm", "-f", `${prefix}-${suffix}`], { stdio: "ignore", timeout: 10_000 }); } catch { /* best effort */ }
+			}
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// process_exit event handling (no Docker needed)
 // ---------------------------------------------------------------------------
 
 test.describe("process_exit event handling", () => {

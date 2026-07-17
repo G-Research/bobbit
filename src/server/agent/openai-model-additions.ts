@@ -9,7 +9,7 @@ import type { ApiModel } from "./model-registry.js";
 // `authenticated` is resolved at registry-merge time; `sessionSelectable` /
 // `sessionUnavailableReason` only apply to runtime-gated providers (e.g. Google
 // Code Assist) and are never carried by an OpenAI addition.
-type OpenAIAddition = Omit<ApiModel, "authenticated" | "sessionSelectable" | "sessionUnavailableReason">;
+type OpenAIAddition = Omit<ApiModel, "authenticated" | "sessionSelectable" | "sessionUnavailableReason" | "upstreamProvider">;
 
 /**
  * ── OpenAI / OpenAI-Codex model additions ─────────────────────────

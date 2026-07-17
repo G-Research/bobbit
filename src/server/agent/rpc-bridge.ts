@@ -1062,6 +1062,7 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		// sandboxed agents can load remapped --extension paths.
 		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
 		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
+		{ containerPrefix: "/bobbit-state/aigw-dns-guard", hostPath: path.join(stateDir, "aigw-dns-guard") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];
 

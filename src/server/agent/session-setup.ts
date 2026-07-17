@@ -46,6 +46,7 @@ import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExten
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
+import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
@@ -995,6 +996,11 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	const codeAssistPath = writeGoogleCodeAssistProviderExtension(plan.id);
 	if (codeAssistPath) {
 		plan.bridgeOptions.args.push("--extension", codeAssistPath);
+	}
+
+	const aigwDnsGuardPath = writeAigwDnsGuardExtension();
+	if (aigwDnsGuardPath) {
+		plan.bridgeOptions.args.push("--extension", aigwDnsGuardPath);
 	}
 }
 

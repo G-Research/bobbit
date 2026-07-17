@@ -135,8 +135,11 @@ describe("OpenRouter/AIGW GLM 5.x thinking clamp", () => {
 			invalidateModelCache();
 
 			const models = await getAvailableModels(prefs);
-			const luna = models.find((m: any) => m.provider === "aigw" && m.id === "openai/gpt-5.6-luna");
-			assert.ok(luna, "expected openai/gpt-5.6-luna in model registry output");
+			// Option-1 fallback routes reasoning OpenAI ids to openai-responses with a bare
+			// wire id (no `openai/` prefix), so the registry id is now bare `gpt-5.6-luna`.
+			const luna = models.find((m: any) => m.provider === "aigw" && m.id === "gpt-5.6-luna");
+			assert.ok(luna, "expected gpt-5.6-luna in model registry output");
+			assert.equal(luna.api, "openai-responses");
 			assert.equal(luna.reasoning, true);
 			assert.equal(luna.thinkingLevelMap?.xhigh, "xhigh");
 			assert.equal(luna.thinkingLevelMap?.max, "max");
