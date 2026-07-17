@@ -442,9 +442,9 @@ turning any of them into a publication decision.
 
 In `GitStatusWidget`:
 - When `partial === true`: render the pill with a faint yellow dot (distinct from the blue refresh dot) next to the branch. Tooltip "Status scan timed out — showing partial data." Dropdown shows branch/ahead/behind fields but hides the file list with a "Re-scan" button that triggers an `?untracked=1` refetch.
-- For a non-primary work branch, show that remote publication is manual and keep the explicit **Push** control available. Missing upstream/base-ref state does not imply a failed or pending automatic publication.
+- For a non-primary work branch, omit remote-publication copy and controls from the status dropdown.
 
-Add `@property({ type: Boolean }) partial = false;` to `GitStatusWidget` and wire it from `AgentInterface.ts`. Publication copy is derived from the general local-only lifecycle, not from a status response field.
+Add `@property({ type: Boolean }) partial = false;` to `GitStatusWidget` and wire it from `AgentInterface.ts`.
 
 ---
 
@@ -461,7 +461,7 @@ Playwright file:// fixture rendering the widget.
 | Normal state | `loading=false`, `branch="foo"` | No dot, normal rendering |
 | Hidden when no data + not loading | `loading=false`, no branch | `render()` returns `nothing` |
 | Partial flag renders warning | `partial=true`, `branch="foo"` | Warning dot present, dropdown on open shows "Re-scan" button |
-| Manual publication hint | Non-primary `branch="foo"` with or without upstream | Dropdown explains remote publication is manual and offers explicit Push |
+| Hidden publication controls | Non-primary `branch="foo"` with or without upstream | Dropdown omits remote-publication copy and Push control |
 
 ### 8.2 Unit — `tests/git-status-refresh.spec.ts` (new)
 
