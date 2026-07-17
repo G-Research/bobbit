@@ -66,7 +66,11 @@ beforeEach(() => {
 		if (/\/gates\/[^/]+\/signals/.test(textUrl)) {
 			const gateId = decodeURIComponent(textUrl.match(/\/gates\/([^/]+)\/signals/)?.[1] || "");
 			if (signalFetchOverride) return signalFetchOverride(gateId);
-			return jsonResponse({ signals: signalsByGate.get(gateId) || [] });
+			return jsonResponse({
+				signals: signalsByGate.get(gateId) || [],
+				goalTitle: "Server Goal Title",
+				gateName: "Server Gate Name",
+			});
 		}
 		if (textUrl.endsWith("/verifications/active")) return jsonResponse({ verifications: activeVerifications });
 		if (textUrl.endsWith("/gates")) return jsonResponse({ gates: gateRows });

@@ -404,8 +404,9 @@ test.describe("Journey: gate-card sign-off review handoff", () => {
 		let sessionId = "";
 		try {
 			await createSignoffWorkflow(id, projectId as string);
+			const goalTitle = `Gate Card Sign-off ${Date.now()}`;
 			const goal = await createGoal({
-				title: `Gate Card Sign-off ${Date.now()}`,
+				title: goalTitle,
 				workflowId: id,
 				projectId,
 			});
@@ -437,7 +438,7 @@ test.describe("Journey: gate-card sign-off review handoff", () => {
 			await expect(launcher).toBeVisible({ timeout: 15_000 });
 			await launcher.click();
 
-			const expectedTitle = `Sign-off: ${goalId} / ${GATE_ID} / ${STEP_LABEL}`;
+			const expectedTitle = `Sign-off: ${goalTitle} / ${GATE_NAME} / ${STEP_LABEL}`;
 			const reviewTab = page.locator(".goal-tab-pill[data-panel-tab-kind='review']").filter({ hasText: expectedTitle });
 			await expect(reviewTab, "Start Review should open the matching sign-off document tab").toBeVisible({ timeout: 20_000 });
 			const reviewPane = page.locator("review-pane");

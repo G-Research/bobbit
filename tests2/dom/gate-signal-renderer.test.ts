@@ -197,6 +197,8 @@ describe("GateSignalRenderer", () => {
 
 			fetchMock.mockImplementationOnce(async () => jsonResponse({
 				signals: [{ id: "signal-live", content: "## Release\n\nPlease verify this exact submission." }],
+				goalTitle: "Release Goal",
+				gateName: "Human Approval",
 			}));
 			(launcher.querySelector("button") as HTMLButtonElement).click();
 			for (let i = 0; i < 10 && openEvents.length === 0; i++) {
@@ -204,7 +206,7 @@ describe("GateSignalRenderer", () => {
 				await launcher.updateComplete;
 			}
 			expect(openEvents).toEqual([{
-				title: "Sign-off: goal-live / human-approval / Approve release",
+				title: "Sign-off: Release Goal / Human Approval / Approve release",
 				markdown: "## Release\n\nPlease verify this exact submission.",
 				source: {
 					kind: "verification-signoff-markdown",
@@ -212,10 +214,39 @@ describe("GateSignalRenderer", () => {
 					gateId: "human-approval",
 					signalId: "signal-live",
 					stepName: "approve-release",
+					goalTitle: "Release Goal",
+					gateName: "Human Approval",
 					stepLabel: "Approve release",
 				},
 			}]);
 			expect(launcher.querySelector('[role="alert"]')).toBeNull();
+		} finally {
+			window.removeEventListener("bobbit-open-review-document", onOpen);
+		}
+	});
+
+	it("keeps identifier title fallbacks when signal history omits display metadata", async () => {
+		vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+			signals: [{ id: "signal-live", content: "Review this" }],
+		})));
+		const openEvents: any[] = [];
+		const onOpen = (event: Event) => openEvents.push((event as CustomEvent).detail);
+		window.addEventListener("bobbit-open-review-document", onOpen);
+
+		try {
+			const { live } = await renderSignal({ gate_id: "human-approval" }, {
+				signal: {
+					id: "signal-live", goalId: "goal-live", status: "running",
+					steps: [{ name: "approve-release", type: "human-signoff", status: "running", awaitingHuman: true }],
+				},
+			});
+			await settleLive(live);
+			(live.querySelector("signoff-review-launcher button") as HTMLButtonElement).click();
+			for (let i = 0; i < 10 && openEvents.length === 0; i++) await Promise.resolve();
+
+			expect(openEvents[0].title).toBe("Sign-off: goal-live / human-approval / approve-release");
+			expect(openEvents[0].source).not.toHaveProperty("goalTitle");
+			expect(openEvents[0].source).not.toHaveProperty("gateName");
 		} finally {
 			window.removeEventListener("bobbit-open-review-document", onOpen);
 		}

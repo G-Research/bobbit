@@ -11135,7 +11135,13 @@ async function handleApiRoute(
 		const gateStore = gateSignalsCtx.gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
-		json({ signals: gate.signals });
+		const goal = gateSignalsCtx.goalStore.get(goalId);
+		const gateName = goal?.workflow?.gates.find(def => def.id === gateId)?.name;
+		json({
+			signals: gate.signals,
+			...(goal?.title ? { goalTitle: goal.title } : {}),
+			...(gateName ? { gateName } : {}),
+		});
 		return;
 	}
 
