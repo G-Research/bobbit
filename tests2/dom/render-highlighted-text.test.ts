@@ -21,7 +21,7 @@ describe("getProjectAccentColor", () => {
 		document.documentElement.classList.remove("dark");
 		expect(getProjectAccentColor(headquarters)).toBe(HEADQUARTERS_ACCENT_COLOR);
 		document.documentElement.classList.add("dark");
-		expect(getProjectAccentColor(headquarters)).toBe("color-mix(in oklch, var(--foreground) 75%, var(--muted-foreground))");
+		expect(getProjectAccentColor(headquarters)).toBe(HEADQUARTERS_ACCENT_COLOR);
 		document.documentElement.classList.remove("dark");
 	});
 });
