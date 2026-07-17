@@ -2,7 +2,7 @@
 
 The review pane is Bobbit's shared human decision surface for markdown reviews and gate sign-offs. It lets reviewers read the submitted content at full pane size, add inline annotations, add a final decision note, and then approve or reject from one consistent action bar.
 
-This keeps compact surfaces, such as the goal status widget, focused on alerting and handoff instead of duplicating markdown rendering or decision validation.
+This keeps compact surfaces, including the goal status widget and gate tool cards, focused on alerting and handoff instead of duplicating submitted-content rendering or decision validation.
 
 ## Launch sources
 
@@ -53,19 +53,63 @@ type ReviewDecisionPayload = {
 
 The `feedback` field is a human-readable fallback for the agent-chat path. Verification sign-off submissions compose `finalComment` and `inlineComments` into markdown feedback and send it as the sign-off endpoint's `feedback` value when any feedback exists.
 
-## Goal status widget handoff
+## Pending sign-off launchers
 
-The goal status widget is only the launcher for pending sign-off content.
+Pending sign-off launchers are notifications and handoffs, not alternate review surfaces. They all use the same launch helper and review-document event so content lookup, titles, fallbacks, and decision routing cannot drift between UI locations.
 
-When a `human-signoff` verification step is awaiting input, the widget shows an awaiting indicator and an **Awaiting sign-off** card. The card's **View content** action:
+### Eligibility
 
-1. Fetches the gate's signal history and finds the pending `signalId`.
-2. Opens or focuses a review-pane document with `source.kind: "verification-signoff-markdown"`.
-3. Titles the tab as `Sign-off: <goal> / <gate> / <step label-or-name>`, adding a signal suffix only when repeated titles need disambiguation.
-4. Closes the popover after a successful handoff.
-5. Shows a compact row-level error if the signal content cannot be loaded.
+`awaitingHuman: true` on the authoritative active step is the actionability marker. A launcher must not infer eligibility from a `human-signoff` type, a `running` status, prompt or label metadata, status text, or verification output.
 
-The widget must not expand or render the submitted markdown inline. That constraint avoids a cramped reader, duplicated approve/reject flows, and validation drift between the widget and review pane.
+This strict rule excludes:
+
+- a `human-signoff` step queued for a later phase;
+- a completed or cancelled step;
+- a stale verification;
+- a historical signal that is no longer awaiting input; and
+- persisted output that merely describes a past sign-off.
+
+The active `gate_inspect(section="verification")` snapshot applies `awaitingHuman`, `humanLabel`, and `humanPrompt` as an active-state overlay only when the current verification and exact live `human-signoff` step are both running and the step is parked for human input. Inactive and historical snapshots omit the marker, so their cards are not actionable.
+
+### Supported surfaces
+
+| Surface | Launcher behavior |
+|---|---|
+| Goal status widget | Shows the pending label and substituted prompt in an **Awaiting sign-off** card. **Start Review** launches the submitted content and closes the widget popover after a successful handoff. |
+| Live `gate_signal` card | `GateVerificationLive` adds **Start Review** to the exact active step. It reacts to `gate_verification_awaiting_human`, removes the action on step/sign-off/verification completion, and reconciles with REST so dropped events do not require a reload. |
+| Shared `gate_status` card | Uses the same `GateVerificationLive` component for its latest active verification, so it follows the same event and reconciliation lifecycle as `gate_signal`. |
+| Active `gate_inspect(section="verification")` card | Shows **Start Review** only when the server snapshot carries the active step's explicit `awaitingHuman: true` marker. Inspecting an older signal does not revive its action. |
+
+### Shared handoff contract
+
+On **Start Review**, the shared launcher:
+
+1. Disables the button, marks it busy, and changes its label to **Opening…**.
+2. Fetches `/api/goals/:goalId/gates/:gateId/signals` and selects the signal whose `id` exactly matches `signalId`.
+3. Uses the signal's submitted `content` as the review markdown. Missing or whitespace-only content becomes `No content was attached to this sign-off signal.`
+4. Builds `Sign-off: <goal> / <gate> / <step>` from human-readable goal, gate, and step metadata when available, falling back to their identifiers. The goal widget adds the first eight characters of the signal id only when otherwise-identical pending titles need disambiguation.
+5. Dispatches `bobbit-open-review-document` with the title, markdown, and this source:
+
+   ```ts
+   {
+     kind: "verification-signoff-markdown",
+     goalId,
+     gateId,
+     signalId,
+     stepName,
+     goalTitle?,
+     gateName?,
+     stepLabel?,
+   }
+   ```
+
+The shared event handler opens or focuses the matching review document and selects the review workspace. Keeping all four launch sources on this event contract ensures approve/reject decisions retain the exact goal, gate, signal, and step routing identifiers.
+
+If the request fails or the matching signal no longer exists, the launcher re-enables **Start Review** and shows `Couldn’t open review. Try again.` beside the action. A completion event received during loading also clears the loading/error state and removes the resolved launcher.
+
+### Launcher-only constraint
+
+Gate tool cards do not render the submitted sign-off markdown, substituted prompt, annotations, or approve/reject controls inline. Existing verification-output displays are separate from the pending sign-off reader. The goal status widget may show the short sign-off prompt for context, but it also leaves submitted content and all decisions to the review pane. This keeps compact cards readable and leaves sanitization, comments, validation, and submission in one authoritative surface.
 
 ## Decision controls and validation
 
