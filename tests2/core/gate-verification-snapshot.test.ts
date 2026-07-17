@@ -91,6 +91,48 @@ function lines(prefix: string, count: number): string {
 	return Array.from({ length: count }, (_, i) => `${prefix}-${i + 1}`).join("\n");
 }
 
+function makeSignoffSnapshotInput(): Parameters<typeof buildGateVerificationSnapshot>[0] {
+	return {
+		goalId: "goal-1",
+		gateId: "gate-1",
+		signalId: "signal-1",
+		verification: {
+			status: "running",
+			steps: [{
+				name: "approve-design",
+				type: "human-signoff",
+				status: "running",
+				passed: false,
+				output: "Awaiting human approval",
+				duration_ms: 0,
+			}],
+		},
+		activeVerification: {
+			goalId: "goal-1",
+			gateId: "gate-1",
+			signalId: "signal-1",
+			overallStatus: "running",
+			startedAt: 1,
+			steps: [{
+				name: "approve-design",
+				type: "human-signoff",
+				status: "running",
+				startedAt: 1,
+				awaitingHuman: true,
+				humanLabel: "Approve design",
+				humanPrompt: "Review **this design**.",
+			}],
+		},
+		now: 100,
+	};
+}
+
+function assertSignoffMetadataOmitted(step: ReturnType<typeof buildGateVerificationSnapshot>["steps"][number]): void {
+	assert.equal("awaitingHuman" in step, false);
+	assert.equal("humanLabel" in step, false);
+	assert.equal("humanPrompt" in step, false);
+}
+
 function makeMultiStepSnapshot(stepName?: string, selectionOptions?: Parameters<typeof buildGateVerificationSnapshot>[0]["selectionOptions"]) {
 	return buildGateVerificationSnapshot({
 		goalId: "goal-1",
@@ -183,6 +225,103 @@ function makeArtifactDiagnosticsSnapshot(input: {
 		now: 100,
 	});
 }
+
+describe("gate verification active human-signoff projection", () => {
+	it("projects the marker, label, and substituted prompt for the exact parked human-signoff step", () => {
+		const snapshot = buildGateVerificationSnapshot(makeSignoffSnapshotInput());
+
+		assert.equal(snapshot.active, true);
+		assert.deepEqual(
+			{
+				awaitingHuman: snapshot.steps[0].awaitingHuman,
+				humanLabel: snapshot.steps[0].humanLabel,
+				humanPrompt: snapshot.steps[0].humanPrompt,
+			},
+			{
+				awaitingHuman: true,
+				humanLabel: "Approve design",
+				humanPrompt: "Review **this design**.",
+			},
+		);
+	});
+
+	it("requires the active verification identity to match goal, gate, and signal", () => {
+		for (const mismatch of ["goal", "gate", "signal"] as const) {
+			const input = makeSignoffSnapshotInput();
+			if (mismatch === "goal") input.goalId = "other-goal";
+			if (mismatch === "gate") input.gateId = "other-gate";
+			if (mismatch === "signal") input.signalId = "historical-signal";
+
+			const snapshot = buildGateVerificationSnapshot(input);
+			assert.equal(snapshot.active, false, `${mismatch} mismatch must not be active`);
+			assertSignoffMetadataOmitted(snapshot.steps[0]);
+		}
+	});
+
+	it("omits actionability unless both rows describe a currently running parked human-signoff", () => {
+		const cases: Array<{
+			name: string;
+			mutate: (input: ReturnType<typeof makeSignoffSnapshotInput>) => void;
+		}> = [
+			{
+				name: "persisted row is not human-signoff",
+				mutate: input => { input.verification!.steps[0].type = "command"; },
+			},
+			{
+				name: "active row is not human-signoff",
+				mutate: input => { input.activeVerification!.steps[0].type = "command"; },
+			},
+			{
+				name: "active row is queued",
+				mutate: input => { input.activeVerification!.steps[0].status = "waiting"; },
+			},
+			{
+				name: "active row is completed",
+				mutate: input => { input.activeVerification!.steps[0].status = "passed"; },
+			},
+			{
+				name: "verification is completed",
+				mutate: input => { input.activeVerification!.overallStatus = "passed"; },
+			},
+			{
+				name: "authoritative marker is false",
+				mutate: input => { input.activeVerification!.steps[0].awaitingHuman = false; },
+			},
+		];
+
+		for (const testCase of cases) {
+			const input = makeSignoffSnapshotInput();
+			testCase.mutate(input);
+			const step = buildGateVerificationSnapshot(input).steps[0];
+			assertSignoffMetadataOmitted(step);
+		}
+	});
+
+	it("does not trust persisted markers or awaiting prose without a matching active overlay", () => {
+		const input = makeSignoffSnapshotInput();
+		input.activeVerification = undefined;
+		Object.assign(input.verification!.steps[0], {
+			awaitingHuman: true,
+			humanLabel: "Persisted label must not leak",
+			humanPrompt: "Persisted prompt must not leak",
+			output: "Awaiting human approval — Start Review now",
+		});
+
+		const snapshot = buildGateVerificationSnapshot(input);
+		assert.equal(snapshot.active, false);
+		assertSignoffMetadataOmitted(snapshot.steps[0]);
+	});
+
+	it("omits actionability when a matching active entry is stale", () => {
+		const input = makeSignoffSnapshotInput();
+		input.isActiveVerificationAlive = false;
+
+		const snapshot = buildGateVerificationSnapshot(input);
+		assert.equal(snapshot.active, false);
+		assert.equal(snapshot.stale, true);
+		assertSignoffMetadataOmitted(snapshot.steps[0]);
+	});
+});
 
 describe("gate verification per-step (stepName) filter", () => {
 	it("returns the full step array when stepName is omitted", () => {
