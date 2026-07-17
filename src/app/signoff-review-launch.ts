@@ -60,8 +60,15 @@ export async function launchSignoffReview(target: SignoffReviewTarget): Promise<
 	}) as Record<string, unknown> | undefined;
 	if (!signal) throw new Error("Signal content is no longer available");
 
+	// Gate-card targets carry only stable identifiers. Prefer any display names
+	// explicitly supplied by richer launchers, then use the endpoint metadata.
+	const goalTitle = target.goalTitle
+		?? (typeof data?.goalTitle === "string" && data.goalTitle ? data.goalTitle : undefined);
+	const gateName = target.gateName
+		?? (typeof data?.gateName === "string" && data.gateName ? data.gateName : undefined);
+	const resolvedTarget = { ...target, goalTitle, gateName };
 	const detail: SignoffReviewEventDetail = {
-		title: signoffReviewTitle(target),
+		title: signoffReviewTitle(resolvedTarget),
 		markdown: typeof signal.content === "string" && signal.content.trim()
 			? signal.content
 			: EMPTY_SIGNOFF_CONTENT,
@@ -71,8 +78,8 @@ export async function launchSignoffReview(target: SignoffReviewTarget): Promise<
 			gateId: target.gateId,
 			signalId: target.signalId,
 			stepName: target.stepName,
-			...(target.goalTitle ? { goalTitle: target.goalTitle } : {}),
-			...(target.gateName ? { gateName: target.gateName } : {}),
+			...(goalTitle ? { goalTitle } : {}),
+			...(gateName ? { gateName } : {}),
 			...(target.stepLabel ? { stepLabel: target.stepLabel } : {}),
 		},
 	};
