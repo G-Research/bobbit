@@ -633,6 +633,15 @@
       }
     },
     {
+      "path": "tests2/core/release-skill-preflight-order.test.ts",
+      "reason": "Pins the clean-release pre-flight order so the build emits dist/server declarations before tsconfig.tests2 follows intentional runtime imports of those artifacts.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/pwtest-cache-publish.test.ts",
       "reason": "Pins the persistent Playwright transform-cache seed/publish helpers: seed copies the latest snapshot without clobbering run-dir files and tolerates a missing latest; publish atomically replaces latest from a non-empty run dir and a concurrent-publish loser cleans its tmp dir; the env-gated wrapper honours OWNED gating, the v2 namespace guard, and KEEP=1 not suppressing publish.",
       "execution": {

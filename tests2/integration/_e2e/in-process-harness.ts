@@ -14,14 +14,9 @@
  *
  * This keeps the shared fork clean (R2 mitigation) without editing spec bodies.
  */
-// The fork gateway freezes `skipLlmReview` at boot from process.env (server.ts
-// reads resolveLegacyTestRuntimeFlags() directly). Set it before the singleton
-// boot so llm-review / agent-qa / human-signoff verification steps auto-pass in
-// tier-1 (they have no reviewer sub-agent). NOTE: for full determinism the
-// gateway fixture itself should set this before boot — see the escalation note
-// in the migration report; this import-time set is a transitional belt.
-process.env.BOBBIT_LLM_REVIEW_SKIP ??= "1";
-process.env.BOBBIT_HUMAN_SIGNOFF_SKIP ??= "1";
+// The tier-1 setup file pins non-interactive verification flags before this
+// module graph loads. Do not move them back here: ESM dependencies evaluate
+// before module-body assignments and can boot the fork gateway first.
 
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
