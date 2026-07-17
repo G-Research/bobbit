@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
+import { GoalManager } from "../../src/server/agent/goal-manager.ts";
+import { GoalStore } from "../../src/server/agent/goal-store.ts";
 import { createWorktree, createWorktreeSet } from "../../src/server/skills/git.ts";
 import type { CommandRunner, ExecFileOptions } from "../../src/server/gateway-deps.ts";
 import { installMemoryFs } from "./helpers/memory-fs-spies.js";
@@ -80,6 +82,9 @@ function fakeGitRunner(
 			}
 
 			const repo = repoForCwd(cwd);
+			if (args[0] === "remote" && args[1] === "get-url") {
+				return { stdout: "https://example.invalid/repo.git\n", stderr: "" };
+			}
 			if (args[0] === "rev-parse" && args[1] === "--verify") {
 				if (args[2] === "HEAD") return { stdout: `${repo.localBranches.get("master")}\n`, stderr: "" };
 				const branch = String(args[2]).replace(/^refs\/heads\//, "");
@@ -184,6 +189,32 @@ describe("local-only host worktree primitives", () => {
 			assertBranchStayedLocal(state, branch);
 			assert.equal(state.repos.get(canonical(repo))?.upstreams.get(branch), "origin/master");
 			assert.ok(commandStrings(state).includes(`branch --set-upstream-to=origin/master ${branch}`));
+		});
+	});
+
+	it("GoalManager forwards remote policy so configured-base fetch is suppressed while local creation succeeds", async () => {
+		await withFakeRepo(async (root, repo) => {
+			const stateDir = path.join(root, "state");
+			memoryFs.mkdirSync(stateDir, { recursive: true });
+			const { state, runner } = fakeGitRunner([repo]);
+			const store = new GoalStore(stateDir);
+			const manager = new GoalManager(store, undefined, stateDir, {
+				commandRunner: runner,
+				remotePolicy: { skipNonLocalRemoteGit: true },
+			});
+			manager.setBaseRefResolver(() => "origin/master");
+
+			const goal = await manager.createGoal("Remote policy", repo, { projectId: "project" });
+			assert.equal(goal.setupStatus, "preparing");
+			await manager.setupWorktree(goal.id);
+
+			const commands = commandStrings(state);
+			assert.ok(commands.includes("remote get-url origin"), "remote policy should classify origin before fetching");
+			assert.ok(!commands.some(command => command.startsWith("fetch ")), `non-local configured-base fetch must be suppressed; commands:\n${commands.join("\n")}`);
+			assert.ok(commands.some(command => command.startsWith(`worktree add -b ${goal.branch} `) && command.endsWith(" origin/master")));
+			assert.equal(store.get(goal.id)?.setupStatus, "ready");
+			assert.equal(state.repos.get(canonical(repo))?.localBranches.has(goal.branch!), true);
+			assertBranchStayedLocal(state, goal.branch!);
 		});
 	});
 
