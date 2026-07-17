@@ -535,17 +535,15 @@ export async function resolveSandboxMountRoot(repoPath: string, commandRunner: C
 	}
 }
 
-export type WorktreePushPolicy = "local-only" | "publish";
-
 export interface CreateWorktreeOptions {
 	startPoint?: string;
 	worktreeRoot?: string;
 	configuredBaseRef?: string;
 	commandRunner?: CommandRunner;
 	remotePolicy?: RemoteGitPolicy;
-	/** Backward-compatible default for this low-level primitive: "publish". */
-	pushPolicy?: WorktreePushPolicy;
-	/** Deprecated compatibility shim; true maps to local-only. */
+	/** @deprecated Ignored. Worktree creation is always local-only. */
+	pushPolicy?: "local-only" | "publish";
+	/** @deprecated Ignored. Worktree creation is always local-only. */
 	skipPush?: boolean;
 }
 
@@ -554,7 +552,9 @@ export interface CreateWorktreeSetOptions {
 	configuredBaseRef?: string;
 	commandRunner?: CommandRunner;
 	remotePolicy?: RemoteGitPolicy;
-	pushPolicy?: WorktreePushPolicy;
+	/** @deprecated Ignored. Worktree creation is always local-only. */
+	pushPolicy?: "local-only" | "publish";
+	/** @deprecated Ignored. Worktree creation is always local-only. */
 	skipPush?: boolean;
 }
 
@@ -567,8 +567,8 @@ export interface WorktreeResult {
  * Create a git worktree on a new branch from a given start-point (default HEAD).
  * The worktree is placed as a sibling directory to the repo.
  *
- * Fully async — the `git worktree add` and `git push` are all awaited
- * without blocking the Node.js event loop.
+ * Fully async — git operations are awaited without blocking the Node.js event
+ * loop. Creation is local-only and never publishes the work branch.
  *
  * Per-component worktree setup is the responsibility of the caller —
  * invoke `runComponentSetups()` from `worktree-setup.ts` after this
@@ -582,9 +582,9 @@ export interface WorktreeResult {
  *   When `startPoint` is absent and this is non-empty, it drives both the
  *   worktree start-point and the branch upstream (via `--set-upstream-to`).
  *   Empty/undefined falls back to today's behavior (`resolveRemotePrimary`).
- *   Only fires `--set-upstream-to` when this is non-empty — explicit-startPoint
- *   callers (e.g. team-manager's hierarchical branching) keep today's
- *   `origin/<branch>` upstream semantics after a safe explicit-refspec publish.
+ *   Only fires `--set-upstream-to` when this is non-empty. Explicit-startPoint
+ *   callers (for example hierarchical local branching) do not gain an upstream
+ *   merely by creating a worktree.
  */
 export async function createWorktree(repoPath: string, branchName: string, opts?: CreateWorktreeOptions): Promise<WorktreeResult> {
 	const commandRunner = opts?.commandRunner ?? realCommandRunner;
@@ -699,35 +699,8 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 		}
 	}
 
-	// Push the new branch with an explicit destination refspec so inherited
-	// upstream config (for example origin/master) can never redirect the publish.
-	// Set upstream tracking only after that safe publish succeeds so git-status can
-	// report ahead/behind and `git rev-parse @{u}` doesn't emit "fatal: no upstream" errors.
-	const pushPolicy: WorktreePushPolicy = opts?.skipPush ? "local-only" : (opts?.pushPolicy ?? "publish");
-	const shouldPublish = pushPolicy === "publish" && !(await shouldSkipRemotePushForTests(worktreePath, "origin", commandRunner, remotePolicy));
-	if (shouldPublish) {
-		try {
-			await runGit(["push", "origin", `${branchName}:refs/heads/${branchName}`], {
-				cwd: worktreePath,
-				timeout: 30_000, // 30s max for push
-			});
-			await runGit(["fetch", "origin", `refs/heads/${branchName}:refs/remotes/origin/${branchName}`], {
-				cwd: worktreePath,
-				timeout: 15_000,
-			});
-			await runGit(["branch", `--set-upstream-to=origin/${branchName}`, branchName], {
-				cwd: worktreePath,
-				timeout: 10_000,
-			});
-		} catch {
-			// Push/upstream setup may fail (no remote, auth issues, offline) — not fatal
-		}
-	}
-
-	// When the project has a configured `base_ref`, override the per-branch
-	// upstream so `@{u}` (and the ahead/behind pair in git-status-native) points
-	// at the configured integration target rather than `origin/<branch>` created
-	// above. Runs whether the base is local (`master`) or
+	// A configured `base_ref` is a comparison/upstream baseline, not a request to
+	// publish the work branch. Runs whether the base is local (`master`) or
 	// remote (`origin/develop`) — save-time validation guarantees the ref
 	// resolves at PUT time; the defence-in-depth try/catch below catches the
 	// edge case where it has been deleted between save and worktree creation.
@@ -783,23 +756,18 @@ export async function createWorktreeSet(
 	const commandRunner = opts?.commandRunner ?? realCommandRunner;
 	const remotePolicy = opts?.remotePolicy ?? DEFAULT_REMOTE_GIT_POLICY;
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
-	const pushPolicy: WorktreePushPolicy = opts?.skipPush ? "local-only" : (opts?.pushPolicy ?? "local-only");
 
 	// Single-repo path collapses to existing behavior. `configuredBaseRef`
 	// flows through `createWorktree`, which handles start-point resolution and
 	// the `--set-upstream-to` post-step uniformly with the standalone caller.
 	if (repos.length === 1 && repos[0] === ".") {
-		const createOpts: CreateWorktreeOptions = {
+		const result = await createWorktree(rootPath, branchName, {
 			startPoint: baseBranch,
 			worktreeRoot: opts?.worktreeRoot,
 			configuredBaseRef: opts?.configuredBaseRef,
 			commandRunner,
 			remotePolicy,
-		};
-		if (opts?.pushPolicy) createOpts.pushPolicy = opts.pushPolicy;
-		if (opts?.skipPush !== undefined) createOpts.skipPush = opts.skipPush;
-		else if (!opts?.pushPolicy) createOpts.skipPush = true;
-		const result = await createWorktree(rootPath, branchName, createOpts);
+		});
 		return {
 			container: result.worktreePath,
 			worktrees: [{ repo: ".", repoPath: rootPath, worktreePath: result.worktreePath }],
@@ -892,26 +860,7 @@ export async function createWorktreeSet(
 			throw new Error(`createWorktreeSet: git worktree add failed for repo "${repo}" at ${wtPath}: ${err instanceof Error ? err.message : err}`);
 		}
 
-		if (pushPolicy === "publish" && !(await shouldSkipRemotePushForTests(wtPath, "origin", commandRunner, remotePolicy))) {
-			try {
-				await runGit(["push", "origin", `${branchName}:refs/heads/${branchName}`], {
-					cwd: wtPath,
-					timeout: 30_000,
-				});
-				await runGit(["fetch", "origin", `refs/heads/${branchName}:refs/remotes/origin/${branchName}`], {
-					cwd: wtPath,
-					timeout: 15_000,
-				});
-				await runGit(["branch", `--set-upstream-to=origin/${branchName}`, branchName], {
-					cwd: wtPath,
-					timeout: 10_000,
-				});
-			} catch {
-				// Push/upstream setup may fail (no remote, auth issues, offline) — not fatal.
-			}
-		}
-
-		// When the project has a configured `base_ref`, override per-branch
+		// When the project has a configured `base_ref`, set it as the per-branch
 		// upstream so each component's `@{u}` reflects the integration target.
 		// Single-repo path delegates to `createWorktree` above, which handles
 		// this; the multi-repo loop must do it explicitly per worktree.
