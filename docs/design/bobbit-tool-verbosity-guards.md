@@ -1,17 +1,17 @@
 # Design: Bobbit tool verbosity guards
 
-Status: **implementation-ready design**  
+Status: **implemented**
 Goal: **Bobbit Tool Verbosity Guards**
 
 ## 1. Problem and scope
 
-Agent-facing gateway tools can currently place much more data in model context than the caller needs. The largest risks are:
+Agent-facing gateway tools previously placed much more data in model context than the caller needed. The largest risks were:
 
 - `bobbit_read` returning full goal/session records, including frozen workflow snapshots and full goal specs;
 - `read_session` allowing `verbose: true` and `include_tool_results: true` over its normal 20-message default or larger windows; and
 - all three `bobbit_*` tools returning successful REST payloads verbatim, with no compact default.
 
-This change is an **agent-tool output policy**, not a REST API policy. Gateway REST responses and non-agent callers remain unchanged. The four affected tools are:
+The implemented change is an **agent-tool output policy**, not a REST API policy. Gateway REST responses and non-agent callers remain unchanged. The four affected tools are:
 
 - `bobbit_read`, `bobbit_orchestrate`, and `bobbit_admin` in `defaults/tools/bobbit/extension.ts`;
 - `read_session` in `defaults/tools/agent/extension.ts`.
