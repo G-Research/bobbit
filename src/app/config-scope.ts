@@ -6,7 +6,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { html, type TemplateResult } from "lit";
 import { state } from "./state.js";
 import { gatewayFetch } from "./api.js";
-import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
+import { HEADQUARTERS_ACCENT_COLOR, HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 
 export type ConfigOrigin = "builtin" | "server" | "user" | "project";
 
@@ -93,7 +93,7 @@ export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope
 					: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 				@click=${() => onScopeChange("system")}
 			>
-				<span data-testid="headquarters-icon" data-project-icon="headquarters" class="inline-flex items-center">${icon(projectIconComponent("headquarters"), "xs")}</span>
+				<span data-testid="headquarters-icon" data-project-icon="headquarters" class="inline-flex items-center" style="color:${HEADQUARTERS_ACCENT_COLOR};">${icon(projectIconComponent("headquarters"), "xs")}</span>
 				<span class="inline-flex flex-col items-start leading-tight">
 					<span>${HEADQUARTERS_PROJECT_NAME}</span>
 					<span class="text-[11px] text-muted-foreground">${HEADQUARTERS_HELPER_TEXT}</span>
@@ -104,7 +104,7 @@ export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope
 				const isDark = document.documentElement.classList.contains("dark");
 				const headquarters = isHeadquartersProject(project);
 				const color = headquarters
-					? "var(--primary)"
+					? HEADQUARTERS_ACCENT_COLOR
 					: isDark
 						? (project.colorDark || project.color || "var(--muted-foreground)")
 						: (project.colorLight || project.color || "var(--muted-foreground)");

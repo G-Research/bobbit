@@ -11,7 +11,20 @@ import {
 	splitByQuery,
 	filterArchivedGoalsByQuery,
 	filterArchivedSessionsByQuery,
+	getProjectAccentColor,
 } from "../../src/app/render-helpers.js";
+import { HEADQUARTERS_ACCENT_COLOR } from "../../src/app/headquarters.js";
+
+describe("getProjectAccentColor", () => {
+	it("keeps the Headquarters accent neutral and foreground-weighted in light and dark modes", () => {
+		const headquarters = { id: "headquarters", kind: "headquarters", color: "#ff00ff", colorLight: "#ff0000", colorDark: "#00ff00" } as any;
+		document.documentElement.classList.remove("dark");
+		expect(getProjectAccentColor(headquarters)).toBe(HEADQUARTERS_ACCENT_COLOR);
+		document.documentElement.classList.add("dark");
+		expect(getProjectAccentColor(headquarters)).toBe(HEADQUARTERS_ACCENT_COLOR);
+		document.documentElement.classList.remove("dark");
+	});
+});
 
 describe("splitByQuery", () => {
 	it("empty query returns the text as a single unmatched segment", () => {
