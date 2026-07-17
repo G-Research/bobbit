@@ -68,7 +68,7 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyDirRecursive, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
+import { ToolManager, copyToolGroupWithSharedDependencies, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
@@ -8601,12 +8601,11 @@ async function handleApiRoute(
 		}
 
 		const srcDir = path.join(actualSourceDir, groupDir);
-		const destDir = path.join(targetToolsDir, groupDir);
 
 		if (!fs.existsSync(srcDir)) { json({ error: "Source tool group not found" }, 404); return; }
 
-		// Copy entire group directory (recursively handles nested files)
-		copyDirRecursive(srcDir, destDir);
+		// Copy the whole group plus sibling modules imported through ../_shared/*.
+		copyToolGroupWithSharedDependencies(actualSourceDir, targetToolsDir, groupDir);
 
 		json({ ok: true, groupDir }, 201);
 		return;
