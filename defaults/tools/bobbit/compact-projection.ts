@@ -176,7 +176,6 @@ function sanitizeGeneric(value: unknown, field?: string): unknown {
 	const out: Record<string, unknown> = {};
 	for (const [key, child] of Object.entries(value)) {
 		if (UNIVERSAL_DROP_FIELDS.has(key) || isRedundantIdAlias(key, child, value)) continue;
-		if (key === "verify") continue;
 		if (key === "workflow" && isRecord(child) && looksGoalOrSessionShaped(value)) continue;
 		out[key] = sanitizeGeneric(child, key);
 	}

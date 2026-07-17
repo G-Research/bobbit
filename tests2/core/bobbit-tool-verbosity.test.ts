@@ -10,6 +10,7 @@ import {
 	BOBBIT_COMPACT_PROJECTIONS,
 	COMPACT_TEXT_PREVIEW_CHARS,
 	COMPACT_TRUNCATION_SUFFIX,
+	projectBobbitResponse,
 } from "../../defaults/tools/bobbit/compact-projection.ts";
 import {
 	CONTEXT_HEAVY_ERROR_CODE,
@@ -50,7 +51,10 @@ function longText(prefix: string): string {
 }
 
 function preview(value: string): string {
-	return `${value.slice(0, COMPACT_TEXT_PREVIEW_CHARS)}${COMPACT_TRUNCATION_SUFFIX}`;
+	const chars = Array.from(value);
+	return chars.length <= COMPACT_TEXT_PREVIEW_CHARS
+		? value
+		: `${chars.slice(0, COMPACT_TEXT_PREVIEW_CHARS).join("")}${COMPACT_TRUNCATION_SUFFIX}`;
 }
 
 describe("bobbit compact projections", () => {
@@ -407,6 +411,37 @@ describe("bobbit compact projections", () => {
 		// Error text is actionable and is therefore never truncated.
 		expect(data.error).toBe(longText("database unavailable: "));
 		expect(data.generation).toBeUndefined();
+	});
+
+	it("preserves legitimate generic verify data but omits verifier prompts from known profiles", () => {
+		const shortSummary = "✅ signature verified";
+		const nonBmpDetails = `${"🙂".repeat(COMPACT_TEXT_PREVIEW_CHARS)}🚀tail`;
+		const genericDiagnostic = projectBobbitResponse("bobbit_read", "health", {
+			status: "healthy",
+			verify: { summary: shortSummary, details: nonBmpDetails },
+		}) as any;
+
+		expect(genericDiagnostic.verify).toEqual({
+			summary: shortSummary,
+			details: preview(nonBmpDetails),
+		});
+		expect(Array.from(genericDiagnostic.verify.details.slice(0, -COMPACT_TRUNCATION_SUFFIX.length))).toHaveLength(
+			COMPACT_TEXT_PREVIEW_CHARS,
+		);
+
+		const task = projectBobbitResponse("bobbit_read", "get_task", {
+			id: "task-verify",
+			title: "Known task",
+			verify: { prompt: longText("task verifier: ") },
+		}) as any;
+		const workflow = projectBobbitResponse("bobbit_read", "get_workflow", {
+			id: "workflow-verify",
+			name: "Known workflow",
+			gates: [{ id: "gate-verify", name: "Known gate", verify: { prompt: longText("gate verifier: ") } }],
+		}) as any;
+
+		expect(task.verify).toBeUndefined();
+		expect(workflow.gates[0].verify).toBeUndefined();
 	});
 
 	it.each([
