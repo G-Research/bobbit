@@ -32,7 +32,7 @@ import {
 	mergeCompactionSidecarIntoMessages,
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
-import { SessionStore, type PersistedSession, type WorktreePushPolicy } from "./session-store.js";
+import { SessionStore, type PersistedSession } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
@@ -771,9 +771,9 @@ export interface SessionInfo {
 	repoPath?: string;
 	/** Active branch name. Mirrors the persisted store; stable for the session's lifetime. */
 	branch?: string;
-	/** Worktree branch publication policy; scoped sub-agent branches are local-only by default. */
+	/** @deprecated Legacy inert metadata exposed only while restoring older records. */
 	worktreePushPolicy?: "local-only" | "publish";
-	/** Back-compat alias for persisted publication policy metadata. */
+	/** @deprecated Legacy inert alias exposed only while restoring older records. */
 	remotePublicationPolicy?: "local-only" | "publish";
 	/** Multi-repo: per-repo worktree paths from the pool claim. Stable for the session's lifetime. */
 	repoWorktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
@@ -2710,7 +2710,7 @@ export class SessionManager {
 	/**
 	 * Initialize the worktree pool for a repo. Pre-creates worktrees in the
 	 * background so new sessions can claim one instantly (~0ms) instead of
-	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
+	 * waiting for `git worktree add` + `npm ci` (~10-30s).
 	 */
 	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined, projectRoot?: string): void {
 		if (projectId === HEADQUARTERS_PROJECT_ID) {
@@ -6898,7 +6898,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -6934,7 +6934,6 @@ export class SessionManager {
 		const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
 		const effectiveSandboxed = opts?.sandboxed && !sandboxExemptScope ? true : undefined;
 		const worktreeOpts = headquartersScope ? undefined : opts?.worktreeOpts;
-		const worktreePushPolicy = headquartersScope ? undefined : opts?.worktreePushPolicy;
 		const sandboxBranch = effectiveSandboxed ? opts?.sandboxBranch : undefined;
 		const sandboxBaseBranch = effectiveSandboxed ? opts?.sandboxBaseBranch : undefined;
 		await this.ensureMcpManagerForContext(projectId, cwd);
@@ -7024,7 +7023,6 @@ export class SessionManager {
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
 				worktreePath,
-				worktreePushPolicy,
 				projectId,
 				promptQueue: new PromptQueue(),
 			};
@@ -7064,7 +7062,6 @@ export class SessionManager {
 				readOnly: opts?.readOnly,
 				sessionScopedAllowedTools,
 				worktreePath,
-				worktreePushPolicy,
 				repoPath,
 				branch,
 				sandboxed: effectiveSandboxed,
@@ -7148,7 +7145,6 @@ export class SessionManager {
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
-			worktreePushPolicy,
 			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.

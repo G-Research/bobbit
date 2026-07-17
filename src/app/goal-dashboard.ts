@@ -2186,7 +2186,6 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.deletionsVsPrimary=${gs?.deletionsVsPrimary ?? 0}
 						.mergedIntoPrimary=${gs?.mergedIntoPrimary ?? false}
 						.unpushed=${gs?.unpushed ?? false}
-						.remotePublication=${(gs as { remotePublication?: 'local-only-policy' } | null | undefined)?.remotePublication}
 						.statusFiles=${gs?.status ?? []}
 						.repos=${gs?.repos as any}
 						.loading=${!gs && !!branch}

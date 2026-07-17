@@ -10,13 +10,15 @@ hard-coded reference is also baked into:
 
 - workflow gate verify commands (`{{master}}` for the ready-to-merge gate),
 - the LLM-review prompts the project assistant seeds for new projects,
-- the per-branch upstream used by status/ahead-behind checks after branch publication,
+- the optional per-branch upstream used by status/ahead-behind checks,
 - the "primary" comparator the git-status widget uses for the
   `aheadOfPrimary` / `behindPrimary` counters in `git-status-native.ts`.
 
 Some workflows want a different integration target — `develop`, a release branch,
 or even a local `master` that is never pushed. This document defines a single
-project-level setting, **`base_ref`**, that controls all of the above.
+project-level setting, **`base_ref`**, that controls those baselines. It does not
+publish work branches: worktree creation, reuse, recovery, and status remain
+local/read-only regardless of whether the configured value is local or remote.
 
 ## Setting
 
@@ -250,22 +252,16 @@ fallback inputs when the local goal branch is unavailable; publication to
 `origin/<goal-branch>` remains an explicit workflow/user action, not a
 prerequisite for `createWorktree`.
 
-### 2. Upstream tracking and safe publication
+### 2. Upstream tracking without publication
 
-`createWorktree` separates branch creation from publication. Scoped sub-agent
-and pool worktrees pass a local-only push policy, so they are not published on
-creation. Publication paths that intentionally need a remote branch still push
-with an explicit destination refspec and then fetch/set matching tracking:
-
-```bash
-git -C <worktree> push origin <branch>:refs/heads/<branch>
-git -C <worktree> fetch origin refs/heads/<branch>:refs/remotes/origin/<branch>
-git -C <worktree> branch --set-upstream-to=origin/<branch> <branch>
-```
+`createWorktree` and `createWorktreeSet` always create local branches. Their
+legacy `pushPolicy` and `skipPush` options are ignored, so no caller can turn
+routine provisioning into publication. This invariant applies to sessions,
+goals and child goals, staff, team members, pool fill/claim, multi-repo sets,
+sandbox provisioning, and recovery/recreation.
 
 If `base_ref` is configured, non-pool `createWorktree` callers point `@{u}` at
-that base for status/ahead-behind semantics, even when the branch itself stays
-local-only:
+that base for status/ahead-behind semantics:
 
 ```bash
 git -C <worktree> branch --set-upstream-to=<base-ref> <branch>
@@ -273,19 +269,19 @@ git -C <worktree> branch --set-upstream-to=<base-ref> <branch>
 
 Effect:
 
-- Branch publication never depends on the local upstream or `push.default`.
-  Bobbit-owned publishes target `refs/heads/<branch>` directly, so an inherited
-  upstream such as `origin/master` cannot redirect the push.
-- Scoped local-only branches rely on the local worktree/ref for durability and
-  are not pushed merely because they were created or committed.
 - Local base → local upstream for non-pool worktrees. `git status` ahead/behind
   compares against the local base after the override.
-- Remote base (`origin/X`) → remote upstream for non-pool worktrees. Workflow
-  variables and merge-base checks still use `{{baseBranch}}` explicitly; any
-  intentional push destination remains the work branch, not the base branch.
+- Remote base (`origin/X`) → remote-tracking upstream for non-pool worktrees.
+  This records a baseline; it does not create `origin/<work-branch>`.
 - Pool-claimed worktrees clear inherited upstream synchronously on claim. The
-  background freshen path fetches/resets to the current configured base, but the
-  claimed branch remains local-only unless an explicit publication path runs.
+  background freshen path may fetch/reset to the current configured base, but
+  it does not publish the claimed branch.
+- Repair and recovery may fetch and recreate a worktree from a surviving local
+  branch. They never push it. Deleting a remote work branch therefore remains
+  durable across status polling and lifecycle recovery.
+- Explicit user/agent push APIs and Ready-to-Merge workflow commands remain
+  separate publication paths. When they publish, they choose their destination
+  explicitly rather than inheriting it from `base_ref`.
 
 Save-time validation guarantees the base is a branch ref, so `--set-upstream-to`
 never fails on tag/SHA at runtime. Defence-in-depth error if it does fail
@@ -381,8 +377,11 @@ redirected to honor `base_ref`:
 
 The `aheadOfPrimary`/`behindPrimary` counts then reflect the configured
 integration target. The per-branch `@{u}` counts are unchanged — old branches
-with their old upstream tracking keep their meaningful per-branch
-comparisons.
+with their old upstream tracking keep their meaningful per-branch comparisons.
+These are read-only calculations: neither `hasUpstream`, positive `ahead`
+counts, a configured remote `base_ref`, nor any refresh trigger authorizes a
+push. Connection/idle events, reconnect, dropdown refresh, visibility refresh,
+and periodic polling all use the same no-publication status path.
 
 To thread `configured` into `runBatchGitStatusNative`, `BatchGitStatusOpts`
 gains a new field:
@@ -475,8 +474,8 @@ and hard-resets the worktree to that base. It does not publish the claimed
 branch or set tracking to `origin/<targetBranch>`.
 
 This keeps claim fast while preventing a stale `origin/master` upstream from
-influencing later Bobbit-owned pushes. Claimed branches stay local-only unless
-an explicit publication path runs later.
+distorting status comparisons. Claimed branches stay local-only unless an
+explicit user, agent, or workflow publication path runs later.
 
 The unconditional `git fetch origin` in `freshenInBackground` stays — harmless
 when base is local, useful for refreshing any other tracking branches the
@@ -531,7 +530,9 @@ identical on the acceptance list. Implementation tasks will tick each row.)
 - `base_ref = "master"` (local) → new worktree HEAD = local master's SHA;
   `git rev-parse --abbrev-ref <branch>@{upstream}` returns `master`.
 - `base_ref = "origin/develop"` → new worktree HEAD = `origin/develop`'s SHA;
-  upstream = `origin/develop`.
+  upstream = `origin/develop`, with no `origin/<work-branch>` created.
+- Repeated git-status reads, pool reuse, worktree recovery, and child merge do
+  not publish a work branch, including after that remote branch is deleted.
 - `{{baseBranch}}` substitutes correctly for both local and remote configured
   values, falls back when unset.
 - `{{master}}` continues to resolve via `detectPrimaryBranch` independent of

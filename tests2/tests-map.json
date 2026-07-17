@@ -535,7 +535,7 @@
     },
     {
       "path": "tests2/core/test-map-execution.test.ts",
-      "reason": "Focused contract coverage that explicit runner, tier, project, and isolated-reason metadata matches physical test paths and the two approved Vitest E2E owners.",
+      "reason": "Focused contract coverage that explicit runner, tier, project, and isolated-reason metadata matches physical test paths and the approved Vitest E2E owners.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -909,6 +909,24 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/gateway-nondelete-push-boundary.test.ts",
+      "reason": "Unit source-boundary regression permitting non-delete gateway pushes only in explicit publication paths.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-lifecycle-no-publication-real-git.test.ts",
+      "reason": "Real-Git lifecycle regression using local bare origins to prove deleted remote branches are not recreated by creation, reuse, recovery, pool claim, multi-repo provisioning, or child merge.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
       }
     }
   ],

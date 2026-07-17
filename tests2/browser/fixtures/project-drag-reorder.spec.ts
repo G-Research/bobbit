@@ -24,7 +24,10 @@ type ProjectFixture = {
 	sessionTitle: string;
 };
 
-let createdProjects: ProjectFixture[] = [];
+let sharedProjects: ProjectFixture[] = [];
+let alpha: ProjectFixture;
+let beta: ProjectFixture;
+let gamma: ProjectFixture;
 let projectCounter = 0;
 
 function attr(value: string): string {
@@ -82,13 +85,16 @@ async function createProjectFixture(label: string): Promise<ProjectFixture> {
 	});
 	expect(renameResp.status).toBe(200);
 	const fixture: ProjectFixture = { id: project.id, name, rootPath, sessionId, sessionTitle };
-	createdProjects.push(fixture);
+	sharedProjects.push(fixture);
 	return fixture;
 }
 
-async function resetSidebarState(page: Page): Promise<void> {
-	await page.evaluate(() => {
+async function resetSidebarStateOnFirstLoad(page: Page): Promise<void> {
+	await page.addInitScript(() => {
 		try {
+			const marker = "bobbit-e2e-project-reorder-sidebar-reset";
+			if (sessionStorage.getItem(marker)) return;
+			sessionStorage.setItem(marker, "true");
 			localStorage.removeItem("bobbit-sidebar-collapsed");
 			localStorage.removeItem("bobbit-sidebar-tree-state:v1");
 			localStorage.removeItem("bobbit-expanded-projects");
@@ -102,17 +108,14 @@ async function resetSidebarState(page: Page): Promise<void> {
 
 async function openDesktop(page: Page): Promise<void> {
 	await page.setViewportSize(DESKTOP);
+	await resetSidebarStateOnFirstLoad(page);
 	await openApp(page);
-	await resetSidebarState(page);
-	await page.reload();
-	await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 }
 
 async function openMobile(page: Page): Promise<void> {
 	await page.setViewportSize(MOBILE);
+	await resetSidebarStateOnFirstLoad(page);
 	await openApp(page);
-	await resetSidebarState(page);
-	await page.reload();
 	await page.waitForSelector("input[data-search]", { timeout: 20_000 });
 }
 
@@ -178,6 +181,23 @@ async function apiProjectOrder(projectIds: string[]): Promise<string[]> {
 	const projects = Array.isArray(body) ? body : body.projects || [];
 	const wanted = new Set(projectIds);
 	return projects.map((p: { id?: string }) => p.id).filter((id: string | undefined): id is string => !!id && wanted.has(id));
+}
+
+async function setProjectOrder(first: ProjectFixture[]): Promise<void> {
+	const listResp = await apiFetch("/api/projects");
+	expect(listResp.status).toBe(200);
+	const body = await listResp.json();
+	const projects = Array.isArray(body) ? body : body.projects || [];
+	const visibleIds: string[] = projects
+		.map((project: { id?: string }) => project.id)
+		.filter((id: string | undefined): id is string => !!id);
+	const firstIds = first.map(project => project.id).filter(id => visibleIds.includes(id));
+	const firstSet = new Set(firstIds);
+	const orderResp = await apiFetch("/api/projects/order", {
+		method: "PUT",
+		body: JSON.stringify({ projectIds: [...firstIds, ...visibleIds.filter(id => !firstSet.has(id))] }),
+	});
+	expect(orderResp.status).toBe(200);
 }
 
 async function expectRenderedOrder(page: Page, expected: ProjectFixture[]): Promise<void> {
@@ -328,17 +348,20 @@ async function blockProjectListFetches(page: Page): Promise<void> {
 }
 
 test.describe("Project drag reorder (browser E2E)", () => {
-	test.beforeEach(async () => {
-		createdProjects = [];
+	test.beforeAll(async () => {
+		sharedProjects = [];
 		await waitForHealth();
+		alpha = await createProjectFixture("alpha");
+		beta = await createProjectFixture("beta");
+		gamma = await createProjectFixture("gamma");
 	});
 
-	test.afterEach(async () => {
-		for (const project of [...createdProjects].reverse()) {
+	test.afterAll(async () => {
+		for (const project of [...sharedProjects].reverse()) {
 			await deleteSession(project.sessionId).catch(() => {});
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 		}
-		createdProjects = [];
+		sharedProjects = [];
 		await setHeadquartersVisible(true).catch(() => {});
 	});
 
@@ -346,7 +369,6 @@ test.describe("Project drag reorder (browser E2E)", () => {
 		// Note: master commit cd75f50b changed HQ to no longer be first by default.
 		// The test now asserts HQ is in the list and has a reorder handle (participates),
 		// without asserting its position.
-		test.slow();
 		await setHeadquartersVisible(true);
 		await openDesktop(page);
 		const headerIds = await page.locator('[data-testid="project-header"][data-project-id]').evaluateAll((els) =>
@@ -359,15 +381,13 @@ test.describe("Project drag reorder (browser E2E)", () => {
 	});
 
 	test("Headquarters can be dragged to a new position and it persists across reload", async ({ page }) => {
-		test.setTimeout(120_000);
 		await setHeadquartersVisible(true);
-		const alpha = await createProjectFixture("hq-drag-alpha");
-		const beta = await createProjectFixture("hq-drag-beta");
 		const hq = { id: HEADQUARTERS_PROJECT_ID, name: "Headquarters", rootPath: "", sessionId: "", sessionTitle: "" } as ProjectFixture;
+		await setProjectOrder([hq, gamma, alpha, beta]);
 
 		await openDesktop(page);
 		await waitForProjects(page, [alpha, beta]);
-		// Headquarters is first by default, then user-ordered normal projects.
+		// Seed Headquarters first, followed by the normal projects under test.
 		await expectRenderedOrder(page, [hq, alpha, beta]);
 
 		// Drag Headquarters to the end — it is a first-class reorderable project.
@@ -384,11 +404,8 @@ test.describe("Project drag reorder (browser E2E)", () => {
 	});
 
 	test("releasing the drag outside the list commits the previewed order", async ({ page }) => {
-		test.setTimeout(120_000);
 		await setHeadquartersVisible(false);
-		const alpha = await createProjectFixture("outside-alpha");
-		const beta = await createProjectFixture("outside-beta");
-		const gamma = await createProjectFixture("outside-gamma");
+		await setProjectOrder([alpha, beta, gamma]);
 
 		await openDesktop(page);
 		await waitForProjects(page, [alpha, beta, gamma]);
@@ -413,11 +430,9 @@ test.describe("Project drag reorder (browser E2E)", () => {
 	});
 
 	test("desktop affordances, pointer reorder persistence, live sync, cancel, and collapsed sidebar order", async ({ page }) => {
-		test.setTimeout(120_000);
 		await setHeadquartersVisible(true);
-		const alpha = await createProjectFixture("desktop-alpha");
-		const beta = await createProjectFixture("desktop-beta");
-		const gamma = await createProjectFixture("desktop-gamma");
+		const hq = { id: HEADQUARTERS_PROJECT_ID, name: "Headquarters", rootPath: "", sessionId: "", sessionTitle: "" } as ProjectFixture;
+		await setProjectOrder([hq, alpha, beta, gamma]);
 		const savedOrderPayloads: string[][] = [];
 		await page.route("**/api/projects/order", async (route) => {
 			if (route.request().method() === "PUT") {
@@ -529,11 +544,8 @@ test.describe("Project drag reorder (browser E2E)", () => {
 	});
 
 	test("mobile handle is always visible; pointer drag reorders with temporary collapse/restore and reload persistence", async ({ page }) => {
-		test.setTimeout(120_000);
 		await setHeadquartersVisible(false);
-		const alpha = await createProjectFixture("mobile-alpha");
-		const beta = await createProjectFixture("mobile-beta");
-		const gamma = await createProjectFixture("mobile-gamma");
+		await setProjectOrder([alpha, beta, gamma]);
 
 		await openMobile(page);
 		await expect(projectReorderLiveRegion(page), "mobile reorder UI should render a polite live region").toBeAttached({ timeout: 20_000 });

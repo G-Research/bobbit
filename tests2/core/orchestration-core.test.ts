@@ -62,7 +62,17 @@ class FakeView implements OrchestrationSessionView {
 		const id = `child-${++this.seq}`;
 		this.createSessionCalls.push({ cwd, opts });
 		this.live.set(id, { id, status: "idle" });
-		this.persisted.set(id, { id, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, sandboxed: opts?.sandboxed, projectId: opts?.projectId, worktreePushPolicy: opts?.worktreePushPolicy, cwd });
+		this.persisted.set(id, {
+			id,
+			parentSessionId: opts?.parentSessionId,
+			childKind: opts?.childKind,
+			sandboxed: opts?.sandboxed,
+			projectId: opts?.projectId,
+			...(Object.prototype.hasOwnProperty.call(opts, "worktreePushPolicy")
+				? { worktreePushPolicy: opts.worktreePushPolicy }
+				: {}),
+			cwd,
+		});
 		return { id };
 	}
 	async enqueuePrompt(sessionId: string, text: string, opts?: any): Promise<{ status: string }> {
@@ -159,8 +169,8 @@ describe("OrchestrationCore.spawn — sandbox/credential inheritance (no escalat
 	});
 });
 
-describe("OrchestrationCore.spawn — delegated helper worktree push policy", () => {
-	it("marks full-lifecycle sub-branch children local-only", async () => {
+describe("OrchestrationCore.spawn — local delegated helper worktrees", () => {
+	it("creates full-lifecycle sub-branch children without legacy publication metadata", async () => {
 		const view = new FakeView();
 		view.owner("owner-1", { projectId: "proj-A", cwd: "/host/owner" });
 		const core = makeCore(view, "anthropic/claude-x");
@@ -176,12 +186,14 @@ describe("OrchestrationCore.spawn — delegated helper worktree push policy", ()
 		assert.equal(view.createSessionCalls.length, 1);
 		const { opts } = view.createSessionCalls[0];
 		assert.deepEqual(opts.worktreeOpts, { repoPath: "/repo" });
-		assert.equal(opts.worktreePushPolicy, "local-only");
+		assert.equal("worktreePushPolicy" in opts, false, "local creation must not carry removed publication policy metadata");
 		assert.equal(opts.sandboxBranch, "goal/abcd/helper");
-		assert.equal(view.persisted.get("child-1")?.worktreePushPolicy, "local-only");
+		const persistedChild = view.persisted.get("child-1");
+		assert.ok(persistedChild);
+		assert.equal("worktreePushPolicy" in persistedChild, false, "persisted child metadata must not imply publication policy");
 	});
 
-	it("bare and shared-cwd delegates do not request a worktree policy", async () => {
+	it("bare and shared-cwd delegates omit worktree publication metadata", async () => {
 		const view = new FakeView();
 		view.owner("owner-1", { cwd: "/host/owner" });
 		const core = makeCore(view, "anthropic/claude-x");
@@ -190,12 +202,12 @@ describe("OrchestrationCore.spawn — delegated helper worktree push policy", ()
 		assert.equal(view.delegateCalls.length, 1, "bare shared-cwd spawn stays on createDelegateSession");
 		assert.equal(view.createSessionCalls.length, 0);
 		assert.equal(view.delegateCalls[0].opts.worktreeOpts, undefined);
-		assert.equal(view.delegateCalls[0].opts.worktreePushPolicy, undefined);
+		assert.equal("worktreePushPolicy" in view.delegateCalls[0].opts, false);
 
 		await core.spawn({ ownerSessionId: "owner-1", instructions: "full", lifecycle: "full", worktree: { mode: "shared", cwd: "/host/owner" } });
 		assert.equal(view.createSessionCalls.length, 1, "explicit full shared-cwd spawn is visible but branchless");
 		assert.equal(view.createSessionCalls[0].opts.worktreeOpts, undefined);
-		assert.equal(view.createSessionCalls[0].opts.worktreePushPolicy, undefined);
+		assert.equal("worktreePushPolicy" in view.createSessionCalls[0].opts, false);
 	});
 });
 

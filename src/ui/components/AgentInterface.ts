@@ -2228,7 +2228,7 @@ export class AgentInterface extends LitElement {
 		};
 
 		return html`
-			<div data-testid="session-stats" class="text-xs text-muted-foreground flex items-center mt-0.5 pl-2 pr-2 sm:pl-0 sm:pr-0">
+			<div class="text-xs text-muted-foreground flex items-center mt-0.5 pl-2 pr-2 sm:pl-0 sm:pr-0" data-testid="session-stats-bar">
 				<div class="flex shrink-0 items-center">
 					${this.showThemeToggle ? html`<bell-toggle></bell-toggle><theme-toggle></theme-toggle>` : html``}
 					${thinkingSelect}
@@ -2336,7 +2336,6 @@ export class AgentInterface extends LitElement {
 								.deletionsVsPrimary=${this.gitStatus?.deletionsVsPrimary ?? 0}
 								.mergedIntoPrimary=${this.gitStatus?.mergedIntoPrimary ?? false}
 								.unpushed=${this.gitStatus?.unpushed ?? false}
-								.remotePublication=${(this.gitStatus as { remotePublication?: 'local-only-policy' } | null | undefined)?.remotePublication}
 								.statusFiles=${this.gitStatus?.status ?? []}
 								.repos=${(this.gitStatus as { repos?: Record<string, unknown> } | null | undefined)?.repos as any}
 								.loading=${this.gitStatusLoading}

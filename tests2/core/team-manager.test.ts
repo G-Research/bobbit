@@ -1488,7 +1488,10 @@ describe("TeamManager", () => {
 				.split(/\r?\n/);
 			assert.equal(memberHead, goalHead, "member worktree HEAD should equal the unpublished local goal branch HEAD");
 			assertRegisteredWorktree(fixture.repoPath, result.worktreePath!);
-			assert.equal(sm.getSession(result.sessionId)?.worktreePushPolicy, "local-only");
+			const session = sm.getSession(result.sessionId);
+			assert.ok(session, "member session should exist");
+			assert.equal(Object.hasOwn(session, "worktreePushPolicy"), false, "new sessions must omit legacy push policy metadata");
+			assert.equal(Object.hasOwn(session, "remotePublicationPolicy"), false, "new sessions must omit legacy publication metadata");
 			assert.throws(
 				() => runGit(["show-ref", "--verify", "--quiet", `refs/heads/${agent.branch}`], fixture.originPath),
 				"local-only team member branch must not be published to origin",
@@ -1522,7 +1525,8 @@ describe("TeamManager", () => {
 			assert.equal(session.createOpts.sandboxBaseBranch, "feat/test");
 			assert.notEqual(session.createOpts.sandboxBaseBranch, "origin/feat/test");
 			assert.match(session.createOpts.sandboxBranch, /^goal\/12345678\/coder-[0-9a-f]{4}$/);
-			assert.equal(session.worktreePushPolicy, "local-only");
+			assert.equal(Object.hasOwn(session, "worktreePushPolicy"), false, "new sandbox sessions must omit legacy push policy metadata");
+			assert.equal(Object.hasOwn(session, "remotePublicationPolicy"), false, "new sandbox sessions must omit legacy publication metadata");
 			assert.deepEqual(
 				listedWorktreePaths(fixture.repoPath),
 				worktreesBeforeSpawn,

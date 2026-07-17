@@ -55,9 +55,10 @@ a workflow gate — it is the team-lead's tool and is unchanged. `team_delegate`
 anywhere `delegate` was granted and runs the child in *your* worktree.
 
 When `OrchestrationCore` is asked to create a child on its own sub-branch worktree
-(for example a team member or full-lifecycle helper/session child), that branch is
-local-only by default. The persisted worktree is the durability boundary; remote
-publication happens only through explicit user/workflow handoff or final PR flows.
+(for example a team member or full-lifecycle helper/session child), that branch
+stays local throughout routine creation, status, and recovery. The persisted
+worktree is the durability boundary; remote publication happens only through an
+explicit user/agent command, workflow handoff, or final PR flow.
 
 ### `team_delegate`
 

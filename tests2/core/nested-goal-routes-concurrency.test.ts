@@ -105,7 +105,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 		return g;
 	};
 	// mergeChild is a git op — stub a clean merge.
-	(goalManager as any).mergeChild = async () => ({ merged: true, alreadyMerged: false, conflict: false, pushed: false, output: "" });
+	(goalManager as any).mergeChild = async () => ({ merged: true, alreadyMerged: false, conflict: false, output: "" });
 
 	const started: string[] = [];
 	const running = new Set<string>();
@@ -232,6 +232,8 @@ describe("Finding 2 — REST spawn-child respects the per-root concurrency cap (
 		// Merge the running child → releases the permit → next queued starts.
 		const m = await h.call("POST", `/api/goals/${h.parent.id}/integrate-child/${firstStarted}`, { force: true }, h.authAs(TL));
 		assert.equal(m.payload.merged, true);
+		assert.equal(m.payload.conflict, false);
+		assert.equal("pushed" in m.payload, false, "local merge response must not claim remote publication");
 		assert.equal(h.started.length, 2, "merging the running child admits exactly one more");
 
 		// Merge the second → the third (last queued) starts.
