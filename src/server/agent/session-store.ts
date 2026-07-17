@@ -43,6 +43,7 @@ export function shouldKeepDespiteOrphan(
 	return recentTranscript;
 }
 
+/** Legacy persisted value. Retained only so older session records remain readable. */
 export type WorktreePushPolicy = "local-only" | "publish";
 
 /** Persisted metadata for a single gateway session */
@@ -135,10 +136,10 @@ export interface PersistedSession {
 	repoPath?: string;
 	/** Branch name (preserved for worktree cleanup) */
 	branch?: string;
-	/** Worktree branch publication policy; scoped sub-agent branches are local-only by default. */
+	/** @deprecated Legacy inert metadata retained for backward-compatible reads. */
 	worktreePushPolicy?: WorktreePushPolicy;
-	/** Back-compat alias for persisted publication policy metadata. */
-	remotePublicationPolicy?: "local-only" | "publish";
+	/** @deprecated Legacy inert metadata retained for backward-compatible reads. */
+	remotePublicationPolicy?: WorktreePushPolicy;
 	/** Model provider (e.g. "anthropic") — persisted so archived sessions can display model info */
 	modelProvider?: string;
 	/** Model ID (e.g. "claude-sonnet-4-20250514") — persisted so archived sessions can display model info */
@@ -179,7 +180,6 @@ export type UpdatableSessionFields = Pick<
 	| "teamGoalId"
 	| "teamLeadSessionId"
 	| "worktreePath"
-	| "worktreePushPolicy"
 	| "assistantType"
 	| "goalAssistant"
 	| "roleAssistant"
@@ -194,8 +194,6 @@ export type UpdatableSessionFields = Pick<
 	| "archivedAt"
 	| "repoPath"
 	| "branch"
-	| "worktreePushPolicy"
-	| "remotePublicationPolicy"
 	| "nonInteractive"
 	| "cwd"
 	| "reattemptGoalId"
@@ -605,7 +603,7 @@ export class SessionStore {
 	 * every event and benefit from coalescing.
 	 */
 	private static RECOVERY_CRITICAL_FIELDS: ReadonlyArray<keyof UpdatableSessionFields> = [
-		"agentSessionFile", "branch", "worktreePath", "worktreePushPolicy", "remotePublicationPolicy", "cwd", "repoPath",
+		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
 		"repoWorktrees", "archived", "archivedAt",
 		"sandboxed", "projectId", "goalId", "delegateOf",
 		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",

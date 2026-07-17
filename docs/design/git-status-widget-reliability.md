@@ -427,24 +427,24 @@ Add optional fields to the existing response (non-breaking — old clients ignor
   unpushed: boolean;
 
   // NEW
-  partial?: boolean;                          // true if porcelain was skipped/timed-out
-  untrackedIncluded?: boolean;                // true only when ?untracked=1 was passed
-  remotePublication?: "local-only-policy";    // branch is intentionally not auto-published
+  partial?: boolean;             // true if porcelain was skipped/timed-out
+  untrackedIncluded?: boolean;   // true only when ?untracked=1 was passed
 }
 ```
 
-`GET /api/sessions/:id/git-status` sets `remotePublication: "local-only-policy"`
-for scoped worker sessions whose branches are durable locally and should not be
-published just because status was queried. The field distinguishes intentional
-local-only policy from a push failure or missing remote.
+Git status does not carry publication-policy fields. All lifecycle-created work
+branches are local-only until an explicit push, so `remotePublication`,
+`worktreePushPolicy`, and branch-prefix inference would create a false distinction.
+The endpoint reports Git facts (`hasUpstream`, `ahead`, comparisons) without
+turning any of them into a publication decision.
 
 ### 7.4 Client handling of status hints
 
 In `GitStatusWidget`:
 - When `partial === true`: render the pill with a faint yellow dot (distinct from the blue refresh dot) next to the branch. Tooltip "Status scan timed out — showing partial data." Dropdown shows branch/ahead/behind fields but hides the file list with a "Re-scan" button that triggers an `?untracked=1` refetch.
-- When `remotePublication === "local-only-policy"`: show "Local-only by policy" in the dropdown. This means Bobbit intentionally kept the scoped worker branch local; it is not an error and does not imply that a push was attempted.
+- For a non-primary work branch, show that remote publication is manual and keep the explicit **Push** control available. Missing upstream/base-ref state does not imply a failed or pending automatic publication.
 
-Add `@property({ type: Boolean }) partial = false;` and `remotePublication?: "local-only-policy"` to `GitStatusWidget`. Wire them from `AgentInterface.ts`.
+Add `@property({ type: Boolean }) partial = false;` to `GitStatusWidget` and wire it from `AgentInterface.ts`. Publication copy is derived from the general local-only lifecycle, not from a status response field.
 
 ---
 
@@ -461,7 +461,7 @@ Playwright file:// fixture rendering the widget.
 | Normal state | `loading=false`, `branch="foo"` | No dot, normal rendering |
 | Hidden when no data + not loading | `loading=false`, no branch | `render()` returns `nothing` |
 | Partial flag renders warning | `partial=true`, `branch="foo"` | Warning dot present, dropdown on open shows "Re-scan" button |
-| Local-only policy hint | `remotePublication="local-only-policy"`, `branch="foo"` | Dropdown explains "Local-only by policy" and does not show it as a push failure |
+| Manual publication hint | Non-primary `branch="foo"` with or without upstream | Dropdown explains remote publication is manual and offers explicit Push |
 
 ### 8.2 Unit — `tests/git-status-refresh.spec.ts` (new)
 

@@ -261,7 +261,7 @@ export interface PersistedSessionLike {
 	 */
 	sandboxed?: boolean;
 	projectId?: string;
-	/** Remote publication policy for this session's worktree branch. */
+	/** @deprecated Legacy inert metadata retained for persisted-record compatibility. */
 	worktreePushPolicy?: "local-only" | "publish";
 	/** Owner's validated host-side cwd (never trust a container-internal cwd). */
 	cwd?: string;
@@ -603,7 +603,6 @@ export class OrchestrationCore {
 				projectId: ownerPs?.projectId,
 			};
 			if (opts.worktree?.mode === "sub-branch") {
-				createOpts.worktreePushPolicy = "local-only";
 				createOpts.sandboxBranch = opts.worktree.branch;
 			}
 			const child = await this.deps.sessionManager.createSession(cwd, undefined, goalId, undefined, createOpts);

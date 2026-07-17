@@ -359,7 +359,7 @@ test.describe("Journey: Prompt Stats", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			await sendMessage(page, "Full stats test");
 			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
-			const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
+			const statsBar = page.getByTestId("session-stats-bar");
 			await expect(statsBar).toBeVisible({ timeout: 15_000 });
 			await expect(statsBar).toContainText("mock-model", { timeout: 20_000 });
 			const contextSpan = page.locator("span[title*='Context:']");

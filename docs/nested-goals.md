@@ -331,11 +331,16 @@ Children integrate **locally**, not via per-child PRs — this keeps the GitHub 
 surface to exactly one PR per goal tree:
 
 - Each child merges into the **parent's branch** with `git merge --no-ff`
-  (`mergeChildBranchLocal`), behind a gated push (`shouldSkipRemotePush`).
+  (`mergeChildBranchLocal`). The merge may fetch the child ref best-effort, but
+  it never pushes the child or parent branch.
 - **Only the root goal raises a GitHub PR.** Children never raise their own.
 - On **merge conflict**: `git merge --abort`, the subgoal step fails with a
   manual-recovery directive, and **the child is preserved** (not auto-archived)
   so a human or the team-lead can resolve it.
+
+A remote parent branch that was deleted before integration stays deleted after
+the merge. Publication, when desired, remains a later explicit push or root
+Ready-to-Merge/PR operation.
 
 A child must be **ready-to-merge** (`child-ready-to-merge.ts`) before
 integration; `team_complete` on the parent blocks while children are unresolved.
@@ -384,11 +389,13 @@ can then display all outcome states:
 | Already merged | `already merged` (muted) |
 | Other error | Plain error message |
 
-A 409 with `{ conflict: true, output }` passes through as-is so the renderer
-can show the expandable conflict block. A 409 with `{ code: "RTM_NOT_PASSED" }`
-is normalized to `{ ...body, rtmFailed: true }` so the renderer pill fires
-correctly. A 409 with `code: "GOAL_GIT_UNAVAILABLE"` surfaces as a plain error
-message, since no structured pill is defined for that case.
+A 409 with `{ conflict: true, output, repos? }` passes through as-is so the
+renderer can show the expandable conflict block. A 409 with
+`{ code: "RTM_NOT_PASSED" }` is normalized to `{ ...body, rtmFailed: true }` so
+the renderer pill fires correctly. A 409 with `code: "GOAL_GIT_UNAVAILABLE"`
+surfaces as a plain error message, since no structured pill is defined for that
+case. Successful and conflict responses intentionally contain no `pushed`
+field: the operation makes no remote-publication claim.
 
 ## Governance
 
@@ -595,7 +602,7 @@ per-session containers.
 | Subtree / descendant queries | `src/server/agent/goal-subtree.ts`, `goal-descendants.ts` |
 | Ready-to-merge check | `src/server/agent/child-ready-to-merge.ts` |
 | Parent notifications (pure helpers) | `src/server/agent/notify-team-lead-child-passed.ts` — `buildParentReadyNotification` (RTM gate pass/fail) and `buildParentCompletionNotification` (`team_complete`) |
-| Local branch merge helpers | `src/server/agent/skills/git.ts` (`mergeChildBranchLocal`, `shouldSkipRemotePush`) |
+| Local branch merge helper | `src/server/agent/skills/git.ts` (`mergeChildBranchLocal`) |
 | dependsOn validation | `src/server/agent/depends-on-validation.ts` |
 | Persisted goal fields | `src/server/agent/goal-store.ts` |
 | Children tool definitions | `defaults/tools/children/*`, policy in `defaults/tool-group-policies.yaml` |

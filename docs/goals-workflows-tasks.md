@@ -794,7 +794,7 @@ These fields replace the old `commitSha` field, which was a single optional fiel
 | Team lead merges | Team lead | `git merge <task.branch>` locally — no remote fetch needed |
 | Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
 
-Team-member and delegated helper/session sub-agent branches are local-only by default. Bobbit does not push them to origin as a default safety net; the persistent local worktree is the crash-recovery and merge handoff mechanism. Team leads merge or cherry-pick from the local ref/worktree when it is available, so no remote fetch is required.
+Lifecycle-created work branches — including goal integration, team-member, and delegated helper/session sub-agent branches — stay local during creation, status, reuse, and recovery. Bobbit does not push them to origin as a safety net; the persistent local worktree is the crash-recovery and merge handoff mechanism. Team leads merge or cherry-pick from the local ref/worktree when it is available, so no remote fetch is required.
 
 Remote publication is still allowed when it is intentional: a user-requested push, a workflow/cross-machine/container handoff that needs a remote branch, or the final Ready-to-Merge / PR publication of the goal integration branch. Intentional Bobbit-owned pushes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only routine PR in the workflow is the final goal-to-primary-branch PR for human review.
 

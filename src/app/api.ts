@@ -1538,7 +1538,6 @@ export interface GitStatusData {
 	insertionsVsPrimary: number;
 	deletionsVsPrimary: number;
 	unpushed: boolean;
-	remotePublication?: 'local-only-policy';
 	status: Array<{ file: string; status: string }>;
 }
 
