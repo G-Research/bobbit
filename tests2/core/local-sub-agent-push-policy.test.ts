@@ -218,6 +218,64 @@ describe("local-only host worktree primitives", () => {
 		});
 	});
 
+	it("GoalManager updateGoal team upgrade suppresses configured-base fetch and keeps the new worktree local", async () => {
+		await withFakeRepo(async (root, repo) => {
+			const stateDir = path.join(root, "state");
+			memoryFs.mkdirSync(stateDir, { recursive: true });
+			const { state, runner } = fakeGitRunner([repo]);
+			const store = new GoalStore(stateDir);
+			const manager = new GoalManager(store, undefined, stateDir, {
+				commandRunner: runner,
+				remotePolicy: { skipNonLocalRemoteGit: true },
+			});
+			manager.setBaseRefResolver(() => "origin/master");
+
+			const id = "upgrade-policy-goal";
+			store.put({
+				id,
+				title: "Upgrade policy",
+				cwd: repo,
+				state: "todo",
+				spec: "",
+				createdAt: 1,
+				updatedAt: 1,
+				projectId: "project",
+				team: false,
+				setupStatus: "ready",
+			});
+
+			assert.equal(manager.getBaseRef("project"), "origin/master");
+			assert.equal(await manager.updateGoal(id, { team: true }), true);
+
+			const upgraded = store.get(id);
+			assert.ok(upgraded?.branch);
+			const expectedWorktreePath = path.join(`${repo}-wt`, upgraded.branch.replace(/\//g, "-"));
+			assert.deepEqual(
+				{
+					team: upgraded.team,
+					repoPath: upgraded.repoPath,
+					branch: upgraded.branch,
+					cwd: upgraded.cwd,
+					setupStatus: upgraded.setupStatus,
+				},
+				{
+					team: true,
+					repoPath: repo,
+					branch: "goal/upgrade-policy-upgrade-",
+					cwd: expectedWorktreePath,
+					setupStatus: "ready",
+				},
+			);
+
+			const commands = commandStrings(state);
+			assert.ok(commands.includes("remote get-url origin"), "team upgrade should classify origin before fetching");
+			assert.ok(!commands.some(command => command.startsWith("fetch ")), `team upgrade must suppress non-local configured-base fetch; commands:\n${commands.join("\n")}`);
+			assert.ok(commands.some(command => command.startsWith(`worktree add -b ${upgraded.branch} `) && command.endsWith(" origin/master")));
+			assert.equal(state.repos.get(canonical(repo))?.localBranches.has(upgraded.branch), true);
+			assertBranchStayedLocal(state, upgraded.branch);
+		});
+	});
+
 	it("createWorktree repairs an existing local branch without recreating its deleted remote", async () => {
 		await withFakeRepo(async (_root, repo) => {
 			const branch = "session/reused";
