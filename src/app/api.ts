@@ -83,9 +83,9 @@ export function goalDeepLink(goalId: string): string {
 }
 
 /** Copy text via the async Clipboard API, falling back to a legacy
- *  execCommand("copy") path so links are still copied in insecure contexts
+ *  execCommand("copy") path so text is still copied in insecure contexts
  *  (e.g. plain http:// over NordLynx) where the Clipboard API is blocked. */
-async function copyTextToClipboard(text: string): Promise<boolean> {
+export async function copyTextToClipboard(text: string): Promise<boolean> {
 	try {
 		if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
 			await navigator.clipboard.writeText(text);

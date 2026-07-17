@@ -312,6 +312,38 @@ test.describe("Journey: Compaction", () => {
 	});
 });
 
+test.describe("Journey: Footer Working Directory", () => {
+	test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
+	test("desktop footer shows the full path and copies it", async ({ page }) => {
+		await page.setViewportSize({ width: 1440, height: 900 });
+		const project = await defaultProject();
+		const sessionId = await createSession({ cwd: project.rootPath, projectId: project.id });
+		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const cwdPath = page.getByTestId("footer-cwd-path");
+			await expect(cwdPath).toBeVisible({ timeout: 15_000 });
+			await expect(cwdPath).toHaveText(project.rootPath);
+			await expect(cwdPath).toHaveAttribute("title", project.rootPath);
+
+			const copyButton = page.getByTestId("footer-cwd-copy");
+			await copyButton.click();
+			await expect(copyButton).toHaveAttribute("aria-label", "Working directory copied");
+			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).toBe(project.rootPath);
+
+			await page.reload();
+			await expect(page.getByTestId("footer-cwd-path")).toHaveText(project.rootPath, { timeout: 20_000 });
+			await expect(page.getByTestId("footer-cwd-copy")).toBeVisible();
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+});
+
 // Ported from prompt-stats-e2e.spec.ts (audit: misc GAP / BR51): after an agent
 // response, the stats bar must show the model name, a context-usage tooltip
 // prefixed "Context:" with a percentage, and a "$" cost. The journey previously
