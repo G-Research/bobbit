@@ -53,7 +53,7 @@ Match existing icon sizing exactly:
 | Project picker popover | accent dot/folder surrogate | `TowerControl`, `sm` or same row height |
 | Settings/config scope pill | color dot | `TowerControl`, `xs` |
 
-Do not render the normal project color dot for Headquarters. Let the icon carry the identity. Use the same color treatment as the project label in that surface, normally `var(--primary)` when active and `var(--muted-foreground)` or inherited text color when inactive.
+Do not render the normal project color dot for Headquarters. Let the icon carry the identity. Its accent is a theme-aware mix weighted toward the primary text colour — `color-mix(in oklch, var(--foreground) 75%, var(--muted-foreground))` — so it stays neutral and prominent without the full contrast of pure foreground.
 
 ## Sidebar behavior
 

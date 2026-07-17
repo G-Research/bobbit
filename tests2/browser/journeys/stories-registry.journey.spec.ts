@@ -46,6 +46,38 @@ test.describe("Journey: Headquarters", () => {
 		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 	});
+
+	test("Headquarters accent stays neutral and foreground-weighted in light and dark modes", async ({ page }) => {
+		await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ showHeadquartersInProjectLists: true }),
+		});
+		await openApp(page);
+		const icon = page.locator('[data-testid="project-header"][data-project-id="headquarters"] [data-testid="headquarters-icon"]').first();
+		await expect(icon).toBeVisible({ timeout: 15_000 });
+
+		const colors = async (dark: boolean) => page.evaluate(({ dark }) => {
+			document.documentElement.classList.toggle("dark", dark);
+			const target = document.querySelector('[data-testid="project-header"][data-project-id="headquarters"] [data-testid="headquarters-icon"]');
+			if (!target) return null;
+			const probe = document.createElement("span");
+			probe.style.color = "color-mix(in oklch, var(--foreground) 75%, var(--muted-foreground))";
+			document.body.appendChild(probe);
+			const result = { actual: getComputedStyle(target).color, expected: getComputedStyle(probe).color };
+			probe.remove();
+			return result;
+		}, { dark });
+
+		const light = await colors(false);
+		expect(light).not.toBeNull();
+		expect(light?.actual).toBe(light?.expected);
+		const dark = await colors(true);
+		expect(dark).not.toBeNull();
+		expect(dark?.actual).toBe(dark?.expected);
+
+		await page.reload();
+		await expect(page.locator('[data-testid="project-header"][data-project-id="headquarters"] [data-testid="headquarters-icon"]').first()).toBeVisible({ timeout: 20_000 });
+	});
 });
 
 // ═══════════════════════════════════════════════════════════════

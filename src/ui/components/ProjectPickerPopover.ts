@@ -12,7 +12,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { HEADQUARTERS_HELPER_TEXT, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId, projectSearchText } from "../../app/headquarters.js";
+import { HEADQUARTERS_ACCENT_COLOR, HEADQUARTERS_HELPER_TEXT, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId, projectSearchText } from "../../app/headquarters.js";
 
 /**
  * Project info exposed to the picker. Callers pass the subset of their
@@ -190,7 +190,7 @@ export class ProjectPickerPopover extends LitElement {
 	}
 
 	private _accent(p: ProjectPickerItem): string {
-		if (isHeadquartersProject(p)) return "var(--primary)";
+		if (isHeadquartersProject(p)) return HEADQUARTERS_ACCENT_COLOR;
 		const isDark = document.documentElement.classList.contains("dark");
 		return (isDark ? (p.colorDark || p.colorLight) : (p.colorLight || p.colorDark)) || p.color || "var(--muted-foreground)";
 	}
