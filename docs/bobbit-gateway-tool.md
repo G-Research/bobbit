@@ -126,7 +126,7 @@ by operation:
 | Workflow list/get | Lists omit gates. A direct `get_workflow` keeps a compact gate DAG but omits each gate's verifier blocks and prompts. |
 | Project, role, tool, staff, MCP, and commit operations | Keep fields needed for selection and follow-up actions while previewing descriptions/prompts/messages and omitting large nested definitions. |
 | `goal_cost`, `session_cost` | Returned unchanged because the payloads are already small and diagnostic. |
-| Health, git/PR status, maintenance, acknowledgements, and other irregular results | Recursively remove universal bookkeeping and verifier blocks and truncate long text while preserving short diagnostics. |
+| Health, git/PR status, maintenance, acknowledgements, and other irregular results | Recursively remove universal bookkeeping and truncate long text while preserving short diagnostics, including legitimate `verify` fields. Verifier prompts are omitted only by the task, gate, and workflow allowlist projections above. |
 
 `verbose: true` is the escape hatch for the processed full gateway payload. For
 any paged `bobbit_read` operation, verbose mode requires an explicit integer

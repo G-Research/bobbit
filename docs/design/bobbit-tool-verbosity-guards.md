@@ -210,7 +210,7 @@ For `list_workflows`, keep `id`, `name`, `title`, `projectId`, `type`, `createdA
 
 `goal_cost` and `session_cost` use an `identity` profile and return unchanged because their payloads are already small and wholly diagnostic.
 
-`health`, `connection_info`, git/PR status, maintenance probes, reset/cleanup acknowledgements, provider/override acknowledgements, and other irregular mutation/admin results use a `generic` profile. Generic projection recursively applies universal drops, text truncation, duplicate-ID removal, and embedded goal/session workflow suppression while preserving short scalar diagnostics and short structural arrays/objects. This avoids inventing unstable allowlists for heterogeneous maintenance results while still bounding their text. Any array that has a `PageSpec` is paged before generic projection.
+`health`, `connection_info`, git/PR status, maintenance probes, reset/cleanup acknowledgements, provider/override acknowledgements, and other irregular mutation/admin results use a `generic` profile. Generic projection recursively applies universal drops, text truncation, duplicate-ID removal, and embedded goal/session workflow suppression while preserving short scalar diagnostics and short structural arrays/objects. It preserves legitimate fields named `verify`; only the task, gate, and workflow allowlist profiles omit verifier prompt blocks. This avoids inventing unstable allowlists for heterogeneous maintenance results while still bounding their text. Any array that has a `PageSpec` is paged before generic projection.
 
 ### 4.4 Exact operation map
 
