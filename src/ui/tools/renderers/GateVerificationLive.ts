@@ -357,7 +357,7 @@ export class GateVerificationLive extends LitElement {
 							(v: any) => v.signalId === this.signalId
 						);
 						if (active) hasLiveActive = true;
-						if (Array.isArray(active?.steps)) {
+						if (Array.isArray(active?.steps) && active.steps.length > 0) {
 							activeSteps = active.steps.map((s: InitialVerificationStep) => mapVerificationStep(s, "running"));
 							this.currentPhase = active.currentPhase ?? 0;
 						}

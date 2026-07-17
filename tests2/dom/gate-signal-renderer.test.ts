@@ -291,6 +291,15 @@ describe("GateSignalRenderer", () => {
 		await settleLive(live);
 		expect((live.querySelector("signoff-review-launcher") as any).target.stepLabel).toBe("Approve reconciled release");
 
+		// An active row can briefly exist before its steps are seeded. Treat that
+		// empty array as unavailable data and retain the signal/event fallback.
+		activeSteps = [];
+		await live._fetchAndReconcile();
+		await settleLive(live);
+		expect((live.querySelector("signoff-review-launcher") as any).target.stepLabel).toBe("Approve reconciled release");
+
+		// Once the active snapshot has steps, it remains authoritative and may
+		// remove a marker that only the fallback state still carries.
 		activeSteps = [{
 			name: "approve-release", type: "human-signoff", status: "running",
 			output: "Awaiting human approval, but the structured marker was resolved",
