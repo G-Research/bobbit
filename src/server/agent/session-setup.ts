@@ -23,7 +23,7 @@ import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
-import type { PersistedSession, SessionStore, WorktreePushPolicy } from "./session-store.js";
+import type { PersistedSession, SessionStore } from "./session-store.js";
 import { sessionFsContextForAgentFile } from "./session-fs.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
@@ -261,7 +261,6 @@ export interface SessionSetupPlan {
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
 	worktreePath?: string;
-	worktreePushPolicy?: WorktreePushPolicy;
 	repoPath?: string;
 	branch?: string;
 	sandboxed?: boolean;
@@ -1047,7 +1046,6 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		assistantType: plan.assistantType,
 		role: plan.role ?? plan.roleName,
 		worktreePath: plan.worktreePath,
-		worktreePushPolicy: plan.worktreePushPolicy,
 		repoPath: plan.repoPath,
 		branch: plan.branch,
 		taskId: plan.taskId,
@@ -1207,13 +1205,12 @@ export async function executeWorktreeAsync(
 		type WorktreeCreationOptions = {
 			worktreeRoot?: string;
 			configuredBaseRef?: string;
-			pushPolicy?: WorktreePushPolicy;
 			remotePolicy?: RemoteGitPolicy;
 		};
 		if (isMulti) {
 			const { createWorktreeSet } = await import("../skills/git.js");
 			const worktreeRoot = ctx.projectConfigStore?.get("worktree_root") || undefined;
-			const worktreeOptions: WorktreeCreationOptions = { worktreeRoot, configuredBaseRef, pushPolicy: plan.worktreePushPolicy, remotePolicy: ctx.remoteGitPolicy };
+			const worktreeOptions: WorktreeCreationOptions = { worktreeRoot, configuredBaseRef, remotePolicy: ctx.remoteGitPolicy };
 			const result = await withRetry(
 				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, worktreeOptions),
 				{ retries: 2, delays: [1000, 2000], label: "createWorktreeSet", sessionId: plan.id },
@@ -1235,7 +1232,7 @@ export async function executeWorktreeAsync(
 			try {
 				worktreeCwd = await withRetry(
 					async () => {
-						const worktreeOptions: WorktreeCreationOptions = { configuredBaseRef, pushPolicy: plan.worktreePushPolicy, remotePolicy: ctx.remoteGitPolicy };
+						const worktreeOptions: WorktreeCreationOptions = { configuredBaseRef, remotePolicy: ctx.remoteGitPolicy };
 						const result = await createWorktree(plan.repoPath!, plan.branch!, worktreeOptions);
 						return result.worktreePath;
 					},

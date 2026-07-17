@@ -473,8 +473,8 @@ export class ProjectSandbox {
 			}
 		}
 
-		// Sandbox worktrees are local-only by default. Do not publish the branch
-		// or install a post-commit push hook during worktree creation.
+		// Sandbox worktree creation is local-only. It never publishes the branch
+		// or installs a post-commit push hook.
 
 		// When the project has a configured `base_ref`, override the per-branch
 		// upstream so `@{u}` (and the ahead/behind pair) points at the configured
@@ -574,8 +574,8 @@ export class ProjectSandbox {
 				}
 			}
 
-			// Sandbox worktrees are local-only by default. Do not publish the branch
-			// or install a post-commit push hook during worktree creation.
+			// Sandbox worktree creation is local-only. It never publishes the branch
+			// or installs a post-commit push hook.
 
 			// Override per-branch upstream to the configured `base_ref` when set,
 			// mirroring host-side `createWorktreeSet` (see `docs/design/base-ref.md` §2).
