@@ -58,7 +58,7 @@ Raw report: `.profiles/testing-v2/windows-process-profile/2026-07-14T19-56-11-55
 
 ## Historical Step 2 experiment
 
-The broad relocations below describe the July 14 profiling experiment. They were later restored to tier 1. The shipped execution map relocates exactly `team-manager.test.ts` and `marketplace-install.test.ts`; their seam-based decision suites remain in tier 1.
+The broad relocations below describe the July 14 profiling experiment. They were later restored to tier 1. The shipped execution map keeps `team-manager.test.ts`, `marketplace-install.test.ts`, and the native real-filesystem `orphan-tool-result-rehydration-boundaries.test.ts` in Vitest E2E; their seam-based decision suites remain in tier 1.
 
 - Moved real-Git/worktree-heavy maintenance, multi-repository goal, staff patch/reassign, verification restart, and retained-artifact command tests to the real-fidelity e2e project.
 - Replaced unnecessary repository fixtures with ordinary project directories in three API-state suites.

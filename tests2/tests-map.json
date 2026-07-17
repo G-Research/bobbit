@@ -838,6 +838,42 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/transcript-orphan-tool-results.test.ts",
+      "reason": "Failing-first raw Pi 0.80.6 reproducer for orphan message-level toolResult records on the active transcript branch: the two affected toolCallIds follow a text-only assistant with no matching toolCall blocks and must be removed before Anthropic rehydration. FAILS on HEAD until transcript sanitization removes them. Failure token ORPHAN_TOOL_RESULTS_ACTIVE_BRANCH.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/orphan-tool-result-recovery.test.ts",
+      "reason": "Native v2 coverage for Anthropic orphan tool-result poison classification and one-shot in-place recovery through Retry, normal follow-up, and session_prompt while preserving session identity, model selection, queued prompts, and user intent.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
+      "reason": "Vitest E2E real-filesystem owner for host and sandbox transcript realm resolution, every pre-existing-session sanitization boundary, and replacement/queue/race orchestration across commit and rollback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/orphan-tool-result-recovery.journey.spec.ts",
+      "reason": "Real-filesystem browser E2E journey for an Anthropic-poisoned session recovering through visible Retry and follow-up flows: orphan records are removed, the agent respawns in place, preserved history/model remain visible, intent completes once, and no replacement session is created.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

@@ -15,7 +15,7 @@ import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { CommandRunner } from "../gateway-deps.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd } from "./session-manager.js";
+import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, switchSessionPathForAgent } from "./session-manager.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
@@ -23,7 +23,8 @@ import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
-import type { SessionStore, WorktreePushPolicy } from "./session-store.js";
+import type { PersistedSession, SessionStore, WorktreePushPolicy } from "./session-store.js";
+import { sessionFsContextForAgentFile } from "./session-fs.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
@@ -1430,27 +1431,36 @@ export async function executeWorktreeAsync(
 		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
 		if (correctPath !== plan.preExistingAgentSessionFile) {
 			const { sessionFileCopy, sessionFileDelete } = await import("./session-fs.js");
-			const fsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
-			if (plan.sandboxed) {
-				// Container-side: copy via docker exec then delete the old file.
-				await sessionFileCopy(fsCtx, plan.preExistingAgentSessionFile, fsCtx, correctPath, ctx.sandboxManager);
-				await sessionFileDelete(fsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
+			const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
+			// Preserve the source transcript's filesystem realm while moving it to
+			// the cwd-derived slot. The formatter returns the host mount path; a
+			// container-side source needs the corresponding container path instead.
+			const correctAgentPath = sourceFsCtx.sandboxed
+				? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
+				: correctPath;
+			const correctFsCtx = sessionFsContextForAgentFile(plan, correctAgentPath);
+			if (sourceFsCtx.sandboxed || correctFsCtx.sandboxed) {
+				// Container-side paths use the session filesystem abstraction. A
+				// host-absolute transcript owned by a sandboxed session deliberately
+				// remains host-side so it is never passed to docker exec as a host path.
+				await sessionFileCopy(sourceFsCtx, plan.preExistingAgentSessionFile, correctFsCtx, correctAgentPath, ctx.sandboxManager);
+				await sessionFileDelete(sourceFsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
 			} else {
 				// Host-side: prefer rename, fall back to copy+unlink for cross-device.
 				const fsp = await import("node:fs/promises");
-				await fsp.mkdir(path.dirname(correctPath), { recursive: true });
+				await fsp.mkdir(path.dirname(correctAgentPath), { recursive: true });
 				try {
-					await fsp.rename(plan.preExistingAgentSessionFile, correctPath);
+					await fsp.rename(plan.preExistingAgentSessionFile, correctAgentPath);
 				} catch (err) {
-					await fsp.copyFile(plan.preExistingAgentSessionFile, correctPath);
+					await fsp.copyFile(plan.preExistingAgentSessionFile, correctAgentPath);
 					await fsp.unlink(plan.preExistingAgentSessionFile).catch(() => {});
 				}
 			}
-			plan.preExistingAgentSessionFile = correctPath;
-			ctx.store.update(session.id, { agentSessionFile: correctPath });
+			plan.preExistingAgentSessionFile = correctAgentPath;
+			ctx.store.update(session.id, { agentSessionFile: correctAgentPath });
 		}
 
-		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
+		const transcriptFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
 				transcriptFsCtx,
@@ -1468,8 +1478,12 @@ export async function executeWorktreeAsync(
 			ctx.sandboxManager,
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
+		const switchSessionPath = switchSessionPathForAgent({
+			sandboxed: plan.sandboxed,
+			agentSessionFile: plan.preExistingAgentSessionFile,
+		} as PersistedSession);
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			{ type: "switch_session", sessionPath: switchSessionPath },
 			switchTimeout,
 		);
 		if (!switchResp.success) {
@@ -1599,7 +1613,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
 	if (plan.preExistingAgentSessionFile) {
-		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
+		const transcriptFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
 				transcriptFsCtx,
@@ -1614,8 +1628,12 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			ctx.sandboxManager,
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
+		const switchSessionPath = switchSessionPathForAgent({
+			sandboxed: plan.sandboxed,
+			agentSessionFile: plan.preExistingAgentSessionFile,
+		} as PersistedSession);
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			{ type: "switch_session", sessionPath: switchSessionPath },
 			switchTimeout,
 		);
 		if (!switchResp.success) {

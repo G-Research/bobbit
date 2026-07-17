@@ -26,7 +26,7 @@ The expensive server graph had a useful foundation at that baseline:
 - `tests2/harness/server-runtime.ts::{loadServerTestRuntime, serverRuntimeMode}` selected the bundle via `BOBBIT_V2_SERVER_PREBUNDLE`.
 - `tests2/harness/gateway.ts::boot` created one gateway per worker, but then obtained `acquireGatewayBootLease()` and only integration workers received the prepared bundle.
 
-The pre-existing map-driven E2E path was reusable. `scripts/testing-v2/run-e2e-v2.mjs::classifyDaily` placed entries with `bucket: "daily"` and `method: "vitest-e2e"` in Group D; `runGroupD` selected the conditional `v2-e2e-vitest` project. The implementation populated that path with the two approved owners.
+The pre-existing map-driven E2E path was reusable. `scripts/testing-v2/run-e2e-v2.mjs::classifyDaily` places legacy entries with `bucket: "daily"` and `method: "vitest-e2e"`, plus explicitly E2E-owned native tests, in Group D; `runGroupD` selects the conditional `v2-e2e-vitest` project. The current project has three approved owners.
 
 ## Target architecture
 
@@ -86,14 +86,14 @@ The current 15-entry `singleForkFiles` list is not carried forward. After `withE
 
 Allowed Vitest projects are `core`, `dom`, `integration`, `isolated`, and `e2e`. `isolated` additionally requires `reason`. Browser and non-Vitest records retain their existing runner classification. A shared loader in `scripts/testing-v2/test-map-execution.mjs` normalizes paths to forward slashes, returns disjoint project arrays, and fails on missing files, duplicate ownership, unknown projects, an isolated count above ten, or a unit `.test.ts` with no execution tag. Both `vitest.config.ts` and inventory tooling consume this loader.
 
-Exactly these two existing entries change to E2E:
+The two legacy-derived owners remain:
 
 ```text
 tests2/core/team-manager.test.ts
 tests2/core/marketplace-install.test.ts
 ```
 
-Each receives `bucket: "daily"`, `method: "vitest-e2e"`, and `execution: { runner:"vitest", tier:"e2e", project:"e2e" }`. No other entry may have that combination. `scripts/testing-v2/lib-census.mjs::METHODS` and `scripts/testing-v2/gen-inventory.mjs` receive exact-path overrides so regeneration preserves the classification.
+They receive `bucket: "daily"`, `method: "vitest-e2e"`, and `execution: { runner:"vitest", tier:"e2e", project:"e2e" }`. The native real-filesystem owner `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts` has the same execution classification directly in `v2Native`. No unapproved entry may use that combination. `scripts/testing-v2/lib-census.mjs::METHODS`, `scripts/testing-v2/gen-inventory.mjs`, and `test-map-execution.mjs` preserve the classifications.
 
 The original files retain only their real filesystem/process fidelity assertions. Their fast decision assertions are extracted, not copied and abandoned, into unit-tagged files such as:
 
@@ -158,7 +158,7 @@ Any unavoidable bootstrap/E2E command goes through `tests2/harness/spawn-with-re
 
 Add `tests2/harness/git-template.ts` with `prepareGitTemplate`, `copyGitTemplate`, and teardown. Vitest global setup prepares one immutable repository under the short temp root (`C:\bobbit-v2` by default on Windows) with explicit `master`, local user name/email, `core.autocrlf=false`, one README, and one commit. Initialization uses `runFixtureCommand` before the worker spawn guard is installed. Workers receive the absolute template path through an environment value set by global setup.
 
-`copyGitTemplate(destination)` removes a pre-created empty destination and uses `cpSync(..., { recursive:true, verbatimSymlinks:true })`. It never invokes Git. Test-specific remote/ref/worktree behavior is expressed through `CommandRunner` canned outputs; a test requiring real command behavior belongs only in one of the two approved E2E files. Migrate all current fixture-local `execFileSync("git", ...)` calls to this API or to an existing command seam. Pure command-policy tests use fake outputs and assert argv/cwd, not the host Git executable.
+`copyGitTemplate(destination)` removes a pre-created empty destination and uses `cpSync(..., { recursive:true, verbatimSymlinks:true })`. It never invokes Git. Test-specific remote/ref/worktree behavior is expressed through `CommandRunner` canned outputs; a test requiring real command behavior belongs only in an approved E2E file. Migrate all current fixture-local `execFileSync("git", ...)` calls to this API or to an existing command seam. Pure command-policy tests use fake outputs and assert argv/cwd, not the host Git executable.
 
 The template and prebundle are immutable and content-addressed/run-scoped respectively, so three simultaneous suites never share writable `.git`, cache temporary directories, or cleanup roots.
 
@@ -244,7 +244,7 @@ The two solo unit runs must be consecutive, green, and each at or below 300 seco
 
 Then start three independent `npm run test:unit` processes simultaneously from PowerShell using `Start-Process npm.cmd -ArgumentList 'run','test:unit' -PassThru`, with distinct redirected stdout/stderr files under `.profiles/testing-v2/fast-gate-concurrency/<timestamp>/`. Wait for all three and record each PID, exit code, Vitest duration, file count, test count, failed-suite count, failed-test count, and retry count. Acceptance is three exit codes of zero and zero failed suites/tests. Record the command, log paths, start/end timestamps, and summarized evidence in the progress document.
 
-Finally verify `node scripts/testing-v2/run-e2e-v2.mjs --list` reports Group D as exactly `team-manager.test.ts` and `marketplace-install.test.ts`, and verify the inventory report shows no third E2E exclusion. The team lead signals `unit-stage-target` only after the two solo and one 3x-concurrent evidence blocks are committed.
+Finally verify `node scripts/testing-v2/run-e2e-v2.mjs --list` reports the exact approved Group D owners and the inventory report shows no unapproved E2E exclusion. The team lead signals `unit-stage-target` only after the two solo and one 3x-concurrent evidence blocks are committed.
 
 ## Completion criteria
 
@@ -255,6 +255,6 @@ The design is implemented only when all of the following are true:
 - Transform plus import is below 15 percent of worker time.
 - Unit tests cannot spawn child processes; fixture setup and command decisions use the template/DI flows above.
 - Every unit file is at or below 15 seconds, with the maintenance cluster at or below 60 seconds.
-- Only the two approved files run in Vitest E2E Group D, and tier-1 seam coverage remains.
+- Only approved files run in Vitest E2E Group D, and tier-1 seam coverage remains.
 - Inventory, changed mode, coverage/parity, browser, and E2E remain green.
 - Two solo runs meet 300 seconds and a three-suite concurrent run has zero failures.
