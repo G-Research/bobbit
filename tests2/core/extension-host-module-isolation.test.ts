@@ -96,7 +96,9 @@ afterAll(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
-describe("ModuleHost — confined execution (happy path + identity)", () => {
+// Worker bootstrap dominates this file's wall time. Run independent cases concurrently
+// so the same worker-boundary assertions stay comfortably inside the tier-1 15s budget.
+describe.concurrent("ModuleHost — confined execution (happy path + identity)", () => {
 	it("runs a handler in a worker and returns its (structured-cloned) result", async () => {
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
@@ -122,7 +124,7 @@ describe("ModuleHost — confined execution (happy path + identity)", () => {
 	});
 });
 
-describe("ModuleHost — module eval runs in the worker (parent NEVER imports pack code)", () => {
+describe.concurrent("ModuleHost — module eval runs in the worker (parent NEVER imports pack code)", () => {
 	it("a module whose TOP-LEVEL code spins forever (while(1)) is TERMINATED on timeout → 504", async () => {
 		// PROOF for Fix 1: the runaway is in MODULE EVALUATION (before any export), so
 		// it can only be bounded if the IMPORT happens in the terminate-able worker. If
@@ -157,7 +159,7 @@ describe("ModuleHost — module eval runs in the worker (parent NEVER imports pa
 	});
 });
 
-describe("ModuleHost — ambient parity (trusted pack = tool/MCP tier; acceptance #1)", () => {
+describe.concurrent("ModuleHost — ambient parity (trusted pack = tool/MCP tier; acceptance #1)", () => {
 	it("a pack module may import node:child_process and node:fs with no declaration", async () => {
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
@@ -224,7 +226,7 @@ describe("ModuleHost — ambient parity (trusted pack = tool/MCP tier; acceptanc
 	});
 });
 
-describe("ModuleHost — CPU / wall-time termination (design §9: terminate-on-timeout IS the CPU control)", () => {
+describe.concurrent("ModuleHost — CPU / wall-time termination (design §9: terminate-on-timeout IS the CPU control)", () => {
 	it("a while(1) CPU spin is TERMINATED on timeout → 504 (true cancellation, not a hung permit)", async () => {
 		const mh = new ModuleHost({ timeoutMs: 400 });
 		try {
@@ -242,7 +244,7 @@ describe("ModuleHost — CPU / wall-time termination (design §9: terminate-on-t
 	});
 });
 
-describe("ModuleHost — memory cap (resourceLimits)", () => {
+describe.concurrent("ModuleHost — memory cap (resourceLimits)", () => {
 	it("a handler that exceeds the heap cap crashes the worker → ActionError, not an unbounded parent alloc", async () => {
 		// Tight heap cap; a generous timeout so the OOM (not the timer) is what fires.
 		const mh = new ModuleHost({ timeoutMs: 15_000, maxOldGenerationSizeMb: 16 });
@@ -258,7 +260,7 @@ describe("ModuleHost — memory cap (resourceLimits)", () => {
 	});
 });
 
-describe("ModuleHost — file-resolution confinement (pack module graph is confined to its pack root)", () => {
+describe.concurrent("ModuleHost — file-resolution confinement (pack module graph is confined to its pack root)", () => {
 	let caseSeq = 0;
 	const packDir = (): string => path.join(tmp, `pack-${caseSeq++}`);
 
@@ -374,7 +376,7 @@ describe("ModuleHost — file-resolution confinement (pack module graph is confi
 	});
 });
 
-describe("ModuleHost — crash isolation", () => {
+describe.concurrent("ModuleHost — crash isolation", () => {
 	it("a thrown handler becomes a 500 (message preserved) and the host survives for the NEXT invoke", async () => {
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
@@ -408,7 +410,7 @@ describe("ModuleHost — crash isolation", () => {
 	});
 });
 
-describe("ModuleHost — host-API proxy (the ONLY capability over the MessagePort)", () => {
+describe.concurrent("ModuleHost — host-API proxy (the ONLY capability over the MessagePort)", () => {
 	it("store.put/get calls are marshalled to (and serviced by) the parent's LIVE host", async () => {
 		// The parent host records calls; the worker reaches it ONLY through the proxy.
 		const stored = new Map<string, unknown>();
@@ -506,7 +508,7 @@ describe("ModuleHost — host-API proxy (the ONLY capability over the MessagePor
 	});
 });
 
-describe("ModuleHost — host.agents proxy (Sub-goal C)", () => {
+describe.concurrent("ModuleHost — host.agents proxy (Sub-goal C)", () => {
 	it("the six host.agents verbs are marshalled to (and serviced by) the parent's LIVE host", async () => {
 		const calls: string[] = [];
 		const host = {

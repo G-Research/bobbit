@@ -188,7 +188,7 @@ async function setProjectOrder(first: ProjectFixture[]): Promise<void> {
 	expect(listResp.status).toBe(200);
 	const body = await listResp.json();
 	const projects = Array.isArray(body) ? body : body.projects || [];
-	const visibleIds = projects
+	const visibleIds: string[] = projects
 		.map((project: { id?: string }) => project.id)
 		.filter((id: string | undefined): id is string => !!id);
 	const firstIds = first.map(project => project.id).filter(id => visibleIds.includes(id));
