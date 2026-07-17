@@ -38,7 +38,7 @@ export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
-import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
+import { SessionManager, type ExtensionChannelServices } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -1310,8 +1310,6 @@ async function publishCurrentBranchToOrigin(
 }
 
 /** Git status result shape (+ optional partial/untrackedIncluded flags). */
-export type GitStatusRemotePublication = "local-only-policy";
-
 export interface GitStatusResult {
 	branch: string; primaryBranch: string; isOnPrimary: boolean;
 	/**
@@ -1332,107 +1330,6 @@ export interface GitStatusResult {
 	partial?: boolean;
 	/** true only when ?untracked=1 was passed (-uall); false on default -uno */
 	untrackedIncluded?: boolean;
-	/** Set when status intentionally suppresses default publication by policy. */
-	remotePublication?: GitStatusRemotePublication;
-}
-
-type GitStatusPublicationPolicy = "legacy-auto-publish" | "local-only-policy";
-type WorktreePushPolicy = "local-only" | "publish";
-type SessionGitPublicationMetadata = Partial<Pick<SessionInfo, "teamGoalId" | "teamLeadSessionId" | "role" | "branch">> & {
-	worktreePushPolicy?: WorktreePushPolicy;
-	remotePublicationPolicy?: WorktreePushPolicy;
-};
-
-function normalizeWorktreePushPolicy(value: unknown): WorktreePushPolicy | undefined {
-	return value === "local-only" || value === "publish" ? value : undefined;
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function readSessionGitPublicationMetadata(sessionManager: unknown, sessionId: string, liveSession: unknown): SessionGitPublicationMetadata {
-	const live = liveSession as SessionGitPublicationMetadata | undefined;
-	const persisted = (sessionManager as { getPersistedSession?: (id: string) => unknown })
-		.getPersistedSession?.(sessionId) as SessionGitPublicationMetadata | undefined;
-	return {
-		teamGoalId: live?.teamGoalId ?? persisted?.teamGoalId,
-		teamLeadSessionId: live?.teamLeadSessionId ?? persisted?.teamLeadSessionId,
-		role: live?.role ?? persisted?.role,
-		branch: live?.branch ?? persisted?.branch,
-		worktreePushPolicy: normalizeWorktreePushPolicy(live?.worktreePushPolicy) ?? normalizeWorktreePushPolicy(persisted?.worktreePushPolicy),
-		remotePublicationPolicy: normalizeWorktreePushPolicy(live?.remotePublicationPolicy) ?? normalizeWorktreePushPolicy(persisted?.remotePublicationPolicy),
-	};
-}
-
-function explicitWorktreePushPolicy(session: SessionGitPublicationMetadata): WorktreePushPolicy | undefined {
-	return normalizeWorktreePushPolicy(session.worktreePushPolicy) ?? normalizeWorktreePushPolicy(session.remotePublicationPolicy);
-}
-
-function isLegacyScopedTeamMemberSession(session: SessionGitPublicationMetadata, branch: string | undefined): boolean {
-	if (!session.teamGoalId || !session.teamLeadSessionId || !session.role || !branch) return false;
-	if (session.role === "team-lead") return false;
-	const goalId8 = session.teamGoalId.slice(0, 8);
-	if (!/^[0-9a-f]{8}$/i.test(goalId8)) return false;
-	const rolePattern = escapeRegExp(session.role);
-	const branchPattern = new RegExp(`^goal/${escapeRegExp(goalId8)}/${rolePattern}-[0-9a-f]{4}$`, "i");
-	return branchPattern.test(branch);
-}
-
-function resolveSessionGitStatusPublicationPolicy(
-	session: SessionGitPublicationMetadata,
-	branch: string | undefined,
-): GitStatusPublicationPolicy {
-	const explicitPolicy = explicitWorktreePushPolicy(session);
-	if (explicitPolicy === "local-only") return "local-only-policy";
-	if (explicitPolicy === "publish") return "legacy-auto-publish";
-	return isLegacyScopedTeamMemberSession(session, branch) ? "local-only-policy" : "legacy-auto-publish";
-}
-
-function sessionGitStatusRemotePublication(
-	sessionManager: unknown,
-	sessionId: string,
-	liveSession: unknown,
-	branch: string | undefined,
-): GitStatusRemotePublication | undefined {
-	const metadata = readSessionGitPublicationMetadata(sessionManager, sessionId, liveSession);
-	return resolveSessionGitStatusPublicationPolicy(metadata, branch) === "local-only-policy"
-		? "local-only-policy"
-		: undefined;
-}
-
-export function sessionGitStatusAutoPublishDecision(
-	result: Pick<GitStatusResult, "isOnPrimary" | "ahead" | "hasUpstream" | "branch"> | null | undefined,
-	remotePublication?: GitStatusRemotePublication,
-): { branch: string; setUpstream?: boolean } | undefined {
-	if (!result || remotePublication) return undefined;
-	if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
-		return { branch: result.branch };
-	}
-	if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-		return { branch: result.branch, setUpstream: true };
-	}
-	return undefined;
-}
-
-export function __resolveSessionGitStatusPublicationPolicyForTests(
-	session: SessionGitPublicationMetadata,
-	branch: string | undefined,
-): GitStatusPublicationPolicy {
-	return resolveSessionGitStatusPublicationPolicy(session, branch);
-}
-
-export function __resolveSessionGitStatusPublicationForTests(
-	session: SessionGitPublicationMetadata,
-	result: GitStatusResult,
-): { policy: GitStatusPublicationPolicy; result: GitStatusResult; autoPublish: boolean } {
-	const policy = resolveSessionGitStatusPublicationPolicy(session, result.branch);
-	const remotePublication = policy === "local-only-policy" ? "local-only-policy" : undefined;
-	return {
-		policy,
-		result: remotePublication ? { ...result, remotePublication } : result,
-		autoPublish: !!sessionGitStatusAutoPublishDecision(result, remotePublication),
-	};
 }
 
 // ── Git status cache + single-flight ──
@@ -13836,21 +13733,7 @@ async function handleApiRoute(
 			// Single-repo / no repoWorktrees: keep back-compat flat shape plus
 			// `repos: { ".": result }, aggregate: result`.
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-			const remotePublication = sessionGitStatusRemotePublication(sessionManager, id, session, result.branch);
-			const shapedResult = remotePublication ? { ...result, remotePublication } : result;
-			json({ ...shapedResult, aggregate: shapedResult, repos: { ".": shapedResult } });
-
-			// Auto-push: for feature branches with unpushed commits, publish the
-			// current branch to its matching remote ref regardless of inherited
-			// upstream config. Local-only sessions are explicitly durable via their
-			// local worktree and must not publish just because status was queried.
-			const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
-			if (publishDecision && !shouldSkipRemotePush(serverRemoteGitPolicy)) {
-				publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
-					containerId: cid,
-					setUpstream: publishDecision.setUpstream,
-				}).catch(() => {});
-			}
+			json({ ...result, aggregate: result, repos: { ".": result } });
 			return;
 		}
 
@@ -13903,22 +13786,7 @@ async function handleApiRoute(
 			};
 		}
 
-		const remotePublication = sessionGitStatusRemotePublication(sessionManager, id, session, aggregate.branch);
-		const shapedAggregate = remotePublication ? { ...aggregate, remotePublication } : aggregate;
-		json({ ...shapedAggregate, aggregate: shapedAggregate, repos });
-
-		// Auto-push only when the root container IS a git repo. Session branches
-		// are published at worktree-claim time, so skipping container auto-push
-		// for a true (non-git-container) polyrepo is fine. Local-only sessions are
-		// explicitly durable via their local worktree and must not publish just
-		// because status was queried.
-		const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
-		if (publishDecision && !shouldSkipRemotePush(serverRemoteGitPolicy)) {
-			publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
-				containerId: cid,
-				setUpstream: publishDecision.setUpstream,
-			}).catch(() => {});
-		}
+		json({ ...aggregate, aggregate, repos });
 		return;
 	}
 	// GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex — lazy-load full tool input content

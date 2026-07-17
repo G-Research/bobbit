@@ -203,6 +203,48 @@ describe("GitStatusWidget render states", () => {
 		expect(p.textContent).not.toContain("-4");
 	});
 
+	it("offers manual publication for non-primary session branches", async () => {
+		const el = await mount({
+			loading: false,
+			branch: "session/manual-publish",
+			primaryBranch: "master",
+			primaryRef: "origin/master",
+			isOnPrimary: false,
+			clean: true,
+			hasUpstream: true,
+			ahead: 3,
+			sessionId: "session-manual",
+		});
+		const pushEvents: Event[] = [];
+		el.addEventListener("git-push", (event) => pushEvents.push(event));
+
+		await openDropdown(el);
+		expect(dd()!.textContent).toContain("Remote publication is manual.");
+		expect(dd()!.textContent).not.toContain("published automatically");
+		btnByText(dd()!, "Push")!.click();
+		expect(pushEvents).toHaveLength(1);
+	});
+
+	it("does not infer automatic publication from missing upstream or base_ref", async () => {
+		const el = await mount({
+			loading: false,
+			branch: "goal/local-only",
+			primaryBranch: "master",
+			primaryRef: "origin/master",
+			isOnPrimary: false,
+			clean: true,
+			hasUpstream: false,
+			ahead: 0,
+			unpushed: true,
+			sessionId: "session-local",
+		});
+
+		await openDropdown(el);
+		expect(dd()!.querySelector('[data-testid="git-manual-publication"]')).toBeTruthy();
+		expect(btnByText(dd()!, "Push")).toBeTruthy();
+		expect(dd()!.querySelector('[data-testid="git-local-only-policy"]')).toBeFalsy();
+	});
+
 	it("skeleton is non-interactive (no dropdown-open event)", async () => {
 		const el = await mount({ loading: true, branch: "" });
 		let openEvents = 0;

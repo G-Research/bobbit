@@ -1,13 +1,14 @@
 /**
- * Focused coverage for session git-status publication policy.
+ * Focused HTTP coverage for read-only session git status.
  *
- * The git-status producer and branch publisher are faked so these tests verify
- * only the HTTP handler's policy/observability decisions, not Git itself.
+ * The status producer and branch publisher are faked so these tests pin the
+ * route boundary: status may inspect/fetch refs, but only POST /git-push may
+ * invoke the publisher.
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, defaultProjectId, deleteSession, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, defaultProjectId, deleteSession, gitCwd, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 let serverModule: any;
@@ -47,8 +48,8 @@ function okResult(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-async function mkFakeSession(tag: string): Promise<{ id: string; cwd: string }> {
-	const cwd = join(nonGitCwd(), `git-status-policy-${tag}-${process.pid}-${Date.now()}`);
+async function mkSession(tag: string, requestedCwd?: string): Promise<{ id: string; cwd: string }> {
+	const cwd = requestedCwd ?? join(nonGitCwd(), `git-status-read-only-${tag}-${process.pid}-${Date.now()}`);
 	mkdirSync(cwd, { recursive: true });
 	const projectId = await defaultProjectId();
 	const resp = await apiFetch("/api/sessions", {
@@ -57,9 +58,9 @@ async function mkFakeSession(tag: string): Promise<{ id: string; cwd: string }> 
 	});
 	expect(resp.status).toBe(201);
 	const { id } = await resp.json();
-	const s = await apiFetch(`/api/sessions/${id}`);
-	expect(s.status).toBe(200);
-	const { cwd: realCwd } = await s.json();
+	const sessionResp = await apiFetch(`/api/sessions/${id}`);
+	expect(sessionResp.status).toBe(200);
+	const { cwd: realCwd } = await sessionResp.json();
 	mkdirSync(realCwd, { recursive: true });
 	return { id, cwd: realCwd };
 }
@@ -73,16 +74,21 @@ async function withRemotePushEnabled<T>(fn: () => Promise<T>): Promise<T> {
 	}
 }
 
-test.describe("session git-status local-only publication policy", () => {
+test.describe("session git-status read-only contract", () => {
 	let createdSessionIds: string[] = [];
 	let currentResult: Record<string, unknown>;
 	let publishCalls: Array<{ cwd: string; branch: string; opts: Record<string, unknown> }>;
+	let statusCalls: Array<{ cwd: string; opts?: { untracked?: boolean; configuredBaseRef?: string } }>;
 
 	test.beforeEach(() => {
 		createdSessionIds = [];
 		publishCalls = [];
+		statusCalls = [];
 		currentResult = okResult();
-		serverModule.__setGitStatusFake(async () => currentResult);
+		serverModule.__setGitStatusFake(async (cwd: string, _containerId?: string, opts?: { untracked?: boolean; configuredBaseRef?: string }) => {
+			statusCalls.push({ cwd, opts });
+			return currentResult;
+		});
 		serverModule.__setPublishCurrentBranchToOriginFake(async (cwd: string, branch: string, opts: Record<string, unknown>) => {
 			publishCalls.push({ cwd, branch, opts });
 			return "published";
@@ -95,62 +101,119 @@ test.describe("session git-status local-only publication policy", () => {
 		await Promise.all(createdSessionIds.map((id) => deleteSession(id).catch(() => {})));
 	});
 
-	test("does not auto-publish and reports policy when persisted metadata is local-only", async ({ gateway }) => {
-		const { id, cwd } = await mkFakeSession("local-only");
+	test("repeated status reads preserve upstream/base_ref data without publishing", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		const store = gateway.projectContextManager.getOrCreate(projectId!)?.projectConfigStore;
+		expect(store).toBeTruthy();
+		const previousBaseRef = store!.get("base_ref");
+		store!.set("base_ref", "origin/master");
+
+		try {
+			const { id, cwd } = await mkSession("repeated");
+			createdSessionIds.push(id);
+			const persisted = gateway.sessionManager.getPersistedSession(id) as any;
+			persisted.worktreePushPolicy = "publish";
+			persisted.remotePublicationPolicy = "publish";
+			currentResult = okResult({
+				branch: "goal/integration-12345678",
+				isOnPrimary: false,
+				hasUpstream: true,
+				ahead: 3,
+				aheadOfPrimary: 3,
+				mergedIntoPrimary: false,
+				unpushed: true,
+			});
+			serverModule.invalidateGitStatusCache(cwd);
+
+			for (const suffix of ["", "?fetch=true", "", "?untracked=1"]) {
+				const response = await withRemotePushEnabled(() => apiFetch(`/api/sessions/${id}/git-status${suffix}`));
+				expect(response.status).toBe(200);
+				const body = await response.json();
+				expect(body).toMatchObject({
+					branch: "goal/integration-12345678",
+					hasUpstream: true,
+					ahead: 3,
+					primaryRef: "origin/master",
+				});
+				expect(body.remotePublication).toBeUndefined();
+				expect(body.aggregate.remotePublication).toBeUndefined();
+			}
+
+			expect(statusCalls.some((call) => call.opts?.configuredBaseRef === "origin/master")).toBe(true);
+			expect(publishCalls).toHaveLength(0);
+
+			currentResult = okResult({
+				branch: "session/helper-abcdef",
+				isOnPrimary: false,
+				hasUpstream: false,
+				mergedIntoPrimary: false,
+				unpushed: true,
+			});
+			serverModule.invalidateGitStatusCache(cwd);
+			const noUpstream = await withRemotePushEnabled(() => apiFetch(`/api/sessions/${id}/git-status`));
+			expect(noUpstream.status).toBe(200);
+			expect(await noUpstream.json()).toMatchObject({ branch: "session/helper-abcdef", hasUpstream: false });
+			expect(publishCalls).toHaveLength(0);
+		} finally {
+			if (previousBaseRef) store!.set("base_ref", previousBaseRef);
+			else store!.remove("base_ref");
+		}
+	});
+
+	test("multi-repo status aggregation remains read-only", async ({ gateway }) => {
+		const { id, cwd } = await mkSession("multi");
 		createdSessionIds.push(id);
-		const persisted = gateway.sessionManager.getPersistedSession(id) as any;
-		expect(persisted, "session must be persisted").toBeTruthy();
-		persisted.worktreePushPolicy = "local-only";
+		const apiWorktree = join(cwd, "api");
+		const webWorktree = join(cwd, "web");
+		mkdirSync(apiWorktree, { recursive: true });
+		mkdirSync(webWorktree, { recursive: true });
+		const live = gateway.sessionManager.getSession(id) as any;
+		live.repoWorktrees = [
+			{ repo: "api", repoPath: apiWorktree, worktreePath: apiWorktree },
+			{ repo: "web", repoPath: webWorktree, worktreePath: webWorktree },
+		];
 		currentResult = okResult({
-			branch: "goal/656b8057/coder-abcd",
+			branch: "session/multi-abcdef",
 			isOnPrimary: false,
-			ahead: 3,
 			hasUpstream: true,
+			ahead: 1,
+			aheadOfPrimary: 1,
+			mergedIntoPrimary: false,
 			unpushed: true,
 		});
 		serverModule.invalidateGitStatusCache(cwd);
 
-		const resp = await withRemotePushEnabled(() => apiFetch(`/api/sessions/${id}/git-status`));
-		expect(resp.status).toBe(200);
-		const body = await resp.json();
-		expect(body.remotePublication).toBe("local-only-policy");
-		expect(body.aggregate.remotePublication).toBe("local-only-policy");
-
+		const response = await withRemotePushEnabled(() => apiFetch(`/api/sessions/${id}/git-status?fetch=true`));
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(Object.keys(body.repos).sort()).toEqual(["api", "web"]);
+		expect(body.aggregate).toMatchObject({ branch: "session/multi-abcdef", ahead: 1 });
 		expect(publishCalls).toHaveLength(0);
 	});
 
-	test("does not classify goal/ or session/ prefixes as local-only without metadata", async () => {
-		const { id, cwd } = await mkFakeSession("prefixes");
+	test("explicit POST git-push still invokes the branch publisher", async () => {
+		const { id } = await mkSession("explicit", gitCwd());
 		createdSessionIds.push(id);
+		const runtime = await loadServerTestRuntime();
+		const runner = runtime.gatewayDeps.realCommandRunner;
+		const originalExecFile = runner.execFile;
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const command = args.join(" ");
+			if (command === "symbolic-ref --short HEAD") return { stdout: "feature/explicit", stderr: "" };
+			if (command === "rev-parse --abbrev-ref --symbolic-full-name @{u}") throw new Error("no upstream");
+			return originalExecFile(file, args, options);
+		};
 
-		currentResult = okResult({
-			branch: "goal/integration-12345678",
-			isOnPrimary: false,
-			ahead: 2,
-			hasUpstream: true,
-			unpushed: true,
-		});
-		serverModule.invalidateGitStatusCache(cwd);
-		const goalResp = await withRemotePushEnabled(() => apiFetch(`/api/sessions/${id}/git-status`));
-		expect(goalResp.status).toBe(200);
-		expect((await goalResp.json()).remotePublication).toBeUndefined();
-		await expect.poll(() => publishCalls.length, { timeout: 1_000 }).toBe(1);
-		expect(publishCalls[0].branch).toBe("goal/integration-12345678");
-		expect(publishCalls[0].opts.setUpstream).toBeUndefined();
-
-		currentResult = okResult({
-			branch: "session/helper-abcdef",
-			isOnPrimary: false,
-			ahead: 0,
-			hasUpstream: false,
-			unpushed: false,
-		});
-		serverModule.invalidateGitStatusCache(cwd);
-		const sessionResp = await withRemotePushEnabled(() => apiFetch(`/api/sessions/${id}/git-status`));
-		expect(sessionResp.status).toBe(200);
-		expect((await sessionResp.json()).remotePublication).toBeUndefined();
-		await expect.poll(() => publishCalls.length, { timeout: 1_000 }).toBe(2);
-		expect(publishCalls[1].branch).toBe("session/helper-abcdef");
-		expect(publishCalls[1].opts.setUpstream).toBe(true);
+		try {
+			const response = await withRemotePushEnabled(() => apiFetch(`/api/sessions/${id}/git-push`, { method: "POST" }));
+			const body = await response.json();
+			expect(response.status, JSON.stringify(body)).toBe(200);
+			expect(body).toMatchObject({ ok: true, output: "published" });
+			expect(publishCalls).toHaveLength(1);
+			expect(publishCalls[0]).toMatchObject({ branch: "feature/explicit", opts: { setUpstream: true } });
+		} finally {
+			runner.execFile = originalExecFile;
+		}
 	});
 });
