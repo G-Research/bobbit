@@ -8,6 +8,12 @@ import {
 } from "../../src/server/agent/tool-extension-preflight.js";
 import { prepareGitTemplate } from "./git-template.js";
 
+// Tier-1 never launches real review agents. Setup files execute before the test
+// module graph, so pin these boot-frozen flags here rather than in an imported
+// compatibility shim whose ESM dependencies may boot the gateway first.
+process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
+process.env.BOBBIT_HUMAN_SIGNOFF_SKIP = "1";
+
 const DISABLE_ENV = "BOBBIT_TIER1_SPAWN_GUARD_DISABLE";
 const STATE_KEY = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
 const GUARDED_APIS = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"] as const;

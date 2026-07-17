@@ -27,6 +27,11 @@ function messageFrom(call: () => unknown): string {
 }
 
 describe("tier-1 spawn guard policy", () => {
+	it("pins non-interactive verification flags before test modules boot", () => {
+		expect(process.env.BOBBIT_LLM_REVIEW_SKIP).toBe("1");
+		expect(process.env.BOBBIT_HUMAN_SIGNOFF_SKIP).toBe("1");
+	});
+
 	it("blocks every sync and async process API with migration guidance", () => {
 		const target = fakeTarget();
 		const guard = createTier1SpawnGuardController(target);
