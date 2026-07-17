@@ -6,7 +6,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { AlertTriangle, ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Sparkles } from "lucide";
+import { AlertTriangle, ArrowDown, ArrowUp, Brain, Check, ChevronsDown, Copy, Image as ImageIcon, Sparkles } from "lucide";
 import type { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 
@@ -45,7 +45,7 @@ import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
 import { state as appState, renderApp, type GatewaySession } from "../../app/state.js";
-import { gatewayFetch } from "../../app/api.js";
+import { copyTextToClipboard, gatewayFetch } from "../../app/api.js";
 import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
 import { canContinueArchivedSession, continueArchivedSession } from "../../app/session-actions.js";
@@ -397,6 +397,8 @@ export class AgentInterface extends LitElement {
 		? !window.matchMedia("(min-width: 640px)").matches
 		: false;
 	private _narrowResizeObserver?: ResizeObserver;
+	@state() private _cwdCopied = false;
+	private _cwdCopyResetTimer?: ReturnType<typeof setTimeout>;
 	private _updateNarrow = (width: number) => {
 		const next = width > 0 && width < 640;
 		if (next !== this._isNarrow) {
@@ -404,6 +406,18 @@ export class AgentInterface extends LitElement {
 			this.requestUpdate();
 		}
 	};
+
+	private async _copyCwd(event: Event): Promise<void> {
+		event.preventDefault();
+		event.stopPropagation();
+		if (!this.cwd || !await copyTextToClipboard(this.cwd)) return;
+		this._cwdCopied = true;
+		if (this._cwdCopyResetTimer) clearTimeout(this._cwdCopyResetTimer);
+		this._cwdCopyResetTimer = setTimeout(() => {
+			this._cwdCopied = false;
+			this._cwdCopyResetTimer = undefined;
+		}, 1500);
+	}
 
 	/**
 	 * Window-level Escape handler. Aborts the streaming agent regardless of
@@ -969,6 +983,10 @@ export class AgentInterface extends LitElement {
 		if (this._scrollDeferTimer) {
 			clearTimeout(this._scrollDeferTimer);
 			this._scrollDeferTimer = null;
+		}
+		if (this._cwdCopyResetTimer) {
+			clearTimeout(this._cwdCopyResetTimer);
+			this._cwdCopyResetTimer = undefined;
 		}
 
 		if (this._pillResizeObserver) {
@@ -2096,11 +2114,21 @@ export class AgentInterface extends LitElement {
 			})
 			: "";
 
-		const cwdHtml = this.cwd ? (() => {
-			const parts = this.cwd!.split(/[/\\]/).filter(Boolean);
-			const short = parts.length <= 2 ? parts.join("/") : "…/" + parts.slice(-2).join("/");
-			return html`<span class="font-mono opacity-60 flex items-center gap-1 truncate" style="max-width:280px;" title="${this.cwd}">${short}</span>`;
-		})() : "";
+		const cwdHtml = this.cwd ? html`
+			<span
+				class="font-mono opacity-60 truncate"
+				data-testid="footer-cwd-path"
+				title=${this.cwd}
+			>${this.cwd}</span>
+			<button
+				type="button"
+				class="shrink-0 rounded p-1 opacity-60 hover:bg-accent hover:text-foreground hover:opacity-100 transition-colors"
+				data-testid="footer-cwd-copy"
+				aria-label=${this._cwdCopied ? "Working directory copied" : "Copy working directory"}
+				title=${this._cwdCopied ? "Copied" : "Copy working directory"}
+				@click=${(event: Event) => void this._copyCwd(event)}
+			>${icon(this._cwdCopied ? Check : Copy, "xs")}</button>
+		` : nothing;
 
 		// Build context popover content
 		const popoverContent = this._contextPopoverOpen ? (() => {
@@ -2200,15 +2228,15 @@ export class AgentInterface extends LitElement {
 		};
 
 		return html`
-			<div class="text-xs text-muted-foreground flex justify-between items-center mt-0.5 pl-2 pr-2 sm:pl-0 sm:pr-0">
-				<div class="flex items-center">
+			<div class="text-xs text-muted-foreground flex items-center mt-0.5 pl-2 pr-2 sm:pl-0 sm:pr-0">
+				<div class="flex shrink-0 items-center">
 					${this.showThemeToggle ? html`<bell-toggle></bell-toggle><theme-toggle></theme-toggle>` : html``}
 					${thinkingSelect}
 					${modelButton}
 					${imageModelButton}
 				</div>
-				${cwdHtml && !this._isNarrow ? html`<div class="flex items-center pl-4">${cwdHtml}</div>` : ""}
-				<div class="flex ml-auto items-center gap-3 relative" style="position:relative">
+				${this.cwd && !this._isNarrow ? html`<div class="flex min-w-0 flex-1 items-center gap-1 pl-4 pr-3">${cwdHtml}</div>` : ""}
+				<div class="flex shrink-0 ml-auto items-center gap-3 relative" style="position:relative">
 					${popoverContent}
 					<span class="cursor-pointer hover:text-foreground transition-colors"
 						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}>

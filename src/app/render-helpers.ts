@@ -18,7 +18,7 @@ import {
 import { statusBobbit } from "./session-colors.js";
 import { connectToSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { setHashRoute } from "./routing.js";
-import { isHeadquartersProject } from "./headquarters.js";
+import { HEADQUARTERS_ACCENT_COLOR, isHeadquartersProject } from "./headquarters.js";
 import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { buildArchivedSessionActions, buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
@@ -217,7 +217,7 @@ export function filterArchivedSessionsByQuery(
 
 /** Get the appropriate project accent color for the current theme mode. */
 export function getProjectAccentColor(project: Project): string {
-	if (isHeadquartersProject(project)) return "var(--primary)";
+	if (isHeadquartersProject(project)) return HEADQUARTERS_ACCENT_COLOR;
 	const isDark = document.documentElement.classList.contains("dark");
 	return isDark
 		? (project.colorDark || project.color || "var(--muted-foreground)")

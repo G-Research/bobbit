@@ -4,6 +4,8 @@ export const HEADQUARTERS_PROJECT_ID = "headquarters";
 export const HEADQUARTERS_PROJECT_NAME = "Headquarters";
 export const HEADQUARTERS_PROJECT_KIND = "headquarters";
 export const HEADQUARTERS_HELPER_TEXT = "Server workspace";
+/** Theme-aware Headquarters accent: primarily foreground, softened slightly to avoid excessive contrast. */
+export const HEADQUARTERS_ACCENT_COLOR = "color-mix(in oklch, var(--foreground) 75%, var(--muted-foreground))";
 export const SHOW_HEADQUARTERS_IN_PROJECT_LISTS_PREF = "showHeadquartersInProjectLists";
 
 export type ProjectKind = "normal" | "headquarters" | "system";
