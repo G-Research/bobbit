@@ -971,9 +971,9 @@ export interface MergeChildResult {
  *   - "Already up to date" / "Already up-to-date" output → `alreadyMerged`.
  *   - On conflict: runs `git merge --abort` so the parent worktree returns
  *     to a clean state. Caller decides whether to surface to the user.
- *   - On clean merge: returns `{ merged: true }` with the merge-commit
- *     message in `output` (caller may push afterwards — gated by
- *     `shouldSkipRemotePush()`).
+ *   - On clean merge: returns `{ merged: true }` with the local merge-commit
+ *     message in `output`. This helper never publishes the merge; publication
+ *     is a separate operation that must be explicitly requested elsewhere.
  *
  * Anti-pattern (see SUBGOALS-SPEC §9): NEVER auto-resolve conflicts.
  * Escalate to the user.

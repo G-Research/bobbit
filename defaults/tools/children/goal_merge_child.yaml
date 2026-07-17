@@ -6,7 +6,7 @@ provider:
   extension: extension.ts
 group: Children
 docs: |-
-  Required: `childGoalId`. Performs a local `git merge --no-ff` of the child's branch into the parent's branch without publishing either branch. For multi-repo goals, all matching component worktrees are merged and returned in `repos`. On full success the child is archived and its team is torn down. Returns 409 with `{ conflict: true, output, repos? }` on merge conflict — child stays live, manual resolution required.
+  Required: `childGoalId`. Performs a local `git merge --no-ff` of the child's branch into the parent's branch. This operation does not publish either branch; publication must be explicitly requested through a separate operation. For multi-repo goals, matching component worktrees merge sequentially and their outcomes are returned in `repos`. If a later component conflicts, earlier successful local merges remain applied and are not destructively rolled back. The 409 response includes `{ conflict: true, output, repos? }`; the child stays live for repair and retry. On full success the child is archived and its team is torn down.
 detail_docs: >-
   ## Purpose
 
@@ -34,7 +34,9 @@ detail_docs: >-
 
   - 409 `{ merged: false, alreadyMerged: false, conflict: true, output, repos? }` — merge conflict; child stays live.
 
-  `repos`, when present, maps each matching component repo to its local merge outcome. This tool never pushes the parent branch.
+  `repos`, when present, maps each matching component repo to its local merge outcome. Component repositories merge sequentially. If a later component conflicts, any earlier successful local merges remain applied; they are not destructively rolled back. The child stays live so the conflict can be repaired and the merge retried.
+
+  This tool is local-only and does not publish either branch. Publication, when explicitly requested elsewhere, is a separate operation.
 
   ## Parameters
 

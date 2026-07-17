@@ -645,7 +645,7 @@ export class GoalManager {
 				const configuredBaseRef = goal.projectId && this.baseRefResolver
 					? this.baseRefResolver(goal.projectId) : undefined;
 				if (isMulti && components) {
-					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, childBaseBranch, { worktreeRoot: worktreeRootOverride, configuredBaseRef, commandRunner: this.commandRunner });
+					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, childBaseBranch, { worktreeRoot: worktreeRootOverride, configuredBaseRef, commandRunner: this.commandRunner, remotePolicy: this.remotePolicy });
 					// Defense-in-depth: if no worktree-able git sub-repo remained
 					// (createWorktreeSet skips the non-git container and non-git
 					// sub-repos), fall back gracefully to no-worktree. The goal
@@ -690,7 +690,7 @@ export class GoalManager {
 					console.log(`[goal-manager] Multi-repo worktree set provisioned for goal "${goal.title}" at ${set.container}`);
 					return { worktreePath: set.container, cwd: offsetCwd, repoWorktrees };
 				}
-				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride, startPoint: childBaseBranch, configuredBaseRef, commandRunner: this.commandRunner });
+				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride, startPoint: childBaseBranch, configuredBaseRef, commandRunner: this.commandRunner, remotePolicy: this.remotePolicy });
 				// Per-component setup — non-fatal on failure. Mirrors the multi-repo
 				// branch above so component.relativePath is honored.
 				if (components && components.length > 0) {
@@ -796,8 +796,12 @@ export class GoalManager {
 	/**
 	 * Locally merge a child's branch into its parent's branch (child goals
 	 * merge LOCALLY into parent branch — no PR and no remote publication).
-	 * Multi-repo goals merge every component worktree shared by parent and
-	 * child and expose each result in `repos`.
+	 * Publication, when explicitly requested elsewhere, is a separate operation.
+	 *
+	 * Multi-repo component repositories merge sequentially and expose each result
+	 * in `repos`. If a later component conflicts, an earlier component may remain
+	 * successfully merged locally: successful merges are not destructively rolled
+	 * back. The child remains live so callers can repair the conflict and retry.
 	 *
 	 * Security invariant: `child.parentGoalId === parentGoalId` MUST hold;
 	 * mismatch throws PARENT_MISMATCH (prevents cross-tree merges).
@@ -1083,7 +1087,7 @@ export class GoalManager {
 				const title = updates.title ?? existing.title;
 				const branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
 				try {
-					const result = await createWorktree(repoRoot, branch, { commandRunner: this.commandRunner });
+					const result = await createWorktree(repoRoot, branch, { commandRunner: this.commandRunner, remotePolicy: this.remotePolicy });
 					updates.repoPath = repoRoot;
 					updates.branch = branch;
 					// Also update cwd to the worktree
