@@ -17,10 +17,12 @@ __syncBeforeAll(() => __syncCE());
  *   - Empty / missing content produces no output (no zero-text rows).
  */
 
-import { describe, expect, test } from "vitest";
-import * as fs from "node:fs";
+import { describe, expect, test, vi } from "vitest";
+import fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { syncBuiltinESMExports } from "node:module";
+import { Readable } from "node:stream";
 
 import { GoalIndexSource } from "../../../src/server/search/sources/goal-source.ts";
 import { SessionIndexSource } from "../../../src/server/search/sources/session-source.ts";
@@ -34,6 +36,7 @@ import type { IndexSource, IndexSourceContext, Indexable } from "../../../src/se
 import type { PersistedGoal, GoalStore } from "../../../src/server/agent/goal-store.ts";
 import type { PersistedSession, SessionStore } from "../../../src/server/agent/session-store.ts";
 import type { PersistedStaff, StaffStore } from "../../../src/server/agent/staff-store.ts";
+import { installScopedMemoryFs } from "../../core/helpers/scoped-memory-fs.ts";
 
 // ── In-memory fake stores ────────────────────────────────────────────
 
@@ -335,15 +338,9 @@ describe("MessageIndexSource", () => {
 		expect(user.weight).toBe(2.0);
 		expect(user.id).toBe("message:s1:0:text:0");
 		expect(user.metadata.sessionTitle, "message rows should carry parent session title metadata").toBe("Chat");
-		expect(user.metadata.authorKind).toBe("user");
-		expect(user.metadata.authorId).toBe("user:local");
-		expect(user.metadata.authorLabel).toBe("User");
 
 		const assistant = out.find((o) => o.role === "assistant")!;
 		expect(assistant.weight).toBe(1.0);
-		expect(assistant.metadata.authorKind).toBe("agent");
-		expect(assistant.metadata.authorId).toBe("session:s1");
-		expect(assistant.metadata.authorLabel).toBe("Chat");
 		expect(assistant.text.includes("<thinking>")).toBe(false);
 
 		const toolCall = out.find((o) => o.role === "tool_call")!;
@@ -354,42 +351,62 @@ describe("MessageIndexSource", () => {
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
-	test("adds sidecar-resolved system author metadata without changing indexed text or weights", async () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-author-source-"));
-		const file = path.join(dir, "session.jsonl");
-		fs.writeFileSync(file, JSON.stringify({
-			id: "system-message",
-			message: { role: "user", content: "SystemPromptSearchToken" },
-		}) + "\n", "utf-8");
-		const source = new MessageIndexSource(() => [{
-			schemaVersion: 1,
-			type: "prompt-author",
-			promptId: "system-prompt",
-			dispatchedAt: 100,
-			modelText: "SystemPromptSearchToken",
-			source: "task-notification",
-			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
-		}]);
+	test("indexes inferred and sidecar-resolved authors without changing text or weights", async () => {
+		const restoreFs = installScopedMemoryFs();
+		const file = path.resolve("/memory/message-author-source/session.jsonl");
+		const transcript = [
+			{ id: "human-message", message: { role: "user", content: "HumanPromptSearchToken" } },
+			{ id: "assistant-message", message: { role: "assistant", content: "AssistantSearchToken" } },
+			{ id: "system-message", message: { role: "user", content: "SystemPromptSearchToken" } },
+		].map((row) => JSON.stringify(row)).join("\n") + "\n";
+		const streamSpy = vi.spyOn(fs, "createReadStream").mockImplementation((streamPath) => {
+			return Readable.from([fs.readFileSync(streamPath, "utf-8")]) as fs.ReadStream;
+		});
+		syncBuiltinESMExports();
 
-		const [message] = await collect(source, makeCtx({
-			sessions: [{
-				id: "system-session",
-				title: "System session",
-				cwd: "/tmp",
-				agentSessionFile: file,
-				createdAt: 1,
-				lastActivity: 2,
-			}],
-		}));
-		expect(message.text).toBe("SystemPromptSearchToken");
-		expect(message.role).toBe("user");
-		expect(message.weight).toBe(2.0);
-		expect(message.metadata.authorKind).toBe("system");
-		expect(message.metadata.authorId).toBe("system:bobbit");
-		expect(message.metadata.authorLabel).toBe("Bobbit");
-		expect(message.text).not.toContain("Bobbit");
+		try {
+			fs.writeFileSync(file, transcript, "utf-8");
+			const source = new MessageIndexSource(() => [{
+				schemaVersion: 1,
+				type: "prompt-author",
+				promptId: "system-prompt",
+				dispatchedAt: 100,
+				modelText: "SystemPromptSearchToken",
+				source: "task-notification",
+				author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+			}]);
 
-		fs.rmSync(dir, { recursive: true, force: true });
+			const messages = await collect(source, makeCtx({
+				sessions: [{
+					id: "system-session",
+					title: "System session",
+					cwd: "/tmp",
+					agentSessionFile: file,
+					createdAt: 1,
+					lastActivity: 2,
+				}],
+			}));
+			expect(messages.map(({ text, role, weight }) => ({ text, role, weight }))).toEqual([
+				{ text: "HumanPromptSearchToken", role: "user", weight: 2.0 },
+				{ text: "AssistantSearchToken", role: "assistant", weight: 1.0 },
+				{ text: "SystemPromptSearchToken", role: "user", weight: 2.0 },
+			]);
+			expect(messages.map((message) => ({
+				kind: message.metadata.authorKind,
+				id: message.metadata.authorId,
+				label: message.metadata.authorLabel,
+			}))).toEqual([
+				{ kind: "user", id: "user:local", label: "User" },
+				{ kind: "agent", id: "session:system-session", label: "System session" },
+				{ kind: "system", id: "system:bobbit", label: "Bobbit" },
+			]);
+			expect(messages.map((message) => message.text).join(" ")).not.toContain("Bobbit");
+			expect(messages.map((message) => message.text).join(" ")).not.toContain("System session");
+		} finally {
+			streamSpy.mockRestore();
+			restoreFs();
+			syncBuiltinESMExports();
+		}
 	});
 
 	test("denormalizes goal-prefixed session title metadata for message result round-trip", async () => {
