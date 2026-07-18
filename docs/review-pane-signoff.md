@@ -82,6 +82,8 @@ The active `gate_inspect(section="verification")` snapshot applies `awaitingHuma
 
 Live reconciliation treats the active-verifications endpoint as authoritative for whether a matching verification still exists. A successful response with no matching entry marks persisted running state stale and removes sign-off actionability. A matching active entry with an empty `steps` array still confirms that the verification is alive, but carries no replacement step data, so it does not erase event-seeded or already rendered rows. Failed REST requests also leave current live state intact, because a network failure is not evidence that the verification or sign-off ended.
 
+Completion events are scoped to the mounted card's gate and signal, plus the step when the event represents one step. A present `goalId` must match the launch target; document-scoped events may omit it because the mounted card already supplies the goal scope. This lets scoped completion events remove a resolved launcher without allowing an event from another goal to do so.
+
 ### Shared handoff contract
 
 On **Start Review**, the shared launcher:
@@ -106,6 +108,8 @@ On **Start Review**, the shared launcher:
    ```
 
 The shared event handler opens or focuses the matching review document and selects the review workspace. Keeping all four launch sources on this event contract ensures approve/reject decisions retain the exact goal, gate, signal, and step routing identifiers.
+
+A launch remains bound to the target and card that started it. If the target changes, the sign-off resolves, or the card disconnects while content is loading, the request is cancelled and its late result cannot open a stale review or surface an irrelevant error. This prevents recycled or removed cards from handing off content for an obsolete sign-off.
 
 If the request fails or the matching signal no longer exists, the launcher re-enables **Start Review** and shows `Couldn’t open review. Try again.` beside the action. A completion event received during loading also clears the loading/error state and removes the resolved launcher.
 
