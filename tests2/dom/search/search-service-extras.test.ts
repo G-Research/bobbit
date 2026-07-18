@@ -341,8 +341,10 @@ test("serialized message reindexes keep latest session and goal title metadata",
 });
 
 test("live message indexing adds validated author metadata without changing text or weight", async () => {
-	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-live-author-"));
-	const svc = new SearchService({ stateDir, projectId: "project-author" });
+	const svc = new SearchService({
+		stateDir: path.resolve("/memory/search-service-author"),
+		projectId: "project-author",
+	});
 	const captured: Array<{ text: string; weight: number; metadata: Record<string, unknown> }> = [];
 	const indexer = {
 		upsertEntries: async (entries: typeof captured) => { captured.push(...entries); },
@@ -372,7 +374,6 @@ test("live message indexing adds validated author metadata without changing text
 	expect(captured[0].metadata.authorId).toBe("session:session-author");
 	expect(captured[0].metadata.authorLabel).toBe("Authored chat");
 	expect(captured[0].text).not.toContain("Authored chat");
-	fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
 test("close waits for an in-flight message reindex before closing the store", async () => {

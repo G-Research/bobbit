@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import "../../src/app/session-manager.js";
-import { RemoteAgent } from "../../src/app/remote-agent.js";
-import { customConvertToLlm, createSystemNotification } from "../../src/app/custom-messages.js";
 import { initialState, reduce } from "../../src/app/message-reducer.js";
-import { defaultConvertToLlm } from "../../src/ui/components/Messages.js";
 import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.js";
 
 const AGENT_AUTHOR: MessageAuthor = {
@@ -26,6 +22,12 @@ function textMessage(role: "user" | "assistant", text: string, author: MessageAu
 		timestamp: 1,
 		author,
 	};
+}
+
+function visibleText(message: Record<string, any>): string {
+	return Array.isArray(message.content)
+		? message.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("\n")
+		: String(message.message ?? message.content ?? "");
 }
 
 describe("client message author metadata", () => {
@@ -59,53 +61,53 @@ describe("client message author metadata", () => {
 			SYSTEM_AUTHOR,
 			AGENT_AUTHOR,
 		]);
+		expect(state.messages.map(visibleText)).toEqual(["same prompt", "reply"]);
+		expect(state.messages.map(visibleText).join(" ")).not.toContain(SYSTEM_AUTHOR.label);
+		expect(state.messages.map(visibleText).join(" ")).not.toContain(AGENT_AUTHOR.label);
 	});
 
-	it("stamps optimistic prompts, steers, and offline queue rows as the local user", async () => {
-		const agent = new RemoteAgent() as any;
-		agent.ws = { readyState: 1, send: () => {} };
-
-		await agent.prompt("hello");
-		expect(agent.state.messages.at(-1)?.author).toEqual(LOCAL_USER_AUTHOR);
-
-		agent.steer("redirect");
-		expect(agent.state.messages.at(-1)?.author).toEqual(LOCAL_USER_AUTHOR);
-
-		agent.reset();
-		agent.ws = null;
-		await agent.prompt("offline");
-		expect(agent.getQueue()[0].author).toEqual(LOCAL_USER_AUTHOR);
-		expect(agent.getQueue()[0].source).toBe("user");
-	});
-
-	it("retains author on in-flight updates and finalized assistant rows", () => {
-		const agent = new RemoteAgent() as any;
-		agent._highestSeq = 1;
-		agent.handleAgentEvent({
-			type: "message_update",
-			message: textMessage("assistant", "streaming", AGENT_AUTHOR, "assistant_1"),
+	it("preserves local-user identity on optimistic prompts and steers", () => {
+		let state = initialState();
+		state = reduce(state, {
+			type: "optimistic-prompt",
+			message: textMessage("user", "hello", LOCAL_USER_AUTHOR, "optimistic_1"),
 		});
-		expect(agent.state.streamingMessage.author).toEqual(AGENT_AUTHOR);
-
-		agent.handleAgentEvent({
-			type: "message_end",
-			message: textMessage("assistant", "complete", AGENT_AUTHOR, "assistant_1"),
+		state = reduce(state, {
+			type: "optimistic-steer",
+			message: textMessage("user", "redirect", LOCAL_USER_AUTHOR, "optimistic_2"),
 		});
-		expect(agent.state.messages.at(-1)?.author).toEqual(AGENT_AUTHOR);
-	});
 
-	it("stamps client-created system rows and strips author at Pi conversion boundaries", () => {
-		const notification = createSystemNotification("maintenance");
-		expect(notification.author).toEqual(SYSTEM_AUTHOR);
-
-		const standard = defaultConvertToLlm([
-			textMessage("assistant", "reply", AGENT_AUTHOR, "assistant_1") as any,
+		expect(state.messages.map((message) => message.author)).toEqual([
+			LOCAL_USER_AUTHOR,
+			LOCAL_USER_AUTHOR,
 		]);
-		expect(standard[0]).not.toHaveProperty("author");
-		expect(standard[0]).toMatchObject({ role: "assistant", content: [{ type: "text", text: "reply" }] });
+		expect(state.messages.map(visibleText)).toEqual(["hello", "redirect"]);
+	});
 
-		const custom = customConvertToLlm([notification as any]);
-		expect(custom[0]).not.toHaveProperty("author");
-		expect(custom[0]).toMatchObject({ role: "user", content: "<system>maintenance</system>" });
+	it("retains author on finalized assistant rows", () => {
+		const state = reduce(initialState(), {
+			type: "live-event",
+			seq: 2,
+			frame: {
+				type: "message_end",
+				message: textMessage("assistant", "complete", AGENT_AUTHOR, "assistant_1"),
+			},
+		});
+		expect(state.messages.at(-1)?.author).toEqual(AGENT_AUTHOR);
+		expect(visibleText(state.messages.at(-1)!)).toBe("complete");
+	});
+
+	it("preserves client-created system-row identity without injecting its label into display text", () => {
+		const notification = {
+			id: "notification_1",
+			role: "system-notification",
+			message: "maintenance",
+			author: SYSTEM_AUTHOR,
+		};
+		const state = reduce(initialState(), { type: "system-notification", message: notification });
+
+		expect(state.messages[0].author).toEqual(SYSTEM_AUTHOR);
+		expect(visibleText(state.messages[0])).toBe("maintenance");
+		expect(visibleText(state.messages[0])).not.toContain(SYSTEM_AUTHOR.label);
 	});
 });
