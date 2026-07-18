@@ -11362,11 +11362,11 @@ export class SessionManager {
 		session.unsubscribe();
 		await session.rpcClient.stop();
 
-		// Reconcile any in-flight steers that died with the bridge: anything
-		// left in the shadow ledger was recorded for dispatch but never echoed
-		// (the process is dead before its message_end could arrive). Re-enqueue
-		// at front so the post-respawn drainQueue redispatches them once.
-		this._reconcileAfterAbort(session);
+		// Keep the in-flight steer ledger intact until the replacement has replayed
+		// durable history. A message_end may have reached the transcript immediately
+		// before the hard kill even though the old live listener never observed it.
+		// The staged switch listener consumes only proven echoes; anything still
+		// unresolved is re-enqueued after replay (or on replacement failure).
 
 		// Hard kill cannot emit Pi's terminal lifecycle event. Run the exact same
 		// canonical terminal bookkeeping once before deriving the replacement
@@ -11486,14 +11486,16 @@ export class SessionManager {
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
+			let replayingSession = false;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
-				// switch_session replays durable history. It restores Pi's model context,
-				// but it is not new live activity: do not rebroadcast it, append it to the
-				// resume EventBuffer, rewrite lastActivity, or run lifecycle/cost hooks.
-				// Preserve only steer-ledger reconciliation, matching cold restore.
+				// Keep staged startup/replay invisible. During replay, prepare only for
+				// occurrence-aware steer reconciliation; skip all normal event side effects.
 				if (switchingSession) {
-					this._consumeSteerEcho(session, event);
+					if (replayingSession) {
+						const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+						this._consumeSteerEcho(session, preparedEvent);
+					}
 					return;
 				}
 				const preparedEvent = this.prepareVisibleAgentEvent(session, event);
@@ -11524,7 +11526,20 @@ export class SessionManager {
 					if (!await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
 						throw new Error(`Cannot recover force-aborted session ${id}: persisted conversation history is unavailable`);
 					}
-					await this.switchSessionForRehydration(rpcClient, abortPs, agentSessionFile);
+					// Hydrate immediately before switch_session so settled keyless occurrences
+					// guard newer same-text dispatches for exactly the replay window. Startup
+					// frames remain staged but cannot consume the steer ledger by text.
+					const settledSteersPruned = restorePromptAuthorBindings(session, readAuthorSidecar(id));
+					if (settledSteersPruned > 0) this.persistInFlightSteerLedger(session);
+					replayingSession = true;
+					try {
+						await this.switchSessionForRehydration(rpcClient, abortPs, agentSessionFile);
+					} finally {
+						replayingSession = false;
+						// Restore-only keyless guards must not shadow future live prompts.
+						session.promptAuthorReplayBindings = undefined;
+						session.lastKeylessPromptAuthorEnd = undefined;
+					}
 				}
 			} catch (err) {
 				switchingSession = false;
@@ -11533,6 +11548,10 @@ export class SessionManager {
 				throw err;
 			}
 			switchingSession = false;
+
+			// Requeue only steers that the bounded replay did not prove durable.
+			// Coordinator release owns the eventual dispatch against the final bridge.
+			this._reconcileAfterAbort(session);
 			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 				unsub();
 				await rpcClient.stop().catch(() => {});
@@ -11566,6 +11585,11 @@ export class SessionManager {
 			// lifecycle replacement has settled, never against an intermediate bridge.
 			session.recoverDrainAttempts = 0;
 		} catch (err) {
+			// If replacement setup failed before replay reconciliation, preserve the
+			// accepted steer as queued intent for a later recovery attempt.
+			this._reconcileAfterAbort(session);
+			session.promptAuthorReplayBindings = undefined;
+			session.lastKeylessPromptAuthorEnd = undefined;
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
 			broadcastStatus(session, "terminated");
 		}
