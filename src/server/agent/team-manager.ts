@@ -36,23 +36,27 @@ import {
 	isStaleRecoveredTeamLeadTitle,
 } from "./team-store-consistency.js";
 import {
-	readSessionSidecar,
+	readSessionSidecarAsync,
 	reconcileRecoveredSessionWithSidecar,
 	sidecarPathFor,
-	writeSessionSidecar,
 	buildSessionSidecar,
+	type SessionSidecar,
 } from "./session-sidecar.js";
 import { trustedAgentSessionsRoots } from "./agent-session-path.js";
+import {
+	realRecoveryFs,
+	type RecoveryFs,
+} from "./bounded-async-work.js";
 import { isHeadquartersProject } from "./project-registry.js";
 
 const execFile = promisify(execFileCb);
 
 /** Production wrapper around the testable `scanSlugDirForJsonlsAt`. */
-function scanSlugDirForJsonls(worktreePath: string) {
-	const out: ReturnType<typeof scanSlugDirForJsonlsAt> = [];
+async function scanSlugDirForJsonls(worktreePath: string, recoveryFs: RecoveryFs) {
+	const out: Awaited<ReturnType<typeof scanSlugDirForJsonlsAt>> = [];
 	const seen = new Set<string>();
 	for (const sessionsRoot of trustedAgentSessionsRoots()) {
-		for (const candidate of scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join)) {
+		for (const candidate of await scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, recoveryFs, path.join)) {
 			const key = path.resolve(candidate.jsonlPath);
 			if (seen.has(key)) continue;
 			seen.add(key);
@@ -62,14 +66,14 @@ function scanSlugDirForJsonls(worktreePath: string) {
 	return out;
 }
 
-function discoverAgentsForGoalAcrossSessionRoots(teamLeadWorktreePath: string) {
-	const out: ReturnType<typeof discoverAgentsForGoal> = [];
+async function discoverAgentsForGoalAcrossSessionRoots(teamLeadWorktreePath: string, recoveryFs: RecoveryFs) {
+	const out: Awaited<ReturnType<typeof discoverAgentsForGoal>> = [];
 	const seen = new Set<string>();
 	for (const sessionsRoot of trustedAgentSessionsRoots()) {
-		for (const agent of discoverAgentsForGoal(
+		for (const agent of await discoverAgentsForGoal(
 			sessionsRoot,
 			teamLeadWorktreePath,
-			fs,
+			recoveryFs,
 			path.join,
 			path.dirname,
 			path.basename,
@@ -81,6 +85,48 @@ function discoverAgentsForGoalAcrossSessionRoots(teamLeadWorktreePath: string) {
 		}
 	}
 	return out;
+}
+
+export interface TeamRecoverySidecars {
+	exists(filePath: string): Promise<boolean>;
+	read(jsonlPath: string): Promise<SessionSidecar | null>;
+	write(jsonlPath: string, sidecar: SessionSidecar): Promise<void>;
+}
+
+async function readRecoverySidecar(
+	sidecars: TeamRecoverySidecars,
+	jsonlPath: string,
+): Promise<SessionSidecar | null> {
+	try {
+		return await sidecars.read(jsonlPath);
+	} catch {
+		return null;
+	}
+}
+
+function createRealTeamRecoverySidecars(recoveryFs: RecoveryFs): TeamRecoverySidecars {
+	return {
+		async exists(filePath) {
+			try {
+				await recoveryFs.access(filePath);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		read: (jsonlPath) => readSessionSidecarAsync(jsonlPath, recoveryFs),
+		async write(jsonlPath, sidecar) {
+			const target = sidecarPathFor(jsonlPath);
+			try {
+				await fs.promises.mkdir(path.dirname(target), { recursive: true });
+				const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+				await fs.promises.writeFile(tmp, JSON.stringify(sidecar, null, 2), { encoding: "utf-8" });
+				await fs.promises.rename(tmp, target);
+			} catch (err) {
+				console.warn(`[session-sidecar] Failed to write sidecar for ${jsonlPath}: ${err}`);
+			}
+		},
+	};
 }
 
 const BOUNDED_ERRORED_IDLE_AUTO_RETRY_ATTEMPTS = 3;
@@ -263,6 +309,10 @@ export interface TeamManagerConfig {
 	toolManager?: ToolManager;
 	/** Command runner implementation. Defaults to real child_process execution. */
 	commandRunner?: CommandRunner;
+	/** Injectable asynchronous filesystem for boot recovery scans. */
+	recoveryFs?: RecoveryFs;
+	/** Injectable asynchronous sidecar operations for boot recovery/backfill. */
+	recoverySidecars?: TeamRecoverySidecars;
 	/**
 	 * OrchestrationCore — the goal-agnostic child-agent lifecycle core
 	 * (docs/design/orchestration-core.md). The team-manager is the GOAL ADAPTER:
@@ -354,12 +404,19 @@ export class TeamManager {
 	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
 	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
 	private readonly commandRunner: CommandRunner;
+	private readonly recoveryFs: RecoveryFs;
+	private readonly recoverySidecars: TeamRecoverySidecars;
+	private readonly restorePromise: Promise<void>;
+	private restoreCompleted = false;
+	private startStuckSweepAfterRestore = true;
 
 	constructor(sessionManager: SessionManager, config: TeamManagerConfig, stateDir?: string, private readonly clock: Clock = realClock) {
 		this.sessionManager = sessionManager;
 		this.config = config;
 		this.taskManager = config.taskManager;
 		this.commandRunner = config.commandRunner ?? realCommandRunner;
+		this.recoveryFs = config.recoveryFs ?? realRecoveryFs;
+		this.recoverySidecars = config.recoverySidecars ?? createRealTeamRecoverySidecars(this.recoveryFs);
 		if (config.projectContextManager) {
 			this.localStore = null;
 		} else {
@@ -368,8 +425,15 @@ export class TeamManager {
 			// Non-PCM test path: create a local GoalManager from the same stateDir
 			this._localGoalManager = new GoalManager(new GoalStore(dir), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock });
 		}
-		this.restoreTeams();
-		this.startStuckSweep();
+		this.restorePromise = this.restoreTeams().then(() => {
+			this.restoreCompleted = true;
+			if (this.startStuckSweepAfterRestore) this.startStuckSweep();
+		});
+	}
+
+	/** Wait until all required boot-time team recovery has completed. */
+	waitForRestore(): Promise<void> {
+		return this.restorePromise;
 	}
 
 	/** Stop watchdog timers (idempotent). */
@@ -379,7 +443,8 @@ export class TeamManager {
 
 	/** Start the periodic stuck-team watchdog (idempotent). */
 	startStuckSweep(): void {
-		if (this.stuckSweepTimer) return;
+		this.startStuckSweepAfterRestore = true;
+		if (!this.restoreCompleted || this.stuckSweepTimer) return;
 		const t = this.clock.setInterval(() => {
 			try {
 				this._stuckSweepTick();
@@ -392,6 +457,7 @@ export class TeamManager {
 	}
 
 	stopStuckSweep(): void {
+		this.startStuckSweepAfterRestore = false;
 		if (this.stuckSweepTimer) {
 			this.clock.clearInterval(this.stuckSweepTimer);
 			this.stuckSweepTimer = null;
@@ -534,7 +600,7 @@ export class TeamManager {
 	 * Restore teams from disk. Called from the constructor (before sessions
 	 * are restored). Event subscriptions deferred to resubscribeTeamEvents().
 	 */
-	private restoreTeams(): void {
+	private async restoreTeams(): Promise<void> {
 		// orphan team-store cleanup — Boot-time orphan cleanup. Walk every persisted team
 		// entry FIRST and drop entries whose `goalId` is not present in the
 		// owning project's goal store. This prevents the zombie-reviewer sweep
@@ -618,7 +684,7 @@ export class TeamManager {
 						const goal = ctx.goalStore.get(goalId);
 						let recoveredOk = false;
 						if (goal?.worktreePath && entry?.teamLeadSessionId) {
-							const candidates = scanSlugDirForJsonls(goal.worktreePath);
+							const candidates = await scanSlugDirForJsonls(goal.worktreePath, this.recoveryFs);
 							const chosen = pickCanonicalTeamLeadJsonl(candidates);
 							if (chosen) {
 								const funName = generateTeamNameSync();
@@ -642,7 +708,7 @@ export class TeamManager {
 									// exists next to the chosen .jsonl, prefer its
 									// exact values (original session id, title, role,
 									// team links, model prefs).
-									const sidecar = readSessionSidecar(chosen.jsonlPath);
+									const sidecar = await readRecoverySidecar(this.recoverySidecars, chosen.jsonlPath);
 									const finalRecord = sidecar
 										? reconcileRecoveredSessionWithSidecar(reconstructed as unknown as Record<string, unknown>, sidecar)
 										: reconstructed;
@@ -715,7 +781,7 @@ export class TeamManager {
 						.find(s => s.teamGoalId === goal.id && s.role === "team-lead");
 					if (existingLead) continue;
 					// Look for surviving .jsonl(s) in the worktree slug-dir.
-					const candidates = scanSlugDirForJsonls(goal.worktreePath);
+					const candidates = await scanSlugDirForJsonls(goal.worktreePath, this.recoveryFs);
 					const chosen = pickCanonicalTeamLeadJsonl(candidates);
 					if (!chosen) continue;
 					// Generate a fresh-but-stable bobbit session id. The
@@ -739,7 +805,7 @@ export class TeamManager {
 							funName,
 						});
 						if (reconstructed) {
-							const sidecar = readSessionSidecar(chosen.jsonlPath);
+							const sidecar = await readRecoverySidecar(this.recoverySidecars, chosen.jsonlPath);
 							const finalRecord = sidecar
 								? reconcileRecoveredSessionWithSidecar(reconstructed as unknown as Record<string, unknown>, sidecar)
 								: reconstructed;
@@ -830,7 +896,7 @@ export class TeamManager {
 							.filter(s => s.teamGoalId === goal.id && s.role !== "team-lead" && s.worktreePath)
 							.map(s => s.worktreePath!),
 					);
-					const discovered = discoverAgentsForGoalAcrossSessionRoots(goal.worktreePath);
+					const discovered = await discoverAgentsForGoalAcrossSessionRoots(goal.worktreePath, this.recoveryFs);
 					for (const agent of discovered) {
 						if (existingAgentWorktrees.has(agent.agentWorktreePath)) continue;
 						const chosen = pickCanonicalTeamLeadJsonl(agent.candidates);
@@ -853,7 +919,7 @@ export class TeamManager {
 								agentWorktreePath: agent.agentWorktreePath,
 								chosenJsonl: chosen,
 							});
-							const sidecar = readSessionSidecar(chosen.jsonlPath);
+							const sidecar = await readRecoverySidecar(this.recoverySidecars, chosen.jsonlPath);
 							const finalRecord = sidecar
 								? reconcileRecoveredSessionWithSidecar(record as unknown as Record<string, unknown>, sidecar)
 								: record;
@@ -896,13 +962,13 @@ export class TeamManager {
 					if (!s.agentSessionFile) continue;
 					try {
 						const sidecarPath = sidecarPathFor(s.agentSessionFile);
-						if (fs.existsSync(sidecarPath)) continue;
+						if (await this.recoverySidecars.exists(sidecarPath)) continue;
 						// Skip if the .jsonl itself is missing — nothing to attach
 						// the sidecar to and the session is non-recoverable anyway.
-						if (!fs.existsSync(s.agentSessionFile)) continue;
+						if (!await this.recoverySidecars.exists(s.agentSessionFile)) continue;
 						const agentSessionId = path.basename(s.agentSessionFile).replace(/\.jsonl$/, "");
 						const sidecar = buildSessionSidecar(s, agentSessionId, undefined);
-						writeSessionSidecar(s.agentSessionFile, sidecar);
+						await this.recoverySidecars.write(s.agentSessionFile, sidecar);
 						sidecarsBackfilled++;
 					} catch (err) {
 						console.warn(`[team-manager] Sidecar backfill failed for session ${s.id}:`, err);
