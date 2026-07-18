@@ -1,4 +1,5 @@
 import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../shared/message-author.js";
+import type { PromptAuthorBinding } from "./author-sidecar.js";
 import type { InFlightSteerRecord, PersistedInFlightSteer } from "./session-store.js";
 
 /**
@@ -47,10 +48,61 @@ function extractUserText(message: any): string {
 	if (!message) return "";
 	if (typeof message.content === "string") return message.content;
 	if (Array.isArray(message.content)) {
-		const block = message.content.find((c: any) => c?.type === "text");
-		return block?.text ?? "";
+		const blocks = message.content
+			.filter((c: any) => c?.type === "text" && typeof c.text === "string")
+			.map((c: any) => c.text);
+		return blocks.join("\n");
 	}
 	return "";
+}
+
+function userMessageId(message: any): string | undefined {
+	for (const key of ["id", "entryId", "_entryId", "_bobbitEntryId"]) {
+		const value = message?.[key];
+		if (typeof value === "string" && value.length > 0) return value;
+	}
+	return undefined;
+}
+
+function epochMilliseconds(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value !== "string" || value.length === 0) return undefined;
+	const numeric = Number(value);
+	if (Number.isFinite(numeric)) return numeric;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+const ECHO_TIMESTAMP_TOLERANCE_MS = 2_000;
+
+/**
+ * A structured steer is represented only when the same prompt occurrence can
+ * be proven. Text equality is deliberately insufficient: an older transcript
+ * row may have the same body as a newly accepted steer.
+ */
+function hasStructuredSteerOccurrence(
+	messages: any[],
+	record: InFlightSteerRecord,
+	bindings: readonly PromptAuthorBinding[],
+): boolean {
+	const syntheticId = `inflight-steer:${record.promptId}`;
+	if (messages.some((message) => message?._inFlightSteer === true && message.id === syntheticId)) return true;
+
+	const binding = bindings.find((candidate) =>
+		candidate.promptId === record.promptId && candidate.settlement?.outcome === "echoed",
+	);
+	if (!binding?.settlement) return false;
+
+	const { messageId, messageTimestamp } = binding.settlement;
+	return messages.some((message) => {
+		if (!message || (message.role !== "user" && message.role !== "user-with-attachments")) return false;
+		if (extractUserText(message) !== record.text) return false;
+		if (messageId && userMessageId(message) === messageId) return true;
+		if (messageTimestamp === undefined) return false;
+		const timestamp = epochMilliseconds(message.timestamp) ?? epochMilliseconds(message.ts);
+		return timestamp !== undefined
+			&& Math.abs(timestamp - messageTimestamp) <= ECHO_TIMESTAMP_TOLERANCE_MS;
+	});
 }
 
 /**
@@ -87,28 +139,28 @@ function extractUserText(message: any): string {
 export function spliceInFlightSteers(
 	messages: any[],
 	inFlightSteerTexts?: readonly PersistedInFlightSteer[],
+	promptAuthorBindings: readonly PromptAuthorBinding[] = [],
 ): any[] {
 	if (!Array.isArray(messages)) return messages;
 	if (!inFlightSteerTexts || inFlightSteerTexts.length === 0) return messages;
 
-	// Count every user-role plain text already present in the snapshot so we
-	// don't double-up if the echo has already flushed to `.jsonl` by the time
-	// this splice runs (and the ledger hasn't been cleared yet). MULTISET, not a
-	// Set (S42): two identical-text steers must each splice a row. The old
-	// Set + `add(text)` collapsed them — the second identical steer was skipped,
-	// so a resync in the dispatch→echo window dropped one of two same-text pills.
-	const presentCounts = new Map<string, number>();
-	for (const m of messages) {
-		if (!m) continue;
-		if (m.role !== "user" && m.role !== "user-with-attachments") continue;
-		const t = extractUserText(m);
-		if (t) presentCounts.set(t, (presentCounts.get(t) ?? 0) + 1);
+	// Legacy string ledgers have no occurrence identity, so retain their
+	// historical multiset text correlation. Structured records must use their
+	// prompt id plus settlement evidence instead: any historical same-text row
+	// must remain available for a newly accepted occurrence.
+	const legacyPresentCounts = new Map<string, number>();
+	for (const message of messages) {
+		if (!message) continue;
+		if (message.role !== "user" && message.role !== "user-with-attachments") continue;
+		const text = extractUserText(message);
+		if (text) legacyPresentCounts.set(text, (legacyPresentCounts.get(text) ?? 0) + 1);
 	}
 
 	const additions: any[] = [];
 	let i = 0;
 	for (const entry of inFlightSteerTexts) {
-		const record: InFlightSteerRecord | undefined = typeof entry === "string"
+		const legacy = typeof entry === "string";
+		const record: InFlightSteerRecord | undefined = legacy
 			? (entry.length > 0
 				? {
 					text: entry,
@@ -120,19 +172,25 @@ export function spliceInFlightSteers(
 			: entry;
 		const text = record?.text;
 		if (!text) { i++; continue; }
-		const remaining = presentCounts.get(text) ?? 0;
-		if (remaining > 0) {
-			// Already represented by a real snapshot row — consume one and skip.
-			presentCounts.set(text, remaining - 1);
+
+		if (legacy) {
+			const remaining = legacyPresentCounts.get(text) ?? 0;
+			if (remaining > 0) {
+				legacyPresentCounts.set(text, remaining - 1);
+				i++;
+				continue;
+			}
+		} else if (hasStructuredSteerOccurrence(messages, record, promptAuthorBindings)) {
 			i++;
 			continue;
 		}
+
 		const author: MessageAuthor | undefined = isMessageAuthor(record.author) ? record.author : undefined;
 		additions.push({
 			// New structured entries use their stable prompt identity. Keep the
 			// legacy content-derived shape so reconnect behaviour is unchanged for
 			// old persisted string ledgers.
-			id: typeof entry === "string"
+			id: legacy
 				? `inflight-steer:${i}:${text.slice(0, 32)}`
 				: `inflight-steer:${record.promptId}`,
 			role: "user",

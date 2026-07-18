@@ -248,6 +248,23 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 	const assignments = new Map<number, MessageAuthor>();
 	const rows = messages as Array<T & Record<string, unknown>>;
 
+	// Phase 0: Bobbit's synthetic in-flight steer row encodes the dispatch
+	// prompt id directly. Consume it before text correlation so a historical
+	// same-text row cannot take the newer occurrence's author binding.
+	for (let index = 0; index < rows.length; index++) {
+		const row = rows[index];
+		if (!eligiblePromptMessage(row) || row._inFlightSteer !== true) continue;
+		const id = messageId(row);
+		if (!id?.startsWith("inflight-steer:")) continue;
+		const promptId = id.slice("inflight-steer:".length);
+		const binding = available.find((candidate) =>
+			!consumed.has(candidate) && candidate.promptId === promptId,
+		);
+		if (!binding) continue;
+		assignments.set(index, binding.author);
+		consumed.add(binding);
+	}
+
 	// Phase 1: exact settled Pi/session entry id.
 	for (let index = 0; index < rows.length; index++) {
 		const row = rows[index];
