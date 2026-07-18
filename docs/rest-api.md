@@ -1611,16 +1611,41 @@ Notes:
 - Signal history, content, metadata, and verification output are preserved for audit. The gate `status` is the approval source of truth after reset.
 - `human-signoff` approvals are never reused from verification cache; each re-signal requires a fresh human decision.
 - After a fresh post-reset pass, later non-reset re-signals at the same commit may reuse that new passed output normally.
-- Active verifications for affected gates are cancelled before status changes are persisted.
-- For an active goal whose state is `complete`, reset first persists `complete` → `in-progress`, then invalidates the gates without an asynchronous gap. This is necessary because reset creates real outstanding work; leaving the goal complete would keep its team lead excluded from normal recovery nudges.
-- `reopen` is always present. `reopened` reports whether this request performed the transition; `previousState` is the state observed for this reset; and `state` is the resulting state. Active `todo`, `in-progress`, and `blocked` goals keep their current state.
-- Reopening preserves the goal and team identity, existing team-lead session, tasks, gate signal/content/metadata history, branch and worktree, repository fields, and PR association. It rearms the existing team runtime; it does not start a replacement team or session.
-- The server always emits affected `gate_status_changed` events and a `gate_reset` event containing the same `reopen` object. An actual reopen additionally emits global `goal_state_changed`, which makes goal-list clients refresh immediately.
-- The team lead is notified only when at least one gate changed or the goal reopened. The notice includes the lifecycle outcome. `teamLeadNotified` reports whether it was delivered to a live lead.
-- Exact retries are idempotent. Once all affected gates are pending and the goal is already active, the response has `changedGateIds: []`, `reopen: { "reopened": false, "previousState": "in-progress", "state": "in-progress" }`, and `teamLeadNotified: false`; no second state-transition event, runtime rearm, or lead notice is produced.
+- Active verifications for affected gates are cancelled before the durable transaction begins. The route then re-reads the goal and repeats its dormant-state guards so cancellation cannot open a race with pause, shelving, or archival.
+- `reopen` is always present. `reopened` reports whether the durable transaction includes `complete` → `in-progress`; `previousState` is the state captured by that transaction; and `state` is the resulting state. Active `todo`, `in-progress`, and `blocked` goals keep their current state.
+- Reopening preserves the goal, tasks, gate audit data, branch/worktree and repository fields, and PR association. When a completed team runtime still exists, it also preserves and rearms that team and lead instead of replacing them.
+- A completed goal whose team was explicitly torn down is still resettable. The goal reopens and its gates reset, but reset does not recreate a team, lead session, subscription, or nudge timer; `teamLeadNotified` is `false`. Starting a new runtime remains a separate operator action.
+- A new successful request emits affected `gate_status_changed` events and `gate_reset` with the same `reopen` object. An actual reopen additionally emits global `goal_state_changed`. A retry that resumes a retained recovery intent suppresses duplicate events and notification.
+- The team lead is notified only when at least one gate changed or the goal reopened and a live lead exists. The notice includes the lifecycle outcome. `teamLeadNotified` reports whether delivery succeeded.
+- An exact retry after a fully finalized reset is idempotent: once all affected gates are pending and the goal is active, the response has `changedGateIds: []`, `reopen: { "reopened": false, "previousState": "in-progress", "state": "in-progress" }`, and `teamLeadNotified: false`; it does not rearm the runtime or send another lead notice.
 - Sandboxed agent tokens are forbidden from this route.
 
-Dormant goals are never reopened implicitly. Reset returns `409` before mutation for archived goals (`{ "error": "Goal is archived" }`), shelved goals (`{ "error": "Goal is shelved", "code": "GOAL_SHELVED", "goalId": "…" }`), and paused goals (`{ "error": "Goal … is paused", "code": "GOAL_PAUSED", "goalId": "…" }`). The goal must be returned to an active lifecycle through an explicit operator action before reset is allowed; reset itself never performs that recovery. These guards are checked again after verification cancellation so a concurrent pause or archival cannot be overwritten.
+#### Durable reset transaction
+
+Goal lifecycle and gate state live in separate project stores. Reset coordinates them with a project-scoped write-ahead intent so a crash cannot leave the durable combination `complete` plus newly `pending` gates. After verification cancellation and lifecycle revalidation, the phases are:
+
+1. Atomically persist an intent containing the requested gate, affected DAG scope, prior statuses, prior goal state, and whether reopening is required.
+2. If required, strictly persist the goal as `in-progress`.
+3. Strictly persist the selected and dependent gates as `pending`, including cache-invalidation markers.
+4. Rearm the existing completed-team runtime, if one still exists.
+5. Atomically clear the intent.
+
+The goal and gate strict-write paths write through a temporary file and rename, propagate persistence errors, and restore their in-memory snapshot when the durable write fails. Gate observers run only after the strict gate commit; an observer failure is logged and cannot compensate the goal back to `complete` over already-pending gates.
+
+Each project constructs its reset coordinator after loading its goal and gate stores but before team restoration and boot-resume scanning. Any retained intent is replayed state-first and idempotently, then cleared. Replay therefore handles restarts after intent persistence, goal persistence, gate persistence, or finalization failure. If replay itself cannot persist, the intent remains for a later restart. A goal explicitly made archived, shelved, or paused before replay wins over the older reset intent; recovery clears the intent without resuming work.
+
+Synchronous commit failure uses controlled compensation. If strict gate persistence fails after the goal reopened, the server strictly restores the prior goal state and clears the intent before returning an error. No rearm, notification, or lifecycle/reset broadcast occurs. If either compensation write fails, the intent is deliberately retained so boot replay finishes the idempotent transaction instead of guessing which store won.
+
+Runtime rearm is also retryable. If an existing team's unsubscribe or new event-subscription callback fails, the already-durable goal/gate reset is not rolled back. The API retains the intent and returns `503 TEAM_REOPEN_FAILED` with `retryable: true`, `durableReset: true`, and the original `reopen` outcome. Repeating the same reset resumes that intent and retries rearm without duplicate prompts, timers, events, or notifications. After success, the response reports the original affected scope and reopen outcome rather than presenting the durable replay as a no-op.
+
+| Status | Code | Durable outcome |
+|---|---|---|
+| `500` | `GATE_RESET_PREPARE_FAILED` | Intent persistence failed; no goal or gate mutation occurred. `retryable: true`. |
+| `500` | `GATE_RESET_PERSIST_FAILED` | Strict goal/gate commit failed. Successful compensation restores the pre-reset state; failed compensation leaves the intent for boot replay. `retryable: true`. |
+| `503` | `TEAM_REOPEN_FAILED` | Goal and gates are durably reset, but an existing team runtime was not rearmed. Intent remains so the same request can retry. `durableReset: true`, `retryable: true`. |
+| `500` | `GATE_RESET_FINALIZE_FAILED` | Goal, gates, and any required rearm committed, but intent cleanup failed. Replay or request retry finalizes idempotently. `durableReset: true`, `retryable: true`. |
+
+Dormant goals are never reopened implicitly. Reset returns `409` before mutation for archived goals (`{ "error": "Goal is archived" }`), shelved goals (`{ "error": "Goal is shelved", "code": "GOAL_SHELVED", "goalId": "…" }`), and paused goals (`{ "error": "Goal … is paused", "code": "GOAL_PAUSED", "goalId": "…" }`). The goal must be returned to an active lifecycle through an explicit operator action before reset is allowed; reset itself never performs that recovery.
 
 Other errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 for unknown goal/gate.
 

@@ -142,18 +142,36 @@ is fine now because the helper *owns* the drain's promise. Combined with
 gone), the rejection is caught and logged here, never escaping as a gateway-level
 unhandled rejection.
 
-### Idempotence after a reset
+### Durable reset replay and idempotence
 
-The reset path rearms the existing team lead once; it does not create a team or
-lead. At runtime, an idle lead begins the normal base-delay nudge cycle. After a
-gateway restart, the persisted `in-progress` state and pending gate are enough for
-the one-shot boot-resume scan to recognize the outstanding work.
+Gate reset uses a project-scoped write-ahead intent because goal lifecycle and
+gate status are persisted separately. On project-context construction, reset
+recovery runs after both stores load but before team restoration and this
+boot-resume scan. It idempotently applies the phases in safe order — reopen the
+goal, reset the selected and dependent gates, then clear the intent — whether the
+previous process stopped after intent, goal, gate, or finalization persistence.
+The scan therefore never observes a crash-produced `complete` goal with pending
+reset work. A persistence failure keeps the intent for a later boot; an explicit
+archived, shelved, or paused state wins and prevents replay from resuming work.
+
+When a completed team record still exists, normal team restoration re-subscribes
+its existing lead and the persisted `in-progress` state plus pending gate make
+that idle lead eligible for one boot-resume prompt. A live reset also rearms that
+same runtime at most once. Transient unsubscribe or event-subscription callback
+failure is retryable: the API retains the durable intent, returns a retryable
+`TEAM_REOPEN_FAILED`, and the next matching reset request retries rearm without
+stacking subscriptions or timers.
+
+If the operator explicitly tore down the completed team before reset, reopening
+is still valid but there is no runtime to restore. Reset does not create a lead,
+team, subscription, timer, or boot-resume target; starting a new team remains an
+explicit action.
 
 Boot recovery still applies its normal duplicate guards: active verification,
 pending nudge delivery, in-flight children, or an existing mid-turn boot
-re-prompt suppress a second prompt. Repeating the gate reset does not add another
-runtime subscription or timer, and the boot scan sends at most one recovery
-prompt for that pass.
+re-prompt suppress a second prompt. A retained reset request resumed after a
+runtime/finalization error also suppresses duplicate reset broadcasts and lead
+notices. The boot scan sends at most one recovery prompt for that pass.
 
 ## Avoiding the double-prompt race
 
@@ -199,8 +217,9 @@ implementation detail:
    a process-level unhandled rejection (it must be awaited inside a `try/catch`).
 3. A session that is both mid-turn and a team-lead with outstanding work is
    re-prompted/nudged **exactly once**.
-4. A reopened `in-progress` goal with a pending reset gate receives one
-   boot-resume nudge, while complete, paused, shelved, and archived goals do not.
+4. A reopened `in-progress` goal with a pending reset gate and restored team
+   receives one boot-resume nudge, while teamless, complete, paused, shelved, and
+   archived goals do not.
 
 ## Where the code lives
 

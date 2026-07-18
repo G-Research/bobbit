@@ -154,11 +154,15 @@ Every `gate_reset` event includes this additive object, matching the REST reset 
 - `previousState` — the goal state observed for this reset.
 - `state` — the resulting goal state. Both state fields use `todo | in-progress | complete | shelved | blocked`.
 
-A successful reset always emits `gate_reset`, including a no-op retry. For an already reopened goal, that retry carries `{ "reopened": false, "previousState": "in-progress", "state": "in-progress" }`. It does not emit a second `goal_state_changed` or duplicate the team runtime rearm/lead notice when no gates changed.
+A new successful reset emits `gate_reset`, including a no-op retry after a previously finalized reset. For an already reopened goal, that retry carries `{ "reopened": false, "previousState": "in-progress", "state": "in-progress" }`. It does not emit a second `goal_state_changed` or duplicate the team runtime rearm/lead notice when no gates changed.
 
-On an actual reopen, `goal_state_changed { goalId }` is broadcast globally so sidebar, dashboard, status widget, and other browser contexts refresh their goal-list cache immediately. Goal-scoped `gate_status_changed` and `gate_reset` events update gate views. The initiating widget may use `reopen` to clear completed state optimistically, but REST remains authoritative.
+A retry that resumes a retained write-ahead intent is different: its job is to finish runtime rearm or intent cleanup after the goal and gates already committed. It returns the original affected scope and reopen outcome through REST, but suppresses duplicate `gate_status_changed`, `gate_reset`, `goal_state_changed`, and lead notification. This makes transport effects idempotent as well as persistence.
 
-Dormant archived, shelved, or paused goals return REST `409`; they produce no `gate_reset` or reopen-driven `goal_state_changed` event. See [REST API — Gate reset endpoint](rest-api.md#gate-reset-endpoint) and [Goals, Workflows & Tasks — Reset-driven goal reopening](goals-workflows-tasks.md#reset-driven-goal-reopening).
+On an actual reopen, `goal_state_changed { goalId }` is broadcast globally so sidebar, dashboard, status widget, and other browser contexts refresh their goal-list cache immediately. Goal-scoped `gate_status_changed` and `gate_reset` events update gate views. The widget's own viewer subscription refreshes goals, gates, and active verifications on `goal_state_changed`, so an external reopen reconciles even without an active chat socket.
+
+The widget does not treat completion as a permanent local latch. While its popover is open it mirrors the authoritative app goal cache, so an external `team_complete` observed by the normal goal refresh/poll switches it to completed; the same mirror can later switch back on reopen. For an initiating reset it applies the REST `reopen.state` and affected pending gates immediately, then performs authoritative goal/gate/verification reads. The response is therefore a latency optimization, not a second source of lifecycle truth.
+
+Dormant archived, shelved, or paused goals return REST `409`; they produce no `gate_reset` or reopen-driven `goal_state_changed` event. See [REST API — Durable reset transaction](rest-api.md#durable-reset-transaction) and [Goals, Workflows & Tasks — Reset-driven goal reopening](goals-workflows-tasks.md#reset-driven-goal-reopening).
 
 ### Background process events
 
