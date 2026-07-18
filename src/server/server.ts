@@ -557,7 +557,8 @@ import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.j
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
-import type { GateResetResult } from "./agent/gate-store.js";
+import type { GateResetResult, GateStatus } from "./agent/gate-store.js";
+import type { GateResetIntent } from "./agent/gate-reset-intent.js";
 import { launchSidebarSessionFork, resolveGoalGithubLink } from "./sidebar-actions.js";
 import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData, seedModelDefaultsFromLegacy } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
@@ -10730,35 +10731,100 @@ async function handleApiRoute(
 		const requestedGateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!requestedGateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
 
-		// Keep the goal transition and gate invalidation in one synchronous
-		// continuation. State-first ordering ensures a crash cannot leave pending
-		// gates hidden behind a completed goal.
-		const previousState = goal.state;
-		const reopened = previousState === "complete";
-		if (reopened) gateResetCtx.goalStore.update(goalId, { state: "in-progress" });
+		// The project-scoped write-ahead intent is durable before either store
+		// changes. Both store mutations use fail-loud atomic writes; boot replay is
+		// idempotent at every phase of intent -> goal -> gates -> clear.
+		const initialPreviousStatuses: Record<string, GateStatus> = {};
+		for (const affectedGateId of getGateAndTransitiveDependents(goal.workflow, gateId)) {
+			initialPreviousStatuses[affectedGateId] = gateResetCtx.gateStore.getGate(goalId, affectedGateId)?.status ?? "pending";
+		}
+
+		let intent: GateResetIntent;
+		let resumedIntent = false;
+		try {
+			const begun = gateResetCtx.gateResetCoordinator.begin({
+				goalId,
+				gateId,
+				affectedGateIds: Object.keys(initialPreviousStatuses),
+				previousStatuses: initialPreviousStatuses,
+				previousState: goal.state,
+				reopenRequired: goal.state === "complete",
+			});
+			intent = begun.intent;
+			resumedIntent = begun.resumed;
+		} catch (err) {
+			console.error(`[api] Failed to persist gate-reset intent ${goalId}/${gateId}:`, err);
+			json({ error: "Failed to prepare gate reset", code: "GATE_RESET_PREPARE_FAILED", retryable: true }, 500);
+			return;
+		}
 
 		let resetResult: GateResetResult;
 		try {
-			resetResult = gateResetCtx.gateStore.resetGateAndDependents(goalId, gateId, goal.workflow);
+			resetResult = gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
 		} catch (err) {
-			// A controlled reset failure must not leave a completed goal reopened
-			// without invalidated gates. Keep state-first ordering above so an actual
-			// process crash still fails safe as in-progress rather than complete with
-			// pending work.
-			if (reopened) gateResetCtx.goalStore.update(goalId, { state: previousState });
+			// A synchronous failure is compensated when both rollback writes work.
+			// If compensation itself fails, the retained intent remains the source of
+			// truth and boot recovery safely completes the operation.
+			try {
+				gateResetCtx.gateResetCoordinator.abort(intent);
+			} catch (abortErr) {
+				console.error(`[api] Failed to abort gate reset ${goalId}/${gateId}; recovery intent retained:`, abortErr);
+			}
 			console.error(`[api] Failed to reset gate ${goalId}/${gateId}:`, err);
-			json({ error: "Failed to reset gate" }, 500);
+			json({ error: "Failed to reset gate", code: "GATE_RESET_PERSIST_FAILED", retryable: true }, 500);
 			return;
 		}
+
+		// A retry after runtime/intent-clear failure reports the original durable
+		// reset scope rather than the idempotent replay's now-empty changed set.
+		if (resumedIntent) {
+			const changedGateIds = intent.affectedGateIds.filter(id => intent.previousStatuses[id] !== "pending");
+			resetResult = {
+				requestedGateId: intent.gateId,
+				affectedGateIds: intent.affectedGateIds,
+				changedGateIds,
+				unchangedGateIds: intent.affectedGateIds.filter(id => !changedGateIds.includes(id)),
+				previousStatuses: intent.previousStatuses,
+			};
+		}
+
+		const previousState = intent.previousState;
+		const reopened = intent.reopenRequired;
 		const reopen: GateResetReopenOutcome = {
 			reopened,
 			previousState,
 			state: reopened ? "in-progress" : previousState,
 		};
 
-		if (reopened) {
-			// TeamManager owns the existing lead/team runtime rearm.
-			teamManager.reopenCompletedTeam(goalId);
+		let lifecycleError: { message: string; code: string; status: number } | undefined;
+		if (reopened && !gateResetCtx.gateResetCoordinator.intents.wasRuntimeRearmed(intent)) {
+			try {
+				// TeamManager owns the existing lead/team runtime rearm. A false result
+				// for an actual team is a controlled, retryable failure; retaining the
+				// intent ensures the next reset request tries again.
+				const rearmed = teamManager.reopenCompletedTeam(goalId);
+				const team = teamManager.getTeamState(goalId);
+				if (!rearmed && (goal.team || team?.teamLeadSessionId)) {
+					lifecycleError = { message: "Goal reopened, but its team runtime could not be rearmed", code: "TEAM_REOPEN_FAILED", status: 503 };
+				} else {
+					gateResetCtx.gateResetCoordinator.intents.markRuntimeRearmed(intent);
+				}
+			} catch (err) {
+				console.error(`[api] Failed to rearm completed team ${goalId}:`, err);
+				lifecycleError = { message: "Goal reopened, but its team runtime could not be rearmed", code: "TEAM_REOPEN_FAILED", status: 503 };
+			}
+		}
+
+		if (!lifecycleError) {
+			try {
+				gateResetCtx.gateResetCoordinator.complete(intent);
+			} catch (err) {
+				console.error(`[api] Gate reset committed but intent clear failed ${goalId}/${gateId}:`, err);
+				lifecycleError = { message: "Gate reset committed but finalization failed", code: "GATE_RESET_FINALIZE_FAILED", status: 500 };
+			}
+		}
+
+		if (reopened && !resumedIntent) {
 			broadcastToAll({ type: "goal_state_changed", goalId });
 		}
 
@@ -10772,18 +10838,20 @@ async function handleApiRoute(
 			};
 		});
 
-		for (const gate of affectedGates) {
-			broadcastGateStatusChanged(broadcastToGoal, goalId, gate.gateId, gate.status);
+		if (!resumedIntent) {
+			for (const gate of affectedGates) {
+				broadcastGateStatusChanged(broadcastToGoal, goalId, gate.gateId, gate.status);
+			}
+			broadcastToGoal(goalId, {
+				type: "gate_reset",
+				goalId,
+				gateId,
+				affectedGateIds: resetResult.affectedGateIds,
+				changedGateIds: resetResult.changedGateIds,
+				unchangedGateIds: resetResult.unchangedGateIds,
+				reopen,
+			});
 		}
-		broadcastToGoal(goalId, {
-			type: "gate_reset",
-			goalId,
-			gateId,
-			affectedGateIds: resetResult.affectedGateIds,
-			changedGateIds: resetResult.changedGateIds,
-			unchangedGateIds: resetResult.unchangedGateIds,
-			reopen,
-		});
 
 		const gateNameById = new Map(goal.workflow.gates.map(g => [g.id, g.name || g.id]));
 		const namesFor = (ids: string[]) => ids.map(id => `- ${gateNameById.get(id) || id}`);
@@ -10818,7 +10886,7 @@ async function handleApiRoute(
 		const notification = notificationLines.join("\n");
 
 		let teamLeadNotified = false;
-		const shouldNotifyTeamLead = reopened || resetResult.changedGateIds.length > 0;
+		const shouldNotifyTeamLead = !resumedIntent && (reopened || resetResult.changedGateIds.length > 0);
 		const team = shouldNotifyTeamLead ? teamManager.getTeamState(goalId) : undefined;
 		if (team?.teamLeadSessionId) {
 			const teamLeadSession = sessionManager.getSession(team.teamLeadSessionId);
@@ -10834,6 +10902,17 @@ async function handleApiRoute(
 					console.error(`[api] Failed to notify team lead for gate reset ${goalId}/${gateId}:`, err);
 				}
 			}
+		}
+
+		if (lifecycleError) {
+			json({
+				error: lifecycleError.message,
+				code: lifecycleError.code,
+				retryable: true,
+				durableReset: true,
+				reopen,
+			}, lifecycleError.status);
+			return;
 		}
 
 		json({

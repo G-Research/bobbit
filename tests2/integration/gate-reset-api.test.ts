@@ -287,10 +287,10 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 
 			const context = gateway.projectContextManager.getContextForGoal(goalId);
 			conn = trackGateApiConnection(await connectWs(teamLeadId));
-			resetSpy = vi.spyOn(context.gateStore, "resetGateAndDependents")
+			resetSpy = vi.spyOn(context.gateStore, "resetGateAndDependentsStrict")
 				.mockImplementation(() => {
 					expect(context.goalStore.get(goalId)?.state).toBe("in-progress");
-					throw new Error("forced gate reset failure");
+					throw new Error("forced gate reset persistence failure");
 				});
 			reopenSpy = vi.spyOn(gateway.teamManager, "reopenCompletedTeam");
 			enqueueSpy = vi.spyOn(gateway.sessionManager, "enqueuePrompt");
@@ -299,7 +299,11 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 
 			const reset = await resetGate(goalId, "root");
 			expect(reset.status, JSON.stringify(reset.body)).toBe(500);
-			expect(reset.body).toEqual({ error: "Failed to reset gate" });
+			expect(reset.body).toMatchObject({
+				error: "Failed to reset gate",
+				code: "GATE_RESET_PERSIST_FAILED",
+				retryable: true,
+			});
 			expect((await getGoal(goalId)).state).toBe("complete");
 			expect((await getGate(goalId, "root")).status).toBe("passed");
 			expect(reopenSpy).not.toHaveBeenCalled();
@@ -313,6 +317,53 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 			enqueueSpy?.mockRestore();
 			steerSpy?.mockRestore();
 			conn?.close();
+			await teardownTeam(goalId).catch(() => {});
+			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
+	test("retains the durable intent and retries a failed team runtime rearm", async ({ gateway }) => {
+		const wf = workflowId("gate-reset-rearm-retry");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
+		]);
+		const goal = await createGoal({ title: `Gate Reset Rearm Retry ${Date.now()}`, workflowId: wf, worktree: false, team: true, autoStartTeam: false });
+		const goalId = goal.id;
+		let teamLeadId: string | undefined;
+		let reopenSpy: any;
+		try {
+			await signalGate(goalId, "root");
+			await waitForGateStatus(goalId, "root", "passed");
+			teamLeadId = await startTeam(goalId);
+			await completeTeam(goalId);
+
+			const context = gateway.projectContextManager.getContextForGoal(goalId);
+			reopenSpy = vi.spyOn(gateway.teamManager, "reopenCompletedTeam")
+				.mockReturnValueOnce(false)
+				.mockReturnValueOnce(true);
+
+			const failed = await resetGate(goalId, "root");
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({
+				code: "TEAM_REOPEN_FAILED",
+				retryable: true,
+				durableReset: true,
+				reopen: { reopened: true, previousState: "complete", state: "in-progress" },
+			});
+			expect((await getGoal(goalId)).state).toBe("in-progress");
+			expect((await getGate(goalId, "root")).status).toBe("pending");
+			expect(context.gateResetCoordinator.intents.get(goalId)).toBeTruthy();
+
+			const retried = await resetGate(goalId, "root");
+			expect(retried.status, JSON.stringify(retried.body)).toBe(200);
+			expect(retried.body.reopen).toEqual({ reopened: true, previousState: "complete", state: "in-progress" });
+			expect(retried.body.changedGateIds).toEqual(["root"]);
+			expect(reopenSpy).toHaveBeenCalledTimes(2);
+			expect(context.gateResetCoordinator.intents.get(goalId)).toBeUndefined();
+		} finally {
+			reopenSpy?.mockRestore();
 			await teardownTeam(goalId).catch(() => {});
 			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
 			await deleteGoal(goalId).catch(() => {});

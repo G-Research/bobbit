@@ -129,6 +129,24 @@ export class GateStore {
 		}
 	}
 
+	/** Atomic, fail-loud persistence used by cross-store lifecycle transactions. */
+	private saveStrict(): void {
+		if (!this.fs.existsSync(this.storeDir)) {
+			this.fs.mkdirSync(this.storeDir, { recursive: true });
+		}
+		const tempFile = `${this.storeFile}.reset-${randomUUID()}.tmp`;
+		try {
+			const data = Array.from(this.gates.values());
+			this.fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), "utf-8");
+			this.fs.renameSync(tempFile, this.storeFile);
+		} catch (err) {
+			try {
+				if (this.fs.existsSync(tempFile)) this.fs.unlinkSync(tempFile);
+			} catch { /* best-effort temp cleanup */ }
+			throw err;
+		}
+	}
+
 	/** Initialize pending gate states for a new goal. */
 	initGatesForGoal(goalId: string, gateIds: string[]): void {
 		const now = Date.now();
@@ -342,10 +360,25 @@ export class GateStore {
 	 * Preserves signal history, current content, content version, and metadata.
 	 */
 	resetGateAndDependents(goalId: string, gateId: string, workflow: Workflow): GateResetResult {
+		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false);
+	}
+
+	/** Reset gates with atomic, fail-loud persistence for lifecycle transactions. */
+	resetGateAndDependentsStrict(goalId: string, gateId: string, workflow: Workflow): GateResetResult {
+		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, true);
+	}
+
+	private resetGateAndDependentsInternal(
+		goalId: string,
+		gateId: string,
+		workflow: Workflow,
+		strict: boolean,
+	): GateResetResult {
 		const affectedGateIds = this.getDependentGateIds(gateId, workflow, true);
 		const changedGateIds: string[] = [];
 		const unchangedGateIds: string[] = [];
 		const previousStatuses: Record<string, GateStatus> = {};
+		const snapshots = new Map<string, { status: GateStatus; updatedAt: number; cacheAt?: number; hadCacheAt: boolean }>();
 		const now = Date.now();
 
 		for (const affectedGateId of affectedGateIds) {
@@ -355,6 +388,12 @@ export class GateStore {
 			previousStatuses[affectedGateId] = previousStatus;
 
 			if (gate) {
+				snapshots.set(key, {
+					status: gate.status,
+					updatedAt: gate.updatedAt,
+					cacheAt: gate.verificationCacheInvalidatedAt,
+					hadCacheAt: Object.prototype.hasOwnProperty.call(gate, "verificationCacheInvalidatedAt"),
+				});
 				gate.verificationCacheInvalidatedAt = now;
 				gate.updatedAt = now;
 			}
@@ -367,11 +406,34 @@ export class GateStore {
 			}
 		}
 
-		if (affectedGateIds.length > 0) {
-			this.save();
+		try {
+			if (affectedGateIds.length > 0) {
+				if (strict) this.saveStrict();
+				else this.save();
+			}
+		} catch (err) {
+			for (const [key, snapshot] of snapshots) {
+				const gate = this.gates.get(key);
+				if (!gate) continue;
+				gate.status = snapshot.status;
+				gate.updatedAt = snapshot.updatedAt;
+				if (snapshot.hadCacheAt) gate.verificationCacheInvalidatedAt = snapshot.cacheAt;
+				else delete gate.verificationCacheInvalidatedAt;
+			}
+			throw err;
 		}
 		for (const changedGateId of changedGateIds) {
-			this.onStatusChange?.(goalId, changedGateId);
+			if (!strict) {
+				this.onStatusChange?.(goalId, changedGateId);
+				continue;
+			}
+			try {
+				this.onStatusChange?.(goalId, changedGateId);
+			} catch (err) {
+				// Persistence has committed. Observer failures must not make the
+				// coordinator compensate the goal back to complete over pending gates.
+				console.error(`[gate-store] Status observer failed after strict reset ${goalId}/${changedGateId}:`, err);
+			}
 		}
 
 		return {
