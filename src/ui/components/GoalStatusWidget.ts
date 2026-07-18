@@ -29,7 +29,7 @@ import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { AlertTriangle, CheckCircle2, Eye, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
-import { completeTeam, scheduleGateStatusRefreshForGoal } from "../../app/api.js";
+import { completeTeam, refreshSessions, scheduleGateStatusRefreshForGoal } from "../../app/api.js";
 import type { SignoffReviewTarget } from "../../app/signoff-review-launch.js";
 import "./SignoffReviewLauncher.js";
 import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
@@ -85,8 +85,9 @@ export class GoalStatusWidget extends LitElement {
 	@state() private _bypassErrors: Map<string, string> = new Map();
 	@state() private _confirmCompletionLoading = false;
 	@state() private _confirmCompletionError = "";
-	/** Set true once this goal has been completed (locally or per app state) so
-	 * the widget gives immediate feedback and stops offering the override. */
+	/** Immediate completion feedback, reconciled back to authoritative goal state
+	 * whenever the goal list refreshes. This must remain reversible because a
+	 * completed goal can be reopened by resetting one of its gates. */
 	@state() private _completed = false;
 	@state() private _closing = false;
 
@@ -140,6 +141,7 @@ export class GoalStatusWidget extends LitElement {
 		window.addEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
 		this._ensureWidgetStyles();
 		if (this.goalId) {
+			this._syncCompletedFromGoalState();
 			void this._fetchInitial();
 			this._connectWs();
 		}
@@ -175,7 +177,7 @@ export class GoalStatusWidget extends LitElement {
 			this._bypassErrors = new Map();
 			this._confirmCompletionLoading = false;
 			this._confirmCompletionError = "";
-			this._completed = false;
+			this._completed = appState.goals.find(g => g.id === this.goalId)?.state === "complete";
 			this._loading = true;
 			this._disconnectWs();
 			if (this.goalId) {
@@ -236,6 +238,16 @@ export class GoalStatusWidget extends LitElement {
 				this._activeGateIds = this._extractActiveGateIds(data.verifications);
 			}
 		} catch { /* non-fatal */ }
+	}
+
+	private _syncCompletedFromGoalState(): void {
+		const goal = appState.goals.find(g => g.id === this.goalId);
+		if (goal) this._completed = goal.state === "complete";
+	}
+
+	private async _refreshGoalState(): Promise<void> {
+		await refreshSessions();
+		this._syncCompletedFromGoalState();
 	}
 
 	private async _fetch(path: string, init?: RequestInit): Promise<Response | null> {
@@ -425,6 +437,15 @@ export class GoalStatusWidget extends LitElement {
 			void this._refreshActive();
 		}
 		switch (t) {
+			case "goal_state_changed":
+				// This widget has its own goal-scoped viewer subscription, so reconcile
+				// completion even when the app-wide RemoteAgent socket is not mounted.
+				void Promise.all([
+					this._refreshGoalState(),
+					this._refreshGates(),
+					this._refreshActive(),
+				]);
+				break;
 			case "gate_verification_awaiting_human": {
 				const signalId = typeof msg.signalId === "string" ? msg.signalId : null;
 				const gateId = typeof msg.gateId === "string" ? msg.gateId : null;
@@ -596,7 +617,26 @@ export class GoalStatusWidget extends LitElement {
 			});
 			if (!resp) throw new Error("Unable to reset gate (network)");
 			if (!resp.ok) throw new Error(await this._resetErrorMessage(resp));
-			await Promise.all([this._refreshGates(), this._refreshActive()]);
+			const data = await resp.json().catch(() => null);
+			const reopen = data?.reopen;
+			if (reopen?.state === "in-progress" || reopen?.reopened === true) {
+				this._completed = false;
+			}
+
+			// Reflect the successful reset before the follow-up reads complete. The
+			// server returns the full affected set (selected plus dependants).
+			const returnedAffectedGateIds = data?.reset?.affectedGateIds ?? data?.affectedGateIds;
+			const affectedGateIds = Array.isArray(returnedAffectedGateIds)
+				? returnedAffectedGateIds.filter((id: unknown): id is string => typeof id === "string")
+				: [gate.id];
+			const affected = new Set(affectedGateIds);
+			this._gates = this._gates.map(current => affected.has(current.id)
+				? { ...current, status: "pending", latestPassedSignalId: undefined }
+				: current);
+			this._activeGateIds = new Set([...this._activeGateIds].filter(id => !affected.has(id)));
+			this._awaitingSignoffs = this._awaitingSignoffs.filter(signoff => !affected.has(signoff.gateId));
+
+			await Promise.all([this._refreshGoalState(), this._refreshGates(), this._refreshActive()]);
 		} catch (err) {
 			const next = new Map(this._resetErrors);
 			next.set(gate.id, err instanceof Error ? err.message : "Unable to reset gate");
@@ -704,11 +744,9 @@ export class GoalStatusWidget extends LitElement {
 		// human "Confirm completion" override must not be offered yet.
 		const allGatesResolved = this._gates.length > 0
 			&& this._gates.every(g => !this._activeGateIds.has(g.id) && (g.status === "passed" || g.status === "bypassed"));
-		// The goal is complete once the server marks it so (or we just completed it
-		// locally). A completed goal must not keep offering the override — instead we
-		// surface a clear “completed” indicator so clicking the button has visible
-		// feedback rather than appearing to do nothing.
-		const goalComplete = this._completed || appState.goals.find(g => g.id === this.goalId)?.state === "complete";
+		// The local value gives immediate completion feedback; goal-list refreshes
+		// reconcile it in both directions so reset-driven reopening is visible.
+		const goalComplete = this._completed;
 		const canConfirmCompletion = anyBypassed && allGatesResolved && !goalComplete;
 		return html`
 			<div class="flex items-center justify-between gap-2 mb-2 text-foreground font-medium text-sm">
