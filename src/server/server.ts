@@ -46,7 +46,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
-import type { ServerMessage } from "./ws/protocol.js";
+import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
@@ -10687,35 +10687,81 @@ async function handleApiRoute(
 		}
 
 		const [, goalId, gateId] = gateResetMatch;
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
-		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
-
 		const gateResetCtx = projectContextManager.getContextForGoal(goalId);
 		if (!gateResetCtx) { json({ error: "Goal not found in any project" }, 404); return; }
-		const gateStore = gateResetCtx.gateStore;
-		const requestedGateDef = goal.workflow.gates.find(g => g.id === gateId);
-		if (!requestedGateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+		const rejectDormantGoal = (candidate: PersistedGoal): boolean => {
+			if (candidate.archived) {
+				json({ error: "Goal is archived" }, 409);
+				return true;
+			}
+			if (candidate.state === "shelved") {
+				json({ error: "Goal is shelved", code: "GOAL_SHELVED", goalId }, 409);
+				return true;
+			}
+			if (candidate.paused) {
+				json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409);
+				return true;
+			}
+			return false;
+		};
 
-		const affectedGateIds = getGateAndTransitiveDependents(goal.workflow, gateId);
+		const initialGoal = gateResetCtx.goalStore.get(goalId);
+		if (!initialGoal) { json({ error: "Goal not found" }, 404); return; }
+		if (rejectDormantGoal(initialGoal)) return;
+		if (!initialGoal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+		if (!initialGoal.workflow.gates.some(g => g.id === gateId)) {
+			json({ error: `Unknown gate: ${gateId}` }, 404);
+			return;
+		}
+
+		const affectedGateIds = getGateAndTransitiveDependents(initialGoal.workflow, gateId);
 		try {
 			await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds);
 		} catch (err) {
 			console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
 		}
 
+		// Cancellation is awaited, so re-read the project-owned record and reapply
+		// dormant guards before mutating either persistence store.
+		const goal = gateResetCtx.goalStore.get(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (rejectDormantGoal(goal)) return;
+		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+		const requestedGateDef = goal.workflow.gates.find(g => g.id === gateId);
+		if (!requestedGateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+
+		// Keep the goal transition and gate invalidation in one synchronous
+		// continuation. State-first ordering ensures a crash cannot leave pending
+		// gates hidden behind a completed goal.
+		const previousState = goal.state;
+		const reopened = previousState === "complete";
+		if (reopened) gateResetCtx.goalStore.update(goalId, { state: "in-progress" });
+
 		let resetResult: GateResetResult;
 		try {
-			resetResult = gateStore.resetGateAndDependents(goalId, gateId, goal.workflow);
+			resetResult = gateResetCtx.gateStore.resetGateAndDependents(goalId, gateId, goal.workflow);
 		} catch (err: any) {
 			json({ error: err?.message || `Unknown gate: ${gateId}` }, 404);
 			return;
 		}
+		const reopen: GateResetReopenOutcome = {
+			reopened,
+			previousState,
+			state: reopened ? "in-progress" : previousState,
+		};
+
+		if (reopened) {
+			// TeamManager owns the existing lead/team runtime rearm.
+			const reopenCapableTeamManager = teamManager as TeamManager & {
+				reopenCompletedTeam: (reopenGoalId: string) => Promise<void> | void;
+			};
+			await reopenCapableTeamManager.reopenCompletedTeam(goalId);
+			broadcastToAll({ type: "goal_state_changed", goalId });
+		}
 
 		const affectedGates = resetResult.affectedGateIds.map(affectedGateId => {
 			const def = goal.workflow!.gates.find(g => g.id === affectedGateId);
-			const state = gateStore.getGate(goalId, affectedGateId);
+			const state = gateResetCtx.gateStore.getGate(goalId, affectedGateId);
 			return {
 				gateId: affectedGateId,
 				name: def?.name || affectedGateId,
@@ -10733,6 +10779,7 @@ async function handleApiRoute(
 			affectedGateIds: resetResult.affectedGateIds,
 			changedGateIds: resetResult.changedGateIds,
 			unchangedGateIds: resetResult.unchangedGateIds,
+			reopen,
 		});
 
 		const gateNameById = new Map(goal.workflow.gates.map(g => [g.id, g.name || g.id]));
@@ -10744,6 +10791,11 @@ async function handleApiRoute(
 			`Gate reset: ${requestedGateDef.name || gateId}`,
 			"",
 			"Reset by user action from the goal status widget.",
+			"",
+			"Goal lifecycle:",
+			reopened
+				? `- Reopened from ${previousState} to ${reopen.state}.`
+				: `- Remained ${reopen.state}; no reopen transition was needed.`,
 			"",
 			"Selected gate:",
 			`- ${requestedGateDef.name || gateId}`,
@@ -10763,7 +10815,8 @@ async function handleApiRoute(
 		const notification = notificationLines.join("\n");
 
 		let teamLeadNotified = false;
-		const team = teamManager.getTeamState(goalId);
+		const shouldNotifyTeamLead = reopened || resetResult.changedGateIds.length > 0;
+		const team = shouldNotifyTeamLead ? teamManager.getTeamState(goalId) : undefined;
 		if (team?.teamLeadSessionId) {
 			const teamLeadSession = sessionManager.getSession(team.teamLeadSessionId);
 			if (teamLeadSession && teamLeadSession.status !== "terminated") {
@@ -10788,6 +10841,7 @@ async function handleApiRoute(
 			unchangedGateIds: resetResult.unchangedGateIds,
 			previousStatuses: resetResult.previousStatuses,
 			gates: affectedGates,
+			reopen,
 			teamLeadNotified,
 		});
 		return;
