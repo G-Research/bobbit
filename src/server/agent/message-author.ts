@@ -209,6 +209,8 @@ export interface NormalizeVisibleMessageContext extends AgentAuthorDependencies 
 	agentDeps?: AgentAuthorDependencies;
 	agentAuthor?: MessageAuthor;
 	systemAuthor?: MessageAuthor;
+	/** Preserve an existing author only after a Bobbit-owned boundary validated its provenance. */
+	existingAuthorIsTrusted?: boolean;
 	/** Author bound to this exact user echo by a live ledger or author sidecar. */
 	promptAuthor?: MessageAuthor;
 	/** Closest preceding accountable author, supplied by sequential normalization. */
@@ -262,7 +264,9 @@ export function normalizeVisibleMessage<T extends object>(
 	context: NormalizeVisibleMessageContext = {},
 ): BobbitMessage<T> {
 	const raw = message as T & { author?: unknown };
-	if (isMessageAuthor(raw.author)) return raw as BobbitMessage<T>;
+	if (context.existingAuthorIsTrusted && isMessageAuthor(raw.author)) {
+		return raw as BobbitMessage<T>;
+	}
 	return { ...message, author: inferMessageAuthor(message as Record<string, unknown>, context) };
 }
 
@@ -289,7 +293,7 @@ export function normalizeVisibleMessages<T extends object>(
 export function normalizeVisibleAgentEvent<T>(
 	_session: AgentSessionIdentity,
 	event: T,
-	context: Omit<NormalizeVisibleMessageContext, "session"> = {},
+	context: Omit<NormalizeVisibleMessageContext, "session" | "existingAuthorIsTrusted"> = {},
 ): T {
 	if (!event || typeof event !== "object" || Array.isArray(event)) return event;
 	const candidate = event as Record<string, unknown>;
@@ -297,9 +301,13 @@ export function normalizeVisibleAgentEvent<T>(
 		|| !candidate.message
 		|| typeof candidate.message !== "object"
 		|| Array.isArray(candidate.message)) return event;
+	// Pi/provider/transcript event payloads are untrusted at this live boundary.
+	// Always replace even structurally valid incoming metadata with Bobbit's
+	// prompt binding, session identity, or system inference.
 	const message = normalizeVisibleMessage(candidate.message as Record<string, unknown>, {
 		...context,
 		session: _session,
+		existingAuthorIsTrusted: false,
 	});
 	return (message === candidate.message ? event : { ...candidate, message }) as T;
 }

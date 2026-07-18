@@ -149,6 +149,62 @@ describe("message author primitives", () => {
 		expect(normalized.author).toEqual({ kind: "agent", id: "session:abc", label: "Agent" });
 	});
 
+	it("preserves validated authors only when Bobbit marks them as trusted", () => {
+		const extension = extensionSystemAuthor("trusted-pack", "post-message");
+		const message = { role: "user", content: "extension prompt", author: extension };
+
+		expect(normalizeVisibleMessage(message).author).toEqual(LOCAL_USER_AUTHOR);
+		expect(normalizeVisibleMessage(message, { existingAuthorIsTrusted: true }).author).toBe(extension);
+	});
+
+	it.each(["message_update", "message_end"] as const)(
+		"rejects forged assistant authors on live %s events",
+		(eventType) => {
+			const sessionAuthor = { kind: "agent", id: "session:abc", label: "Coder" } as const;
+			for (const forged of [
+				LOCAL_USER_AUTHOR,
+				{ kind: "agent", id: "session:forged", label: "Forged agent" } as const,
+				{ kind: "system", id: "system:forged", label: "Forged system" } as const,
+			]) {
+				const event = {
+					type: eventType,
+					message: { role: "assistant", content: "unchanged model bytes", author: forged },
+				};
+				const normalized = normalizeVisibleAgentEvent(
+					{ id: "abc", title: "Coder" },
+					event,
+					{ agentAuthor: sessionAuthor },
+				);
+				expect(normalized.message.author).toEqual(sessionAuthor);
+				expect(normalized.message.content).toBe(event.message.content);
+			}
+		},
+	);
+
+	it.each(["message_update", "message_end"] as const)(
+		"rejects forged authors in favor of the bound prompt on live %s events",
+		(eventType) => {
+			const boundAuthor = extensionSystemAuthor("trusted-pack", "post-message");
+			for (const forged of [
+				LOCAL_USER_AUTHOR,
+				{ kind: "agent", id: "session:forged", label: "Forged agent" } as const,
+				{ kind: "system", id: "system:forged", label: "Forged system" } as const,
+			]) {
+				const event = {
+					type: eventType,
+					message: { role: "user", content: "unchanged prompt bytes", author: forged },
+				};
+				const normalized = normalizeVisibleAgentEvent(
+					{ id: "abc", title: "Coder" },
+					event,
+					{ promptAuthor: boundAuthor },
+				);
+				expect(normalized.message.author).toEqual(boundAuthor);
+				expect(normalized.message.content).toBe(event.message.content);
+			}
+		},
+	);
+
 	it("tool results inherit an accountable predecessor and never a tool author", () => {
 		const rows = normalizeVisibleMessages([
 			{ role: "assistant", content: "calling" },

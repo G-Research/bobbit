@@ -308,7 +308,9 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		});
 		if (!changed) authored = messages;
 	}
-	return normalizeVisibleMessages(authored, context);
+	// Authors attached above came from Bobbit's validated sidecar; callers also
+	// splice only Bobbit-owned live/steer metadata before reaching this helper.
+	return normalizeVisibleMessages(authored, { ...context, existingAuthorIsTrusted: true });
 }
 
 /** Copy author metadata only after the destination Bobbit session id exists. */
