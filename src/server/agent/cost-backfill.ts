@@ -33,9 +33,14 @@
  * generation tick when at least one entry was actually updated.
  */
 
-import fs from "node:fs";
 import path from "node:path";
-import { readSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
+import {
+	mapWithConcurrency,
+	realRecoveryFs,
+	RECOVERY_IO_CONCURRENCY,
+	type RecoveryFs,
+} from "./bounded-async-work.js";
+import { readSessionSidecarAsync } from "./session-sidecar.js";
 import type { CostTracker } from "./cost-tracker.js";
 
 /**
@@ -65,6 +70,7 @@ export interface CostBackfillOptions {
 	 */
 	agentSessionsRoot: string;
 	logger?: Pick<Console, "log" | "warn">;
+	fs?: RecoveryFs;
 }
 
 /**
@@ -77,9 +83,10 @@ export interface CostBackfillOptions {
  * subsequent runs with no new unstamped entries are pure no-ops (no
  * persistence write, no generation bump).
  */
-export function backfillLegacyCostGoalIds(opts: CostBackfillOptions): CostBackfillResult {
+export async function backfillLegacyCostGoalIds(opts: CostBackfillOptions): Promise<CostBackfillResult> {
 	const { costTracker, sessionManager, agentSessionsRoot } = opts;
 	const logger = opts.logger ?? console;
+	const fsImpl = opts.fs ?? realRecoveryFs;
 
 	const unstamped = costTracker.getUnstampedSessionIds();
 	if (unstamped.length === 0) {
@@ -87,44 +94,35 @@ export function backfillLegacyCostGoalIds(opts: CostBackfillOptions): CostBackfi
 		return { stamped: 0, unattributable: 0 };
 	}
 
-	// Lazy-build the sidecar index only when we actually need it — scanning
-	// `~/.bobbit/agent/sessions` recursively is comparatively expensive and
-	// most installs have all live records intact.
-	let sidecarIndex: Map<string, string> | null = null;
-	const ensureSidecarIndex = (): Map<string, string> => {
-		if (sidecarIndex) return sidecarIndex;
-		sidecarIndex = buildSidecarGoalIdIndex(agentSessionsRoot, logger);
-		return sidecarIndex;
-	};
-
-	const resolver = (sessionId: string): string | undefined => {
-		// Path 1: live persisted record.
-		const ps = sessionManager.getPersistedSession(sessionId);
-		if (ps) {
+	// Resolve persisted metadata and adjacent sidecars first. Keeping the
+	// fallback tree scan as a second bounded phase prevents nested pools from
+	// multiplying the global recovery I/O ceiling.
+	const resolvedGoalIds = await mapWithConcurrency(
+		unstamped,
+		RECOVERY_IO_CONCURRENCY,
+		async (sessionId): Promise<string | undefined> => {
+			const ps = sessionManager.getPersistedSession(sessionId);
+			if (!ps) return undefined;
 			if (ps.teamGoalId) return ps.teamGoalId;
 			if (ps.goalId) return ps.goalId;
-			// Persisted record exists but has no goal mapping — try the
-			// sidecar next to its .jsonl before giving up (the record may
-			// have lost the field while the sidecar still has it).
-			if (ps.agentSessionFile) {
-				try {
-					const sidecar = readSessionSidecar(ps.agentSessionFile);
-					if (sidecar?.teamGoalId) return sidecar.teamGoalId;
-				} catch {
-					// fall through to index scan
-				}
-			}
-		}
+			if (!ps.agentSessionFile) return undefined;
+			const sidecar = await readSessionSidecarAsync(ps.agentSessionFile, fsImpl);
+			return sidecar?.teamGoalId;
+		},
+	);
 
-		// Path 2: scan-all sidecar index by bobbitSessionId.
-		const idx = ensureSidecarIndex();
-		const fromIndex = idx.get(sessionId);
-		if (fromIndex) return fromIndex;
+	let sidecarIndex: Map<string, string> | undefined;
+	if (resolvedGoalIds.some((goalId) => !goalId)) {
+		sidecarIndex = await buildSidecarGoalIdIndex(agentSessionsRoot, logger, fsImpl);
+	}
+	const resolved = new Map<string, string>();
+	for (let i = 0; i < unstamped.length; i++) {
+		const sessionId = unstamped[i]!;
+		const goalId = resolvedGoalIds[i] ?? sidecarIndex?.get(sessionId);
+		if (goalId) resolved.set(sessionId, goalId);
+	}
 
-		return undefined;
-	};
-
-	const stamped = costTracker.backfillGoalIds(resolver);
+	const stamped = costTracker.backfillGoalIds((sessionId) => resolved.get(sessionId));
 	const remaining = costTracker.getUnstampedSessionIds().length;
 
 	// Only emit when a real backfill happened; a no-op pass (stamped=0) is boot
@@ -169,6 +167,8 @@ export interface CostBackfillTranscriptOptions {
 	maxBytes?: number;
 	/** Per-project total runtime budget in ms. Default 30s. */
 	deadlineMs?: number;
+	fs?: RecoveryFs;
+	clock?: { now(): number };
 }
 
 export interface CostBackfillTranscriptResult {
@@ -242,26 +242,25 @@ export function extractTranscriptGoalId(
 	return undefined;
 }
 
-/** Read up to `maxLines` lines or `maxBytes` bytes from a file. Defensive:
- *  any I/O error returns `""`. Truncated trailing lines are still returned. */
-function readTranscriptHead(
+/** Read one bounded transcript header. Any I/O error returns `""`. */
+async function readTranscriptHead(
 	filePath: string,
 	maxLines: number,
 	maxBytes: number,
-): string {
-	let fd: number | undefined;
+	fsImpl: RecoveryFs,
+): Promise<string> {
+	let handle: Awaited<ReturnType<RecoveryFs["open"]>> | undefined;
 	try {
-		fd = fs.openSync(filePath, "r");
-		const buf = Buffer.alloc(maxBytes);
-		const n = fs.readSync(fd, buf, 0, maxBytes, 0);
-		const text = buf.subarray(0, n).toString("utf8");
-		const lines = text.split("\n");
-		return lines.slice(0, maxLines).join("\n");
+		handle = await fsImpl.open(filePath, "r");
+		const buffer = Buffer.alloc(maxBytes);
+		const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+		const text = buffer.subarray(0, bytesRead).toString("utf8");
+		return text.split("\n").slice(0, maxLines).join("\n");
 	} catch {
 		return "";
 	} finally {
-		if (fd !== undefined) {
-			try { fs.closeSync(fd); } catch { /* ignore */ }
+		if (handle) {
+			try { await handle.close(); } catch { /* ignore */ }
 		}
 	}
 }
@@ -273,14 +272,15 @@ function readTranscriptHead(
  * `<sessionId>.jsonl`; accept both. Returns the first match or `undefined`.
  * Defensive — any I/O error is swallowed.
  */
-function findTranscriptPath(
+async function findTranscriptPath(
 	agentSessionsRoot: string,
 	sessionId: string,
-): string | undefined {
+	fsImpl: RecoveryFs,
+): Promise<string | undefined> {
 	let entries: string[];
 	try {
-		if (!fs.existsSync(agentSessionsRoot)) return undefined;
-		entries = fs.readdirSync(agentSessionsRoot);
+		await fsImpl.access(agentSessionsRoot);
+		entries = await fsImpl.readdir(agentSessionsRoot);
 	} catch {
 		return undefined;
 	}
@@ -289,16 +289,16 @@ function findTranscriptPath(
 	for (const slug of entries) {
 		const slugDir = path.join(agentSessionsRoot, slug);
 		try {
-			const stat = fs.statSync(slugDir);
+			const stat = await fsImpl.stat(slugDir);
 			if (!stat.isDirectory()) continue;
 		} catch { continue; }
 		let names: string[];
-		try { names = fs.readdirSync(slugDir); } catch { continue; }
+		try { names = await fsImpl.readdir(slugDir); } catch { continue; }
 		for (const name of names) {
 			if (name !== exactTarget && !name.endsWith(suffixTarget)) continue;
 			const candidate = path.join(slugDir, name);
 			try {
-				const stat = fs.statSync(candidate);
+				const stat = await fsImpl.stat(candidate);
 				if (stat.isFile()) return candidate;
 			} catch { /* ignore */ }
 		}
@@ -325,6 +325,8 @@ export async function backfillLegacyCostGoalIdsFromTranscripts(
 	const maxLines = opts.maxLines ?? 50;
 	const maxBytes = opts.maxBytes ?? 64 * 1024;
 	const deadlineMs = opts.deadlineMs ?? 30_000;
+	const fsImpl = opts.fs ?? realRecoveryFs;
+	const clock = opts.clock ?? { now: Date.now };
 
 	const unmapped = costTracker.getUnstampedSessionIds();
 	if (unmapped.length === 0) {
@@ -341,34 +343,49 @@ export async function backfillLegacyCostGoalIdsFromTranscripts(
 		return { stamped: 0, unattributable: unmapped.length, skipped: 0 };
 	}
 
-	const transcriptMap = new Map<string, string>();
-	const start = Date.now();
+	const transcriptGoalIds = new Array<string | undefined>(unmapped.length);
+	const start = clock.now();
+	let cursor = 0;
+	let dispatchClosed = false;
 	let skipped = 0;
 
-	for (let i = 0; i < unmapped.length; i++) {
-		const sid = unmapped[i]!;
-		if (Date.now() - start > deadlineMs) {
-			skipped = unmapped.length - i;
-			break;
-		}
-		let transcriptPath: string | undefined;
-		try {
-			transcriptPath = findTranscriptPath(agentSessionsRoot, sid);
-		} catch {
-			transcriptPath = undefined;
-		}
-		if (!transcriptPath) continue;
-		const text = readTranscriptHead(transcriptPath, maxLines, maxBytes);
-		if (!text) continue;
-		let goalId: string | undefined;
-		try {
-			goalId = extractTranscriptGoalId(text, known);
-		} catch {
-			goalId = undefined;
-		}
-		if (goalId) transcriptMap.set(sid, goalId);
-	}
+	const workerCount = Math.min(RECOVERY_IO_CONCURRENCY, unmapped.length);
+	const workers = Array.from({ length: workerCount }, async () => {
+		while (true) {
+			// No await may occur between the deadline check and index claim. This
+			// makes closure atomic while allowing already-claimed work to finish.
+			if (dispatchClosed || cursor >= unmapped.length) return;
+			if (clock.now() - start > deadlineMs) {
+				dispatchClosed = true;
+				skipped = unmapped.length - cursor;
+				return;
+			}
+			const index = cursor++;
+			const sid = unmapped[index]!;
 
+			let transcriptPath: string | undefined;
+			try {
+				transcriptPath = await findTranscriptPath(agentSessionsRoot, sid, fsImpl);
+			} catch {
+				transcriptPath = undefined;
+			}
+			if (!transcriptPath) continue;
+			const text = await readTranscriptHead(transcriptPath, maxLines, maxBytes, fsImpl);
+			if (!text) continue;
+			try {
+				transcriptGoalIds[index] = extractTranscriptGoalId(text, known);
+			} catch {
+				transcriptGoalIds[index] = undefined;
+			}
+		}
+	});
+	await Promise.all(workers);
+
+	const transcriptMap = new Map<string, string>();
+	for (let i = 0; i < unmapped.length; i++) {
+		const goalId = transcriptGoalIds[i];
+		if (goalId) transcriptMap.set(unmapped[i]!, goalId);
+	}
 	const stamped = costTracker.backfillGoalIds((sid) => transcriptMap.get(sid));
 	const remaining = costTracker.getUnstampedSessionIds().length;
 
@@ -392,49 +409,64 @@ export async function backfillLegacyCostGoalIdsFromTranscripts(
  *
  * Exported for tests.
  */
-export function buildSidecarGoalIdIndex(
+export async function buildSidecarGoalIdIndex(
 	agentSessionsRoot: string,
 	logger: Pick<Console, "warn"> = console,
-): Map<string, string> {
+	fsImpl: RecoveryFs = realRecoveryFs,
+): Promise<Map<string, string>> {
 	const out = new Map<string, string>();
+	try {
+		await fsImpl.access(agentSessionsRoot);
+	} catch {
+		return out;
+	}
+
 	let rootEntries: string[];
 	try {
-		if (!fs.existsSync(agentSessionsRoot)) return out;
-		rootEntries = fs.readdirSync(agentSessionsRoot);
+		rootEntries = await fsImpl.readdir(agentSessionsRoot);
 	} catch (err) {
 		logger.warn(`[cost-backfill] Failed to read agent sessions root ${agentSessionsRoot}: ${err}`);
 		return out;
 	}
-	for (const slug of rootEntries) {
-		const slugDir = path.join(agentSessionsRoot, slug);
-		let stat: fs.Stats;
-		try { stat = fs.statSync(slugDir); } catch { continue; }
-		if (!stat.isDirectory()) continue;
-		let names: string[];
-		try { names = fs.readdirSync(slugDir); } catch { continue; }
-		for (const name of names) {
-			if (!name.endsWith(".bobbit.json")) continue;
-			const full = path.join(slugDir, name);
-			// readSessionSidecar takes the JSONL path, not the sidecar path —
-			// derive a synthetic JSONL path so `sidecarPathFor` produces this
-			// exact file.
-			const stem = name.slice(0, -".bobbit.json".length);
-			const syntheticJsonl = path.join(slugDir, `${stem}.jsonl`);
-			// Sanity check — sidecarPathFor(syntheticJsonl) should equal `full`.
-			if (sidecarPathFor(syntheticJsonl) !== full) continue;
-			let sidecar;
+
+	const candidatesBySlug = await mapWithConcurrency(
+		rootEntries,
+		RECOVERY_IO_CONCURRENCY,
+		async (slug): Promise<Array<readonly [string, string]>> => {
+			const slugDir = path.join(agentSessionsRoot, slug);
 			try {
-				sidecar = readSessionSidecar(syntheticJsonl);
+				const stat = await fsImpl.stat(slugDir);
+				if (!stat.isDirectory()) return [];
 			} catch {
-				continue;
+				return [];
 			}
-			if (!sidecar) continue;
-			if (!sidecar.teamGoalId) continue;
-			// First-wins: if the same bobbitSessionId somehow appears twice
-			// across slug dirs (shouldn't, but defensive), keep the first.
-			if (!out.has(sidecar.bobbitSessionId)) {
-				out.set(sidecar.bobbitSessionId, sidecar.teamGoalId);
+
+			let names: string[];
+			try {
+				names = await fsImpl.readdir(slugDir);
+			} catch {
+				return [];
 			}
+
+			const candidates: Array<readonly [string, string]> = [];
+			for (const name of names) {
+				if (!name.endsWith(".bobbit.json")) continue;
+				const stem = name.slice(0, -".bobbit.json".length);
+				const syntheticJsonl = path.join(slugDir, `${stem}.jsonl`);
+				const sidecar = await readSessionSidecarAsync(syntheticJsonl, fsImpl);
+				if (sidecar?.teamGoalId) {
+					candidates.push([sidecar.bobbitSessionId, sidecar.teamGoalId]);
+				}
+			}
+			return candidates;
+		},
+	);
+
+	// Flatten only after every slug settles so duplicate identities remain
+	// first-wins in root-entry and file-entry listing order.
+	for (const candidates of candidatesBySlug) {
+		for (const [sessionId, goalId] of candidates) {
+			if (!out.has(sessionId)) out.set(sessionId, goalId);
 		}
 	}
 	return out;

@@ -3335,7 +3335,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
-			// Restore persisted sessions before accepting connections
+			// Restore persisted teams before sessions so reconstructed records are available
+			// to session revival. Both complete before accepting connections.
+			await bootPhase("restore-teams", () => teamManager.waitForRestore());
 			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
@@ -3346,7 +3348,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const costBackfillStart = Date.now();
 			try {
 				for (const ctx of projectContextManager.all()) {
-					backfillLegacyCostGoalIds({
+					await backfillLegacyCostGoalIds({
 						costTracker: ctx.costTracker,
 						sessionManager,
 						agentSessionsRoot,
@@ -3393,7 +3395,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				const t0 = Date.now();
 
 				// Transcript-pass backfill — lazy, fire-and-forget after listen().
-				// Runs *after* the synchronous sidecar pass so it only touches entries
+				// Runs *after* the pre-listen sidecar pass so it only touches entries
 				// that pass could not resolve. Bounded per-project (50 lines / 64 KiB
 				// per file, 30s total) and confidence-gated (see extractTranscriptGoalId).
 				// Bumps the cost-tracker generation when it stamps anything, which

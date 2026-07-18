@@ -317,15 +317,17 @@ export class GateInspectRenderer implements ToolRenderer {
 									@click=${hasOutput ? toggleStep : null}
 								>
 									${stepStatusIcon(status)}
-									<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name}</span>
+									<div class="flex flex-1 min-w-0 items-center gap-2">
+										<span class="font-mono text-xs min-w-0 truncate">${step.name}</span>
+										${reviewTarget ? html`
+											<signoff-review-launcher class="shrink-0" .target=${reviewTarget}></signoff-review-launcher>
+										` : nothing}
+									</div>
 									<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${stepStatusClass(status)}">${statusLabel}</span>
 									<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
 									${marker
 										? html`<span data-timeout-timing class="text-xs text-muted-foreground tabular-nums">${formatTimeoutTiming(marker)}</span>`
 										: shouldShowDuration(status, step.duration_ms) ? html`<span class="text-xs text-muted-foreground tabular-nums">${formatDuration(step.duration_ms)}</span>` : nothing}
-									${reviewTarget ? html`
-										<signoff-review-launcher .target=${reviewTarget}></signoff-review-launcher>
-									` : nothing}
 									${canChangeTimeout ? html`
 										<button
 											type="button"
