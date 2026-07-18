@@ -31,12 +31,24 @@ export class SignoffReviewLauncher extends LitElement {
 	@state() private _resolved = false;
 
 	private _targetKey = "";
+	private _launchGeneration = 0;
+	private _launchAbort?: AbortController;
+
+	private _cancelLaunch(): void {
+		this._launchGeneration++;
+		this._launchAbort?.abort();
+		this._launchAbort = undefined;
+		this._loading = false;
+	}
 
 	private _onGateStatusEvent = (event: Event) => {
 		const detail = (event as CustomEvent).detail;
 		const target = this.target;
 		if (!target || !detail || typeof detail !== "object") return;
-		if (detail.goalId !== target.goalId || detail.gateId !== target.gateId || detail.signalId !== target.signalId) return;
+		// Document-scoped verification events can omit goalId because the mounted
+		// card already supplies that scope. A present goalId must still match.
+		if (detail.goalId !== undefined && detail.goalId !== target.goalId) return;
+		if (detail.gateId !== target.gateId || detail.signalId !== target.signalId) return;
 
 		const completesTarget = (detail.type === "gate_verification_step_complete"
 			|| detail.type === HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE)
@@ -44,8 +56,8 @@ export class SignoffReviewLauncher extends LitElement {
 		const completesVerification = detail.type === "gate_verification_complete";
 		if (!completesTarget && !completesVerification) return;
 
+		this._cancelLaunch();
 		this._resolved = true;
-		this._loading = false;
 		this._error = false;
 	};
 
@@ -64,13 +76,14 @@ export class SignoffReviewLauncher extends LitElement {
 		super.disconnectedCallback();
 		window.removeEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusEvent);
 		document.removeEventListener("gate-verification-event", this._onGateStatusEvent);
+		this._cancelLaunch();
 	}
 
 	protected willUpdate(): void {
 		const nextKey = targetKey(this.target);
 		if (nextKey !== this._targetKey) {
+			this._cancelLaunch();
 			this._targetKey = nextKey;
-			this._loading = false;
 			this._error = false;
 			this._resolved = false;
 		}
@@ -78,20 +91,36 @@ export class SignoffReviewLauncher extends LitElement {
 
 	private async _launch(event: MouseEvent): Promise<void> {
 		event.stopPropagation();
-		if (!this.target || this._loading || this._resolved) return;
+		const target = this.target;
+		if (!target || this._loading || this._resolved) return;
+
+		const launchKey = targetKey(target);
+		const generation = ++this._launchGeneration;
+		const abort = new AbortController();
+		this._launchAbort?.abort();
+		this._launchAbort = abort;
+		const isCurrent = () => this.isConnected
+			&& this._launchGeneration === generation
+			&& targetKey(this.target) === launchKey
+			&& !this._resolved;
+
 		this._loading = true;
 		this._error = false;
 		try {
-			const detail = await launchSignoffReview(this.target);
+			const detail = await launchSignoffReview(target, { signal: abort.signal, isCurrent });
+			if (!isCurrent()) return;
 			this.dispatchEvent(new CustomEvent<SignoffReviewEventDetail>(SIGNOFF_REVIEW_LAUNCHED_EVENT, {
 				detail,
 				bubbles: true,
 				composed: true,
 			}));
 		} catch {
-			this._error = true;
+			if (isCurrent()) this._error = true;
 		} finally {
-			this._loading = false;
+			if (this._launchGeneration === generation) {
+				this._launchAbort = undefined;
+				this._loading = false;
+			}
 		}
 	}
 

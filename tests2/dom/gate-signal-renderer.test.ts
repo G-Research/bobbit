@@ -341,3 +341,105 @@ describe("GateSignalRenderer", () => {
 		expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/verifications/active"))).toBe(true);
 	});
 });
+
+const firstTarget = {
+	goalId: "goal-first",
+	gateId: "approval",
+	signalId: "signal-first",
+	stepName: "sign-off",
+};
+
+async function renderDirectLauncher(target = firstTarget): Promise<any> {
+	const launcher = document.createElement("signoff-review-launcher") as any;
+	launcher.target = target;
+	document.body.appendChild(launcher);
+	await launcher.updateComplete;
+	return launcher;
+}
+
+async function flushLaunch(): Promise<void> {
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
+describe("SignoffReviewLauncher lifecycle", () => {
+	it("accepts completion events without goalId but rejects a present goal mismatch", async () => {
+		const launcher = await renderDirectLauncher();
+		document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: {
+			type: "gate_verification_step_complete",
+			goalId: "another-goal",
+			gateId: firstTarget.gateId,
+			signalId: firstTarget.signalId,
+			stepName: firstTarget.stepName,
+		} }));
+		await launcher.updateComplete;
+		expect(launcher.querySelector("button")).toBeTruthy();
+
+		document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: {
+			type: "gate_verification_step_complete",
+			gateId: firstTarget.gateId,
+			signalId: firstTarget.signalId,
+			stepName: firstTarget.stepName,
+		} }));
+		await launcher.updateComplete;
+		expect(launcher.querySelector("button")).toBeNull();
+	});
+
+	it("does not dispatch an in-flight review after the launcher target changes", async () => {
+		let resolveFetch!: (response: Response) => void;
+		const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>((resolve) => {
+			resolveFetch = resolve;
+		}));
+		vi.stubGlobal("fetch", fetchMock);
+		const opened = vi.fn();
+		window.addEventListener("bobbit-open-review-document", opened);
+		try {
+			const launcher = await renderDirectLauncher();
+			const launched = vi.fn();
+			launcher.addEventListener("signoff-review-launched", launched);
+			launcher.querySelector("button").click();
+			await launcher.updateComplete;
+			const requestSignal = fetchMock.mock.calls[0][1]?.signal as AbortSignal;
+			expect(requestSignal.aborted).toBe(false);
+
+			launcher.target = { ...firstTarget, signalId: "signal-second" };
+			await launcher.updateComplete;
+			expect(requestSignal.aborted).toBe(true);
+			resolveFetch(jsonResponse({ signals: [{ id: firstTarget.signalId, content: "Stale review" }] }));
+			await flushLaunch();
+
+			expect(opened).not.toHaveBeenCalled();
+			expect(launched).not.toHaveBeenCalled();
+			expect(launcher.querySelector("button")?.textContent).toContain("Start Review");
+			expect(launcher.querySelector('[role="alert"]')).toBeNull();
+		} finally {
+			window.removeEventListener("bobbit-open-review-document", opened);
+		}
+	});
+
+	it("does not dispatch an in-flight review after the launcher disconnects", async () => {
+		let resolveFetch!: (response: Response) => void;
+		const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>((resolve) => {
+			resolveFetch = resolve;
+		}));
+		vi.stubGlobal("fetch", fetchMock);
+		const opened = vi.fn();
+		window.addEventListener("bobbit-open-review-document", opened);
+		try {
+			const launcher = await renderDirectLauncher();
+			const launched = vi.fn();
+			launcher.addEventListener("signoff-review-launched", launched);
+			launcher.querySelector("button").click();
+			await launcher.updateComplete;
+			const requestSignal = fetchMock.mock.calls[0][1]?.signal as AbortSignal;
+			launcher.remove();
+			expect(requestSignal.aborted).toBe(true);
+			resolveFetch(jsonResponse({ signals: [{ id: firstTarget.signalId, content: "Detached review" }] }));
+			await flushLaunch();
+
+			expect(opened).not.toHaveBeenCalled();
+			expect(launched).not.toHaveBeenCalled();
+		} finally {
+			window.removeEventListener("bobbit-open-review-document", opened);
+		}
+	});
+});

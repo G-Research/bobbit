@@ -27,7 +27,20 @@ export interface SignoffReviewEventDetail {
 	};
 }
 
+export interface SignoffReviewLaunchOptions {
+	signal?: AbortSignal;
+	/** Checked immediately before dispatch so callers can invalidate stale targets. */
+	isCurrent?: () => boolean;
+}
+
 const EMPTY_SIGNOFF_CONTENT = "No content was attached to this sign-off signal.";
+
+function assertLaunchCurrent(options: SignoffReviewLaunchOptions): void {
+	if (!options.signal?.aborted && options.isCurrent?.() !== false) return;
+	const error = new Error("Sign-off review launch was cancelled");
+	error.name = "AbortError";
+	throw error;
+}
 
 function signoffReviewTitle(target: SignoffReviewTarget): string {
 	const goal = target.goalTitle || target.goalId || "Goal";
@@ -42,16 +55,26 @@ function signoffReviewTitle(target: SignoffReviewTarget): string {
  * Eligibility is intentionally the caller's responsibility: this helper only
  * performs the launch for an already-authoritative sign-off target.
  */
-export async function launchSignoffReview(target: SignoffReviewTarget): Promise<SignoffReviewEventDetail> {
+export async function launchSignoffReview(
+	target: SignoffReviewTarget,
+	options: SignoffReviewLaunchOptions = {},
+): Promise<SignoffReviewEventDetail> {
+	assertLaunchCurrent(options);
 	let response: Response;
 	try {
-		response = await gatewayFetch(`/api/goals/${encodeURIComponent(target.goalId)}/gates/${encodeURIComponent(target.gateId)}/signals`);
-	} catch {
-		throw new Error("Unable to load signal content (network)");
+		response = await gatewayFetch(
+			`/api/goals/${encodeURIComponent(target.goalId)}/gates/${encodeURIComponent(target.gateId)}/signals`,
+			{ signal: options.signal },
+		);
+	} catch (error) {
+		assertLaunchCurrent(options);
+		throw new Error("Unable to load signal content (network)", { cause: error });
 	}
+	assertLaunchCurrent(options);
 	if (!response.ok) throw new Error(`Unable to load signal content (${response.status})`);
 
 	const data = await response.json().catch(() => null);
+	assertLaunchCurrent(options);
 	const signals = Array.isArray(data?.signals) ? data.signals : [];
 	const signal = signals.find((candidate: unknown) => {
 		return !!candidate
@@ -83,6 +106,7 @@ export async function launchSignoffReview(target: SignoffReviewTarget): Promise<
 			...(target.stepLabel ? { stepLabel: target.stepLabel } : {}),
 		},
 	};
+	assertLaunchCurrent(options);
 	window.dispatchEvent(new CustomEvent("bobbit-open-review-document", { detail }));
 	return detail;
 }
