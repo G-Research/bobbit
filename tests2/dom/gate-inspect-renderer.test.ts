@@ -170,6 +170,7 @@ describe("GateInspectRenderer", () => {
 			stepName: "approved-review",
 			stepLabel: "Approve review",
 		});
+		expect(launchers[0].previousElementSibling?.textContent).toBe("approved-review");
 	});
 
 	it("does not mount an unusable review launcher without exact target identifiers", () => {

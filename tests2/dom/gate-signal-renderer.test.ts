@@ -153,6 +153,7 @@ describe("GateSignalRenderer", () => {
 			stepName: "actionable",
 			stepLabel: "Approve release",
 		});
+		expect(launchers[0].previousElementSibling?.textContent).toBe("actionable");
 		expect(launchers[0].querySelectorAll("button")).toHaveLength(1);
 		expect(launchers[0].querySelector("button")?.getAttribute("aria-label")).toBe("Start review: Approve release");
 	});
