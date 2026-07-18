@@ -1,32 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import type { ApiModel } from "../../src/server/agent/model-registry.js";
-
-const virtualModelConfig = vi.hoisted(() => ({ modelsJson: undefined as string | undefined }));
-
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
-	const isModelsJson = (value: unknown) => String(value).replaceAll("\\", "/").endsWith("/virtual-agent/models.json");
-	return {
-		...actual,
-		existsSync: (file: unknown) => isModelsJson(file) && virtualModelConfig.modelsJson !== undefined,
-		readFileSync: (file: unknown) => {
-			if (!isModelsJson(file) || virtualModelConfig.modelsJson === undefined) throw new Error(`unexpected fake read: ${String(file)}`);
-			return virtualModelConfig.modelsJson;
-		},
-	};
-});
-
-vi.mock("../../src/server/bobbit-dir.js", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../../src/server/bobbit-dir.js")>();
-	return {
-		...actual,
-		globalAgentDir: () => "/virtual-agent",
-		globalAuthPath: () => "/virtual-agent/auth.json",
-	};
-});
-
 import {
 	completeModelText,
 	resolveConfigValue,
@@ -85,9 +60,9 @@ class FakeRunner {
 	}
 }
 
-function expectedShell(command: string): { file: string; args: string[] } {
+function expectedShell(command: string, env: NodeJS.ProcessEnv): { file: string; args: string[] } {
 	return process.platform === "win32"
-		? { file: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", command] }
+		? { file: env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", command] }
 		: { file: "/bin/sh", args: ["-c", command] };
 }
 
@@ -106,10 +81,6 @@ const model: ApiModel = {
 };
 
 const emptyEnv = {} as NodeJS.ProcessEnv;
-
-afterEach(() => {
-	virtualModelConfig.modelsJson = undefined;
-});
 
 describe("async model configuration commands", () => {
 	it("preserves literal, none, environment-name, blank, and non-string resolution without invoking the runner", async () => {
@@ -134,7 +105,7 @@ describe("async model configuration commands", () => {
 
 		assert.equal(await resolveConfigValue(`!${command}`, runner.asCommandRunner(), emptyEnv), "resolved value");
 		assert.equal(runner.calls.length, 1);
-		const expected = expectedShell(command);
+		const expected = expectedShell(command, emptyEnv);
 		assert.equal(runner.calls[0].file, expected.file);
 		assert.deepEqual(runner.calls[0].args, expected.args);
 		assert.deepEqual(runner.calls[0].options, {
@@ -194,21 +165,19 @@ describe("async model configuration commands", () => {
 });
 
 describe("completeModelText command integration", () => {
-	it("awaits API-key and AIGW header commands sequentially, preserving header order and completion options", async () => {
-		virtualModelConfig.modelsJson = JSON.stringify({
-			providers: {
-				aigw: {
-					apiKey: "!resolve-api-key",
-					headers: {
-						"X-First": "!resolve-first-header",
-						"X-Literal": "literal-header",
-						"X-Second": "!resolve-second-header",
-					},
+	it("awaits AIGW header commands sequentially, preserving header order and completion options", async () => {
+		const providerConfigReads: string[] = [];
+		const providerConfigReader = (provider: string) => {
+			providerConfigReads.push(provider);
+			return provider === "aigw" ? {
+				headers: {
+					"X-First": "!resolve-first-header",
+					"X-Literal": "literal-header",
+					"X-Second": "!resolve-second-header",
 				},
-			},
-		});
+			} : undefined;
+		};
 		const pending = new Map<string, Deferred<RunnerResult>>([
-			["resolve-api-key", deferred<RunnerResult>()],
 			["resolve-first-header", deferred<RunnerResult>()],
 			["resolve-second-header", deferred<RunnerResult>()],
 		]);
@@ -226,7 +195,7 @@ describe("completeModelText command integration", () => {
 		};
 		const completion = completeModelText(
 			model,
-			{ get: () => undefined } as any,
+			{ get: (key: string) => key === "providerKey.aigw" ? "api-secret" : undefined } as any,
 			{
 				systemPrompt: "system text",
 				userPrompt: "user text",
@@ -235,23 +204,16 @@ describe("completeModelText command integration", () => {
 				timeoutMs: 4_321,
 			},
 			completeFn,
-			{ commandRunner: runner.asCommandRunner(), env: emptyEnv },
+			{ commandRunner: runner.asCommandRunner(), env: emptyEnv, providerConfigReader },
 		);
 
 		await runner.waitForCallCount(1);
-		assert.deepEqual(runner.calls.map((call) => call.args.at(-1)), ["resolve-api-key"]);
-		assert.equal(completionCalled, false);
-		pending.get("resolve-api-key")!.resolve({ stdout: " api-secret\n", stderr: "ignored" });
-
-		await runner.waitForCallCount(2);
-		assert.deepEqual(runner.calls.map((call) => call.args.at(-1)), ["resolve-api-key", "resolve-first-header"]);
-		assert.equal(runner.active, 1);
+		assert.deepEqual(runner.calls.map((call) => call.args.at(-1)), ["resolve-first-header"]);
 		assert.equal(completionCalled, false);
 		pending.get("resolve-first-header")!.resolve({ stdout: " first-value ", stderr: "ignored" });
 
-		await runner.waitForCallCount(3);
+		await runner.waitForCallCount(2);
 		assert.deepEqual(runner.calls.map((call) => call.args.at(-1)), [
-			"resolve-api-key",
 			"resolve-first-header",
 			"resolve-second-header",
 		]);
@@ -260,6 +222,7 @@ describe("completeModelText command integration", () => {
 		pending.get("resolve-second-header")!.resolve({ stdout: "second-value\n", stderr: "ignored" });
 
 		assert.equal(await completion, "complete response");
+		assert.deepEqual(providerConfigReads, ["aigw"]);
 		assert.equal(runner.maxActive, 1, "config commands must resolve sequentially");
 		assert.equal(completionCalls.length, 1);
 		assert.deepEqual(completionCalls[0].options, {

@@ -48,7 +48,14 @@ function authCredentialForProvider(provider: string): AuthCredentials | null {
 	return null;
 }
 
-function readModelsJsonProvider(provider: string): any | undefined {
+export interface ModelProviderConfig {
+	apiKey?: unknown;
+	headers?: unknown;
+}
+
+export type ModelProviderConfigReader = (provider: string) => ModelProviderConfig | undefined;
+
+function readModelsJsonProvider(provider: string): ModelProviderConfig | undefined {
 	try {
 		const p = path.join(globalAgentDir(), "models.json");
 		if (!existsSync(p)) return undefined;
@@ -115,9 +122,10 @@ async function resolveProviderHeaders(
 	provider: string,
 	commandRunner: ModelConfigCommandRunner,
 	env: NodeJS.ProcessEnv,
+	providerConfigReader: ModelProviderConfigReader,
 ): Promise<Record<string, string> | undefined> {
 	if (provider !== "aigw") return undefined;
-	const rawHeaders = readModelsJsonProvider(provider)?.headers;
+	const rawHeaders = providerConfigReader(provider)?.headers;
 	if (!rawHeaders || typeof rawHeaders !== "object") return undefined;
 	const headers: Record<string, string> = {};
 	for (const [key, value] of Object.entries(rawHeaders)) {
@@ -133,6 +141,7 @@ async function resolveProviderApiKey(
 	provider: string,
 	commandRunner: ModelConfigCommandRunner,
 	env: NodeJS.ProcessEnv,
+	providerConfigReader: ModelProviderConfigReader,
 ): Promise<string | undefined> {
 	const stored = prefs?.get(`providerKey.${provider}`);
 	if (typeof stored === "string" && stored.trim()) return stored.trim();
@@ -153,7 +162,7 @@ async function resolveProviderApiKey(
 	const custom = configs.find(c => (c.name || c.id) === provider || c.id === provider);
 	if (custom) return custom.apiKey?.trim() || "none";
 
-	return resolveConfigValue(readModelsJsonProvider(provider)?.apiKey, commandRunner, env);
+	return resolveConfigValue(providerConfigReader(provider)?.apiKey, commandRunner, env);
 }
 
 export function toPiModel(model: ApiModel): Model<Api> {
@@ -187,6 +196,7 @@ type CompleteSimpleFn = typeof completeSimple;
 export interface ModelCompletionDependencies {
 	commandRunner?: ModelConfigCommandRunner;
 	env?: NodeJS.ProcessEnv;
+	providerConfigReader?: ModelProviderConfigReader;
 }
 
 export async function completeModelText(
@@ -221,8 +231,9 @@ export async function completeModelText(
 
 	const commandRunner = dependencies.commandRunner ?? realModelConfigCommandRunner;
 	const env = dependencies.env ?? process.env;
-	const apiKey = await resolveProviderApiKey(prefs, model.provider, commandRunner, env);
-	const providerHeaders = await resolveProviderHeaders(model.provider, commandRunner, env);
+	const providerConfigReader = dependencies.providerConfigReader ?? readModelsJsonProvider;
+	const apiKey = await resolveProviderApiKey(prefs, model.provider, commandRunner, env, providerConfigReader);
+	const providerHeaders = await resolveProviderHeaders(model.provider, commandRunner, env, providerConfigReader);
 	const options: Record<string, any> = {
 		maxTokens: args.maxTokens ?? 500,
 		timeoutMs: args.timeoutMs ?? 30_000,
