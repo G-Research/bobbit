@@ -10798,20 +10798,26 @@ async function handleApiRoute(
 
 		let lifecycleError: { message: string; code: string; status: number } | undefined;
 		if (reopened && !gateResetCtx.gateResetCoordinator.intents.wasRuntimeRearmed(intent)) {
-			try {
-				// TeamManager owns the existing lead/team runtime rearm. A false result
-				// for an actual team is a controlled, retryable failure; retaining the
-				// intent ensures the next reset request tries again.
-				const rearmed = teamManager.reopenCompletedTeam(goalId);
-				const team = teamManager.getTeamState(goalId);
-				if (!rearmed && (goal.team || team?.teamLeadSessionId)) {
+			const team = teamManager.getTeamState(goalId);
+			if (!team) {
+				// `goal.team` records capability, not a live runtime. Explicit teardown
+				// leaves completed goals resettable without creating a replacement team.
+				gateResetCtx.gateResetCoordinator.intents.markRuntimeRearmed(intent);
+			} else {
+				try {
+					// TeamManager owns the existing lead/team runtime rearm. A false result
+					// for an actual team is a controlled, retryable failure; retaining the
+					// intent ensures the next reset request tries again.
+					const rearmed = teamManager.reopenCompletedTeam(goalId);
+					if (!rearmed) {
+						lifecycleError = { message: "Goal reopened, but its team runtime could not be rearmed", code: "TEAM_REOPEN_FAILED", status: 503 };
+					} else {
+						gateResetCtx.gateResetCoordinator.intents.markRuntimeRearmed(intent);
+					}
+				} catch (err) {
+					console.error(`[api] Failed to rearm completed team ${goalId}:`, err);
 					lifecycleError = { message: "Goal reopened, but its team runtime could not be rearmed", code: "TEAM_REOPEN_FAILED", status: 503 };
-				} else {
-					gateResetCtx.gateResetCoordinator.intents.markRuntimeRearmed(intent);
 				}
-			} catch (err) {
-				console.error(`[api] Failed to rearm completed team ${goalId}:`, err);
-				lifecycleError = { message: "Goal reopened, but its team runtime could not be rearmed", code: "TEAM_REOPEN_FAILED", status: 503 };
 			}
 		}
 

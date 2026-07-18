@@ -371,6 +371,66 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 		}
 	});
 
+	test("reopens and finalizes a reset after the completed team's runtime was torn down", async ({ gateway }) => {
+		const wf = workflowId("gate-reset-torn-down-team");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "root ok", type: "command", run: "echo ok" }] },
+			{ id: "other", name: "Other", dependsOn: [], verify: [{ name: "other ok", type: "command", run: "echo ok" }] },
+		]);
+		const goal = await createGoal({ title: `Gate Reset Torn Down Team ${Date.now()}`, workflowId: wf, worktree: false, team: true, autoStartTeam: false });
+		const goalId = goal.id;
+		let teamLeadId: string | undefined;
+		let reopenSpy: any;
+		try {
+			await signalGate(goalId, "root");
+			await waitForGateStatus(goalId, "root", "passed");
+			await signalGate(goalId, "other");
+			await waitForGateStatus(goalId, "other", "passed");
+			teamLeadId = await startTeam(goalId);
+			await completeTeam(goalId);
+			expect((await getGoal(goalId)).state).toBe("complete");
+
+			await teardownTeam(goalId);
+			expect(gateway.teamManager.getTeamState(goalId)).toBeUndefined();
+			const sessionsAfterTeardown = gateway.sessionManager.listSessions()
+				.filter((session: any) => session.goalId === goalId || session.teamGoalId === goalId)
+				.map((session: any) => session.id);
+			expect(sessionsAfterTeardown).toEqual([]);
+
+			const context = gateway.projectContextManager.getContextForGoal(goalId);
+			reopenSpy = vi.spyOn(gateway.teamManager, "reopenCompletedTeam");
+			const first = await resetGate(goalId, "root");
+			expect(first.status, JSON.stringify(first.body)).toBe(200);
+			expect(first.body.reopen).toEqual({ reopened: true, previousState: "complete", state: "in-progress" });
+			expect(first.body.changedGateIds).toEqual(["root"]);
+			expect(first.body.teamLeadNotified).toBe(false);
+			expect((await getGoal(goalId)).state).toBe("in-progress");
+			expect((await getGate(goalId, "root")).status).toBe("pending");
+			expect((await getGate(goalId, "other")).status).toBe("passed");
+			expect(gateway.teamManager.getTeamState(goalId)).toBeUndefined();
+			expect(reopenSpy).not.toHaveBeenCalled();
+			expect(
+				gateway.sessionManager.listSessions()
+					.filter((session: any) => session.goalId === goalId || session.teamGoalId === goalId)
+					.map((session: any) => session.id),
+			).toEqual(sessionsAfterTeardown);
+			expect(context.gateResetCoordinator.intents.get(goalId)).toBeUndefined();
+
+			const later = await resetGate(goalId, "other");
+			expect(later.status, JSON.stringify(later.body)).toBe(200);
+			expect(later.body.reopen).toEqual({ reopened: false, previousState: "in-progress", state: "in-progress" });
+			expect(later.body.changedGateIds).toEqual(["other"]);
+			expect((await getGate(goalId, "other")).status).toBe("pending");
+			expect(context.gateResetCoordinator.intents.get(goalId)).toBeUndefined();
+		} finally {
+			reopenSpy?.mockRestore();
+			await teardownTeam(goalId).catch(() => {});
+			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
 	test("resets an already in-progress goal without a lifecycle transition", async () => {
 		const wf = workflowId("gate-reset-active");
 		await createWorkflow(wf, [
