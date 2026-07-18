@@ -1,3 +1,9 @@
+import {
+	mapWithConcurrency,
+	RECOVERY_IO_CONCURRENCY,
+	type RecoveryFs,
+} from "./bounded-async-work.js";
+
 /**
  * Pure helpers for team-store consistency sweeps.
  *
@@ -227,20 +233,25 @@ export function slugDirNameForCwd(cwd: string): string {
 	return "--" + cwd.replace(/^\/+/, "").replace(/\//g, "-") + "--";
 }
 
-// ── FS-touching scan, parameterised for testability ──────────────────────────
-//
-// We expose `scanSlugDirForJsonlsAt(sessionsDir, worktreeCwd, fs)` so unit
-// tests can pass a real `node:fs` plus a tmpdir, validating the actual scan
-// behaviour end-to-end without monkey-patching globals. The production wrapper
-// in `team-manager.ts` calls this with `~/.bobbit/agent/sessions/` and the
-// real fs module.
+// ── FS-touching scans, parameterised for testability ─────────────────────────
 
-export interface MinimalFs {
-	readdirSync: (path: string) => string[];
-	statSync: (path: string) => { size: number; mtimeMs?: number; mtime: Date; birthtimeMs?: number; isFile?: () => boolean };
-	openSync: (path: string, flags: string) => number;
-	readSync: (fd: number, buf: Uint8Array, offset: number, length: number, position: number) => number;
-	closeSync: (fd: number) => void;
+const JSONL_HEADER_BYTES = 2_048;
+
+async function readJsonlHeader(filePath: string, fs: RecoveryFs): Promise<string | null> {
+	let handle: Awaited<ReturnType<RecoveryFs["open"]>> | undefined;
+	try {
+		handle = await fs.open(filePath, "r");
+		const buffer = Buffer.alloc(JSONL_HEADER_BYTES);
+		const { bytesRead } = await handle.read(buffer, 0, JSONL_HEADER_BYTES, 0);
+		const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+		return buffer.toString("utf-8", 0, newline >= 0 ? newline : bytesRead);
+	} catch {
+		return null;
+	} finally {
+		if (handle) {
+			try { await handle.close(); } catch { /* best-effort recovery */ }
+		}
+	}
 }
 
 /**
@@ -315,14 +326,14 @@ export interface DiscoveredAgent {
  * inside. Empty if the team-lead worktree path is malformed or the agent
  * sessions root can't be read.
  */
-export function discoverAgentsForGoal(
+export async function discoverAgentsForGoal(
 	sessionsDir: string,
 	teamLeadWorktreePath: string,
-	fs: MinimalFs,
+	fs: RecoveryFs,
 	join: (...parts: string[]) => string,
 	dirname: (p: string) => string,
 	basename: (p: string) => string,
-): DiscoveredAgent[] {
+): Promise<DiscoveredAgent[]> {
 	const wtName = basename(teamLeadWorktreePath);
 	const wtParent = dirname(teamLeadWorktreePath);
 	// The agent slug-dir name prefix is `slugDirNameForCwd(wtParent + "/goal-" + wtName + "-")`
@@ -331,7 +342,7 @@ export function discoverAgentsForGoal(
 	const slugPrefix = "--" + innerPrefix;  // does NOT have closing `--` — the role/id + `--` comes after
 
 	let names: string[];
-	try { names = fs.readdirSync(sessionsDir); } catch { return []; }
+	try { names = await fs.readdir(sessionsDir); } catch { return []; }
 
 	const out: DiscoveredAgent[] = [];
 	for (const name of names) {
@@ -344,8 +355,9 @@ export function discoverAgentsForGoal(
 		const role = m[1];
 		const agentId = m[2];
 		const agentWorktreePath = `${wtParent}/goal-${wtName}-${role}-${agentId}`;
-		// Scan inside the slug-dir for .jsonls matching the agent cwd.
-		const candidates = scanSlugDirForJsonlsAt(sessionsDir, agentWorktreePath, fs, join);
+		// Keep agent directories sequential: each inner file scan already uses the
+		// shared cap, so concurrent directories would multiply the ceiling.
+		const candidates = await scanSlugDirForJsonlsAt(sessionsDir, agentWorktreePath, fs, join);
 		if (candidates.length === 0) continue;
 		out.push({ agentWorktreePath, role, agentId, candidates });
 	}
@@ -438,47 +450,42 @@ export function reconstructAgentSessionRecord(input: AgentRecoveryInput): Recons
  * @param sessionsDir Path to `~/.bobbit/agent/sessions` (the agent-sessions
  *   root). The function appends `slugDirNameForCwd(worktreeCwd)` itself.
  * @param worktreeCwd The team-lead's cwd (i.e. the goal's worktreePath).
- * @param fs Subset of `node:fs` — pass `import("node:fs")` directly, or a
- *   stub in tests.
+ * @param fs Injectable asynchronous recovery filesystem.
  */
-export function scanSlugDirForJsonlsAt(
+export async function scanSlugDirForJsonlsAt(
 	sessionsDir: string,
 	worktreeCwd: string,
-	fs: MinimalFs,
+	fs: RecoveryFs,
 	join: (...parts: string[]) => string,
-): CandidateJsonl[] {
+): Promise<CandidateJsonl[]> {
 	const dir = join(sessionsDir, slugDirNameForCwd(worktreeCwd));
 	let names: string[];
 	try {
-		names = fs.readdirSync(dir);
+		names = await fs.readdir(dir);
 	} catch {
 		return [];
 	}
-	const out: CandidateJsonl[] = [];
-	for (const name of names) {
-		if (!name.endsWith(".jsonl")) continue;
-		const full = join(dir, name);
-		let st;
-		try { st = fs.statSync(full); } catch { continue; }
-		let firstLine = "";
-		try {
-			const fd = fs.openSync(full, "r");
-			const buf = Buffer.alloc(2048);
-			const bytes = fs.readSync(fd, buf, 0, 2048, 0);
-			fs.closeSync(fd);
-			const nl = buf.indexOf(0x0a); // '\n'
-			firstLine = buf.toString("utf-8", 0, nl >= 0 && nl < bytes ? nl : bytes);
-		} catch { continue; }
-		let parsed: { type?: string; cwd?: string; id?: string; timestamp?: string } | undefined;
-		try { parsed = JSON.parse(firstLine); } catch { continue; }
-		if (!parsed || parsed.type !== "session" || parsed.cwd !== worktreeCwd || typeof parsed.id !== "string") continue;
-		out.push({
-			jsonlPath: full,
-			size: st.size,
-			mtime: st.mtime.getTime(),
-			agentSessionId: parsed.id,
-			agentStartedAtIso: typeof parsed.timestamp === "string" ? parsed.timestamp : st.mtime.toISOString(),
-		});
-	}
-	return out;
+	const jsonlNames = names.filter((name) => name.endsWith(".jsonl"));
+	const candidates = await mapWithConcurrency(
+		jsonlNames,
+		RECOVERY_IO_CONCURRENCY,
+		async (name): Promise<CandidateJsonl | undefined> => {
+			const full = join(dir, name);
+			let st;
+			try { st = await fs.stat(full); } catch { return undefined; }
+			const firstLine = await readJsonlHeader(full, fs);
+			if (firstLine === null) return undefined;
+			let parsed: { type?: string; cwd?: string; id?: string; timestamp?: string } | undefined;
+			try { parsed = JSON.parse(firstLine); } catch { return undefined; }
+			if (!parsed || parsed.type !== "session" || parsed.cwd !== worktreeCwd || typeof parsed.id !== "string") return undefined;
+			return {
+				jsonlPath: full,
+				size: st.size,
+				mtime: st.mtime.getTime(),
+				agentSessionId: parsed.id,
+				agentStartedAtIso: typeof parsed.timestamp === "string" ? parsed.timestamp : st.mtime.toISOString(),
+			};
+		},
+	);
+	return candidates.filter((candidate): candidate is CandidateJsonl => candidate !== undefined);
 }

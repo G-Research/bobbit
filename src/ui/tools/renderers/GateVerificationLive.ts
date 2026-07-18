@@ -758,21 +758,23 @@ export class GateVerificationLive extends LitElement {
 					${step.status === "timeout"
 						? html`<span data-timeout-icon title="Timed out" class="text-warning">⏱</span>`
 						: html`<span class="${statusColor(dStatus)}">${statusIcon(dStatus)}</span>`}
-					<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name || "step"}</span>
+					<div class="flex flex-1 min-w-0 items-center gap-2">
+						<span class="font-mono text-xs min-w-0 truncate">${step.name || "step"}</span>
+						${canStartReview ? html`
+							<signoff-review-launcher class="shrink-0" .target=${{
+								goalId: this.goalId,
+								gateId: this.gateId,
+								signalId: this.signalId,
+								stepName: step.name,
+								stepLabel: step.humanLabel || step.name,
+							}}></signoff-review-launcher>
+						` : nothing}
+					</div>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${stepStatusBadgeClass(step.status)}">${statusLabel}</span>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
 					${marker
 						? html`<span data-timeout-timing class="text-xs text-muted-foreground tabular-nums">${formatTimeoutTiming(marker)}</span>`
 						: shouldRenderDuration(step) ? renderDuration(entry) : nothing}
-					${canStartReview ? html`
-						<signoff-review-launcher .target=${{
-							goalId: this.goalId,
-							gateId: this.gateId,
-							signalId: this.signalId,
-							stepName: step.name,
-							stepLabel: step.humanLabel || step.name,
-						}}></signoff-review-launcher>
-					` : nothing}
 					${canChangeTimeout ? html`
 						<button
 							type="button"
