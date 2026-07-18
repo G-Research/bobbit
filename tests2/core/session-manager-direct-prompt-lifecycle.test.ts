@@ -652,6 +652,53 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		}
 	});
 
+	it("lets a newly accepted same-text dispatch supersede the prior keyless terminal binding", async () => {
+		const manager = makeManager();
+		const text = "same keyless live bytes";
+		const agentAuthor = { kind: "agent", id: "session:caller", label: "Caller" } as const;
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })), steer },
+		});
+
+		await manager.deliverLiveSteer(session.id, text);
+		const p1 = session.inFlightSteerTexts[0].promptId;
+		const first: any = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { role: "user", content: text },
+		});
+		manager.handleAgentLifecycle(session, first);
+		assert.deepEqual(first.message.author, { kind: "user", id: "user:local", label: "User" });
+		assert.equal(session.inFlightSteerTexts.length, 0);
+
+		await manager.deliverLiveSteer(session.id, text, { source: "agent", author: agentAuthor });
+		const p2 = session.inFlightSteerTexts[0].promptId;
+		assert.notEqual(p2, p1);
+		const second: any = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { role: "user", content: text },
+		});
+		manager.handleAgentLifecycle(session, second);
+
+		assert.deepEqual(second.message.author, agentAuthor, "the new occurrence must not inherit p1's author");
+		assert.equal(second.message.role, "user");
+		assert.equal(second.message.content, text, "author correlation must not change model-facing bytes");
+		assert.equal(session.pendingPromptAuthors.length, 0);
+		assert.equal(session.inFlightSteerTexts.length, 0, "p2's ledger is consumed by p2 exactly once");
+		const settled = readAuthorSidecar(session.id);
+		assert.equal(settled.find((row) => row.promptId === p1)?.settlement?.outcome, "echoed");
+		assert.equal(settled.find((row) => row.promptId === p2)?.settlement?.outcome, "echoed");
+
+		const duplicate: any = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { role: "user", content: text },
+		});
+		manager.handleAgentLifecycle(session, duplicate);
+		assert.deepEqual(duplicate.message.author, agentAuthor);
+		assert.deepEqual(readAuthorSidecar(session.id), settled, "duplicate p2 end must not append another settlement");
+	});
+
 	it("keeps an unresolved same-text steer ledger-backed when an old keyless echo replays", () => {
 		const manager = makeManager();
 		const userAuthor = { kind: "user", id: "user:local", label: "User" } as const;
@@ -693,31 +740,30 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.deepEqual(session.promptQueue.peek()?.author, systemAuthor);
 	});
 
-	it("does not let a duplicate keyless settled end consume the next same-text prompt", () => {
+	it("keeps an immediate duplicate keyless terminal frame idempotent without a newer dispatch", async () => {
 		const manager = makeManager();
-		const userAuthor = { kind: "user", id: "user:local", label: "User" } as const;
-		const agentAuthor = { kind: "agent", id: "session:caller", label: "Caller" } as const;
 		const text = "duplicate keyless text";
-		const { session } = putSession(manager);
-		restorePromptAuthorBindings(session, [
-			{
-				schemaVersion: 1, type: "prompt-author", promptId: "p1", dispatchedAt: 1,
-				modelText: text, source: "user", author: userAuthor,
-				settlement: { schemaVersion: 1, type: "prompt-author-settlement", promptId: "p1", settledAt: 2, outcome: "echoed" },
-			},
-			{
-				schemaVersion: 1, type: "prompt-author", promptId: "p2", dispatchedAt: 3,
-				modelText: text, source: "agent", author: agentAuthor,
-			},
-		]);
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })), steer },
+		});
+		await manager.deliverLiveSteer(session.id, text);
+		const promptId = session.inFlightSteerTexts[0].promptId;
 		const raw = { type: "message_end", message: { role: "user", content: text } };
 
 		const first: any = manager.prepareVisibleAgentEvent(session, raw);
+		manager.handleAgentLifecycle(session, first);
+		const settled = readAuthorSidecar(session.id);
 		const duplicate: any = manager.prepareVisibleAgentEvent(session, raw);
+		manager.handleAgentLifecycle(session, duplicate);
 
-		assert.deepEqual(first.message.author, userAuthor);
-		assert.deepEqual(duplicate.message.author, userAuthor);
-		assert.deepEqual(session.pendingPromptAuthors.map((row: any) => row.promptId), ["p2"]);
+		assert.deepEqual(first.message.author, { kind: "user", id: "user:local", label: "User" });
+		assert.deepEqual(duplicate.message.author, first.message.author);
+		assert.equal(session.pendingPromptAuthors.length, 0);
+		assert.equal(session.inFlightSteerTexts.length, 0);
+		assert.equal(settled.find((row) => row.promptId === promptId)?.settlement?.outcome, "echoed");
+		assert.deepEqual(readAuthorSidecar(session.id), settled, "duplicate end must remain settlement-idempotent");
 	});
 
 	it("restores unresolved sidecar dispatches and consumes a replayed steer exactly once", () => {

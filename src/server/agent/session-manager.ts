@@ -4289,6 +4289,12 @@ export class SessionManager {
 		};
 		if (!session.pendingPromptAuthors) session.pendingPromptAuthors = [];
 		session.pendingPromptAuthors.push(pending);
+		// A keyless terminal binding is idempotent only within the dispatch
+		// occurrence that produced it. Once Bobbit accepts another dispatch, its
+		// same-text keyless echo must be allowed to bind the new pending record.
+		// Restore-only replay bindings remain intact and continue to protect an
+		// unresolved steer from historical transcript frames.
+		session.lastKeylessPromptAuthorEnd = undefined;
 		void appendPromptAuthorDispatch(session.id, {
 			schemaVersion: 1,
 			type: "prompt-author",
