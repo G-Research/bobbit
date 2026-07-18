@@ -72,6 +72,12 @@ function makeSessionManager(goals: Map<string, MockGoal>) {
 			return session;
 		}),
 		getSession: (id: string) => sessions.get(id),
+		enqueuePrompt: vi.fn(async (id: string, text: string, opts?: any) => {
+			const session = sessions.get(id);
+			if (session) session.lastPromptSource = opts?.source ?? "user";
+			await session?.rpcClient.prompt(text);
+			return { status: "dispatched" as const };
+		}),
 		getPersistedSession: (_id: string) => undefined,
 		setTitle: (id: string, title: string) => {
 			const session = sessions.get(id);
@@ -173,7 +179,7 @@ describe("TeamManager seam decisions", () => {
 	it("spawns a role without a host worktree and preserves role policy in session metadata", async () => {
 		const { goals } = addGoal();
 		const { manager, sessions } = makeTeam(goals);
-		await manager.startTeam("goal-1");
+		const lead = await manager.startTeam("goal-1");
 
 		const result = await manager.spawnRole("goal-1", "coder", "Implement the decision path");
 		const session = sessions.getSession(result.sessionId)!;
@@ -190,6 +196,25 @@ describe("TeamManager seam decisions", () => {
 		assert.equal(agent.task, "Implement the decision path");
 		assert.equal(agent.baseSha, "0123456789abcdef0123456789abcdef01234567");
 		assert.equal(sessions._sandboxExec.mock.calls.length, 1, "base SHA should use the injected sandbox seam");
+		assert.deepEqual(
+			sessions.enqueuePrompt.mock.calls,
+			[
+				[
+					lead.id,
+					"# Goal Spec\n\nExercise orchestration decisions\n\n---\n\nExecute the task described in your system prompt. Follow the instructions carefully.",
+					{ source: "system", suppressTitleGen: true },
+				],
+				[
+					result.sessionId,
+					"Implement the decision path",
+					{
+						source: "agent",
+						author: { kind: "agent", id: `session:${lead.id}`, label: lead.title },
+					},
+				],
+			],
+			"kickoff and worker task prompts must retain their system and accountable-agent provenance",
+		);
 	});
 
 	it("rejects unknown and team-lead roles before creating a worker session", async () => {
