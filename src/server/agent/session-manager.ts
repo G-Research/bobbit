@@ -604,6 +604,10 @@ interface LivePromptAuthorMessageBinding {
 	settled: boolean;
 }
 
+interface ReplayPromptAuthorBinding extends LivePromptAuthorMessageBinding {
+	modelText: string;
+}
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -748,6 +752,12 @@ export interface SessionInfo {
 	/** Stable Pi-message-id bindings. Retained after settlement so duplicate
 	 * update/end replay cannot consume a later identical-text prompt record. */
 	promptAuthorMessageBindings?: Map<string, LivePromptAuthorMessageBinding>;
+	/** Restore-only FIFO of non-cancelled prompt occurrences. Settled keyless
+	 * rows remain guards for the whole Pi transcript replay because a legacy
+	 * frame has no occurrence identity with which to distinguish duplicates. */
+	promptAuthorReplayBindings?: ReplayPromptAuthorBinding[];
+	/** Last keyless terminal occurrence within one live lifecycle boundary. */
+	lastKeylessPromptAuthorEnd?: ReplayPromptAuthorBinding;
 	/** Pending grant request from the guard extension's long-poll */
 	pendingGrantRequest?: {
 		resolve: (result: ToolGrantResolution) => void;
@@ -886,16 +896,25 @@ function extractUserMessageText(message: any): string {
 const PROMPT_AUTHOR_MESSAGE_ID_FIELDS = ["id", "entryId", "_entryId", "_bobbitEntryId"] as const;
 
 /** Extract the stable Pi/session entry id used by both live and sidecar correlation. */
-function promptAuthorMessageId(message: Record<string, unknown>): string | undefined {
-	for (const field of PROMPT_AUTHOR_MESSAGE_ID_FIELDS) {
-		const value = message[field];
-		if (typeof value === "string" && value) return value;
+function promptAuthorMessageId(
+	message: Record<string, unknown>,
+	event?: Record<string, unknown>,
+): string | undefined {
+	for (const owner of [message, event]) {
+		if (!owner) continue;
+		for (const field of PROMPT_AUTHOR_MESSAGE_ID_FIELDS) {
+			const value = owner[field];
+			if (typeof value === "string" && value) return value;
+		}
 	}
 	return undefined;
 }
 
-function promptAuthorMessageKey(message: Record<string, unknown>): string | undefined {
-	const messageId = promptAuthorMessageId(message);
+function promptAuthorMessageKey(
+	message: Record<string, unknown>,
+	event?: Record<string, unknown>,
+): string | undefined {
+	const messageId = promptAuthorMessageId(message, event);
 	if (messageId) return `id:${messageId}`;
 	const timestamp = message.timestamp ?? message.ts;
 	if ((typeof timestamp === "string" && timestamp) || (typeof timestamp === "number" && Number.isFinite(timestamp))) {
@@ -920,14 +939,29 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		}));
 	const messageBindings = new Map<string, LivePromptAuthorMessageBinding>();
 	for (const entry of entries) {
-		if (entry.settlement?.outcome !== "echoed" || !entry.settlement.messageId) continue;
-		messageBindings.set(`id:${entry.settlement.messageId}`, {
+		if (entry.settlement?.outcome !== "echoed") continue;
+		const binding = {
 			promptId: entry.promptId,
 			author: entry.author,
 			settled: true,
-		});
+		};
+		if (entry.settlement.messageId) {
+			messageBindings.set(`id:${entry.settlement.messageId}`, binding);
+		}
+		if (entry.settlement.messageTimestamp !== undefined) {
+			messageBindings.set(`timestamp:${String(entry.settlement.messageTimestamp)}`, binding);
+		}
 	}
 	session.promptAuthorMessageBindings = messageBindings;
+	session.promptAuthorReplayBindings = entries
+		.filter((entry) => entry.settlement?.outcome !== "cancelled")
+		.map((entry) => ({
+			promptId: entry.promptId,
+			modelText: entry.modelText,
+			author: entry.author,
+			settled: entry.settlement?.outcome === "echoed",
+		}));
+	session.lastKeylessPromptAuthorEnd = undefined;
 
 	// Settlement may have reached the durable sidecar just before a gateway
 	// crash, while the in-flight steer ledger update did not. The echoed
@@ -971,6 +1005,9 @@ export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): 
 	if (!event || typeof event !== "object") return event;
 	const raw = event as any;
 	if ((raw.type !== "message_update" && raw.type !== "message_end") || !raw.message || typeof raw.message !== "object") {
+		if (raw.type === "agent_start" || raw.type === "agent_end") {
+			session.lastKeylessPromptAuthorEnd = undefined;
+		}
 		return event;
 	}
 
@@ -978,8 +1015,24 @@ export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): 
 	let author: MessageAuthor;
 	const userRole = message.role === "user" || message.role === "user-with-attachments";
 	const modelText = userRole ? extractUserMessageText(message) : "";
-	const messageKey = userRole ? promptAuthorMessageKey(message) : undefined;
+	const messageKey = userRole ? promptAuthorMessageKey(message, raw) : undefined;
+	if (!userRole || messageKey || raw.type === "message_update" || session.lastKeylessPromptAuthorEnd?.modelText !== modelText) {
+		session.lastKeylessPromptAuthorEnd = undefined;
+	}
 	let stableBinding = messageKey ? session.promptAuthorMessageBindings?.get(messageKey) : undefined;
+	if (!stableBinding && userRole && !messageKey && raw.type === "message_end") {
+		stableBinding = session.lastKeylessPromptAuthorEnd;
+	}
+	if (!stableBinding && userRole && !messageKey && modelText) {
+		// During switch_session replay, settled legacy rows without an id or
+		// timestamp must win over unresolved identical-text rows. Keep settled
+		// rows as guards until replay completes: duplicate keyless frames are
+		// otherwise information-theoretically indistinguishable from the newer
+		// occurrence and could erase its durable steer ledger.
+		stableBinding = session.promptAuthorReplayBindings?.find((binding) =>
+			binding.modelText === modelText,
+		);
+	}
 	let pendingIndex = stableBinding && !stableBinding.settled
 		? (session.pendingPromptAuthors?.findIndex((record) => record.promptId === stableBinding!.promptId) ?? -1)
 		: -1;
@@ -1018,11 +1071,19 @@ export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): 
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
+	if (raw.type === "message_end" && messageKey && stableBinding) {
+		session.promptAuthorReplayBindings = session.promptAuthorReplayBindings?.filter(
+			(binding) => binding.promptId !== stableBinding!.promptId,
+		);
+	}
 	if (raw.type === "message_end" && stableBinding?.settled) {
 		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
 			promptId: stableBinding.promptId,
 			alreadySettled: true,
 		} satisfies PromptAuthorEventBinding;
+		if (!messageKey) {
+			session.lastKeylessPromptAuthorEnd = { ...stableBinding, modelText };
+		}
 	} else if (raw.type === "message_end" && pendingIndex !== -1) {
 		const [pending] = session.pendingPromptAuthors!.splice(pendingIndex, 1);
 		if (stableBinding) stableBinding.settled = true;
@@ -1030,7 +1091,15 @@ export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): 
 			promptId: pending.promptId,
 			alreadySettled: false,
 		} satisfies PromptAuthorEventBinding;
-		const messageId = promptAuthorMessageId(message);
+		if (!messageKey) {
+			session.lastKeylessPromptAuthorEnd = {
+				promptId: pending.promptId,
+				modelText: pending.modelText,
+				author: pending.author,
+				settled: true,
+			};
+		}
+		const messageId = promptAuthorMessageId(message, raw);
 		void appendPromptAuthorSettlement(session.id, {
 			schemaVersion: 1,
 			type: "prompt-author-settlement",
@@ -7264,6 +7333,10 @@ export class SessionManager {
 		// agent_end must never dequeue durable intent against a provisional bridge.
 		this.sessions.set(ps.id, session);
 		if (settledSteersPruned > 0) this.persistInFlightSteerLedger(session);
+		// Replay-only keyless guards must not shadow a genuine future prompt once
+		// switch_session has finished emitting the historical transcript.
+		session.promptAuthorReplayBindings = undefined;
+		session.lastKeylessPromptAuthorEnd = undefined;
 		restoring = false;
 		broadcastStatus(session, "idle");
 
