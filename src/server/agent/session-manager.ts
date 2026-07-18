@@ -39,8 +39,7 @@ import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
 import { readToken } from "../auth/token.js";
-import { shouldKeepDespiteOrphan } from "./orphan-cleanup.js";
-import * as orphanCleanup from "./orphan-cleanup.js";
+import { shouldKeepDespiteOrphan, scanOrphanedTranscriptsAsync } from "./orphan-cleanup.js";
 import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -2459,14 +2458,8 @@ export class SessionManager {
 			return tasks.length > 0 ? tasks[0].id : undefined;
 		}
 
-		// `getTaskGeneration()` is supplied by ProjectContextManager's
-		// topology-aware generation integration. Until that API is present, stay
-		// conservative and use the uncached scan rather than risk stale task ids.
-		const generationSource = this.projectContextManager as ProjectContextManager & {
-			getTaskGeneration?: () => number;
-		};
-		const generation = generationSource.getTaskGeneration?.();
-		const cached = generation === undefined ? undefined : this._taskIdCache.get(sessionId);
+		const generation = this.projectContextManager.getTaskGeneration();
+		const cached = this._taskIdCache.get(sessionId);
 		if (cached && cached.gen === generation) return cached.taskId;
 
 		const live = this.sessions.get(sessionId);
@@ -2496,7 +2489,7 @@ export class SessionManager {
 			}
 		}
 
-		if (generation !== undefined) this._taskIdCache.set(sessionId, { gen: generation, taskId });
+		this._taskIdCache.set(sessionId, { gen: generation, taskId });
 		return taskId;
 	}
 
@@ -6182,7 +6175,7 @@ export class SessionManager {
 			// If the store is empty (fresh install), use a 24h floor so we don't
 			// flag every transcript from a previous install.
 			const floor = mostRecent > 0 ? mostRecent : (this.clock.now() - 24 * 60 * 60 * 1000);
-			const result = await this.scanOrphanedTranscriptsAsync(agentSessionsRoot, tracked, floor);
+			const result = await scanOrphanedTranscriptsAsync(agentSessionsRoot, tracked, floor);
 			this.orphanedTranscriptsCount = result.count;
 			if (result.count > 0) {
 				console.warn(`[session-store] WARN: ${result.count} agent transcript(s) on disk are not tracked in sessions.json`);
@@ -6228,27 +6221,6 @@ export class SessionManager {
 		await new Promise<void>((resolve) => globalThis.setTimeout(resolve, Math.max(0, Math.min(25, delayMs))));
 	}
 
-	/** Compatibility shim while the async walker lands independently. The merged
-	 * implementation always selects `scanOrphanedTranscriptsAsync`; the sync
-	 * fallback keeps intermediate feature branches runnable without weakening
-	 * the final API contract. */
-	private async scanOrphanedTranscriptsAsync(
-		agentSessionsRoot: string,
-		tracked: Set<string>,
-		floor: number,
-	): Promise<{ count: number; paths: string[] }> {
-		const module = orphanCleanup as typeof orphanCleanup & {
-			scanOrphanedTranscriptsAsync?: (
-				root: string,
-				trackedFiles: Set<string>,
-				mostRecentLastActivity: number,
-			) => Promise<{ count: number; paths: string[] }>;
-		};
-		if (module.scanOrphanedTranscriptsAsync) {
-			return module.scanOrphanedTranscriptsAsync(agentSessionsRoot, tracked, floor);
-		}
-		return module.scanOrphanedTranscripts(agentSessionsRoot, tracked, floor);
-	}
 
 	// NOTE: cleanupOrphanedNonInteractiveSessions() was removed — replaced by
 	// listOrphanedNonInteractiveSessions() + terminateOrphanedSessions() which
@@ -7680,7 +7652,8 @@ export class SessionManager {
 		const msgsResp = await this.getMessagesSnapshotBase(session);
 		if (!msgsResp.success) return this.getPersistedSessionOutput(sessionId);
 
-		const messages = msgsResp.data?.messages || msgsResp.data;
+		const snapshot: any = msgsResp.data;
+		const messages = snapshot?.messages || snapshot;
 		if (!Array.isArray(messages)) return "";
 
 		return this.extractAssistantText(messages);
@@ -11281,13 +11254,13 @@ export class SessionManager {
 		if (this.projectContextManager) {
 			for (const ctx of this.projectContextManager.all()) {
 				try {
-					(ctx.costTracker as CostTracker & { flush?: () => void }).flush?.();
+					ctx.costTracker.flush();
 				} catch (err) {
 					console.error(`[session-manager] Failed to flush cost tracker for project ${ctx.project.id}:`, err);
 				}
 			}
 		} else {
-			try { (this._testCostTracker as (CostTracker & { flush?: () => void }) | null)?.flush?.(); }
+			try { this._testCostTracker?.flush(); }
 			catch (err) { console.error("[session-manager] Failed to flush test cost tracker:", err); }
 		}
 
