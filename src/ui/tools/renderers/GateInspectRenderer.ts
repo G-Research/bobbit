@@ -12,6 +12,7 @@ import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResul
 import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 import { getResult, gateBadge } from "./GateToolRenderers.js";
 import { ansiToHtml, hasAnsi } from "../../utils/ansi.js";
+import "../../components/SignoffReviewLauncher.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -292,6 +293,19 @@ export class GateInspectRenderer implements ToolRenderer {
 						const marker = status === "timeout" ? timeoutInfo(step.timeout) : undefined;
 						const statusLabel = status === "timeout" ? "Timed out" : (STATUS_LABELS[status] || status);
 						const canChangeTimeout = !!marker && !!goalId && typeof step.name === "string" && !!step.name;
+						const canStartReview = step.type === "human-signoff"
+							&& step.awaitingHuman === true
+							&& !!goalId
+							&& !!signalId
+							&& typeof step.name === "string"
+							&& !!step.name;
+						const reviewTarget = canStartReview ? {
+							goalId,
+							gateId,
+							signalId,
+							stepName: step.name,
+							...(typeof step.humanLabel === "string" && step.humanLabel ? { stepLabel: step.humanLabel } : {}),
+						} : undefined;
 						const typeBadgeCls = step.type === "command"
 							? "bg-muted text-muted-foreground"
 							: "bg-purple-500/20 text-purple-600 dark:text-purple-400";
@@ -309,6 +323,9 @@ export class GateInspectRenderer implements ToolRenderer {
 									${marker
 										? html`<span data-timeout-timing class="text-xs text-muted-foreground tabular-nums">${formatTimeoutTiming(marker)}</span>`
 										: shouldShowDuration(status, step.duration_ms) ? html`<span class="text-xs text-muted-foreground tabular-nums">${formatDuration(step.duration_ms)}</span>` : nothing}
+									${reviewTarget ? html`
+										<signoff-review-launcher .target=${reviewTarget}></signoff-review-launcher>
+									` : nothing}
 									${canChangeTimeout ? html`
 										<button
 											type="button"

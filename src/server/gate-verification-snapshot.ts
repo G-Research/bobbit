@@ -39,6 +39,12 @@ export interface GateVerificationSnapshotStep {
 	output?: string;
 	selection?: TextSelectionMetadata;
 	phase?: number;
+	/** Authoritative marker for an active human-signoff step awaiting input. */
+	awaitingHuman?: true;
+	/** Human-readable sign-off label, exposed only with `awaitingHuman`. */
+	humanLabel?: string;
+	/** Already-substituted sign-off prompt, exposed only with `awaitingHuman`. */
+	humanPrompt?: string;
 	sessionId?: string;
 	session?: { id: string; href: string };
 	liveLogs?: { stdout: boolean; stderr: boolean };
@@ -474,6 +480,19 @@ export function buildGateVerificationSnapshot(input: {
 		if (status === "skipped" || status === "blocked" || persisted.skipped) out.skipped = true;
 		const phase = activeStep?.phase ?? persisted.phase;
 		if (phase !== undefined) out.phase = phase;
+		// Sign-off actionability is an active-state overlay, never something inferred
+		// from persisted status/output. Require the exact live, parked human step so
+		// queued, terminal, stale, mismatched, and historical snapshots cannot leak it.
+		const isAwaitingHumanSignoff = active?.overallStatus === "running"
+			&& persisted.type === "human-signoff"
+			&& activeStep?.type === "human-signoff"
+			&& activeStep.status === "running"
+			&& activeStep.awaitingHuman === true;
+		if (isAwaitingHumanSignoff) {
+			out.awaitingHuman = true;
+			if (typeof activeStep.humanLabel === "string") out.humanLabel = activeStep.humanLabel;
+			if (typeof activeStep.humanPrompt === "string") out.humanPrompt = activeStep.humanPrompt;
+		}
 		if (sessionId) {
 			out.sessionId = sessionId;
 			out.session = { id: sessionId, href: `/sessions/${encodeURIComponent(sessionId)}` };
