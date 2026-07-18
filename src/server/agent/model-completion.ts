@@ -1,9 +1,10 @@
 import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai/compat";
-import { execSync } from "node:child_process";
+import { execFile as execFileCallback } from "node:child_process";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { promisify } from "node:util";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
@@ -58,41 +59,86 @@ function readModelsJsonProvider(provider: string): any | undefined {
 	}
 }
 
-function resolveConfigValue(value: unknown): string | undefined {
+export interface ModelConfigCommandRunner {
+	execFile(
+		file: string,
+		args: readonly string[],
+		options: { encoding: "utf-8"; timeout: number; windowsHide: boolean },
+	): Promise<{ stdout: unknown; stderr: unknown }>;
+}
+
+const execFileAsync = promisify(execFileCallback);
+
+export const realModelConfigCommandRunner: ModelConfigCommandRunner = {
+	async execFile(file, args, options) {
+		return execFileAsync(file, [...args], options);
+	},
+};
+
+function platformShellCommand(command: string, env: NodeJS.ProcessEnv): { file: string; args: string[] } {
+	if (process.platform === "win32") {
+		return { file: env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", command] };
+	}
+	return { file: "/bin/sh", args: ["-c", command] };
+}
+
+export async function resolveConfigValue(
+	value: unknown,
+	commandRunner: ModelConfigCommandRunner = realModelConfigCommandRunner,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<string | undefined> {
 	if (typeof value !== "string" || !value.trim()) return undefined;
 	const trimmed = value.trim();
 	if (trimmed === "none") return trimmed;
 	if (trimmed.startsWith("!")) {
 		try {
-			return execSync(trimmed.slice(1), { encoding: "utf-8", timeout: 15_000, windowsHide: true }).trim() || undefined;
+			const command = platformShellCommand(trimmed.slice(1), env);
+			const { stdout } = await commandRunner.execFile(command.file, command.args, {
+				encoding: "utf-8",
+				timeout: 15_000,
+				windowsHide: true,
+			});
+			const output = typeof stdout === "string"
+				? stdout
+				: Buffer.isBuffer(stdout) ? stdout.toString("utf-8") : undefined;
+			return output?.trim() || undefined;
 		} catch {
 			return undefined;
 		}
 	}
-	const envValue = process.env[trimmed];
+	const envValue = env[trimmed];
 	if (envValue) return envValue;
 	return trimmed;
 }
 
-function resolveProviderHeaders(provider: string): Record<string, string> | undefined {
+async function resolveProviderHeaders(
+	provider: string,
+	commandRunner: ModelConfigCommandRunner,
+	env: NodeJS.ProcessEnv,
+): Promise<Record<string, string> | undefined> {
 	if (provider !== "aigw") return undefined;
 	const rawHeaders = readModelsJsonProvider(provider)?.headers;
 	if (!rawHeaders || typeof rawHeaders !== "object") return undefined;
 	const headers: Record<string, string> = {};
 	for (const [key, value] of Object.entries(rawHeaders)) {
 		if (typeof key !== "string" || !key.trim()) continue;
-		const resolved = resolveConfigValue(value);
+		const resolved = await resolveConfigValue(value, commandRunner, env);
 		if (resolved) headers[key] = resolved;
 	}
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
-async function resolveProviderApiKey(prefs: PreferencesStore | undefined, provider: string): Promise<string | undefined> {
+async function resolveProviderApiKey(
+	prefs: PreferencesStore | undefined,
+	provider: string,
+	commandRunner: ModelConfigCommandRunner,
+	env: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
 	const stored = prefs?.get(`providerKey.${provider}`);
 	if (typeof stored === "string" && stored.trim()) return stored.trim();
 
 	for (const key of PROVIDER_ENV_KEYS[provider] || []) {
-		if (process.env[key]) return process.env[key];
+		if (env[key]) return env[key];
 	}
 
 	const auth = authCredentialForProvider(provider);
@@ -107,7 +153,7 @@ async function resolveProviderApiKey(prefs: PreferencesStore | undefined, provid
 	const custom = configs.find(c => (c.name || c.id) === provider || c.id === provider);
 	if (custom) return custom.apiKey?.trim() || "none";
 
-	return resolveConfigValue(readModelsJsonProvider(provider)?.apiKey);
+	return resolveConfigValue(readModelsJsonProvider(provider)?.apiKey, commandRunner, env);
 }
 
 export function toPiModel(model: ApiModel): Model<Api> {
@@ -138,6 +184,11 @@ function assistantText(message: any): string {
 
 type CompleteSimpleFn = typeof completeSimple;
 
+export interface ModelCompletionDependencies {
+	commandRunner?: ModelConfigCommandRunner;
+	env?: NodeJS.ProcessEnv;
+}
+
 export async function completeModelText(
 	model: ApiModel,
 	prefs: PreferencesStore | undefined,
@@ -149,6 +200,7 @@ export async function completeModelText(
 		timeoutMs?: number;
 	},
 	completeFn: CompleteSimpleFn = completeSimple,
+	dependencies: ModelCompletionDependencies = {},
 ): Promise<string> {
 	// Google account (Code Assist / OAuth) models speak a different wire protocol
 	// than pi-ai's API-key `google` provider, so route them through the Bearer
@@ -167,8 +219,10 @@ export async function completeModelText(
 		});
 	}
 
-	const apiKey = await resolveProviderApiKey(prefs, model.provider);
-	const providerHeaders = resolveProviderHeaders(model.provider);
+	const commandRunner = dependencies.commandRunner ?? realModelConfigCommandRunner;
+	const env = dependencies.env ?? process.env;
+	const apiKey = await resolveProviderApiKey(prefs, model.provider, commandRunner, env);
+	const providerHeaders = await resolveProviderHeaders(model.provider, commandRunner, env);
 	const options: Record<string, any> = {
 		maxTokens: args.maxTokens ?? 500,
 		timeoutMs: args.timeoutMs ?? 30_000,
