@@ -120,6 +120,15 @@
       }
     },
     {
+      "path": "tests2/core/model-completion-command.test.ts",
+      "reason": "Native v2 unit coverage for injectable asynchronous model-completion commands, exact invocation options, parsing, failure mapping, timeout handling, and non-blocking deferred execution.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/model-state-frame-preservation.test.ts",
       "reason": "Pinning tests for buildResolvedModelStateModel (ws/handler.ts): custom/unknown provider (resolver source=inferred) preserves live contextWindow/maxTokens/reasoning/thinkingLevelMap, while known Fable model still gets authoritative catalog metadata incl. thinkingLevelMap.max over stale live base.",
       "execution": {
@@ -804,8 +813,26 @@
       }
     },
     {
+      "path": "tests2/core/team-manager-async-recovery.test.ts",
+      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries using deterministic in-memory asynchronous I/O.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/team-manager-decisions.test.ts",
       "reason": "Tier-1 seam-based TeamManager spawn validation, role/authz, unpublished-branch, dismiss, completion, and persistence decision coverage retained alongside the real-fidelity E2E owner.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/team-store-consistency-async-io.test.ts",
+      "reason": "Native v2 unit coverage for bounded asynchronous team consistency scans, per-item isolation, deterministic ordering, and exact recovered session parity.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
