@@ -136,6 +136,8 @@ Key responsibilities:
 
 All API endpoints and WebSocket handlers resolve the correct per-project store through `ProjectContextManager` rather than accessing stores directly. Managers (`GoalManager`, `TaskManager`) accept store instances directly - they no longer create stores internally. `StaffManager` accepts `ProjectContextManager` and resolves the correct per-project `StaffStore` on each operation, matching the aggregation pattern used by goals and sessions.
 
+Session snapshots, archived-session traversal, persistence hot paths, eager restoration, and task-generation caching share a behavior-preserving performance contract. See [Session-loading performance](session-loading-performance.md) for the cache boundaries, ordering and durability invariants, test ownership, benchmarks, and first-open transcript limitation.
+
 #### Store resolution pattern
 
 Store resolution **never falls back to a default project**. Every operation resolves its store through one of these paths:
