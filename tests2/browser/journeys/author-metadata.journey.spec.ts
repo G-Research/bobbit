@@ -6,7 +6,6 @@ import {
 	openApp,
 	sendMessage,
 	test,
-	waitForAgentResponse,
 	waitForSessionStatus,
 } from "../_helpers/journey-fixture.js";
 
@@ -15,10 +14,14 @@ interface CapturedAuthors {
 	assistant: { kind: string; id: string; label: string };
 }
 
-async function captureAuthors(page: import("@playwright/test").Page, prompt: string): Promise<CapturedAuthors> {
-	return page.evaluate((promptText) => {
+async function waitForAuthoredExchange(
+	page: import("@playwright/test").Page,
+	prompt: string,
+): Promise<CapturedAuthors> {
+	const handle = await page.waitForFunction((promptText) => {
 		const appState = (window as any).bobbitState ?? (window as any).__bobbitState;
-		const messages = appState?.remoteAgent?.state?.messages ?? [];
+		const remoteState = appState?.remoteAgent?.state;
+		const messages = remoteState?.messages ?? [];
 		const textOf = (message: any): string => {
 			if (typeof message?.content === "string") return message.content;
 			if (!Array.isArray(message?.content)) return "";
@@ -27,37 +30,31 @@ async function captureAuthors(page: import("@playwright/test").Page, prompt: str
 				.map((block: any) => block.text ?? "")
 				.join("\n");
 		};
-		const user = messages.find((message: any) =>
+		const userIndex = messages.findIndex((message: any) =>
 			(message.role === "user" || message.role === "user-with-attachments")
 			&& textOf(message) === promptText,
 		);
-		const assistant = [...messages].reverse().find((message: any) => message.role === "assistant");
-		if (!user?.author || !assistant?.author) {
-			throw new Error("authored user and assistant messages are not available");
-		}
+		if (userIndex < 0) return null;
+		const user = messages[userIndex];
+		const assistant = messages.slice(userIndex + 1).find((message: any) => message.role === "assistant");
+		if (remoteState.status !== "idle" || !user?.author || !assistant?.author) return null;
 		return { user: user.author, assistant: assistant.author };
 	}, prompt);
+	return handle.jsonValue() as Promise<CapturedAuthors>;
 }
 
 test.describe("Journey: Author metadata", () => {
 	test("normal prompt authors survive reload without adding visible labels", async ({ page }) => {
 		const sessionId = await createSession();
-		const prompt = `author-metadata-${Date.now()}`;
+		const prompt = "AUTHOR_METADATA_RELOAD_SMOKE";
 		await waitForSessionStatus(sessionId, "idle");
 
 		try {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			await sendMessage(page, prompt);
-			await waitForAgentResponse(page, { timeout: 20_000 });
-			await waitForSessionStatus(sessionId, "idle");
 
-			await expect.poll(
-				() => captureAuthors(page, prompt).catch(() => null),
-				{ timeout: 15_000 },
-			).not.toBeNull();
-			const liveAuthors = await captureAuthors(page, prompt);
+			const liveAuthors = await waitForAuthoredExchange(page, prompt);
 			expect(liveAuthors.user.kind).toBe("user");
 			expect(liveAuthors.user.id).toBe("user:local");
 			expect(liveAuthors.assistant.kind).toBe("agent");
@@ -71,12 +68,7 @@ test.describe("Journey: Author metadata", () => {
 			expect(await assistantBubble.innerText()).not.toMatch(/(^|\n)(Agent|Bobbit)($|\n)/);
 
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
-			await expect.poll(
-				() => captureAuthors(page, prompt).catch(() => null),
-				{ timeout: 20_000 },
-			).not.toBeNull();
-			const reloadedAuthors = await captureAuthors(page, prompt);
+			const reloadedAuthors = await waitForAuthoredExchange(page, prompt);
 			expect(reloadedAuthors).toEqual(liveAuthors);
 
 			await expect(page.locator("user-message").filter({ hasText: prompt }).last()).toBeVisible();
