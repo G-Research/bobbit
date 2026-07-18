@@ -1,6 +1,5 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
 	appendPromptAuthorDispatch,
@@ -13,12 +12,26 @@ import {
 	type PromptAuthorDispatchInput,
 } from "../../src/server/agent/author-sidecar.ts";
 import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
+import { createMemFs } from "../harness/mem-fs.ts";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-author-sidecar-"));
-const stateDir = path.join(root, "state");
-initAuthorSidecarDir(stateDir);
+const memoryFs = createMemFs();
+const stateDir = path.resolve("/memfs/author-sidecar/state");
+const fsSpies: Array<{ mockRestore(): void }> = [];
 
-afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+beforeAll(() => {
+	for (const method of [
+		"existsSync", "mkdirSync", "appendFileSync", "readFileSync", "copyFileSync", "unlinkSync",
+	] as const) {
+		fsSpies.push((vi.spyOn as any)(fs, method).mockImplementation(
+			(...args: unknown[]) => (memoryFs as any)[method](...args),
+		));
+	}
+	initAuthorSidecarDir(stateDir);
+});
+
+afterAll(() => {
+	for (const spy of fsSpies.reverse()) spy.mockRestore();
+});
 
 const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
 const agentAuthor: MessageAuthor = { kind: "agent", id: "session:caller", label: "Caller" };
@@ -74,7 +87,7 @@ describe("author sidecar persistence", () => {
 		const sessionId = "corrupt";
 		appendPromptAuthorDispatch(sessionId, dispatch("valid", "kept"));
 		const file = path.join(stateDir, "author-sidecar", `${sessionId}.jsonl`);
-		fs.appendFileSync(file, [
+		memoryFs.appendFileSync(file, [
 			"not json",
 			JSON.stringify({ schemaVersion: 2, type: "prompt-author", promptId: "future" }),
 			JSON.stringify({ schemaVersion: 1, type: "prompt-author", ...dispatch("bad", "bad"), author: { kind: "tool", id: "x", label: "x" } }),

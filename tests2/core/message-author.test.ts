@@ -1,6 +1,4 @@
 import { describe, expect, it } from "vitest";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
 	LOCAL_USER_AUTHOR,
@@ -25,6 +23,37 @@ import {
 	normalizeVisibleMessages,
 	resolvePromptAuthor,
 } from "../../src/server/agent/message-author.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.ts";
+
+type SessionStoreMemFs = MemFs & {
+	openSync(file: string, flags: string): number;
+	fsyncSync(fd: number): void;
+	closeSync(fd: number): void;
+};
+
+function createSessionStoreMemFs(): SessionStoreMemFs {
+	const memoryFs = createMemFs() as SessionStoreMemFs;
+	const descriptors = new Map<number, string>();
+	const writeFileSync = memoryFs.writeFileSync.bind(memoryFs);
+	let nextDescriptor = 3;
+	memoryFs.openSync = (file: string) => {
+		const descriptor = nextDescriptor++;
+		descriptors.set(descriptor, file);
+		return descriptor;
+	};
+	(memoryFs as any).writeFileSync = (
+		target: string | number,
+		data: string | NodeJS.ArrayBufferView,
+		encoding?: BufferEncoding,
+	) => writeFileSync(
+		typeof target === "number" ? descriptors.get(target)! : target,
+		data,
+		encoding as any,
+	);
+	memoryFs.fsyncSync = () => {};
+	memoryFs.closeSync = (descriptor: number) => { descriptors.delete(descriptor); };
+	return memoryFs;
+}
 
 const sources: Array<[PromptSource, "user" | "agent" | "system"]> = [
 	["user", "user"],
@@ -147,32 +176,29 @@ describe("message author primitives", () => {
 		queued.enqueue("legacy prompt");
 
 		const persisted = JSON.parse(JSON.stringify(queued.toArray()));
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-author-queue-"));
-		try {
-			const store = new SessionStore(root);
-			store.put({
-				id: "author-queue-session",
-				title: "Author queue",
-				cwd: root,
-				agentSessionFile: path.join(root, "agent.jsonl"),
-				createdAt: 1,
-				lastActivity: 1,
-				messageQueue: persisted,
-			} as any);
-			const reloaded = new SessionStore(root).get("author-queue-session");
-			const restored = new PromptQueue(reloaded?.messageQueue).toArray();
-			expect(restored[0]).toMatchObject({
-				text: "notification",
-				isSteered: true,
-				source: "task-notification",
-				author: systemAuthor,
-			});
-			expect(restored[1]).toMatchObject({ text: "legacy prompt" });
-			expect(restored[1].source).toBeUndefined();
-			expect(restored[1].author).toBeUndefined();
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
+		const stateDir = path.resolve("/memfs/message-author/queue");
+		const memoryFs = createSessionStoreMemFs();
+		const store = new SessionStore(stateDir, memoryFs);
+		store.put({
+			id: "author-queue-session",
+			title: "Author queue",
+			cwd: stateDir,
+			agentSessionFile: path.join(stateDir, "agent.jsonl"),
+			createdAt: 1,
+			lastActivity: 1,
+			messageQueue: persisted,
+		} as any);
+		const reloaded = new SessionStore(stateDir, memoryFs).get("author-queue-session");
+		const restored = new PromptQueue(reloaded?.messageQueue).toArray();
+		expect(restored[0]).toMatchObject({
+			text: "notification",
+			isSteered: true,
+			source: "task-notification",
+			author: systemAuthor,
+		});
+		expect(restored[1]).toMatchObject({ text: "legacy prompt" });
+		expect(restored[1].source).toBeUndefined();
+		expect(restored[1].author).toBeUndefined();
 
 		const invalid = new PromptQueue([{ ...persisted[0], author: { kind: "tool", id: "tool:x", label: "Tool" } }]);
 		expect(invalid.peek()?.author).toBeUndefined();
