@@ -28,6 +28,12 @@ export class ProjectContextManager {
   private registry: ProjectRegistry;
   private sessionResolver: SessionResolver | null = null;
   private _sessionResolverWarned = false;
+  /** Changes whenever a context is created or removed. */
+  private contextTopologyVersion = 0;
+  /** Stable between observations; increases when task state or topology changes. */
+  private taskGenerationToken = 0;
+  private lastObservedTaskGenerationSum = 0;
+  private lastObservedTaskTopologyVersion = 0;
   /**
    * Shared dispatcher for `goal_created` / `goal_archived` staff triggers.
    * Wired post-boot by `server.ts` once the staff/inbox managers exist.
@@ -106,6 +112,7 @@ export class ProjectContextManager {
       try { this.contextConfigurator(ctx); } catch (err) { console.warn("[pcm] context configurator failed:", err); }
     }
     this.contexts.set(projectId, ctx);
+    this.contextTopologyVersion++;
     return ctx;
   }
 
@@ -356,6 +363,33 @@ export class ProjectContextManager {
     return gen;
   }
 
+  /**
+   * Monotonic process-local cache token for cross-project task lookups.
+   *
+   * A raw sum of store generations is insufficient: removing a context can
+   * revisit an earlier sum, while adding a context whose persisted tasks load
+   * at generation zero does not alter the sum at all. Including an explicit
+   * topology version and translating observed changes into a monotonic token
+   * prevents both states from colliding with an older cache entry.
+   */
+  getTaskGeneration(): number {
+    let generationSum = 0;
+    for (const ctx of this.contexts.values()) {
+      generationSum += ctx.taskStore.getGeneration();
+    }
+
+    if (
+      generationSum !== this.lastObservedTaskGenerationSum
+      || this.contextTopologyVersion !== this.lastObservedTaskTopologyVersion
+    ) {
+      this.taskGenerationToken++;
+      this.lastObservedTaskGenerationSum = generationSum;
+      this.lastObservedTaskTopologyVersion = this.contextTopologyVersion;
+    }
+
+    return this.taskGenerationToken;
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────
 
   /** Close all contexts on shutdown. Awaits every context's async close so
@@ -363,7 +397,10 @@ export class ProjectContextManager {
    *  state dir only after all pending search flushes have settled. */
   async closeAll(): Promise<void> {
     await Promise.allSettled([...this.contexts.values()].map((ctx) => ctx.close()));
-    this.contexts.clear();
+    if (this.contexts.size > 0) {
+      this.contexts.clear();
+      this.contextTopologyVersion++;
+    }
   }
 
   /** Remove a context when a project is unregistered. Runs during normal
@@ -375,6 +412,7 @@ export class ProjectContextManager {
     if (ctx) {
       void ctx.close().catch((err) => console.warn("[pcm] context close failed:", err));
       this.contexts.delete(projectId);
+      this.contextTopologyVersion++;
     }
   }
 
