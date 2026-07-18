@@ -1,11 +1,14 @@
 # Author Identity Metadata
 
-**Status:** implementation design  
+**Status:** implemented decision record
+
+The imperative language below records the constraints followed by the implementation; it does not describe pending work. For the concise maintainer reference, see [Message author identity](../message-author-identity.md).
+
 **Scope:** Bobbit-visible message metadata only; Pi 0.80.6 roles, transcript schema, and model/provider input remain unchanged.
 
 ## 1. Problem and goals
 
-Bobbit currently treats `role` as both transport shape and apparent authorship. That is insufficient because a Pi `role: "user"` row can be a human prompt, a Bobbit orchestration prompt, an extension session write, or provider-history tool output. Conversely, Bobbit-created custom rows can use assistant-like roles without being model-authored.
+Before this feature, Bobbit treated `role` as both transport shape and apparent authorship. That was insufficient because a Pi `role: "user"` row can be a human prompt, a Bobbit orchestration prompt, an extension session write, or provider-history tool output. Conversely, Bobbit-created custom rows can use assistant-like roles without being model-authored.
 
 Add an optional, Bobbit-owned author envelope:
 
@@ -451,116 +454,70 @@ Do not add badges or per-bubble author text. Existing user, assistant, tool, art
 - Unknown/invalid incoming `author` fields from Pi transcript data are not authoritative. Replace them with Bobbit-derived values unless they originated from a validated Bobbit sidecar/live normalization path.
 - IDs/labels are metadata, not authorization principals. Existing session secrets, surface tokens, and REST authorization remain the authority.
 
-## 12. Implementation file plan
+## 12. Implemented module map
 
-| Path | Change |
+| Path | Responsibility |
 |---|---|
-| `src/shared/message-author.ts` | New public types, constants, guards, `BobbitMessage` intersection. |
+| `src/shared/message-author.ts` | Public types, constants, guards, and the `BobbitMessage` intersection. |
 | `src/shared/prompt-source.ts` | Dependency-neutral home for the unchanged eight-value `PromptSource` union; `session-manager.ts` re-exports it for compatibility. |
-| `src/server/agent/message-author.ts` | New pure identity construction, PromptSource mapping, tool-result detection, event/message normalization. |
-| `src/server/agent/author-sidecar.ts` | New host-side versioned JSONL dispatch/settlement persistence, merge/copy/purge. |
-| `src/server/agent/visible-message-snapshot.ts` | New shared snapshot pipeline used by active, refresh, role-switch, and archived paths. |
-| `src/server/ws/protocol.ts` | Optional `source`/`author` on `QueuedMessage`; import shared author type. |
-| `src/server/agent/prompt-queue.ts` | Preserve author/source on enqueue/front/restore. |
-| `src/server/agent/session-store.ts` | Back-compatible structured in-flight steer element type. |
-| `src/server/agent/session-manager.ts` | Re-export `PromptSource`; resolve/stash authors, author-aware dispatch/drain/steer/retry, normalize every live event, use shared snapshot helper, archived normalization, cleanup. |
-| `src/server/agent/session-setup.ts` | Stamp the server-synthesized setup-failure `message_end` as Bobbit system. |
-| `src/server/agent/session-prompt-delivery.ts` | Thread resolved author through prompt/steer/recovery options. |
-| `src/server/agent/splice-inflight-message.ts` | Stamp authored in-flight steer rows and accept legacy/new ledger records. |
-| `src/server/agent/transcript-reader.ts` | Add optional authors to compact/verbose output and normalize legacy/pre-compaction messages. |
-| `src/server/ws/handler.ts` | Initialize/use authored snapshots; human and extension author context; extension pack/tool identity. |
-| `src/server/server.ts` | Initialize sidecar, derive agent relay identities, audit system sources, copy/purge sidecars on fork/continue/failure. |
-| `src/server/agent/{team-manager,inbox-nudger,nested-goal-routes,orchestration-core}.ts` | Correct producer sources and caller identities. |
-| `src/server/search/{search-service.ts,sources/message-source.ts}` | Add author metadata without changing indexed text/role weights. |
-| `src/app/{remote-agent,message-reducer,custom-messages}.ts` | Client types, optimistic/system authors, preservation, provider-conversion stripping. |
-| `src/ui/components/{Messages,MessageList,MessageEditor}.ts` | Author-aware types only; no label rendering. |
+| `src/server/agent/message-author.ts` | Identity construction, PromptSource mapping, tool-result detection, and event/message normalization. |
+| `src/server/agent/author-sidecar.ts` | Host-side versioned JSONL dispatch/settlement persistence and merge/copy/purge operations. |
+| `src/server/agent/visible-message-snapshot.ts` | Shared snapshot pipeline for active, refresh, role-switch, and archived paths. |
+| `src/server/ws/protocol.ts` | Optional `source`/`author` fields on `QueuedMessage`. |
+| `src/server/agent/prompt-queue.ts` | Author/source preservation through enqueue, promotion, and restore. |
+| `src/server/agent/session-store.ts` | Back-compatible structured in-flight steer persistence. |
+| `src/server/agent/session-manager.ts` | Author-aware acceptance, dispatch, event normalization, snapshot integration, restore, and cleanup. |
+| `src/server/agent/session-setup.ts` | Bobbit system identity on server-synthesized setup failures. |
+| `src/server/agent/session-prompt-delivery.ts` | Resolved author propagation through prompt, steer, and recovery delivery. |
+| `src/server/agent/splice-inflight-message.ts` | Authored in-flight assistant/steer snapshot rows and legacy ledger compatibility. |
+| `src/server/agent/transcript-reader.ts` | Optional authors in compact/verbose and legacy/pre-compaction projections. |
+| `src/server/ws/handler.ts` | Authored snapshots and trusted human/extension author context. |
+| `src/server/server.ts` | Sidecar lifecycle, agent relay identity, producer provenance, and fork/continue handling. |
+| `src/server/agent/{team-manager,inbox-nudger,nested-goal-routes,orchestration-core}.ts` | Correct producer sources and trusted caller identities. |
+| `src/server/search/{search-service.ts,sources/message-source.ts}` | Author metadata indexing without text or role-weight changes. |
+| `src/app/{remote-agent,message-reducer,custom-messages}.ts` | Client types, optimistic/system authors, preservation, and provider-conversion stripping. |
+| `src/ui/components/{Messages,MessageList,MessageEditor}.ts` | Author-aware types without label rendering. |
 
 Avoid a broad Pi type augmentation and avoid adding author fields to client command payloads.
 
-## 13. Test plan
+## 13. Deterministic verification strategy
 
-All new tests live under `tests2/` and are registered through the repository's v2 test inventory process.
+The author contract crosses storage, RPC events, WebSocket snapshots, client reconciliation, and rendering. Its tests therefore verify convergence across those boundaries, but avoid making identity correctness depend on an external model, provider credentials, host filesystem timing, or wall-clock sleeps.
 
-### 13.1 Core/unit
+### 13.1 Pure and persistence contracts
 
-1. **`tests2/core/message-author.test.ts`**
-   - all eight `PromptSource` values map correctly;
-   - staff/session/role label priority and stable ids;
-   - hidden dynamic context -> system;
-   - assistant -> agent;
-   - ordinary legacy user -> local user;
-   - message-level and block-level tool results inherit agent/accountable author and never produce `tool`;
-   - invalid pre-existing author is ignored.
+Core tests exercise identity construction, all `PromptSource` mappings, legacy inference, tool-result inheritance, queue restore, in-flight splices, and sidecar correlation as pure transformations where possible. Sidecar and transcript cases use a scoped in-memory filesystem. Unexpected filesystem access fails the test, which both removes host I/O variance and proves that the intended Bobbit-owned persistence boundary is the only one used.
 
-2. **`tests2/core/author-sidecar.test.ts`**
-   - dispatch + echoed settlement round-trip;
-   - cancelled dispatch excluded;
-   - duplicate identical texts consume FIFO;
-   - id match wins over text;
-   - timestamp disambiguates compacted duplicates;
-   - corrupt/unknown-version lines are skipped;
-   - missing directory/file is empty and non-throwing;
-   - copy and purge behavior.
+The persistence cases deliberately include corrupt and future-version records, cancellation, redispatch, repeated identical text, id-priority matching, timestamp disambiguation, copy/purge, and legacy rows. These are the ambiguous cases most likely to make live and restored attribution diverge.
 
-3. **`tests2/core/prompt-queue-author.test.ts`** (or extend the v2 queue tests)
-   - author/source survive enqueue, reorder, steer promotion, `toArray`, persisted restore, and front re-enqueue;
-   - old rows without fields still construct and default safely;
-   - mixed-author steer batching uses the Bobbit batch system author without changing joined text.
+Session lifecycle tests use mocked RPC methods, deferred promises, and a manual clock. They drive dispatch, echo, rejection, retry, abort, and restore seams directly rather than waiting for child processes or real timers. This makes race-sensitive assertions reproducible while still exercising `SessionManager`'s actual bookkeeping and sidecar API.
 
-4. **Extend `tests2/core/session-manager-getmessages-splice.test.ts`**
-   - in-flight assistant splice has target agent author;
-   - in-flight human/agent/system steers retain their author;
-   - two identical in-flight steers remain distinct;
-   - snapshot and live final event authors converge.
+### 13.2 Client and search boundaries
 
-5. **Extend `tests2/core/transcript-reader.test.ts`**
-   - legacy compact/verbose rows infer authors;
-   - sidecar system prompt overrides user-role inference;
-   - verbose `message.author` equals envelope `author`;
-   - provider-history user-role tool-result blocks do not become user/tool authors;
-   - pre-compaction reader applies the same rules.
+DOM tests run the real reducer and conversion helpers under Happy DOM. They prove that optimistic human authors are replaced by authoritative server authors without changing role/text deduplication, that snapshots and live assistant rows retain authors, and that model conversion strips Bobbit-only metadata.
 
-6. **Extend reducer/client tests**
-   - optimistic local-user author survives until authoritative replacement;
-   - `message_update`/`message_end` and snapshot reductions retain author;
-   - author does not alter existing dedup/order behavior;
-   - `defaultConvertToLlm` strips author.
+Search-source tests normalize memory-backed transcript data through the real indexing source. They assert author metadata separately from indexed text, weights, and hashes, so a future indexing change cannot accidentally make labels affect matching.
 
-### 13.2 Integration
+### 13.3 Gateway convergence
 
-Add `tests2/integration/message-author-lifecycle.test.ts` using the real gateway fixture and mock agent:
+The gateway integration suite runs in process with the mock agent bridge. Each bridge gets a session-local virtual clock, rather than advancing the gateway's shared clock or sleeping, so settling one prompt cannot fire unrelated session timers. The tests send real WebSocket commands and assert:
 
-- send a normal WS prompt; assert live user `message_end.author.kind === "user"` and assistant update/end `=== "agent"`;
-- request `get_messages`; assert ids/kinds equal the live frames;
-- reconnect/reload and assert equality again;
-- enqueue while busy, restart gateway, and assert queued `author` survives and the eventual echo/snapshot is still user;
-- trigger one server path (prefer task notification or auto-nudge with injectable timers); assert its Pi user-role row has `author.kind === "system"` live and after snapshot reload;
-- exercise `session_prompt` from an authenticated caller session; assert target prompt author is the caller agent identity;
-- exercise extension session write; assert system kind and extension pack/tool id.
+- human and server-generated prompt authors on live events;
+- assistant identity on the same exchange;
+- unchanged Pi roles and exact message text;
+- equality between live events, `get_messages`, and reconnect snapshots.
 
-Retain existing role/content assertions to prove roles and model text did not change.
+Restart-sensitive steer coverage targets the durable seam rather than restarting an operating-system process: it leaves an accepted steer in the persisted in-flight ledger, removes the live session, restores through `SessionManager`, and lets a fresh mock bridge echo it. The assertion is exact-once, ordered recovery with the original author. This isolates the persistence guarantee from process startup noise while exercising the production restore path.
 
-### 13.3 Browser
+Producer-focused seam tests separately pin trusted agent/system source forwarding for team, inbox, and orchestration paths; pure tests pin extension identity construction from trusted pack/tool metadata. Keeping those decisions close to each producer makes attribution regressions fail at their origin rather than only in an end-to-end transcript.
 
-Add `tests2/browser/e2e/message-author-reload.spec.ts` (or a journey using existing tail-chat fixtures):
+### 13.4 Browser acceptance
 
-1. create/open a session;
-2. send a normal prompt and wait for reply;
-3. inspect the active `RemoteAgent.state.messages` and assert user/assistant author metadata;
-4. reload or navigate away/back to force `get_messages`;
-5. assert the same author ids/kinds remain in client state;
-6. assert normal user/assistant bubbles contain no new visible author badge/label and their existing layout remains present.
+The Chromium journey covers the user-visible invariant that lower-level tests cannot: a normal prompt and assistant response expose stable authors in client state before and after reload, while ordinary one-human bubbles gain no author label. It waits on authored application state and idle status instead of selecting an arbitrary assistant row or sleeping for a model response.
 
-### 13.4 Commands
+### 13.5 Gate ownership
 
-```bash
-npm run check
-npm run test:unit
-npm run test:browser -- message-author-reload.spec.ts
-npm run test:e2e
-```
-
-Run the full E2E suite because queue persistence, restart recovery, and extension session-write delivery are modified.
+The dedicated pure, DOM, and in-process gateway tests run in the unit gate; the authored reload journey runs in the browser gate. The full E2E gate remains the broader regression owner when session restore, queue persistence, or extension delivery changes. This split keeps the author contract fast and deterministic without replacing the repository's real process-level coverage.
 
 ## 14. Acceptance traceability
 

@@ -196,6 +196,20 @@ Live normalization copies Pi event objects without changing their role or conten
 
 These boundaries keep provider/model input byte-equivalent to the pre-author path. Any existing transformation—such as skill expansion, error-recovery framing, attachment synthesis, steer newline batching, or extension system-reminder framing—continues to operate exactly where it did before and is not affected by author metadata.
 
+## Verification strategy
+
+Author tests are split by architectural boundary so failures identify the broken contract rather than depending on a full external-agent run:
+
+- pure and memory-filesystem tests pin identity mapping, legacy/tool-result inference, queue and steer restore, transcript projection, and sidecar corruption/correlation behavior;
+- lifecycle tests use mocked RPCs, deferred promises, and a manual clock to reproduce dispatch, echo, retry, abort, and restore races without wall-clock sleeps;
+- in-process gateway tests use the real WebSocket and snapshot paths with a mock agent bridge and session-local virtual clock, proving live/snapshot/reconnect equality for both human and system prompts while keeping roles and text unchanged;
+- DOM and search-source tests pin client preservation, provider conversion stripping, and metadata-only indexing;
+- the Chromium journey verifies stable user/assistant authors across reload and confirms that ordinary bubbles render no new identity label.
+
+The restart-sensitive steer test restores from the persisted ledger through `SessionManager` with a fresh mock bridge instead of restarting an operating-system process. This deliberately targets Bobbit's durable boundary: exact-once, ordered recovery with the same author. Broader process-level E2E remains responsible for gateway restart infrastructure.
+
+See the [implemented design](design/author-identity-metadata.md#13-deterministic-verification-strategy) for the rationale behind these deterministic seams.
+
 ## Maintainer map
 
 | Area | Module |
