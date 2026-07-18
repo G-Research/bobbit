@@ -1,12 +1,15 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
-	agentEndPredicate,
 	connectWs,
 	createSession,
 	messageEndPredicate,
+	type WsConnection,
 } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { gatewaySync } from "./_e2e/runtime.js";
+import { attachLocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
+
+const HUMAN_PROMPT = "AUTHOR_HUMAN_LIVE_SNAPSHOT_RECONNECT";
+const SYSTEM_PROMPT = "AUTHOR_SYSTEM_TASK_NOTIFICATION";
 
 function messageText(message: any): string {
 	if (typeof message?.content === "string") return message.content;
@@ -21,66 +24,76 @@ function snapshotMessages(frame: any): any[] {
 	return Array.isArray(frame?.data) ? frame.data : frame?.data?.messages ?? [];
 }
 
-test("human WS author survives live echo, snapshot, and reconnect without changing roles or text", async () => {
+async function getMessages(conn: WsConnection): Promise<any[]> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "get_messages" });
+	return snapshotMessages(await conn.waitForFrom(cursor, (message) => message.type === "messages"));
+}
+
+function authoredTurn(messages: any[], prompt: string): { user: any; assistant: any } {
+	const user = messages.find((message) => message.role === "user" && messageText(message) === prompt);
+	const assistant = messages.find((message) => message.role === "assistant");
+	expect(user, `snapshot contains user prompt ${prompt}`).toBeTruthy();
+	expect(assistant, "snapshot contains assistant response").toBeTruthy();
+	return { user, assistant };
+}
+
+test("human WS author survives live echo, snapshot, and reconnect without changing roles or text", async ({ gateway }) => {
 	const sessionId = await createSession();
-	const marker = `author-human-${Date.now()}`;
+	const agentClock = attachLocalMockAgentClock(gateway, sessionId);
 	const conn = await connectWs(sessionId);
+	let liveSnapshot: { user: any; assistant: any };
 
 	try {
-		conn.send({ type: "prompt", text: marker });
+		conn.send({ type: "prompt", text: HUMAN_PROMPT });
 		const liveUser = await conn.waitFor(messageEndPredicate("user"));
 		expect(liveUser.data.message.role).toBe("user");
-		expect(messageText(liveUser.data.message)).toContain(marker);
+		expect(messageText(liveUser.data.message)).toBe(HUMAN_PROMPT);
 		expect(liveUser.data.message.author).toEqual({
 			kind: "user",
 			id: "user:local",
 			label: "User",
 		});
 
-		const liveAssistant = await conn.waitFor(messageEndPredicate("assistant"));
-		expect(liveAssistant.data.message.role).toBe("assistant");
-		expect(liveAssistant.data.message.author?.kind).toBe("agent");
-		expect(liveAssistant.data.message.author?.id).toBe(`session:${sessionId}`);
-		await conn.waitFor(agentEndPredicate(), 10_000).catch(() => {});
+		await agentClock.settleCurrentPrompt();
+		const liveAssistant = conn.messages.find(messageEndPredicate("assistant"));
+		expect(liveAssistant?.data.message.role).toBe("assistant");
+		expect(liveAssistant?.data.message.author).toMatchObject({
+			kind: "agent",
+			id: `session:${sessionId}`,
+		});
+
+		liveSnapshot = authoredTurn(await getMessages(conn), HUMAN_PROMPT);
 	} finally {
 		conn.close();
 	}
 
 	const reconnected = await connectWs(sessionId);
 	try {
-		const snapshot = await pollUntil(async () => {
-			const cursor = reconnected.messageCount();
-			reconnected.send({ type: "get_messages" });
-			const frame = await reconnected.waitForFrom(cursor, (message) => message.type === "messages");
-			const rows = snapshotMessages(frame);
-			const user = rows.find((row) => row.role === "user" && messageText(row).includes(marker));
-			const assistant = rows.find((row) => row.role === "assistant" && row.author?.kind === "agent");
-			return user && assistant ? { user, assistant } : null;
-		}, {
-			timeoutMs: 5_000,
-			intervalMs: 100,
-			label: "authored messages visible after reconnect",
+		const reconnectSnapshot = authoredTurn(await getMessages(reconnected), HUMAN_PROMPT);
+		expect(reconnectSnapshot.user).toMatchObject({
+			role: "user",
+			author: { kind: "user", id: "user:local", label: "User" },
 		});
-
-		if (!snapshot) throw new Error("authored reconnect snapshot was not produced");
-		expect(snapshot.user.role).toBe("user");
-		expect(messageText(snapshot.user)).toContain(marker);
-		expect(snapshot.user.author).toEqual({ kind: "user", id: "user:local", label: "User" });
-		expect(snapshot.assistant.role).toBe("assistant");
-		expect(snapshot.assistant.author?.kind).toBe("agent");
-		expect(snapshot.assistant.author?.id).toBe(`session:${sessionId}`);
+		expect(messageText(reconnectSnapshot.user)).toBe(HUMAN_PROMPT);
+		expect(reconnectSnapshot.assistant).toMatchObject({
+			role: "assistant",
+			author: { kind: "agent", id: `session:${sessionId}` },
+		});
+		expect(reconnectSnapshot.user.author).toEqual(liveSnapshot!.user.author);
+		expect(reconnectSnapshot.assistant.author).toEqual(liveSnapshot!.assistant.author);
 	} finally {
 		reconnected.close();
 	}
 });
 
-test("server-generated prompt is system-authored in the live stream and get_messages snapshot", async () => {
+test("server-generated prompt is system-authored in the live stream and get_messages snapshot", async ({ gateway }) => {
 	const sessionId = await createSession();
-	const marker = `author-system-${Date.now()}`;
+	const agentClock = attachLocalMockAgentClock(gateway, sessionId);
 	const conn = await connectWs(sessionId);
 
 	try {
-		const result = await gatewaySync().sessionManager.enqueuePrompt(sessionId, marker, {
+		const result = await gatewaySync().sessionManager.enqueuePrompt(sessionId, SYSTEM_PROMPT, {
 			isSteered: true,
 			source: "task-notification",
 		});
@@ -88,36 +101,26 @@ test("server-generated prompt is system-authored in the live stream and get_mess
 
 		const liveUser = await conn.waitFor(messageEndPredicate("user"));
 		expect(liveUser.data.message.role).toBe("user");
-		expect(messageText(liveUser.data.message)).toBe(marker);
+		expect(messageText(liveUser.data.message)).toBe(SYSTEM_PROMPT);
 		expect(liveUser.data.message.author).toEqual({
 			kind: "system",
 			id: "system:bobbit",
 			label: "Bobbit",
 		});
 
-		const liveAssistant = await conn.waitFor(messageEndPredicate("assistant"));
-		expect(liveAssistant.data.message.author).toMatchObject({
+		await agentClock.settleCurrentPrompt();
+		const liveAssistant = conn.messages.find(messageEndPredicate("assistant"));
+		expect(liveAssistant?.data.message.author).toMatchObject({
 			kind: "agent",
 			id: `session:${sessionId}`,
 		});
 
-		const snapshot = await pollUntil(async () => {
-			const cursor = conn.messageCount();
-			conn.send({ type: "get_messages" });
-			const frame = await conn.waitForFrom(cursor, (message) => message.type === "messages");
-			const row = snapshotMessages(frame).find((message) =>
-				message.role === "user" && messageText(message) === marker,
-			);
-			return row ?? null;
-		}, {
-			timeoutMs: 5_000,
-			intervalMs: 100,
-			label: "system-authored prompt visible in snapshot",
+		const snapshot = authoredTurn(await getMessages(conn), SYSTEM_PROMPT);
+		expect(snapshot.user).toMatchObject({
+			role: "user",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
 		});
-		if (!snapshot) throw new Error("system-authored snapshot was not produced");
-		expect(snapshot.role).toBe("user");
-		expect(messageText(snapshot)).toBe(marker);
-		expect(snapshot.author).toEqual({ kind: "system", id: "system:bobbit", label: "Bobbit" });
+		expect(messageText(snapshot.user)).toBe(SYSTEM_PROMPT);
 	} finally {
 		conn.close();
 	}
