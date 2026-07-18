@@ -102,6 +102,8 @@ export type SessionIdsForGoalFn = (goalId: string) => string[];
  */
 export const UNATTRIBUTABLE_LEGACY_GOAL_ID = "__unattributable__";
 
+const SAVE_DEBOUNCE_MS = 1_000;
+
 function emptyRaw(): RawSessionCost {
 	return {
 		inputTokens: 0,
@@ -136,13 +138,15 @@ export function withDerivedFields(raw: RawSessionCost): SessionCost {
 /**
  * Tracks cumulative per-session cost/usage data.
  * Persists to .bobbit/state/session-costs.json.
- * Same load-on-construct, write-on-mutate pattern as GoalStore/SessionStore.
+ * Loads on construction and debounces frequent usage persistence.
  */
 export class CostTracker {
 	private costs: Map<string, RawSessionCost> = new Map();
 	private readonly storeDir: string;
 	private readonly storeFile: string;
 	private readonly fs: FsLike;
+	private saveTimer: ReturnType<typeof setTimeout> | null = null;
+	private dirty = false;
 	/** Monotonically increasing tick — bumped on every cost mutation.
 	 *  Used by `computeTreeCost` for cache invalidation (tree-cost rollup). */
 	private generation = 0;
@@ -185,7 +189,25 @@ export class CostTracker {
 		}
 	}
 
-	private save(): void {
+	private cancelScheduledSave(): void {
+		if (this.saveTimer === null) return;
+		clearTimeout(this.saveTimer);
+		this.saveTimer = null;
+	}
+
+	private scheduleSave(): void {
+		this.cancelScheduledSave();
+		this.saveTimer = setTimeout(() => {
+			this.saveTimer = null;
+			this.saveNow();
+		}, SAVE_DEBOUNCE_MS);
+		// Cost telemetry must not keep the gateway alive during shutdown.
+		(this.saveTimer as { unref?: () => void }).unref?.();
+	}
+
+	private saveNow(): void {
+		if (!this.dirty) return;
+		const savingGeneration = this.generation;
 		try {
 			if (!this.fs.existsSync(this.storeDir)) {
 				this.fs.mkdirSync(this.storeDir, { recursive: true });
@@ -207,9 +229,19 @@ export class CostTracker {
 				data[id] = entry;
 			}
 			this.fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			// A synchronous injected writer can still trigger a nested mutation.
+			// Do not let this older save clear that newer dirty generation.
+			if (this.generation === savingGeneration) this.dirty = false;
 		} catch (err) {
+			// Keep dirty state so the next mutation or graceful flush retries.
 			console.error("[cost-tracker] Failed to save costs:", err);
 		}
+	}
+
+	/** Persist pending usage immediately. Safe to call repeatedly. */
+	flush(): void {
+		this.cancelScheduledSave();
+		this.saveNow();
 	}
 
 	/**
@@ -239,7 +271,8 @@ export class CostTracker {
 		}
 		this.costs.set(sessionId, existing);
 		this.generation++;
-		this.save();
+		this.dirty = true;
+		this.scheduleSave();
 		return withDerivedFields(existing);
 	}
 
@@ -367,7 +400,9 @@ export class CostTracker {
 	removeSession(sessionId: string): void {
 		if (this.costs.delete(sessionId)) {
 			this.generation++;
-			this.save();
+			this.dirty = true;
+			this.cancelScheduledSave();
+			this.saveNow();
 		}
 	}
 
@@ -395,7 +430,9 @@ export class CostTracker {
 		}
 		if (stamped > 0) {
 			this.generation++;
-			this.save();
+			this.dirty = true;
+			this.cancelScheduledSave();
+			this.saveNow();
 		}
 		return stamped;
 	}

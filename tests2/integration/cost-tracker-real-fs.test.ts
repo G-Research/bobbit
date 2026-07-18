@@ -28,8 +28,9 @@ describe("CostTracker real filesystem fidelity", () => {
 		// Default constructor (no fsImpl) exercises the real-disk realFs path.
 		const tracker = new CostTracker(stateDir);
 		tracker.recordUsage("session-a", { inputTokens: 100, outputTokens: 20, cost: 0.5 }, "goal-1");
+		tracker.flush();
 
-		assert.ok(fs.existsSync(storeFile), "session-costs.json should exist on real disk after recordUsage");
+		assert.ok(fs.existsSync(storeFile), "session-costs.json should exist on real disk after flush");
 		const parsed = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
 		assert.equal(parsed["session-a"].inputTokens, 100);
 		assert.equal(parsed["session-a"].totalCost, 0.5);
