@@ -2,6 +2,8 @@
 
 The review pane is Bobbit's shared human decision surface for markdown reviews and gate sign-offs. It lets reviewers read the submitted content at full pane size, add inline annotations, add a final decision note, and then approve or reject from one consistent action bar.
 
+Opening a pending sign-off review does not resolve the gate; the reviewer must explicitly select **Approve** or **Reject**.
+
 This keeps compact surfaces, including the goal status widget and gate tool cards, focused on alerting and handoff instead of duplicating submitted-content rendering or decision validation.
 
 ## Launch sources
