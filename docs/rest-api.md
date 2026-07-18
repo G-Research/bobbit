@@ -1594,6 +1594,11 @@ Response:
     { "gateId": "implementation", "name": "Implementation", "status": "pending" },
     { "gateId": "ready-to-merge", "name": "Ready to Merge", "status": "pending" }
   ],
+  "reopen": {
+    "reopened": true,
+    "previousState": "complete",
+    "state": "in-progress"
+  },
   "teamLeadNotified": true
 }
 ```
@@ -1607,10 +1612,17 @@ Notes:
 - `human-signoff` approvals are never reused from verification cache; each re-signal requires a fresh human decision.
 - After a fresh post-reset pass, later non-reset re-signals at the same commit may reuse that new passed output normally.
 - Active verifications for affected gates are cancelled before status changes are persisted.
-- The server emits `gate_status_changed` plus `gate_reset` WebSocket events and notifies the team lead when one is active.
+- For an active goal whose state is `complete`, reset first persists `complete` → `in-progress`, then invalidates the gates without an asynchronous gap. This is necessary because reset creates real outstanding work; leaving the goal complete would keep its team lead excluded from normal recovery nudges.
+- `reopen` is always present. `reopened` reports whether this request performed the transition; `previousState` is the state observed for this reset; and `state` is the resulting state. Active `todo`, `in-progress`, and `blocked` goals keep their current state.
+- Reopening preserves the goal and team identity, existing team-lead session, tasks, gate signal/content/metadata history, branch and worktree, repository fields, and PR association. It rearms the existing team runtime; it does not start a replacement team or session.
+- The server always emits affected `gate_status_changed` events and a `gate_reset` event containing the same `reopen` object. An actual reopen additionally emits global `goal_state_changed`, which makes goal-list clients refresh immediately.
+- The team lead is notified only when at least one gate changed or the goal reopened. The notice includes the lifecycle outcome. `teamLeadNotified` reports whether it was delivered to a live lead.
+- Exact retries are idempotent. Once all affected gates are pending and the goal is already active, the response has `changedGateIds: []`, `reopen: { "reopened": false, "previousState": "in-progress", "state": "in-progress" }`, and `teamLeadNotified: false`; no second state-transition event, runtime rearm, or lead notice is produced.
 - Sandboxed agent tokens are forbidden from this route.
 
-Errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 for unknown goal/gate; 409 when the goal is archived.
+Dormant goals are never reopened implicitly. Reset returns `409` before mutation for archived goals (`{ "error": "Goal is archived" }`), shelved goals (`{ "error": "Goal is shelved", "code": "GOAL_SHELVED", "goalId": "…" }`), and paused goals (`{ "error": "Goal … is paused", "code": "GOAL_PAUSED", "goalId": "…" }`). The goal must be returned to an active lifecycle through an explicit operator action before reset is allowed; reset itself never performs that recovery. These guards are checked again after verification cancellation so a concurrent pause or archival cannot be overwritten.
+
+Other errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 for unknown goal/gate.
 
 ### Gate bypass endpoint
 

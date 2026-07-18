@@ -340,7 +340,33 @@ Reset is safe to repeat:
 - verification-step cache eligibility is invalidated for both changed and already-pending affected gates;
 - only gates whose stored status actually changes are counted in `changedGateIds`.
 
-The endpoint broadcasts `gate_status_changed` for affected gates and a `gate_reset` summary event so the status widget, sidebar badge, dashboard pipeline, and team lead view refresh promptly.
+The endpoint broadcasts `gate_status_changed` for affected gates and a `gate_reset` summary event so gate consumers refresh promptly.
+
+#### Reset-driven goal reopening
+
+A human gate reset creates new workflow work even when the team previously finished. For an active goal in `complete`, Bobbit therefore persists the goal as `in-progress` before resetting the selected and downstream gates. Keeping it complete would hide the new pending work from team-lead no-workers, workers-idle, stuck-sweep, and restart recovery.
+
+This transition reuses the existing lifecycle rather than starting over. The goal ID, workflow snapshot, team record, team-lead session, tasks, gate history, branch/worktree and repository metadata, and PR association remain intact. Completion may have dismissed role workers, but reset does not recreate them or replace the lead. It reinstalls the existing lead's runtime subscription, clears completion-era nudge bookkeeping, and starts a fresh base-delay nudge cycle when that lead is already idle.
+
+Only an active `complete` goal is reopened. Active `todo`, `in-progress`, and scheduler-managed `blocked` states are preserved. Archived, shelved, and paused goals return `409` without gate mutation, notification, or team rearm; the operator must explicitly restore their lifecycle first. Dormant intent takes precedence even if a stored goal also says `complete`.
+
+The lifecycle outcome is additive in both the reset response and `gate_reset` WebSocket event:
+
+```json
+{
+  "reopen": {
+    "reopened": true,
+    "previousState": "complete",
+    "state": "in-progress"
+  }
+}
+```
+
+`reopen` is returned for every successful reset. A retry after the transition reports `reopened: false` with `previousState` and `state` both `in-progress`. Rearming is likewise one-shot: retries do not replace subscriptions, duplicate timers, emit another `goal_state_changed`, or enqueue another reset notice when no gate status changed.
+
+On a real transition, global `goal_state_changed` makes sidebar, dashboard, widget, and other-tab goal caches refresh from the goal-list API. The initiating widget also consumes `reopen` immediately, clears its reversible completed state, and marks affected gates pending while follow-up reads reconcile server truth. `gate_reset` remains the gate-specific refresh signal.
+
+See [REST API — Gate reset endpoint](rest-api.md#gate-reset-endpoint) for the full response and `409` shapes, and [WebSocket Protocol](websocket-protocol.md) for event fields.
 
 #### History and audit preservation
 
@@ -352,15 +378,16 @@ After a fresh post-reset signal passes, normal cache behavior resumes from that 
 
 #### Team lead notification
 
-After a reset, Bobbit sends the team lead session a system-origin message when a live team lead exists. The message names:
+After a reset changes at least one gate or reopens the goal, Bobbit sends the live team lead a system-origin message. The message names:
 
+- the goal lifecycle outcome, including `complete` → `in-progress` when reopened;
 - the selected gate that was reset;
 - downstream dependent gates invalidated by the DAG traversal;
 - which gates had passed state cleared;
 - which affected gates were already not passed;
 - why downstream implementation, review, or verification work may need to be revisited.
 
-If the team lead is streaming, the server delivers the notice as a live steer; otherwise it queues it as a steered prompt. The reset response includes `teamLeadNotified` so callers can tell whether a live lead received the message. Goals without an active team lead still reset normally.
+If the team lead is streaming, the server delivers the notice as a live steer; otherwise it queues it as a steered prompt. The reset response includes `teamLeadNotified` so callers can tell whether a live lead received the message. Goals without an active team lead still reset normally. An exact no-op retry sends no duplicate notice.
 
 #### Usage and test coverage
 

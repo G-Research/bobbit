@@ -7,8 +7,8 @@ work resumes without operator intervention:
 1. **Mid-turn re-prompt** — a session that was *streaming* (mid-turn) when the
    gateway died is told to continue from where it left off.
 2. **Boot-resume nudge** — an idle team-lead that still has concrete
-   outstanding work (a failed gate or an open task) is nudged to pick that work
-   back up, rather than sitting idle until the 5-minute stuck-sweep tick.
+   outstanding work (an unresolved workflow gate or an open task) is nudged to
+   pick that work back up, rather than sitting idle until the stuck-sweep tick.
 
 This document covers the shared readiness/timeout plumbing both paths use, the
 `coldStart` enqueue option, and the coordination that stops them double-prompting
@@ -101,6 +101,14 @@ idle and has concrete outstanding work (and which is not paused / complete /
 shelved / archived / already nudge-pending), it dispatches a `[BOOT-RESUME]`
 nudge so progress resumes without waiting for the stuck-sweep tick.
 
+Outstanding workflow work means any gate not in `passed` or `bypassed`, plus
+tasks in `todo` or `in-progress`. Counting all unresolved gate states matters for
+reset recovery: a human reset normally produces `pending` gates, even when every
+task was already complete. A completed active goal is persisted as `in-progress`
+by the reset path, so that pending gate makes its restored lead eligible. Paused,
+shelved, archived, and still-complete goals remain excluded even if they contain
+pending data; restart must not override explicit operator dormancy.
+
 The nudge is dispatched via `SessionManager.enqueuePrompt(sessionId, msg,
 { isSteered: true, coldStart: true })`. The `coldStart: true` option threads down
 to `dispatchDirectPrompt`, which then dispatches through `promptWhenReady` instead
@@ -133,6 +141,19 @@ is fine now because the helper *owns* the drain's promise. Combined with
 `coldStart`, the common case no longer rejects at all; if it still does (agent
 gone), the rejection is caught and logged here, never escaping as a gateway-level
 unhandled rejection.
+
+### Idempotence after a reset
+
+The reset path rearms the existing team lead once; it does not create a team or
+lead. At runtime, an idle lead begins the normal base-delay nudge cycle. After a
+gateway restart, the persisted `in-progress` state and pending gate are enough for
+the one-shot boot-resume scan to recognize the outstanding work.
+
+Boot recovery still applies its normal duplicate guards: active verification,
+pending nudge delivery, in-flight children, or an existing mid-turn boot
+re-prompt suppress a second prompt. Repeating the gate reset does not add another
+runtime subscription or timer, and the boot scan sends at most one recovery
+prompt for that pass.
 
 ## Avoiding the double-prompt race
 
@@ -178,6 +199,8 @@ implementation detail:
    a process-level unhandled rejection (it must be awaited inside a `try/catch`).
 3. A session that is both mid-turn and a team-lead with outstanding work is
    re-prompted/nudged **exactly once**.
+4. A reopened `in-progress` goal with a pending reset gate receives one
+   boot-resume nudge, while complete, paused, shelved, and archived goals do not.
 
 ## Where the code lives
 
@@ -189,6 +212,6 @@ implementation detail:
 | `src/server/agent/session-manager.ts` | `enqueuePrompt` (`coldStart` opt) → `dispatchDirectPrompt` | Threads `coldStart` so the direct dispatch uses `promptWhenReady`. |
 | `src/server/agent/team-manager.ts` | `_bootResumeIdleTeamLeads`, `_dispatchBootResumeNudge` | Boot-resume nudge for idle leads with work; owns the async-drain rejection. |
 | `src/server/agent/verification-harness.ts` | `_tryResumeFromSession` | Reviewer resume — third consumer of `promptWhenReady` (see verification-restart.md). |
-| `tests/cold-restart-reprompt.test.ts` | 3 unit tests | Pins readiness wait + generous timeout, no escaped rejection, single re-prompt. |
+| `tests2/core/cold-restart-reprompt.test.ts` | Restart recovery coverage | Pins readiness wait, owned rejection handling, pending-gate recovery, dormant-goal suppression, and prompt deduplication. |
 </content>
 </invoke>
