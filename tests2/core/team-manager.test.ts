@@ -50,6 +50,8 @@ interface MockGoal {
 	sandboxed?: boolean;
 	team?: boolean;
 	teamLeadSessionId?: string;
+	archived?: boolean;
+	paused?: boolean;
 }
 
 function createMockGoal(overrides: Partial<MockGoal> = {}): MockGoal {
@@ -180,6 +182,41 @@ const DEFAULT_CONFIG = {
 	colorStore: createMockColorStore(),
 	taskManager: createMockTaskManager(),
 } as unknown as TeamManagerConfig;
+
+interface TeamLeadEventHarness {
+	emit(event: any): void;
+	activeListenerCount(): number;
+	unsubscribeCalls: ReturnType<typeof vi.fn>;
+}
+
+/** Capture the live team-lead subscription, including completion/reopen teardown. */
+function captureTeamLeadEvents(sm: any): TeamLeadEventHarness {
+	const listeners = new Set<(event: any) => void>();
+	const unsubscribeCalls = vi.fn();
+	const origCreateSession = sm.createSession.bind(sm);
+	sm.createSession = async (
+		cwd: string,
+		args?: string[],
+		goalId?: string,
+		goalAssistant?: boolean,
+		opts?: any,
+	) => {
+		const session = await origCreateSession(cwd, args, goalId, goalAssistant, opts);
+		session.rpcClient.onEvent = vi.fn((cb: (event: any) => void) => {
+			listeners.add(cb);
+			return () => {
+				listeners.delete(cb);
+				unsubscribeCalls();
+			};
+		});
+		return session;
+	};
+	return {
+		emit: (event) => { for (const cb of [...listeners]) cb(event); },
+		activeListenerCount: () => listeners.size,
+		unsubscribeCalls,
+	};
+}
 
 /** Track managers to clean up idle-nudge timers after tests */
 const _createdManagers: InstanceType<typeof TeamManager>[] = [];
@@ -762,6 +799,163 @@ describe("TeamManager", () => {
 			assert.equal(sm._sessions.has("session-0"), true); // team lead alive
 			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
 			assert.equal(goal.state, "complete");
+		});
+	});
+
+	// ---------------------------------------------------------------------------
+	// Tests: reset-driven completed-team reopen
+	// ---------------------------------------------------------------------------
+
+	describe("reopenCompletedTeam", () => {
+		it("keeps a completed team unsubscribed and suppressed until explicitly reopened", async () => {
+			const clock = createManualClock();
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ state: "in-progress" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const events = captureTeamLeadEvents(sm);
+			const enqueuePrompt = vi.fn();
+			sm.enqueuePrompt = enqueuePrompt;
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
+
+			await team.startTeam(goal.id);
+			assert.equal(events.activeListenerCount(), 1);
+			await team.completeTeam(goal.id);
+
+			assert.equal(goal.state, "complete");
+			assert.equal(events.activeListenerCount(), 0, "completion must remove the idle lifecycle subscription");
+			(team as any).startIdleNudgeTimer(goal.id);
+			clock.advance(10 * 60 * 1000);
+			await flush();
+			assert.equal(enqueuePrompt.mock.calls.length, 0, "completed-goal suppression must remain intact");
+		});
+
+		it("rearms an idle reset-reopened team at the base delay without duplicate subscriptions or timers", async () => {
+			const clock = createManualClock();
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ state: "in-progress" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const events = captureTeamLeadEvents(sm);
+			const enqueuePrompt = vi.fn();
+			sm.enqueuePrompt = enqueuePrompt;
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
+
+			const lead = await team.startTeam(goal.id);
+			await team.completeTeam(goal.id);
+			assert.equal(events.activeListenerCount(), 0);
+
+			// The reset coordinator owns the persisted state transition, then asks
+			// TeamManager to rearm the existing lead/team runtime.
+			goal.state = "in-progress";
+			await (team as any).reopenCompletedTeam(goal.id);
+			await (team as any).reopenCompletedTeam(goal.id);
+
+			assert.equal(team.getTeamState(goal.id)?.teamLeadSessionId, lead.id, "reopen must preserve the lead session");
+			assert.equal(events.activeListenerCount(), 1, "repeated reopen must replace, not duplicate, subscriptions");
+			assert.equal((team as any).noWorkersNudgeTimers.size, 1, "only one no-workers timer may be armed");
+			assert.equal((team as any).idleNudgeTimers.size, 1, "only one workers timer may be armed");
+
+			clock.advance(5 * 60 * 1000);
+			await flush();
+			assert.equal(enqueuePrompt.mock.calls.length, 1, "reopened idle lead must receive one base-delay nudge");
+			assert.match(enqueuePrompt.mock.calls[0][1], /no active team agents/i);
+		});
+
+		it("restores workers-idle nudge eligibility after the reset transition", async () => {
+			const clock = createManualClock();
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ state: "in-progress" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			captureTeamLeadEvents(sm);
+			const enqueuePrompt = vi.fn();
+			sm.enqueuePrompt = enqueuePrompt;
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
+
+			await team.startTeam(goal.id);
+			await team.completeTeam(goal.id);
+			goal.state = "in-progress";
+			const entry = (team as any).teams.get(goal.id)!;
+			sm._sessions.set("worker-reopened", {
+				id: "worker-reopened",
+				status: "idle",
+				cwd: "/tmp/worker-reopened",
+				rpcClient: { onEvent: vi.fn(() => () => {}) },
+				clients: new Set(),
+			});
+			entry.agents.push({
+				sessionId: "worker-reopened",
+				role: "coder",
+				task: "continue reset gate",
+				createdAt: clock.now(),
+			});
+
+			await (team as any).reopenCompletedTeam(goal.id);
+			clock.advance(10 * 60 * 1000);
+			await flush();
+
+			assert.equal(enqueuePrompt.mock.calls.length, 1, "workers-idle timer must resume after reopen");
+			assert.match(enqueuePrompt.mock.calls[0][1], /team check-in/i);
+		});
+
+		it("restores stuck-sweep eligibility after the reset transition", async () => {
+			const clock = createManualClock();
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ state: "in-progress" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			captureTeamLeadEvents(sm);
+			const enqueuePrompt = vi.fn();
+			sm.enqueuePrompt = enqueuePrompt;
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
+
+			await team.startTeam(goal.id);
+			await team.completeTeam(goal.id);
+			goal.state = "in-progress";
+			const entry = (team as any).teams.get(goal.id)!;
+			sm._sessions.set("worker-stuck", {
+				id: "worker-stuck",
+				status: "idle",
+				cwd: "/tmp/worker-stuck",
+				rpcClient: { onEvent: vi.fn(() => () => {}) },
+				clients: new Set(),
+			});
+			entry.agents.push({
+				sessionId: "worker-stuck",
+				role: "coder",
+				task: "continue reset gate",
+				createdAt: clock.now(),
+			});
+
+			await (team as any).reopenCompletedTeam(goal.id);
+			(team as any)._stuckSweepTick(clock.now() + 5 * 60 * 1000);
+
+			assert.equal(enqueuePrompt.mock.calls.length, 1, "stuck sweep must resume after reopen");
+			assert.match(enqueuePrompt.mock.calls[0][1], /workflow has stalled/i);
+		});
+
+		it.each([
+			["archived", { state: "complete", archived: true }],
+			["shelved", { state: "shelved" }],
+			["paused", { state: "complete", paused: true }],
+		] as const)("continues suppressing %s goals", async (_label, overrides) => {
+			const clock = createManualClock();
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ state: "in-progress" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = vi.fn();
+			sm.enqueuePrompt = enqueuePrompt;
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
+			await team.startTeam(goal.id);
+			Object.assign(goal, overrides);
+
+			(team as any).startIdleNudgeTimer(goal.id);
+			clock.advance(10 * 60 * 1000);
+			await flush();
+
+			assert.equal(enqueuePrompt.mock.calls.length, 0, `${_label} goal must never be resumed implicitly`);
 		});
 	});
 
