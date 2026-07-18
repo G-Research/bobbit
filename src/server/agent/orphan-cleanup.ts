@@ -10,6 +10,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import type { PersistedSession } from "./session-store.js";
 
 /**
@@ -98,5 +100,121 @@ export function scanOrphanedTranscripts(
 		}
 	};
 	walk(agentSessionsRoot);
+	return { count, paths };
+}
+
+export interface AsyncOrphanScanOptions {
+	maxPaths?: number;
+	maxLogLines?: number;
+	concurrency?: number;
+	/** Filesystem boundary for deterministic semantic tests. Defaults to node:fs. */
+	fsImpl?: Pick<FsLike, "promises">;
+}
+
+type AsyncScanWork =
+	| { kind: "directory"; fullPath: string }
+	| { kind: "file"; fullPath: string };
+
+/**
+ * Async, concurrency-limited equivalent of {@link scanOrphanedTranscripts}.
+ *
+ * Directory reads and candidate-file stats share one bounded worker pool, so
+ * even a single wide directory cannot create an unbounded burst of filesystem
+ * requests. The capped path/log sample may be ordered differently from the
+ * synchronous scanner; filesystem enumeration order is not an API contract.
+ */
+export async function scanOrphanedTranscriptsAsync(
+	agentSessionsRoot: string,
+	trackedFiles: Set<string>,
+	mostRecentLastActivity: number,
+	opts: AsyncOrphanScanOptions = {},
+): Promise<{ count: number; paths: string[] }> {
+	const pathCap = opts.maxPaths ?? 50;
+	const logCap = opts.maxLogLines ?? 20;
+	const asyncFs = opts.fsImpl ?? realFs;
+	const requestedConcurrency = opts.concurrency ?? 8;
+	const concurrency = Number.isFinite(requestedConcurrency)
+		? Math.max(1, Math.floor(requestedConcurrency))
+		: 8;
+	const paths: string[] = [];
+	let count = 0;
+	let logged = 0;
+
+	try {
+		if (!(await asyncFs.promises.stat(agentSessionsRoot)).isDirectory()) {
+			return { count: 0, paths: [] };
+		}
+	} catch {
+		return { count: 0, paths: [] };
+	}
+
+	const queue: AsyncScanWork[] = [{ kind: "directory", fullPath: agentSessionsRoot }];
+	let cursor = 0;
+
+	const processWork = async (work: AsyncScanWork): Promise<void> => {
+		if (work.kind === "directory") {
+			let entries: fs.Dirent[];
+			try {
+				entries = await asyncFs.promises.readdir(work.fullPath, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const entry of entries) {
+				const fullPath = path.join(work.fullPath, entry.name);
+				if (entry.isDirectory()) {
+					queue.push({ kind: "directory", fullPath });
+				} else if (entry.isFile() && entry.name.endsWith(".jsonl") && !trackedFiles.has(fullPath)) {
+					queue.push({ kind: "file", fullPath });
+				}
+			}
+			return;
+		}
+
+		let mtimeMs: number;
+		try {
+			mtimeMs = (await asyncFs.promises.stat(work.fullPath)).mtimeMs;
+		} catch {
+			return;
+		}
+		if (mtimeMs < mostRecentLastActivity) return;
+
+		count++;
+		if (paths.length < pathCap) paths.push(work.fullPath);
+		if (logged < logCap) {
+			console.warn(`[session-store] WARN: orphaned transcript: ${work.fullPath}`);
+			logged++;
+		}
+	};
+
+	await new Promise<void>((resolve, reject) => {
+		let active = 0;
+		let settled = false;
+
+		const schedule = (): void => {
+			if (settled) return;
+			while (active < concurrency && cursor < queue.length) {
+				const work = queue[cursor++];
+				active++;
+				void processWork(work).then(
+					() => {
+						active--;
+						schedule();
+					},
+					(error: unknown) => {
+						active--;
+						settled = true;
+						reject(error);
+					},
+				);
+			}
+			if (active === 0 && cursor >= queue.length) {
+				settled = true;
+				resolve();
+			}
+		};
+
+		schedule();
+	});
+
 	return { count, paths };
 }

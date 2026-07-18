@@ -116,6 +116,26 @@ describe("SessionStore stale-snapshot guard", () => {
 		assert.equal(errors.length, errsBefore, "guard latched — no further error spam");
 	});
 
+	it("refuses a stale first write from a second store instance", () => {
+		const staleStore = new SessionStore(stateDir, memfs);
+		const winningStore = new SessionStore(stateDir, memfs);
+
+		winningStore.put(makeSession("winner"));
+		const winningRaw = memfs.readFileSync(STORE_FILE, "utf-8");
+
+		const origErr = console.error;
+		console.error = () => {};
+		try {
+			staleStore.put(makeSession("stale-writer"));
+		} finally {
+			console.error = origErr;
+		}
+
+		assert.equal(staleStore.isStaleGuardTripped(), true);
+		assert.equal(staleStore.getWrittenEpoch(), 0);
+		assert.equal(memfs.readFileSync(STORE_FILE, "utf-8"), winningRaw, "stale writer must not alter the winner's bytes");
+	});
+
 	it("does NOT trip the guard when on-disk epoch matches what we wrote earlier", () => {
 		// Write a few sessions, flush, then put more — no external rewrite.
 		const store = new SessionStore(stateDir, memfs);

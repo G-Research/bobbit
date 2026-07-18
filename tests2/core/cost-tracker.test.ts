@@ -7,19 +7,40 @@
  * Uses an injected in-memory FsLike to avoid real filesystem IO.
  */
 import path from "node:path";
-import { describe, it, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { CostTracker, deriveCacheHitRate } from "../../src/server/agent/cost-tracker.ts";
+import { ProjectContext } from "../../src/server/agent/project-context.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 let memfs: MemFs;
 const stateDir = path.resolve("/memfs/cost-tracker/state");
 const STORE_FILE = path.join(stateDir, "session-costs.json");
 
+function trackWrites(base: MemFs, failWrites = 0): { fs: MemFs; writeCount: () => number } {
+	let writes = 0;
+	return {
+		fs: {
+			...base,
+			writeFileSync: ((file: Parameters<MemFs["writeFileSync"]>[0], data: Parameters<MemFs["writeFileSync"]>[1], options?: unknown) => {
+				writes++;
+				if (writes <= failWrites) throw new Error("injected cost persistence failure");
+				return (base.writeFileSync as (...args: unknown[]) => unknown)(file, data, options);
+			}) as MemFs["writeFileSync"],
+		},
+		writeCount: () => writes,
+	};
+}
+
 describe("CostTracker", () => {
 	beforeEach(() => {
 		memfs = createMemFs();
 		memfs.mkdirSync(stateDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
 	});
 
 	describe("construction", () => {
@@ -140,13 +161,78 @@ describe("CostTracker", () => {
 			assert.equal(result.totalCost, 0.3);
 		});
 
-		it("persists to disk after recording", () => {
+		it("persists to disk when pending usage is flushed", () => {
 			const tracker = new CostTracker(stateDir, memfs);
 			tracker.recordUsage("s1", { inputTokens: 42, cost: 0.001 });
+			tracker.flush();
 
 			const raw = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
 			assert.ok(raw["s1"]);
 			assert.equal(raw["s1"].inputTokens, 42);
+		});
+
+		it("coalesces usage into one trailing write with exact totals", () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const tracked = trackWrites(memfs);
+			const tracker = new CostTracker(stateDir, tracked.fs);
+
+			tracker.recordUsage("s1", { inputTokens: 10, cost: 0.001 });
+			vi.advanceTimersByTime(500);
+			tracker.recordUsage("s1", { inputTokens: 20, cost: 0.002 });
+			tracker.recordUsage("s2", { outputTokens: 7, cost: 0.003 });
+
+			assert.equal(tracked.writeCount(), 0);
+			assert.equal(memfs.existsSync(STORE_FILE), false);
+			vi.advanceTimersByTime(999);
+			assert.equal(tracked.writeCount(), 0, "the trailing deadline must restart after later usage");
+			vi.advanceTimersByTime(1);
+
+			assert.equal(tracked.writeCount(), 1);
+			const raw = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw.s1.inputTokens, 30);
+			assert.equal(raw.s1.totalCost, 0.003);
+			assert.equal(raw.s2.outputTokens, 7);
+		});
+
+		it("flushes immediately, cancels the timer, and is idempotent", () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const tracked = trackWrites(memfs);
+			const tracker = new CostTracker(stateDir, tracked.fs);
+			tracker.recordUsage("s1", { inputTokens: 42 });
+
+			tracker.flush();
+			assert.equal(tracked.writeCount(), 1);
+			tracker.flush();
+			assert.equal(tracked.writeCount(), 1, "a clean flush must not rewrite the file");
+			vi.advanceTimersByTime(1_000);
+			assert.equal(tracked.writeCount(), 1, "the canceled debounce must not write later");
+		});
+
+		it("keeps failed writes dirty so a later flush retries", () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			vi.spyOn(console, "error").mockImplementation(() => undefined);
+			const tracked = trackWrites(memfs, 1);
+			const tracker = new CostTracker(stateDir, tracked.fs);
+			tracker.recordUsage("s1", { inputTokens: 42 });
+
+			vi.advanceTimersByTime(1_000);
+			assert.equal(tracked.writeCount(), 1);
+			assert.equal(memfs.existsSync(STORE_FILE), false);
+
+			tracker.flush();
+			assert.equal(tracked.writeCount(), 2);
+			assert.equal(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")).s1.inputTokens, 42);
+			tracker.flush();
+			assert.equal(tracked.writeCount(), 2);
+		});
+
+		it("unrefs the debounce timer", () => {
+			const unref = vi.fn();
+			vi.spyOn(globalThis, "setTimeout").mockReturnValue({ unref } as unknown as ReturnType<typeof setTimeout>);
+			const tracker = new CostTracker(stateDir, memfs);
+			tracker.recordUsage("s1", { inputTokens: 1 });
+			assert.equal(unref.mock.calls.length, 1);
+			tracker.flush();
 		});
 
 		it("returns a copy (modifying return value doesn't affect tracker)", () => {
@@ -243,6 +329,25 @@ describe("CostTracker", () => {
 
 			const raw = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
 			assert.equal(raw["s1"], undefined);
+		});
+
+		it("writes structural removal and backfill immediately and supersedes pending timers", () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const tracked = trackWrites(memfs);
+			const tracker = new CostTracker(stateDir, tracked.fs);
+
+			tracker.recordUsage("s1", { inputTokens: 100 });
+			tracker.removeSession("s1");
+			assert.equal(tracked.writeCount(), 1);
+			assert.equal(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")).s1, undefined);
+
+			tracker.recordUsage("s2", { inputTokens: 20 });
+			assert.equal(tracker.backfillGoalIds((sid) => sid === "s2" ? "goal-2" : undefined), 1);
+			assert.equal(tracked.writeCount(), 2);
+			assert.equal(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")).s2.goalId, "goal-2");
+
+			vi.advanceTimersByTime(1_000);
+			assert.equal(tracked.writeCount(), 2, "structural saves must cancel pending usage timers");
 		});
 
 		it("is a no-op for nonexistent session (no crash)", () => {
@@ -350,6 +455,7 @@ describe("CostTracker", () => {
 		it("cacheHitRate is NOT persisted to disk", () => {
 			const tracker = new CostTracker(stateDir, memfs);
 			tracker.recordUsage("s1", { inputTokens: 100, cacheReadTokens: 300 });
+			tracker.flush();
 			const raw = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
 			assert.equal(raw["s1"].inputTokens, 100);
 			assert.equal(raw["s1"].cacheReadTokens, 300);
@@ -379,6 +485,19 @@ describe("CostTracker", () => {
 	});
 
 	describe("persistence round-trip", () => {
+		it("ProjectContext.close flushes pending cost usage", async () => {
+			const calls: string[] = [];
+			const context = {
+				sessionStore: { flush: () => calls.push("sessions") },
+				costTracker: { flush: () => calls.push("cost") },
+				bgProcessStore: { flush: () => calls.push("background") },
+				searchIndex: { close: async () => { calls.push("search"); } },
+			} as unknown as ProjectContext;
+
+			await ProjectContext.prototype.close.call(context);
+			assert.deepEqual(calls, ["sessions", "cost", "background", "search"]);
+		});
+
 		it("survives save and reload", () => {
 			const tracker1 = new CostTracker(stateDir, memfs);
 			tracker1.recordUsage("s1", {
@@ -389,6 +508,7 @@ describe("CostTracker", () => {
 				cost: 0.015,
 			});
 			tracker1.recordUsage("s2", { inputTokens: 500, cost: 0.05 });
+			tracker1.flush();
 
 			const tracker2 = new CostTracker(stateDir, memfs);
 			const s1 = tracker2.getSessionCost("s1");

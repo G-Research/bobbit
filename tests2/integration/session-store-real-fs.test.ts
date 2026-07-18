@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
+import { scanOrphanedTranscriptsAsync } from "../../src/server/agent/orphan-cleanup.ts";
 import { readDeletionTombstones } from "../../src/server/agent/deletion-tombstones.ts";
 
 const roots: string[] = [];
@@ -56,6 +57,28 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(parsed.version, 2);
 		assert.equal(parsed.epoch, 1);
 		assert.deepEqual(parsed.sessions.map((s: PersistedSession) => s.id), ["s1"]);
+	});
+
+	it("an external real rewrite changes the fingerprint and forces epoch revalidation", () => {
+		const root = freshRoot();
+		const stateDir = path.join(root, "state");
+		const storeFile = path.join(stateDir, "sessions.json");
+		const store = new SessionStore(stateDir);
+		store.put(makeSession("s1"));
+		assert.equal(store.getWrittenEpoch(), 1);
+
+		const externalPayload = {
+			version: 2,
+			epoch: 41,
+			sessions: [makeSession("external", { title: "external rewrite with a distinct real-file size" })],
+		};
+		fs.writeFileSync(storeFile, JSON.stringify(externalPayload), "utf-8");
+
+		store.put(makeSession("s2"));
+
+		const persisted = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
+		assert.equal(persisted.epoch, 42, "changed real metadata must disable fingerprint reuse and re-read epoch 41");
+		assert.equal(store.getWrittenEpoch(), 42);
 	});
 
 	it("rotates real backups and restores from .bak.1 after a corrupt primary", () => {
@@ -127,7 +150,7 @@ describe("SessionStore real filesystem fidelity", () => {
 		);
 	});
 
-	it("walks real nested transcript directories and ignores tracked or old jsonl files", () => {
+	it("walks real nested transcript directories and ignores tracked or old jsonl files", async () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const transcriptsDir = path.join(root, "agent-sessions");
@@ -149,17 +172,26 @@ describe("SessionStore real filesystem fidelity", () => {
 		const origWarn = console.warn;
 		console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
 		let result: { count: number; paths: string[] };
+		let asyncResult: { count: number; paths: string[] };
 		try {
 			result = store.scanOrphanedTranscripts(transcriptsDir);
+			asyncResult = await scanOrphanedTranscriptsAsync(
+				transcriptsDir,
+				new Set([trackedFile]),
+				now - 60_000,
+			);
 		} finally {
 			console.warn = origWarn;
 		}
 
-		assert.equal(result!.count, 2);
-		assert.deepEqual(result!.paths.map(p => path.relative(transcriptsDir, p)).sort(), [
+		const expected = [
 			path.join("another", "branch.jsonl"),
 			path.join("deep", "nested", "dir", "lost.jsonl"),
-		].sort());
+		].sort();
+		assert.equal(result!.count, 2);
+		assert.deepEqual(result!.paths.map(p => path.relative(transcriptsDir, p)).sort(), expected);
+		assert.equal(asyncResult!.count, 2);
+		assert.deepEqual(asyncResult!.paths.map(p => path.relative(transcriptsDir, p)).sort(), expected);
 		assert.ok(warns.every(w => !w.includes("tracked.jsonl") && !w.includes("old-orphan.jsonl")));
 	});
 });

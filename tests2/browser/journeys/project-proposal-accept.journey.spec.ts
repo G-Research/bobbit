@@ -282,27 +282,44 @@ async function setupRegisteredProposal(page: Page, testName: string): Promise<{
 async function setupProvisionalProposal(page: Page): Promise<{
 	sessionId: string;
 	projectId: string;
+	rootPath: string;
 	panel: ReturnType<Page["locator"]>;
 	button: ReturnType<Page["locator"]>;
 }> {
-	const baseProject = await defaultProject();
-	const sessionId = await createSession({ projectId: baseProject.id });
-	await waitForSessionStatus(sessionId, "idle");
-	await openApp(page);
-	await openSession(page, sessionId);
-	const projectId = `e2e-provisional-project-${Date.now()}`;
-	await injectProjectProposal(page, {
-		sessionId,
-		projectId,
-		projectName: "Provisional Accept Repro",
-		rootPath: baseProject.rootPath,
-		mode: "create",
-	});
-	const panel = page.locator(`${PANEL_SELECTOR}[data-mode="create"]`).first();
-	const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
-	await expect(panel.locator('[data-testid="accept-label"]')).toContainText("Accept Project", { timeout: 10_000 });
-	await expect(button).toBeEnabled({ timeout: 10_000 });
-	return { sessionId, projectId, panel, button };
+	const rootPath = tempProjectRoot("provisional-config-failure");
+	let sessionId: string | undefined;
+	let projectId: string | undefined;
+	try {
+		writeFileSync(join(rootPath, "package.json"), JSON.stringify({ name: "provisional-config-failure" }));
+		const createResp = await rawApiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ assistantType: "project", cwd: rootPath }),
+		});
+		const createText = await createResp.text();
+		expect(createResp.status, createText).toBe(201);
+		const createdSession = JSON.parse(createText) as { id: string; provisionalProjectId?: string };
+		sessionId = createdSession.id;
+		projectId = createdSession.provisionalProjectId;
+		expect(projectId, "project assistant should own an isolated provisional project").toBeTruthy();
+
+		await waitForSessionStatus(sessionId, "idle");
+		await openApp(page);
+		await openSession(page, sessionId);
+		const panel = await seedAndHydrateProjectProposal(page, sessionId, {
+			name: "Provisional Accept Repro",
+			root_path: rootPath,
+			test_command: "echo provisional-config-failure",
+		}, "create");
+		const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
+		await expect(panel.locator('[data-testid="accept-label"]')).toContainText("Accept Project", { timeout: 10_000 });
+		await expect(button).toBeEnabled({ timeout: 10_000 });
+		return { sessionId, projectId: projectId!, rootPath, panel, button };
+	} catch (err) {
+		if (sessionId) await deleteSession(sessionId);
+		await deleteProject(projectId);
+		rmSync(rootPath, { recursive: true, force: true });
+		throw err;
+	}
 }
 
 async function routeProjectMutations(page: Page, projectId: string, opts?: {
@@ -676,20 +693,26 @@ test.describe("Journey: project proposal accept/apply no-op regression", () => {
 
 	test("provisional config failure surfaces an error and does not clear the project proposal", async ({ page }) => {
 		test.setTimeout(60_000);
-		const { projectId, button } = await setupProvisionalProposal(page);
+		const { sessionId, projectId, rootPath, button } = await setupProvisionalProposal(page);
 		const routes = await routeProjectMutations(page, projectId, { promote: "ok", config: "abort" });
 
-		await button.click();
-		await expect.poll(routes.configAttempts, {
-			timeout: 10_000,
-			message: "provisional config write should be attempted after promote",
-		}).toBe(1);
+		try {
+			await button.click();
+			await expect.poll(routes.configAttempts, {
+				timeout: 10_000,
+				message: "provisional config write should be attempted after promote",
+			}).toBe(1);
 
-		await expect(
-			page.getByText(/Config write failed|Failed to (write|save|apply).*config|Project proposal accept failed/i).first(),
-			"PROJECT_PROPOSAL_ACCEPT_FAILURE_BUG: provisional config failure must show a clear connection error",
-		).toBeVisible({ timeout: 10_000 });
-		await expectProjectProposalStillActionable(page, "create");
+			await expect(
+				page.getByText(/Config write failed|Failed to (write|save|apply).*config|Project proposal accept failed/i).first(),
+				"PROJECT_PROPOSAL_ACCEPT_FAILURE_BUG: provisional config failure must show a clear connection error",
+			).toBeVisible({ timeout: 10_000 });
+			await expectProjectProposalStillActionable(page, "create");
+		} finally {
+			await deleteSession(sessionId);
+			await deleteProject(projectId);
+			rmSync(rootPath, { recursive: true, force: true });
+		}
 	});
 
 	test("registered Apply Changes success clears the proposal panel", async ({ page }) => {

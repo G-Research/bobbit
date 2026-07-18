@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1134,
+  "censusTotal": 1135,
   "buckets": {
-    "daily": 60,
+    "daily": 61,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 45,
+    "relocate": 46,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -936,6 +936,87 @@
         "runner": "vitest",
         "tier": "e2e",
         "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/core/archived-session-bfs.test.ts",
+      "reason": "Native v2 core coverage for indexed archived-session BFS equivalence, stable ordering, deduplication, cycles, wide fan-out, and reachable-only enrichment.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/orphan-cleanup-async-walk.test.ts",
+      "reason": "Native v2 core coverage for bounded asynchronous orphan transcript traversal parity, caps, concurrency, and filesystem error tolerance.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/rpc-bridge-line-buffer-complexity.test.ts",
+      "reason": "Native v2 core coverage pinning linear incremental RPC JSONL scanning for large chunked lines.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/rpc-bridge-line-buffer-correctness.test.ts",
+      "reason": "Native v2 core coverage for incremental RPC line framing, partial chunks, CRLF handling, ordering, and multibyte UTF-8 boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-boot-restore-lag.test.ts",
+      "reason": "Native v2 core coverage for event-loop-lag-aware eager restore batching without skipped or deferred sessions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-snapshot-memo.test.ts",
+      "reason": "Native v2 core coverage for sequence-keyed snapshot coalescing, invalidation, failure retry, and stale-promise fencing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-taskid-cache.test.ts",
+      "reason": "Native v2 core coverage for generation-invalidated session-to-task lookup caching across assignment and topology changes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/task-generation.test.ts",
+      "reason": "Native v2 core coverage for TaskStore mutation generations on successful put, remove, and removeMany operations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/archived-session-bfs-route.test.ts",
+      "reason": "Native v2 integration coverage for archived-session BFS route envelopes, stable pagination, deduplication, and reachable-only cloning.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],
@@ -15891,6 +15972,13 @@
       "method": "codemod",
       "replacement": [],
       "rationale": "node:test logic suite — codemod to vitest (node env, pool=forks)."
+    },
+    {
+      "file": "tests/e2e/session-loading-performance.e2e.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "API-only real-gateway E2E covering session loading across graceful restart, eager restoration, WebSocket snapshots, archived pagination, cost persistence, and task reassignment."
     }
   ]
 }
