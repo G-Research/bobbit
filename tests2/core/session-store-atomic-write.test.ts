@@ -51,6 +51,48 @@ function createSessionStoreMemFs(): SessionStoreMemFs {
 	return memfs;
 }
 
+type FingerprintTrackingFs = SessionStoreMemFs & {
+	primaryReads: number;
+	failPrimaryStat: boolean;
+	externalWrite(data: string): void;
+	resetPrimaryReads(): void;
+};
+
+function createFingerprintTrackingFs(storeFile: string): FingerprintTrackingFs {
+	const memfs = createSessionStoreMemFs() as FingerprintTrackingFs;
+	const primary = path.resolve(storeFile);
+	const baseReadFileSync = memfs.readFileSync.bind(memfs);
+	const baseWriteFileSync = memfs.writeFileSync.bind(memfs);
+	const baseStatSync = memfs.statSync.bind(memfs);
+	const baseRenameSync = memfs.renameSync.bind(memfs);
+	let fingerprintVersion = 1;
+
+	memfs.primaryReads = 0;
+	memfs.failPrimaryStat = false;
+	memfs.resetPrimaryReads = () => { memfs.primaryReads = 0; };
+	memfs.externalWrite = (data: string) => {
+		baseWriteFileSync(primary, data, "utf-8");
+		fingerprintVersion++;
+	};
+	memfs.readFileSync = ((file: PathLike | number, ...args: unknown[]) => {
+		if (typeof file !== "number" && path.resolve(String(file)) === primary) memfs.primaryReads++;
+		return (baseReadFileSync as (...callArgs: unknown[]) => unknown)(file, ...args);
+	}) as typeof memfs.readFileSync;
+	(memfs as { statSync: typeof memfs.statSync }).statSync = ((file: PathLike, ...args: unknown[]) => {
+		const isPrimary = path.resolve(String(file)) === primary;
+		if (isPrimary && memfs.failPrimaryStat) throw Object.assign(new Error("injected stat failure"), { code: "EIO" });
+		const stat = (baseStatSync as (...callArgs: unknown[]) => import("node:fs").Stats)(file, ...args);
+		return isPrimary
+			? { ...stat, mtimeMs: fingerprintVersion, ctimeMs: fingerprintVersion }
+			: stat;
+	}) as typeof memfs.statSync;
+	memfs.renameSync = ((from: PathLike, to: PathLike) => {
+		baseRenameSync(from, to);
+		if (path.resolve(String(to)) === primary) fingerprintVersion++;
+	}) as typeof memfs.renameSync;
+	return memfs;
+}
+
 const stateDir = path.resolve("/memfs/session-store-atomic/state");
 const STORE_FILE = path.join(stateDir, "sessions.json");
 const BAK_1 = `${STORE_FILE}.bak.1`;
@@ -75,7 +117,7 @@ describe("SessionStore atomic write", () => {
 		memfs.mkdirSync(stateDir, { recursive: true });
 	});
 
-	it("writes v2 shape with monotonically increasing epoch", () => {
+	it("writes compact v2 JSON with monotonically increasing epoch and reloads identically", () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));
 		store.put(makeSession("s2"));
@@ -84,12 +126,52 @@ describe("SessionStore atomic write", () => {
 
 		const raw = memfs.readFileSync(STORE_FILE, "utf-8");
 		const parsed = JSON.parse(raw);
+		assert.equal(raw, JSON.stringify(parsed), "sessions.json must contain no pretty-print whitespace");
 		assert.equal(parsed.version, 2);
 		assert.equal(typeof parsed.epoch, "number");
 		assert.equal(parsed.epoch, 3, "three put()s ⇒ epoch=3");
 		assert.equal(parsed.sessions.length, 3);
 		const ids = parsed.sessions.map((s: PersistedSession) => s.id).sort();
 		assert.deepEqual(ids, ["s1", "s2", "s3"]);
+
+		const restored = new SessionStore(stateDir, memfs);
+		assert.equal(restored.getLoadedEpoch(), parsed.epoch);
+		assert.deepEqual(restored.getAll(), parsed.sessions);
+	});
+
+	it("fully validates the first save, then skips reads while its own fingerprint is unchanged", () => {
+		const fs = createFingerprintTrackingFs(STORE_FILE);
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.externalWrite(JSON.stringify({ version: 2, epoch: 7, sessions: [makeSession("seed")] }, null, 2));
+		const store = new SessionStore(stateDir, fs);
+		fs.resetPrimaryReads();
+
+		store.put(makeSession("s1"));
+		assert.equal(fs.primaryReads, 1, "first save after load must still read and parse the disk epoch");
+
+		fs.resetPrimaryReads();
+		store.put(makeSession("s2"));
+		assert.equal(fs.primaryReads, 0, "unchanged post-own-write fingerprint should reuse the known epoch");
+		assert.equal(store.getWrittenEpoch(), 9);
+	});
+
+	it("falls back to a full epoch read after an external rewrite or stat failure", () => {
+		const fs = createFingerprintTrackingFs(STORE_FILE);
+		fs.mkdirSync(stateDir, { recursive: true });
+		const store = new SessionStore(stateDir, fs);
+		store.put(makeSession("s1"));
+
+		fs.externalWrite(JSON.stringify({ version: 2, epoch: 40, sessions: [makeSession("external")] }));
+		fs.resetPrimaryReads();
+		store.put(makeSession("s2"));
+		assert.equal(fs.primaryReads, 1, "changed fingerprint must force a full read and parse");
+		assert.equal(store.getWrittenEpoch(), 41, "existing epoch progression remains authoritative");
+
+		fs.failPrimaryStat = true;
+		fs.resetPrimaryReads();
+		store.put(makeSession("s3"));
+		assert.equal(fs.primaryReads, 1, "stat errors must disable the fast path and fully validate");
+		assert.equal(store.getWrittenEpoch(), 42);
 	});
 
 	it("does not leave a .tmp file behind after a successful save", () => {

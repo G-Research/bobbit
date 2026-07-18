@@ -217,6 +217,12 @@ type SessionStoreFs = FsLike & {
 	closeSync: typeof import("node:fs").closeSync;
 };
 
+type DiskFingerprint = {
+	size: number;
+	mtimeMs: number;
+	ctimeMs?: number;
+};
+
 export class SessionStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
@@ -232,6 +238,8 @@ export class SessionStore {
 	private loadedEpoch = 0;
 	/** Epoch we have successfully written to disk this process. */
 	private writtenEpoch = 0;
+	/** Last observed metadata for the primary; never authoritative before our first write. */
+	private diskFingerprint: DiskFingerprint | null = null;
 	/** One-shot latch: once tripped, no further saveNow() writes to disk. */
 	private staleGuardTripped = false;
 
@@ -241,6 +249,7 @@ export class SessionStore {
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "sessions.json");
 		this.load();
+		this.diskFingerprint = this.currentDiskFingerprint();
 	}
 
 	/** Normalise PersistedSession-shaped rows read from disk (legacy field migration). */
@@ -373,6 +382,31 @@ export class SessionStore {
 		}
 	}
 
+	/** Best-effort metadata used only to prove our own last write is unchanged. */
+	private currentDiskFingerprint(): DiskFingerprint | null {
+		try {
+			const stat = this.fs.statSync(this.storeFile);
+			const size = Number(stat.size);
+			const mtimeMs = Number(stat.mtimeMs);
+			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) return null;
+			const ctimeMs = Number(stat.ctimeMs);
+			return {
+				size,
+				mtimeMs,
+				...(Number.isFinite(ctimeMs) ? { ctimeMs } : {}),
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	private static fingerprintsEqual(a: DiskFingerprint | null, b: DiskFingerprint | null): boolean {
+		return a !== null && b !== null
+			&& a.size === b.size
+			&& a.mtimeMs === b.mtimeMs
+			&& a.ctimeMs === b.ctimeMs;
+	}
+
 	/** Rotate sessions.json → .bak.1 → .bak.2 → … → .bak.N. Best-effort. */
 	private rotateBackups(): void {
 		try {
@@ -424,7 +458,13 @@ export class SessionStore {
 			// last loaded AND we have not yet written anything this process, refuse
 			// — we'd be clobbering newer state (e.g. cloud-sync / antivirus / manual
 			// restore from .pre-migration backup under a running gateway).
-			const onDiskEpoch = this.peekDiskEpoch();
+			// The first write always performs the full read/parse. Only after our own
+			// successful rename may an unchanged fingerprint reuse the known epoch.
+			const currentFingerprint = this.currentDiskFingerprint();
+			const onDiskEpoch = this.writtenEpoch > 0
+				&& SessionStore.fingerprintsEqual(currentFingerprint, this.diskFingerprint)
+				? Math.max(this.loadedEpoch, this.writtenEpoch)
+				: this.peekDiskEpoch();
 			if (onDiskEpoch > this.loadedEpoch && this.writtenEpoch === 0) {
 				console.error(
 					`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
@@ -443,7 +483,7 @@ export class SessionStore {
 				epoch: nextEpoch,
 				sessions: Array.from(this.sessions.values()),
 			};
-			const json = JSON.stringify(payload, null, 2);
+			const json = JSON.stringify(payload);
 
 			// Rotate .bak (keep N=5) before writing — best-effort.
 			this.rotateBackups();
@@ -459,6 +499,9 @@ export class SessionStore {
 			}
 			this.fs.renameSync(tmp, this.storeFile);
 			this.writtenEpoch = nextEpoch;
+			// Refresh only after the atomic replacement succeeds. A stat failure
+			// leaves the fast path disabled so the next save performs full validation.
+			this.diskFingerprint = this.currentDiskFingerprint();
 		} catch (err) {
 			console.error("[session-store] Failed to save sessions:", err);
 			// Best-effort cleanup of stray .tmp from a failed write.
