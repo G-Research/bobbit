@@ -309,6 +309,8 @@ export class TeamManager {
 	private leadIdleSinceByGoal = new Map<string, number>();
 	/** goalId → last stuck-nudge ms (5-min floor). */
 	private lastNudgeAtPerGoal = new Map<string, number>();
+	/** Goals whose completed team runtime has already been rearmed after a reset. */
+	private rearmedCompletedTeams = new Set<string>();
 	/** Periodic 60s sweep that detects fully-idle teams. */
 	private stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
 	private verificationHarness?: VerificationHarness;
@@ -1054,15 +1056,15 @@ export class TeamManager {
 
 	/**
 	 * Detect teams whose lead is idle on boot AND that have concrete
-	 * outstanding work (a failed gate or an open task). Send a one-shot
+	 * outstanding work (an unresolved gate or an open task). Send a one-shot
 	 * boot-resume nudge so the operator doesn't have to wait for the 5-min
 	 * stuck-sweep tick before progress resumes after a gateway restart.
 	 *
 	 * Conservatism rules:
 	 *  - Skip everything `shouldSkipNudge` skips (paused/complete/shelved/
 	 *    archived/in-flight-child/nudge-pending/active-verification).
-	 *  - Skip teams with no failed gate AND no open task — a goal with all
-	 *    gates passed and no pending tasks is genuinely dormant; nudging
+	 *  - Skip teams with no unresolved gate AND no open task — a goal with all
+	 *    gates passed or bypassed and no pending tasks is genuinely dormant; nudging
 	 *    it would just re-invoke an LLM for no reason.
 	 *  - Stamp `nudgePending` + `lastNudgeAtPerGoal` so the stuck-sweep
 	 *    doesn't double-fire within STUCK_QUIET_THRESHOLD_MS.
@@ -1225,26 +1227,26 @@ export class TeamManager {
 
 	/**
 	 * Return a one-line description of a goal's concrete outstanding work,
-	 * or null if there is none. "Outstanding" = failed gate OR open task
-	 * (state in todo/in-progress). Passed gates and complete tasks don't
+	 * or null if there is none. "Outstanding" = unresolved gate OR open task
+	 * (state in todo/in-progress). Passed/bypassed gates and complete tasks don't
 	 * count; this is about "the team-lead has a concrete next action".
 	 */
 	private _outstandingWorkSummary(goalId: string): string | null {
 		const ctx = this.config.projectContextManager?.getContextForGoal(goalId);
 		if (!ctx) return null;
-		let failedGates = 0;
+		let unresolvedGates = 0;
 		try {
 			const gateStates = ctx.gateStore.getGatesForGoal(goalId);
-			failedGates = gateStates.filter(g => g.status === "failed").length;
+			unresolvedGates = gateStates.filter(g => g.status !== "passed" && g.status !== "bypassed").length;
 		} catch { /* gate store may be unavailable for a freshly-recovered goal */ }
 		let openTasks = 0;
 		try {
 			const tasks = ctx.taskStore.getByGoalId(goalId);
 			openTasks = tasks.filter(t => t.state === "todo" || t.state === "in-progress").length;
 		} catch { /* task store may be unavailable */ }
-		if (failedGates === 0 && openTasks === 0) return null;
+		if (unresolvedGates === 0 && openTasks === 0) return null;
 		const parts: string[] = [];
-		if (failedGates > 0) parts.push(`${failedGates} failed gate(s)`);
+		if (unresolvedGates > 0) parts.push(`${unresolvedGates} unresolved gate(s)`);
 		if (openTasks > 0) parts.push(`${openTasks} open task(s)`);
 		return parts.join(", ");
 	}
@@ -2600,6 +2602,37 @@ export class TeamManager {
 	}
 
 	/**
+	 * Rearm the existing team lead after a completed goal is explicitly reopened.
+	 * The caller owns the persisted `complete` → `in-progress` transition; this
+	 * method only restores runtime subscriptions and base-delay nudge timers.
+	 * Repeated calls are no-ops until the team is completed again.
+	 */
+	reopenCompletedTeam(goalId: string): boolean {
+		if (this.rearmedCompletedTeams.has(goalId)) return false;
+
+		const entry = this.teams.get(goalId);
+		if (!entry?.teamLeadSessionId) return false;
+		const goal = this.resolveGoal(goalId);
+		if (!goal || goal.state !== "in-progress" || goal.archived || goal.paused) return false;
+
+		const lead = this.sessionManager.getSession(entry.teamLeadSessionId);
+		if (!lead || lead.status === "terminated") return false;
+
+		// Completion removes the lead subscription and clears its timers, but idle
+		// and stuck-nudge timestamps can survive. Reset all completion-era runtime
+		// state so this is a fresh base-delay cycle, then replace the subscription.
+		this.clearIdleNudgeTimer(goalId);
+		this.leadIdleSinceByGoal.delete(goalId);
+		this.lastNudgeAtPerGoal.delete(goalId);
+		this.subscribeTeamLeadEvents(goalId);
+		if (lead.status === "idle") this.startIdleNudgeTimer(goalId);
+
+		this.rearmedCompletedTeams.add(goalId);
+		console.log(`[team-manager] Rearmed completed team for reopened goal ${goalId}; team lead remains ${entry.teamLeadSessionId}`);
+		return true;
+	}
+
+	/**
 	 * Complete a team: dismiss all role agents but keep the team lead alive.
 	 * The team lead remains active to await further instructions.
 	 */
@@ -2653,8 +2686,9 @@ export class TeamManager {
 		// Keep the team lead session alive — do NOT terminate it.
 		// The team lead will await further instructions.
 
-		// Update goal state
+		// Update goal state. A later reset-driven reopen may rearm this runtime once.
 		await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "complete" });
+		this.rearmedCompletedTeams.delete(goalId);
 
 		// Notify parent team lead when a child goal completes, regardless of workflow shape.
 		// This ensures the parent is woken up even if the child's workflow has no
@@ -2744,6 +2778,7 @@ export class TeamManager {
 		this.teams.delete(goalId);
 		this.leadIdleSinceByGoal.delete(goalId);
 		this.lastNudgeAtPerGoal.delete(goalId);
+		this.rearmedCompletedTeams.delete(goalId);
 		this.resolveTeamStore(goalId).remove(goalId);
 
 		console.log(`[team-manager] Tore down team for goal ${goalId}`);
