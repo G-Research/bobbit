@@ -5,6 +5,7 @@ import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { WebSocket } from "ws";
 import type {
 	ServerMessage,
@@ -38,7 +39,8 @@ import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
 import { readToken } from "../auth/token.js";
-import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
+import { shouldKeepDespiteOrphan } from "./orphan-cleanup.js";
+import * as orphanCleanup from "./orphan-cleanup.js";
 import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -804,6 +806,15 @@ export interface SessionInfo {
 	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
 	 */
 	latestMessageUpdate?: { id?: string; message: any };
+	/**
+	 * Memoized agent snapshot base (RPC response plus error normalization), keyed
+	 * by the event buffer's monotonic sequence. Mutable overlays and sidecars are
+	 * deliberately applied by callers on every response.
+	 */
+	messagesSnapshotCache?: {
+		seq: number;
+		promise: Promise<{ success: boolean; data?: unknown; error?: string }>;
+	};
 }
 
 // `spliceInFlightMessage` lives in its own module so unit tests can import
@@ -1132,6 +1143,9 @@ export interface SessionManagerOptions {
 	 * Defaults to bobbitStateDir() when omitted.
 	 */
 	stateDir?: string;
+	/** Test seam for boot restore lag, in milliseconds. The production default
+	 * samples a `monitorEventLoopDelay()` histogram. */
+	bootRestoreLagSampler?: () => number;
 }
 
 type SessionReplacementToken = {
@@ -1278,6 +1292,12 @@ export class SessionManager {
 	private _poisonedHistoryRecoveries = new Map<string, Promise<void>>();
 	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
 	private _sessionRespawnGenerations = new Map<string, number>();
+	/** Session-to-task lookup memo, invalidated by ProjectContextManager's
+	 * topology-aware task generation. Cached absence is intentional. */
+	private _taskIdCache = new Map<string, { gen: number; taskId: string | undefined }>();
+	/** Injected boot lag sampler. When absent, restoreSessions owns a temporary
+	 * real event-loop delay histogram for the duration of eager restoration. */
+	private readonly _bootRestoreLagSampler?: () => number;
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
@@ -1320,6 +1340,7 @@ export class SessionManager {
 	}
 
 	private _fenceReplacedSession(session: SessionInfo, replacingGeneration: number): void {
+		this._taskIdCache.delete(session.id);
 		session.lifecycleFenced = true;
 		session.lifecycleGeneration = replacingGeneration - 1;
 		session.dormant = true;
@@ -1738,6 +1759,7 @@ export class SessionManager {
 		this.testPreparingDelayMs = options?.testPreparingDelayMs;
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
 		this.stateDir = options?.stateDir ?? bobbitStateDir();
+		this._bootRestoreLagSampler = options?.bootRestoreLagSampler;
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -2428,20 +2450,54 @@ export class SessionManager {
 	}
 
 	private resolveTaskIdForSession(sessionId: string): string | undefined {
-		const live = this.sessions.get(sessionId);
-		if (live?.taskId) return live.taskId;
-		const persisted = this.getPersistedSession(sessionId);
-		if (persisted?.taskId) return persisted.taskId;
-		if (this.projectContextManager) {
-			for (const ctx of this.projectContextManager.all()) {
-				const tm = new TaskManager(ctx.taskStore);
-				const tasks = tm.getTasksForSession(sessionId);
-				if (tasks.length > 0) return tasks[0].id;
-			}
-			return undefined;
+		if (!this.projectContextManager) {
+			const live = this.sessions.get(sessionId);
+			if (live?.taskId) return live.taskId;
+			const persisted = this.getPersistedSession(sessionId);
+			if (persisted?.taskId) return persisted.taskId;
+			const tasks = this._testTaskManager?.getTasksForSession(sessionId) ?? [];
+			return tasks.length > 0 ? tasks[0].id : undefined;
 		}
-		const tasks = this._testTaskManager?.getTasksForSession(sessionId) ?? [];
-		return tasks.length > 0 ? tasks[0].id : undefined;
+
+		// `getTaskGeneration()` is supplied by ProjectContextManager's
+		// topology-aware generation integration. Until that API is present, stay
+		// conservative and use the uncached scan rather than risk stale task ids.
+		const generationSource = this.projectContextManager as ProjectContextManager & {
+			getTaskGeneration?: () => number;
+		};
+		const generation = generationSource.getTaskGeneration?.();
+		const cached = generation === undefined ? undefined : this._taskIdCache.get(sessionId);
+		if (cached && cached.gen === generation) return cached.taskId;
+
+		const live = this.sessions.get(sessionId);
+		const persisted = this.getPersistedSession(sessionId);
+		const stampedTaskId = live?.taskId ?? persisted?.taskId;
+		let taskId: string | undefined;
+
+		// A stamped task id is only a hint: assignments can change without
+		// rewriting the session row, so verify it against the current task store.
+		if (stampedTaskId) {
+			for (const ctx of this.projectContextManager.all()) {
+				const task = ctx.taskStore.get(stampedTaskId);
+				if (task?.assignedSessionId === sessionId) {
+					taskId = task.id;
+					break;
+				}
+			}
+		}
+
+		if (!taskId) {
+			for (const ctx of this.projectContextManager.all()) {
+				const tasks = new TaskManager(ctx.taskStore).getTasksForSession(sessionId);
+				if (tasks.length > 0) {
+					taskId = tasks[0].id;
+					break;
+				}
+			}
+		}
+
+		if (generation !== undefined) this._taskIdCache.set(sessionId, { gen: generation, taskId });
+		return taskId;
 	}
 
 	private mcpScopeKey(scope?: { projectId?: string; cwd?: string; scopeKey?: string }): string {
@@ -5953,24 +6009,11 @@ export class SessionManager {
 			cost: costValue,
 		}, stampGoalId);
 
-		// Look up taskId from assigned tasks for this session
-		let taskId: string | undefined;
-		if (this.projectContextManager) {
-			for (const ctx of this.projectContextManager.all()) {
-				const tm = new TaskManager(ctx.taskStore);
-				const tasks = tm.getTasksForSession(session.id);
-				if (tasks.length > 0) { taskId = tasks[0].id; break; }
-			}
-		} else {
-			const tasks = this._testTaskManager?.getTasksForSession(session.id) ?? [];
-			taskId = tasks.length > 0 ? tasks[0].id : undefined;
-		}
-
 		broadcast(session.clients, {
 			type: "cost_update",
 			sessionId: session.id,
 			goalId: session.goalId,
-			taskId,
+			taskId: this.resolveTaskIdForSession(session.id),
 			cost: cumulativeCost,
 		});
 	}
@@ -6057,11 +6100,23 @@ export class SessionManager {
 		const liveRestore = [...regular, ...delegateSurvivors];
 		console.log(`[session-manager] Restoring ${regular.length} session(s) + ${delegateSurvivors.length} delegate(s) live...`);
 
-		// Restore regular + surviving delegate sessions in parallel (batched concurrency)
-		const CONCURRENCY = 5;
-		for (let i = 0; i < liveRestore.length; i += CONCURRENCY) {
-			const batch = liveRestore.slice(i, i + CONCURRENCY);
-			await Promise.all(batch.map(ps => this.restoreOneSession(ps)));
+		// Restore the unchanged eager set in adaptive batches. Lag only changes
+		// simultaneous width and the inter-batch yield; every candidate is attempted
+		// exactly once, in the existing regular + delegate-survivor order.
+		const lagMonitor = this.startBootRestoreLagMonitor();
+		try {
+			for (let i = 0; i < liveRestore.length;) {
+				const lagMs = lagMonitor.sample();
+				const CONCURRENCY = this.concurrencyForBootLag(lagMs);
+				const batch = liveRestore.slice(i, i + CONCURRENCY);
+				await Promise.all(batch.map(ps => this.restoreOneSession(ps)));
+				i += batch.length;
+				if (i < liveRestore.length) {
+					await this.yieldBootRestore(lagMs >= 200 ? 25 : 0);
+				}
+			}
+		} finally {
+			lagMonitor.disable();
 		}
 
 		// OrchestrationCore (§3/§4): rebuild the in-memory child index from the
@@ -6127,7 +6182,7 @@ export class SessionManager {
 			// If the store is empty (fresh install), use a 24h floor so we don't
 			// flag every transcript from a previous install.
 			const floor = mostRecent > 0 ? mostRecent : (this.clock.now() - 24 * 60 * 60 * 1000);
-			const result = scanOrphanedTranscripts(agentSessionsRoot, tracked, floor);
+			const result = await this.scanOrphanedTranscriptsAsync(agentSessionsRoot, tracked, floor);
 			this.orphanedTranscriptsCount = result.count;
 			if (result.count > 0) {
 				console.warn(`[session-store] WARN: ${result.count} agent transcript(s) on disk are not tracked in sessions.json`);
@@ -6135,6 +6190,64 @@ export class SessionManager {
 		} catch (err) {
 			console.warn("[session-manager] orphan-transcript scan failed:", err);
 		}
+	}
+
+	/** Map observed boot event-loop lag to a bounded eager restore width. */
+	private concurrencyForBootLag(lagMs: number): number {
+		const nominal = 5;
+		if (!Number.isFinite(lagMs) || lagMs <= 50) return nominal;
+		if (lagMs >= 200) return 1;
+		const fraction = (lagMs - 50) / (200 - 50);
+		return Math.max(1, Math.min(nominal, Math.round(nominal - fraction * (nominal - 1))));
+	}
+
+	/** Enable a restore-scoped lag sampler. Real histograms are always disabled
+	 * in the returned cleanup, including when a restore attempt throws. */
+	private startBootRestoreLagMonitor(): { sample: () => number; disable: () => void } {
+		if (this._bootRestoreLagSampler) {
+			return {
+				sample: () => {
+					try { return this._bootRestoreLagSampler?.() ?? 0; } catch { return 0; }
+				},
+				disable: () => {},
+			};
+		}
+		const histogram = monitorEventLoopDelay({ resolution: 20 });
+		histogram.enable();
+		return {
+			sample: () => {
+				const lagMs = histogram.max / 1e6;
+				histogram.reset();
+				return Number.isFinite(lagMs) ? lagMs : 0;
+			},
+			disable: () => histogram.disable(),
+		};
+	}
+
+	private async yieldBootRestore(delayMs: number): Promise<void> {
+		await new Promise<void>((resolve) => globalThis.setTimeout(resolve, Math.max(0, Math.min(25, delayMs))));
+	}
+
+	/** Compatibility shim while the async walker lands independently. The merged
+	 * implementation always selects `scanOrphanedTranscriptsAsync`; the sync
+	 * fallback keeps intermediate feature branches runnable without weakening
+	 * the final API contract. */
+	private async scanOrphanedTranscriptsAsync(
+		agentSessionsRoot: string,
+		tracked: Set<string>,
+		floor: number,
+	): Promise<{ count: number; paths: string[] }> {
+		const module = orphanCleanup as typeof orphanCleanup & {
+			scanOrphanedTranscriptsAsync?: (
+				root: string,
+				trackedFiles: Set<string>,
+				mostRecentLastActivity: number,
+			) => Promise<{ count: number; paths: string[] }>;
+		};
+		if (module.scanOrphanedTranscriptsAsync) {
+			return module.scanOrphanedTranscriptsAsync(agentSessionsRoot, tracked, floor);
+		}
+		return module.scanOrphanedTranscripts(agentSessionsRoot, tracked, floor);
 	}
 
 	// NOTE: cleanupOrphanedNonInteractiveSessions() was removed — replaced by
@@ -7564,13 +7677,48 @@ export class SessionManager {
 			return this.getPersistedSessionOutput(sessionId);
 		}
 
-		const msgsResp = await session.rpcClient.getMessages();
+		const msgsResp = await this.getMessagesSnapshotBase(session);
 		if (!msgsResp.success) return this.getPersistedSessionOutput(sessionId);
 
 		const messages = msgsResp.data?.messages || msgsResp.data;
 		if (!Array.isArray(messages)) return "";
 
 		return this.extractAssistantText(messages);
+	}
+
+	/**
+	 * Return the normalized agent snapshot base for the session's current event
+	 * sequence. The promise is installed before awaiting so concurrent tabs share
+	 * one RPC. Failed responses and rejections clear only their owning slot, so a
+	 * newer-sequence request cannot be clobbered by an older completion.
+	 *
+	 * Callers must treat `data` as immutable and freshly apply in-flight overlays,
+	 * sidecar merges, truncation, ordering stamps, and serialization.
+	 */
+	async getMessagesSnapshotBase(session: SessionInfo): Promise<{ success: boolean; data?: unknown; error?: string }> {
+		const seq = session.eventBuffer.lastSeq;
+		const cached = session.messagesSnapshotCache;
+		if (cached?.seq === seq) return cached.promise;
+
+		const promise = (async (): Promise<{ success: boolean; data?: unknown; error?: string }> => {
+			const response = await session.rpcClient.getMessages();
+			if (!response?.success) return response;
+			return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
+		})();
+		session.messagesSnapshotCache = { seq, promise };
+		promise.then(
+			(response) => {
+				if (!response?.success && session.messagesSnapshotCache?.promise === promise) {
+					session.messagesSnapshotCache = undefined;
+				}
+			},
+			() => {
+				if (session.messagesSnapshotCache?.promise === promise) {
+					session.messagesSnapshotCache = undefined;
+				}
+			},
+		);
+		return promise;
 	}
 
 	/** Query the agent for its session file and save metadata to disk */
@@ -8267,6 +8415,7 @@ export class SessionManager {
 			session.clients.clear();
 			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
+			this._taskIdCache.delete(id);
 			extStore.remove(id);
 			cleanupSessionPrompt(id, this.stateDir);
 			console.log(`[session-manager] Unregistered external session ${id}`);
@@ -9255,6 +9404,7 @@ export class SessionManager {
 		const terminateStore = this.resolveStoreForSession(id);
 		const terminatedScope = { projectId: session.projectId, cwd: session.cwd };
 		this.sessions.delete(id);
+		this._taskIdCache.delete(id);
 		await this.cleanupScopedMcpManagersForSessionScope(terminatedScope);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down on the live DELETE/stop path too. terminateSession
@@ -11122,6 +11272,23 @@ export class SessionManager {
 			session.clients.clear();
 			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
+			this._taskIdCache.delete(id);
+		}
+		this._taskIdCache.clear();
+
+		// Persist the trailing debounced cost window before contexts are closed.
+		// `flush()` is idempotent, so ProjectContext.close() may safely repeat it.
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				try {
+					(ctx.costTracker as CostTracker & { flush?: () => void }).flush?.();
+				} catch (err) {
+					console.error(`[session-manager] Failed to flush cost tracker for project ${ctx.project.id}:`, err);
+				}
+			}
+		} else {
+			try { (this._testCostTracker as (CostTracker & { flush?: () => void }) | null)?.flush?.(); }
+			catch (err) { console.error("[session-manager] Failed to flush test cost tracker:", err); }
 		}
 
 		// Flush any debounced store writes before exit

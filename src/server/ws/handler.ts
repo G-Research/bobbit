@@ -18,7 +18,6 @@ import { resolveModelStateMeta } from "../agent/model-registry.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
-import { normalizeToolResultErrorSnapshot } from "../agent/tool-result-error-normalizer.js";
 import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
@@ -84,6 +83,43 @@ function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[
 	const entries = readSkillSidecarEntries(sessionId);
 	if (entries.length === 0) return messages;
 	return mergeSidecarEntriesIntoMessages(entries, messages);
+}
+
+/**
+ * Apply the mutable/live half of snapshot assembly to a fresh shallow copy.
+ * The memoized base must never receive `_order`, overlay, truncation, or
+ * sidecar mutations: cache hits deliberately rerun all of this work.
+ */
+export function applyLiveSnapshotTransforms(
+	sessionId: string,
+	session: { latestMessageUpdate?: { id?: string; message: any }; inFlightSteerTexts?: string[] },
+	rawBase: any,
+): any {
+	const cloneMessages = (messages: any[]): any[] => messages.map((message) =>
+		message && typeof message === "object" ? { ...message } : message,
+	);
+
+	if (Array.isArray(rawBase)) {
+		const base = cloneMessages(rawBase);
+		const spliced = spliceInFlightSteers(
+			spliceInFlightMessage(base, session.latestMessageUpdate),
+			session.inFlightSteerTexts,
+		);
+		const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
+		return mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
+	}
+	if (rawBase && typeof rawBase === "object" && Array.isArray(rawBase.messages)) {
+		const base = { ...rawBase, messages: cloneMessages(rawBase.messages) };
+		const spliced = spliceInFlightSteers(
+			spliceInFlightMessage(base.messages, session.latestMessageUpdate),
+			session.inFlightSteerTexts,
+		);
+		const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
+		const truncated = truncateLargeToolContentInMessages(withCompaction);
+		const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
+		return { ...base, messages: merged };
+	}
+	return rawBase;
 }
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
@@ -1105,33 +1141,15 @@ export function handleWebSocketConnection(
 					const tStart = perf ? performance.now() : 0;
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
-					const msgsResp = await session.rpcClient.getMessages();
+					const msgsResp = await sessionManager.getMessagesSnapshotBase(session);
 					if (diagEnabled) {
 						getCpuDiagnostics().recordTimer("ws-handler:getMessages", performance.now() - diagStart, { success: msgsResp.success ? 1 : 0 });
 					}
 					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
-						const raw = normalizeToolResultErrorSnapshot(msgsResp.data as any);
-						// msgsResp.data may be an array or { messages: [...] }
-						let data: any = raw;
-						if (Array.isArray(raw)) {
-							// H3: splice in-flight message_update before truncation/sidecar/stamp.
-							const spliced = spliceInFlightSteers(
-								spliceInFlightMessage(raw, (session as any).latestMessageUpdate),
-								(session as any).inFlightSteerTexts,
-							);
-							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
-							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
-						} else if (raw && Array.isArray(raw.messages)) {
-							const spliced = spliceInFlightSteers(
-								spliceInFlightMessage(raw.messages, (session as any).latestMessageUpdate),
-								(session as any).inFlightSteerTexts,
-							);
-							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
-							const truncated = truncateLargeToolContentInMessages(withCompaction);
-							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
-							data = merged === raw.messages ? raw : { ...raw, messages: merged };
-						}
+						// The memo covers only RPC + normalization. Mutable overlays,
+						// sidecars, truncation and order stamps are rebuilt on every hit.
+						const data = applyLiveSnapshotTransforms(sessionId, session, msgsResp.data as any);
 						const tPipeline = perf ? performance.now() : 0;
 						const stamped = stampSnapshotOrder(data);
 						const tStamp = perf ? performance.now() : 0;
@@ -1231,20 +1249,11 @@ export function handleWebSocketConnection(
 						// Refresh messages after restart so the client sees the full history
 						const restored = sessionManager.getSession(sessionId);
 						if (restored) {
-							restored.rpcClient.getMessages?.()
+							sessionManager.getMessagesSnapshotBase(restored)
 								.then((msgs: any) => {
 									if (!msgs) return;
-									const raw = normalizeToolResultErrorSnapshot(msgs.data ?? msgs);
-									let data: any = raw;
-									if (Array.isArray(raw)) {
-										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw);
-										data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
-									} else if (raw && Array.isArray(raw.messages)) {
-										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw.messages);
-										const truncated = truncateLargeToolContentInMessages(withCompaction);
-										const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
-										data = merged === raw.messages ? raw : { ...raw, messages: merged };
-									}
+									const raw = msgs.data ?? msgs;
+									const data = applyLiveSnapshotTransforms(sessionId, restored, raw);
 									send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
 								})
 								.catch(() => {});
