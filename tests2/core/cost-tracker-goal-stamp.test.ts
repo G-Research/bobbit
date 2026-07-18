@@ -96,6 +96,7 @@ describe("CostTracker goalId stamping", () => {
 	it("goalId round-trips through save/load", () => {
 		const t1 = new CostTracker(stateDir, memfs);
 		t1.recordUsage("s1", { cost: 0.01 }, "goal-1");
+		t1.flush();
 		const t2 = new CostTracker(stateDir, memfs);
 		assert.equal(t2.getSessionCost("s1")?.goalId, "goal-1");
 		assert.equal(t2.getGoalCost("goal-1").totalCost, 0.01);
