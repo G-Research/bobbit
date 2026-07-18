@@ -240,9 +240,15 @@ Do not store images, attachments, or rewritten display text. `modelText` is alre
 2. exact message timestamp/settlement timestamp within 2 seconds plus exact `modelText`;
 3. exact `modelText`, FIFO by `dispatchedAt`, consuming each sidecar record once.
 
-Cancelled records never match. Duplicate identical prompts remain distinct because matching consumes a multiset, not a `Set`. When compaction removes an earlier duplicate, timestamp/id binding prevents the retained duplicate from consuming the removed prompt's author. If a legacy message has neither id nor timestamp, FIFO text matching is the final safe fallback.
+Live and restore replay additionally use stable occurrence keys from Pi id aliases on either the message or outer event. A keyed occurrence retains one binding across updates and repeated terminal frames, so a duplicate cannot advance to the next same-text prompt.
 
-The merge clones only changed message objects and is idempotent. It never rewrites Pi JSONL.
+Legacy replay may provide neither id nor timestamp. For the bounded `switch_session` replay window, retain an ordered runtime view of every non-cancelled sidecar occurrence, including settled rows. Settled same-text occurrences remain guards, and consecutive duplicate keyless terminal frames reuse the last binding. Clear this restore-only state after replay so it cannot shadow later live input.
+
+The safety invariant is stronger than best-effort attribution: a historical or duplicate echo must not settle a newer unresolved same-text prompt or consume its in-flight steer ledger. Only an echo correlated to that unresolved occurrence may do so; unresolved ledger rows survive replay and are requeued unchanged. Because two genuinely keyless identical occurrences are information-theoretically indistinguishable, the fallback preserves durable intent rather than guessing the newer occurrence.
+
+Cancelled records never match. Snapshot/transcript duplicates remain distinct because matching consumes a multiset, not a `Set`. When compaction removes an earlier duplicate, timestamp/id binding prevents the retained duplicate from consuming the removed prompt's author.
+
+The merge clones only changed message objects and is idempotent. The replay guard is in-memory correlation state: it adds no v1 sidecar fields or record variants, synthesizes no Pi ids, and changes neither Pi JSONL nor model/provider roles, content, or schemas.
 
 ## 6. Queue and in-flight state
 
@@ -289,9 +295,9 @@ For a steer batch:
 
 ### 6.3 Runtime pending bindings
 
-Add `SessionInfo.pendingPromptAuthors?: PromptAuthorDispatchRecord[]`. Every direct/queued/steer dispatch pushes a record before invoking Pi and appends it to the sidecar. User-role `message_end` consumes the first exact-text pending record, stamps its author on the cloned visible event, and appends an `echoed` settlement. Rejection removes the pending record and appends `cancelled`.
+Add `SessionInfo.pendingPromptAuthors?: PromptAuthorDispatchRecord[]`. Every direct/queued/steer dispatch pushes a record before invoking Pi and appends it to the sidecar. A user-role event first reuses its stable id/timestamp occurrence binding; exact text is the ordered fallback only when Pi supplies no key. A newly resolved `message_end` stamps the cloned visible event, appends an `echoed` settlement, and consumes only the matching pending record. Rejection removes that record and appends `cancelled`.
 
-Keep this independent of `pendingSkillExpansions`; both may match the same echo. Skill rewriting and author stamping must be applied to the same cloned event without either helper discarding the other's fields.
+Restore also hydrates settled occurrence bindings and the bounded keyless replay guard described in §5.3. `_consumeSteerEcho` acts on the correlated `promptId` and ignores already-settled occurrences, which prevents historical replay from deleting a newer same-text steer. Keep this independent of `pendingSkillExpansions`; both may match the same echo. Skill rewriting and author stamping must be applied to the same cloned event without either helper discarding the other's fields.
 
 ## 7. Live event flow
 
@@ -490,7 +496,7 @@ Core tests exercise identity construction, all `PromptSource` mappings, legacy i
 
 The persistence cases deliberately include corrupt and future-version records, cancellation, redispatch, repeated identical text, id-priority matching, timestamp disambiguation, copy/purge, and legacy rows. These are the ambiguous cases most likely to make live and restored attribution diverge.
 
-Session lifecycle tests use mocked RPC methods, deferred promises, and a manual clock. They drive dispatch, echo, rejection, retry, abort, and restore seams directly rather than waiting for child processes or real timers. This makes race-sensitive assertions reproducible while still exercising `SessionManager`'s actual bookkeeping and sidecar API.
+Session lifecycle tests use mocked RPC methods, deferred promises, and a manual clock. They drive dispatch, echo, rejection, retry, abort, and restore seams directly rather than waiting for child processes or real timers. Regressions pin three occurrence boundaries: a top-level Pi entry id makes repeated same-text ends idempotent; a duplicate keyless settled end cannot consume the next prompt; and an old settled keyless replay leaves a newer same-text prompt pending and unsettled, with its steer ledger intact so reconciliation requeues it with the original source and author. The assertions also keep message role and content unchanged.
 
 ### 13.2 Client and search boundaries
 
@@ -507,7 +513,7 @@ The gateway integration suite runs in process with the mock agent bridge. Each b
 - unchanged Pi roles and exact message text;
 - equality between live events, `get_messages`, and reconnect snapshots.
 
-Restart-sensitive steer coverage targets the durable seam rather than restarting an operating-system process: it leaves an accepted steer in the persisted in-flight ledger, removes the live session, restores through `SessionManager`, and lets a fresh mock bridge echo it. The assertion is exact-once, ordered recovery with the original author. This isolates the persistence guarantee from process startup noise while exercising the production restore path.
+Restart-sensitive steer coverage targets the durable seam rather than restarting an operating-system process: it leaves accepted steers in the persisted in-flight ledger, removes the live session, and restores through `SessionManager`. The tests cover both a fresh mock-bridge echo and an older settled keyless same-text replay before reconciliation. They assert exact-once ordered recovery, original authorship, and the ledger-safety invariant without conflating persistence with process startup noise.
 
 Producer-focused seam tests separately pin trusted agent/system source forwarding for team, inbox, and orchestration paths; pure tests pin extension identity construction from trusted pack/tool metadata. Keeping those decisions close to each producer makes attribution regressions fail at their origin rather than only in an end-to-end transcript.
 

@@ -114,13 +114,13 @@ A redispatch with the same prompt id replaces the earlier folded binding. Cancel
 
 Writes occur immediately before prompt or steer delivery and are best-effort. A write failure is logged but never delays or rejects delivery. Reads skip malformed lines, partial crash tails, invalid records, and unsupported schema versions. A missing or unreadable sidecar behaves like an empty sidecar and falls back to role/content inference. The Pi transcript is never repaired or rewritten.
 
-When rebuilding visible history, Bobbit correlates each eligible user-role prompt echo in this order:
+Stable occurrence keys take precedence over text. Live and replayed events read Pi entry-id aliases from either the message or its outer event; once an occurrence is bound, its updates and duplicate terminal frames reuse that binding. Snapshot and transcript correlation then matches eligible user-role echoes by settled message id, timestamp plus exact model text, and finally FIFO exact text. Tool-result-only user-role rows are excluded, and matching runs before display-text rewriting.
 
-1. exact settled message id;
-2. exact model text plus a nearby settled message timestamp;
-3. FIFO exact model text, consuming duplicate prompts separately.
+Legacy replay can contain user echoes with neither an id nor a timestamp. During `switch_session`, Bobbit therefore keeps a restore-only ordered view of every non-cancelled sidecar occurrence, including settled rows. A settled same-text occurrence remains a guard for the replay window, and consecutive duplicate keyless ends reuse its binding. The guard is cleared when replay completes so it cannot shadow a future live prompt.
 
-Tool-result-only user-role rows are excluded from this matching. Author correlation runs before slash-skill and file-mention sidecars replace expanded model text with user-facing text, so matching uses the exact dispatched bytes.
+This enforces the ledger-safety invariant: a historical or duplicate echo must never settle a newer unresolved same-text prompt or remove that prompt's in-flight steer record. Only an echo bound to the unresolved occurrence may consume that record; anything still unresolved after replay is requeued with its original text, source, and author. When keyless occurrences are otherwise indistinguishable, preserving durable intent takes priority over guessing a newer binding.
+
+The replay guard is runtime correlation state, not persisted data. It adds no sidecar fields or record types, does not synthesize Pi ids, and does not change Pi events, transcript rows, prompt bytes, or provider schemas.
 
 Fork and continue operations copy the sidecar after the destination session exists. A hard purge removes it. Ordinary archive operations retain it with the session history.
 
@@ -134,7 +134,7 @@ The in-flight steer ledger persists structured `{ text, promptId, source?, autho
 
 ### Live events
 
-All message-bearing Pi `message_update` and `message_end` events pass through one normalization boundary before lifecycle tracking, buffering, replay, or broadcast. Assistant events receive the session agent identity. User-role echoes are matched to the pending dispatch ledger by exact model text, then settled into the sidecar when the final event arrives. Other visible rows use the inference rules below.
+All message-bearing Pi `message_update` and `message_end` events pass through one normalization boundary before lifecycle tracking, buffering, replay, or broadcast. Assistant events receive the session agent identity. User-role echoes correlate by stable occurrence key when Pi supplies one, with exact model text used only for ordered fallback; a newly resolved terminal occurrence is then settled into the sidecar. Other visible rows use the inference rules below.
 
 Because normalization happens before the event buffer and `latestMessageUpdate` tracking, reconnect replay and in-flight assistant snapshots preserve the same metadata as the original live stream.
 
@@ -201,12 +201,12 @@ These boundaries keep provider/model input byte-equivalent to the pre-author pat
 Author tests are split by architectural boundary so failures identify the broken contract rather than depending on a full external-agent run:
 
 - pure and memory-filesystem tests pin identity mapping, legacy/tool-result inference, queue and steer restore, transcript projection, and sidecar corruption/correlation behavior;
-- lifecycle tests use mocked RPCs, deferred promises, and a manual clock to reproduce dispatch, echo, retry, abort, and restore races without wall-clock sleeps;
+- lifecycle tests use mocked RPCs, deferred promises, and a manual clock to reproduce dispatch, echo, retry, abort, and restore races without wall-clock sleeps; they pin top-level entry-id reuse, duplicate keyless ends, and settled-old/unresolved-new same-text replay;
 - in-process gateway tests use the real WebSocket and snapshot paths with a mock agent bridge and session-local virtual clock, proving live/snapshot/reconnect equality for both human and system prompts while keeping roles and text unchanged;
 - DOM and search-source tests pin client preservation, provider conversion stripping, and metadata-only indexing;
 - the Chromium journey verifies stable user/assistant authors across reload and confirms that ordinary bubbles render no new identity label.
 
-The restart-sensitive steer test restores from the persisted ledger through `SessionManager` with a fresh mock bridge instead of restarting an operating-system process. This deliberately targets Bobbit's durable boundary: exact-once, ordered recovery with the same author. Broader process-level E2E remains responsible for gateway restart infrastructure.
+The restart-sensitive steer tests restore from the persisted ledger through `SessionManager` with a fresh mock bridge instead of restarting an operating-system process. They assert exact-once ordered recovery and the keyless safety case: replaying an older settled same-text echo leaves the newer prompt pending, leaves its sidecar unsettled and its steer ledger intact, and allows reconciliation to requeue it unchanged. A separate duplicate-end case proves that repeated keyless settlement cannot consume the next occurrence. Broader process-level E2E remains responsible for gateway restart infrastructure.
 
 See the [implemented design](design/author-identity-metadata.md#13-deterministic-verification-strategy) for the rationale behind these deterministic seams.
 
