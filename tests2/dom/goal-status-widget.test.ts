@@ -344,8 +344,10 @@ describe("GoalStatusWidget fixture", () => {
 	it("resetting a completed goal clears the local completed latch and shows the pending gate immediately", async () => {
 		resetResponse = {
 			ok: true,
+			affectedGateIds: ["design-doc"],
+			changedGateIds: ["design-doc"],
+			unchangedGateIds: [],
 			reopen: { reopened: true, previousState: "complete", state: "in-progress" },
-			reset: { affectedGateIds: ["design-doc"], changedGateIds: ["design-doc"], unchangedGateIds: [] },
 		};
 		const el = await mountGoalStatusWidget({
 			goalId: GOAL_ID,

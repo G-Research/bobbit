@@ -625,9 +625,8 @@ export class GoalStatusWidget extends LitElement {
 
 			// Reflect the successful reset before the follow-up reads complete. The
 			// server returns the full affected set (selected plus dependants).
-			const returnedAffectedGateIds = data?.reset?.affectedGateIds ?? data?.affectedGateIds;
-			const affectedGateIds = Array.isArray(returnedAffectedGateIds)
-				? returnedAffectedGateIds.filter((id: unknown): id is string => typeof id === "string")
+			const affectedGateIds = Array.isArray(data?.affectedGateIds)
+				? data.affectedGateIds.filter((id: unknown): id is string => typeof id === "string")
 				: [gate.id];
 			const affected = new Set(affectedGateIds);
 			this._gates = this._gates.map(current => affected.has(current.id)
