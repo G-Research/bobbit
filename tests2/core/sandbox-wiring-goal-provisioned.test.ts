@@ -26,7 +26,7 @@ guardProcessEnv();
  *   1. the dispatch uses the HOST worktree cwd (captured before the container
  *      remap), not the `/workspace-wt/...` path;
  *   2. the agent's boot cwd (`bridgeOptions.cwd`) is STILL the container path;
- *   3. a real provider actually writes its marker file into the host worktree;
+ *   3. the isolated LifecycleHub companion proves a real provider writes there;
  *   4. restore/respawn (cwd already container-internal) does NOT re-dispatch.
  * No Docker required — the sandbox + stores are stubbed.
  */

@@ -9,37 +9,56 @@
  *   - the env-gated wrapper honours OWNED gating, the v2 namespace guard,
  *     and KEEP=1 not suppressing publish (KEEP only affects deletion).
  */
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import {
-	LATEST_SEGMENT,
-	V2_TRANSFORM_CACHE_SEGMENT,
-	latestTransformCacheDir,
-	publishTransformCache,
-	publishTransformCacheFromEnv,
-	seedTransformCache,
-	seedTransformCacheForRunDir,
-} from "../../scripts/testing-v2/pwtest-cache.js";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
-const tempRoots: string[] = [];
+type CacheModule = typeof import("../../scripts/testing-v2/pwtest-cache.js");
+
+const ROOT = resolve("/memfs/pwtest-cache-publish");
+let fixtureSequence = 0;
+let restoreFs: () => void;
+let LATEST_SEGMENT: CacheModule["LATEST_SEGMENT"];
+let V2_TRANSFORM_CACHE_SEGMENT: CacheModule["V2_TRANSFORM_CACHE_SEGMENT"];
+let latestTransformCacheDir: CacheModule["latestTransformCacheDir"];
+let publishTransformCache: CacheModule["publishTransformCache"];
+let publishTransformCacheFromEnv: CacheModule["publishTransformCacheFromEnv"];
+let seedTransformCache: CacheModule["seedTransformCache"];
+let seedTransformCacheForRunDir: CacheModule["seedTransformCacheForRunDir"];
+
+beforeAll(async () => {
+	const scoped = installScopedMemFs([
+		"cpSync", "existsSync", "mkdirSync", "readFileSync", "readdirSync", "renameSync", "rmSync", "writeFileSync",
+	]);
+	restoreFs = scoped.restore;
+	scoped.fs.mkdirSync(ROOT, { recursive: true });
+	({
+		LATEST_SEGMENT,
+		V2_TRANSFORM_CACHE_SEGMENT,
+		latestTransformCacheDir,
+		publishTransformCache,
+		publishTransformCacheFromEnv,
+		seedTransformCache,
+		seedTransformCacheForRunDir,
+	} = await import("../../scripts/testing-v2/pwtest-cache.js"));
+});
+
+afterAll(() => restoreFs());
+
+function makeRoot(label: string): string {
+	const root = join(ROOT, `${label}-${fixtureSequence++}`);
+	mkdirSync(root, { recursive: true });
+	return root;
+}
 
 function makeBase(): { base: string; latest: string; run: string } {
-	const root = mkdtempSync(join(tmpdir(), "pwtest-cache-test-"));
-	tempRoots.push(root);
-	const base = join(root, V2_TRANSFORM_CACHE_SEGMENT);
+	const base = join(makeRoot("case"), V2_TRANSFORM_CACHE_SEGMENT);
 	const latest = join(base, LATEST_SEGMENT);
 	const run = join(base, "run-1");
 	mkdirSync(run, { recursive: true });
 	return { base, latest, run };
 }
-
-afterEach(() => {
-	for (const root of tempRoots.splice(0)) {
-		try { rmSync(root, { recursive: true, force: true }); } catch {}
-	}
-});
 
 describe("latestTransformCacheDir", () => {
 	it("is the `latest` sibling of the run dir", () => {
@@ -94,8 +113,7 @@ describe("seedTransformCache", () => {
 		expect(readFileSync(join(run, "a.js"), "utf8")).toBe("A");
 
 		// Outside the v2 namespace: no seed.
-		const outsideRoot = mkdtempSync(join(tmpdir(), "pwtest-cache-outside-"));
-		tempRoots.push(outsideRoot);
+		const outsideRoot = makeRoot("outside");
 		const outsideRun = join(outsideRoot, "some-cache", "run-1");
 		mkdirSync(outsideRun, { recursive: true });
 		expect(seedTransformCacheForRunDir(outsideRun)).toBe(false);
@@ -149,14 +167,15 @@ describe("publishTransformCache", () => {
 		const tmpDir = `${latest}-${tag}-tmp`;
 
 		// Simulate a concurrent winner: between the loser's rmSync(latest) and
-		// its renameSync, the winner publishes `latest`. The injected renameSync
-		// re-creates the winner's snapshot at the destination and then performs
-		// the real rename, which fails (dir-over-existing-non-empty-dir fails on
-		// both Windows and POSIX).
-		const raceyRename: typeof renameSync = (from, to) => {
+		// its renameSync, the winner publishes `latest`, making the loser's
+		// rename fail. Throw explicitly because memfs replaces an existing
+		// non-empty destination whereas Windows and POSIX reject this rename.
+		const raceyRename: typeof renameSync = () => {
 			mkdirSync(latest, { recursive: true });
 			writeFileSync(join(latest, "winner.js"), "W");
-			renameSync(from, to);
+			const error = new Error("concurrent publisher won") as NodeJS.ErrnoException;
+			error.code = "ENOTEMPTY";
+			throw error;
 		};
 
 		expect(publishTransformCache(run, latest, tag, { renameSync: raceyRename })).toBe(false);
@@ -216,8 +235,7 @@ describe("publishTransformCacheFromEnv", () => {
 	});
 
 	it("ignores run dirs outside the v2 namespace (legacy dirs untouched)", () => {
-		const root = mkdtempSync(join(tmpdir(), "pwtest-cache-legacy-"));
-		tempRoots.push(root);
+		const root = makeRoot("legacy");
 		const legacyRun = join(root, "pwtest-transform-cache", "run-1");
 		mkdirSync(legacyRun, { recursive: true });
 		writeFileSync(join(legacyRun, "a.js"), "A");

@@ -348,6 +348,7 @@ export class RpcBridge {
 	private requestId = 0;
 	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<Clock["setTimeout"]> }>();
 	private eventListeners: RpcEventListener[] = [];
+	/** Incomplete trailing JSONL fragment retained between stdout chunks. */
 	private lineBuffer = "";
 	/** Persistent UTF-8 decoders so a multibyte char split across two stdout/
 	 *  stderr reads is reassembled instead of corrupted into U+FFFD (S14 — the
@@ -880,35 +881,63 @@ export class RpcBridge {
 		this.emitPiExtensionDiagnostic(extension, "runtime-load-failed", "runtime_load_failed", `Pi extension ${extension.origin.packName}/${extension.listName} failed to load: ${rawMessage}`);
 	}
 
-	private handleData(data: string) {
-		this.lineBuffer += data;
-		const lines = this.lineBuffer.split("\n");
-		this.lineBuffer = lines.pop()!; // keep incomplete trailing fragment
+	/**
+	 * Scan only the newly decoded chunk for JSONL boundaries. Searching the
+	 * complete accumulated fragment on every chunk makes a large newline-free
+	 * line quadratic; the retained fragment is now joined only when that line
+	 * completes.
+	 */
+	private handleData(data: string): void {
+		let newlineIdx = data.indexOf("\n");
+		if (newlineIdx === -1) {
+			this.lineBuffer += data;
+			return;
+		}
 
-		for (const line of lines) {
-			const trimmed = line.replace(/\r$/, "").trim();
-			if (!trimmed) continue;
+		const bufferedPrefix = this.lineBuffer;
+		// Match the old split-based implementation's state before dispatch: even
+		// if a listener throws, the final incomplete fragment remains buffered and
+		// the unprocessed complete lines from this chunk are not replayed.
+		const lastNewlineIdx = data.lastIndexOf("\n");
+		this.lineBuffer = data.slice(lastNewlineIdx + 1);
 
-			let parsed: any;
-			try {
-				parsed = JSON.parse(trimmed);
-			} catch {
-				continue; // skip non-JSON output (e.g. log lines)
-			}
+		let start = 0;
+		let firstLine = true;
+		while (newlineIdx !== -1) {
+			const segment = data.slice(start, newlineIdx);
+			const line = firstLine && bufferedPrefix.length > 0
+				? bufferedPrefix + segment
+				: segment;
+			firstLine = false;
+			start = newlineIdx + 1;
+			this.processLine(line);
+			newlineIdx = data.indexOf("\n", start);
+		}
+	}
 
-			// Response to a pending request
-			if (parsed.type === "response" && parsed.id && this.pending.has(parsed.id)) {
-				const p = this.pending.get(parsed.id)!;
-				this.clock.clearTimeout(p.timeout);
-				this.pending.delete(parsed.id);
-				p.resolve(parsed);
-			} else {
-				this.recordPiExtensionLoadFailureFromEvent(parsed);
-				const normalized = normalizeToolResultErrorEvent(parsed);
-				// Agent event — forward to listeners
-				for (const listener of this.eventListeners) {
-					listener(normalized);
-				}
+	private processLine(line: string): void {
+		const trimmed = line.replace(/\r$/, "").trim();
+		if (!trimmed) return;
+
+		let parsed: any;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			return; // skip non-JSON output (e.g. log lines)
+		}
+
+		// Response to a pending request
+		if (parsed.type === "response" && parsed.id && this.pending.has(parsed.id)) {
+			const p = this.pending.get(parsed.id)!;
+			this.clock.clearTimeout(p.timeout);
+			this.pending.delete(parsed.id);
+			p.resolve(parsed);
+		} else {
+			this.recordPiExtensionLoadFailureFromEvent(parsed);
+			const normalized = normalizeToolResultErrorEvent(parsed);
+			// Agent event — forward to listeners
+			for (const listener of this.eventListeners) {
+				listener(normalized);
 			}
 		}
 	}

@@ -37,6 +37,7 @@ import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
+import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
 import { SessionManager, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
@@ -5719,29 +5720,10 @@ async function handleApiRoute(
 		return;
 	}
 
-	// BFS helper: walk delegateOf, parentSessionId, teamLeadSessionId, teamGoalId, and goalId chains
-	// from seed IDs through an archived session pool.
-	function bfsEnrichArchived(seedIds: string[], allArchived: any[]): any[] {
-		const result: any[] = [];
-		const seen = new Set<string>();
-		const queue = [...seedIds];
-		while (queue.length > 0) {
-			const parentId = queue.shift()!;
-			for (const s of allArchived) {
-				if (!seen.has(s.id) && (
-					s.delegateOf === parentId ||
-					s.parentSessionId === parentId ||
-					s.teamLeadSessionId === parentId ||
-					s.teamGoalId === parentId ||
-					s.goalId === parentId
-				)) {
-					seen.add(s.id);
-					result.push(s);
-					queue.push(s.id);
-				}
-			}
+	function* visibleArchivedRaw() {
+		for (const ctx of projectContextManager.visible()) {
+			for (const session of ctx.sessionStore.getArchived()) yield session;
 		}
-		return result;
 	}
 
 	function normalizedArchivedQuery(value: string | null): string {
@@ -5807,13 +5789,6 @@ async function handleApiRoute(
 				: allArchived
 			).filter((s: any) => archivedSessionMatchesQuery(s, archivedQuery));
 
-			// Collect ALL archived sessions for BFS enrichment (not just delegates)
-			const allArchivedForBfs: typeof sessions = [];
-			for (const ctx of projectContextManager.visible()) {
-				for (const s of ctx.sessionStore.getArchived()) {
-					allArchivedForBfs.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
-				}
-			}
 			// Build live goal IDs for BFS seeding
 			const liveGoalIds: string[] = [];
 			for (const ctx of projectContextManager.visible()) {
@@ -5840,15 +5815,23 @@ async function handleApiRoute(
 				const nextCursor = sliced.length > 0 ? (sliced[sliced.length - 1] as any).archivedAt : undefined;
 				const nextOffset = hasMore && !hasCursor ? paging.offset + paging.limit : undefined;
 
-				// BFS: collect archived children reachable from live sessions and goals
+				// BFS: collect archived children reachable from live sessions and goals.
 				const liveIdSet = new Set(sessions.map(s => s.id));
-				const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIds], allArchivedForBfs);
+				const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
+					[...liveIdSet, ...liveGoalIds],
+					visibleArchivedRaw(),
+					(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+				);
 
 				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, limit: paging.limit, offset: !hasCursor ? paging.offset : undefined, hasMore, nextCursor, ...(nextOffset !== undefined ? { nextOffset } : {}), archivedDelegates: archivedDelegatesOfLive });
 			} else {
-				// BFS: collect archived children reachable from live sessions and goals
+				// BFS: collect archived children reachable from live sessions and goals.
 				const liveIdSet = new Set(sessions.map(s => s.id));
-				const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIds], allArchivedForBfs);
+				const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
+					[...liveIdSet, ...liveGoalIds],
+					visibleArchivedRaw(),
+					(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+				);
 
 				// Backward compatible: return all archived sessions
 				json({ generation: currentGen, sessions: [...sessions, ...filteredArchived], archivedDelegates: archivedDelegatesOfLive });
@@ -5857,12 +5840,6 @@ async function handleApiRoute(
 			// Always include archived children of live sessions/goals so the sidebar
 			// can render chevrons/nesting without a separate fetch.
 			const liveIdSet = new Set(sessions.map(s => s.id));
-			const allArchivedForBfsNonPaginated: typeof sessions = [];
-			for (const ctx of projectContextManager.visible()) {
-				for (const s of ctx.sessionStore.getArchived()) {
-					allArchivedForBfsNonPaginated.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
-				}
-			}
 			// Build live goal IDs for BFS seeding
 			const liveGoalIdsNonPaginated: string[] = [];
 			for (const ctx of projectContextManager.visible()) {
@@ -5871,7 +5848,11 @@ async function handleApiRoute(
 				}
 			}
 			// BFS: live parents/goals → their archived children → children of those, etc.
-			const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIdsNonPaginated], allArchivedForBfsNonPaginated);
+			const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
+				[...liveIdSet, ...liveGoalIdsNonPaginated],
+				visibleArchivedRaw(),
+				(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+			);
 			const paging = readOffsetPaging();
 			if (paging.enabled) {
 				const page = pageArray(sessions, paging);
@@ -6835,14 +6816,12 @@ async function handleApiRoute(
 					}
 				}
 			}
-			// BFS walk delegate/team chains from affiliated sessions
-			const allArchivedForGoalsBfs: any[] = [];
-			for (const ctx of projectContextManager.visible()) {
-				for (const s of ctx.sessionStore.getArchived()) {
-					allArchivedForGoalsBfs.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
-				}
-			}
-			const delegateEnriched = bfsEnrichArchived(affiliatedSessions.map(s => s.id), allArchivedForGoalsBfs);
+			// BFS walk delegate/team chains from affiliated sessions.
+			const delegateEnriched = bfsEnrichArchivedIndexed(
+				affiliatedSessions.map(s => s.id),
+				visibleArchivedRaw(),
+				(s) => ({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any),
+			);
 			for (const s of delegateEnriched) {
 				if (!seenSessionIds.has(s.id)) {
 					seenSessionIds.add(s.id);

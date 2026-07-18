@@ -21,6 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { ContextTraceStore } from "../../src/server/agent/context-trace-store.ts";
+import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { LifecycleHub, type HookCtx } from "../../src/server/agent/lifecycle-hub.ts";
 import type { ProviderContribution } from "../../src/server/agent/pack-contributions.ts";
 import type { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
@@ -64,6 +65,30 @@ function registry(providers: ProviderContribution[]): PackContributionRegistry {
 
 function base(tmp: string, sessionId = "sess-1"): Omit<HookCtx, "budget" | "config" | "gateway"> {
 	return { sessionId, projectId: "project-1", scope: "project", cwd: tmp };
+}
+
+const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
+const TEST_ADMIN_TOKEN = "a".repeat(64);
+
+function seedAdminToken(stateRoot: string): () => void {
+	const stateDir = path.join(stateRoot, "state");
+	const secretsDir = path.join(stateRoot, "secrets");
+	fs.mkdirSync(stateDir, { recursive: true });
+	fs.mkdirSync(secretsDir, { recursive: true });
+	fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
+	fs.writeFileSync(path.join(stateDir, "token"), `${TEST_ADMIN_TOKEN}\n`);
+	fs.writeFileSync(path.join(secretsDir, "token"), `${TEST_ADMIN_TOKEN}\n`);
+
+	const previousBobbitDir = process.env.BOBBIT_DIR;
+	const previousSecretsDir = process.env.BOBBIT_SECRETS_DIR;
+	process.env.BOBBIT_DIR = stateRoot;
+	process.env.BOBBIT_SECRETS_DIR = secretsDir;
+	return () => {
+		if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+		else process.env.BOBBIT_DIR = previousBobbitDir;
+		if (previousSecretsDir === undefined) delete process.env.BOBBIT_SECRETS_DIR;
+		else process.env.BOBBIT_SECRETS_DIR = previousSecretsDir;
+	};
 }
 
 function hub(tmp: string, providers: ProviderContribution[], moduleHost: ModuleHost, globalMaxTokens = 4_000): LifecycleHub {
@@ -240,6 +265,78 @@ describe("LifecycleHub", () => {
 		} finally {
 			moduleHost.dispose();
 			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("writes a goalProvisioned marker into the sandbox session's host worktree", async () => {
+		// This is a real worker + real-filesystem fidelity proof. It belongs in this
+		// isolated extension-host suite: ModuleHost's source-mode worker needs the
+		// NODE_OPTIONS resolver above, while shared v2-core workers may legitimately
+		// restore another file's environment between files.
+		const stateRoot = tmpDir();
+		const hostWorktree = path.join(stateRoot, "host-worktree");
+		const providerRoot = path.join(stateRoot, "provider");
+		fs.mkdirSync(hostWorktree, { recursive: true });
+		fs.mkdirSync(providerRoot, { recursive: true });
+		const restoreEnv = seedAdminToken(stateRoot);
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		const marker = ".goal-provisioned-marker.json";
+
+		try {
+			const manager: any = new SessionManager();
+			manager.projectConfigStore = {
+				get: (key: string) => key === "sandbox" ? "docker" : undefined,
+				getSandboxTokens: () => [],
+			};
+			manager.preferencesStore = undefined;
+			manager.projectContextManager = null;
+			manager.sandboxTokenStore = null;
+			manager.sandboxManager = {
+				ensureForProject: async () => {},
+				get: () => ({
+					getContainerId: async () => "container-xyz",
+					createWorktree: async () => CONTAINER_WORKTREE,
+				}),
+			};
+
+			const provider = fixtureProvider(
+				providerRoot,
+				"marker",
+				`import fs from "node:fs"; import path from "node:path";
+				 export default { async goalProvisioned(ctx) {
+				   const dir = ctx.cwd || ctx.worktreePath;
+				   fs.writeFileSync(path.join(dir, ${JSON.stringify(marker)}), JSON.stringify({ goalId: ctx.goalId, worktreePath: ctx.worktreePath, branch: ctx.branch }), "utf-8");
+				 } };`,
+				{ timeoutMs: 5_000 },
+			);
+			provider.hooks = ["goalProvisioned"];
+			manager.lifecycleHub = new LifecycleHub({
+				registry: registry([provider]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(stateRoot, "trace")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "tok" }),
+			});
+
+			const bridgeOptions: any = { env: {}, cwd: hostWorktree };
+			const ok = await manager.applySandboxWiring(bridgeOptions, "sess-fs", {
+				projectId: "proj-1",
+				goalId: "goal-g1",
+				sandboxBranch: "goal/g1/coder-x",
+			});
+			assert.equal(ok, true);
+			assert.equal(bridgeOptions.cwd, CONTAINER_WORKTREE, "agent runtime cwd remains container-internal");
+
+			const markerPath = path.join(hostWorktree, marker);
+			assert.ok(fs.existsSync(markerPath), `marker must be written into the host worktree (${markerPath})`);
+			const parsed = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
+			assert.equal(parsed.goalId, "goal-g1");
+			assert.equal(parsed.worktreePath, hostWorktree);
+			assert.equal(parsed.branch, "goal/g1/coder-x");
+			assert.ok(!fs.existsSync(path.join(CONTAINER_WORKTREE, marker)), "no marker at the container path");
+		} finally {
+			moduleHost.dispose();
+			restoreEnv();
+			fs.rmSync(stateRoot, { recursive: true, force: true });
 		}
 	});
 });

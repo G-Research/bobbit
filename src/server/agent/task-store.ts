@@ -51,6 +51,8 @@ export class TaskStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
 	private tasks: Map<string, PersistedTask> = new Map();
+	/** Monotonic process-local counter, bumped once per mutation call. */
+	private generation = 0;
 
 	constructor(stateDir: string) {
 		this.storeDir = stateDir;
@@ -101,9 +103,15 @@ export class TaskStore {
 		}
 	}
 
+	/** Current generation counter. Loading persisted tasks does not increment it. */
+	getGeneration(): number {
+		return this.generation;
+	}
+
 	put(task: PersistedTask): void {
 		this.tasks.set(task.id, task);
 		this.save();
+		this.generation++;
 	}
 
 	get(id: string): PersistedTask | undefined {
@@ -113,13 +121,17 @@ export class TaskStore {
 	remove(id: string): void {
 		this.tasks.delete(id);
 		this.save();
+		this.generation++;
 	}
 
 	removeMany(ids: string[]): void {
 		for (const id of ids) {
 			this.tasks.delete(id);
 		}
-		if (ids.length > 0) this.save();
+		if (ids.length > 0) {
+			this.save();
+			this.generation++;
+		}
 	}
 
 	getAll(): PersistedTask[] {
