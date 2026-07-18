@@ -1,22 +1,45 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
-import {
-	scanOrphanedTranscripts,
-	scanOrphanedTranscriptsAsync,
-} from "../../src/server/agent/orphan-cleanup.ts";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import type { FsLike } from "../../src/server/gateway-deps.ts";
+import { scanOrphanedTranscriptsAsync } from "../../src/server/agent/orphan-cleanup.ts";
+import { createMemFs, type MemFs } from "../harness/mem-fs.ts";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-async-walk-"));
-const root = path.join(tmpRoot, "agent-sessions");
+const root = path.resolve("/memfs/orphan-async-walk/agent-sessions");
+let memfs: MemFs;
+let mtimes: Map<string, number>;
 
 function writeFile(relativePath: string, mtimeMs = Date.now()): string {
 	const fullPath = path.join(root, relativePath);
-	fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-	fs.writeFileSync(fullPath, "{}\n", "utf8");
-	fs.utimesSync(fullPath, mtimeMs / 1_000, mtimeMs / 1_000);
+	memfs.mkdirSync(path.dirname(fullPath), { recursive: true });
+	memfs.writeFileSync(fullPath, "{}\n", "utf8");
+	mtimes.set(path.resolve(fullPath), mtimeMs);
 	return fullPath;
+}
+
+function scannerFs(options: {
+	statFailures?: Set<string>;
+	readdirFailures?: Set<string>;
+	measure?: <T>(operation: () => Promise<T>) => Promise<T>;
+} = {}): Pick<FsLike, "promises"> {
+	const statFailures = options.statFailures ?? new Set<string>();
+	const readdirFailures = options.readdirFailures ?? new Set<string>();
+	const measure = options.measure ?? (async <T>(operation: () => Promise<T>) => operation());
+	const promises: any = {
+		...memfs.promises,
+		stat: async (target: any, statOptions: any) => measure(async () => {
+			const resolved = path.resolve(String(target));
+			if (statFailures.has(resolved)) throw new Error("injected stat failure");
+			const stat = await (memfs.promises.stat as any)(target, statOptions);
+			return { ...stat, mtimeMs: mtimes.get(resolved) ?? stat.mtimeMs };
+		}),
+		readdir: async (target: any, readdirOptions: any) => measure(async () => {
+			const resolved = path.resolve(String(target));
+			if (readdirFailures.has(resolved)) throw new Error("injected readdir failure");
+			return (memfs.promises.readdir as any)(target, readdirOptions);
+		}),
+	};
+	return { promises } as Pick<FsLike, "promises">;
 }
 
 function sortedResolved(paths: string[]): string[] {
@@ -24,20 +47,17 @@ function sortedResolved(paths: string[]): string[] {
 }
 
 beforeEach(() => {
-	fs.rmSync(root, { recursive: true, force: true });
-	fs.mkdirSync(root, { recursive: true });
+	memfs = createMemFs();
+	memfs.mkdirSync(root, { recursive: true });
+	mtimes = new Map();
 });
 
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-afterAll(() => {
-	fs.rmSync(tmpRoot, { recursive: true, force: true });
-});
-
 describe("scanOrphanedTranscriptsAsync", () => {
-	it("matches the synchronous qualifying set for nested, tracked, old, and non-jsonl files", async () => {
+	it("finds the expected nested set while excluding tracked, old, and non-jsonl files", async () => {
 		const now = Date.now();
 		const tracked = writeFile("project/tracked.jsonl", now);
 		const expected = [
@@ -51,21 +71,18 @@ describe("scanOrphanedTranscriptsAsync", () => {
 		const floor = now - 24 * 60 * 60 * 1_000;
 		vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-		const syncResult = scanOrphanedTranscripts(root, trackedFiles, floor);
-		const asyncResult = await scanOrphanedTranscriptsAsync(root, trackedFiles, floor);
+		const result = await scanOrphanedTranscriptsAsync(root, trackedFiles, floor, { fsImpl: scannerFs() });
 
-		assert.equal(asyncResult.count, syncResult.count);
-		assert.equal(asyncResult.count, expected.length);
-		assert.deepEqual(sortedResolved(asyncResult.paths), sortedResolved(syncResult.paths));
-		assert.deepEqual(sortedResolved(asyncResult.paths), sortedResolved(expected));
+		assert.equal(result.count, expected.length);
+		assert.deepEqual(sortedResolved(result.paths), sortedResolved(expected));
 		assert.deepEqual([...trackedFiles], [tracked], "the tracked-path set must not be mutated");
-		for (const file of [tracked, ...expected]) assert.equal(fs.readFileSync(file, "utf8"), "{}\n");
+		for (const file of [tracked, ...expected]) assert.equal(memfs.readFileSync(file, "utf8"), "{}\n");
 	});
 
 	it("returns empty for missing and non-directory roots", async () => {
-		const missing = await scanOrphanedTranscriptsAsync(path.join(tmpRoot, "missing"), new Set(), 0);
+		const missing = await scanOrphanedTranscriptsAsync(path.join(root, "missing"), new Set(), 0, { fsImpl: scannerFs() });
 		const fileRoot = writeFile("root.jsonl");
-		const notDirectory = await scanOrphanedTranscriptsAsync(fileRoot, new Set(), 0);
+		const notDirectory = await scanOrphanedTranscriptsAsync(fileRoot, new Set(), 0, { fsImpl: scannerFs() });
 
 		assert.deepEqual(missing, { count: 0, paths: [] });
 		assert.deepEqual(notDirectory, { count: 0, paths: [] });
@@ -75,7 +92,7 @@ describe("scanOrphanedTranscriptsAsync", () => {
 		for (let index = 0; index < 75; index++) writeFile(`wide/orphan-${index}.jsonl`);
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-		const result = await scanOrphanedTranscriptsAsync(root, new Set(), 0);
+		const result = await scanOrphanedTranscriptsAsync(root, new Set(), 0, { fsImpl: scannerFs() });
 
 		assert.equal(result.count, 75);
 		assert.equal(result.paths.length, 50);
@@ -87,31 +104,23 @@ describe("scanOrphanedTranscriptsAsync", () => {
 		const badStat = writeFile("good/stat-fails.jsonl");
 		const hiddenByReadError = writeFile("unreadable/hidden.jsonl");
 		const unreadableDir = path.dirname(hiddenByReadError);
-		const originalStat = fs.promises.stat.bind(fs.promises);
-		const originalReaddir = fs.promises.readdir.bind(fs.promises);
 		vi.spyOn(console, "warn").mockImplementation(() => undefined);
-		vi.spyOn(fs.promises, "stat").mockImplementation(async (target, options) => {
-			if (path.resolve(String(target)) === path.resolve(badStat)) throw new Error("injected stat failure");
-			return originalStat(target, options as never);
-		});
-		vi.spyOn(fs.promises, "readdir").mockImplementation(async (target, options) => {
-			if (path.resolve(String(target)) === path.resolve(unreadableDir)) throw new Error("injected readdir failure");
-			return originalReaddir(target, options as never) as never;
+		const fsImpl = scannerFs({
+			statFailures: new Set([path.resolve(badStat)]),
+			readdirFailures: new Set([path.resolve(unreadableDir)]),
 		});
 
-		const result = await scanOrphanedTranscriptsAsync(root, new Set(), 0, { concurrency: 2 });
+		const result = await scanOrphanedTranscriptsAsync(root, new Set(), 0, { concurrency: 2, fsImpl });
 
 		assert.equal(result.count, 1);
 		assert.deepEqual(result.paths, [good]);
-		for (const file of [good, badStat, hiddenByReadError]) assert.equal(fs.existsSync(file), true);
+		for (const file of [good, badStat, hiddenByReadError]) assert.equal(memfs.existsSync(file), true);
 	});
 
 	it("shares one global concurrency bound across directory reads and file stats", async () => {
 		for (let directory = 0; directory < 12; directory++) {
 			for (let file = 0; file < 4; file++) writeFile(`dir-${directory}/orphan-${file}.jsonl`);
 		}
-		const originalStat = fs.promises.stat.bind(fs.promises);
-		const originalReaddir = fs.promises.readdir.bind(fs.promises);
 		let active = 0;
 		let maxActive = 0;
 		const measured = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -125,14 +134,11 @@ describe("scanOrphanedTranscriptsAsync", () => {
 			}
 		};
 		vi.spyOn(console, "warn").mockImplementation(() => undefined);
-		vi.spyOn(fs.promises, "stat").mockImplementation((target, options) =>
-			measured(() => originalStat(target, options as never)));
-		vi.spyOn(fs.promises, "readdir").mockImplementation((target, options) =>
-			measured(() => originalReaddir(target, options as never) as never) as never);
 
 		const result = await scanOrphanedTranscriptsAsync(root, new Set(), 0, {
 			concurrency: 3,
 			maxLogLines: 0,
+			fsImpl: scannerFs({ measure: measured }),
 		});
 
 		assert.equal(result.count, 48);
@@ -150,6 +156,7 @@ describe("scanOrphanedTranscriptsAsync", () => {
 			concurrency: 1,
 			maxPaths: 5,
 			maxLogLines: 0,
+			fsImpl: scannerFs(),
 		});
 
 		assert.equal(result.count, 20);

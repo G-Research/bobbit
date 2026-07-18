@@ -1,19 +1,8 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import assert from "node:assert/strict";
-import { afterAll, afterEach, describe, it, vi } from "vitest";
+import { describe, it, vi } from "vitest";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { applyLiveSnapshotTransforms } from "../../src/server/ws/handler.ts";
-import {
-	appendCompactionSidecarEntry,
-	initCompactionSidecarDir,
-} from "../../src/server/agent/compaction-sidecar.ts";
-
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-snapshot-memo-"));
-initCompactionSidecarDir(tmpRoot);
-const managers: any[] = [];
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -23,9 +12,7 @@ function deferred<T>() {
 }
 
 function manager(): any {
-	const value: any = new SessionManager({ stateDir: tmpRoot });
-	managers.push(value);
-	return value;
+	return Object.create(SessionManager.prototype);
 }
 
 function session(getMessages: () => Promise<any>): any {
@@ -35,14 +22,6 @@ function session(getMessages: () => Promise<any>): any {
 		rpcClient: { getMessages },
 	};
 }
-
-afterEach(() => {
-	for (const value of managers.splice(0)) {
-		if (value._statusHeartbeatTimer) clearInterval(value._statusHeartbeatTimer);
-	}
-});
-
-afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 
 describe("SessionManager snapshot memo", () => {
 	it("coalesces concurrent callers and reuses a byte-identical normalized base at one sequence", async () => {
@@ -110,14 +89,19 @@ describe("SessionManager snapshot memo", () => {
 		assert.equal(getMessages.mock.calls.length, 2);
 	});
 
-	it("keeps cached bases immutable while overlays and sidecars are recomputed fresh", async () => {
+	it("keeps cached bases immutable while overlays and both sidecar transforms are recomputed fresh", async () => {
 		const baseMessage = { id: "base", role: "assistant", content: "base" };
 		const getMessages = vi.fn(async () => ({ success: true, data: [baseMessage] }));
 		const value = manager();
 		const live = session(getMessages);
 		const cached = await value.getMessagesSnapshotBase(live);
+		let compactionMessages: any[] = [];
+		let skillMessages: any[] = [];
+		const mergeCompactionSidecar = vi.fn((_sessionId: string, messages: any[]) => [...messages, ...compactionMessages]);
+		const mergeSkillSidecar = vi.fn((_sessionId: string, messages: any[]) => [...messages, ...skillMessages]);
+		const collaborators = { mergeCompactionSidecar, mergeSkillSidecar };
 
-		const first = applyLiveSnapshotTransforms(live.id, live, cached.data);
+		const first = applyLiveSnapshotTransforms(live.id, live, cached.data, collaborators);
 		assert.equal(first.length, 1);
 		assert.deepEqual(baseMessage, { id: "base", role: "assistant", content: "base" });
 
@@ -125,22 +109,21 @@ describe("SessionManager snapshot memo", () => {
 			id: "streaming",
 			message: { id: "streaming", role: "assistant", content: "fresh overlay" },
 		};
-		appendCompactionSidecarEntry(live.id, {
-			schemaVersion: 1,
-			id: "c_1_test",
-			trigger: "manual",
-			tokensBefore: 10,
-			tokensAfter: 5,
-			durationMs: 1,
-			startedAt: new Date(1).toISOString(),
-			endedAt: new Date(2).toISOString(),
-			success: true,
-			firstKeptEntryId: null,
-		});
-		const second = applyLiveSnapshotTransforms(live.id, live, (await value.getMessagesSnapshotBase(live)).data);
+		compactionMessages = [{ id: "compaction-fresh", role: "tool", content: "compaction" }];
+		skillMessages = [{ id: "skill-fresh", role: "tool", content: "skill" }];
+		const second = applyLiveSnapshotTransforms(
+			live.id,
+			live,
+			(await value.getMessagesSnapshotBase(live)).data,
+			collaborators,
+		);
+
 		assert.equal(getMessages.mock.calls.length, 1, "base remains memoized");
 		assert.ok(second.some((message: any) => message.id === "streaming"), "live overlay is fresh");
-		assert.ok(second.some((message: any) => message.content?.some?.((block: any) => block.name === "__compaction_summary")), "sidecar merge is fresh");
+		assert.ok(second.some((message: any) => message.id === "compaction-fresh"), "compaction sidecar is fresh");
+		assert.ok(second.some((message: any) => message.id === "skill-fresh"), "skill sidecar is fresh");
+		assert.equal(mergeCompactionSidecar.mock.calls.length, 2);
+		assert.equal(mergeSkillSidecar.mock.calls.length, 2);
 		assert.deepEqual(baseMessage, { id: "base", role: "assistant", content: "base" });
 	});
 });

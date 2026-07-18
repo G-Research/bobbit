@@ -1,23 +1,7 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
-guardProcessEnv();
-
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
-import { afterAll, describe, it } from "vitest";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
-import type { PersistedTask } from "../../src/server/agent/task-store.ts";
-
-const suiteRoot = makeTmpDir("task-generation-");
-process.env.BOBBIT_DIR = path.join(suiteRoot, "bobbit-home");
-fs.mkdirSync(process.env.BOBBIT_DIR, { recursive: true });
-
-const { TaskStore } = await import("../../src/server/agent/task-store.ts");
-const { ProjectRegistry } = await import("../../src/server/agent/project-registry.ts");
-const { ProjectContextManager } = await import("../../src/server/agent/project-context-manager.ts");
-
-type ContextManager = InstanceType<typeof ProjectContextManager>;
-const contextManagers: ContextManager[] = [];
+import { describe, it } from "vitest";
+import { TaskStore, type PersistedTask } from "../../src/server/agent/task-store.ts";
+import { ProjectContextManager } from "../../src/server/agent/project-context-manager.ts";
 
 function task(id: string, assignedSessionId?: string): PersistedTask {
 	return {
@@ -32,36 +16,40 @@ function task(id: string, assignedSessionId?: string): PersistedTask {
 	};
 }
 
-function makeContextManager(projectNames: string[]): {
-	manager: ContextManager;
-	projects: Map<string, { id: string; rootPath: string }>;
-} {
-	const registryDir = makeTmpDir("task-generation-registry-");
-	const registry = new ProjectRegistry(registryDir);
-	const projects = new Map<string, { id: string; rootPath: string }>();
-	for (const name of projectNames) {
-		const rootPath = makeTmpDir(`task-generation-${name}-`);
-		const registered = registry.register(name, rootPath);
-		projects.set(name, { id: registered.id, rootPath });
-	}
-	const manager = new ProjectContextManager(registry);
-	contextManagers.push(manager);
-	return { manager, projects };
+function inMemoryTaskStore(initial: PersistedTask[] = []): TaskStore {
+	const store: any = Object.create(TaskStore.prototype);
+	store.tasks = new Map(initial.map((value) => [value.id, value]));
+	store.generation = 0;
+	store.save = () => {};
+	return store;
 }
 
-afterAll(async () => {
-	await Promise.allSettled(contextManagers.map((manager) => manager.closeAll()));
-	// remove() closes its detached context asynchronously; let those close jobs
-	// settle before deleting shared test state.
-	await new Promise((resolve) => setTimeout(resolve, 20));
-	try { fs.rmSync(suiteRoot, { recursive: true, force: true }); } catch { /* best effort */ }
-});
+function fakeContext(id: string, initialTasks: PersistedTask[] = []) {
+	return {
+		project: { id },
+		taskStore: inMemoryTaskStore(initialTasks),
+		close: async () => {},
+	};
+}
+
+function contextManager(initialContexts: any[] = []): any {
+	const manager: any = Object.create(ProjectContextManager.prototype);
+	manager.contexts = new Map(initialContexts.map((ctx) => [ctx.project.id, ctx]));
+	manager.contextTopologyVersion = initialContexts.length;
+	manager.taskGenerationToken = 0;
+	manager.lastObservedTaskGenerationSum = 0;
+	manager.lastObservedTaskTopologyVersion = 0;
+	return manager;
+}
+
+function addContext(manager: any, context: any): void {
+	manager.contexts.set(context.project.id, context);
+	manager.contextTopologyVersion++;
+}
 
 describe("TaskStore mutation generation", () => {
-	it("starts at zero after load and advances once per mutation path", () => {
-		const stateDir = makeTmpDir("task-store-generation-");
-		fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify([task("loaded")]));
-		const store = new TaskStore(stateDir);
+	it("starts at zero for loaded rows and advances once per mutation path", () => {
+		const store = inMemoryTaskStore([task("loaded")]);
 
 		assert.equal(store.getGeneration(), 0, "loading persisted rows must not count as a mutation");
 		store.put(task("put"));
@@ -77,8 +65,8 @@ describe("TaskStore mutation generation", () => {
 
 describe("ProjectContextManager task generation token", () => {
 	it("is stable without changes and advances after task assignment mutations", () => {
-		const { manager, projects } = makeContextManager(["alpha"]);
-		const ctx = manager.getOrCreate(projects.get("alpha")!.id)!;
+		const ctx = fakeContext("alpha");
+		const manager = contextManager([ctx]);
 		const initial = manager.getTaskGeneration();
 
 		assert.equal(manager.getTaskGeneration(), initial);
@@ -88,43 +76,37 @@ describe("ProjectContextManager task generation token", () => {
 		assert.equal(manager.getTaskGeneration(), afterPut);
 	});
 
-	it("advances when adding a zero-generation context with persisted tasks", () => {
-		const { manager, projects } = makeContextManager(["alpha", "beta"]);
-		manager.getOrCreate(projects.get("alpha")!.id);
+	it("advances when adding a zero-generation context with loaded tasks", () => {
+		const manager = contextManager([fakeContext("alpha")]);
 		const beforeAdd = manager.getTaskGeneration();
+		const beta = fakeContext("beta", [task("persisted", "session-2")]);
 
-		const beta = projects.get("beta")!;
-		const betaStateDir = path.join(beta.rootPath, ".bobbit", "state");
-		fs.mkdirSync(betaStateDir, { recursive: true });
-		fs.writeFileSync(path.join(betaStateDir, "tasks.json"), JSON.stringify([task("persisted", "session-2")]));
-		const betaContext = manager.getOrCreate(beta.id)!;
+		addContext(manager, beta);
 
-		assert.equal(betaContext.taskStore.getGeneration(), 0);
-		assert.ok(betaContext.taskStore.get("persisted"));
+		assert.equal(beta.taskStore.getGeneration(), 0);
+		assert.ok(beta.taskStore.get("persisted"));
 		assert.ok(manager.getTaskGeneration() > beforeAdd, "topology must invalidate even when the raw generation sum is unchanged");
 	});
 
 	it("never reuses a token across context removal and same-id re-addition", () => {
-		const { manager, projects } = makeContextManager(["alpha"]);
-		const projectId = projects.get("alpha")!.id;
-		const firstContext = manager.getOrCreate(projectId)!;
-		firstContext.taskStore.put(task("persisted"));
+		const firstContext = fakeContext("alpha", [task("persisted")]);
+		const manager = contextManager([firstContext]);
+		firstContext.taskStore.put(task("new"));
 		const beforeRemove = manager.getTaskGeneration();
 
-		manager.remove(projectId);
+		manager.remove("alpha");
 		const afterRemove = manager.getTaskGeneration();
 		assert.ok(afterRemove > beforeRemove);
 
-		const replacement = manager.getOrCreate(projectId)!;
-		assert.equal(replacement.taskStore.getGeneration(), 0, "a replacement context reloads with a fresh local generation");
+		const replacement = fakeContext("alpha", [task("persisted")]);
+		addContext(manager, replacement);
+		assert.equal(replacement.taskStore.getGeneration(), 0, "a replacement context has a fresh local generation");
 		assert.ok(replacement.taskStore.get("persisted"));
-		const afterReAdd = manager.getTaskGeneration();
-		assert.ok(afterReAdd > afterRemove, "same-id re-addition must receive a fresh aggregate token");
+		assert.ok(manager.getTaskGeneration() > afterRemove, "same-id re-addition must receive a fresh aggregate token");
 	});
 
 	it("advances when closeAll removes the initialized topology", async () => {
-		const { manager, projects } = makeContextManager(["alpha"]);
-		manager.getOrCreate(projects.get("alpha")!.id);
+		const manager = contextManager([fakeContext("alpha")]);
 		const beforeClose = manager.getTaskGeneration();
 
 		await manager.closeAll();

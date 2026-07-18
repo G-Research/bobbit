@@ -1,20 +1,24 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import assert from "node:assert/strict";
-import { afterAll, afterEach, describe, it } from "vitest";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import path from "node:path";
+import { describe, it, vi } from "vitest";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-restore-lag-"));
-const managers: any[] = [];
+vi.mock("../../src/server/agent/orphan-cleanup.ts", async (importOriginal) => {
+	const original = await importOriginal<typeof import("../../src/server/agent/orphan-cleanup.ts")>();
+	return {
+		...original,
+		scanOrphanedTranscriptsAsync: async () => ({ count: 0, paths: [] }),
+	};
+});
+
+const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
 
 function persisted(id: string, overrides: Record<string, unknown> = {}): any {
 	return {
 		id,
 		title: id,
-		cwd: tmpRoot,
+		cwd: path.resolve("/pure/session-manager-restore"),
 		projectId: "project",
-		agentSessionFile: path.join(tmpRoot, `${id}.jsonl`),
+		agentSessionFile: path.resolve("/pure/session-manager-restore", `${id}.jsonl`),
 		createdAt: 1,
 		lastActivity: 1,
 		...overrides,
@@ -23,18 +27,27 @@ function persisted(id: string, overrides: Record<string, unknown> = {}): any {
 
 function makeManager(rows: any[], lagSamples: number[]) {
 	let sample = 0;
-	const manager: any = new SessionManager({
-		stateDir: tmpRoot,
-		bootRestoreLagSampler: () => lagSamples[sample++] ?? 0,
-	});
-	managers.push(manager);
 	const byId = new Map(rows.map((row) => [row.id, row]));
-	manager._testStore = {
+	const archived: string[] = [];
+	const sessionStore = {
 		getLive: () => rows,
 		getAll: () => rows,
 		get: (id: string) => byId.get(id),
-		archive: () => {},
+		archive: (id: string) => { archived.push(id); },
 	};
+	const context = { project: { id: "project" }, sessionStore };
+	const pcm = {
+		getAllLiveSessions: () => rows,
+		getAllSessions: () => rows,
+		all: () => [context].values(),
+		getOrCreate: (projectId: string) => projectId === "project" ? context : null,
+	};
+	const manager: any = Object.create(SessionManager.prototype);
+	manager.projectContextManager = pcm;
+	manager.sessions = new Map();
+	manager.orchestrationCore = null;
+	manager.clock = { now: () => Date.now() };
+	manager._bootRestoreLagSampler = () => lagSamples[sample++] ?? 0;
 	const attempted: string[] = [];
 	const yieldAt: number[] = [];
 	const yieldDelays: number[] = [];
@@ -43,16 +56,8 @@ function makeManager(rows: any[], lagSamples: number[]) {
 		yieldAt.push(attempted.length);
 		yieldDelays.push(delay);
 	};
-	return { manager, attempted, yieldAt, yieldDelays };
+	return { manager, attempted, archived, yieldAt, yieldDelays };
 }
-
-afterEach(() => {
-	for (const manager of managers.splice(0)) {
-		if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
-	}
-});
-
-afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 
 describe("SessionManager lag-aware eager boot restore", () => {
 	it("uses nominal batches of five under healthy lag without deferring any session", async () => {
@@ -95,9 +100,7 @@ describe("SessionManager lag-aware eager boot restore", () => {
 		const regular = persisted("regular");
 		const survivor = persisted("delegate-survivor", { delegateOf: owner.id });
 		const orphan = persisted("delegate-orphan", { delegateOf: "missing-owner" });
-		const { manager, attempted } = makeManager([owner, survivor, orphan, regular], [0]);
-		const archived: string[] = [];
-		manager._testStore.archive = (id: string) => { archived.push(id); };
+		const { manager, attempted, archived } = makeManager([owner, survivor, orphan, regular], [0]);
 
 		await manager.restoreSessions();
 		assert.deepEqual(attempted, [owner.id, regular.id, survivor.id]);
