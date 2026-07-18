@@ -10,6 +10,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import type { PersistedSession } from "./session-store.js";
 
 /**
@@ -105,6 +107,8 @@ export interface AsyncOrphanScanOptions {
 	maxPaths?: number;
 	maxLogLines?: number;
 	concurrency?: number;
+	/** Filesystem boundary for deterministic semantic tests. Defaults to node:fs. */
+	fsImpl?: Pick<FsLike, "promises">;
 }
 
 type AsyncScanWork =
@@ -127,6 +131,7 @@ export async function scanOrphanedTranscriptsAsync(
 ): Promise<{ count: number; paths: string[] }> {
 	const pathCap = opts.maxPaths ?? 50;
 	const logCap = opts.maxLogLines ?? 20;
+	const asyncFs = opts.fsImpl ?? realFs;
 	const requestedConcurrency = opts.concurrency ?? 8;
 	const concurrency = Number.isFinite(requestedConcurrency)
 		? Math.max(1, Math.floor(requestedConcurrency))
@@ -136,7 +141,7 @@ export async function scanOrphanedTranscriptsAsync(
 	let logged = 0;
 
 	try {
-		if (!(await fs.promises.stat(agentSessionsRoot)).isDirectory()) {
+		if (!(await asyncFs.promises.stat(agentSessionsRoot)).isDirectory()) {
 			return { count: 0, paths: [] };
 		}
 	} catch {
@@ -150,7 +155,7 @@ export async function scanOrphanedTranscriptsAsync(
 		if (work.kind === "directory") {
 			let entries: fs.Dirent[];
 			try {
-				entries = await fs.promises.readdir(work.fullPath, { withFileTypes: true });
+				entries = await asyncFs.promises.readdir(work.fullPath, { withFileTypes: true });
 			} catch {
 				return;
 			}
@@ -167,7 +172,7 @@ export async function scanOrphanedTranscriptsAsync(
 
 		let mtimeMs: number;
 		try {
-			mtimeMs = (await fs.promises.stat(work.fullPath)).mtimeMs;
+			mtimeMs = (await asyncFs.promises.stat(work.fullPath)).mtimeMs;
 		} catch {
 			return;
 		}

@@ -1,12 +1,6 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import assert from "node:assert/strict";
-import { afterAll, afterEach, describe, it, vi } from "vitest";
+import { describe, it, vi } from "vitest";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
-
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-task-cache-"));
-const managers: any[] = [];
 
 function task(id: string, assignedSessionId?: string): any {
 	return {
@@ -34,7 +28,6 @@ function context(projectId: string, persistedSessions: any[] = [], initialTasks:
 		sessionStore: {
 			get: (id: string) => sessions.get(id),
 		},
-		costTracker: { flush: () => {} },
 		tasks,
 		getBySessionId,
 	};
@@ -43,25 +36,19 @@ function context(projectId: string, persistedSessions: any[] = [], initialTasks:
 function fixture(contexts: any[]) {
 	let generation = 0;
 	const pcm: any = {
-		all: () => contexts,
+		all: () => contexts.values(),
 		getTaskGeneration: () => generation,
 	};
-	const manager: any = new SessionManager({ projectContextManager: pcm, stateDir: tmpRoot });
-	managers.push(manager);
+	const manager: any = Object.create(SessionManager.prototype);
+	manager.projectContextManager = pcm;
+	manager.sessions = new Map();
+	manager._taskIdCache = new Map();
 	return {
 		manager,
 		setGeneration: (value: number) => { generation = value; },
 		bumpGeneration: () => { generation++; },
 	};
 }
-
-afterEach(() => {
-	for (const manager of managers.splice(0)) {
-		if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
-	}
-});
-
-afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 
 describe("SessionManager generation-invalidated task lookup", () => {
 	it("caches presence and absence at a stable task generation", () => {

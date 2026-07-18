@@ -85,6 +85,11 @@ function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[
 	return mergeSidecarEntriesIntoMessages(entries, messages);
 }
 
+export interface LiveSnapshotTransformCollaborators {
+	mergeCompactionSidecar?: (sessionId: string, messages: any[]) => any[];
+	mergeSkillSidecar?: (sessionId: string, messages: any[]) => any[];
+}
+
 /**
  * Apply the mutable/live half of snapshot assembly to a fresh shallow copy.
  * The memoized base must never receive `_order`, overlay, truncation, or
@@ -94,7 +99,10 @@ export function applyLiveSnapshotTransforms(
 	sessionId: string,
 	session: { latestMessageUpdate?: { id?: string; message: any }; inFlightSteerTexts?: string[] },
 	rawBase: any,
+	collaborators: LiveSnapshotTransformCollaborators = {},
 ): any {
+	const mergeCompaction = collaborators.mergeCompactionSidecar ?? mergeCompactionSidecarIntoMessages;
+	const mergeSkill = collaborators.mergeSkillSidecar ?? mergeSkillSidecarIntoMessages;
 	const cloneMessages = (messages: any[]): any[] => messages.map((message) =>
 		message && typeof message === "object" ? { ...message } : message,
 	);
@@ -105,8 +113,8 @@ export function applyLiveSnapshotTransforms(
 			spliceInFlightMessage(base, session.latestMessageUpdate),
 			session.inFlightSteerTexts,
 		);
-		const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
-		return mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
+		const withCompaction = mergeCompaction(sessionId, spliced);
+		return mergeSkill(sessionId, truncateLargeToolContentInMessages(withCompaction));
 	}
 	if (rawBase && typeof rawBase === "object" && Array.isArray(rawBase.messages)) {
 		const base = { ...rawBase, messages: cloneMessages(rawBase.messages) };
@@ -114,9 +122,9 @@ export function applyLiveSnapshotTransforms(
 			spliceInFlightMessage(base.messages, session.latestMessageUpdate),
 			session.inFlightSteerTexts,
 		);
-		const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
+		const withCompaction = mergeCompaction(sessionId, spliced);
 		const truncated = truncateLargeToolContentInMessages(withCompaction);
-		const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
+		const merged = mergeSkill(sessionId, truncated);
 		return { ...base, messages: merged };
 	}
 	return rawBase;

@@ -65,7 +65,7 @@ export function createMemFs(): MemFs {
 		},
 		writeFileSync(p: fs.PathLike | number, data: string | NodeJS.ArrayBufferView) { const n = norm(p as fs.PathLike); ensureParents(n); files.set(n, toText(data)); },
 		appendFileSync(p: fs.PathLike | number, data: string | NodeJS.ArrayBufferView) { const n = norm(p as fs.PathLike); ensureParents(n); files.set(n, (files.get(n) ?? "") + toText(data)); },
-		readdirSync(p: fs.PathLike, _opts?: any) {
+		readdirSync(p: fs.PathLike, opts?: any) {
 			const n = norm(p);
 			const prefix = n.endsWith(path.sep) ? n : n + path.sep;
 			const children = new Set<string>();
@@ -75,7 +75,16 @@ export function createMemFs(): MemFs {
 					if (rest.length) children.add(rest.split(path.sep)[0]);
 				}
 			}
-			return [...children] as any;
+			if (!opts?.withFileTypes) return [...children] as any;
+			return [...children].map((name) => {
+				const child = path.join(n, name);
+				return {
+					name,
+					isDirectory: () => dirs.has(child),
+					isFile: () => files.has(child),
+					isSymbolicLink: () => false,
+				};
+			}) as any;
 		},
 		statSync(p: fs.PathLike, _opts?: any) {
 			const n = norm(p);
@@ -114,7 +123,7 @@ export function createMemFs(): MemFs {
 			readFile: async (p: fs.PathLike) => api.readFileSync(p as fs.PathLike) as any,
 			writeFile: async (p: fs.PathLike, data: string | NodeJS.ArrayBufferView) => { api.writeFileSync(p as fs.PathLike, data as any); },
 			appendFile: async (p: fs.PathLike, data: string | NodeJS.ArrayBufferView) => { api.appendFileSync(p as fs.PathLike, data as any); },
-			readdir: async (p: fs.PathLike) => api.readdirSync(p) as any,
+			readdir: async (p: fs.PathLike, opts?: any) => api.readdirSync(p, opts) as any,
 			stat: async (p: fs.PathLike) => api.statSync(p) as any,
 			lstat: async (p: fs.PathLike) => api.lstatSync(p) as any,
 			rename: async (from: fs.PathLike, to: fs.PathLike) => { api.renameSync(from, to); },
