@@ -242,7 +242,7 @@ Do not store images, attachments, or rewritten display text. `modelText` is alre
 
 Live and restore replay additionally use stable occurrence keys from Pi id aliases on either the message or outer event. A keyed occurrence retains one binding across updates and repeated terminal frames, so a duplicate cannot advance to the next same-text prompt.
 
-Legacy replay may provide neither id nor timestamp. For the bounded `switch_session` replay window, retain an ordered runtime view of every non-cancelled sidecar occurrence, including settled rows. Settled same-text occurrences remain guards, and consecutive duplicate keyless terminal frames reuse the last binding. Clear this restore-only state after replay so it cannot shadow later live input.
+Legacy replay may provide neither id nor timestamp. For the bounded `switch_session` replay window, retain an ordered runtime view of every non-cancelled sidecar occurrence, including settled rows. Settled same-text occurrences remain guards, and consecutive duplicate keyless terminal frames reuse the last binding. In force-abort recovery, hydrate this restore-only state immediately before replay and clear it on every replay exit so it cannot shadow later live input.
 
 The safety invariant is stronger than best-effort attribution: a historical or duplicate echo must not settle a newer unresolved same-text prompt or consume its in-flight steer ledger. Only an echo correlated to that unresolved occurrence may do so; unresolved ledger rows survive replay and are requeued unchanged. Because two genuinely keyless identical occurrences are information-theoretically indistinguishable, the fallback preserves durable intent rather than guessing the newer occurrence.
 
@@ -298,6 +298,10 @@ For a steer batch:
 Add `SessionInfo.pendingPromptAuthors?: PromptAuthorDispatchRecord[]`. Every direct/queued/steer dispatch pushes a record before invoking Pi and appends it to the sidecar. A user-role event first reuses its stable id/timestamp occurrence binding; exact text is the ordered fallback only when Pi supplies no key. A newly resolved `message_end` stamps the cloned visible event, appends an `echoed` settlement, and consumes only the matching pending record. Rejection removes that record and appends `cancelled`.
 
 Restore also hydrates settled occurrence bindings and the bounded keyless replay guard described in §5.3. `_consumeSteerEcho` acts on the correlated `promptId` and ignores already-settled occurrences, which prevents historical replay from deleting a newer same-text steer. Keep this independent of `pendingSkillExpansions`; both may match the same echo. Skill rewriting and author stamping must be applied to the same cloned event without either helper discarding the other's fields.
+
+Hard force-abort must not drain the in-flight steer ledger when the old bridge stops: Pi may have persisted a terminal echo that the detached listener never saw. The replacement hydrates sidecar bindings immediately before `switch_session`, prunes ledger rows already settled as echoed, and prepares each replay event through the normal author boundary before passing it only to `_consumeSteerEcho`. Staged startup and replay remain invisible—no activity, lifecycle, event-buffer, cost, or broadcast effects.
+
+When the bounded replay exits, clear `promptAuthorReplayBindings` and `lastKeylessPromptAuthorEnd` in a `finally` path. Then reconcile only the remaining ledger rows: cancel their stale dispatch bindings, requeue them at the front with original text/source/author, and leave dispatch to the replacement coordinator after the final bridge commits. Replacement failure performs the same reconciliation and guard cleanup so accepted intent survives for a later recovery without leaking replay guards into live traffic.
 
 ## 7. Live event flow
 

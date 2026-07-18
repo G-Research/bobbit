@@ -116,11 +116,11 @@ Writes occur immediately before prompt or steer delivery and are best-effort. A 
 
 Stable occurrence keys take precedence over text. Live and replayed events read Pi entry-id aliases from either the message or its outer event; once an occurrence is bound, its updates and duplicate terminal frames reuse that binding. Snapshot and transcript correlation then matches eligible user-role echoes by settled message id, timestamp plus exact model text, and finally FIFO exact text. Tool-result-only user-role rows are excluded, and matching runs before display-text rewriting.
 
-Legacy replay can contain user echoes with neither an id nor a timestamp. During `switch_session`, Bobbit therefore keeps a restore-only ordered view of every non-cancelled sidecar occurrence, including settled rows. A settled same-text occurrence remains a guard for the replay window, and consecutive duplicate keyless ends reuse its binding. The guard is cleared when replay completes so it cannot shadow a future live prompt.
+Legacy replay can contain user echoes with neither an id nor a timestamp. During `switch_session`, Bobbit therefore keeps a restore-only ordered view of every non-cancelled sidecar occurrence, including settled rows. A settled same-text occurrence remains a guard for the replay window, and consecutive duplicate keyless ends reuse its binding.
 
 This enforces the ledger-safety invariant: a historical or duplicate echo must never settle a newer unresolved same-text prompt or remove that prompt's in-flight steer record. Only an echo bound to the unresolved occurrence may consume that record; anything still unresolved after replay is requeued with its original text, source, and author. When keyless occurrences are otherwise indistinguishable, preserving durable intent takes priority over guessing a newer binding.
 
-The replay guard is runtime correlation state, not persisted data. It adds no sidecar fields or record types, does not synthesize Pi ids, and does not change Pi events, transcript rows, prompt bytes, or provider schemas.
+The replay guard is runtime correlation state, not persisted data. Force-abort recovery hydrates it immediately before the bounded transcript replay and clears it when that replay exits, whether successfully or by error. It adds no sidecar fields or record types, does not synthesize Pi ids, and does not change Pi events, transcript rows, prompt bytes, or provider schemas.
 
 Fork and continue operations copy the sidecar after the destination session exists. A hard purge removes it. Ordinary archive operations retain it with the session history.
 
@@ -131,6 +131,8 @@ Fork and continue operations copy the sidecar after the destination session exis
 `SessionManager` resolves `source` and `author` when it accepts a prompt. Both optional fields travel with `QueuedMessage`, are broadcast in `queue_update`, and persist in `PersistedSession.messageQueue`. `PromptQueue` validates restored metadata, preserves it through priority changes and recovery re-enqueues, and can recover a missing source from a valid author's kind. Legacy rows without either field retain the historical local-user default.
 
 The in-flight steer ledger persists structured `{ text, promptId, source?, author? }` records until Pi echoes them or abort reconciliation returns them to the queue. Legacy string-only steer entries normalize as local-user prompts. When steers are combined into the existing newline-joined batch, a common author is retained; a mixed-author batch receives the Bobbit batch-system identity. The prompt text and batching behavior do not change.
+
+A hard force-abort keeps this ledger intact after stopping the old bridge because an echo may already be durable even if the live listener missed it. Immediately before the replacement runs `switch_session`, Bobbit reloads author bindings, removes ledger rows already proven echoed by the sidecar, and enables the keyless replay guard. Replay events pass through normal author preparation, then only correlated steer-echo consumption; they do not update activity or lifecycle state and are not buffered, costed, or broadcast. After replay, abort reconciliation cancels and requeues only unresolved rows. The replacement coordinator drains them only after the final bridge commits; if replacement setup fails, the same reconciliation preserves them as queued intent for a later recovery.
 
 ### Live events
 
