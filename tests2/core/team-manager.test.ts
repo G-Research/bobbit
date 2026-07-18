@@ -52,6 +52,7 @@ interface MockGoal {
 	teamLeadSessionId?: string;
 	archived?: boolean;
 	paused?: boolean;
+	workflow?: any;
 }
 
 function createMockGoal(overrides: Partial<MockGoal> = {}): MockGoal {
@@ -800,6 +801,61 @@ describe("TeamManager", () => {
 			assert.ok(team.getTeamState("goal-1"), "team state should still exist");
 			assert.equal(goal.state, "complete");
 		});
+
+		it("revalidates gates after awaited dismissals and rearms instead of completing after an interleaved reset", async () => {
+			const clock = createManualClock();
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({
+				state: "in-progress",
+				workflow: { gates: [{ id: "implementation", name: "Implementation", dependsOn: [] }] },
+			});
+			goals.set(goal.id, goal);
+			const gateStates = [{ gateId: "implementation", status: "passed" }];
+			const gateStore = { getGatesForGoal: vi.fn(() => gateStates.map((gate) => ({ ...gate }))) };
+			const sm = createMockSessionManager(goals);
+			const events = captureTeamLeadEvents(sm);
+			const enqueuePrompt = vi.fn();
+			sm.enqueuePrompt = enqueuePrompt;
+			let releaseDismiss!: () => void;
+			const dismissBlocked = new Promise<void>((resolve) => { releaseDismiss = resolve; });
+			let markDismissStarted!: () => void;
+			const dismissStarted = new Promise<void>((resolve) => { markDismissStarted = resolve; });
+			sm.terminateSession = vi.fn(async (id: string) => {
+				markDismissStarted();
+				await dismissBlocked;
+				sm._sessions.delete(id);
+				return true;
+			});
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
+			(team as any).resolveGateStore = () => gateStore;
+
+			await team.startTeam(goal.id);
+			const entry = (team as any).teams.get(goal.id)!;
+			sm._sessions.set("worker-race", {
+				id: "worker-race",
+				status: "idle",
+				cwd: "/tmp/worker-race",
+				rpcClient: { onEvent: vi.fn(() => () => {}) },
+				clients: new Set(),
+			});
+			entry.agents.push({ sessionId: "worker-race", role: "coder", task: "finish", createdAt: clock.now() });
+			(team as any).sessionToGoal.set("worker-race", goal.id);
+
+			const completing = team.completeTeam(goal.id);
+			await dismissStarted;
+			gateStates[0].status = "pending";
+			releaseDismiss();
+
+			await assert.rejects(completing, /Cannot complete: gates not passed: Implementation/);
+			assert.equal(goal.state, "in-progress", "an interleaved reset must win over completion");
+			assert.ok(gateStore.getGatesForGoal.mock.calls.length >= 2, "workflow gates must be read again after dismissal");
+			assert.equal(events.activeListenerCount(), 1, "aborted completion must restore the lead subscription");
+			assert.equal((team as any).noWorkersNudgeTimers.size, 1, "aborted completion must restore the base-delay timer");
+
+			clock.advance(5 * 60 * 1000);
+			await flush();
+			assert.equal(enqueuePrompt.mock.calls.length, 1, "the restored idle lead must remain nudge eligible");
+		});
 	});
 
 	// ---------------------------------------------------------------------------
@@ -860,6 +916,72 @@ describe("TeamManager", () => {
 			await flush();
 			assert.equal(enqueuePrompt.mock.calls.length, 1, "reopened idle lead must receive one base-delay nudge");
 			assert.match(enqueuePrompt.mock.calls[0][1], /no active team agents/i);
+		});
+
+		it("retries rearm after an old unsubscribe callback throws without duplicating runtime state", async () => {
+			const clock = createManualClock();
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ state: "in-progress" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const events = captureTeamLeadEvents(sm);
+			sm.enqueuePrompt = vi.fn();
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
+
+			await team.startTeam(goal.id);
+			await team.completeTeam(goal.id);
+			goal.state = "in-progress";
+			const entry = (team as any).teams.get(goal.id)!;
+			let shouldThrow = true;
+			const staleUnsubscribe = vi.fn(() => {
+				if (shouldThrow) {
+					shouldThrow = false;
+					throw new Error("transient unsubscribe failure");
+				}
+			});
+			entry.unsubscribeTeamLeadEvents = staleUnsubscribe;
+
+			assert.equal(team.reopenCompletedTeam(goal.id), false, "failed cleanup must report that rearm did not happen");
+			assert.equal(events.activeListenerCount(), 0);
+			assert.equal((team as any).noWorkersNudgeTimers.size, 0);
+			assert.equal(team.reopenCompletedTeam(goal.id), true, "a failed attempt must remain retryable");
+			assert.equal(team.reopenCompletedTeam(goal.id), false, "a successful rearm must be idempotent");
+			assert.equal(staleUnsubscribe.mock.calls.length, 2);
+			assert.equal(events.activeListenerCount(), 1);
+			assert.equal((team as any).noWorkersNudgeTimers.size, 1);
+		});
+
+		it("retries rearm after rpc onEvent throws without poisoning idempotency", async () => {
+			const clock = createManualClock();
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ state: "in-progress" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const events = captureTeamLeadEvents(sm);
+			sm.enqueuePrompt = vi.fn();
+			const team = createTeamManager(sm, DEFAULT_CONFIG, clock);
+
+			const lead = await team.startTeam(goal.id);
+			await team.completeTeam(goal.id);
+			goal.state = "in-progress";
+			const workingOnEvent = lead.rpcClient.onEvent.bind(lead.rpcClient);
+			let shouldThrow = true;
+			lead.rpcClient.onEvent = vi.fn((callback: (event: any) => void) => {
+				if (shouldThrow) {
+					shouldThrow = false;
+					throw new Error("transient onEvent failure");
+				}
+				return workingOnEvent(callback);
+			});
+
+			assert.equal(team.reopenCompletedTeam(goal.id), false);
+			assert.equal(events.activeListenerCount(), 0);
+			assert.equal((team as any).noWorkersNudgeTimers.size, 0);
+			assert.equal(team.reopenCompletedTeam(goal.id), true);
+			assert.equal(team.reopenCompletedTeam(goal.id), false);
+			assert.equal((lead.rpcClient.onEvent as any).mock.calls.length, 2);
+			assert.equal(events.activeListenerCount(), 1);
+			assert.equal((team as any).noWorkersNudgeTimers.size, 1);
 		});
 
 		it("restores workers-idle nudge eligibility after the reset transition", async () => {
