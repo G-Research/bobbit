@@ -12326,6 +12326,10 @@ async function handleApiRoute(
 		}
 
 		try {
+			// The destination id is fixed before creation. Copy author bindings now so
+			// switch_session replay is normalized correctly on its first pass and the
+			// resulting EventBuffer never captures fallback authors.
+			copyAuthorSidecar(sourceId, forkId);
 			const launched = await launchSidebarSessionFork({
 				forkId,
 				projectId,
@@ -12387,7 +12391,6 @@ async function handleApiRoute(
 				createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
 				setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
 			});
-			copyAuthorSidecar(sourceId, launched.fork.id);
 			if (ps.staffId) launched.fork.staffId = ps.staffId;
 			json({
 				id: launched.fork.id,
@@ -12951,16 +12954,20 @@ async function handleApiRoute(
 
 		let newSession;
 		try {
+			// createSession synchronously rehydrates the cloned transcript. Seed the
+			// already-known destination id first so replayed events resolve against the
+			// copied author ledger instead of being frozen with fallback identities.
+			copyAuthorSidecar(archivedId, newSessionId);
 			newSession = await sessionManager.createSession(
 				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);
-			copyAuthorSidecar(archivedId, newSession.id);
 		} catch (err) {
 			const failedRecord = sessionManager.getPersistedSession(newSessionId);
 			cleanupFailedContinue(failedRecord?.agentSessionFile || destJsonl, newSessionId, bobbitStateDir());
 			if (failedRecord?.agentSessionFile && failedRecord.agentSessionFile !== destJsonl) {
 				cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
 			}
+			purgeAuthorSidecar(newSessionId);
 			jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
