@@ -37,15 +37,17 @@ function transformMessages(messages: any[], context: VisibleMessageSnapshotConte
 	// valid-looking author metadata before Bobbit adds its trusted live,
 	// compaction, and sidecar identities below.
 	const trustedBase = stripUntrustedSnapshotAuthors(messages);
+	const authorBindings = readAuthorSidecar(context.sessionId);
 	const withInFlight = spliceInFlightSteers(
 		spliceInFlightMessage(trustedBase, context.latestMessageUpdate),
 		context.inFlightSteerTexts,
+		authorBindings,
 	);
 	const withCompaction = mergeCompactionSidecarIntoMessages(context.sessionId, withInFlight);
 	// Author correlation must see exact model text, before skill/file sidecars
 	// replace it with the user-facing original text.
 	const withAuthors = mergeAuthorSidecarIntoMessages(
-		readAuthorSidecar(context.sessionId),
+		authorBindings,
 		withCompaction,
 		{
 			session: context.session ?? { id: context.sessionId },
