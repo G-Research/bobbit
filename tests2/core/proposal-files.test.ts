@@ -10,12 +10,12 @@
  *
  * Design doc: docs/design/editable-proposals.md §9.1.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { createMemFs } from "../harness/mem-fs.ts";
 import {
 	deleteProposalFile,
 	editProposalFile,
@@ -31,19 +31,37 @@ import {
 	type ProposalType,
 } from "../../src/server/proposals/proposal-files.ts";
 
-let stateDir: string;
+const memoryFs = createMemFs();
+const stateDir = path.resolve("/memfs/proposal-files-test");
+const fsSpies: Array<{ mockRestore(): void }> = [];
 const sid = "sess-abc_123";
 
 beforeAll(() => {
-	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "proposal-files-test-"));
+	// proposal-files owns atomic temp-write/rename behavior, but its semantic unit
+	// coverage does not need Defender-scanned disk I/O. Route only the async fs
+	// boundary it uses through a deterministic in-memory implementation.
+	for (const method of ["mkdir", "readFile", "writeFile", "readdir", "rename"] as const) {
+		fsSpies.push((vi.spyOn as any)(fs.promises, method).mockImplementation(
+			(...args: unknown[]) => (memoryFs.promises as any)[method](...args),
+		));
+	}
+	fsSpies.push(vi.spyOn(fs.promises, "unlink").mockImplementation(async (file) => {
+		if (!memoryFs.existsSync(file)) {
+			throw Object.assign(new Error(`ENOENT: no such file or directory, unlink '${file}'`), {
+				code: "ENOENT",
+			});
+		}
+		memoryFs.unlinkSync(file);
+	}));
+	memoryFs.mkdirSync(stateDir, { recursive: true });
 });
 
 afterAll(() => {
-	fs.rmSync(stateDir, { recursive: true, force: true });
+	for (const spy of fsSpies.reverse()) spy.mockRestore();
 });
 
 function sha(p: string): string {
-	const buf = fs.readFileSync(p);
+	const buf = memoryFs.readFileSync(p);
 	return createHash("sha256").update(buf).digest("hex");
 }
 
@@ -158,7 +176,7 @@ describe("goal proposal round-trip", () => {
 			"metadata:\n  - arrays-are-not-objects",
 		];
 		for (const bad of cases) {
-			fs.writeFileSync(fp, `---\ntitle: G\n${bad}\n---\nbody\n`);
+			memoryFs.writeFileSync(fp, `---\ntitle: G\n${bad}\n---\nbody\n`);
 			const parsed = await parseProposalFile(stateDir, sid, "goal");
 			assert.equal(parsed.ok, false, `expected rejection for: ${bad}`);
 			if (!parsed.ok) assert.equal(parsed.code, "STRUCTURAL_VALIDATION_FAILED", bad);
@@ -168,7 +186,7 @@ describe("goal proposal round-trip", () => {
 	it("missing title yields MISSING_REQUIRED_FIELD on parse", async () => {
 		// Hand-craft a goal file with empty title
 		const fp = proposalFilePath(stateDir, sid, "goal");
-		fs.writeFileSync(fp, "---\ntitle: \"\"\n---\nsome body\n");
+		memoryFs.writeFileSync(fp, "---\ntitle: \"\"\n---\nsome body\n");
 		const parsed = await parseProposalFile(stateDir, sid, "goal");
 		assert.equal(parsed.ok, false);
 		if (!parsed.ok) assert.equal(parsed.code, "MISSING_REQUIRED_FIELD");
@@ -223,7 +241,7 @@ describe("editProposalFile semantics", () => {
 	it("OLD_TEXT_NOT_UNIQUE when matches twice", async () => {
 		// craft a project yaml with a duplicated substring
 		const fp = proposalFilePath(stateDir, editSid, "project");
-		fs.writeFileSync(fp, "name: P\nroot_path: /tmp/x\nextra1: dup\nextra2: dup\n");
+		memoryFs.writeFileSync(fp, "name: P\nroot_path: /tmp/x\nextra1: dup\nextra2: dup\n");
 		const r = await editProposalFile(stateDir, editSid, "project", "dup", "uniq");
 		assert.equal(r.ok, false);
 		if (!r.ok) assert.equal((r as any).code, "OLD_TEXT_NOT_UNIQUE");
@@ -254,7 +272,7 @@ describe("editProposalFile semantics", () => {
 		const after = sha(fp);
 		assert.equal(before, after, "file content must be unchanged on failed edit");
 		// .tmp must not linger
-		assert.equal(fs.existsSync(fp + ".tmp"), false);
+		assert.equal(memoryFs.existsSync(fp + ".tmp"), false);
 	});
 
 	it("malformed edit rolls back on MISSING_REQUIRED_FIELD", async () => {
@@ -314,8 +332,8 @@ describe("snapshot history", () => {
 		const sidG = "sess-garbage";
 		await writeProposalFile(stateDir, sidG, "project", { name: "X", root_path: "/tmp/x" });
 		const hist = path.join(stateDir, "proposal-drafts", sidG, "project.history");
-		fs.writeFileSync(path.join(hist, "foo.txt"), "junk");
-		fs.writeFileSync(path.join(hist, "abc.yaml"), "junk");
+		memoryFs.writeFileSync(path.join(hist, "foo.txt"), "junk");
+		memoryFs.writeFileSync(path.join(hist, "abc.yaml"), "junk");
 		assert.equal(await latestRev(stateDir, sidG, "project"), 1);
 	});
 
@@ -358,11 +376,11 @@ describe("snapshot history", () => {
 		await writeProposalFile(stateDir, sidC, "project", { name: "X", root_path: "/tmp/x" });
 		await writeProposalFile(stateDir, sidC, "project", { name: "Y", root_path: "/tmp/x" });
 		const dir = path.join(stateDir, "proposal-drafts", sidC);
-		assert.equal(fs.existsSync(path.join(dir, "project.yaml")), true);
-		assert.equal(fs.existsSync(path.join(dir, "project.history", "1.yaml")), true);
-		assert.equal(fs.existsSync(path.join(dir, "project.history", "2.yaml")), true);
-		fs.rmSync(dir, { recursive: true, force: true });
-		assert.equal(fs.existsSync(dir), false);
+		assert.equal(memoryFs.existsSync(path.join(dir, "project.yaml")), true);
+		assert.equal(memoryFs.existsSync(path.join(dir, "project.history", "1.yaml")), true);
+		assert.equal(memoryFs.existsSync(path.join(dir, "project.history", "2.yaml")), true);
+		memoryFs.rmSync(dir, { recursive: true, force: true });
+		assert.equal(memoryFs.existsSync(dir), false);
 	});
 });
 
