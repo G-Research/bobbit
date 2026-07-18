@@ -23,6 +23,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { realRecoveryFs, type RecoveryFs } from "./bounded-async-work.js";
 
 export interface SessionSidecar {
 	version: 1;
@@ -81,24 +82,8 @@ export function writeSessionSidecar(jsonlPath: string, meta: SessionSidecar): vo
 	}
 }
 
-/**
- * Read the sidecar JSON. Returns null when:
- *   - the file is absent
- *   - JSON parsing fails
- *   - `version` is not `1` (forward-compat — caller falls back to heuristic)
- *   - required string fields are missing/malformed
- *
- * Never throws — recovery callers should always be able to continue with
- * the heuristic fallback on any sidecar problem.
- */
-export function readSessionSidecar(jsonlPath: string): SessionSidecar | null {
-	const target = sidecarPathFor(jsonlPath);
-	let raw: string;
-	try {
-		raw = fs.readFileSync(target, "utf-8");
-	} catch {
-		return null;
-	}
+/** Parse and validate sidecar JSON without performing I/O. */
+export function parseSessionSidecar(raw: string): SessionSidecar | null {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
@@ -128,6 +113,28 @@ export function readSessionSidecar(jsonlPath: string): SessionSidecar | null {
 		modelProvider: typeof obj.modelProvider === "string" ? obj.modelProvider : undefined,
 		modelId: typeof obj.modelId === "string" ? obj.modelId : undefined,
 	};
+}
+
+/** Synchronous reader retained for unchanged non-recovery call sites. */
+export function readSessionSidecar(jsonlPath: string): SessionSidecar | null {
+	try {
+		return parseSessionSidecar(fs.readFileSync(sidecarPathFor(jsonlPath), "utf-8"));
+	} catch {
+		return null;
+	}
+}
+
+/** Asynchronously read a sidecar through the injectable recovery filesystem. */
+export async function readSessionSidecarAsync(
+	jsonlPath: string,
+	fsImpl: Pick<RecoveryFs, "readFile"> = realRecoveryFs,
+): Promise<SessionSidecar | null> {
+	try {
+		const raw = await fsImpl.readFile(sidecarPathFor(jsonlPath), "utf-8");
+		return parseSessionSidecar(raw);
+	} catch {
+		return null;
+	}
 }
 
 /**
