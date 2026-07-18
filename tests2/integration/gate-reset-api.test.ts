@@ -214,7 +214,6 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 				id: completedGoal.id,
 				cwd: completedGoal.cwd,
 				team: completedGoal.team,
-				teamLeadSessionId: teamLeadId,
 				...preservedGit,
 			});
 			expect(gateway.teamManager.getTeamState(goalId)?.teamLeadSessionId).toBe(teamBefore?.teamLeadSessionId);
