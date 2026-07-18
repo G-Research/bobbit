@@ -40,7 +40,7 @@ import {
 	RECOVERY_IO_CONCURRENCY,
 	type RecoveryFs,
 } from "./bounded-async-work.js";
-import { readSessionSidecarAsync, sidecarPathFor } from "./session-sidecar.js";
+import { readSessionSidecarAsync } from "./session-sidecar.js";
 import type { CostTracker } from "./cost-tracker.js";
 
 /**
@@ -451,10 +451,8 @@ export async function buildSidecarGoalIdIndex(
 			const candidates: Array<readonly [string, string]> = [];
 			for (const name of names) {
 				if (!name.endsWith(".bobbit.json")) continue;
-				const full = path.join(slugDir, name);
 				const stem = name.slice(0, -".bobbit.json".length);
 				const syntheticJsonl = path.join(slugDir, `${stem}.jsonl`);
-				if (sidecarPathFor(syntheticJsonl) !== full) continue;
 				const sidecar = await readSessionSidecarAsync(syntheticJsonl, fsImpl);
 				if (sidecar?.teamGoalId) {
 					candidates.push([sidecar.bobbitSessionId, sidecar.teamGoalId]);
