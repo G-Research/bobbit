@@ -265,6 +265,61 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 		}
 	});
 
+	test("restores a completed goal when gate invalidation fails without lifecycle side effects", async ({ gateway }) => {
+		const wf = workflowId("gate-reset-compensation");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
+		]);
+		const goal = await createGoal({ title: `Gate Reset Compensation ${Date.now()}`, workflowId: wf, worktree: false, team: true, autoStartTeam: false });
+		const goalId = goal.id;
+		let teamLeadId: string | undefined;
+		let conn: WsConnection | undefined;
+		let resetSpy: any;
+		let reopenSpy: any;
+		let enqueueSpy: any;
+		let steerSpy: any;
+		try {
+			await signalGate(goalId, "root");
+			await waitForGateStatus(goalId, "root", "passed");
+			teamLeadId = await startTeam(goalId);
+			await completeTeam(goalId);
+			expect((await getGoal(goalId)).state).toBe("complete");
+
+			const context = gateway.projectContextManager.getContextForGoal(goalId);
+			conn = trackGateApiConnection(await connectWs(teamLeadId));
+			resetSpy = vi.spyOn(context.gateStore, "resetGateAndDependents")
+				.mockImplementation(() => {
+					expect(context.goalStore.get(goalId)?.state).toBe("in-progress");
+					throw new Error("forced gate reset failure");
+				});
+			reopenSpy = vi.spyOn(gateway.teamManager, "reopenCompletedTeam");
+			enqueueSpy = vi.spyOn(gateway.sessionManager, "enqueuePrompt");
+			steerSpy = vi.spyOn(gateway.sessionManager, "deliverLiveSteer");
+			const cursor = conn.messageCount();
+
+			const reset = await resetGate(goalId, "root");
+			expect(reset.status, JSON.stringify(reset.body)).toBe(500);
+			expect(reset.body).toEqual({ error: "Failed to reset gate" });
+			expect((await getGoal(goalId)).state).toBe("complete");
+			expect((await getGate(goalId, "root")).status).toBe("passed");
+			expect(reopenSpy).not.toHaveBeenCalled();
+			expect(resetNotificationCalls([enqueueSpy, steerSpy], teamLeadId)).toHaveLength(0);
+			const errorEvents = conn.messages.slice(cursor);
+			expect(errorEvents.filter(message => message.type === "goal_state_changed" && message.goalId === goalId)).toHaveLength(0);
+			expect(errorEvents.filter(message => message.type === "gate_reset" && message.goalId === goalId)).toHaveLength(0);
+		} finally {
+			resetSpy?.mockRestore();
+			reopenSpy?.mockRestore();
+			enqueueSpy?.mockRestore();
+			steerSpy?.mockRestore();
+			conn?.close();
+			await teardownTeam(goalId).catch(() => {});
+			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
 	test("resets an already in-progress goal without a lifecycle transition", async () => {
 		const wf = workflowId("gate-reset-active");
 		await createWorkflow(wf, [

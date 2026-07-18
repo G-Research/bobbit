@@ -10740,8 +10740,14 @@ async function handleApiRoute(
 		let resetResult: GateResetResult;
 		try {
 			resetResult = gateResetCtx.gateStore.resetGateAndDependents(goalId, gateId, goal.workflow);
-		} catch (err: any) {
-			json({ error: err?.message || `Unknown gate: ${gateId}` }, 404);
+		} catch (err) {
+			// A controlled reset failure must not leave a completed goal reopened
+			// without invalidated gates. Keep state-first ordering above so an actual
+			// process crash still fails safe as in-progress rather than complete with
+			// pending work.
+			if (reopened) gateResetCtx.goalStore.update(goalId, { state: previousState });
+			console.error(`[api] Failed to reset gate ${goalId}/${gateId}:`, err);
+			json({ error: "Failed to reset gate" }, 500);
 			return;
 		}
 		const reopen: GateResetReopenOutcome = {
@@ -10752,10 +10758,7 @@ async function handleApiRoute(
 
 		if (reopened) {
 			// TeamManager owns the existing lead/team runtime rearm.
-			const reopenCapableTeamManager = teamManager as TeamManager & {
-				reopenCompletedTeam: (reopenGoalId: string) => Promise<void> | void;
-			};
-			await reopenCapableTeamManager.reopenCompletedTeam(goalId);
+			teamManager.reopenCompletedTeam(goalId);
 			broadcastToAll({ type: "goal_state_changed", goalId });
 		}
 
