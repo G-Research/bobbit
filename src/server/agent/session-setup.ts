@@ -15,7 +15,8 @@ import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { CommandRunner } from "../gateway-deps.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, switchSessionPathForAgent } from "./session-manager.js";
+import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, restorePromptAuthorBindings, switchSessionPathForAgent } from "./session-manager.js";
+import { readAuthorSidecar } from "./author-sidecar.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
@@ -1420,6 +1421,10 @@ export async function executeWorktreeAsync(
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
 	if (plan.preExistingAgentSessionFile) {
+		// Fork/continue routes copy the destination sidecar before createSession.
+		// Hydrate immediately before switch_session so replay events and their
+		// EventBuffer entries retain the source prompt identities.
+		restorePromptAuthorBindings(session, readAuthorSidecar(session.id));
 		// The continue handler pre-computes the cloned-.jsonl path against the
 		// project-root cwd. For worktree-backed sessions, the agent CLI boots
 		// with cwd=offsetCwd (the worktree path), and `formatAgentSessionFilePath`
@@ -1489,6 +1494,10 @@ export async function executeWorktreeAsync(
 			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
+		// Text-only replay guards are scoped to this switch. Keeping them would let
+		// an unrelated future same-text prompt inherit an historical author.
+		session.promptAuthorReplayBindings = undefined;
+		session.lastKeylessPromptAuthorEnd = undefined;
 	}
 
 	// Persist agentSessionFile to disk BEFORE flipping status to idle. Otherwise
@@ -1612,6 +1621,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
 	if (plan.preExistingAgentSessionFile) {
+		// See the worktree path above: this must precede switch_session replay.
+		restorePromptAuthorBindings(session, readAuthorSidecar(session.id));
 		const transcriptFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
@@ -1639,6 +1650,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
+		session.promptAuthorReplayBindings = undefined;
+		session.lastKeylessPromptAuthorEnd = undefined;
 	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
