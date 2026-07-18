@@ -341,7 +341,31 @@ describe("GoalStatusWidget fixture", () => {
 		expect(dd.querySelector('[data-testid="goal-widget-gate-bypass-info"]')?.textContent).toContain("Emergency fix");
 	});
 
-	it("resetting a completed goal clears the local completed latch and shows the pending gate immediately", async () => {
+	it("tracks completion from an authoritative app goal refresh after mounting in-progress", async () => {
+		const el = await mountGoalStatusWidget({
+			goalId: GOAL_ID,
+			gates: [
+				{ gateId: "design-doc", name: "Design Document", status: "passed", latestPassedSignalId: "sig-pass" },
+				{ gateId: "risk", name: "Risk Review", status: "bypassed", whyBypassed: "Accepted risk", whoAmI: "Lead" },
+			],
+			cache: { passed: 1, total: 2, bypassed: 1 },
+			goalState: "in-progress",
+		});
+		await openDropdown(el);
+		expect(dropdown()!.querySelector('[data-testid="goal-widget-confirm-completion"]')).toBeTruthy();
+		expect(dropdown()!.querySelector('[data-testid="goal-widget-completed"]')).toBeNull();
+
+		// Mirrors refreshSessions replacing the authoritative goal list after
+		// team_complete runs in another agent/tab.
+		state.goals = state.goals.map(goal => goal.id === GOAL_ID ? { ...goal, state: "complete" } : goal) as any;
+		for (let i = 0; i < 50 && !dropdown()!.querySelector('[data-testid="goal-widget-completed"]'); i++) await sleep(10);
+
+		expect((el as any)._goalState).toBe("complete");
+		expect(dropdown()!.querySelector('[data-testid="goal-widget-completed"]')?.textContent).toContain("Completed");
+		expect(dropdown()!.querySelector('[data-testid="goal-widget-confirm-completion"]')).toBeNull();
+	});
+
+	it("resetting a completed goal clears the completed state and shows the pending gate immediately", async () => {
 		resetResponse = {
 			ok: true,
 			affectedGateIds: ["design-doc"],
@@ -355,10 +379,6 @@ describe("GoalStatusWidget fixture", () => {
 			cache: { passed: 1, total: 1 },
 			goalState: "complete",
 		});
-		// Reproduce completion through the widget's immediate-feedback path, whose
-		// local latch must be reversible once reset returns authoritative reopen data.
-		(el as any)._completed = true;
-		await (el as any).updateComplete;
 		await openDropdown(el);
 		expect(dropdown()!.querySelector('[data-testid="goal-widget-completed"]')).toBeTruthy();
 
@@ -368,7 +388,7 @@ describe("GoalStatusWidget fixture", () => {
 
 		expect(resetRequests).toHaveLength(1);
 		expect(state.goals.find(goal => goal.id === GOAL_ID)?.state).toBe("in-progress");
-		expect((el as any)._completed).toBe(false);
+		expect((el as any)._goalState).toBe("in-progress");
 		expect(dropdown()!.querySelector('[data-testid="goal-widget-completed"]')).toBeNull();
 		expect(dropdown()!.querySelector('[data-testid="goal-widget-gate"][data-gate-id="design-doc"]')?.getAttribute("data-gate-status")).toBe("pending");
 	});
@@ -380,8 +400,6 @@ describe("GoalStatusWidget fixture", () => {
 			cache: { passed: 1, total: 1 },
 			goalState: "complete",
 		});
-		(el as any)._completed = true;
-		await (el as any).updateComplete;
 		await openDropdown(el);
 		expect(dropdown()!.querySelector('[data-testid="goal-widget-completed"]')).toBeTruthy();
 
@@ -391,7 +409,7 @@ describe("GoalStatusWidget fixture", () => {
 		for (let i = 0; i < 50 && dropdown()!.querySelector('[data-testid="goal-widget-completed"]'); i++) await sleep(10);
 
 		expect(state.goals.find(goal => goal.id === GOAL_ID)?.state).toBe("in-progress");
-		expect((el as any)._completed).toBe(false);
+		expect((el as any)._goalState).toBe("in-progress");
 		expect(dropdown()!.querySelector('[data-testid="goal-widget-completed"]')).toBeNull();
 		expect(dropdown()!.querySelector('[data-testid="goal-widget-gate"][data-gate-id="design-doc"]')?.getAttribute("data-gate-status")).toBe("pending");
 	});
