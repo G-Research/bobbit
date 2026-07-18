@@ -14,10 +14,14 @@
 
 import http from "node:http";
 import https from "node:https";
+import dnsCallback from "node:dns";
+import net from "node:net";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { globalAgentDir } from "../bobbit-dir.js";
+import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
@@ -31,6 +35,12 @@ export interface AigwModelCost {
 }
 
 export interface AigwModel {
+	/**
+	 * Bobbit-facing id. Used to key the model registry and match models.json
+	 * entries for `set_model`. For authoritative (well-known) and option-1 routed
+	 * models this equals the bare wire id; kept as a distinct field so future
+	 * multiplexed-root callers can diverge if needed.
+	 */
 	id: string;
 	name: string;
 	api: string;
@@ -41,6 +51,21 @@ export interface AigwModel {
 	cost?: AigwModelCost;
 	thinkingLevelMap?: Record<string, string | null>;
 	compat?: Record<string, unknown>;
+	/**
+	 * Per-model endpoint (a provider's `options.baseURL`, e.g. `…/openai/v1`).
+	 * pi-ai uses this directly as the SDK `baseURL`, so responses/completions/
+	 * bedrock traffic hits the correct per-provider subpath instead of the
+	 * multiplexed `/v1` root. `undefined` ⇒ fall back to the provider baseUrl.
+	 */
+	baseUrl?: string;
+	/**
+	 * Bare id to send on the wire. Per-provider subpaths expose bare ids
+	 * (e.g. `gpt-5.6-sol`, not `openai/gpt-5.6-sol`), so this is the value
+	 * `writeAigwModelsJson` emits as the models.json `id`. Defaults to `id`.
+	 */
+	wireId?: string;
+	/** Provider key from the opencode well-known config (e.g. "openai", "aws-mantle"). */
+	upstreamProvider?: string;
 }
 
 export interface AigwConfig {
@@ -83,7 +108,9 @@ function normalizeCostValue(value: number): number {
 	return Math.round(value * 1_000_000_000_000) / 1_000_000_000_000;
 }
 
-function normalizeAigwPricing(pricing: unknown): AigwModelCost {
+export function normalizeAigwPricing(pricing: unknown): AigwModelCost {
+	// Legacy /v1/models pricing is USD per token. It must be scaled to the
+	// per-million units used by Bobbit; do not share scaling with well-known cost.
 	if (!pricing || typeof pricing !== "object") return zeroAigwCost();
 
 	const record = pricing as Record<string, unknown>;
@@ -105,6 +132,31 @@ function normalizeAigwPricing(pricing: unknown): AigwModelCost {
 		output: normalizeCostValue(completion * 1_000_000),
 		cacheRead: normalizeCostValue(prompt * 0.1 * 1_000_000),
 		cacheWrite: normalizeCostValue(prompt * 1.25 * 1_000_000),
+	};
+}
+
+/**
+ * Normalize a well-known `cost` block to Bobbit's per-1M `AigwModelCost`.
+ *
+ * Unlike `/v1/models` pricing (which is USD *per token* under {prompt,completion}
+ * and needs the *1M scale-up done by `normalizeAigwPricing`), opencode well-known
+ * `cost` is already denominated in USD per 1M tokens under
+ * {input,output,cache_read,cache_write} — so we map the fields straight across.
+ * cache_read/cache_write are honoured when present (falling back to the same
+ * heuristic ratios `normalizeAigwPricing` uses when the gateway omits them).
+ */
+export function normalizeWellKnownCost(cost: unknown): AigwModelCost {
+	if (!cost || typeof cost !== "object") return zeroAigwCost();
+	const c = cost as Record<string, unknown>;
+	const num = (v: unknown): number | undefined =>
+		typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+	const input = num(c.input) ?? 0;
+	const output = num(c.output) ?? 0;
+	return {
+		input: normalizeCostValue(input),
+		output: normalizeCostValue(output),
+		cacheRead: normalizeCostValue(num(c.cache_read) ?? input * 0.1),
+		cacheWrite: normalizeCostValue(num(c.cache_write) ?? input * 1.25),
 	};
 }
 
@@ -264,6 +316,58 @@ function writeModelsJson(data: Record<string, any>): void {
 			try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
 		}
 		console.error("[aigw-manager] Failed to write models.json:", err);
+		throw err;
+	}
+}
+
+/**
+ * Resolve legacy AIGW ids that used to include an upstream provider prefix
+ * (`openai/gpt-5.6-sol`, `gresearch/glm-5.2-fp8`) to the current models.json
+ * id (`gpt-5.6-sol`, `glm-5.2-fp8`). The agent runtime's `set_model` matches
+ * models.json strictly; leaving the old slash-prefixed id falls through to a
+ * custom model id and the gateway rejects the wire request.
+ */
+export function normalizeAigwModelId(modelId: string): string {
+	if (!modelId.includes("/")) return modelId;
+	const slash = modelId.indexOf("/");
+	const upstream = modelId.slice(0, slash);
+	const bareId = modelId.slice(slash + 1);
+	if (!upstream || !bareId || bareId.includes("/")) return modelId;
+	try {
+		const models = readModelsJson()?.providers?.aigw?.models;
+		if (!Array.isArray(models)) return modelId;
+		const exact = models.find((m: any) => m?.id === modelId);
+		if (exact) return modelId;
+		const bareMatches = models.filter((m: any) => m?.id === bareId);
+		// Old generated files can contain duplicate bare ids from different
+		// upstreams. Even a provenance match is not enough to erase the prefix:
+		// the resulting bare preference would bind whichever duplicate Pi sees
+		// first. Wait for a successful regeneration to make the candidate unique.
+		if (bareMatches.length !== 1) return modelId;
+		return bareId;
+	} catch { /* best-effort */ }
+	return modelId;
+}
+
+export function normalizeAigwModelString(modelString: string): string {
+	const slash = modelString.indexOf("/");
+	if (slash <= 0 || slash >= modelString.length - 1) return modelString;
+	const provider = modelString.slice(0, slash);
+	if (provider !== "aigw") return modelString;
+	const modelId = modelString.slice(slash + 1);
+	const normalized = normalizeAigwModelId(modelId);
+	return normalized === modelId ? modelString : `aigw/${normalized}`;
+}
+
+export function normalizeAigwModelPreferences(prefs: PreferencesStore): void {
+	for (const key of ["default.sessionModel", "default.reviewModel", "default.namingModel"] as const) {
+		const value = prefs.get(key);
+		if (typeof value !== "string") continue;
+		const normalized = normalizeAigwModelString(value);
+		if (normalized !== value) {
+			prefs.set(key, normalized);
+			console.log(`[aigw-manager] Migrated ${key} from legacy AIGW model id "${value}" to "${normalized}"`);
+		}
 	}
 }
 
@@ -567,9 +671,33 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		},
 		models: models.map(m => {
 			const cost = m.cost ?? zeroAigwCost();
+			// AUTHORITATIVE path: a model carrying both `api` and `baseUrl` came from
+			// well-known discovery (or the fallback option-1 OpenAI-responses fix).
+			// Emit those verbatim with the BARE wire id the per-provider subpath
+			// expects (pi-ai uses `model.baseUrl` as the SDK baseURL and `model.id`
+			// as the wire model). This is how `@ai-sdk/openai` models reach
+			// openai-responses on `…/openai/v1` instead of the chat/completions root.
+			if (m.api && m.baseUrl) {
+				return {
+					id: m.wireId ?? m.id,
+					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
+					name: m.name,
+					contextWindow: m.contextWindow,
+					maxTokens: m.maxTokens,
+					reasoning: m.reasoning,
+					input: m.input,
+					cost,
+					api: m.api,
+					baseUrl: m.baseUrl,
+					...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
+					...(m.compat ? { compat: m.compat } : {}),
+				};
+			}
+			// ── Fallback heuristic path (no authoritative api/baseUrl) ──
 			if (isClaudeModel(m.id)) {
 				return {
 					id: bedrockModelId(m.id),
+					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
 					name: m.name,
 					contextWindow: m.contextWindow,
 					maxTokens: m.maxTokens,
@@ -588,6 +716,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 			}
 			return {
 				id: m.id,
+				...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
 				name: m.name,
 				contextWindow: m.contextWindow,
 				maxTokens: m.maxTokens,
@@ -609,9 +738,112 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		}),
 	};
 
-	setBedrockEnvVars(aigwUrl);
-
 	writeModelsJson(data);
+	// The atomically persisted provider is now the active routing authority. Keep
+	// its admitted host set in memory so every later session activation can decide
+	// whether it needs the guard without re-reading models.json. Failed writes never
+	// reach this point and therefore cannot change active DNS behavior.
+	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(data.providers.aigw));
+	setBedrockEnvVars(aigwUrl);
+}
+
+export function collectAigwProviderDnsHosts(provider: any): string[] {
+	let configuredOrigin = "";
+	try { configuredOrigin = new URL(provider?.baseUrl).origin; }
+	catch { return []; }
+	const hosts = new Set<string>();
+	for (const model of Array.isArray(provider?.models) ? provider.models : []) {
+		if (typeof model?.baseUrl !== "string") continue;
+		try {
+			const target = new URL(model.baseUrl);
+			const hostname = target.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+			if (target.protocol === "https:" && target.origin !== configuredOrigin && !net.isIP(hostname)) hosts.add(hostname);
+		} catch { /* malformed entries are ignored by the runtime registry */ }
+	}
+	return [...hosts].sort();
+}
+
+/**
+ * Generate the in-agent DNS guard for cross-origin AIGW provider hostnames.
+ * Pi's SDKs retain the hostname for TLS, while this guard validates and returns
+ * the exact DNS answers used by each socket connection. Content-addressing
+ * keeps restored/sandboxed extension mounts stable across model refreshes.
+ */
+export function writeAigwDnsGuardExtension(): string | undefined {
+	// startupAigwCheck() hydrates this set once from persisted routing, while
+	// writeAigwModelsJson()/removeAigwModelsJson() update it after atomic changes.
+	// Session setup is a hot path: reading and parsing models.json here made every
+	// non-AIGW activation pay synchronous I/O (and repeatedly log malformed test or
+	// recovery fixtures) merely to discover there was no guard to install.
+	const hosts = getAigwProviderDnsGuardHosts();
+	if (hosts.length === 0) return undefined;
+	const code = `import dns from "node:dns";
+import net from "node:net";
+const guardedHosts = new Set(${JSON.stringify(hosts)});
+const originalLookup = dns.lookup.bind(dns);
+function isPublicIpv4(address: string): boolean {
+  const octets = address.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b, c] = octets;
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+  if (a === 192 && b === 88 && c === 99) return false;
+  if (a === 198 && (b === 18 || b === 19 || b === 51)) return false;
+  if (a === 203 && b === 0 && c === 113) return false;
+  if (a >= 240) return false;
+  return true;
+}
+function isPublicIp(address: string): boolean {
+  const version = net.isIP(address);
+  if (version === 4) return isPublicIpv4(address);
+  if (version !== 6) return false;
+  const lower = address.toLowerCase().split("%")[0];
+  const dotted = lower.match(/^(?:0*:){5}(?:ffff:)?(\\d+\\.\\d+\\.\\d+\\.\\d+)$/);
+  if (dotted) return isPublicIpv4(dotted[1]);
+  const mapped = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mapped) {
+    const value = (Number.parseInt(mapped[1], 16) << 16) | Number.parseInt(mapped[2], 16);
+    return isPublicIpv4([value >>> 24, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join("."));
+  }
+  if (lower === "::" || lower === "::1" || /^f[cd]/.test(lower) || /^fe[89ab]/.test(lower) || /^ff/.test(lower)) return false;
+  if (/^2001:db8(?:[:]|$)/.test(lower)) return false;
+  return /^[23]/.test(lower);
+}
+(dns as any).lookup = (hostname: string, options: any, callback?: any) => {
+  const cb = typeof options === "function" ? options : callback;
+  const requested = typeof options === "function" || options == null ? {} : typeof options === "number" ? { family: options } : options;
+  if (!guardedHosts.has(hostname.toLowerCase())) return typeof options === "function"
+    ? (originalLookup as any)(hostname, options)
+    : (originalLookup as any)(hostname, options, callback);
+  (originalLookup as any)(hostname, { all: true, verbatim: true }, (error: Error | null, answers: Array<{ address: string; family: number }>) => {
+    if (error) return cb(error);
+    if (!Array.isArray(answers) || answers.length === 0 || answers.some((answer) => !isPublicIp(answer.address))) {
+      const rejected: NodeJS.ErrnoException = new Error("AIGW provider DNS resolved to a non-public address");
+      rejected.code = "EAI_AGAIN";
+      return cb(rejected);
+    }
+    const eligible = requested.family ? answers.filter((answer) => answer.family === requested.family) : answers;
+    if (eligible.length === 0) return cb(Object.assign(new Error("No validated AIGW provider address for requested family"), { code: "EAI_AGAIN" }));
+    return requested.all ? cb(null, eligible) : cb(null, eligible[0].address, eligible[0].family);
+  });
+};
+export default function aigwDnsGuard() {}
+`;
+	const hash = createHash("sha256").update(code).digest("hex").slice(0, 16);
+	const dir = path.join(bobbitStateDir(), "aigw-dns-guard", hash);
+	const file = path.join(dir, "guard.ts");
+	try {
+		fs.mkdirSync(dir, { recursive: true });
+		if (!fs.existsSync(file) || fs.readFileSync(file, "utf-8") !== code) fs.writeFileSync(file, code, "utf-8");
+		return file;
+	} catch (error) {
+		console.warn("[aigw] Failed to write DNS guard extension:", error);
+		return undefined;
+	}
 }
 
 /**
@@ -623,6 +855,9 @@ export function removeAigwModelsJson(): void {
 		delete data.providers.aigw;
 		writeModelsJson(data);
 	}
+	// Keep the in-memory activation decision aligned even when this lower-level
+	// helper is called directly. A failed persistence above throws before clearing.
+	replaceAigwProviderDnsGuardHosts([]);
 }
 
 // ── Startup internet check ─────────────────────────────────────────
@@ -711,6 +946,9 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 	if (existingUrl) {
 		console.log("[aigw] AI Gateway already configured:", existingUrl);
 		setBedrockEnvVars(existingUrl);
+		// A skip/unreachable startup keeps the last persisted routing active. Load
+		// its admitted host set before any spawned process or gateway-side request.
+		syncAigwProviderDnsGuardFromModelsJson();
 		// Users with a local aigw are typically offline; probe the public
 		// internet once and wire PI_OFFLINE accordingly. The probe is short
 		// (≤4s) and runs in parallel with no other startup work below.
@@ -729,6 +967,7 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 		try {
 			const models = await discoverAigwModels(existingUrl);
 			writeAigwModelsJson(existingUrl, models);
+			normalizeAigwModelPreferences(prefs);
 			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
 		} catch (err: any) {
 			const msg = err?.message || String(err);
@@ -798,30 +1037,289 @@ function httpHead(url: string, timeoutMs = 4_000): Promise<void> {
 	});
 }
 
-/**
- * Simple HTTP GET that returns a parsed JSON body.
- * Works with both http:// and https:// URLs.
- */
-function httpGet(url: string, timeoutMs = 10_000): Promise<any> {
-	return new Promise((resolve, reject) => {
-		const parsedUrl = new URL(url);
-		const transport = parsedUrl.protocol === "https:" ? https : http;
+const MAX_DISCOVERY_BODY_BYTES = 1024 * 1024;
+const WELL_KNOWN_DEADLINE_MS = 8_000;
 
-		const req = transport.request(parsedUrl, { method: "GET", headers: aigwUserAgentHeaders(), timeout: timeoutMs }, (res) => {
+function normalizeHttpUrl(raw: string, label = "AI Gateway URL"): URL {
+	let parsed: URL;
+	try { parsed = new URL(raw); }
+	catch { throw new Error(`${label} must be an absolute HTTP(S) URL`); }
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+		throw new Error(`${label} must use HTTP or HTTPS`);
+	}
+	if (parsed.username || parsed.password || parsed.hash) {
+		throw new Error(`${label} must not contain credentials or a fragment`);
+	}
+	// Accessing port forces WHATWG URL validation of malformed/out-of-range ports.
+	void parsed.port;
+	return parsed;
+}
+
+function isPublicIpv4(address: string): boolean {
+	const octets = address.split(".").map(Number);
+	if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+	const [a, b, c] = octets;
+	if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+	if (a === 100 && b >= 64 && b <= 127) return false;
+	if (a === 169 && b === 254) return false;
+	if (a === 172 && b >= 16 && b <= 31) return false;
+	if (a === 192 && b === 168) return false;
+	if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+	if (a === 192 && b === 88 && c === 99) return false;
+	if (a === 198 && (b === 18 || b === 19 || b === 51)) return false;
+	if (a === 203 && b === 0 && c === 113) return false;
+	if (a >= 240) return false;
+	return true;
+}
+
+function isPublicIp(address: string): boolean {
+	const version = net.isIP(address);
+	if (version === 4) return isPublicIpv4(address);
+	if (version !== 6) return false;
+	const lower = address.toLowerCase().split("%")[0];
+	const dottedMapped = lower.match(/^(?:0*:){5}(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/);
+	if (dottedMapped) return isPublicIpv4(dottedMapped[1]);
+	const hexMapped = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+	if (hexMapped) {
+		const value = (Number.parseInt(hexMapped[1], 16) << 16) | Number.parseInt(hexMapped[2], 16);
+		return isPublicIpv4([value >>> 24, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join("."));
+	}
+	if (lower === "::" || lower === "::1") return false;
+	if (/^f[cd]/.test(lower) || /^fe[89ab]/.test(lower) || /^ff/.test(lower)) return false;
+	if (/^2001:db8(?:[:]|$)/.test(lower)) return false;
+	// Public global-unicast IPv6 is 2000::/3. Reject unspecified, link-local,
+	// documentation, multicast, and other special/reserved ranges by default.
+	return /^[23]/.test(lower);
+}
+
+function structurallyValidateTarget(raw: string, configuredOrigin: string): URL | null {
+	try {
+		const parsed = normalizeHttpUrl(raw, "Discovery target");
+		if (parsed.origin === configuredOrigin) return parsed;
+		if (parsed.protocol !== "https:") return null;
+		if (net.isIP(parsed.hostname) && !isPublicIp(parsed.hostname)) return null;
+		return parsed;
+	} catch {
+		return null;
+	}
+}
+
+type DnsLookup = typeof dnsCallback.lookup;
+const originalGatewayDnsLookup = dnsCallback.lookup.bind(dnsCallback) as DnsLookup;
+
+/**
+ * Wrap DNS lookup so every connection to an approved cross-origin provider
+ * resolves once, validates every answer, and returns those exact answers to the
+ * socket. This closes the validation/connect rebinding gap while retaining the
+ * original hostname for HTTPS SNI and certificate verification.
+ */
+export function createAigwGuardedLookup(guardedHosts: ReadonlySet<string>, originalLookup: DnsLookup): DnsLookup {
+	return ((hostname: string, options: any, callback?: any) => {
+		const cb = typeof options === "function" ? options : callback;
+		const requested = typeof options === "function" || options == null
+			? {}
+			: typeof options === "number" ? { family: options } : options;
+		if (!guardedHosts.has(hostname.toLowerCase())) {
+			return typeof options === "function"
+				? (originalLookup as any)(hostname, options)
+				: (originalLookup as any)(hostname, options, callback);
+		}
+		(originalLookup as any)(hostname, { all: true, verbatim: true }, (error: Error | null, answers: Array<{ address: string; family: number }>) => {
+			if (error) return cb(error);
+			if (!Array.isArray(answers) || answers.length === 0 || answers.some((answer) => !isPublicIp(answer.address))) {
+				const rejected = new Error("AIGW provider DNS resolved to a non-public address");
+				(rejected as NodeJS.ErrnoException).code = "EAI_AGAIN";
+				return cb(rejected);
+			}
+			const eligible = requested.family ? answers.filter((answer) => answer.family === requested.family) : answers;
+			if (eligible.length === 0) {
+				const missing = new Error("AIGW provider DNS returned no address for the requested family");
+				(missing as NodeJS.ErrnoException).code = "EAI_AGAIN";
+				return cb(missing);
+			}
+			if (requested.all) return cb(null, eligible);
+			return cb(null, eligible[0].address, eligible[0].family);
+		});
+	}) as DnsLookup;
+}
+
+const guardedProviderHosts = new Set<string>();
+let gatewayDnsGuardInstalled = false;
+
+/** Replace, rather than append to, the active AIGW connection-time DNS policy. */
+export function replaceAigwProviderDnsGuardHosts(hosts: Iterable<string>): void {
+	guardedProviderHosts.clear();
+	for (const host of hosts) {
+		const normalized = host.replace(/^\[|\]$/g, "").toLowerCase();
+		if (normalized && !net.isIP(normalized)) guardedProviderHosts.add(normalized);
+	}
+	if (!gatewayDnsGuardInstalled) {
+		gatewayDnsGuardInstalled = true;
+		dnsCallback.lookup = createAigwGuardedLookup(guardedProviderHosts, originalGatewayDnsLookup);
+	}
+}
+
+export function getAigwProviderDnsGuardHosts(): string[] {
+	return [...guardedProviderHosts].sort();
+}
+
+function syncAigwProviderDnsGuardFromModelsJson(): void {
+	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(readModelsJson()?.providers?.aigw));
+}
+
+function validateProviderBaseTarget(raw: string, configuredOrigin: string): URL | null {
+	return structurallyValidateTarget(raw, configuredOrigin);
+}
+
+interface ValidatedTarget {
+	url: URL;
+	lookup?: (...args: any[]) => void;
+}
+
+function lookupAllBeforeDeadline(hostname: string, deadline: number, lookupImpl: DnsLookup): Promise<Array<{ address: string; family: number }>> {
+	const remaining = deadline - Date.now();
+	if (remaining <= 0) return Promise.reject(new Error("Discovery deadline exceeded"));
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			reject(new Error("Discovery deadline exceeded"));
+		}, remaining);
+		try {
+			(lookupImpl as any)(hostname, { all: true, verbatim: true }, (error: Error | null, answers: Array<{ address: string; family: number }>) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (error) reject(error);
+				else resolve(Array.isArray(answers) ? answers.map((entry) => ({ address: entry.address, family: entry.family })) : []);
+			});
+		} catch (error) {
+			if (!settled) {
+				settled = true;
+				clearTimeout(timer);
+				reject(error);
+			}
+		}
+	});
+}
+
+async function validateAndPinTarget(
+	raw: string,
+	configuredOrigin: string,
+	deadline: number,
+	lookupImpl: DnsLookup = originalGatewayDnsLookup,
+): Promise<ValidatedTarget | null> {
+	const url = structurallyValidateTarget(raw, configuredOrigin);
+	if (!url) return null;
+	if (url.origin === configuredOrigin || net.isIP(url.hostname)) return { url };
+	let addresses: Array<{ address: string; family: number }>;
+	try {
+		addresses = await lookupAllBeforeDeadline(url.hostname, deadline, lookupImpl);
+	} catch {
+		return null;
+	}
+	if (addresses.length === 0 || addresses.some((entry) => !isPublicIp(entry.address))) return null;
+	// Pin connection lookup to the already-validated answers. HTTPS still uses
+	// the original URL hostname, preserving SNI and certificate verification.
+	const lookup = (_hostname: string, options: any, callback: any) => {
+		const eligible = options?.family ? addresses.filter((entry) => entry.family === options.family) : addresses;
+		if (eligible.length === 0) {
+			callback(new Error("No validated address for requested family"));
+			return;
+		}
+		if (options?.all) callback(null, eligible);
+		else callback(null, eligible[0].address, eligible[0].family);
+	};
+	return { url, lookup };
+}
+
+function sanitizeRemoteHeaders(value: unknown): Record<string, string> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const forbidden = new Set([
+		"connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailer",
+		"host", "content-length", "user-agent", "proxy-authenticate", "proxy-authorization",
+	]);
+	const headers: Record<string, string> = {};
+	for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+		const lower = key.toLowerCase();
+		if (forbidden.has(lower) || lower.startsWith("proxy-") || typeof raw !== "string") continue;
+		if (/[^!#$%&'*+.^_`|~0-9A-Za-z-]/.test(key) || /[\r\n]/.test(raw)) continue;
+		headers[key] = raw;
+	}
+	return headers;
+}
+
+async function httpGetJson(
+	target: string,
+	configuredOrigin: string,
+	deadline: number,
+	extraHeaders?: Record<string, string>,
+): Promise<any> {
+	const validated = await validateAndPinTarget(target, configuredOrigin, deadline);
+	if (!validated) throw new Error("Discovery target was rejected");
+	const remaining = deadline - Date.now();
+	if (remaining <= 0) throw new Error("Discovery deadline exceeded");
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let absoluteTimer: ReturnType<typeof setTimeout> | undefined;
+		const finish = () => {
+			if (absoluteTimer) clearTimeout(absoluteTimer);
+			absoluteTimer = undefined;
+			settled = true;
+		};
+		const fail = (error: Error) => {
+			if (settled) return;
+			finish();
+			reject(error);
+		};
+		const transport = validated.url.protocol === "https:" ? https : http;
+		const req = transport.request(validated.url, {
+			method: "GET",
+			headers: aigwUserAgentHeaders(extraHeaders),
+			timeout: remaining,
+			...(validated.lookup ? { lookup: validated.lookup } : {}),
+		}, (res) => {
+			if ((res.statusCode ?? 0) >= 300 && (res.statusCode ?? 0) < 400) {
+				res.resume();
+				fail(new Error("Discovery redirects are not allowed"));
+				return;
+			}
+			if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+				res.resume();
+				fail(new Error(`Discovery request failed with HTTP ${res.statusCode ?? 0}`));
+				return;
+			}
 			const chunks: Buffer[] = [];
-			res.on("data", (c: Buffer) => chunks.push(c));
+			let bytes = 0;
+			res.on("data", (chunk: Buffer) => {
+				bytes += chunk.length;
+				if (bytes > MAX_DISCOVERY_BODY_BYTES) {
+					res.destroy();
+					req.destroy();
+					fail(new Error("Discovery response exceeded 1 MiB"));
+					return;
+				}
+				chunks.push(chunk);
+			});
 			res.on("end", () => {
-				const body = Buffer.concat(chunks).toString("utf-8");
-				if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-					try { resolve(JSON.parse(body)); }
-					catch { reject(new Error(`Invalid JSON from ${url}`)); }
-				} else {
-					reject(new Error(`HTTP ${res.statusCode} from ${url}: ${body.slice(0, 200)}`));
+				if (settled) return;
+				try {
+					const parsed = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+					finish();
+					resolve(parsed);
+				} catch {
+					fail(new Error("Discovery response was not valid JSON"));
 				}
 			});
+			res.on("error", (error) => fail(error));
 		});
-		req.on("timeout", () => { req.destroy(); reject(new Error(`Timeout fetching ${url}`)); });
-		req.on("error", reject);
+		absoluteTimer = setTimeout(() => {
+			req.destroy();
+			fail(new Error("Discovery deadline exceeded"));
+		}, remaining);
+		req.on("timeout", () => { req.destroy(); fail(new Error("Discovery deadline exceeded")); });
+		req.on("error", (error) => fail(error));
 		req.end();
 	});
 }
@@ -895,42 +1393,417 @@ export function proxyRequest(
 	});
 }
 
+// ── Well-known (opencode) discovery & translation ──────────────────
+//
+// opencode learns its routing from `{gateway}/.well-known/opencode`, an
+// AUTHORITATIVE config (not a bare model list): per provider it names the npm
+// adapter, a dedicated `options.baseURL` subpath, a `whitelist`, and full
+// per-model metadata. We consume it as the source of truth so we stop guessing
+// endpoints via `inferMeta`.
+//
+// WHY `openai` → responses: on this gateway the `openai` provider uses
+// `@ai-sdk/openai`, whose SDK appends `/responses` to `options.baseURL`
+// (`…/openai/v1` → `…/openai/v1/responses`). The Responses API is the only place
+// reasoning + function tools coexist; the multiplexed `/v1/chat/completions`
+// root rejects `reasoning_effort` + tools for models like `gpt-5.6-sol` (400).
+// Routing `@ai-sdk/openai` providers to pi-ai's `openai-responses` therefore
+// fixes the tools-with-reasoning failure.
+//
+// WHY per-provider baseURLs matter: each provider subpath (`…/openai/v1`,
+// `…/aws`, `…/gresearch/v1`) exposes BARE model ids (`gpt-5.6-sol`) and the
+// correct endpoint semantics. The multiplexed `/v1` root Bobbit historically
+// targeted requires the `openai/` prefix and only speaks chat/completions.
+
+interface WkModel {
+	name?: string;
+	variants?: Record<string, unknown>;
+	cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
+	limit?: { context?: number; output?: number };
+	reasoning?: boolean;
+	tool_call?: boolean;
+	modalities?: { input?: string[] };
+}
+interface WkProvider {
+	npm?: string;
+	options?: { baseURL?: string };
+	whitelist?: string[];
+	models?: Record<string, WkModel>;
+}
+interface RemoteConfig {
+	url?: string;
+	headers?: Record<string, string>;
+}
+export interface WellKnownConfig {
+	model?: string;
+	disabled_providers?: string[];
+	provider?: Record<string, WkProvider>;
+	remote_config?: RemoteConfig;
+}
+
+// Provider npm adapter → pi-ai `api`. Unknown adapters fall back to
+// `openai-completions` (the conservative chat/completions default).
+const PROVIDER_NPM_TO_API: Record<string, string> = {
+	"@ai-sdk/openai": "openai-responses",
+	"@ai-sdk/amazon-bedrock": "bedrock-converse-stream",
+	"@ai-sdk/openai-compatible": "openai-completions",
+};
+
+const RECOGNIZED_EFFORT_KEYS = ["minimal", "none", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Build a pi-ai `thinkingLevelMap` from a well-known model's `variants` keys.
+ * Each advertised effort tier maps to itself (identity); `off:"none"` is added
+ * for reasoning models so the responses/completions adapters emit
+ * `reasoning_effort:"none"` in the no-effort case (the tool-compatible path the
+ * gateway wants). Returns undefined when no recognized tiers are advertised.
+ */
+function buildThinkingLevelMap(variants: Record<string, unknown> | undefined, reasoning: boolean): Record<string, string | null> | undefined {
+	if (!variants) return undefined;
+	const map: Record<string, string | null> = {};
+	for (const key of Object.keys(variants)) {
+		if (RECOGNIZED_EFFORT_KEYS.includes(key)) map[key] = key;
+	}
+	if (Object.keys(map).length === 0) return undefined;
+	if (reasoning) map.off = "none";
+	return map;
+}
+
+/**
+ * Pure translator: well-known config → Bobbit `AigwModel[]`. Applies
+ * `disabled_providers` + per-provider `whitelist` as HARD filters and never
+ * runs `inferMeta` guessing. Unit-tested against a captured fixture.
+ */
+export function translateWellKnown(config: WellKnownConfig, gatewayBaseUrl: string): AigwModel[] {
+	const disabled = new Set(Array.isArray(config.disabled_providers) ? config.disabled_providers : []);
+	let configuredOrigin: string;
+	try { configuredOrigin = normalizeHttpUrl(gatewayBaseUrl).origin; }
+	catch { return []; }
+	const defaultRaw = typeof config.model === "string" ? config.model : "";
+	const defaultColon = defaultRaw.indexOf(":");
+	const defaultProvider = defaultColon > 0 ? defaultRaw.slice(0, defaultColon) : undefined;
+	const defaultModelId = defaultColon > 0 ? defaultRaw.slice(defaultColon + 1) : undefined;
+	const candidates = new Map<string, AigwModel[]>();
+
+	for (const [providerName, provider] of Object.entries(config.provider ?? {})) {
+		if (!provider || typeof provider !== "object" || disabled.has(providerName)) continue;
+		const api = PROVIDER_NPM_TO_API[provider.npm ?? ""] ?? "openai-completions";
+		const validatedBase = typeof provider.options?.baseURL === "string"
+			? validateProviderBaseTarget(provider.options.baseURL, configuredOrigin)
+			: null;
+		// A provider without a safe explicit base is unusable, but the provider
+		// object remains authoritative: the caller must not fall back to /v1/models.
+		if (!validatedBase) continue;
+		const baseUrl = validatedBase.href.replace(/\/$/, "");
+		const whitelist = Array.isArray(provider.whitelist) ? new Set(provider.whitelist) : undefined;
+
+		for (const [bareId, wk] of Object.entries(provider.models ?? {})) {
+			if (!bareId || !wk || typeof wk !== "object" || (whitelist && !whitelist.has(bareId))) continue;
+			const reasoning = wk.reasoning === true;
+			const input = (Array.isArray(wk.modalities?.input) ? wk.modalities!.input! : ["text"])
+				.filter((m): m is "text" | "image" => m === "text" || m === "image");
+			const thinkingLevelMap = buildThinkingLevelMap(wk.variants, reasoning);
+			const compat = api === "bedrock-converse-stream"
+				? undefined
+				: { ...GATEWAY_COMPAT, supportsReasoningEffort: true };
+			const positive = (value: unknown, fallback: number) =>
+				typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+			const model: AigwModel = {
+				id: bareId,
+				wireId: bareId,
+				upstreamProvider: providerName,
+				name: typeof wk.name === "string" && wk.name ? wk.name : deriveName(bareId),
+				api,
+				baseUrl,
+				reasoning,
+				input: input.length > 0 ? input : ["text"],
+				contextWindow: positive(wk.limit?.context, DEFAULT_META.contextWindow),
+				maxTokens: positive(wk.limit?.output, DEFAULT_META.maxTokens),
+				cost: normalizeWellKnownCost(wk.cost),
+				...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+				...(compat ? { compat } : {}),
+			};
+			const entries = candidates.get(bareId) ?? [];
+			entries.push(model);
+			candidates.set(bareId, entries);
+		}
+	}
+
+	const out: AigwModel[] = [];
+	for (const [bareId, models] of candidates) {
+		const preferred = bareId === defaultModelId
+			? models.find((model) => model.upstreamProvider === defaultProvider)
+			: undefined;
+		out.push(preferred ?? models[0]);
+	}
+	return out;
+}
+
+/**
+ * Best-effort read of a bearer token for the well-known request. Priority:
+ *   1. AIGW_OPENCODE_TOKEN env
+ *   2. opencode auth.json `type:"wellknown"` entry keyed by the gateway URL/host
+ *   3. (none) — a dummy currently works, but the real token is preferred for
+ *      quota/attribution.
+ * Fully guarded; never throws.
+ */
+export function readOpencodeWellKnownToken(gatewayUrl: string): string | undefined {
+	const envToken = process.env.AIGW_OPENCODE_TOKEN;
+	if (envToken && envToken.trim()) return envToken.trim();
+	try {
+		const candidates = [
+			path.join(os.homedir(), ".local", "share", "opencode", "auth.json"),
+			path.join(os.homedir(), ".config", "opencode", "auth.json"),
+		];
+		let host = "";
+		try { host = new URL(gatewayUrl).host; } catch { /* ignore */ }
+		for (const file of candidates) {
+			if (!fs.existsSync(file)) continue;
+			const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, any>;
+			for (const [key, entry] of Object.entries(parsed)) {
+				if (!entry || typeof entry !== "object") continue;
+				if (entry.type !== "wellknown") continue;
+				let keyHost = key;
+				try { keyHost = new URL(key).host; } catch { /* key may be a bare host */ }
+				if (key === gatewayUrl || keyHost === host || key === host) {
+					const token = entry.key ?? entry.token;
+					if (typeof token === "string" && token.trim()) return token.trim();
+				}
+			}
+		}
+	} catch { /* best-effort */ }
+	return undefined;
+}
+
+/**
+ * Fetch `{origin}/.well-known/opencode`. Returns the resolved config, or null on
+ * 404 / non-JSON / network error / blocked-in-tests so callers fall back to the
+ * `/v1/models` + `inferMeta` heuristic.
+ *
+ * - The well-known doc lives at the ORIGIN ROOT, not under `/v1` — the gateway
+ *   URL may be `http://host/v1`, so we resolve `/.well-known/opencode` against
+ *   the origin (an absolute path drops the `/v1` prefix).
+ * - Supports opencode's `remote_config` indirection: when the payload only
+ *   carries `{ remote_config: { url, headers } }` we fetch that secondary URL.
+ *   This gateway inlines `config`, but the opencode contract requires it.
+ * - A top-level `config` wrapper is unwrapped; otherwise the object itself is
+ *   treated as the config.
+ */
+export async function fetchWellKnownConfig(baseUrl: string, timeoutMs = WELL_KNOWN_DEADLINE_MS): Promise<WellKnownConfig | null> {
+	const deadline = Date.now() + Math.min(Math.max(timeoutMs, 1), WELL_KNOWN_DEADLINE_MS);
+	return fetchWellKnownConfigBeforeDeadline(baseUrl, deadline);
+}
+
+async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: number): Promise<WellKnownConfig | null> {
+	let gateway: URL;
+	try { gateway = normalizeHttpUrl(baseUrl); }
+	catch { return null; }
+	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(gateway.href)) return null;
+	if (runtimeFlags.skipAigwDiscovery) return null;
+	const wellKnownUrl = new URL("/.well-known/opencode", gateway.origin).href;
+	const token = readOpencodeWellKnownToken(gateway.href);
+	const authHeader: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+	try {
+		const payload = await httpGetJson(wellKnownUrl, gateway.origin, deadline, authHeader);
+		return await resolveWellKnownPayload(payload, gateway.origin, authHeader, deadline, 0);
+	} catch {
+		return null;
+	}
+}
+
+async function resolveWellKnownPayload(
+	payload: unknown,
+	configuredOrigin: string,
+	inheritedAuth: Record<string, string>,
+	deadline: number,
+	depth: number,
+): Promise<WellKnownConfig | null> {
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+	const record = payload as Record<string, unknown>;
+	const inline = record.config && typeof record.config === "object" && !Array.isArray(record.config)
+		? record.config as Record<string, unknown>
+		: record;
+	const hasProvider = Object.prototype.hasOwnProperty.call(inline, "provider");
+	if (hasProvider) {
+		return inline.provider && typeof inline.provider === "object" && !Array.isArray(inline.provider)
+			? inline as WellKnownConfig
+			: null;
+	}
+	const rc = inline.remote_config;
+	if (!rc || typeof rc !== "object" || Array.isArray(rc) || depth >= 1) return null;
+	const remote = rc as Record<string, unknown>;
+	if (typeof remote.url !== "string") return null;
+	const target = structurallyValidateTarget(remote.url, configuredOrigin);
+	if (!target) return null;
+	const declared = sanitizeRemoteHeaders(remote.headers);
+	// Inherited gateway credentials never cross origins. Explicitly declared
+	// remote headers may be sent cross-origin after filtering; same-origin
+	// Authorization is allowed to replace the inherited bearer token.
+	const headers = target.origin === configuredOrigin
+		? { ...inheritedAuth, ...declared }
+		: declared;
+	try {
+		const remotePayload = await httpGetJson(target.href, configuredOrigin, deadline, headers);
+		return resolveWellKnownPayload(remotePayload, configuredOrigin, inheritedAuth, deadline, depth + 1);
+	} catch {
+		return null;
+	}
+}
+
+export async function filterValidatedProviderUrls(
+	config: WellKnownConfig,
+	configuredOrigin: string,
+	deadline: number,
+	lookupImpl: DnsLookup = originalGatewayDnsLookup,
+): Promise<WellKnownConfig> {
+	const disabled = new Set(Array.isArray(config.disabled_providers) ? config.disabled_providers : []);
+	const candidates = Object.entries(config.provider ?? {}).flatMap(([name, provider]) => {
+		if (!provider || disabled.has(name) || typeof provider.options?.baseURL !== "string") return [];
+		const target = validateProviderBaseTarget(provider.options.baseURL, configuredOrigin);
+		return target ? [{ name, provider, target }] : [];
+	});
+	// Resolve distinct DNS names concurrently. One slow or duplicated provider can
+	// consume only the remaining shared discovery budget, never N × DNS timeout.
+	const admissions = new Map<string, Promise<boolean>>();
+	for (const { target } of candidates) {
+		if (target.origin === configuredOrigin || net.isIP(target.hostname)) continue;
+		const hostname = target.hostname.toLowerCase();
+		if (!admissions.has(hostname)) {
+			admissions.set(hostname, validateAndPinTarget(target.href, configuredOrigin, deadline, lookupImpl).then(Boolean));
+		}
+	}
+	const entries: Array<[string, WkProvider]> = [];
+	for (const { name, provider, target } of candidates) {
+		const admitted = target.origin === configuredOrigin || net.isIP(target.hostname)
+			? true
+			: await admissions.get(target.hostname.toLowerCase());
+		if (admitted) entries.push([name, provider]);
+	}
+	return { ...config, provider: Object.fromEntries(entries) };
+}
+
+/**
+ * Seed session/review/naming model prefs from the well-known top-level
+ * `config.model` (form `provider:modelId`, e.g. `aws:us.anthropic.claude-opus-4-6`)
+ * into Bobbit's `aigw/<id>` form — but ONLY when the pref is unset (never clobber
+ * a user choice) and ONLY when a discovered model matches. Best-effort.
+ */
+export function seedDefaultModelsFromWellKnown(config: WellKnownConfig, models: AigwModel[], prefs: PreferencesStore): void {
+	const raw = config.model;
+	if (!raw || typeof raw !== "string") return;
+	const colon = raw.indexOf(":");
+	if (colon <= 0 || colon >= raw.length - 1) return;
+	const provider = raw.slice(0, colon);
+	const modelId = raw.slice(colon + 1);
+	const match = models.find((model) =>
+		model.upstreamProvider === provider && (model.wireId ?? model.id) === modelId,
+	);
+	if (!match) return;
+	const pref = `aigw/${match.wireId ?? match.id}`;
+	for (const key of ["default.sessionModel", "default.reviewModel", "default.namingModel"]) {
+		const existing = prefs.get(key);
+		if (existing === undefined || existing === null || existing === "") prefs.set(key, pref);
+	}
+}
+
 // ── Public API ─────────────────────────────────────────────────────
 
 /**
- * Fetch the model list from an aigw endpoint and return structured model info.
- * Hits GET {baseUrl}/v1/models (or {baseUrl}/models if baseUrl already ends with /v1).
+ * Discover aigw models. WELL-KNOWN-FIRST: consult `{origin}/.well-known/opencode`
+ * (authoritative per-provider routing) and, when present, translate it directly.
+ * Otherwise fall back to the legacy `/v1/models` + `inferMeta` heuristic — plus
+ * a minimal fix that routes OpenAI-family reasoning models to `openai-responses`
+ * so tools+reasoning don't 400 on the chat/completions root.
  */
-export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> {
-	const url = baseUrl.replace(/\/+$/, "");
-	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(url)) {
-		throw new Error(`External AI Gateway discovery is disabled in tests: ${url}`);
-	}
-	const modelsUrl = url.endsWith("/v1") ? `${url}/models` : `${url}/v1/models`;
+interface AigwDiscoveryResult {
+	models: AigwModel[];
+	wellKnown: WellKnownConfig | null;
+}
 
-	const data = await httpGet(modelsUrl);
+async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult> {
+	const gateway = normalizeHttpUrl(baseUrl);
+	const url = gateway.href.replace(/\/$/, "");
+	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(url)) {
+		throw new Error("External AI Gateway discovery is disabled in tests");
+	}
+
+	const discoveryDeadline = Date.now() + WELL_KNOWN_DEADLINE_MS;
+	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline);
+	if (fetchedWellKnown && fetchedWellKnown.provider) {
+		const wellKnown = await filterValidatedProviderUrls(fetchedWellKnown, gateway.origin, discoveryDeadline);
+		return { models: translateWellKnown(wellKnown, url), wellKnown };
+	}
+
+	const modelsUrl = url.endsWith("/v1") ? `${url}/models` : `${url}/v1/models`;
+	const data = await httpGetJson(modelsUrl, gateway.origin, Date.now() + 10_000);
 	if (!data?.data || !Array.isArray(data.data)) {
 		throw new Error("Unexpected response format from /v1/models — expected { data: [...] }");
 	}
-
-	return data.data.map((m: any) => {
-		const meta = inferMeta(m.id);
-		// Honour fields if the gateway provides them
-		const ctxFromGw = m.context_length || m.context_window;
-		const maxTokFromGw = m.max_tokens || m.max_completion_tokens;
-		return {
-			id: m.id,
-			name: deriveName(m.id),
+	const openaiResponsesBaseUrl = `${gateway.origin}/openai/v1`;
+	const isOpenAiFamily = (id: string) => {
+		const low = id.toLowerCase();
+		if (low.includes("claude")) return false;
+		return /(?:^|\/)gpt-/.test(low) || /(?:^|\/)o[1-9]/.test(low);
+	};
+	const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
+	const models: AigwModel[] = [];
+	const emittedIds = new Set<string>();
+	for (const item of data.data) {
+		if (!item || typeof item.id !== "string" || !item.id) {
+			throw new Error("Unexpected response format from /v1/models — each model requires a string id");
+		}
+		const meta = inferMeta(item.id);
+		const slash = item.id.indexOf("/");
+		const upstreamProvider = slash > 0 ? item.id.slice(0, slash) : undefined;
+		const ctxFromGw = item.context_length || item.context_window;
+		const maxTokFromGw = item.max_tokens || item.max_completion_tokens;
+		let model: AigwModel = {
+			id: item.id,
+			...(upstreamProvider ? { upstreamProvider } : {}),
+			name: deriveName(item.id),
 			api: "openai-completions",
+			// Legacy /v1/models discovery implies the matching completions root is
+			// /v1, even when the user configured the bare gateway origin.
+			baseUrl: url.endsWith("/v1") ? url : `${url}/v1`,
 			reasoning: meta.reasoning,
 			input: meta.input,
-			contextWindow: Math.max(ctxFromGw || 0, meta.contextWindow),
-			maxTokens: Math.max(maxTokFromGw || 0, meta.maxTokens),
-			cost: normalizeAigwPricing(m.pricing),
+			contextWindow: Math.max(Number.isFinite(ctxFromGw) ? ctxFromGw : 0, meta.contextWindow),
+			maxTokens: Math.max(Number.isFinite(maxTokFromGw) ? maxTokFromGw : 0, meta.maxTokens),
+			cost: normalizeAigwPricing(item.pricing),
 			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 			...(meta.compat ? { compat: meta.compat } : {}),
 		};
-	});
+		if (item.id.toLowerCase().includes("claude")) {
+			const wireId = stripPrefix(item.id);
+			model = {
+				...model,
+				id: wireId,
+				wireId,
+				api: "bedrock-converse-stream",
+				baseUrl: `${gateway.origin}/aws`,
+				compat: undefined,
+			};
+		} else if (meta.reasoning && isOpenAiFamily(item.id)) {
+			const wireId = stripPrefix(item.id);
+			model = {
+				...model,
+				id: wireId,
+				wireId,
+				api: "openai-responses",
+				baseUrl: openaiResponsesBaseUrl,
+				compat: { ...(meta.compat ?? {}), supportsReasoningEffort: true },
+			};
+		}
+		const emittedId = model.id;
+		if (!emittedIds.has(emittedId)) {
+			emittedIds.add(emittedId);
+			models.push(model);
+		}
+	}
+	return { models, wellKnown: null };
+}
+
+export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> {
+	return (await discoverAigwResult(baseUrl)).models;
 }
 
 /**
@@ -938,23 +1811,22 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
  * Returns the discovered models.
  */
 export async function configureAigw(baseUrl: string, prefs: PreferencesStore): Promise<AigwModel[]> {
-	const rawModels = await discoverAigwModels(baseUrl);
-	const normalizedUrl = baseUrl.replace(/\/+$/, "");
+	const gateway = normalizeHttpUrl(baseUrl);
+	const normalizedUrl = gateway.href.replace(/\/$/, "");
+	const result = await discoverAigwResult(normalizedUrl);
+	// Legacy fallback Claude entries are normalized during discovery. Do not
+	// remap authoritative well-known models merely because their ID contains
+	// "claude"; their adapter-selected API/baseUrl remains authoritative.
+	const models = result.models;
 
-	// Normalize model IDs: Claude models get the provider prefix stripped
-	// (e.g. "aws/us.anthropic.claude-..." → "us.anthropic.claude-...") because
-	// they use the Bedrock API where the ID is just the Bedrock model ARN.
-	const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
-	const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
-	const models = rawModels.map(m => isClaudeModel(m.id)
-		? { ...m, id: stripPrefix(m.id), api: "bedrock-converse-stream" }
-		: m
-	);
-
-	prefs.set("aigw.url", normalizedUrl);
-	// Note: aigw.models no longer cached in preferences — model-registry discovers fresh each time
-
+	// Persist generated routing atomically before preference migration. A failed
+	// discovery never reaches this point, preserving the previous models.json.
+	// The writer atomically persists routing and only then replaces the active DNS
+	// host set. Status/test discovery never calls it and cannot mutate behavior.
 	writeAigwModelsJson(normalizedUrl, models);
+	prefs.set("aigw.url", normalizedUrl);
+	if (result.wellKnown?.model) seedDefaultModelsFromWellKnown(result.wellKnown, models, prefs);
+	normalizeAigwModelPreferences(prefs);
 	return models;
 }
 

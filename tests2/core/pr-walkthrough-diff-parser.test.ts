@@ -4,12 +4,11 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { parseUnifiedDiff } from "../../src/server/pr-walkthrough/diff-parser.ts";
 import { resolveLocalChangeset } from "../../src/server/pr-walkthrough/git-changeset.ts";
+import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 
 const SAMPLE_DIFF = `diff --git a/src/a.ts b/src/a.ts
 index 1111111..2222222 100644
@@ -104,39 +103,56 @@ describe("parseUnifiedDiff", () => {
 });
 
 describe("resolveLocalChangeset", () => {
-	it("resolves real local git metadata and parsed diff files", async () => {
-		const cwd = mkdtempSync(join(tmpdir(), "bobbit-pr-walkthrough-"));
-		try {
-			git(cwd, "init");
-			git(cwd, "config", "user.email", "test@example.com");
-			git(cwd, "config", "user.name", "Test User");
-			git(cwd, "config", "core.autocrlf", "false");
-			mkdirSync(join(cwd, "src"), { recursive: true });
-			writeFileSync(join(cwd, "src", "file.ts"), "one\ntwo\nthree\n");
-			git(cwd, "add", ".");
-			git(cwd, "commit", "-m", "base");
-			const baseSha = git(cwd, "rev-parse", "HEAD");
+	it("resolves injected git metadata and parsed diff files", async () => {
+		const baseSha = "a".repeat(40);
+		const headSha = "b".repeat(40);
+		const diff = `diff --git a/src/file.ts b/src/file.ts
+--- a/src/file.ts
++++ b/src/file.ts
+@@ -1,3 +1,4 @@
+ one
+-two
++TWO
+ three
++four
+diff --git a/dist/bundle.js b/dist/bundle.js
+new file mode 100644
+--- /dev/null
++++ b/dist/bundle.js
+@@ -0,0 +1 @@
++console.log('generated');
+`;
+		const calls: string[][] = [];
+		const commandRunner: CommandRunner = {
+			execFile: async (_file, args) => {
+				calls.push([...args]);
+				if (args[0] === "rev-parse") return { stdout: args[2]?.startsWith("base") ? `${baseSha}\n` : `${headSha}\n`, stderr: "" };
+				if (args.includes("--shortstat")) return { stdout: " 2 files changed, 3 insertions(+), 1 deletion(-)\n", stderr: "" };
+				if (args.includes("--name-status")) return { stdout: "M\tsrc/file.ts\nA\tdist/bundle.js\n", stderr: "" };
+				throw new Error(`unexpected git command: ${args.join(" ")}`);
+			},
+			spawn: (_file, args) => {
+				calls.push([...args]);
+				const child = new EventEmitter() as any;
+				child.stdout = new PassThrough();
+				child.stderr = new PassThrough();
+				child.kill = () => true;
+				queueMicrotask(() => {
+					child.stdout.end(diff);
+					child.stderr.end();
+					child.emit("close", 0);
+				});
+				return child;
+			},
+		};
 
-			writeFileSync(join(cwd, "src", "file.ts"), "one\nTWO\nthree\nfour\n");
-			mkdirSync(join(cwd, "dist"), { recursive: true });
-			writeFileSync(join(cwd, "dist", "bundle.js"), "console.log('generated');\n");
-			git(cwd, "add", ".");
-			git(cwd, "commit", "-m", "head");
-			const headSha = git(cwd, "rev-parse", "HEAD");
-
-			const result = await resolveLocalChangeset({ cwd, baseSha, headSha, limits: { maxLinesPerFile: 100, maxFiles: 10 } });
-			assert.equal(result.changesetId, `${baseSha.slice(0, 7)}..${headSha.slice(0, 7)}`);
-			assert.equal(result.changeset.provider, "local");
-			assert.equal(result.changeset.filesChanged, 2);
-			assert.ok(result.changeset.additions && result.changeset.additions >= 2);
-			assert.ok(result.files.some(file => file.filePath === "src/file.ts" && file.hunks.length === 1));
-			assert.ok(result.warnings.some(warning => warning.code === "generated-file" && warning.filePath === "dist/bundle.js"));
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
+		const result = await resolveLocalChangeset({ cwd: "/fixture", baseSha: "base", headSha: "head", limits: { maxLinesPerFile: 100, maxFiles: 10 }, commandRunner });
+		assert.equal(result.changesetId, `${baseSha.slice(0, 7)}..${headSha.slice(0, 7)}`);
+		assert.equal(result.changeset.provider, "local");
+		assert.equal(result.changeset.filesChanged, 2);
+		assert.equal(result.changeset.additions, 3);
+		assert.ok(result.files.some(file => file.filePath === "src/file.ts" && file.hunks.length === 1));
+		assert.ok(result.warnings.some(warning => warning.code === "generated-file" && warning.filePath === "dist/bundle.js"));
+		assert.ok(calls.some(args => args.includes("--binary")), "limited diff must use the injected spawn seam");
 	});
 });
-
-function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-}

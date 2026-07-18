@@ -2,11 +2,8 @@
 // Source: tests/pr-walkthrough-bundle-store-read-window.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import {
 	PR_WALKTHROUGH_ANALYSIS_BUNDLE_FILE_READ_WINDOW,
@@ -18,16 +15,25 @@ import {
 import { handlePrWalkthroughApiRoute } from "../../src/server/pr-walkthrough/routes.ts";
 import type { PrWalkthroughAnalysisBundle } from "../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
 import type { PrWalkthroughJobRecord } from "../../src/server/pr-walkthrough/walkthrough-agent-store.ts";
+import {
+	installPrWalkthroughBundleStoreHarness,
+	type PrWalkthroughBundleStoreHarness,
+} from "./helpers/pr-walkthrough-bundle-store-read-window-harness.ts";
+
+let harness: PrWalkthroughBundleStoreHarness;
+
+beforeEach(() => {
+	harness = installPrWalkthroughBundleStoreHarness();
+});
+
+afterEach(() => {
+	harness.restore();
+});
 
 function withStore<T>(fn: (store: WalkthroughAnalysisBundleStore, job: PrWalkthroughJobRecord) => T): T {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prw-bundle-window-"));
-	try {
-		const store = new WalkthroughAnalysisBundleStore(dir);
-		const job = jobRecord("job-window-test");
-		return fn(store, job);
-	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
-	}
+	const store = new WalkthroughAnalysisBundleStore(harness.stateDir);
+	const job = jobRecord("job-window-test");
+	return fn(store, job);
 }
 
 function jobRecord(jobId: string): PrWalkthroughJobRecord {
@@ -63,6 +69,8 @@ function jobRecordWithPrMetadata(jobId: string): PrWalkthroughJobRecord {
 	} as PrWalkthroughJobRecord;
 }
 
+const LARGE_MINIFIED_LINE = `(()=>{${"a".repeat(700_000)}})();`;
+
 function bundleWithLargeSingleLine(jobId: string): PrWalkthroughAnalysisBundle {
 	return {
 		schema_version: PR_WALKTHROUGH_ANALYSIS_BUNDLE_SCHEMA_VERSION,
@@ -92,7 +100,7 @@ function bundleWithLargeSingleLine(jobId: string): PrWalkthroughAnalysisBundle {
 					kind: "add",
 					side: "new",
 					new_line: 1,
-					text: `(()=>{${"a".repeat(700_000)}})();`,
+					text: LARGE_MINIFIED_LINE,
 				}],
 			}],
 		}],
@@ -291,43 +299,39 @@ describe("WalkthroughAnalysisBundleStore file read windowing", () => {
 	}));
 
 	it("records read receipts for selected file hunk slices and keeps omitted-format output legacy-shaped", async () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prw-bundle-receipts-"));
-		try {
-			const job = jobRecord("job-receipt-test");
-			new WalkthroughAnalysisBundleStore(dir).save(job.jobId, bundleWithMultipleHunks(job.jobId));
-			const { data, store: packStore } = memoryPackStore({
-				"reviewers/child-session": { jobId: job.jobId },
-				[`reviews/${job.jobId}/binding/child-session`]: {
-					jobId: job.jobId,
-					changesetId: job.jobId,
-					target: { provider: "local", baseSha: "base", headSha: "head" },
-				},
-			});
+		const job = jobRecord("job-receipt-test");
+		new WalkthroughAnalysisBundleStore(harness.stateDir).save(job.jobId, bundleWithMultipleHunks(job.jobId));
+		const { data, store: packStore } = memoryPackStore({
+			"reviewers/child-session": { jobId: job.jobId },
+			[`reviews/${job.jobId}/binding/child-session`]: {
+				jobId: job.jobId,
+				changesetId: job.jobId,
+				target: { provider: "local", baseSha: "base", headSha: "head" },
+			},
+		});
 
-			const compact = await postInternalBundleRead(dir, packStore, { mode: "file", format: "compact", path: "src/example.ts", hunkOffset: 1, hunkLimit: 1 });
+		const compact = await postInternalBundleRead(harness.stateDir, packStore, { mode: "file", format: "compact", path: "src/example.ts", hunkOffset: 1, hunkLimit: 1 });
 
-			assert.equal(compact.status, 200);
-			assert.deepEqual(compact.json.file.hunks.map((hunk: any) => hunk.id), ["hunk-1"]);
-			assert.equal(compact.json.read_receipt.mode, "file");
-			assert.equal(compact.json.read_receipt.format, "compact");
-			assert.deepEqual(compact.json.read_receipt.hunkIds, ["hunk-1"]);
-			assert.deepEqual(compact.json.read_receipts.bodyReadHunkIds, ["hunk-1"]);
-			assert.equal(compact.json.read_receipts.total, 1);
-			assert.equal(compact.json.read_receipts.truncatedReads, 1);
-			assert.equal([...data.keys()].filter((key) => key.startsWith(`reviews/${job.jobId}/draft/read-receipts/`)).length, 1);
-			const evidence = data.get(`reviews/${job.jobId}/draft/analysis-bundle-diff`) as any;
-			assert.equal(evidence.kind, "pr_walkthrough_finalization_diff");
-			assert.equal(evidence.source, "analysis-bundle");
-			assert.deepEqual(evidence.parsedDiff.files[0].diffBlocks[0].hunks.map((hunk: any) => hunk.id), ["hunk-0", "hunk-1", "hunk-2"]);
+		assert.equal(compact.status, 200);
+		assert.deepEqual(compact.json.file.hunks.map((hunk: any) => hunk.id), ["hunk-1"]);
+		assert.equal(compact.json.read_receipt.mode, "file");
+		assert.equal(compact.json.read_receipt.format, "compact");
+		assert.deepEqual(compact.json.read_receipt.hunkIds, ["hunk-1"]);
+		assert.deepEqual(compact.json.read_receipts.bodyReadHunkIds, ["hunk-1"]);
+		assert.equal(compact.json.read_receipts.total, 1);
+		assert.equal(compact.json.read_receipts.truncatedReads, 1);
+		assert.equal([...data.keys()].filter((key) => key.startsWith(`reviews/${job.jobId}/draft/read-receipts/`)).length, 1);
+		const evidence = data.get(`reviews/${job.jobId}/draft/analysis-bundle-diff`) as any;
+		assert.equal(evidence.kind, "pr_walkthrough_finalization_diff");
+		assert.equal(evidence.source, "analysis-bundle");
+		assert.deepEqual(evidence.parsedDiff.files[0].diffBlocks[0].hunks.map((hunk: any) => hunk.id), ["hunk-0", "hunk-1", "hunk-2"]);
 
-			const legacy = await postInternalBundleRead(dir, packStore, { mode: "manifest" });
-			assert.equal(legacy.status, 200);
-			assert.ok(Array.isArray(legacy.json.files));
-			assert.equal(legacy.json.read_receipt, undefined, "omitted format must preserve legacy JSON output shape");
-			assert.equal(legacy.json.read_receipts, undefined, "omitted format must not append receipt summaries to legacy output");
-			assert.equal([...data.keys()].filter((key) => key.startsWith(`reviews/${job.jobId}/draft/read-receipts/`)).length, 2, "legacy-shaped reads still persist receipts for resume coverage");
-		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
+		harness.advance();
+		const legacy = await postInternalBundleRead(harness.stateDir, packStore, { mode: "manifest" });
+		assert.equal(legacy.status, 200);
+		assert.ok(Array.isArray(legacy.json.files));
+		assert.equal(legacy.json.read_receipt, undefined, "omitted format must preserve legacy JSON output shape");
+		assert.equal(legacy.json.read_receipts, undefined, "omitted format must not append receipt summaries to legacy output");
+		assert.equal([...data.keys()].filter((key) => key.startsWith(`reviews/${job.jobId}/draft/read-receipts/`)).length, 2, "legacy-shaped reads still persist receipts for resume coverage");
 	});
 });

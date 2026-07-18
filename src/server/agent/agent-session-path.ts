@@ -62,11 +62,20 @@ export function activeAgentSessionsDir(): string {
 	return path.join(BobbitDir.globalAgentDir(), "sessions");
 }
 
+function currentHomeDir(): string {
+	// Node may cache os.homedir() for the process lifetime. Read the platform's
+	// home override directly so a gateway launched with an explicit home (and
+	// shared-fork tests that scope one) resolves the matching legacy roots.
+	const envHome = process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME;
+	return envHome?.trim() ? path.resolve(envHome) : os.homedir();
+}
+
 /** Known legacy agent dirs that may still contain recoverable transcripts. */
 export function legacyAgentDirs(): string[] {
+	const homeDir = currentHomeDir();
 	return [
-		path.join(os.homedir(), ".bobbit", "agent"),
-		path.join(os.homedir(), ".pi", "agent"),
+		path.join(homeDir, ".bobbit", "agent"),
+		path.join(homeDir, ".pi", "agent"),
 	];
 }
 

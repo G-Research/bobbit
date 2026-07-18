@@ -13,6 +13,8 @@ type MockSession = {
 	id: string;
 	status: string;
 	nonInteractive?: boolean;
+	lastTurnErrored?: boolean;
+	title?: string;
 };
 
 function session(overrides: Partial<MockSession> = {}): MockSession {
@@ -136,10 +138,70 @@ describe("deliverSessionPrompt", () => {
 	it("rejects terminated target sessions", async () => {
 		const mock = deps(session({ status: "terminated" }));
 
-		await assertRejectsWithMessage(
+		await assert.rejects(
 			() => deliverSessionPrompt(mock.api, "sess-1", "hello", { defaultMode: "prompt" }),
+			(err: any) => {
+				assert.match(err.message, /terminated|archived|not live/i);
+				assert.equal(err.code, "SESSION_TERMINATED");
+				assert.equal(err.status, 409);
+				return true;
+			},
+		);
+		assert.deepEqual(mock.enqueueCalls, []);
+		assert.deepEqual(mock.liveSteerCalls, []);
+	});
+
+	it("revives a terminated poisoned-history rollback capsule through the same session exactly once", async () => {
+		const capsule = session({
+			status: "terminated",
+			lastTurnErrored: true,
+			title: "Poison rollback",
+		});
+		const enqueueCalls: Call[] = [];
+		let recoveryDecisionCalls = 0;
+
+		const result: any = await deliverSessionPrompt({
+			getSession: (id) => id === capsule.id ? capsule : undefined,
+			async enqueuePrompt(sessionId, message, opts) {
+				enqueueCalls.push({ sessionId, message, opts });
+				capsule.status = "idle";
+				return { status: "dispatched" as const };
+			},
+			async deliverLiveSteer() {},
+			getErroredPromptRecoveryDecision() {
+				recoveryDecisionCalls++;
+				return { recoverable: true as const, reason: "poisoned-history" as const, attempts: 0, maxAttempts: 1 };
+			},
+		}, "sess-1", "new REST intent", { defaultMode: "prompt", source: "agent" });
+
+		assert.equal(result.ok, true);
+		assert.equal(result.status, "recovered");
+		assert.equal(result.target.sessionId, "sess-1");
+		assert.equal(result.target.title, "Poison rollback");
+		assert.equal(result.recovery.reason, "poisoned-history");
+		assert.equal(result.recovery.queued, false);
+		assert.equal(recoveryDecisionCalls, 1);
+		assert.deepEqual(enqueueCalls, [
+			{ sessionId: "sess-1", message: "new REST intent", opts: { source: "agent" } },
+		]);
+	});
+
+	it("rejects an errored terminated session when its recovery is not poisoned history", async () => {
+		const capsule = session({ status: "terminated", lastTurnErrored: true });
+		const mock = deps(capsule);
+		let recoveryDecisionCalls = 0;
+
+		await assertRejectsWithMessage(
+			() => deliverSessionPrompt({
+				...mock.api,
+				getErroredPromptRecoveryDecision() {
+					recoveryDecisionCalls++;
+					return { recoverable: true as const, reason: "transient" as const, attempts: 0 };
+				},
+			}, "sess-1", "hello", { defaultMode: "prompt" }),
 			/terminated|archived|not live/i,
 		);
+		assert.equal(recoveryDecisionCalls, 1);
 		assert.deepEqual(mock.enqueueCalls, []);
 		assert.deepEqual(mock.liveSteerCalls, []);
 	});

@@ -12,9 +12,9 @@ guardProcessEnv();
  * Covers the pure request/response conversion plus the completion + project
  * resolution flow with an injected fetch (no network, no real credentials).
  */
-import { afterEach, beforeEach, describe, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
@@ -48,10 +48,18 @@ const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevProject = process.env.GOOGLE_CLOUD_PROJECT;
 const prevProjectId = process.env.GOOGLE_CLOUD_PROJECT_ID;
 const prevAccessToken = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+let suiteDir: string;
 let dir: string;
+let caseSequence = 0;
+
+beforeAll(() => {
+	suiteDir = mkdtempSync(path.join(tmpdir(), "bobbit-gca-"));
+});
 
 beforeEach(() => {
-	dir = mkdtempSync(path.join(tmpdir(), "bobbit-gca-"));
+	// Give cache-sensitive cases unique logical paths without creating and
+	// deleting a top-level temp tree for every pure conversion case.
+	dir = path.join(suiteDir, `case-${++caseSequence}`);
 	process.env.BOBBIT_AGENT_DIR = dir;
 	pinAgentDirForTest(dir);
 	// Project env override must not leak across tests (it short-circuits onboarding).
@@ -73,7 +81,10 @@ afterEach(() => {
 	if (prevAccessToken === undefined) delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
 	else process.env.GOOGLE_CLOUD_ACCESS_TOKEN = prevAccessToken;
 	resetAgentDirForTest();
-	rmSync(dir, { recursive: true, force: true });
+});
+
+afterAll(() => {
+	rmSync(suiteDir, { recursive: true, force: true });
 });
 
 /** Build a streaming `fetchFn` whose body yields the given SSE string chunks. */
@@ -100,6 +111,7 @@ async function collect(gen: AsyncGenerator<any>): Promise<any[]> {
 }
 
 function writeAuth(cred: Record<string, unknown>): void {
+	mkdirSync(dir, { recursive: true });
 	writeFileSync(path.join(dir, "auth.json"), JSON.stringify(cred), "utf-8");
 }
 

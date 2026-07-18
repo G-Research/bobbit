@@ -157,7 +157,35 @@ test.describe("human-signoff verification step", () => {
 			expect(step.humanPrompt.length).toBeGreaterThan(0);
 			expect(step.humanPrompt).not.toContain("{{branch}}");
 
-			// 3. ?view=summary surfaces awaitingSignoffCount per gate + top-level total.
+			// 3. Active verification snapshots preserve the authoritative sign-off
+			// marker and its display metadata for both inspect and compact status.
+			const inspectRes = await apiFetch(`/api/goals/${goalId}/gates/design/inspect?section=verification`);
+			expect(inspectRes.status).toBe(200);
+			const inspect = await inspectRes.json();
+			expect(inspect.signalId).toBe(signalId);
+			expect(inspect.active).toBe(true);
+			const inspectStep = inspect.steps.find((s: any) => s.name === "approve-design");
+			expect(inspectStep).toMatchObject({
+				type: "human-signoff",
+				status: "running",
+				awaitingHuman: true,
+				humanLabel: "Approve design",
+				humanPrompt: step.humanPrompt,
+			});
+
+			const statusRes = await apiFetch(`/api/goals/${goalId}/gates/design?view=summary`);
+			expect(statusRes.status).toBe(200);
+			const status = await statusRes.json();
+			expect(status.latestSignal.id).toBe(signalId);
+			expect(status.latestSignal.verification.active).toBe(true);
+			expect(status.latestSignal.verification.steps[0]).toMatchObject({
+				name: "approve-design",
+				awaitingHuman: true,
+				humanLabel: "Approve design",
+				humanPrompt: step.humanPrompt,
+			});
+
+			// 4. ?view=summary surfaces awaitingSignoffCount per gate + top-level total.
 			const summaryRes = await apiFetch(`/api/goals/${goalId}/gates?view=summary`);
 			expect(summaryRes.ok).toBe(true);
 			const summary = await summaryRes.json();
@@ -165,7 +193,7 @@ test.describe("human-signoff verification step", () => {
 			const designSummary = summary.gates.find((g: any) => g.gateId === "design");
 			expect(designSummary?.awaitingSignoffCount).toBe(1);
 
-			// 4. POST /signoff with pass → 200.
+			// 5. POST /signoff with pass → 200.
 			const okRes = await apiFetch(`/api/goals/${goalId}/gates/design/signoff`, {
 				method: "POST",
 				body: JSON.stringify({
@@ -181,7 +209,7 @@ test.describe("human-signoff verification step", () => {
 			const okBody = await okRes.json();
 			expect(okBody.resolved).toBe(true);
 
-			// 5. Gate transitions to passed; verification artifact carries the approval text.
+			// 6. Gate transitions to passed; verification artifact carries the approval text.
 			const gate = await waitForGateStatus(goalId, "design", "passed");
 			expect(gate.status).toBe("passed");
 			const sig = gate.signals.find((s: any) => s.id === signalId);
@@ -195,7 +223,26 @@ test.describe("human-signoff verification step", () => {
 			expect(stepResult.artifact.content).toContain("Approved");
 			expect(stepResult.artifact.content).toContain("LGTM");
 
-			// 6. Idempotency: a second POST on the already-resolved step returns 409.
+			// 7. Once resolved, the same now-historical snapshot retains ordinary
+			// verification data but drops every sign-off actionability field.
+			const resolvedInspectRes = await apiFetch(`/api/goals/${goalId}/gates/design/inspect?section=verification`);
+			expect(resolvedInspectRes.status).toBe(200);
+			const resolvedInspect = await resolvedInspectRes.json();
+			expect(resolvedInspect.signalId).toBe(signalId);
+			expect(resolvedInspect.active).toBe(false);
+			const resolvedInspectStep = resolvedInspect.steps.find((s: any) => s.name === "approve-design");
+			expect(resolvedInspectStep).toMatchObject({ type: "human-signoff", status: "passed", passed: true });
+			expect(resolvedInspectStep).not.toHaveProperty("awaitingHuman");
+			expect(resolvedInspectStep).not.toHaveProperty("humanLabel");
+			expect(resolvedInspectStep).not.toHaveProperty("humanPrompt");
+
+			const resolvedStatus = await (await apiFetch(`/api/goals/${goalId}/gates/design?view=summary`)).json();
+			expect(resolvedStatus.latestSignal.verification.active).toBe(false);
+			expect(resolvedStatus.latestSignal.verification.steps[0]).not.toHaveProperty("awaitingHuman");
+			expect(resolvedStatus.latestSignal.verification.steps[0]).not.toHaveProperty("humanLabel");
+			expect(resolvedStatus.latestSignal.verification.steps[0]).not.toHaveProperty("humanPrompt");
+
+			// 8. Idempotency: a second POST on the already-resolved step returns 409.
 			const dupRes = await apiFetch(`/api/goals/${goalId}/gates/design/signoff`, {
 				method: "POST",
 				body: JSON.stringify({
@@ -208,7 +255,7 @@ test.describe("human-signoff verification step", () => {
 			const dupBody = await dupRes.json();
 			expect(dupBody.error).toMatch(/no longer awaiting human/i);
 
-			// 7. After resolution, awaitingSignoffCount drops back to zero.
+			// 9. After resolution, awaitingSignoffCount drops back to zero.
 			const summary2 = await (await apiFetch(`/api/goals/${goalId}/gates?view=summary`)).json();
 			expect(summary2.awaitingSignoffCount).toBe(0);
 			const designSummary2 = summary2.gates.find((g: any) => g.gateId === "design");

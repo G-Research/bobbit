@@ -138,8 +138,9 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 				"provider-level x-opencode-session header must match documented literal",
 			);
 			const ids = data.providers.aigw.models.map((m: any) => m.id);
-			// Claude prefix is stripped by writeAigwModelsJson
-			assert.ok(ids.includes("openai/gpt-5.2"));
+			// gpt-5.2 is a reasoning model → option-1 routes it to openai-responses with a
+			// BARE wire id ("openai/gpt-5.2" → "gpt-5.2"). Claude prefix is stripped by writeAigwModelsJson.
+			assert.ok(ids.includes("gpt-5.2"));
 			assert.ok(ids.includes("us.anthropic.claude-sonnet-4-6"));
 
 			// Bedrock env vars set as a side-effect.
@@ -233,7 +234,9 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 
 			const models = await discoverAigwModels(mock.url);
 			assert.equal(models.length, 1);
-			assert.equal(mock.requestCount(), 1, "local mock gateway should still be reachable under the external-network guard");
+			// Well-known-first: the local mock 404s /.well-known/opencode (probe #1),
+			// then discovery falls back to /v1/models (probe #2).
+			assert.equal(mock.requestCount(), 2, "local mock gateway should still be reachable under the external-network guard (well-known probe + /v1/models fallback)");
 		} finally {
 			configureAigwRuntimeFlags({ testNoExternal: false });
 			await mock.close();

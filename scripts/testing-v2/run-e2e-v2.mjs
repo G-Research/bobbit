@@ -12,7 +12,7 @@
  * Everything else in that bucket runs here at retries:3 (a TEMPORARY
  * concurrency bridge — see docs/testing-strategy.md "Concurrency & budgets" and
  * the Group B/C notes below; Group A uses node:test's --test-force-exit and has
- * no retry knob wired here), in three groups
+ * no retry knob wired here), in four groups
  * derived mechanically from tests-map.json (so this is reusable, not
  * hand-assembled — it tracks the map, not a frozen list):
  *
@@ -24,6 +24,8 @@
  *   Group C — adapter browser specs: the geometry/journey specs migrated into
  *             tests2/browser/e2e/. Run via playwright-v2 config, project
  *             `browser-v2-e2e` (retries:3 inherited from the v2 config).
+ *   Group D — Vitest real-fidelity suites explicitly classified `vitest-e2e`;
+ *             run in the isolated `v2-e2e-vitest` project.
  *
  * External-service-free guarantee: every group runs with BOBBIT_TEST_NO_EXTERNAL
  * / BOBBIT_TEST_NO_REMOTE set (fail-closed on non-loopback fetch + no real git
@@ -34,7 +36,7 @@
  * head-to-head methodology, and reported per group + total.
  *
  * Usage:
- *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C] [--list] [--json <path>]
+ *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C|D] [--list] [--json <path>]
  */
 import { spawn } from "node:child_process";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -43,7 +45,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { execFileSync } from "node:child_process";
 import { createCpuSampler } from "./assert-budget.mjs";
-import { integrationE2eFiles } from "./integration-e2e-files.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -60,18 +61,25 @@ function parseArgs(argv) {
 	return out;
 }
 
-/** Categorize daily-bucket entries into groups A/B/C (excluding manual-integration). */
+/** Categorize daily-bucket entries and native real-fidelity owners (excluding manual-integration). */
 function classifyDaily() {
 	const map = JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "tests-map.json"), "utf8"));
 	const daily = (map.entries || []).filter((e) => (e.tier || e.bucket) === "daily");
 	const A = []; // node relocate .test.ts
 	const B = []; // playwright e2e relocate .spec.ts
 	const C = []; // adapter browser specs -> tests2/browser/e2e/<basename>
+	const D = []; // isolated Vitest real-fidelity suites
 	const excluded = { manualIntegration: [], missing: [] };
 	for (const e of daily) {
 		const f = e.file;
 		if (f.startsWith("tests/manual-integration/")) {
 			excluded.manualIntegration.push(f);
+			continue;
+		}
+		if (e.method === "vitest-e2e") {
+			const dest = e.v2Path || f;
+			if (existsSync(join(REPO_ROOT, dest))) D.push(dest.replace(/\\/g, "/"));
+			else excluded.missing.push(dest.replace(/\\/g, "/"));
 			continue;
 		}
 		if (e.method === "adapter") {
@@ -86,8 +94,19 @@ function classifyDaily() {
 		else if (f.endsWith(".test.ts")) A.push(f);
 		else excluded.missing.push(f); // unexpected shape
 	}
-	// De-dupe Group C (multiple map entries can map to the same physical spec).
-	return { A: [...new Set(A)], B: [...new Set(B)], C: [...new Set(C)], excluded };
+	// Native tests do not have legacy daily-bucket records. Their explicit path
+	// and execution ownership place browser/e2e specs in Group C and approved
+	// Vitest real-filesystem suites in Group D.
+	for (const entry of map.v2Native || []) {
+		const dest = String(entry.path || "").replace(/\\/g, "/");
+		if (!dest || !existsSync(join(REPO_ROOT, dest))) {
+			if (dest) excluded.missing.push(dest);
+			continue;
+		}
+		if (dest.startsWith("tests2/browser/e2e/") && entry.execution?.runner === "playwright") C.push(dest);
+		if (entry.execution?.runner === "vitest" && entry.execution?.tier === "e2e" && entry.execution?.project === "e2e") D.push(dest);
+	}
+	return { A: [...new Set(A)], B: [...new Set(B)], C: [...new Set(C)], D: [...new Set(D)], excluded };
 }
 
 function dockerAvailable() {
@@ -148,12 +167,14 @@ async function runGroupA(specs) {
 	if (specs.length === 0) return { label: "A/node", code: 0, wallMs: 0, skipped: true };
 	// tsx --test, force-exit so lingering handles never hang the lane.
 	// RESOURCE CAP: node:test defaults to ~CPU-count concurrent FILES. These are
-	// worktree/pool/sandbox specs that each boot a gateway AND create git worktrees
-	// whose setup runs `npm ci` — running many at once spawns a SWARM of concurrent
-	// npm ci + gateway boots that can exhaust the box (suspected cause of the
-	// crash + interrupted-npm-ci node_modules corruption on 2026-07-08). Serialise
-	// by default (override with E2E_V2_NODE_CONCURRENCY).
-	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "1";
+	// worktree/pool/sandbox specs that each boot a gateway AND create git worktrees.
+	// Worktree setup does NOT run `npm ci` here (verified 2026-07-16): every
+	// worktree-provisioning Group A test sets BOBBIT_SKIP_NPM_CI=1, and the rest
+	// never configure an npm-ci setup command — so the per-file cost is a gateway
+	// boot plus git worktree creation, not an npm-ci swarm. Default to 2 concurrent
+	// files to cut wall time while keeping gateway-boot load modest (override with
+	// E2E_V2_NODE_CONCURRENCY).
+	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "2";
 	const args = ["--test", "--test-force-exit", `--test-concurrency=${nodeConc}`, ...specs];
 	return run(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", ...args], {
 		env: { ...EXTERNAL_FREE_ENV, NODE_ENV: "test" },
@@ -202,29 +223,36 @@ async function runGroupC(specs) {
 	});
 }
 
-// Group I — heavy REAL-FIDELITY vitest integration specs relocated out of the
-// fast `unit` gate (see integrationE2eFiles in vitest.config.ts). Run here via
-// the dedicated v2-integration-e2e vitest project. External-free like the rest.
-async function runGroupIntegration() {
-	return run(npmCmd(), ["run", "test:e2e:integration"], {
-		env: { ...EXTERNAL_FREE_ENV },
-		label: "I/integration-e2e",
+async function runGroupD(specs) {
+	if (specs.length === 0) return { label: "D/vitest", code: 0, wallMs: 0, skipped: true };
+	const vitestCli = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
+	return run(process.execPath, [
+		vitestCli,
+		"run",
+		"--config", "vitest.config.ts",
+		"--project", "v2-e2e-vitest",
+		"--silent=passed-only",
+	], {
+		env: {
+			...EXTERNAL_FREE_ENV,
+			BOBBIT_V2_E2E_VITEST: "1",
+			VITEST_MAX_WORKERS: "1",
+		},
+		label: "D/vitest-real-fidelity",
+		shell: false,
 	});
 }
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const { A, B, C, excluded } = classifyDaily();
+	const { A, B, C, D, excluded } = classifyDaily();
 
-	// Group I is not classified from the daily bucket — it is the fixed
-	// v2-integration-e2e vitest project (heavy integration specs relocated out of
-	// the unit gate; the file list is the shared integrationE2eFiles module).
 	if (args.list) {
-		console.log(JSON.stringify({ A, B, C, I: integrationE2eFiles, excluded }, null, 2));
+		console.log(JSON.stringify({ A, B, C, D, excluded }, null, 2));
 		return;
 	}
 
-	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length} I(integration)=${integrationE2eFiles.length}`);
+	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length} D(vitest)=${D.length}`);
 	console.log(`[e2e-v2] excluded: manual-integration=${excluded.manualIntegration.length}${excluded.missing.length ? `, MISSING=${excluded.missing.length} (${excluded.missing.join(", ")})` : ""}`);
 
 	const docker = dockerAvailable();
@@ -241,7 +269,7 @@ async function main() {
 	if (!only || only === "A") results.push(await runGroupA(A));
 	if (!only || only === "B") results.push(await runGroupB(B));
 	if (!only || only === "C") results.push(await runGroupC(C));
-	if (!only || only === "I") results.push(await runGroupIntegration());
+	if (!only || only === "D") results.push(await runGroupD(D));
 
 	const sample = sampler.stop();
 	const wallMs = Math.round(performance.now() - startWall);
@@ -257,7 +285,7 @@ async function main() {
 		peakProcesses: sample.peakProcesses,
 		docker,
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
-		counts: { A: A.length, B: B.length, C: C.length, I: integrationE2eFiles.length },
+		counts: { A: A.length, B: B.length, C: C.length, D: D.length },
 		excluded,
 		createdAt: new Date().toISOString(),
 	};

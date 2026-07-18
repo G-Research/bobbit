@@ -41,7 +41,7 @@ if (buildCode !== 0) {
 }
 const testCode = await run(
 	npx,
-	["vitest", "run", "--config", "vitest.config.ts", "--silent=passed-only", "tests2/core/bundle-size.test.ts"],
+	["vitest", "run", "--config", "vitest.config.ts", "--silent=passed-only", "tests2/core/bundle-size.test.ts", "tests2/core/support-packaging.test.ts"],
 	{ BOBBIT_ASSERT_BUNDLE: "1" },
 );
 process.exit(testCode);

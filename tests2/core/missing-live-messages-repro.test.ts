@@ -111,11 +111,13 @@ describe("missing live messages after dormant revive", () => {
 		});
 
 		const restoreGates: Array<ReturnType<typeof deferred<void>>> = [];
+		const restoreStarted = deferred<void>();
 		const restoredSessions: any[] = [];
 		manager.restoreSession = vi.fn(async () => {
 			const restoreIndex = restoreGates.length + 1;
 			const gate = deferred();
 			restoreGates.push(gate);
+			restoreStarted.resolve();
 			await gate.promise;
 
 			const restored: any = {
@@ -158,8 +160,13 @@ describe("missing live messages after dormant revive", () => {
 
 		assert.equal(manager.addClient(sessionId, firstAttachedClient as any), true);
 		assert.equal(manager.addClient(sessionId, secondAttachedClient as any), true);
+		// Replacement operations intentionally begin on the coordinator's promise
+		// tail. Synchronize on entry instead of assuming addClient invokes the async
+		// restore body in the same JavaScript turn.
+		await restoreStarted.promise;
 		assert.equal(restoreGates.length, 1, "concurrent dormant addClient calls must join exactly one restore");
 		assert.equal(manager.restoreSession.mock.calls.length, 1, "coordinator must invoke restoreSession exactly once");
+		assert.equal(manager._sessionReplacementCoordinators.get(sessionId)?.pending, 1, "both clients must share one scheduled restore");
 
 		restoreGates[0].resolve();
 		await flushMicrotasks();

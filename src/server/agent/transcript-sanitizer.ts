@@ -1,8 +1,15 @@
 /**
  * Transcript sanitizer — un-poison persisted agent `.jsonl` transcripts whose
- * `user` messages carry a blank text body.
+ * active branch contains orphaned tool results or whose `user` messages carry
+ * a blank text body.
  *
- * Background: the model API rejects a user message whose ContentBlock has a
+ * Orphan repair follows Pi's parent-linked active branch and latest compaction
+ * projection. A message-level `toolResult`/`tool_result`/`tool` is removed only
+ * when the current assistant result run does not contain its id; unrelated inactive records and
+ * lines remain byte-identical, while every surviving branch minimally bypasses
+ * a removed shared-ancestor link.
+ *
+ * Blank-content background: the model API rejects a user message whose ContentBlock has a
  * blank `text` field (next to an image block, or as a standalone empty text
  * block). Before the source-prevention fix (synthesizeAttachmentText in
  * session-manager.enqueuePrompt), an image/attachment-only prompt committed
@@ -96,10 +103,210 @@ function rewriteBlankUserContent(content: unknown): unknown {
 export interface SanitizeResult {
 	/** The (possibly unchanged) JSONL content. */
 	content: string;
-	/** Whether any line was rewritten. */
+	/** Whether any line was repaired, removed, or rewritten. */
 	changed: boolean;
-	/** Number of transcript records rewritten. */
+	/** Number of poisoned transcript records repaired. */
 	rewritten: number;
+}
+
+interface ParsedTranscriptLine {
+	lineIndex: number;
+	entry: any;
+	id: string | null;
+	parentId: string | null;
+}
+
+function parseTranscriptLines(lines: string[]): ParsedTranscriptLine[] {
+	const parsed: ParsedTranscriptLine[] = [];
+	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+		const trimmed = lines[lineIndex].trim();
+		if (!trimmed) continue;
+		try {
+			const entry = JSON.parse(trimmed);
+			if (!entry || typeof entry !== "object") continue;
+			parsed.push({
+				lineIndex,
+				entry,
+				id: typeof entry.id === "string" && entry.id.length > 0 ? entry.id : null,
+				parentId: typeof entry.parentId === "string" && entry.parentId.length > 0 ? entry.parentId : null,
+			});
+		} catch {
+			// Malformed and non-JSON lines are opaque transcript data.
+		}
+	}
+	return parsed;
+}
+
+/**
+ * Return the parent-linked branch ending at Pi's current leaf. Session headers
+ * are not tree entries; the last parsed, id-bearing non-header record is the
+ * leaf. Missing parents and cycles terminate the walk conservatively.
+ */
+function activeTranscriptBranch(parsed: ParsedTranscriptLine[]): ParsedTranscriptLine[] {
+	let leaf: ParsedTranscriptLine | undefined;
+	const byId = new Map<string, ParsedTranscriptLine>();
+	for (const record of parsed) {
+		if (!record.id || record.entry.type === "session") continue;
+		byId.set(record.id, record);
+		leaf = record;
+	}
+	if (!leaf) return [];
+
+	const reverseBranch: ParsedTranscriptLine[] = [];
+	const visited = new Set<string>();
+	let current: ParsedTranscriptLine | undefined = leaf;
+	while (current?.id && !visited.has(current.id)) {
+		reverseBranch.push(current);
+		visited.add(current.id);
+		current = current.parentId ? byId.get(current.parentId) : undefined;
+	}
+	return reverseBranch.reverse();
+}
+
+function projectedContextBranch(branch: ParsedTranscriptLine[]): ParsedTranscriptLine[] {
+	let compactionIndex = -1;
+	for (let i = 0; i < branch.length; i++) {
+		if (branch[i].entry.type === "compaction") compactionIndex = i;
+	}
+	if (compactionIndex < 0) return branch;
+
+	const compaction = branch[compactionIndex].entry;
+	const firstKeptId = typeof compaction.firstKeptEntryId === "string"
+		? compaction.firstKeptEntryId
+		: "";
+	const firstKeptIndex = firstKeptId
+		? branch.findIndex((record, index) => index < compactionIndex && record.id === firstKeptId)
+		: -1;
+
+	// Pi projects the latest summary ahead of its preserved tail. The compaction
+	// record is metadata, not a conversation message. When its boundary cannot
+	// be resolved, only descendants written after compaction are known-active.
+	const keptTail = firstKeptIndex >= 0
+		? branch.slice(firstKeptIndex, compactionIndex)
+		: [];
+	return [...keptTail, ...branch.slice(compactionIndex + 1)];
+}
+
+const TOOL_USE_ID_KEYS = ["toolCallId", "toolUseId", "tool_use_id", "tool_call_id", "id"] as const;
+
+function persistedToolUseId(value: unknown): string | null {
+	if (!value || typeof value !== "object") return null;
+	for (const key of TOOL_USE_ID_KEYS) {
+		const id = (value as Record<string, unknown>)[key];
+		if (typeof id === "string" && id.trim().length > 0) return id;
+	}
+	return null;
+}
+
+function isMessageLevelToolResultRole(role: unknown): boolean {
+	return role === "toolResult" || role === "tool_result" || role === "tool";
+}
+
+function assistantToolCallIds(content: unknown): Set<string> {
+	const ids = new Set<string>();
+	if (!Array.isArray(content)) return ids;
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const type = (block as any).type;
+		const id = persistedToolUseId(block);
+		if ((type === "toolCall" || type === "tool_use") && id) ids.add(id);
+	}
+	return ids;
+}
+
+function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number> {
+	const orphanLines = new Set<number>();
+	let pendingToolCallIds: Set<string> | null = null;
+
+	for (const record of projectedContextBranch(branch)) {
+		const entry = record.entry;
+		if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") {
+			// Pi projects these top-level entries into actual LLM messages. They
+			// therefore end the immediately-preceding assistant result run just as
+			// a user/custom message stored inside a `message` entry would. Other
+			// session-tree entries are state/display metadata and stay transparent.
+			// The latest compaction is deliberately absent from
+			// projectedContextBranch: Pi places its summary before the preserved
+			// tail, rather than at its physical JSONL position.
+			if (
+				entry.type === "custom_message" ||
+				(entry.type === "branch_summary" && entry.summary)
+			) {
+				pendingToolCallIds = null;
+			}
+			continue;
+		}
+
+		const message = entry.message;
+		if (message.role === "assistant") {
+			pendingToolCallIds = assistantToolCallIds(message.content);
+			continue;
+		}
+		if (isMessageLevelToolResultRole(message.role)) {
+			const toolCallId = persistedToolUseId(message);
+			if (!toolCallId || !pendingToolCallIds?.has(toolCallId)) {
+				orphanLines.add(record.lineIndex);
+			} else {
+				// One result settles one call. Repeated results for the same id are
+				// structurally invalid even when the assistant originally called it.
+				pendingToolCallIds.delete(toolCallId);
+			}
+			continue;
+		}
+
+		// Any other conversation-bearing message ends the result run.
+		pendingToolCallIds = null;
+	}
+
+	return orphanLines;
+}
+
+/**
+ * Remove structurally orphaned message-level Pi tool-result records from the
+ * active context branch. Untouched JSONL lines remain byte-identical. Every
+ * surviving child whose parent chain crosses a removed record is minimally
+ * reparented to the nearest retained ancestor, including children on inactive
+ * branches that shared the removed active-branch ancestor.
+ */
+function repairOrphanToolResults(content: string): SanitizeResult {
+	if (!content) return { content, changed: false, rewritten: 0 };
+	const lines = content.split("\n");
+	const parsed = parseTranscriptLines(lines);
+	const activeBranch = activeTranscriptBranch(parsed);
+	const removedLineIndexes = orphanToolResultLineIndexes(activeBranch);
+	if (removedLineIndexes.size === 0) return { content, changed: false, rewritten: 0 };
+
+	const removedParents = new Map<string, string | null>();
+	for (const record of activeBranch) {
+		if (removedLineIndexes.has(record.lineIndex) && record.id) {
+			removedParents.set(record.id, record.parentId);
+		}
+	}
+
+	// A record removed from the active branch may also be an ancestor of one or
+	// more inactive branches. Repair every surviving direct child of the removed
+	// chain; limiting this pass to activeBranch would leave those branches with a
+	// dangling parentId and make them impossible for Pi to resume later.
+	for (const record of parsed) {
+		if (removedLineIndexes.has(record.lineIndex)) continue;
+		let parentId = record.parentId;
+		const visited = new Set<string>();
+		while (parentId && removedParents.has(parentId) && !visited.has(parentId)) {
+			visited.add(parentId);
+			parentId = removedParents.get(parentId) ?? null;
+		}
+		if (parentId === record.parentId) continue;
+		record.entry.parentId = parentId;
+		const carriageReturn = lines[record.lineIndex].endsWith("\r") ? "\r" : "";
+		lines[record.lineIndex] = JSON.stringify(record.entry) + carriageReturn;
+	}
+
+	const repairedLines = lines.filter((_line, index) => !removedLineIndexes.has(index));
+	return {
+		content: repairedLines.join("\n"),
+		changed: true,
+		rewritten: removedLineIndexes.size,
+	};
 }
 
 export interface RebaseTranscriptCwdMetadataOptions {
@@ -110,13 +317,14 @@ export interface RebaseTranscriptCwdMetadataOptions {
 }
 
 /**
- * Sanitize raw `.jsonl` content. Pure — no I/O. Rewrites blank-text `user`
- * messages in place, preserving every other line byte-for-byte (including the
- * original trailing-newline shape). Idempotent: re-running on sanitized output
- * yields `changed:false`.
+ * Sanitize raw `.jsonl` content. Pure — no I/O. Removes active-branch orphan
+ * tool results and rewrites blank-text `user` messages. All unrelated lines and
+ * the original trailing-newline shape are preserved. Idempotent: re-running on
+ * sanitized output yields `changed:false`.
  */
 export function sanitizeTranscriptContent(content: string): SanitizeResult {
-	return transformTranscriptJsonl(content, (entry) => {
+	const orphanRepair = repairOrphanToolResults(content);
+	const blankRepair = transformTranscriptJsonl(orphanRepair.content, (entry) => {
 		if (!entry || entry.type !== "message" || !entry.message) return false;
 		if (entry.message.role !== "user") return false;
 
@@ -130,6 +338,11 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 		entry.message.content = rewriteBlankUserContent(entry.message.content);
 		return true;
 	});
+	return {
+		content: blankRepair.content,
+		changed: orphanRepair.changed || blankRepair.changed,
+		rewritten: orphanRepair.rewritten + blankRepair.rewritten,
+	};
 }
 
 /**
@@ -218,12 +431,42 @@ function normalizeComparablePath(hostPath: string): string {
 	return path.resolve(hostPath).replace(/[\\/]+$/, "");
 }
 
-const trustedExactSessionFiles = new Set<string>();
+export interface TranscriptRootPolicy {
+	/** Trusted active, historical, and legacy agent sessions roots. */
+	readonly sessionsRoots: () => readonly string[];
+}
 
-function isWithinTrustedSessionsRoot(hostPath: string): boolean {
+/**
+ * Create an isolated transcript path policy. The policy owns its exact-file
+ * trust declarations, so callers can scope validation to a gateway or test
+ * fixture without mutating startup agent-directory state.
+ */
+export function createTranscriptRootPolicy(
+	sessionsRoots: readonly string[] | (() => readonly string[]),
+): TranscriptRootPolicy {
+	const fixedRoots = typeof sessionsRoots === "function" ? null : Object.freeze([...sessionsRoots]);
+	const resolveRoots = typeof sessionsRoots === "function" ? sessionsRoots : () => fixedRoots!;
+	const policy = Object.freeze({ sessionsRoots: resolveRoots });
+	trustedExactSessionFilesByPolicy.set(policy, new Set());
+	return policy;
+}
+
+const trustedExactSessionFilesByPolicy = new WeakMap<TranscriptRootPolicy, Set<string>>();
+const defaultTranscriptRootPolicy = createTranscriptRootPolicy(trustedAgentSessionsRoots);
+
+function trustedExactSessionFiles(rootPolicy: TranscriptRootPolicy): Set<string> {
+	let files = trustedExactSessionFilesByPolicy.get(rootPolicy);
+	if (!files) {
+		files = new Set();
+		trustedExactSessionFilesByPolicy.set(rootPolicy, files);
+	}
+	return files;
+}
+
+function isWithinTrustedSessionsRoot(hostPath: string, rootPolicy: TranscriptRootPolicy): boolean {
 	if (!hostPath || hasTraversalSegment(hostPath)) return false;
 	const resolved = path.resolve(hostPath);
-	return trustedAgentSessionsRoots().some(root => isStrictlyInside(path.resolve(root), resolved));
+	return rootPolicy.sessionsRoots().some(root => isStrictlyInside(path.resolve(root), resolved));
 }
 
 /**
@@ -233,28 +476,34 @@ function isWithinTrustedSessionsRoot(hostPath: string): boolean {
  * with recognizable transcript content; they never become sanitizer write or
  * purge-delete targets.
  */
-export function trustPersistedAgentSessionFile(filePath: string | null | undefined): void {
-	const rootSafe = resolveSafeSessionsPath(filePath ?? "");
+export function trustPersistedAgentSessionFile(
+	filePath: string | null | undefined,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): void {
+	const rootSafe = resolveSafeSessionsPath(filePath ?? "", rootPolicy);
 	if (rootSafe) {
-		trustedExactSessionFiles.add(normalizeComparablePath(rootSafe));
+		trustedExactSessionFiles(rootPolicy).add(normalizeComparablePath(rootSafe));
 		return;
 	}
 	const readable = validateReadableOutsideTranscriptFile(filePath);
 	if (!readable) return;
-	trustedExactSessionFiles.add(normalizeComparablePath(readable));
+	trustedExactSessionFiles(rootPolicy).add(normalizeComparablePath(readable));
 }
 
-function isTrustedExactSessionFile(filePath: string): boolean {
-	return trustedExactSessionFiles.has(normalizeComparablePath(filePath));
+function isTrustedExactSessionFile(filePath: string, rootPolicy: TranscriptRootPolicy): boolean {
+	return trustedExactSessionFiles(rootPolicy).has(normalizeComparablePath(filePath));
 }
 
-export function resolveReadablePersistedAgentSessionFile(filePath: string | null | undefined): string | null {
+export function resolveReadablePersistedAgentSessionFile(
+	filePath: string | null | undefined,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): string | null {
 	if (!filePath || hasTraversalSegment(filePath)) return null;
 	if (!path.isAbsolute(filePath) && !/^[A-Za-z]:[\\/]/.test(filePath)) return null;
-	const rootSafe = resolveSafeSessionsPath(filePath);
+	const rootSafe = resolveSafeSessionsPath(filePath, rootPolicy);
 	if (rootSafe) return rootSafe;
 	const realPath = realpathRegularJsonlFile(path.resolve(filePath));
-	if (!realPath || !isTrustedExactSessionFile(realPath)) return null;
+	if (!realPath || !isTrustedExactSessionFile(realPath, rootPolicy)) return null;
 	return realPath;
 }
 
@@ -322,11 +571,14 @@ function isTranscriptShape(entry: unknown): boolean {
  * manager. Does NOT touch the filesystem — see `resolveSafeSessionsPath` for
  * the symlink/TOCTOU-resistant variant used on the real I/O path.
  */
-export function isWithinAgentSessionsDir(hostPath: string): boolean {
+export function isWithinAgentSessionsDir(
+	hostPath: string,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): boolean {
 	if (!hostPath || hasTraversalSegment(hostPath)) return false;
 	const resolved = path.resolve(hostPath);
-	if (isTrustedExactSessionFile(resolved)) return true;
-	return isWithinTrustedSessionsRoot(resolved);
+	if (isTrustedExactSessionFile(resolved, rootPolicy)) return true;
+	return isWithinTrustedSessionsRoot(resolved, rootPolicy);
 }
 
 /**
@@ -345,7 +597,10 @@ export function isWithinAgentSessionsDir(hostPath: string): boolean {
  * caller opens with `O_NOFOLLOW` (where available) so a symlink swapped in after
  * this check is still not followed.
  */
-export function resolveSafeSessionsPath(hostPath: string): string | null {
+export function resolveSafeSessionsPath(
+	hostPath: string,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): string | null {
 	if (!hostPath) return null;
 	const segments = hostPath.replace(/\\/g, "/").split("/");
 	if (segments.includes("..")) return null;
@@ -360,7 +615,7 @@ export function resolveSafeSessionsPath(hostPath: string): string | null {
 	}
 
 	let insideTrustedRoot = false;
-	for (const root of trustedAgentSessionsRoots()) {
+	for (const root of rootPolicy.sessionsRoots()) {
 		try {
 			const rootReal = fs.realpathSync(path.resolve(root));
 			if (isInsideOrEqual(rootReal, parentReal)) {
@@ -415,12 +670,13 @@ function writeFileNoFollow(realPath: string, data: string): void {
  * container-path is translated to its host path and written there (visible
  * inside the container via the mount).
  *
- * @returns the number of user messages rewritten (0 when nothing changed).
+ * @returns the number of poisoned transcript records repaired (0 when unchanged).
  */
 export async function sanitizeAgentTranscriptFile(
 	ctx: SessionFsContext,
 	filePath: string,
 	sandboxManager: SandboxManager | null,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
 ): Promise<number> {
 	return transformAgentTranscriptFile(
 		ctx,
@@ -428,7 +684,8 @@ export async function sanitizeAgentTranscriptFile(
 		sandboxManager,
 		sanitizeTranscriptContent,
 		"sanitize",
-		(file, rewritten) => `Un-poisoned ${rewritten} blank-text user message(s) in ${file}`,
+		(file, rewritten) => `Repaired ${rewritten} poisoned transcript record(s) in ${file}`,
+		rootPolicy,
 	);
 }
 
@@ -444,6 +701,7 @@ export async function rebaseAgentTranscriptCwdMetadataFile(
 	filePath: string,
 	sandboxManager: SandboxManager | null,
 	options: RebaseTranscriptCwdMetadataOptions,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
 ): Promise<number> {
 	return transformAgentTranscriptFile(
 		ctx,
@@ -452,6 +710,7 @@ export async function rebaseAgentTranscriptCwdMetadataFile(
 		(content) => rebaseTranscriptCwdMetadataContent(content, options),
 		"cwd metadata rebase",
 		(file, rewritten) => `Rebased ${rewritten} runtime cwd metadata record(s) in ${file}`,
+		rootPolicy,
 	);
 }
 
@@ -462,6 +721,7 @@ async function transformAgentTranscriptFile(
 	transform: (content: string) => SanitizeResult,
 	operation: string,
 	logMessage: (filePath: string, rewritten: number) => string,
+	rootPolicy: TranscriptRootPolicy,
 ): Promise<number> {
 	try {
 		// Resolve the host-side path. Non-sandboxed: filePath is already a host
@@ -476,8 +736,8 @@ async function transformAgentTranscriptFile(
 		let writableRealPath: string | null = null;
 		let readAllowed = true;
 		if (!ctx.sandboxed) {
-			writableRealPath = resolveSafeSessionsPath(hostPath);
-			readAllowed = writableRealPath !== null || resolveReadablePersistedAgentSessionFile(hostPath) !== null;
+			writableRealPath = resolveSafeSessionsPath(hostPath, rootPolicy);
+			readAllowed = writableRealPath !== null || resolveReadablePersistedAgentSessionFile(hostPath, rootPolicy) !== null;
 			if (!readAllowed) {
 				console.warn(`[transcript-sanitizer] Refusing to access path outside agent sessions dir: ${hostPath} (from ${filePath})`);
 				return 0;
@@ -494,7 +754,7 @@ async function transformAgentTranscriptFile(
 		// (TOCTOU) and write with O_NOFOLLOW so a symlink swapped in after the
 		// check is not followed. A malformed/hostile agentSessionFile must never
 		// let us clobber an arbitrary file.
-		const realPath = writableRealPath ?? resolveSafeSessionsPath(hostPath);
+		const realPath = resolveSafeSessionsPath(hostPath, rootPolicy);
 		if (realPath === null) {
 			console.warn(`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${hostPath} (from ${filePath})`);
 			return 0;

@@ -51,16 +51,19 @@ export interface GoalWorkflowValidationError {
 	availableWorkflows?: Array<{ id: string; name?: string }>;
 }
 
+export type ProjectProposalMode = "create" | "provisional" | "registered" | "invalid";
+
 export interface ProposalSlot {
 	sessionId: string;
 	fields: Record<string, unknown>;
 	streaming: boolean;
-	mode?: "provisional" | "registered";
-	/** For `project` proposals: the id of the project this proposal targets,
-	 *  pinned at creation time. Accept promotes/writes against THIS id rather
-	 *  than re-deriving from the mutable session list, which a background
-	 *  `refreshSessions()` poll can change out from under an in-flight accept. */
-	projectId?: string;
+	mode?: ProjectProposalMode;
+	/** For `project` proposals: the project that owned the source session when
+	 *  this slot was created. This is provenance only, never an accept target. */
+	sourceProjectId?: string;
+	/** For create-mode project proposals: a successfully registered project whose
+	 *  config write is still pending. This retry checkpoint does not change intent. */
+	createdProjectId?: string;
 	rev: number;
 	workflowValidationError?: GoalWorkflowValidationError;
 }

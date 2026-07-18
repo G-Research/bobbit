@@ -1,7 +1,7 @@
 /**
  * E2E tests for the Tool Management REST API.
  *
- * Tests run against a real gateway (started by Playwright webServer on port 3099).
+ * Tests run against the fork-scoped v2 in-process gateway.
  * They verify the extended GET /api/tools, GET /api/tools/:name,
  * PUT /api/tools/:name endpoints, and backward compatibility.
  *
@@ -9,8 +9,9 @@
  * the specific YAML files that are modified by PUT tests.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { __setToolModuleLoadProbeForTesting } from "../../src/server/agent/tool-extension-preflight.js";
 import { readE2EToken, base, bobbitDir } from "./_e2e/e2e-setup.js";
 
 let _tok: string; function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
@@ -28,6 +29,7 @@ const MODIFIED_YAMLS = [
 ];
 
 const yamlBackups = new Map<string, string>();
+const createdGroups = new Set<string>();
 
 /** Authenticated fetch helper */
 function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
@@ -41,20 +43,35 @@ function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	});
 }
 
-// Back up and restore YAML files around the test suite
+// Metadata PUTs copy builtin tool groups into the test gateway's config layer.
+// Production validates copied extensions in a confined Node child. This tier-1
+// suite owns REST/ToolManager decisions, so reinstall a deterministic module-load
+// override after the global setup restores its no-spawn baseline for each test.
+test.beforeEach(() => {
+	__setToolModuleLoadProbeForTesting(() => undefined);
+});
+
+// Back up and restore pre-existing YAMLs; remove groups copied by this suite.
 test.beforeAll(() => {
 	for (const yamlPath of MODIFIED_YAMLS) {
 		const abs = join(bobbitDir(), yamlPath);
-		if (existsSync(abs)) {
-			yamlBackups.set(yamlPath, readFileSync(abs, "utf-8"));
-		}
+		const groupPath = dirname(abs);
+		if (!existsSync(groupPath)) createdGroups.add(groupPath);
+		if (existsSync(abs)) yamlBackups.set(yamlPath, readFileSync(abs, "utf-8"));
 	}
 });
 
 test.afterAll(() => {
-	for (const [yamlPath, content] of yamlBackups) {
-		const abs = join(bobbitDir(), yamlPath);
-		writeFileSync(abs, content, "utf-8");
+	try {
+		for (const [yamlPath, content] of yamlBackups) {
+			writeFileSync(join(bobbitDir(), yamlPath), content, "utf-8");
+		}
+		// updateToolMetadata copies an entire builtin group on first customization.
+		// Remove groups this suite created so later files in the shared fork do not
+		// inherit overrides or repeatedly preflight their copied extensions.
+		for (const groupPath of createdGroups) rmSync(groupPath, { recursive: true, force: true });
+	} finally {
+		__setToolModuleLoadProbeForTesting(undefined);
 	}
 });
 

@@ -45,7 +45,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // chunk is shared across all UI surfaces that open dialogs.
 import { openGatewayDialog, showQrCodeDialog, showSupportDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
+import { HEADQUARTERS_ACCENT_COLOR, HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
@@ -237,7 +237,7 @@ function _splashProjectPicker() {
 			${projects.map(p => {
 				const isDark = document.documentElement.classList.contains("dark");
 				const color = isHeadquartersProject(p)
-					? "var(--primary)"
+					? HEADQUARTERS_ACCENT_COLOR
 					: isDark
 						? (p.colorDark || p.color || "var(--muted-foreground)")
 						: (p.colorLight || p.color || "var(--muted-foreground)");

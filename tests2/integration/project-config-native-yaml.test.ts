@@ -18,36 +18,51 @@
  *      rewrites it in native form.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch } from "./_e2e/e2e-setup.js";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-async function registerTmpProject(name: string): Promise<{ id: string; rootPath: string; cleanup: () => void }> {
-	const dir = mkdtempSync(join(tmpdir(), "bobbit-nativeyaml-"));
-	const res = await apiFetch("/api/projects", {
-		method: "POST",
-		body: JSON.stringify({ name, rootPath: dir }),
-	});
-	expect(res.status).toBe(201);
-	const proj = await res.json();
-	return {
-		id: proj.id,
-		rootPath: dir,
-		cleanup: () => {
-			apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
-			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-		},
-	};
+function projectYamlPath(rootPath: string): string {
+	return join(rootPath, ".bobbit", "config", "project.yaml");
 }
 
 function readProjectYaml(rootPath: string): string {
-	return readFileSync(join(rootPath, ".bobbit", "config", "project.yaml"), "utf-8");
+	return readFileSync(projectYamlPath(rootPath), "utf-8");
 }
 
+let sharedProjectId = "";
+let sharedProjectRoot = "";
+let sharedProjectBaseline = "";
+
+function sharedNativeYamlProject(): { id: string; rootPath: string; cleanup: () => void } {
+	return { id: sharedProjectId, rootPath: sharedProjectRoot, cleanup: () => { /* reset by afterEach */ } };
+}
+
+test.beforeAll(async () => {
+	sharedProjectRoot = mkdtempSync(join(tmpdir(), "bobbit-nativeyaml-shared-"));
+	const project = await registerProject({
+		name: `nyaml-shared-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		rootPath: sharedProjectRoot,
+		seedWorkflows: false,
+	});
+	sharedProjectId = project.id;
+	sharedProjectBaseline = readProjectYaml(sharedProjectRoot);
+});
+
+test.afterAll(async () => {
+	await apiFetch(`/api/projects/${sharedProjectId}`, { method: "DELETE" }).catch(() => {});
+	try { rmSync(sharedProjectRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+});
+
 test.describe("Native-YAML project.yaml fields", () => {
+	test.afterEach(({ gateway }) => {
+		writeFileSync(projectYamlPath(sharedProjectRoot), sharedProjectBaseline);
+		gateway.projectContextManager.getOrCreate(sharedProjectId)?.projectConfigStore.reload();
+	});
+
 	test("PUT structured payloads persists; GET returns structured; on-disk is native", async () => {
-		const { id, rootPath, cleanup } = await registerTmpProject(`nyaml-${Date.now()}`);
+		const { id, rootPath, cleanup } = sharedNativeYamlProject();
 		try {
 			const payload = {
 				config_directories: [
@@ -93,7 +108,7 @@ test.describe("Native-YAML project.yaml fields", () => {
 	});
 
 	test("PUT rejects legacy JSON-string payloads for migrated fields", async () => {
-		const { id, cleanup } = await registerTmpProject(`nyaml-reject-${Date.now()}`);
+		const { id, cleanup } = sharedNativeYamlProject();
 		try {
 			for (const field of ["config_directories", "sandbox_tokens"]) {
 				const res = await apiFetch(`/api/projects/${id}/config`, {
@@ -123,51 +138,41 @@ test.describe("Native-YAML project.yaml fields", () => {
 		}
 	});
 
-	test("Legacy on-disk project.yaml loads correctly and is rewritten native on next save", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "bobbit-nativeyaml-legacy-"));
+	test("Legacy on-disk project.yaml loads correctly and is rewritten native on next save", async ({ gateway }) => {
+		const { id, rootPath, cleanup } = sharedNativeYamlProject();
 		try {
-			// Hand-write a legacy-format project.yaml BEFORE registering the project.
-			const cfgDir = join(dir, ".bobbit", "config");
-			mkdirSync(cfgDir, { recursive: true });
 			const legacyYaml = [
 				`config_directories: '${JSON.stringify([{ path: "/legacy", types: ["skills"] }])}'`,
 				`sandbox_tokens: '${JSON.stringify([{ key: "GITHUB_TOKEN", enabled: true }])}'`,
 			].join("\n") + "\n";
-			writeFileSync(join(cfgDir, "project.yaml"), legacyYaml);
+			writeFileSync(projectYamlPath(rootPath), legacyYaml);
 
-			// Register the project — load() picks up legacy form, isDirty=true.
-			const res = await apiFetch("/api/projects", {
-				method: "POST",
-				body: JSON.stringify({ name: `nyaml-legacy-${Date.now()}`, rootPath: dir }),
+			// Re-read the out-of-band legacy fixture through the same load() path used
+			// when a ProjectContext is constructed.
+			gateway.projectContextManager.getOrCreate(id)?.projectConfigStore.reload();
+
+			// GET returns parsed structured form.
+			const getRes = await apiFetch(`/api/projects/${id}/config`);
+			const cfg = await getRes.json();
+			expect(cfg.config_directories).toEqual([{ path: "/legacy", types: ["skills"] }]);
+
+			// Trigger a save: edit a flat key.
+			const putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ build_command: "echo build" }),
 			});
-			expect(res.status).toBe(201);
-			const proj = await res.json();
-			try {
-				// GET returns parsed structured form.
-				const getRes = await apiFetch(`/api/projects/${proj.id}/config`);
-				const cfg = await getRes.json();
-				expect(cfg.config_directories).toEqual([{ path: "/legacy", types: ["skills"] }]);
+			expect(putRes.status).toBe(200);
 
-				// Trigger a save: edit a flat key.
-				const putRes = await apiFetch(`/api/projects/${proj.id}/config`, {
-					method: "PUT",
-					body: JSON.stringify({ build_command: "echo build" }),
-				});
-				expect(putRes.status).toBe(200);
-
-				// On-disk YAML is now native — no escaped JSON.
-				const text = readFileSync(join(cfgDir, "project.yaml"), "utf-8");
-				expect(text).not.toMatch(/\[\{\\"/);
-			} finally {
-				await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
-			}
+			// On-disk YAML is now native — no escaped JSON.
+			const text = readProjectYaml(rootPath);
+			expect(text).not.toMatch(/\[\{\\"/);
 		} finally {
-			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+			cleanup();
 		}
 	});
 
 	test("Setting null clears migrated fields", async () => {
-		const { id, cleanup } = await registerTmpProject(`nyaml-clear-${Date.now()}`);
+		const { id, cleanup } = sharedNativeYamlProject();
 		try {
 			// Set, then clear, then confirm cleared.
 			await apiFetch(`/api/projects/${id}/config`, {

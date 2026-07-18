@@ -6,19 +6,43 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-
-const { migrateLegacyHeadquartersDirectory, migrateToPerProjectState } = await import("../../src/server/agent/state-migration.ts");
-const { serverSecretsDir } = await import("../../src/server/bobbit-dir.ts");
-const {
+import { createFsFromVolume, Volume } from "memfs";
+import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState } from "../../src/server/agent/state-migration.js";
+import { serverSecretsDir } from "../../src/server/bobbit-dir.js";
+import {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
 	ProjectRegistry,
-} = await import("../../src/server/agent/project-registry.ts");
+} from "../../src/server/agent/project-registry.js";
+
+// These migrations traverse and compare many small legacy files. Running those
+// trees on NTFS makes this otherwise CPU-trivial suite contend with Defender and
+// other unit forks. Patch only the synchronous fs surface used by this file and
+// the production migration, then restore it before the shared fork moves on.
+const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+const fsSpies: Array<{ mockRestore(): void }> = [];
+const suiteRoot = path.resolve("/memfs/headquarters-state-migration");
+let tmpSequence = 0;
+
+beforeAll(() => {
+	for (const name of [
+		"chmodSync", "copyFileSync", "existsSync", "lstatSync", "mkdirSync",
+		"readFileSync", "readdirSync", "realpathSync", "renameSync", "rmSync",
+		"statSync", "writeFileSync",
+	] as const) {
+		fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
+	}
+	fs.mkdirSync(suiteRoot, { recursive: true });
+});
+
+afterAll(() => {
+	try { fs.rmSync(suiteRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
+	for (const spy of fsSpies.reverse()) spy.mockRestore();
+});
 
 /**
  * Live server secrets (token/TLS/sandbox-agent auth) resolve to serverSecretsDir(),
@@ -36,11 +60,13 @@ function useIsolatedSecretsDir(): string {
 // whole file, so even standalone `tsx --test` runs never write real admin secrets
 // into the developer's home dir. Individual tests override this per-case.
 if (!process.env.BOBBIT_SECRETS_DIR) {
-	process.env.BOBBIT_SECRETS_DIR = tmpRoot("bobbit-hq-secrets-file-");
+	process.env.BOBBIT_SECRETS_DIR = path.join(suiteRoot, "file-secrets");
 }
 
-function tmpRoot(prefix = "bobbit-hq-migration-"): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+function tmpRoot(prefix = "case-"): string {
+	const dir = path.join(suiteRoot, `${prefix}${++tmpSequence}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
 }
 
 function writeJson(filePath: string, value: unknown): void {

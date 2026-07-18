@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import type { GateSignal } from "./agent/gate-store.js";
+import type { GateSignal, VerificationTimeoutInfo } from "./agent/gate-store.js";
 import { MAX_RETAINED_LOG_BYTES, type GateStepDiagnostics } from "./gate-diagnostics.js";
 import { buildArtifactIndex, type GateArtifactIndex } from "./gate-artifacts.js";
 import type { ActiveVerification } from "./agent/verification-harness.js";
@@ -16,7 +16,7 @@ import {
 const LIVE_LOG_READ_MAX_BYTES = 256 * 1024;
 const LIVE_LOG_TAIL_CHUNK_BYTES = 16 * 1024;
 
-export type GateVerificationSnapshotStatus = "passed" | "failed" | "skipped" | "running" | "waiting" | "blocked";
+export type GateVerificationSnapshotStatus = "passed" | "failed" | "timeout" | "skipped" | "running" | "waiting" | "blocked";
 
 /** Thrown when a `stepName` filter does not match any verification step. Maps to a 400. */
 export class UnknownVerificationStepError extends Error {
@@ -35,9 +35,16 @@ export interface GateVerificationSnapshotStep {
 	passed?: boolean | null;
 	skipped?: boolean;
 	duration_ms?: number;
+	timeout?: VerificationTimeoutInfo;
 	output?: string;
 	selection?: TextSelectionMetadata;
 	phase?: number;
+	/** Authoritative marker for an active human-signoff step awaiting input. */
+	awaitingHuman?: true;
+	/** Human-readable sign-off label, exposed only with `awaitingHuman`. */
+	humanLabel?: string;
+	/** Already-substituted sign-off prompt, exposed only with `awaitingHuman`. */
+	humanPrompt?: string;
 	sessionId?: string;
 	session?: { id: string; href: string };
 	liveLogs?: { stdout: boolean; stderr: boolean };
@@ -338,13 +345,13 @@ function isBlockedByEarlierFailure(activeStep: ActiveVerification["steps"][numbe
 
 function finalStatusFromPersisted(step: GateSignal["verification"]["steps"][number], verificationStatus?: GateSignal["verification"]["status"]): GateVerificationSnapshotStatus {
 	if (verificationStatus === "running" && (step.status === "running" || step.status === "waiting")) return step.status;
-	if (step.status === "passed" || step.status === "failed" || step.status === "skipped") return step.status;
+	if (step.status === "passed" || step.status === "failed" || step.status === "timeout" || step.status === "skipped") return step.status;
 	if (step.skipped) return "skipped";
 	return step.passed ? "passed" : "failed";
 }
 
 function shouldExposePassed(status: GateVerificationSnapshotStatus): boolean {
-	return status === "passed" || status === "failed" || status === "skipped";
+	return status === "passed" || status === "failed" || status === "timeout" || status === "skipped";
 }
 
 function runningDurationMs(activeStep: ActiveVerification["steps"][number], now: number): number {
@@ -353,7 +360,7 @@ function runningDurationMs(activeStep: ActiveVerification["steps"][number], now:
 }
 
 function buildSummary(counts: Record<GateVerificationSnapshotStatus, number>): string {
-	const order: GateVerificationSnapshotStatus[] = ["passed", "failed", "skipped", "running", "waiting", "blocked"];
+	const order: GateVerificationSnapshotStatus[] = ["passed", "failed", "timeout", "skipped", "running", "waiting", "blocked"];
 	const parts = order.filter(status => counts[status] > 0).map(status => `${counts[status]} ${status}`);
 	return parts.length ? parts.join(", ") : "0 steps";
 }
@@ -403,6 +410,7 @@ export function buildGateVerificationSnapshot(input: {
 		let status: GateVerificationSnapshotStatus;
 		let rawOutput = rawPersistedOutput;
 		let durationMs = persisted.duration_ms;
+		let timeout = persisted.timeout;
 		let liveLogs: GateVerificationSnapshotStep["liveLogs"];
 		let liveLogTruncationReason: string | undefined;
 		let outputSource: GateVerificationOutputSource = "compact-tail";
@@ -426,6 +434,7 @@ export function buildGateVerificationSnapshot(input: {
 				rawOutput = activeStep.output ?? rawPersistedOutput;
 				if (activeStep.type === "command" && (activeStep.outFile || activeStep.errFile)) liveLogs = { stdout: !!activeStep.outFile, stderr: !!activeStep.errFile };
 			}
+			timeout = (activeStep as typeof activeStep & { timeout?: VerificationTimeoutInfo }).timeout ?? timeout;
 		} else {
 			status = finalStatusFromPersisted(persisted, input.verification?.status);
 		}
@@ -456,7 +465,7 @@ export function buildGateVerificationSnapshot(input: {
 			}
 			: selected.selection;
 		aggregateTotalLines += selection.totalLines;
-		if (status === "failed") priorFailure = true;
+		if (status === "failed" || status === "timeout") priorFailure = true;
 
 		const out: GateVerificationSnapshotStep = {
 			name: persisted.name,
@@ -467,9 +476,23 @@ export function buildGateVerificationSnapshot(input: {
 			selection,
 		};
 		if (shouldExposePassed(status)) out.passed = status === "passed" || (status === "skipped" && persisted.passed === true);
+		if (timeout) out.timeout = timeout;
 		if (status === "skipped" || status === "blocked" || persisted.skipped) out.skipped = true;
 		const phase = activeStep?.phase ?? persisted.phase;
 		if (phase !== undefined) out.phase = phase;
+		// Sign-off actionability is an active-state overlay, never something inferred
+		// from persisted status/output. Require the exact live, parked human step so
+		// queued, terminal, stale, mismatched, and historical snapshots cannot leak it.
+		const isAwaitingHumanSignoff = active?.overallStatus === "running"
+			&& persisted.type === "human-signoff"
+			&& activeStep?.type === "human-signoff"
+			&& activeStep.status === "running"
+			&& activeStep.awaitingHuman === true;
+		if (isAwaitingHumanSignoff) {
+			out.awaitingHuman = true;
+			if (typeof activeStep.humanLabel === "string") out.humanLabel = activeStep.humanLabel;
+			if (typeof activeStep.humanPrompt === "string") out.humanPrompt = activeStep.humanPrompt;
+		}
 		if (sessionId) {
 			out.sessionId = sessionId;
 			out.session = { id: sessionId, href: `/sessions/${encodeURIComponent(sessionId)}` };
@@ -502,6 +525,7 @@ export function buildGateVerificationSnapshot(input: {
 	const counts: Record<GateVerificationSnapshotStatus, number> = {
 		passed: 0,
 		failed: 0,
+		timeout: 0,
 		skipped: 0,
 		running: 0,
 		waiting: 0,

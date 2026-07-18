@@ -68,6 +68,18 @@ export interface AgentDirMigrationReport {
 	error?: { code: AgentDirMigrationErrorCode; message: string };
 }
 
+export type AgentDirMigrationFileSystem = Pick<
+	typeof fs,
+	| "constants"
+	| "copyFileSync"
+	| "existsSync"
+	| "lstatSync"
+	| "mkdirSync"
+	| "readdirSync"
+	| "realpathSync"
+	| "statSync"
+>;
+
 interface ResolveAgentDirInput {
 	env?: NodeJS.ProcessEnv;
 	projectRoot: string;
@@ -315,7 +327,12 @@ export function validateAgentDirTarget(input: unknown, projectRoot: string, comm
 	return { ok: true, resolvedPath };
 }
 
-export function migrateAgentDirData(sourcePath: string, destinationPath: string, overwrite = false): AgentDirMigrationReport {
+export function migrateAgentDirData(
+	sourcePath: string,
+	destinationPath: string,
+	overwrite = false,
+	fileSystem: AgentDirMigrationFileSystem = fs,
+): AgentDirMigrationReport {
 	const source = normalizeAbsolutePath(sourcePath);
 	const destination = normalizeAbsolutePath(destinationPath);
 	const report: AgentDirMigrationReport = {
@@ -330,31 +347,31 @@ export function migrateAgentDirData(sourcePath: string, destinationPath: string,
 		errors: [],
 	};
 
-	const relationshipError = agentDirMigrationRelationshipError(source, destination);
+	const relationshipError = agentDirMigrationRelationshipError(source, destination, fileSystem);
 	if (relationshipError) {
 		report.error = relationshipError;
 		report.errors.push(relationshipError.message);
 		return report;
 	}
 
-	if (!fs.existsSync(source)) {
+	if (!fileSystem.existsSync(source)) {
 		report.errors.push("Source directory does not exist.");
 		return report;
 	}
 	try {
-		if (!fs.statSync(source).isDirectory()) {
+		if (!fileSystem.statSync(source).isDirectory()) {
 			report.errors.push("Source path is not a directory.");
 			return report;
 		}
-		const existingDestination = lstatIfExists(destination);
+		const existingDestination = lstatIfExists(destination, fileSystem);
 		if (existingDestination?.isSymbolicLink()) {
 			const message = "destinationPath must not be a symlink.";
 			report.error = { code: "DESTINATION_SYMLINK", message };
 			report.errors.push(message);
 			return report;
 		}
-		fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
-		const destinationStat = fs.lstatSync(destination);
+		fileSystem.mkdirSync(destination, { recursive: true, mode: 0o700 });
+		const destinationStat = fileSystem.lstatSync(destination);
 		if (destinationStat.isSymbolicLink()) {
 			const message = "destinationPath must not be a symlink.";
 			report.error = { code: "DESTINATION_SYMLINK", message };
@@ -373,12 +390,12 @@ export function migrateAgentDirData(sourcePath: string, destinationPath: string,
 	for (const name of [...MIGRATION_DIRS, ...MIGRATION_FILES]) {
 		const src = path.join(source, name);
 		const dst = path.join(destination, name);
-		if (!fs.existsSync(src)) {
+		if (!fileSystem.existsSync(src)) {
 			report.missing.push(name);
 			continue;
 		}
 		try {
-			const stat = fs.lstatSync(src);
+			const stat = fileSystem.lstatSync(src);
 			if (stat.isSymbolicLink()) {
 				report.warnings.push(`Skipped symlink ${name}.`);
 				continue;
@@ -388,13 +405,13 @@ export function migrateAgentDirData(sourcePath: string, destinationPath: string,
 					report.warnings.push(`Skipped unexpected directory ${name}.`);
 					continue;
 				}
-				copyAllowedDirectory(src, dst, name, overwrite, report, destination);
+				copyAllowedDirectory(src, dst, name, overwrite, report, destination, fileSystem);
 			} else if (stat.isFile()) {
 				if (!MIGRATION_FILES.has(name)) {
 					report.warnings.push(`Skipped unexpected file ${name}.`);
 					continue;
 				}
-				copyAllowedFile(src, dst, name, overwrite, report, destination);
+				copyAllowedFile(src, dst, name, overwrite, report, destination, fileSystem);
 			} else {
 				report.warnings.push(`Skipped special filesystem entry ${name}.`);
 			}
@@ -504,8 +521,16 @@ function resolveGitWorktreeRoot(projectRoot: string, commandRunner: CommandRunne
 	return normalizeAbsolutePath(projectRoot);
 }
 
-function copyAllowedDirectory(src: string, dst: string, rel: string, overwrite: boolean, report: AgentDirMigrationReport, destinationRoot: string): void {
-	const stat = fs.lstatSync(src);
+function copyAllowedDirectory(
+	src: string,
+	dst: string,
+	rel: string,
+	overwrite: boolean,
+	report: AgentDirMigrationReport,
+	destinationRoot: string,
+	fileSystem: AgentDirMigrationFileSystem,
+): void {
+	const stat = fileSystem.lstatSync(src);
 	if (stat.isSymbolicLink()) {
 		report.warnings.push(`Skipped symlink ${rel}.`);
 		return;
@@ -514,30 +539,38 @@ function copyAllowedDirectory(src: string, dst: string, rel: string, overwrite: 
 		report.warnings.push(`Skipped non-directory ${rel}.`);
 		return;
 	}
-	if (!ensureDestinationPathHasNoSymlinks(dst, destinationRoot, rel, report)) return;
-	fs.mkdirSync(dst, { recursive: true, mode: 0o700 });
-	for (const entry of fs.readdirSync(src)) {
+	if (!ensureDestinationPathHasNoSymlinks(dst, destinationRoot, rel, report, fileSystem)) return;
+	fileSystem.mkdirSync(dst, { recursive: true, mode: 0o700 });
+	for (const entry of fileSystem.readdirSync(src)) {
 		const childRel = path.join(rel, entry);
 		const childSrc = path.join(src, entry);
 		const childDst = path.join(dst, entry);
-		const childStat = fs.lstatSync(childSrc);
+		const childStat = fileSystem.lstatSync(childSrc);
 		if (childStat.isSymbolicLink()) {
 			report.warnings.push(`Skipped symlink ${childRel}.`);
 		} else if (childStat.isDirectory()) {
-			copyAllowedDirectory(childSrc, childDst, childRel, overwrite, report, destinationRoot);
+			copyAllowedDirectory(childSrc, childDst, childRel, overwrite, report, destinationRoot, fileSystem);
 		} else if (childStat.isFile()) {
-			copyAllowedFile(childSrc, childDst, childRel, overwrite, report, destinationRoot);
+			copyAllowedFile(childSrc, childDst, childRel, overwrite, report, destinationRoot, fileSystem);
 		} else {
 			report.warnings.push(`Skipped special filesystem entry ${childRel}.`);
 		}
 	}
 }
 
-function copyAllowedFile(src: string, dst: string, rel: string, overwrite: boolean, report: AgentDirMigrationReport, destinationRoot: string): void {
+function copyAllowedFile(
+	src: string,
+	dst: string,
+	rel: string,
+	overwrite: boolean,
+	report: AgentDirMigrationReport,
+	destinationRoot: string,
+	fileSystem: AgentDirMigrationFileSystem,
+): void {
 	const parentRel = path.dirname(rel);
 	const parentLabel = parentRel === "." ? rel : parentRel;
-	if (!ensureDestinationPathHasNoSymlinks(path.dirname(dst), destinationRoot, parentLabel, report)) return;
-	const existingDestination = lstatIfExists(dst);
+	if (!ensureDestinationPathHasNoSymlinks(path.dirname(dst), destinationRoot, parentLabel, report, fileSystem)) return;
+	const existingDestination = lstatIfExists(dst, fileSystem);
 	if (existingDestination) {
 		if (!overwrite) {
 			report.skipped.push(rel);
@@ -551,19 +584,23 @@ function copyAllowedFile(src: string, dst: string, rel: string, overwrite: boole
 			report.errors.push(`${rel}: destination exists as a symlink.`);
 			return;
 		}
-		fs.copyFileSync(src, dst);
+		fileSystem.copyFileSync(src, dst);
 		report.overwritten.push(rel);
 		return;
 	}
-	fs.mkdirSync(path.dirname(dst), { recursive: true, mode: 0o700 });
-	fs.copyFileSync(src, dst, fs.constants.COPYFILE_EXCL);
+	fileSystem.mkdirSync(path.dirname(dst), { recursive: true, mode: 0o700 });
+	fileSystem.copyFileSync(src, dst, fileSystem.constants.COPYFILE_EXCL);
 	report.copied.push(rel);
 }
 
-function agentDirMigrationRelationshipError(source: string, destination: string): AgentDirMigrationReport["error"] | null {
+function agentDirMigrationRelationshipError(
+	source: string,
+	destination: string,
+	fileSystem: AgentDirMigrationFileSystem,
+): AgentDirMigrationReport["error"] | null {
 	const candidates: Array<[string, string]> = [[source, destination]];
-	const realSource = realpathForExistingPrefix(source);
-	const realDestination = realpathForExistingPrefix(destination);
+	const realSource = realpathForExistingPrefix(source, fileSystem);
+	const realDestination = realpathForExistingPrefix(destination, fileSystem);
 	if (realSource && realDestination) candidates.push([realSource, realDestination]);
 	for (const [sourceCandidate, destinationCandidate] of candidates) {
 		if (samePath(sourceCandidate, destinationCandidate)) {
@@ -601,23 +638,26 @@ function isDisallowedInsideWorktree(gitRoot: string, allowedDefault: string | st
 	return isPathWithinOrEqual(gitRoot, target) && !allowedDefaults.some((entry) => isPathWithinOrEqual(entry, target));
 }
 
-function safeRealpath(value: string): string | undefined {
-	try { return fs.realpathSync(value); } catch { return undefined; }
+function safeRealpath(value: string, fileSystem: Pick<typeof fs, "realpathSync"> = fs): string | undefined {
+	try { return fileSystem.realpathSync(value); } catch { return undefined; }
 }
 
-function lstatIfExists(value: string): fs.Stats | undefined {
-	try { return fs.lstatSync(value); } catch (err) {
+function lstatIfExists(value: string, fileSystem: Pick<typeof fs, "lstatSync"> = fs): fs.Stats | undefined {
+	try { return fileSystem.lstatSync(value); } catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw err;
 	}
 }
 
-function realpathForExistingPrefix(value: string): string | undefined {
+function realpathForExistingPrefix(
+	value: string,
+	fileSystem: Pick<typeof fs, "realpathSync"> = fs,
+): string | undefined {
 	const normalized = normalizeAbsolutePath(value);
 	const missing: string[] = [];
 	let current = normalized;
 	while (true) {
-		const real = safeRealpath(current);
+		const real = safeRealpath(current, fileSystem);
 		if (real) return normalizeAbsolutePath(path.join(real, ...missing));
 		const parent = path.dirname(current);
 		if (samePath(parent, current)) return undefined;
@@ -626,14 +666,20 @@ function realpathForExistingPrefix(value: string): string | undefined {
 	}
 }
 
-function ensureDestinationPathHasNoSymlinks(target: string, destinationRoot: string, rel: string, report: AgentDirMigrationReport): boolean {
+function ensureDestinationPathHasNoSymlinks(
+	target: string,
+	destinationRoot: string,
+	rel: string,
+	report: AgentDirMigrationReport,
+	fileSystem: Pick<typeof fs, "lstatSync"> = fs,
+): boolean {
 	const root = normalizeAbsolutePath(destinationRoot);
 	const normalizedTarget = normalizeAbsolutePath(target);
 	if (!isPathWithinOrEqual(root, normalizedTarget)) {
 		report.errors.push(`${rel}: destination path escapes the selected pending directory.`);
 		return false;
 	}
-	const rootStat = lstatIfExists(root);
+	const rootStat = lstatIfExists(root, fileSystem);
 	if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) {
 		report.errors.push(`${rel}: destination directory is not a real directory.`);
 		return false;
@@ -645,7 +691,7 @@ function ensureDestinationPathHasNoSymlinks(target: string, destinationRoot: str
 	for (const part of relative.split(path.sep).filter(Boolean)) {
 		current = path.join(current, part);
 		seen.push(part);
-		const stat = lstatIfExists(current);
+		const stat = lstatIfExists(current, fileSystem);
 		if (!stat) return true;
 		if (stat.isSymbolicLink()) {
 			report.errors.push(`${rel}: destination path contains symlink ${path.join(...seen)}.`);

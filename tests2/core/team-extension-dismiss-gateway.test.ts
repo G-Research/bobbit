@@ -6,11 +6,9 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { describe, it, beforeEach, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import fs from "node:fs";
 import teamExtension from "../../defaults/tools/team/extension.ts";
 import agentExtension from "../../defaults/tools/agent/extension.ts";
 import { __clearCredsCacheForTesting } from "../../defaults/tools/_shared/gateway.ts";
@@ -23,20 +21,14 @@ type RegisteredTool = {
 };
 
 const savedEnv: Record<string, string | undefined> = {};
-let stateRoot = "";
+const gatewayState = { token: "old-token", baseUrl: "https://gateway.test" };
+const realReadFileSync: any = fs.readFileSync.bind(fs);
 let originalFetch: typeof fetch;
 
 function setEnv(name: string, value: string | undefined): void {
 	if (!(name in savedEnv)) savedEnv[name] = process.env[name];
 	if (value === undefined) delete process.env[name];
 	else process.env[name] = value;
-}
-
-function writeGatewayState(token: string, baseUrl = "https://gateway.test"): void {
-	const stateDir = path.join(stateRoot, "state");
-	mkdirSync(stateDir, { recursive: true });
-	writeFileSync(path.join(stateDir, "token"), token, "utf-8");
-	writeFileSync(path.join(stateDir, "gateway-url"), baseUrl, "utf-8");
 }
 
 function registerTeamDismiss(): RegisteredTool {
@@ -57,9 +49,18 @@ function registerOwnChildDismiss(): RegisteredTool {
 
 describe("team_dismiss extension gateway handling", () => {
 	beforeEach(() => {
-		stateRoot = mkdtempSync(path.join(tmpdir(), "bobbit-team-dismiss-ext-"));
-		writeGatewayState("old-token");
-		setEnv("BOBBIT_DIR", stateRoot);
+		// Both extension gateway implementations read this suite-owned in-memory
+		// state through their production credential/cache path. No real gateway or
+		// Defender-contended filesystem fixture is needed.
+		gatewayState.token = "old-token";
+		gatewayState.baseUrl = "https://gateway.test";
+		vi.spyOn(fs, "readFileSync").mockImplementation(((file: unknown, ...args: unknown[]) => {
+			const normalized = String(file).replaceAll("\\", "/");
+			if (normalized.endsWith("/state/token")) return gatewayState.token;
+			if (normalized.endsWith("/state/gateway-url")) return gatewayState.baseUrl;
+			return realReadFileSync(file, ...args);
+		}) as typeof fs.readFileSync);
+		setEnv("BOBBIT_DIR", "C:\\bobbit-team-dismiss-fake");
 		setEnv("BOBBIT_SESSION_ID", "lead-session");
 		setEnv("BOBBIT_GOAL_ID", "goal-1");
 		setEnv("BOBBIT_SESSION_SECRET", "lead-secret");
@@ -72,6 +73,7 @@ describe("team_dismiss extension gateway handling", () => {
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
+		vi.restoreAllMocks();
 		__clearCredsCacheForTesting();
 		__clearAgentCredsCacheForTesting();
 		for (const [name, value] of Object.entries(savedEnv)) {
@@ -79,19 +81,17 @@ describe("team_dismiss extension gateway handling", () => {
 			else process.env[name] = value;
 		}
 		for (const name of Object.keys(savedEnv)) delete savedEnv[name];
-		rmSync(stateRoot, { recursive: true, force: true });
-		stateRoot = "";
 	});
 
 	it("refreshes gateway credentials on 401 before returning a detailed dismiss result", async () => {
 		const tool = registerTeamDismiss();
-		writeGatewayState("new-token");
 
 		const authHeaders: string[] = [];
 		const success = { ok: true, status: "dismissed", sessionId: "child-1", message: "Team agent child-1 dismissed.", retryable: false };
 		globalThis.fetch = (async (_url: any, init: any) => {
 			authHeaders.push(init?.headers?.Authorization);
 			if (authHeaders.length === 1) {
+				gatewayState.token = "new-token";
 				return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
 			}
 			return new Response(JSON.stringify(success), { status: 200 });

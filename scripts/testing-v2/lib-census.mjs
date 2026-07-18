@@ -45,7 +45,7 @@ export function census() {
 }
 
 export const BUCKETS = ["v2-core", "v2-dom", "v2-integration", "v2-browser", "daily"];
-export const METHODS = ["codemod", "adapter", "rewrite", "retire-with-mapping", "relocate"];
+export const METHODS = ["codemod", "adapter", "rewrite", "retire-with-mapping", "relocate", "vitest-e2e"];
 
 /**
  * Geometry / interaction-API criteria. A browser-fixture (.spec.ts) or e2e/ui

@@ -294,7 +294,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_merge_child",
 		label: "Merge Child Goal",
-		description: "Merge a child's branch locally into the parent. Clean merge auto-archives the child; conflicts return structured 409 data. Pass force=true to bypass the ready-to-merge gate check (appropriate when the child's workflow has no such gate, or when the merge has been manually approved as safe).",
+		description: "Local child merge; publication is separate and explicit. Multi-repo merges run sequentially; earlier merges remain after conflict; child stays live.",
 		promptSnippet: "Local-merge a child's branch into the parent.",
 		parameters: Type.Object({
 			childGoalId: Type.String({ description: "Id of the child goal to merge." }),

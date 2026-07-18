@@ -78,7 +78,7 @@ describe("message author primitives", () => {
 	it("resolves human, authenticated-agent, extension, and missing-agent authors safely", () => {
 		const caller = { kind: "agent", id: "session:caller", label: "Caller" } as const;
 		const extension = extensionSystemAuthor("pack", "post");
-		expect(resolvePromptAuthor("user")).toBe(LOCAL_USER_AUTHOR);
+		expect(resolvePromptAuthor("user")).toEqual(LOCAL_USER_AUTHOR);
 		expect(resolvePromptAuthor("agent", { agentAuthor: caller })).toBe(caller);
 		expect(resolvePromptAuthor("agent")).toBe(BOBBIT_SYSTEM_AUTHOR);
 		expect(resolvePromptAuthor("extension", { systemAuthor: extension })).toBe(extension);

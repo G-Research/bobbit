@@ -27,9 +27,11 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { AlertTriangle, CheckCircle2, Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
+import { AlertTriangle, CheckCircle2, Eye, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { completeTeam, scheduleGateStatusRefreshForGoal } from "../../app/api.js";
+import type { SignoffReviewTarget } from "../../app/signoff-review-launch.js";
+import "./SignoffReviewLauncher.js";
 import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -72,8 +74,6 @@ export class GoalStatusWidget extends LitElement {
 	@state() private _activeGateIds: Set<string> = new Set();
 	@state() private _loading = true;
 	@state() private _expanded = false;
-	@state() private _reviewLaunchLoading: Set<string> = new Set();
-	@state() private _reviewLaunchErrors: Map<string, string> = new Map();
 	@state() private _resetLoading: Set<string> = new Set();
 	@state() private _resetErrors: Map<string, string> = new Map();
 	// Inline bypass form (human-only gate override). `_bypassing` holds the gate
@@ -166,8 +166,6 @@ export class GoalStatusWidget extends LitElement {
 			this._gates = [];
 			this._awaitingSignoffs = [];
 			this._activeGateIds = new Set();
-			this._reviewLaunchLoading = new Set();
-			this._reviewLaunchErrors = new Map();
 			this._resetLoading = new Set();
 			this._resetErrors = new Map();
 			this._bypassing = null;
@@ -185,7 +183,7 @@ export class GoalStatusWidget extends LitElement {
 				this._connectWs();
 			}
 		}
-		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors") || changed.has("_resetLoading") || changed.has("_resetErrors") || changed.has("_bypassing") || changed.has("_bypassWhy") || changed.has("_bypassWho") || changed.has("_bypassLoading") || changed.has("_bypassErrors") || changed.has("_confirmCompletionLoading") || changed.has("_confirmCompletionError") || changed.has("_completed")) {
+		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_resetLoading") || changed.has("_resetErrors") || changed.has("_bypassing") || changed.has("_bypassWhy") || changed.has("_bypassWho") || changed.has("_bypassLoading") || changed.has("_bypassErrors") || changed.has("_confirmCompletionLoading") || changed.has("_confirmCompletionError") || changed.has("_completed")) {
 			this._syncDropdown();
 		}
 	}
@@ -453,71 +451,30 @@ export class GoalStatusWidget extends LitElement {
 		const key = `${signalId}::${stepName}`;
 		const filtered = this._awaitingSignoffs.filter(s => signoffKey(s) !== key);
 		if (filtered.length !== this._awaitingSignoffs.length) this._awaitingSignoffs = filtered;
-		if (this._reviewLaunchLoading.has(key)) {
-			const next = new Set(this._reviewLaunchLoading); next.delete(key); this._reviewLaunchLoading = next;
-		}
-		if (this._reviewLaunchErrors.has(key)) {
-			const next = new Map(this._reviewLaunchErrors); next.delete(key); this._reviewLaunchErrors = next;
-		}
 	}
 
 	// ── Sign-off content ──────────────────────────────────────────────
-
-	private async _openSignoffContentInReviewPane(req: SignoffRequest): Promise<void> {
-		const key = signoffKey(req);
-		const loading = new Set(this._reviewLaunchLoading); loading.add(key); this._reviewLaunchLoading = loading;
-		const errors = new Map(this._reviewLaunchErrors); errors.delete(key); this._reviewLaunchErrors = errors;
-		try {
-			const resp = await this._fetch(`/api/goals/${this.goalId}/gates/${encodeURIComponent(req.gateId)}/signals`);
-			if (!resp?.ok) throw new Error(`Unable to load signal content (${resp?.status ?? "network"})`);
-			const data = await resp.json().catch(() => null);
-			const signals = Array.isArray(data?.signals) ? data.signals : [];
-			const signal = signals.find((s: unknown) => !!s && typeof s === "object" && (s as Record<string, unknown>).id === req.signalId) as Record<string, unknown> | undefined;
-			if (!signal) throw new Error("Signal content is no longer available");
-			const markdown = typeof signal.content === "string" && signal.content.trim()
-				? signal.content
-				: "No content was attached to this sign-off signal.";
-			const goalTitle = this._reviewGoalTitle();
-			const gateName = this._gateName(req.gateId);
-			const title = this._reviewDocumentTitle(req, goalTitle, gateName);
-			window.dispatchEvent(new CustomEvent("bobbit-open-review-document", {
-				detail: {
-					title,
-					markdown,
-					source: {
-						kind: "verification-signoff-markdown",
-						goalId: this.goalId,
-						gateId: req.gateId,
-						signalId: req.signalId,
-						stepName: req.stepName,
-						goalTitle,
-						gateName,
-						stepLabel: req.label,
-					},
-				},
-			}));
-			this._closeDropdown();
-		} catch (err) {
-			const next = new Map(this._reviewLaunchErrors);
-			next.set(key, err instanceof Error ? err.message : "Unable to open review document");
-			this._reviewLaunchErrors = next;
-		} finally {
-			const next = new Set(this._reviewLaunchLoading); next.delete(key); this._reviewLaunchLoading = next;
-		}
-	}
 
 	private _gateName(gateId: string): string {
 		return this._gates.find(g => g.id === gateId)?.name || gateId;
 	}
 
-	private _reviewGoalTitle(): string {
-		return this.branch || this.goalId || "Goal";
-	}
-
-	private _reviewDocumentTitle(req: SignoffRequest, goalTitle: string, gateName: string): string {
-		const base = `Sign-off: ${goalTitle} / ${gateName} / ${req.label || req.stepName}`;
-		const duplicateCount = this._awaitingSignoffs.filter(s => this._gateName(s.gateId) === gateName && (s.label || s.stepName) === (req.label || req.stepName)).length;
-		return duplicateCount > 1 ? `${base} (${req.signalId.slice(0, 8)})` : base;
+	private _signoffReviewTarget(req: SignoffRequest): SignoffReviewTarget {
+		const gateName = this._gateName(req.gateId);
+		const duplicateCount = this._awaitingSignoffs.filter(s => {
+			return this._gateName(s.gateId) === gateName
+				&& (s.label || s.stepName) === (req.label || req.stepName);
+		}).length;
+		return {
+			goalId: this.goalId,
+			gateId: req.gateId,
+			signalId: req.signalId,
+			stepName: req.stepName,
+			stepLabel: req.label,
+			goalTitle: this.branch || this.goalId || "Goal",
+			gateName,
+			disambiguateWithSignal: duplicateCount > 1,
+		};
 	}
 
 	// ── Pill toggle ──────────────────────────────────────────────────
@@ -922,9 +879,6 @@ export class GoalStatusWidget extends LitElement {
 
 	private _renderSignoffCard(req: SignoffRequest): TemplateResult {
 		ensureMarkdownBlock();
-		const key = signoffKey(req);
-		const launchLoading = this._reviewLaunchLoading.has(key);
-		const launchError = this._reviewLaunchErrors.get(key);
 		return html`
 			<div class="border border-border rounded-md p-2 flex flex-col gap-1.5"
 				data-testid="goal-widget-signoff"
@@ -937,14 +891,14 @@ export class GoalStatusWidget extends LitElement {
 					</div>
 				` : nothing}
 				<div class="flex items-center justify-end gap-2 mt-1">
-					<button
-						class="goal-widget-button goal-widget-button-neutral"
-						?disabled=${launchLoading}
-						@click=${(e: MouseEvent) => { e.stopPropagation(); void this._openSignoffContentInReviewPane(req); }}
-						data-testid="goal-widget-signoff-content-toggle"
-					>${launchLoading ? icon(Loader2, "xs", "animate-spin") : icon(FileText, "xs")}<span>${launchLoading ? "Opening…" : "Start Review"}</span></button>
+					<signoff-review-launcher
+						.target=${this._signoffReviewTarget(req)}
+						button-class="goal-widget-button goal-widget-button-neutral"
+						button-testid="goal-widget-signoff-content-toggle"
+						error-testid="goal-widget-signoff-content-error"
+						@signoff-review-launched=${() => this._closeDropdown()}
+					></signoff-review-launcher>
 				</div>
-				${launchError ? html`<div style="font-size:11px;color:var(--destructive)" data-testid="goal-widget-signoff-content-error">${launchError}</div>` : nothing}
 			</div>
 		`;
 	}

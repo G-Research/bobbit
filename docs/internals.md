@@ -446,7 +446,7 @@ The marker is `.bobbit/config/project.yaml` rather than the mere presence of a `
 
 Each registered project can override system-level settings (from `project.yaml`). This allows different projects to use different build commands, default models, sandbox settings, etc., while inheriting everything they don't explicitly override.
 
-A notable config key is `base_ref` — the branch ref new worktrees branch off and the source for the `{{baseBranch}}` template variable. Verification normalizes it to a bare branch name (`origin/master` → `master`) for templates. It also drives status baselines; branch publication still targets the work branch with explicit refspecs. Empty/unset preserves today's `resolveRemotePrimary()` behaviour. PUT-time validation rejects tags, SHAs, invalid grammar, non-`origin` prefixes, and (for sandboxed projects) local refs, with a structured `{ field, error, details? }` payload. See [design/base-ref.md](design/base-ref.md).
+A notable config key is `base_ref` — the branch ref new worktrees branch off and the source for the `{{baseBranch}}` template variable. Verification normalizes it to a bare branch name (`origin/master` → `master`) for templates. It also drives status and optional upstream baselines, but never requests publication of the work branch. Empty/unset preserves today's `resolveRemotePrimary()` behaviour. PUT-time validation rejects tags, SHAs, invalid grammar, non-`origin` prefixes, and (for sandboxed projects) local refs, with a structured `{ field, error, details? }` payload. See [design/base-ref.md](design/base-ref.md).
 
 **Resolution cascade**: For each config key, `resolveScalarConfig()` checks project → server → global → built-in default. The first defined value wins. This reuses the same `config-resolver.ts` infrastructure described in [Config resolution](#config-resolution-3-tier-hierarchy) above.
 
@@ -676,7 +676,7 @@ Non-goal, non-assistant sessions normally get their own git worktree branch. Thi
 | Assistant sessions (goal, project, role, tool, staff) | No | N/A - conversational only, no code edits |
 | Staff permanent sessions | Auto when supported; no-worktree on `worktree:false` or non-git projects | `staff-<name>-<id>` when a worktree is used |
 
-Scoped short-lived sub-agent branches — team-member sessions and delegated helper/session children launched on a sub-branch — carry `worktreePushPolicy: "local-only"` metadata. Status and cleanup use that metadata rather than broad branch-prefix inference, so goal integration branches such as `goal/<slug>-<id>` are not misclassified.
+All Bobbit-owned worktree creation is local-only. Sessions, goals and child goals, team members, staff, and pool entries use the same invariant across host/sandbox and single-/multi-repo paths. Legacy `worktreePushPolicy`, `remotePublicationPolicy`, `pushPolicy`, and `skipPush` fields do not opt creation into publication; low-level worktree helpers ignore the deprecated creation options. Explicit push APIs and workflow commands are separate operations.
 
 **Pool branch namespace.** Pool entries pre-create worktrees under the `pool/_pool-<id>` branch prefix (was `session/_pool-*` pre-Phase 3). The `pool/` namespace lets the boot sweeper distinguish pool entries from session worktrees by branch prefix alone, and prevents pool entries from polluting the user's session branch list. Both prefixes (`pool/_pool-*` and the legacy `session/_pool-*`) are recognised on startup so sweeping is idempotent across version upgrades.
 
@@ -708,7 +708,7 @@ The agent's cwd in multi-repo mode is the per-branch container, mirroring the pr
 2. Clear any inherited upstream unless it already points at `origin/<target>`. This is synchronous so a claimed branch never returns while still tracking `origin/master` or another base branch.
 3. `git worktree move <pool-path> <target-path>` - atomic, updates both gitdir pointers (git ≥ 2.17). On directory-rename failure (e.g. Windows file lock) for **single-repo** sessions, `claim()` reverts the branch rename and returns null; the caller falls back to a fresh `createWorktree`. (Multi-repo claims may surface a transient `degraded` warning when only one of N repos fails to move - see `PoolClaimResult.degraded`.)
 4. `git fetch origin` + `git reset --hard <base-ref>` - backgrounded after handoff, so claim itself is fast. The base ref is the project `base_ref` when configured, otherwise the remote primary.
-5. Do not publish during claim. Pool entries are implementation details, and scoped sub-agent branches rely on the persisted worktree rather than a remote safety-net push. Branches that need publication use an explicit or legacy publication path later.
+5. Do not publish during claim. Pool entries are implementation details, and claimed session/goal branches rely on the persisted worktree rather than a remote safety-net push. Branches that need publication use an explicit user, agent, or workflow path later.
 
 Multi-repo pool entries are sets: each pool slot pre-builds N worktrees (one per configured repo, including data-only-component repos) sharing a `pool/_pool-<id>` branch name across repos. Claim fans out the same sequence in parallel across all repos in the entry. Pool target size is configurable via `worktree_pool_size`.
 
@@ -742,10 +742,10 @@ This means crash recovery doesn't require the user to manually clean up pool det
 **Lifecycle:**
 
 1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name; on first claim the pool entry's `pool/_pool-<id>` is renamed once to `session/<id8>` (or the goal branch as appropriate). Staff worktrees are provisioned by `StaffManager` directly and use the same project worktree-root/base-ref/component setup helpers when auto mode chooses a worktree. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, staff provisioning, and team member spawning.
-2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget shows ahead/behind state. Scoped sub-agent branches may show `Local-only by policy`; explicit push/pull controls remain available when publication or sync is intentionally needed.
+2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget reports branch, upstream, ahead/behind, and dirty state without mutating local or remote refs. Explicit push/pull controls remain available when publication or sync is intentionally needed.
 3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox) only after the shared worktree deletion guard confirms no other non-archived session still references the same host path.
 4. **Maintenance cleanup**: If Bobbit-created host worktrees outlive their active owner, Settings → Maintenance → Worktree Cleanup can remove only fresh server-classified safe candidates without purging archives or other durable records. The unified inventory keeps archived metadata as provenance, skips rows protected by live sessions/goals/teams/delegates/staff, evaluates multi-repo component worktrees independently, treats branch-only leftovers as already cleaned, and leaves filesystem-only directories as needs-attention by default. Legacy orphaned and archived-session worktree REST routes are compatibility filters over the same inventory. See [maintenance.md](maintenance.md#worktree-cleanup).
-5. **Restore**: After a restart, existing session worktrees are reused - the server reconnects to the worktree on disk without recreating it.
+5. **Restore**: After a restart, existing session worktrees are reused - the server reconnects to the worktree on disk without recreating it. Repair/recovery may fetch and rebuild a missing worktree from the persisted local branch, but never pushes that branch. If its remote counterpart was deleted, recovery leaves it deleted.
 
 **Session creation modes:** The session-setup pipeline (`src/server/agent/session-setup.ts`) handles these modes, all routed through the same plan/execute structure:
 
@@ -815,14 +815,14 @@ The `?? goal.cwd` fallback inside the helper handles legacy / non-worktree goals
 
 #### Remote branch cleanup
 
-Bobbit creates four classes of remote branch and is responsible for deleting each when its owning entity is archived. **Why eager delete instead of one global purge:** the remote accumulates branches faster than any single timer can drain it (~30 sessions/day churn, dev restarts reset the 24h purge interval), so cleanup must be tied to the archive event itself.
+Worktree creation no longer creates remote branches. A matching remote may still exist because the user/agent pushed explicitly, a Ready-to-Merge/PR workflow published it, or it predates the local-only lifecycle. Archive cleanup continues to delete those remotes where configured; a missing remote is the normal idempotent case. Keeping deletion independent from creation avoids resurrecting remotes during routine work while still cleaning intentionally published branches.
 
-| Branch pattern | Created by | Deleted by | When |
+| Branch pattern | How a remote may exist | Deleted by | When |
 |---|---|---|---|
-| `session/*` | Auto worktree on session create | `eagerDeleteRemoteSessionBranch` (fire-and-forget from `session-manager.ts::terminateSession`) | On archive, iff non-delegate AND fully merged into `origin/<primary>`. Unmerged branches fall back to the 7-day `purgeOneSession` cleanup. |
-| `goal/<branch-name>` | Goal creation | `deleteRemoteGoalBranches` in `server.ts` (DELETE `/api/goals/:id` handler) | On goal archive. Goal/integration branches are still published for PR and Ready-to-Merge flows. |
-| `goal/<goalId8>/<role>-<short4>` | Per-role team agent worktree | Same handler - agent branch names are **snapshotted into a `string[]` before `teamManager.teardownTeam` runs**, because teardown mutates `entry.agents` in place via `dismissRole`'s `splice`. The handler is branch-shape agnostic (it consumes the snapshotted strings), so legacy `goal-goal-<slug>-<id>-<role>-<short>` branches from before the `pithier-te` rename are cleaned up by the same path. | On goal archive or agent dismiss. These branches are local-only by default, so a missing remote branch is expected and must not warn. |
-| `staff-*` | Staff agent creation when worktree auto/explicit mode is supported | `cleanupWorktree(..., deleteBranch=true)` in `skills/git.ts` | On staff dismiss. |
+| `session/*` | Explicit user/agent push or a pre-upgrade branch | `eagerDeleteRemoteSessionBranch` (fire-and-forget from `session-manager.ts::terminateSession`) | On archive, iff non-delegate AND fully merged into `origin/<primary>`. Unmerged branches fall back to the 7-day `purgeOneSession` cleanup. |
+| `goal/<branch-name>` | Ready-to-Merge/PR flow, explicit push, or a pre-upgrade branch | `deleteRemoteGoalBranches` in `server.ts` (DELETE `/api/goals/:id` handler) | On goal archive. |
+| `goal/<goalId8>/<role>-<short4>` | Explicit handoff push or a pre-upgrade branch | Same handler - agent branch names are **snapshotted into a `string[]` before `teamManager.teardownTeam` runs**, because teardown mutates `entry.agents` in place via `dismissRole`'s `splice`. The handler is branch-shape agnostic (it consumes the snapshotted strings), so legacy `goal-goal-<slug>-<id>-<role>-<short>` branches from before the `pithier-te` rename are cleaned up by the same path. | On goal archive or agent dismiss. Missing remote branches are expected and must not warn. |
+| `staff-*` | Explicit user/agent push or a pre-upgrade branch | `cleanupWorktree(..., deleteBranch=true)` in `skills/git.ts` | On staff dismiss. |
 
 **Test-mode gate:** every push-delete call - existing (`cleanupWorktree`) and new (`deleteRemoteGoalBranches`, `eagerDeleteRemoteSessionBranch`) - short-circuits when `shouldSkipRemotePush()` returns true (`BOBBIT_TEST_NO_PUSH=1`). The eager session helper checks this flag *before* invoking `git merge-base --is-ancestor`, so test mode never touches git at all.
 
@@ -841,6 +841,8 @@ The git-status widget (shown on every session with a worktree and on the goal da
 Full design lives in [docs/design/git-status-widget-reliability.md](design/git-status-widget-reliability.md). The sketch:
 
 **Server (`src/server/server.ts`, `src/server/skills/git-status-native.ts`).** `batchGitStatus` is a 2000ms-TTL single-flight cache wrapping `runBatchGitStatus`. Cache key is `${containerId ?? 'host'}::${cwd}::${summary|untracked}`. Concurrent callers share the same in-flight promise, resolved entries are reused for up to 2000ms, errors are never cached (the entry is deleted on rejection so the next call retries fresh). The 2-second window collapses the idle / reconnect / visibility-change / dashboard fan-out refresh storm into one git invocation while keeping data fresh enough for a 10s-cadence widget. `invalidateGitStatusCache(cwd, containerId?)` is called from `/git-commit`, `/git-pull`, `/git-push`, merge endpoints, and the `?fetch=true` branch so local git writes never return cached pre-write state.
+
+`GET /api/sessions/:id/git-status` and the goal equivalent are strictly read-only. Status collection may inspect local refs and remote-tracking refs already present in the clone, but it never decides to publish from `ahead`, `hasUpstream`, branch shape, or `base_ref`, and it never starts a fire-and-forget push. This applies equally to initial connection, idle events, reconnect, dropdown/full refresh, visibility refresh, and periodic polling. A deleted remote work branch therefore stays absent while status continues to report useful local comparisons.
 
 The default `/git-status` call uses `git status --porcelain=v1 -uno` (summary: skips untracked scan, which is the long tail on large repos). `?untracked=1` switches to `-uall` and sets `untrackedIncluded: true` on the response; clients must not treat `clean` as authoritative when `untrackedIncluded === false`. Session and goal-dashboard widgets fetch summary by default. When the user opens the dropdown, the widget dispatches a `git-status-dropdown-open` CustomEvent (bubbles, composed), and the client requests `?fetch=true&untracked=1` in one refresh so remote refs and full untracked details update without competing requests aborting each other. Summary and untracked responses live in separate cache keys so one doesn't shadow the other.
 
@@ -1661,7 +1663,9 @@ Key files and tests:
 
 ## AI Gateway request headers (`User-Agent`, `x-opencode-session`)
 
-Bobbit can route model traffic through a configured AI Gateway instead of directly to public providers. Gateway operators need to identify Bobbit-originated traffic for routing, analytics, and support, while Bobbit sessions still need per-session cache partitioning. Two headers cover those concerns:
+Bobbit can route model traffic through a configured AI Gateway instead of directly to public providers. See [AI Gateway routing](ai-gateway-routing.md) for operator setup, discovery precedence, routing behavior, model migration, and refresh semantics; this section records the underlying implementation details.
+
+Gateway operators need to identify Bobbit-originated traffic for routing, analytics, and support, while Bobbit sessions still need per-session cache partitioning. Two headers cover those concerns:
 
 - `User-Agent: Bobbit/<version>` identifies the Bobbit build. The `<version>` comes from Bobbit's current `package.json`, not a duplicated literal.
 - `x-opencode-session: <session-id>` partitions agent inference cache/routing per Bobbit session. It is emitted only when an agent subprocess has `BOBBIT_SESSION_ID` set.
@@ -1670,11 +1674,11 @@ The canonical user-agent string lives in `src/server/agent/aigw-user-agent.ts` a
 
 ### Covered request paths
 
-The Bobbit AI Gateway user agent is sent only on requests whose target is the configured or tested AI Gateway URL:
+The Bobbit AI Gateway user agent is sent only by AIGW-specific request paths. Discovery may send it to the configured origin or to a validated remote/provider target declared by the well-known config:
 
 | Path | How the header is applied |
 |---|---|
-| Model discovery | `discoverAigwModels()` calls the gateway `/v1/models` endpoint through `httpGet()`, which uses `aigwUserAgentHeaders()`. |
+| Model discovery | `discoverAigwModels()` first requests `/.well-known/opencode`; the legacy fallback requests `/v1/models`. Both guarded request paths apply `aigwUserAgentHeaders()`. |
 | `/api/aigw/status` | If a gateway is configured, the route discovers fresh models, so the discovery request carries the header. |
 | `/api/aigw/test` | Tests the submitted URL by running discovery against that URL with the header. |
 | `/api/aigw/configure` | Runs discovery with the header, persists `aigw.url`, and rewrites `models.json`. |
@@ -1686,9 +1690,9 @@ The Bobbit AI Gateway user agent is sent only on requests whose target is the co
 
 ### AI Gateway model pricing
 
-AI Gateway model discovery is Bobbit's source of truth for gateway-backed pricing. `discoverAigwModels()` reads the optional `pricing` object returned by the gateway `/v1/models` response and converts it locally because completion responses include token counts but no cost, and the gateway aggregate endpoints are not reliable for Bobbit usage accounting.
+AI Gateway model discovery is Bobbit's source of truth for gateway-backed pricing because completion responses include token counts but no cost and gateway aggregate endpoints are not reliable for Bobbit usage accounting. Authoritative well-known discovery reads each model's per-million-token `cost`; legacy `/v1/models` discovery reads the optional per-token `pricing` object.
 
-The gateway reports `pricing.prompt` and `pricing.completion` in USD per token. Bobbit converts them to the per-million-token `cost` shape expected by pi-ai:
+On the legacy path, `pricing.prompt` and `pricing.completion` are USD per token. Bobbit converts them to the per-million-token `cost` shape expected by pi-ai:
 
 ```ts
 input = pricing.prompt * 1_000_000
@@ -1697,12 +1701,115 @@ cacheRead = pricing.prompt * 0.1 * 1_000_000
 cacheWrite = pricing.prompt * 1.25 * 1_000_000
 ```
 
-Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as unknown and safely falls back to `{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }` for that model. Discovery must not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`; all cost calculation remains local from `/v1/models` metadata plus token counts.
+Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as unknown and safely falls back to `{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }` for that model. Discovery must not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`; all cost calculation remains local from discovery metadata plus token counts.
 
-The converted `cost` values flow through two surfaces:
+The normalized `cost` values flow through two surfaces:
 
 - `GET /api/models` returns them in each `ApiModel.cost` entry so the UI and server model registry see non-zero AIGW pricing when the gateway provides it.
 - `writeAigwModelsJson()` persists them on generated `providers.aigw.models[]` entries in the active agent directory's `models.json`, including both OpenAI-compatible models and Claude models routed through Bedrock Converse. Agent subprocesses can then compute usage cost locally from token-count usage data. See [Configurable agent directory](configurable-agent-directory.md).
+
+### Well-known-driven discovery (openai-responses routing)
+
+Model discovery is **well-known-first**. Instead of hand-rolling routing from `/v1/models` + `inferMeta` id heuristics, `discoverAigwModels()` first consults the gateway's authoritative opencode config at `{gatewayOrigin}/.well-known/opencode`. This is the same contract opencode itself uses, so Bobbit inherits opencode's per-provider routing decisions rather than guessing them. When the well-known config is present it is the source of truth; the legacy heuristic path is only a fallback.
+
+**Why this exists.** On this gateway the `gpt-5.6-sol` / GPT 5.6 family reject function tools combined with `reasoning_effort` on `/v1/chat/completions`:
+
+```
+400 Function tools with reasoning_effort are not supported for gpt-5.6-sol
+in /v1/chat/completions. To use function tools, use /v1/responses or set
+reasoning_effort to 'none'.
+```
+
+Bobbit historically routed every non-Claude model through pi-ai's `openai-completions` (chat/completions), which triggers exactly that 400. opencode avoids it because its `openai` provider uses the Responses API (`/v1/responses`), where reasoning and function tools coexist. Consuming the well-known config lets Bobbit route the same way.
+
+#### Discovery flow and fallback
+
+`discoverAigwModels()` resolves `/.well-known/opencode` against the configured **origin root** (the well-known document never lives under `/v1`). `fetchWellKnownConfig()` returns `null` — triggering the legacy `/v1/models` + `inferMeta` fallback — on HTTP/network/JSON errors, redirects, invalid URLs, timeout, an over-1 MiB body, unsafe targets, excessive indirection, or test-network guards. The initial fetch, optional remote fetch, and provider DNS admission share one eight-second deadline. Distinct provider hostnames resolve concurrently and duplicate hostnames share one lookup, so a large or slow provider list cannot multiply the bound.
+
+The payload resolver accepts raw configs, a top-level `config` wrapper, or exactly one `remote_config` hop. A second unresolved `remote_config` is rejected. A valid `provider` object is authoritative even when filtering leaves zero models, so disabled, unwhitelisted, collided-away, or invalid providers are never repopulated from `/v1/models`. Configure reuses the resolved config and does not fetch it a second time.
+
+Remote and provider URLs must be absolute HTTP(S), without credentials or fragments. The exact configured gateway origin may use HTTP and internal addresses. Cross-origin targets require HTTPS and public DNS answers; loopback, private, link-local, carrier-grade NAT, multicast, unspecified, reserved/documentation, IPv4-mapped private, and metadata addresses are rejected. DNS answers are validated and pinned for each discovery connection while TLS still verifies the original hostname. Redirects are not followed.
+
+Cross-origin provider DNS names are accepted only after bounded discovery-time admission. The gateway process installs a connection-time lookup guard that re-resolves the hostname, rejects the whole answer set if any address is non-public, and returns those validated answers to the socket while preserving hostname-based TLS verification. Agent processes receive the equivalent generated guard extension when Bobbit can write and activate it; extension-write failure logs a warning and starts the agent without that guard, so cross-origin deployments must treat the warning as security-relevant. The active gateway guard set is replaced only after the admitted model configuration is atomically persisted, and is replaced or cleared on configure, refresh, and removal; status/test discovery and rejected providers never alter unrelated DNS behavior. When generated, the `aigw-dns-guard` extension is content-addressed, remapped to `/bobbit-state/aigw-dns-guard/...` in Docker, and mounted read-only. Container mount staleness recreates pre-upgrade containers missing that mount.
+
+The inherited Bobbit bearer token is sent only to the configured origin. A same-origin remote may replace it with an explicitly declared Authorization header; cross-origin requests receive only explicitly declared remote headers. Hop-by-hop, `Host`, `Content-Length`, proxy, and `User-Agent` headers are dropped, and Bobbit supplies the canonical user agent. Bodies, credentials, and remote headers are never logged.
+
+#### Auth token
+
+The well-known GET sends a best-effort bearer token (for quota/attribution — a dummy currently works, but the real token is preferred). `readOpencodeWellKnownToken()` resolves it in priority order:
+
+1. `AIGW_OPENCODE_TOKEN` env var.
+2. opencode `auth.json` (`~/.local/share/opencode/auth.json` or `~/.config/opencode/auth.json`): a `type:"wellknown"` entry keyed by the gateway URL or host; the token is read from `entry.key ?? entry.token`.
+3. none — the request proceeds without an `Authorization` header.
+
+Token resolution is fully guarded and never throws.
+
+#### Provider adapter → pi-ai `api`
+
+`translateWellKnown()` maps each provider's npm adapter to a pi-ai `api`. Unknown adapters fall back to the conservative `openai-completions`:
+
+| provider | `npm` adapter | `options.baseURL` subpath | pi-ai `api` | endpoint |
+|---|---|---|---|---|
+| `openai` | `@ai-sdk/openai` | `…/openai/v1` | `openai-responses` | Responses (`/responses`) |
+| `aws` | `@ai-sdk/amazon-bedrock` | `…/aws` | `bedrock-converse-stream` | Bedrock Converse |
+| `aws-mantle` | `@ai-sdk/openai` | `…/aws/openai/v1` | `openai-responses` | Responses |
+| `gresearch` | `@ai-sdk/openai-compatible` | `…/gresearch/v1` | `openai-completions` | chat/completions |
+
+`@ai-sdk/openai` → `openai-responses` is the fix: the OpenAI SDK appends `/responses` to `options.baseURL`, so `…/openai/v1` becomes `…/openai/v1/responses`, the one endpoint where reasoning + tools coexist.
+
+#### Why per-provider baseURLs matter
+
+Each provider's `options.baseURL` becomes the **per-model `baseUrl`**, which pi-ai uses directly as the SDK `baseURL`. This is essential because the per-provider subpaths and the multiplexed `/v1` root differ in two ways:
+
+- **Endpoint semantics** — only `…/openai/v1` speaks the Responses API; the `/v1` root Bobbit historically targeted only speaks chat/completions.
+- **Model id form** — subpath ids are **bare** (`gpt-5.6-sol`), whereas the multiplexed `/v1` root needs the `openai/` prefix. The bare id is tracked as `wireId` (the value `writeAigwModelsJson()` emits as the models.json `id`), kept distinct from the Bobbit-facing `id`.
+
+The SDK's `baseURL`-plus-`/responses` behaviour is exactly why the baseURL must end in `…/openai/v1` and not the bare origin.
+
+`models.json` is published on the host with temp-file-plus-rename atomic replacement. Docker file bind mounts retain the old inode in an already-running container, so configure, refresh, and removal notify every tracked project sandbox. Each sandbox maintains monotonic published/mounted generations and serializes remounts with health recovery; a second publication during recreation therefore triggers another recreation until the mounted generation is current. Workspaces/worktrees survive, and live sandboxed sessions respawn through the normal container-recovery event. Direct host agent processes are not recreated by this path and retain their spawn-time model registry/guard until respawn. The durable model/preferences commit invalidates registry and SessionManager caches and broadcasts preferences before remount recovery; a Docker failure is returned as `remountPending: true` without falsely reporting the committed configuration as rolled back, while normal health recovery remains queued. Startup staleness also compares in-container model content with the active host file, catching a replacement that occurred while Bobbit was down.
+
+#### Filters and per-model metadata
+
+When the well-known config is present, `translateWellKnown()` applies hard filters and never falls back to `inferMeta` guessing:
+
+- `disabled_providers` — drops whole providers.
+- per-provider `whitelist` — drops any model id not listed.
+- missing or invalid provider `options.baseURL` — drops that provider without abandoning the authoritative config.
+
+Bare IDs are unique. If multiple eligible providers advertise the same ID, the provider named by top-level `config.model` wins for that ID; otherwise the first provider in object insertion order wins. Provenance remains in `upstreamProvider` rather than being synthesized into the model ID. The registry and `models.json` preserve this field; Settings and model pickers render it as the AIGW provider badge and include it in search without changing the selectable `aigw/<bare-id>` preference.
+
+Per-model fields are mapped straight across:
+
+| well-known field | Bobbit `AigwModel` field |
+|---|---|
+| `variants` keys | `thinkingLevelMap` (identity per tier; reasoning models also get `off:"none"`) |
+| `limit.context` | `contextWindow` |
+| `limit.output` | `maxTokens` |
+| `modalities.input` | `input` (filtered to `text`/`image`) |
+| `reasoning` | `reasoning` |
+| `cost` | `cost` via `normalizeWellKnownCost()` |
+
+`buildThinkingLevelMap()` only keeps recognized effort tiers (`minimal/none/low/medium/high/xhigh/max`) and adds `off:"none"` for reasoning models so the responses/completions adapters emit `reasoning_effort:"none"` in the no-effort case — the tool-compatible path the gateway wants.
+
+`normalizeWellKnownCost()` is distinct from the legacy `/v1/models` normalizer. Well-known `cost` is already denominated in **USD per 1M tokens** under `{input,output,cache_read,cache_write}`, so the fields map directly (with `cache_read`/`cache_write` defaulting to the same `input * 0.1` / `input * 1.25` heuristics when omitted). The legacy `normalizeAigwPricing()` instead takes USD **per token** under `{prompt,completion}` and scales up by 1M.
+
+`compat.supportsReasoningEffort` is set `true` only for the OpenAI-style endpoints (`openai-responses` / `openai-completions`) and left undefined for `bedrock-converse-stream` (Bedrock ignores compat). Because `@ai-sdk/openai` now routes to `openai-responses`, the forbidden tools+`reasoning_effort`-on-chat/completions combination can no longer occur.
+
+#### Default-model seeding
+
+On successful configure or manual refresh, `seedDefaultModelsFromWellKnown()` seeds `default.sessionModel`, `default.reviewModel`, and `default.namingModel` from the top-level `config.model` (form `provider:id`, e.g. `aws:us.anthropic.claude-opus-4-6`) into Bobbit's `aigw/<id>` form. It only writes an unset/empty preference and only when both provider provenance and bare ID match the deduplicated discovered model. Test, status, and startup refresh do not seed defaults.
+
+Legacy `aigw/<upstream>/<id>` preferences are conservatively migrated to `aigw/<id>` only when `models.json` has no exact prefixed entry and contains exactly one matching bare ID. Exact, missing, malformed, ambiguous, and unknown multi-segment IDs are preserved. Restored session pins are migrated and persisted. Explicit AIGW naming models resolve through `ApiModel` and `completeModelText()`, so Responses, Converse, and completions routes are retained for both session titles and goal summaries. The legacy root-chat path is limited to automatic Claude fallback when no explicit naming model exists.
+
+#### Fallback path (option-1 fix)
+
+When the well-known config is absent, the legacy `/v1/models` + `inferMeta` path still applies the minimal routing fix: OpenAI-family reasoning ids (`gpt-*` / `o[1-9]`, excluding Claude) are routed to `openai-responses` on `${origin}/openai/v1` with a **bare `wireId`**, so tools + reasoning don't 400 on the chat/completions root. Because the emitted id is bare, the registry and models.json ids for these models are bare (e.g. `gpt-5.6-luna`). Other non-Claude models stay on `openai-completions`, and Claude is remapped to `bedrock-converse-stream` downstream.
+
+#### Probes and cache behavior
+
+`/api/models/test` probes the resolved route only: Responses models use `{baseUrl}/responses` with `max_output_tokens`; completions models use `{baseUrl}/chat/completions`; Converse and future native APIs go through pi-ai. A failed probe is not retried against another endpoint. `/api/aigw/test` remains a discovery/reachability check.
+
+Cold authoritative discovery makes one request, fallback makes the well-known and `/v1/models` requests, and one-hop remote discovery makes two requests within the shared deadline. Configure reuses discovery output. The existing five-second registry and sixty-second SessionManager caches remain unchanged.
 
 ### Generated `providers.aigw.headers`
 
@@ -1723,7 +1830,7 @@ The converted `cost` values flow through two surfaces:
 
 Provider-level headers are deliberate: they cover every model exposed through `providers.aigw` without duplicating fields on each model entry. The `User-Agent` value is a plain string because it is build-wide. The `x-opencode-session` value remains the existing pi-coding-agent `!cmd` resolver literal; pi-coding-agent executes it inside the agent subprocess, trims stdout, and drops the header when stdout is empty. That preserves the exact old behavior: sessions with `BOBBIT_SESSION_ID` send their session id, while non-session calls do not fall back to a shared constant.
 
-Every agent session gets its own subprocess environment with `BOBBIT_SESSION_ID=<sessionId>`, so the shell-resolved header is naturally partitioned per session. The command result is cached inside that subprocess, so only the first inference request in a session pays the resolver cost.
+Every agent session gets its own subprocess environment with `BOBBIT_SESSION_ID=<sessionId>`, so the shell-resolved header is naturally partitioned per session. pi-coding-agent resolves the command-form header on the request path; the value is scoped to that subprocess and is not shared across sessions.
 
 ### Bedrock-routed Claude models
 
@@ -1739,7 +1846,7 @@ pi-ai v0.79.6+ natively forwards provider-level `headers` into the AWS SDK reque
 On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites the active agent directory's `models.json` with:
 
 - the current gateway model list,
-- the current gateway-derived per-model `cost` values when `/v1/models` provides pricing,
+- the current gateway-derived per-model `cost` values from well-known metadata or legacy `/v1/models` pricing,
 - the current canonical `User-Agent: Bobbit/<version>`,
 - the unchanged `x-opencode-session` resolver literal,
 - existing non-aigw providers and user `modelOverrides` preserved.
@@ -1754,7 +1861,7 @@ The Bobbit AI Gateway user agent is not a process-wide default HTTP header. It i
 - `writeAigwModelsJson()` writes headers only under `providers.aigw`; non-aigw providers are preserved as-is.
 - `removeAigwModelsJson()` removes the entire `aigw` provider block and leaves no orphan AI Gateway headers on other providers.
 - Direct public-provider paths, such as Anthropic title fallback or non-aigw model completion, do not use the Bobbit AI Gateway user-agent helper.
-- The Bedrock patch exits immediately for any model whose provider is not `aigw`.
+- Bedrock custom headers are emitted only by models under the generated `aigw` provider; public Bedrock models are unchanged.
 
 These boundaries are why the same Bobbit process can talk to an AI Gateway and public providers without leaking `User-Agent: Bobbit/<version>` to public endpoints unless that request is actually routed through the configured gateway.
 
@@ -2262,7 +2369,7 @@ A sandbox is never created for a project that has not asked for one. The image b
 **Agent spawn:**
 
 1. When a branch is supplied, `ProjectSandbox.createWorktree(name, branch, baseBranch?)` creates a git worktree at `/workspace-wt/<name>` inside the container via `docker exec`.
-2. Sandbox worktrees are local-by-default. Bobbit does not install post-commit push hooks; commits stay in the persistent `/workspace-wt` volume unless a user or workflow intentionally publishes them.
+2. Sandbox lifecycle worktrees stay local. Bobbit does not install post-commit push hooks or publish during provisioning/recovery; commits stay in the persistent `/workspace-wt` volume unless a user, agent, or workflow intentionally publishes them.
 3. When no branch is supplied (for example, sandboxed staff with `worktree:false`), the agent runs from `/workspace` instead of `/workspace-wt`.
 4. RpcBridge spawns the agent via `docker exec -i -w <containerCwd> <containerId>` - the `-w` flag sets the container process working directory so the agent CLI's `process.cwd()` resolves to the correct project-derived path. Subdirectory projects keep their relative offset under either `/workspace` or `/workspace-wt/<branch>`.
 5. Delegates inherit parent sandbox config.
@@ -2365,7 +2472,7 @@ Sandboxed agents use standard git worktrees inside the project container when th
 **Worktree creation** (`ProjectSandbox.createWorktree()`):
 
 1. Creates a worktree at `/workspace-wt/<name>` branching from the specified base
-2. Leaves the branch local-only by default; no remote publish and no post-commit push hook are installed
+2. Leaves the branch local-only; no remote publish and no post-commit push hook are installed
 3. Called during agent spawn via `applySandboxWiring()` only when the session/staff runtime carries a sandbox branch
 
 **Multi-repo containers.** Multi-repo projects mount `rootPath` (the container of sibling repos) at `/workspace`; each repo lives at `/workspace/<repo>/`. `docker-args.ts` host-path rewriting understands the new layout. `ProjectSandbox.createWorktree()` returns a worktree set in multi-repo mode. Per-component `worktree_setup_command` runs inside the container at the component's path. The pool prebuild also works inside the sandbox.
@@ -2391,9 +2498,9 @@ Sandbox containers are long-lived and survive gateway restarts (via `--restart=u
 2. If running, reconnects. If stopped, restarts. If gone, recreates with the same named volumes (`bobbit-workspace-<projectId>` for `/workspace`, `bobbit-worktrees-<projectId>` for `/workspace-wt`) - git history and agent worktrees in the volumes are preserved
 3. If the volumes were also lost (e.g. Docker Desktop reset), the container re-clones from the remote. Work that was intentionally published can be recovered from the remote; local-only branch work that existed only in the lost volume cannot be recovered.
 4. `restoreSession()` calls `applySandboxWiring()` which verifies the worktree still exists inside the container
-5. If the worktree is missing (e.g. volume was reset but the container was recreated), the server attempts to recreate it via `ProjectSandbox.createWorktree(branch, branch)` using the session's persisted branch. If recreation succeeds, restore continues normally. If it fails (branch deleted, no sandbox available), the session is archived - the server never launches an agent into a non-existent CWD.
+5. If the worktree is missing (e.g. volume was reset but the container was recreated), the server attempts to recreate it via `ProjectSandbox.createWorktree(branch, branch)` using the session's persisted branch. Recreation is local-only: it may fetch refs needed to locate a start point, but it never pushes or recreates a deleted remote work branch. If no usable local/persisted ref remains or the sandbox is unavailable, the session is archived - the server never launches an agent into a non-existent CWD.
 
-**Durability layers:** (1) Named Docker volumes preserve `/workspace` and `/workspace-wt` across container recreation, so agent worktrees survive even if the container is removed and recreated. (2) Session logs are bind-mounted to the host and never stored only inside the container. (3) Remote branches are an intentional publication layer, not the default durability layer for scoped short-lived sub-agent work.
+**Durability layers:** (1) Named Docker volumes preserve `/workspace` and `/workspace-wt` across container recreation, so agent worktrees survive even if the container is removed and recreated. (2) Session logs are bind-mounted to the host and never stored only inside the container. (3) Remote branches are an intentional publication layer, not the default durability layer for lifecycle-created session, goal, child, team-member, or staff work.
 
 ### Verification command execution
 

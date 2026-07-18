@@ -35,17 +35,34 @@ import { buildFixture, buildActive, buildSubgoalStep } from "../../tests/helpers
  * assertion fails (instead of hanging). All three are detected without relying
  * on wall-clock timing.
  */
+function installPreAcquireBarrier(fx: Awaited<ReturnType<typeof buildFixture>>, expectedCalls: number): void {
+	const harness = fx.harness as any;
+	const original = harness._acquireRootSubgoalSemaphore.bind(harness);
+	let arrived = 0;
+	let release!: () => void;
+	const barrier = new Promise<void>(resolve => { release = resolve; });
+	harness._acquireRootSubgoalSemaphore = (rootGoalId: string, goalId: string) => {
+		const semaphore = original(rootGoalId, goalId);
+		return {
+			acquire: async () => {
+				if (++arrived === expectedCalls) release();
+				await barrier;
+				await semaphore.acquire();
+			},
+			release: () => semaphore.release(),
+		};
+	};
+}
+
 function makeConcurrencyProbe(expectedPeak: number) {
 	let inFlight = 0;
 	let maxObserved = 0;
 	let release!: () => void;
 	const gate = new Promise<void>(r => { release = r; });
-	const safety = setTimeout(() => release(), 2000);
-	(safety as { unref?: () => void }).unref?.();
 	const hook = async (): Promise<"passed"> => {
 		inFlight++;
 		maxObserved = Math.max(maxObserved, inFlight);
-		if (inFlight >= expectedPeak) { clearTimeout(safety); release(); }
+		if (inFlight >= expectedPeak) release();
 		await gate;
 		inFlight--;
 		return "passed";
@@ -64,6 +81,7 @@ describe("runSubgoalStep — concurrency semaphore (§3.5)", () => {
 
 		// Barrier-based probe: parks all in-flight steps until the cap is
 		// simultaneously occupied (deterministic, no wall-clock dependence).
+		installPreAcquireBarrier(fx, 5);
 		const probe = makeConcurrencyProbe(2);
 		fx.setReadyToMergeHook(probe.hook);
 
@@ -86,6 +104,7 @@ describe("runSubgoalStep — concurrency semaphore (§3.5)", () => {
 		// No maxConcurrentChildren set on parent.
 		assert.equal(fx.goalManager.resolveRootMaxConcurrentChildren(fx.parent.id), 5);
 
+		installPreAcquireBarrier(fx, 7);
 		const probe = makeConcurrencyProbe(5);
 		fx.setReadyToMergeHook(probe.hook);
 

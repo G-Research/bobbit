@@ -1,5 +1,12 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, connectWs, nonGitCwd, signalAndWaitForGate } from "./_e2e/e2e-setup.js";
+import { apiFetch, createSession, connectWs, nonGitCwd } from "./_e2e/e2e-setup.js";
+import {
+	signalAndWaitForAuthoredGate,
+	trackGateApiConnection,
+	useGateApiTestSupport,
+} from "./helpers/gate-api-test-support.js";
+
+useGateApiTestSupport();
 
 /** Create a goal with a specific workflow, returning its ID. */
 async function createGoalWithWorkflow(workflowId: string): Promise<string> {
@@ -25,21 +32,20 @@ test.describe("Gates API (verification)", () => {
 	test("cascade reset — re-signaling upstream resets downstream", async () => {
 		const goalId = await createGoalWithWorkflow("test-fast");
 		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
+		const ws = trackGateApiConnection(await connectWs(sessionId));
 		try {
-			await signalAndWaitForGate(ws, goalId, "design-doc",
+			await signalAndWaitForAuthoredGate(ws, goalId, "design-doc",
 				{ content: "# Design v1\n\nApproach: X\nFiles: a.ts\nCriteria: Y" }, "passed");
 
-			await signalAndWaitForGate(ws, goalId, "implementation", {}, "passed");
+			await signalAndWaitForAuthoredGate(ws, goalId, "implementation", {}, "passed");
 
 			const gatesResp1 = await apiFetch(`/api/goals/${goalId}/gates`);
 			const { gates: gates1 } = await gatesResp1.json();
 			expect(gates1.find((g: any) => g.gateId === "design-doc").status).toBe("passed");
 			expect(gates1.find((g: any) => g.gateId === "implementation").status).toBe("passed");
 
-			// Re-signal — signalAndWaitForGate captures cursor before signaling,
-			// so it ignores the stale "passed" event from the first signal.
-			await signalAndWaitForGate(ws, goalId, "design-doc",
+			// Re-signal and await the newly authored gate state, not a stale WS event.
+			await signalAndWaitForAuthoredGate(ws, goalId, "design-doc",
 				{ content: "# Design v2\n\nApproach: Y\nFiles: b.ts\nCriteria: Z" }, "passed");
 
 			const gatesResp2 = await apiFetch(`/api/goals/${goalId}/gates`);
@@ -55,13 +61,13 @@ test.describe("Gates API (verification)", () => {
 	test("metadata variable resolution", async () => {
 		const goalId = await createGoalWithWorkflow("bug-fix");
 		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
+		const ws = trackGateApiConnection(await connectWs(sessionId));
 		try {
-			await signalAndWaitForGate(ws, goalId, "issue-analysis",
+			await signalAndWaitForAuthoredGate(ws, goalId, "issue-analysis",
 				{ content: "# Analysis\n\nSteps: run echo\nRoot cause: src/a.ts:1" }, "passed");
 
 			// expect:failure gate — "echo metadata-works" exits 0 so gate fails
-			await signalAndWaitForGate(ws, goalId, "reproducing-test",
+			await signalAndWaitForAuthoredGate(ws, goalId, "reproducing-test",
 				{ metadata: { test_command: "echo metadata-works", error_pattern: "some error" } },
 				"failed");
 

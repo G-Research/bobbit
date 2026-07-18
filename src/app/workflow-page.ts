@@ -926,6 +926,14 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 
 	const stepType = step.type || "command";
 	const showTimeoutField = stepType !== "human-signoff";
+	const timeoutPlaceholder = stepType === "command" ? "300" : "1200";
+	const timeoutHint = stepType === "command"
+		? html`Empty = 300s for generic commands; component <code>command: unit</code> defaults to 1200s.`
+		: stepType === "llm-review"
+			? html`Empty = 1200s per active attempt/reminder/recovery turn. Provider backoff is excluded.`
+			: html`Empty = the greater of 1200s or the component <code>qa_max_duration_minutes + 5m</code> per active attempt/reminder/recovery turn. An explicit positive integer overrides this and may be shorter. Provider backoff is excluded.`;
+	const timeoutFieldId = `wf-step-timeout-${gateIdx}-${stepIdx}`;
+	const timeoutHintId = `${timeoutFieldId}-hint`;
 	const showRoleField = stepType === "llm-review" || stepType === "agent-qa" || stepType === "human-signoff";
 	const showComponentField = stepType === "command" || stepType === "agent-qa";
 	const componentOptions = projectComponentNames;
@@ -1089,8 +1097,8 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 							</div>
 							${showTimeoutField ? html`
 								<div class="wf-field">
-									<label class="wf-field-label">Timeout (seconds)</label>
-									<input class="wf-input" data-testid="wf-step-timeout" type="number" min="1" step="1" placeholder="300" .value=${step.timeout != null ? String(step.timeout) : ""}
+									<label class="wf-field-label" for=${timeoutFieldId}>Timeout (seconds)</label>
+									<input id=${timeoutFieldId} class="wf-input" data-testid="wf-step-timeout" type="number" min="1" step="1" placeholder=${timeoutPlaceholder} aria-describedby=${timeoutHintId} .value=${step.timeout != null ? String(step.timeout) : ""}
 										?disabled=${readOnly}
 										@click=${(e: Event) => e.stopPropagation()}
 										@input=${(e: Event) => {
@@ -1100,7 +1108,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 											if (!Number.isFinite(n) || n <= 0) { updateStep({ timeout: undefined }); return; }
 											updateStep({ timeout: n });
 										}} />
-									<div class="wf-field-hint">Empty = built-in default. Must be a positive integer.</div>
+									<div id=${timeoutHintId} class="wf-field-hint" data-testid="wf-step-timeout-hint">${timeoutHint}</div>
 								</div>
 							` : nothing}
 							${showRoleField ? html`

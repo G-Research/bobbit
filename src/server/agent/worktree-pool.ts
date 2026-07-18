@@ -849,7 +849,6 @@ export class WorktreePool {
 							configuredBaseRef,
 							commandRunner: this.commandRunner,
 							remotePolicy: this.remotePolicy,
-							pushPolicy: "local-only",
 						});
 						if (set.worktrees.length === 0) {
 							console.warn(`[worktree-pool] Skipping pre-build ${branchName}: no worktree-able repo with a resolved HEAD`);
@@ -869,7 +868,6 @@ export class WorktreePool {
 						// below so single-repo and multi-repo share one code path and
 						// `components[*].worktreeSetupCommand` is the only source of truth.
 						const result = await createWorktree(this.repoPath, branchName, {
-							pushPolicy: "local-only",
 							worktreeRoot: this.worktreeRoot,
 							configuredBaseRef,
 							commandRunner: this.commandRunner,

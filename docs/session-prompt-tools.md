@@ -28,7 +28,11 @@ Recoverable errors include provider backoff, retryable transient transport failu
 2. calls `retryLastPrompt(..., { auto: true })`, the same continuation-safe path used by auto-retry and the UI Retry button;
 3. protects the newly queued row while retrying the failed turn, so the caller's intent drains after recovery exactly once instead of being dropped, consumed as the retry row, or duplicated.
 
+Poisoned history from an orphan Pi `toolResult` uses a separate, user-driven flow. The REST/tool prompt is direct user intent, so delivery calls the ordinary `enqueuePrompt` path once. That path sanitizes the active transcript branch, respawns the same Bobbit session in place, and dispatches or queues the new message against the fresh bridge. It does not replay the failed prompt, queue the new intent behind that replay, or call `retryLastPrompt(..., { auto: true })`. Poisoned-history failures are excluded from provider auto-retry; each user action gets at most one in-place repair attempt rather than starting an automatic loop. See [Pi runtime compatibility](pi-runtime-compatibility.md#in-place-user-recovery).
+
 Non-retryable and action-required failures are blocked before queuing the new message. This includes authentication/authorization failures, invalid or missing provider credentials, deterministic validation/configuration errors, unclassified errors, and bounded retry policies whose automatic budget is exhausted. The API returns a clear recovery-blocked error rather than silently resurrecting the session or leaving the prompt hidden in the queue.
+
+Terminated sessions remain rejected except for one narrow rollback case. If a poisoned-history respawn fails, `SessionManager` retains the old, errored `SessionInfo` as a terminated rollback capsule so its prompt envelopes, grants, clients, and retry intent are not lost. A later REST/tool prompt may pass the terminated check only when the recovery classifier still returns `reason: "poisoned-history"`; ordinary terminated sessions and every other error classification still return `SESSION_TERMINATED`. The accepted follow-up enters the same direct enqueue/in-place recovery flow above and retains the existing Bobbit session identity.
 
 The behavior is shared by goal-team `team_prompt`, direct child goal lead prompting, `OrchestrationCore.prompt`, and the own-child fallback used for non-blocking `team_delegate` children. The goal-team route and the `/api/sessions/:ownerId/orchestrate/prompt` route both feed the same delivery helper and `SessionManager` recovery primitives.
 
@@ -49,7 +53,7 @@ Parameters:
 
 | Name | Type | Required | Default | Notes |
 |---|---|---|---|---|
-| `session_id` | string | Yes | — | Target session id. The target must be live and not terminated or archived. |
+| `session_id` | string | Yes | — | Target session id. Archived and ordinary terminated targets are rejected; only a terminated poisoned-history rollback capsule may be recovered in place. |
 | `message` | string | Yes | — | User message delivered to the target. |
 | `mode` | `"prompt" \| "steer"` | No | `"prompt"` | Selects normal prompt delivery or steer delivery. |
 
@@ -85,8 +89,8 @@ type SessionPromptResult =
       recovered: true;
       recovery: {
         status: "recovered";
-        reason: "provider-backoff" | "transient" | "generic";
-        queued: true;
+        reason: "provider-backoff" | "transient" | "generic" | "poisoned-history";
+        queued: boolean;
         queuedId?: string;
       };
       target: { sessionId: string; title?: string };
@@ -99,7 +103,7 @@ type SessionPromptResult =
     };
 ```
 
-`target.sessionId` is always the resolved target id. `target.title` is present only when the live session has a non-empty title. `status: "recovered"` means the delivery path queued the caller's message as preserved intent and triggered retry recovery for the errored target. This metadata is display-only: `session_prompt` keeps `grantPolicy: never`, still requires the caller session secret, and still checks the caller's allowed tools before resolving or delivering to the target.
+`target.sessionId` is always the resolved target id. `target.title` is present only when the session has a non-empty title. `status: "recovered"` means the delivery path accepted the caller's message and triggered recovery for the errored target. For provider backoff, transient, and generic errors, `queued` is `true` because the caller's message is preserved behind `retryLastPrompt(..., { auto: true })`. For `poisoned-history`, ordinary enqueue performs the user-driven in-place repair directly, so `queued` reports whether that new intent remained queued rather than dispatching immediately, and `queuedId` is absent. This metadata is display-only: `session_prompt` keeps `grantPolicy: never`, still requires the caller session secret, and still checks the caller's allowed tools before resolving or delivering to the target.
 
 ### Non-interactive / reviewer sessions
 

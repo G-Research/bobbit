@@ -7,16 +7,12 @@
 // dot, sign-off card, and the review-document event the Start Review button
 // dispatches).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { GATE_STATUS_CLIENT_EVENT } from "../../src/app/gate-status-events.js";
 import { syncCustomElements } from "./_setup/custom-elements.js";
 
-// Under vitest pool:forks + isolate:false each test file runs in its OWN
-// happy-dom window while the module graph is cached across files — so a
-// component's @customElement define (and lit's template parsing) only happen in
-// the FIRST importing file's window. The shared _setup/custom-elements bridge
-// records every define and syncCustomElements() replays them into both this
-// window and lit-html's pinned window, so we can reuse the single shared lit
-// instance. session-manager is imported first to initialize the pack-panels ⇄
-// session-manager cycle before the widget's app/* imports hit it as a TDZ error.
+// The custom-elements bridge keeps explicit registration deterministic. Import
+// session-manager first to initialize the pack-panels ⇄ session-manager cycle
+// before the widget's app/* imports hit it as a TDZ error.
 let state: typeof import("../../src/app/state.js").state;
 
 beforeAll(async () => {
@@ -49,6 +45,7 @@ class MockWebSocket extends EventTarget {
 let gateRows: any[] = [];
 let activeVerifications: any[] = [];
 let signalsByGate = new Map<string, any[]>();
+let signalFetchOverride: ((gateId: string) => Response | Promise<Response>) | undefined;
 let openReviewEvents: any[] = [];
 
 function jsonResponse(body: any, status = 200): Response {
@@ -61,13 +58,19 @@ beforeEach(() => {
 	gateRows = [];
 	activeVerifications = [];
 	signalsByGate = new Map();
+	signalFetchOverride = undefined;
 	openReviewEvents = [];
 	vi.stubGlobal("WebSocket", MockWebSocket as any);
 	vi.stubGlobal("fetch", async (url: any, _init: any = {}) => {
 		const textUrl = String(url);
 		if (/\/gates\/[^/]+\/signals/.test(textUrl)) {
 			const gateId = decodeURIComponent(textUrl.match(/\/gates\/([^/]+)\/signals/)?.[1] || "");
-			return jsonResponse({ signals: signalsByGate.get(gateId) || [] });
+			if (signalFetchOverride) return signalFetchOverride(gateId);
+			return jsonResponse({
+				signals: signalsByGate.get(gateId) || [],
+				goalTitle: "Server Goal Title",
+				gateName: "Server Gate Name",
+			});
 		}
 		if (textUrl.endsWith("/verifications/active")) return jsonResponse({ verifications: activeVerifications });
 		if (textUrl.endsWith("/gates")) return jsonResponse({ gates: gateRows });
@@ -178,7 +181,98 @@ describe("GoalStatusWidget fixture", () => {
 		const event = openReviewEvents[0];
 		expect(event.title).toContain("Sign-off: fixture/branch / Human Approval / Approve design");
 		expect(event.markdown).toContain("Content awaiting sign-off");
-		expect(event.source).toMatchObject({ kind: "verification-signoff-markdown", goalId: GOAL_ID, gateId: "human-approval", signalId: "sig-human", stepName: "approve-design" });
+		expect(event.source).toMatchObject({
+			kind: "verification-signoff-markdown",
+			goalId: GOAL_ID,
+			gateId: "human-approval",
+			signalId: "sig-human",
+			stepName: "approve-design",
+			goalTitle: "fixture/branch",
+			gateName: "Human Approval",
+			stepLabel: "Approve design",
+		});
+	});
+
+	it("shows launcher loading and a compact retryable error without duplicate launches", async () => {
+		const el = await mountGoalStatusWidget({
+			goalId: GOAL_ID,
+			gates,
+			verifications: [verification],
+			cache: { passed: 1, total: 3 },
+		});
+		await openDropdown(el);
+
+		let resolveSignals!: (response: Response) => void;
+		signalFetchOverride = () => new Promise<Response>(resolve => { resolveSignals = resolve; });
+		const dd = dropdown()!;
+		(dd.querySelector('[data-testid="goal-widget-signoff-content-toggle"]') as HTMLButtonElement).click();
+		await sleep(0);
+		const loadingButton = dd.querySelector('[data-testid="goal-widget-signoff-content-toggle"]') as HTMLButtonElement;
+		expect(loadingButton.disabled).toBe(true);
+		expect(loadingButton.getAttribute("aria-busy")).toBe("true");
+		expect(loadingButton.textContent).toContain("Opening…");
+		loadingButton.click();
+		resolveSignals(jsonResponse({ signals: [] }));
+
+		for (let i = 0; i < 50 && !dd.querySelector('[role="alert"]'); i++) await sleep(10);
+		expect(openReviewEvents).toHaveLength(0);
+		expect(dd.querySelector('[data-testid="goal-widget-signoff-content-error"]')?.textContent).toBe("Couldn’t open review. Try again.");
+
+		signalFetchOverride = undefined;
+		signalsByGate.set("human-approval", [{ id: "sig-human", content: "Ready on retry" }]);
+		(dd.querySelector('[data-testid="goal-widget-signoff-content-toggle"]') as HTMLButtonElement).click();
+		for (let i = 0; i < 50 && openReviewEvents.length === 0; i++) await sleep(10);
+		expect(openReviewEvents).toHaveLength(1);
+		expect(openReviewEvents[0].markdown).toBe("Ready on retry");
+		expect(dd.querySelector('[data-testid="goal-widget-signoff-content-error"]')).toBeNull();
+	});
+
+	it("uses the empty-content and duplicate-title conventions from the shared launcher", async () => {
+		const duplicate = {
+			...verification,
+			signalId: "sig-human-second",
+			steps: [{ ...verification.steps[0] }],
+		};
+		const el = await mountGoalStatusWidget({
+			goalId: GOAL_ID,
+			gates,
+			verifications: [verification, duplicate],
+			cache: { passed: 1, total: 3 },
+			signals: {
+				"human-approval": [
+					{ id: "sig-human", content: "   " },
+					{ id: "sig-human-second", content: "Other content" },
+				],
+			},
+		});
+		await openDropdown(el);
+		const button = dropdown()!.querySelector('[data-signal-id="sig-human"] [data-testid="goal-widget-signoff-content-toggle"]') as HTMLButtonElement;
+		button.click();
+		for (let i = 0; i < 50 && openReviewEvents.length === 0; i++) await sleep(10);
+		expect(openReviewEvents[0].title).toBe("Sign-off: fixture/branch / Human Approval / Approve design (sig-huma)");
+		expect(openReviewEvents[0].markdown).toBe("No content was attached to this sign-off signal.");
+	});
+
+	it("hides a mounted launcher immediately when its verification step completes", async () => {
+		const el = await mountGoalStatusWidget({
+			goalId: GOAL_ID,
+			gates,
+			verifications: [verification],
+			cache: { passed: 1, total: 3 },
+		});
+		await openDropdown(el);
+		const dd = dropdown()!;
+		expect(dd.querySelector('[data-testid="goal-widget-signoff-content-toggle"]')).toBeTruthy();
+
+		window.dispatchEvent(new CustomEvent(GATE_STATUS_CLIENT_EVENT, { detail: {
+			type: "gate_verification_step_complete",
+			goalId: GOAL_ID,
+			gateId: "human-approval",
+			signalId: "sig-human",
+			stepName: "approve-design",
+		} }));
+		await sleep(20);
+		expect(dd.querySelector('[data-testid="goal-widget-signoff-content-toggle"]')).toBeNull();
 	});
 
 	it("passed, failed, bypassed, and completed states expose the right lightweight actions", async () => {

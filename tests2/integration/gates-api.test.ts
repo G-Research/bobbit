@@ -223,8 +223,10 @@ test.describe("Gates API", () => {
 
 			// Check signal history
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);
-			const { signals } = await signalsResp.json();
+			const { signals, goalTitle, gateName } = await signalsResp.json();
 			expect(signals).toHaveLength(2);
+			expect(goalTitle).toMatch(/^Gate Test general /);
+			expect(gateName).toBe("Design Document");
 
 			// Each signal has unique id, timestamp, verification
 			expect(signals[0].id).not.toBe(signals[1].id);

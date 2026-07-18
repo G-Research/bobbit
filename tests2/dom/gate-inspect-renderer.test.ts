@@ -18,10 +18,10 @@ import "../../src/ui/lazy/safe-markdown-block.js";
 
 const toolResult = (data: any, isError = false) => ({ isError, content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data) }] }) as unknown as import("@earendil-works/pi-ai").ToolResultMessage;
 
-function renderInspect(params: any, result?: any, isStreaming?: boolean): HTMLElement {
+function renderInspect(params: any, result?: any, isStreaming?: boolean, ctx?: { goalId?: string }): HTMLElement {
 	const container = document.createElement("div");
 	document.body.appendChild(container);
-	const out = new GateInspectRenderer().render(params, result, isStreaming);
+	const out = new GateInspectRenderer().render(params, result, isStreaming, ctx);
 	render(out.content, container);
 	return container;
 }
@@ -147,6 +147,41 @@ describe("GateInspectRenderer", () => {
 		expect(cards[1].querySelector(".tabular-nums")).toBeTruthy();
 		expect(cards[2].querySelector(".tabular-nums")).toBeNull();
 		expect(cards[3].querySelector(".tabular-nums")).toBeNull();
+	});
+
+	it("shows a review launcher only for structured active human sign-off metadata", () => {
+		const c = renderInspect({ gate_id: "implementation" }, toolResult({
+			section: "verification", signalId: "signal-active",
+			steps: [
+				{ name: "approved-review", type: "human-signoff", status: "running", awaitingHuman: true, humanLabel: "Approve review" },
+				{ name: "queued-review", type: "human-signoff", status: "waiting", awaitingHuman: false },
+				{ name: "prose-only", type: "human-signoff", status: "running", output: "Awaiting human approval" },
+				{ name: "wrong-type", type: "llm-review", status: "running", awaitingHuman: true },
+				{ name: "historical-review", type: "human-signoff", status: "passed" },
+			],
+		}), false, { goalId: "goal-123" });
+
+		const launchers = c.querySelectorAll("signoff-review-launcher");
+		expect(launchers).toHaveLength(1);
+		expect((launchers[0] as any).target).toEqual({
+			goalId: "goal-123",
+			gateId: "implementation",
+			signalId: "signal-active",
+			stepName: "approved-review",
+			stepLabel: "Approve review",
+		});
+	});
+
+	it("does not mount an unusable review launcher without exact target identifiers", () => {
+		const result = toolResult({
+			section: "verification", signalId: "signal-active",
+			steps: [{ name: "approval", type: "human-signoff", awaitingHuman: true }],
+		});
+		expect(renderInspect({ gate_id: "implementation" }, result).querySelector("signoff-review-launcher")).toBeNull();
+		expect(renderInspect({ gate_id: "implementation" }, toolResult({
+			section: "verification",
+			steps: [{ name: "approval", type: "human-signoff", awaitingHuman: true }],
+		}), false, { goalId: "goal-123" }).querySelector("signoff-review-launcher")).toBeNull();
 	});
 
 	// ── Verification step expand/collapse (DOM-direct) ───────────────

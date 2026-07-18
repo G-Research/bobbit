@@ -41,9 +41,24 @@ A **workflow** is a reusable template that defines which gates a goal must pass,
 
 Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New normal projects do **not** receive any default seed; the project assistant designs workflows from the discovered components and commands, and a project may legitimately persist with zero workflows. Headquarters can own workflows too: `projectId=headquarters` reads the Headquarters `project.yaml::workflows` block from the aliased server config store. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only), [No default workflow scaffold](internals.md#no-default-workflow-scaffold), and [Headquarters project](headquarters.md).
 
-When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time. `POST /api/goals` can also receive an inline `workflow` object; that snapshot is used directly instead of resolving a project workflow template.
+When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. Later project-template edits do not change this frozen copy, so an active goal's requirements remain stable unless a caller explicitly replaces its snapshot. `POST /api/goals` can also receive an inline `workflow` object; that snapshot is used directly instead of resolving a project workflow template.
 
 Goals without workflows still work fine — workflows are optional **at the data-model layer**. However, the standard goal-creation flow (the +New Goal picker and the goal assistant) requires either a linked project workflow or a valid inline workflow snapshot carried by the proposal. See [Default workflow resolution](#default-workflow-resolution) below for the resolution rules and the empty-workflows UX.
+
+#### Replacing an active goal's workflow snapshot
+
+`PUT /api/goals/:goalId/workflow` is the explicit escape hatch for changing an active goal's frozen requirements. It accepts a complete workflow definition rather than a partial patch, so it supports general changes: names and descriptions, gates, dependency edges, gate metadata, verification arrays, and step fields such as `timeout`. The workflow id cannot change. The server runs the same full workflow validation used by authoring before persisting anything; malformed fields, missing or cyclic dependencies, invalid component/command references, and non-positive or fractional timeouts are rejected.
+
+Replacement also reconciles persisted gate state so it cannot disagree with the new DAG:
+
+- unchanged gates retain their status, history, and verification cache;
+- modified gates return to `pending`, retain their signal history for audit, and invalidate cached verification results;
+- removed gates are dropped from gate state;
+- added gates start `pending` with no signals.
+
+A presentation-only reorder of unchanged gates does not reset them. If a changed or removed gate has verification running, the server rejects the whole replacement with `409 WORKFLOW_ACTIVE_VERIFICATION`; unrelated gate edits remain safe. The guard and persistence are one uninterrupted server continuation, preventing a verification from starting between the conflict check and mutation.
+
+This endpoint is intentionally goal-local. Editing the project workflow template affects snapshots created by future goals, not goals already in progress. See the [REST contract](rest-api.md#goal-workflow-replacement) and [Changing a timed-out review allowance](#changing-a-timed-out-review-allowance) for the scoped UI built on these two write paths.
 
 #### Default workflow resolution
 
@@ -265,7 +280,9 @@ The validator does **not** reject template tokens in free-form `run:` or `prompt
 
 Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, prompt, role, component, timeout, phase, description, optional toggle, and `optionalLabel`; and `human-signoff`-specific `label` and `prompt` fields.
 
-The editor validates the same user-facing constraints before save: `human-signoff` steps require a card title and prompt; named `command` steps require a component; and stale hidden fields are stripped when a step changes type so saved workflows use the canonical YAML shape.
+Timeout authoring is type-aware and leaving the field empty does not serialize a default. Command steps show the generic 300-second default and the 1200-second component `command: unit` exception. `llm-review` shows the 1200-second per-active-turn default. `agent-qa` explains that its omitted value is the greater of 1200 seconds and component `qa_max_duration_minutes + 5m`. Review-agent help also states that a positive explicit value may be shorter and that provider backoff is excluded.
+
+The editor validates the same user-facing constraints before save: `human-signoff` steps require a card title and prompt; named `command` steps require a component; review-agent timeouts are positive whole seconds with a minimum of one second; and stale hidden fields are stripped when a step changes type so saved workflows use the canonical YAML shape.
 
 #### Dependency DAG
 
@@ -426,12 +443,46 @@ Each signal is recorded in the gate's signal history with a unique ID, timestamp
 Gates can define automated verification that runs when signaled:
 
 - **Command** — runs shell commands and checks exit codes (e.g. `npm run check`). Command steps default to a 300s timeout unless the workflow sets `timeout`; component-linked `command: unit` steps default to 1200s because the full unit suite can exceed the generic shell default under contention.
-- **LLM review** — spawns a sub-agent for qualitative review against a prompt
-- **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill
+- **LLM review** — spawns a sub-agent for qualitative review against a prompt. An omitted timeout gives each active attempt, reminder, retry, restart continuation, and recovery turn a fresh 1200-second allowance.
+- **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill. Its omitted per-turn allowance is the greater of 1200 seconds and the component QA duration plus five minutes.
+- **Review-agent override** — for `llm-review` and `agent-qa`, an explicit positive `timeout` is authoritative even below 1200 seconds; the minimum is one second. Provider overload/rate-limit backoff is excluded from the active-turn allowance.
 - **Human sign-off** — parks the gate on a deferred resolver until a person approves or rejects via the UI (see [Human sign-off steps](#human-sign-off-steps))
 - **Combined** — mechanical + qualitative steps across phases
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
+
+#### Review-agent timeout semantics
+
+Review-agent `timeout` values measure **active turns**, not total verification wall time. Each from-scratch attempt, reminder, session auto-retry, restart continuation/reminder, step-level retry, and same-session process resurrection receives a fresh full resolved allowance after streaming begins. A streaming turn waits for that allowance; a genuinely idle turn without `verification_result` may enter reminder/recovery immediately.
+
+Setup, readiness, prompt transport, and provider backoff do not consume the allowance. Fixed operational waits also remain separate: 10 seconds for restart streaming settle, 15 seconds for reminder/resurrection streaming settle, 20 seconds for late-verdict arrival, and 30 seconds for successful-result terminal flush. Retryable error handling waits up to 75 seconds for an ordinary retry turn to start or 330 seconds for provider backoff; the newly streaming turn then receives its full allowance. Provider overload/rate-limit retries remain effectively unbounded under the existing cancellation rules.
+
+Only actual allowance expiry emits the durable/live machine contract:
+
+```json
+{
+  "passed": false,
+  "status": "timeout",
+  "timeout": {
+    "configuredSeconds": 1200,
+    "elapsedMs": 1200000
+  }
+}
+```
+
+`configuredSeconds` is the resolved per-active-turn allowance and `elapsedMs` is the elapsed time for the turn that expired. Total `duration_ms` may be larger after retries, reminders, recovery, or provider waits. Other failures and idle-without-result do not use the timeout marker. See [Verifier Recovery](llm-review-recovery.md) for lifecycle details.
+
+#### Changing a timed-out review allowance
+
+Gate inspection and the live verification card use the structured marker above to render a warning clock, the distinct **Timed out** label, elapsed active-turn time, and configured limit. The overall gate still fails for dependency purposes. A generic failed step whose output merely mentions a timeout does not receive this presentation or remediation control; the UI never infers timeout state from prose.
+
+A marked step exposes **Change timeout**. The dialog requires a positive whole number of seconds and offers two independent checkboxes:
+
+- **This goal** replaces the current goal's frozen workflow snapshot through `PUT /api/goals/:goalId/workflow`. Only the named verification step is patched in the submitted copy. Reconciliation returns that changed gate to `pending`, after which it can be re-signaled with the new allowance.
+- **Future goals in this project** updates the project workflow template through `PUT /api/workflows/:workflowId?projectId=…`. If the resolved workflow is not yet a project-owned override, Bobbit first calls `POST /api/workflows/:workflowId/customize?projectId=…`. Newly created goals snapshot the new value; every existing goal, including the one whose card opened the dialog, remains unchanged.
+- Selecting **both** performs both independent writes. Each scope reports success or failure separately. A partial success is not reported as complete, and Retry skips a scope that already succeeded.
+
+The dialog defaults to the current-goal scope. Future-only is useful when the current failure should remain auditable under its original contract; both is the explicit choice when the current retry and later goals need the same allowance. Template updates never retroactively reconfigure active goals.
 
 #### Active verification snapshots
 
@@ -445,12 +496,13 @@ Step `status` is explicit:
 |---|---|
 | `passed` | Step completed successfully. |
 | `failed` | Step completed unsuccessfully. |
+| `timeout` | A review-agent active turn exhausted its resolved allowance. The step and overall gate fail. |
 | `skipped` | Step was intentionally skipped, such as a disabled optional step or a later phase skipped after an earlier phase failed. |
 | `running` | Step is executing now; duration is elapsed time so far. |
 | `waiting` | Step has not started yet. This is also the API representation for "yet to run". |
 | `blocked` | Active-snapshot derived state for a not-yet-run step blocked by an earlier phase failure; terminal persisted rows use `skipped`. |
 
-For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. Terminal rows preserve explicit `status` as `passed`, `failed`, or `skipped`; `skipped: true` rows are ignored by aggregate pass calculation and should not be rendered as ordinary passes or failures.
+For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. Terminal rows preserve explicit `status` as `passed`, `failed`, `timeout`, or `skipped`; `skipped: true` rows are ignored by aggregate pass calculation and should not be rendered as ordinary passes or failures.
 
 Verification log output is bounded by default: `gate_status` and `gate_inspect section=verification` return the last 20 lines per step, not full logs. Agents that need deeper evidence should call `gate_inspect` with a targeted selection mode:
 
@@ -583,11 +635,15 @@ interface GateSignalStep {
   name: string;
   type: string;
   passed: boolean;
-  status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+  status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
   phase?: number;            // Workflow phase used for grouping and execution order
   skipped?: boolean;         // true when step was skipped (optional not enabled, or earlier phase failed)
   output: string;            // Short summary
-  duration_ms: number;
+  duration_ms: number;       // Total step elapsed time
+  timeout?: {                // Present only when a review-agent active turn expires
+    configuredSeconds: number;
+    elapsedMs: number;
+  };
   artifact?: {
     content: string;         // Full report body
     contentType: string;     // "text/markdown" | "text/html"
@@ -645,9 +701,9 @@ The `agent-qa` verification step type spawns a test-engineer agent session that 
 4. If the agent includes `report_html`, the HTML is stored as the step's artifact with `contentType: "text/html"`.
 5. If the agent goes idle without calling the tool, the harness sends a reminder prompt. If idle again, the step fails.
 
-**Timeout:** Reads `qa_max_duration_minutes` from the owning component's `config:` map (default 10) plus a 5-minute buffer for setup/teardown. The verification harness resolves the component name via the step's `component:` field, falling back to the first component with `config.qa_start_command`, then a name-match against the project. See [docs/qa-testing.md](qa-testing.md) for the full per-component config layout.
+**Timeout:** When `timeout` is omitted, the resolved active-turn allowance is the maximum of 1200 seconds and `(qa_max_duration_minutes + 5) * 60` seconds; `qa_max_duration_minutes` defaults to 10. A valid explicit workflow timeout always wins, even when shorter than the omitted default, with a one-second minimum. The harness resolves the owning component via the step's `component:` field, falling back to the first component with `config.qa_start_command`, then a name-match against the project. See [QA Testing](qa-testing.md) for the full per-component config layout.
 
-**Retry logic:** Up to 3 attempts with backoff on transient failures (same pattern as `llm-review`).
+**Retry logic:** Up to 3 attempts with backoff on transient failures (same pattern as `llm-review`). Each attempt, reminder, restart continuation, and recovery turn gets a fresh resolved active allowance; provider backoff is outside it.
 
 **Test environments:** Respects `BOBBIT_LLM_REVIEW_SKIP` — when set, `agent-qa` steps auto-pass without spawning an agent.
 
@@ -675,7 +731,7 @@ verify:
 
 Both `label` and `prompt` are required (the validator rejects the step on load otherwise). `{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` tokens (`{{master}}` remains valid as a legacy alias) are substituted before the prompt is shown to the user — same machinery as the other step types.
 
-**Lifecycle.** When the harness reaches the step it broadcasts `gate_verification_awaiting_human` (see [websocket-protocol.md](websocket-protocol.md)), sets `awaitingHuman: true` on the active step, persists, and `await`s a deferred resolver. The chat-header `<goal-status-widget>` (mounted on any session with a goal id) surfaces the pending request and its **View content** action opens the submitted gate content in the review pane. The review pane owns inline comments, final comment, Approve / Reject validation, and decision submission. The browser POSTs to `/api/goals/:id/gates/:gateId/signoff` with `{ signalId, stepName, decision, feedback? }`; the harness builds a step result (passed = `decision === "pass"`; `output` and a `text/markdown` artifact carry the composed final/inline feedback when present) and the gate completes through the standard phase machinery. See [Review Pane Sign-Off](review-pane-signoff.md) for the review-source model, validation rules, persistence, and sanitization constraints.
+**Lifecycle.** When the harness reaches the step it broadcasts `gate_verification_awaiting_human` (see [websocket-protocol.md](websocket-protocol.md)), sets `awaitingHuman: true` on the active step, persists, and `await`s a deferred resolver. The chat-header `<goal-status-widget>` and active verification cards rendered by `gate_signal`, `gate_status`, and `gate_inspect(section="verification")` surface the pending request. Their shared **Start Review** launcher opens the submitted gate content in the review pane only while that authoritative marker remains true. The review pane owns inline comments, final comment, Approve / Reject validation, and decision submission. The browser POSTs to `/api/goals/:id/gates/:gateId/signoff` with `{ signalId, stepName, decision, feedback? }`; the harness builds a step result (passed = `decision === "pass"`; `output` and a `text/markdown` artifact carry the composed final/inline feedback when present) and the gate completes through the standard phase machinery. See [Review Pane Sign-Off](review-pane-signoff.md) for launcher eligibility, the review-source model, validation rules, persistence, and sanitization constraints.
 
 **Resume / cancellation.**
 
@@ -738,7 +794,7 @@ These fields replace the old `commitSha` field, which was a single optional fiel
 | Team lead merges | Team lead | `git merge <task.branch>` locally — no remote fetch needed |
 | Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
 
-Team-member and delegated helper/session sub-agent branches are local-only by default. Bobbit does not push them to origin as a default safety net; the persistent local worktree is the crash-recovery and merge handoff mechanism. Team leads merge or cherry-pick from the local ref/worktree when it is available, so no remote fetch is required.
+Lifecycle-created work branches — including goal integration, team-member, and delegated helper/session sub-agent branches — stay local during creation, status, reuse, and recovery. Bobbit does not push them to origin as a safety net; the persistent local worktree is the crash-recovery and merge handoff mechanism. Team leads merge or cherry-pick from the local ref/worktree when it is available, so no remote fetch is required.
 
 Remote publication is still allowed when it is intentional: a user-requested push, a workflow/cross-machine/container handoff that needs a remote branch, or the final Ready-to-Merge / PR publication of the goal integration branch. Intentional Bobbit-owned pushes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only routine PR in the workflow is the final goal-to-primary-branch PR for human review.
 

@@ -361,8 +361,11 @@ export const state = {
 			sessionId: string;
 			fields: Record<string, unknown>;
 			streaming: boolean;
-			mode?: "provisional" | "registered";
-			projectId?: string;
+			mode?: "create" | "provisional" | "registered" | "invalid";
+			/** Source-session project provenance; never the proposal target. */
+			sourceProjectId?: string;
+			/** Direct-create progress checkpoint; never changes proposal intent. */
+			createdProjectId?: string;
 			rev: number;
 		}
 	>>,

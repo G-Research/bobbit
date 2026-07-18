@@ -1474,7 +1474,7 @@ let aigwStatus: "idle" | "testing" | "saving" | "removing" = "idle";
 let aigwError = "";
 let aigwConfigured = false;
 let aigwConfiguredUrl = "";
-let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }> = [];
+let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean; upstreamProvider?: string }> = [];
 let aigwExclusive = true; // hide built-in providers while gateway is configured
 // Preferences
 let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
@@ -1485,7 +1485,7 @@ let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|"xhigh"
 let prefReviewThinking = "";
 let prefNamingThinking = "";
 let allowSessionModelFallback = false; // Global controlled-fallback opt-in; absent preference defaults off.
-let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
+let allModels: Array<{ id: string; provider: string; reasoning: boolean; upstreamProvider?: string }> = [];
 let allImageModels: ImageGenerationModel[] = [];
 let _modelsLoaded = false;
 
@@ -1813,11 +1813,12 @@ export function renderModelRow(
 	// unknown (not in allModels yet — registry still loading, or the saved
 	// pref is stale/unavailable) we fall back to the full reasoning-capable
 	// set so the dropdown stays usable; the server clamps defensively.
-	let selectedModel: { id: string; provider: string; reasoning: boolean } | undefined;
+	let selectedModel: { id: string; provider: string; reasoning: boolean; upstreamProvider?: string } | undefined;
 	if (modelValue) {
 		selectedModel = allModels.find(m => `${m.provider}/${m.id}` === modelValue);
 	}
 	const thinkingDisabled = !!selectedModel && !selectedModel.reasoning;
+	const upstreamProviderLabel = selectedModel?.provider === "aigw" ? selectedModel.upstreamProvider : undefined;
 	const supportedLevels: ThinkingLevel[] = selectedModel
 		? getSupportedThinkingLevels(selectedModel)
 		: ["off", "minimal", "low", "medium", "high"];
@@ -1871,6 +1872,7 @@ export function renderModelRow(
 					>
 						<span class="text-muted-foreground shrink-0">${icon(Sparkles, "sm")}</span>
 						<span class="truncate">${modelDisplay}</span>
+						${upstreamProviderLabel ? html`<span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-secondary text-muted-foreground shrink-0" title="AIGW provider">${upstreamProviderLabel}</span>` : ""}
 					</button>
 					${showUnavailable ? html`
 						<span
@@ -2011,8 +2013,8 @@ function renderImageModelRow(
 export function __testResetModelsTab(opts: {
 	aigwConfigured?: boolean;
 	aigwUrl?: string;
-	aigwModels?: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }>;
-	allModels?: Array<{ id: string; provider: string; reasoning: boolean }>;
+	aigwModels?: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean; upstreamProvider?: string }>;
+	allModels?: Array<{ id: string; provider: string; reasoning: boolean; upstreamProvider?: string }>;
 	allImageModels?: ImageGenerationModel[];
 	prefSessionModel?: string;
 	prefReviewModel?: string;

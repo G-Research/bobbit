@@ -41,6 +41,7 @@ import {
 	resolvePromptAuthor,
 } from "./message-author.js";
 import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
@@ -54,7 +55,6 @@ import {
 	normalizePersistedInFlightSteers,
 	type InFlightSteerRecord,
 	type PersistedSession,
-	type WorktreePushPolicy,
 } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
@@ -73,7 +73,7 @@ import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
@@ -95,7 +95,7 @@ import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from ".
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
-import { getAigwUrl, discoverAigwModels, deriveName } from "./aigw-manager.js";
+import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
@@ -395,6 +395,10 @@ export type RestartRedriveSnapshot = {
 export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedriveSnapshot): boolean {
 	const status = typeof snapshot === "string" ? snapshot : snapshot.status;
 	const restoreStartupWasStreaming = typeof snapshot === "string" ? undefined : snapshot.restoreStartupWasStreaming;
+	// A cold-restore continuation remains durable until the final canonical bridge
+	// accepts it. The provisional restore can already look idle (or be rolled back
+	// to a dormant/terminated capsule), so status alone must not clear this marker.
+	if (restoreStartupWasStreaming === true) return true;
 	if (status === "idle" || status === "terminated") return false;
 	if (status === "starting" && restoreStartupWasStreaming !== undefined) return restoreStartupWasStreaming;
 	return true;
@@ -412,7 +416,7 @@ const BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS = 3;
 export type ErroredPromptRecoveryDecision =
 	| {
 		recoverable: true;
-		reason: "provider-backoff" | "transient" | "generic";
+		reason: "provider-backoff" | "transient" | "generic" | "poisoned-history";
 		attempts: number;
 		maxAttempts?: number;
 	}
@@ -435,6 +439,11 @@ export function classifyErroredPromptRecovery(input: {
 	const errMsg = input.lastTurnErrorMessage || "";
 	if (!errMsg) {
 		return { recoverable: false, reason: "missing-error", message: "Session has no recorded retryable error message." };
+	}
+	// This Anthropic 400 is not transient, but a user-driven prompt can repair
+	// the persisted transcript and respawn the same Bobbit session in place.
+	if (isOrphanToolResultOrderingError(errMsg)) {
+		return { recoverable: true, reason: "poisoned-history", attempts: 0, maxAttempts: 1 };
 	}
 	if (isNonRetryableAgentError(errMsg)) {
 		return { recoverable: false, reason: "non-retryable", message: "Last session error is non-retryable and requires human/upstream action." };
@@ -658,6 +667,14 @@ export interface SessionInfo {
 	promptQueue: PromptQueue;
 	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
 	recoveredPromptDispatchQueueIds?: string[];
+	/**
+	 * Subset of recovered IDs owned by a user-initiated poisoned-history repair.
+	 * Unlike ordinary failed-dispatch copies, these accepted rows are not
+	 * superseded by a later generic error unstick before Pi accepts them.
+	 */
+	poisonRecoveryPromptDispatchQueueIds?: string[];
+	/** Exact durable row owned by an explicit Retry until canonical dispatch accepts it. */
+	explicitRetryQueueRowId?: string;
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
 	restoreError?: string;
 	/**
@@ -783,9 +800,9 @@ export interface SessionInfo {
 	repoPath?: string;
 	/** Active branch name. Mirrors the persisted store; stable for the session's lifetime. */
 	branch?: string;
-	/** Worktree branch publication policy; scoped sub-agent branches are local-only by default. */
+	/** @deprecated Legacy inert metadata exposed only while restoring older records. */
 	worktreePushPolicy?: "local-only" | "publish";
-	/** Back-compat alias for persisted publication policy metadata. */
+	/** @deprecated Legacy inert alias exposed only while restoring older records. */
 	remotePublicationPolicy?: "local-only" | "publish";
 	/** Multi-repo: per-repo worktree paths from the pool claim. Stable for the session's lifetime. */
 	repoWorktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
@@ -1310,9 +1327,23 @@ export interface SessionManagerOptions {
 	stateDir?: string;
 }
 
-type RestoreCoordinator = {
+type SessionReplacementToken = {
+	coordinator: SessionReplacementCoordinator;
 	generation: number;
-	promise: Promise<SessionInfo | undefined>;
+	kind: string;
+};
+
+type SessionReplacementCoordinator = {
+	tail: Promise<void>;
+	pending: number;
+	active?: SessionReplacementToken;
+	promptOwner?: SessionInfo;
+	coalesced: Map<string, Promise<unknown>>;
+	drainOnRelease: boolean;
+	/** A Stop/terminate accepted while a bridge is absent cancels every non-terminal install. */
+	terminalRequest?: "stop" | "terminate";
+	/** Interrupted-turn continuation waits until the final canonical bridge wins. */
+	bootContinuationPending: boolean;
 };
 
 type IdleWaiter = {
@@ -1429,13 +1460,26 @@ export class SessionManager {
 	 *  See docs/design/unify-session-status.md §3.4. */
 	private _statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	private static readonly STATUS_HEARTBEAT_INTERVAL_MS = 15_000;
-	/** Per-session restore/respawn mutex. Concurrent revive triggers join this promise instead of replacing each other. */
-	private _restoreCoordinators = new Map<string, RestoreCoordinator>();
+	/**
+	 * Single per-session replacement owner. Restore/respawn, role assignment,
+	 * force-abort recovery, and termination all serialize here. Its presence is
+	 * also the prompt-dispatch fence: accepted intent is durably queued on
+	 * `promptOwner` until the final replacement commits or rolls back.
+	 */
+	private _sessionReplacementCoordinators = new Map<string, SessionReplacementCoordinator>();
+	/** User-driven orphan-history recoveries include their redrive so duplicate Retry clicks join instead of dispatching twice. */
+	private _poisonedHistoryRecoveries = new Map<string, Promise<void>>();
 	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
 	private _sessionRespawnGenerations = new Map<string, number>();
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
+
+	/** Clear auto-selection discovery state after configure, refresh, or removal. */
+	invalidateAigwModelCache(): void {
+		this._aigwModelCache = null;
+	}
+
 	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
 
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
@@ -1478,49 +1522,177 @@ export class SessionManager {
 		this._untrackConnectedSession(session);
 	}
 
-	private _coalesceRestore(
-		sessionId: string,
-		restore: (generation: number) => Promise<SessionInfo | undefined>,
-	): Promise<SessionInfo | undefined> {
-		const inFlight = this._restoreCoordinators.get(sessionId);
-		if (inFlight) return inFlight.promise;
+	private _replacementTokenIsCurrent(sessionId: string, token: SessionReplacementToken): boolean {
+		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		return coordinator === token.coordinator
+			&& coordinator.active === token
+			&& this._currentRespawnGeneration(sessionId) === token.generation;
+	}
 
-		const generation = this._nextRespawnGeneration(sessionId);
-		const promise = (async () => restore(generation))()
-			.finally(() => {
-				const current = this._restoreCoordinators.get(sessionId);
-				if (current?.generation === generation) this._restoreCoordinators.delete(sessionId);
-			});
-		this._restoreCoordinators.set(sessionId, { generation, promise });
-		return promise;
+	private _mergeReplacementPromptOwner(coordinator: SessionReplacementCoordinator, canonical: SessionInfo | undefined): void {
+		const owner = coordinator.promptOwner;
+		if (!owner || !canonical || owner === canonical) {
+			if (canonical) coordinator.promptOwner = canonical;
+			return;
+		}
+		const canonicalRows = canonical.promptQueue.toArray();
+		const knownIds = new Set(canonicalRows.map(row => row.id));
+		const missing = owner.promptQueue.toArray().filter(row => !knownIds.has(row.id));
+		if (missing.length > 0) {
+			canonical.promptQueue = new PromptQueue([...canonicalRows, ...missing]);
+			this.broadcastQueue(canonical);
+		}
+		if (owner.pendingSkillExpansions?.length) {
+			const existing = canonical.pendingSkillExpansions ?? [];
+			const signatures = new Set(existing.map(entry => JSON.stringify(entry)));
+			canonical.pendingSkillExpansions = [
+				...existing,
+				...owner.pendingSkillExpansions.filter(entry => !signatures.has(JSON.stringify(entry))),
+			];
+		}
+		if (owner.recoveredPromptDispatchQueueIds?.length) {
+			canonical.recoveredPromptDispatchQueueIds = [
+				...new Set([
+					...(canonical.recoveredPromptDispatchQueueIds ?? []),
+					...owner.recoveredPromptDispatchQueueIds,
+				]),
+			];
+		}
+		if (owner.poisonRecoveryPromptDispatchQueueIds?.length) {
+			canonical.poisonRecoveryPromptDispatchQueueIds = [
+				...new Set([
+					...(canonical.poisonRecoveryPromptDispatchQueueIds ?? []),
+					...owner.poisonRecoveryPromptDispatchQueueIds,
+				]),
+			];
+		}
+		if (owner.explicitRetryQueueRowId && canonical.promptQueue.toArray().some(row => row.id === owner.explicitRetryQueueRowId)) {
+			canonical.explicitRetryQueueRowId = owner.explicitRetryQueueRowId;
+		}
+		canonical.lastPromptSource = owner.lastPromptSource ?? canonical.lastPromptSource;
+		coordinator.promptOwner = canonical;
+	}
+
+	private _coordinateSessionReplacement<T>(
+		sessionId: string,
+		kind: string,
+		operation: (token: SessionReplacementToken) => Promise<T>,
+		opts?: {
+			coalesceKey?: string;
+			drainOnRelease?: boolean;
+			/** Non-terminal operations return this without staging when Stop/terminate already won. */
+			cancelOnTerminal?: () => T | Promise<T>;
+		},
+	): Promise<T> {
+		let coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		if (!coordinator) {
+			coordinator = {
+				tail: Promise.resolve(),
+				pending: 0,
+				promptOwner: this.sessions.get(sessionId),
+				coalesced: new Map(),
+				drainOnRelease: false,
+				bootContinuationPending: false,
+			};
+			this._sessionReplacementCoordinators.set(sessionId, coordinator);
+		}
+		if (opts?.coalesceKey) {
+			const existing = coordinator.coalesced.get(opts.coalesceKey);
+			if (existing) return existing as Promise<T>;
+		}
+
+		coordinator.pending += 1;
+		coordinator.drainOnRelease ||= opts?.drainOnRelease === true;
+		const owned = coordinator;
+		const operationPromise = owned.tail.then(async () => {
+			// Terminal intent is sticky for the coordinator lifetime. A replacement
+			// queued before Stop/terminate but not yet started must never create a
+			// hidden process after cancellation wins.
+			if (owned.terminalRequest && opts?.cancelOnTerminal) {
+				return opts.cancelOnTerminal();
+			}
+			const token: SessionReplacementToken = {
+				coordinator: owned,
+				generation: this._nextRespawnGeneration(sessionId),
+				kind,
+			};
+			owned.active = token;
+			try {
+				const result = await operation(token);
+				if (!this._replacementTokenIsCurrent(sessionId, token)) {
+					throw new Error(`Session ${sessionId} ${kind} replacement was superseded`);
+				}
+				return result;
+			} finally {
+				// Token generation is finalized in exactly one place. Operations may
+				// legitimately no-op (for example Stop queued behind a role swap), or
+				// throw after reinstalling a rollback capsule; either way the surviving
+				// canonical writer must match the generation the coordinator advanced.
+				if (this._replacementTokenIsCurrent(sessionId, token)) {
+					const canonical = this.sessions.get(sessionId);
+					if (canonical) canonical.lifecycleGeneration = token.generation;
+				}
+			}
+		});
+		let resultPromise!: Promise<T>;
+		resultPromise = operationPromise.finally(async () => {
+			if (opts?.coalesceKey && owned.coalesced.get(opts.coalesceKey) === resultPromise) {
+				owned.coalesced.delete(opts.coalesceKey);
+			}
+			owned.pending -= 1;
+			this._mergeReplacementPromptOwner(owned, this.sessions.get(sessionId));
+			if (owned.pending !== 0 || this._sessionReplacementCoordinators.get(sessionId) !== owned) return;
+
+			let canonical = this.sessions.get(sessionId);
+			// Stop/terminate accepted through a transient map gap wins over startup:
+			// never make the rollback capsule idle, boot-continue, or drain intent.
+			if (canonical && !owned.terminalRequest) {
+				if (canonical.status === "starting") broadcastStatus(canonical, "idle");
+				if (owned.bootContinuationPending) {
+					// Keep the coordinator installed across the cold prompt RPC. Prompts
+					// accepted while readiness/ack is pending stay on the coordinator's
+					// durable ledger instead of racing a second prompt on this bridge.
+					owned.bootContinuationPending = false;
+					const accepted = await this._dispatchBootContinuation(canonical);
+					// An unobserved rejection did not consume the durable interrupted-turn
+					// marker. If another replacement joined while the RPC was pending, carry
+					// that intent through its queued lifecycle and retry only on the final
+					// canonical bridge. With no join, the persisted wasStreaming marker stays
+					// authoritative for the next gateway restore as before.
+					if (!accepted && canonical.restoreStartupWasStreaming === true) {
+						owned.bootContinuationPending = true;
+					}
+					this._mergeReplacementPromptOwner(owned, this.sessions.get(sessionId));
+					if (owned.pending !== 0 || this._sessionReplacementCoordinators.get(sessionId) !== owned) return;
+					canonical = this.sessions.get(sessionId);
+				}
+			}
+
+			this._sessionReplacementCoordinators.delete(sessionId);
+			owned.active = undefined;
+			if (!canonical || owned.terminalRequest) return;
+			if (
+				owned.drainOnRelease
+				&& canonical.status === "idle"
+				// Sticky drain intent from an earlier successful replacement must not
+				// override a later canonical turn error or manual-recovery rejection.
+				// The durable rows remain queued until explicit Retry/fresh user intent.
+				&& !canonical.lastTurnErrored
+				&& !canonical.isCompacting
+				&& !this._bootRepromptedSessions.has(sessionId)
+				&& !canonical.promptQueue.isEmpty
+			) this.drainQueue(canonical);
+		});
+		owned.tail = resultPromise.then(() => undefined, () => undefined);
+		if (opts?.coalesceKey) owned.coalesced.set(opts.coalesceKey, resultPromise);
+		return resultPromise;
 	}
 
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
-		return this._coalesceRestore(ps.id, async (generation) => {
+		return this._coordinateSessionReplacement(ps.id, "restore", async (_token) => {
 			await this.restoreSession(ps);
-			const restored = this.sessions.get(ps.id);
-			if (restored) {
-				restored.lifecycleGeneration = generation;
-				// CS-R2 follow-up (narrow CS-R7): restoreSession() re-seeds the prompt
-				// queue from `ps.messageQueue` and broadcasts idle WITHOUT draining, so
-				// a prompt persisted in the queue — or enqueued during the revive window
-				// — would sit undispatched (doc-04 F7 shape). Drain once here against the
-				// canonical revived object. `drainQueue` itself no-ops unless this is the
-				// current writer (`_sessionWriterIsCurrent`); we additionally gate on idle
-				// + not-compacting + no pending boot-reprompt so we never race the
-				// mid-turn boot-resume nudge. This is intentionally a single drain, not a
-				// broad drain-on-every-idle-transition hook.
-				if (
-					restored.status === "idle" &&
-					!restored.isCompacting &&
-					!this._bootRepromptedSessions.has(ps.id) &&
-					!restored.promptQueue.isEmpty
-				) {
-					this.drainQueue(restored);
-				}
-			}
-			return restored;
-		});
+			return this.sessions.get(ps.id);
+		}, { coalesceKey: "rehydrate", drainOnRelease: true, cancelOnTerminal: () => undefined });
 	}
 
 	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
@@ -2043,6 +2215,7 @@ export class SessionManager {
 			searchIndex: resolvedSearchIndex,
 			sessions: this.sessions,
 			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
+			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
@@ -2130,8 +2303,8 @@ export class SessionManager {
 		}
 
 		try {
-			if (await isGitRepo(cwd)) {
-				const repoRoot = await getRepoRoot(cwd);
+			if (await isGitRepo(cwd, this.commandRunner)) {
+				const repoRoot = await getRepoRoot(cwd, this.commandRunner);
 				const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
 				if (repoOffset) return repoOffset;
 			}
@@ -2144,8 +2317,8 @@ export class SessionManager {
 			const projectRoot = project?.rootPath;
 			if (projectRoot) {
 				try {
-					if (await isGitRepo(projectRoot)) {
-						const repoRoot = await getRepoRoot(projectRoot);
+					if (await isGitRepo(projectRoot, this.commandRunner)) {
+						const repoRoot = await getRepoRoot(projectRoot, this.commandRunner);
 						const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
 						if (repoOffset) return repoOffset;
 					}
@@ -2730,7 +2903,7 @@ export class SessionManager {
 	/**
 	 * Initialize the worktree pool for a repo. Pre-creates worktrees in the
 	 * background so new sessions can claim one instantly (~0ms) instead of
-	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
+	 * waiting for `git worktree add` + `npm ci` (~10-30s).
 	 */
 	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined, projectRoot?: string): void {
 		if (projectId === HEADQUARTERS_PROJECT_ID) {
@@ -3026,6 +3199,11 @@ export class SessionManager {
 		const codeAssistPath = writeGoogleCodeAssistProviderExtension(sessionId);
 		if (codeAssistPath) {
 			args.push("--extension", codeAssistPath);
+		}
+
+		const aigwDnsGuardPath = writeAigwDnsGuardExtension();
+		if (aigwDnsGuardPath) {
+			args.push("--extension", aigwDnsGuardPath);
 		}
 
 		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
@@ -3403,6 +3581,60 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, updates);
 	}
 
+	private _queuePromptBehindReplacement(sessionId: string, text: string, opts?: {
+		images?: Array<{ type: "image"; data: string; mimeType: string }>;
+		attachments?: unknown[];
+		isSteered?: boolean;
+		modelText?: string;
+		skillExpansions?: SkillExpansion[];
+		fileMentions?: FileMention[];
+		source?: PromptSource;
+		author?: MessageAuthor;
+		suppressTitleGen?: boolean;
+	}): { status: "queued" } | undefined {
+		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		if (!coordinator) return undefined;
+		// Keep one ordered acceptance ledger for the coordinator's whole lifetime.
+		// A replacement can install its fresh SessionInfo before post-install work
+		// finishes; switching prompt ownership at that point splits the queue and
+		// makes final reconciliation append an earlier prompt after a later one.
+		const session = coordinator.promptOwner ?? this.sessions.get(sessionId);
+		if (!session) return { status: "queued" };
+		coordinator.promptOwner ??= session;
+		const source = opts?.source ?? "user";
+		const author = resolveAcceptedPromptAuthor(source, opts?.author);
+		session.lastPromptSource = source;
+		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
+		const hasSkillExpansions = !!opts?.skillExpansions?.length;
+		const hasFileMentions = !!opts?.fileMentions?.length;
+		if (hasSkillExpansions || hasFileMentions) {
+			appendSkillSidecarEntry(sessionId, {
+				ts: this.clock.now(),
+				modelText: dispatchText,
+				originalText: text,
+				skillExpansions: opts?.skillExpansions ?? [],
+				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+			});
+			if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
+			session.pendingSkillExpansions.push({
+				modelText: dispatchText,
+				originalText: text,
+				skillExpansions: opts?.skillExpansions ?? [],
+				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+			});
+		}
+		session.promptQueue.enqueue(dispatchText, {
+			images: opts?.images,
+			attachments: opts?.attachments,
+			isSteered: opts?.isSteered,
+			suppressTitleGen: opts?.suppressTitleGen,
+			source,
+			author,
+		});
+		this.broadcastQueue(session);
+		return { status: "queued" };
+	}
+
 	/**
 	 * dead-bridge auto-revive — Auto-revive a dead RPC bridge before dispatching a brand-new
 	 * prompt. Used ONLY at the two new-prompt sites in `enqueuePrompt` (the
@@ -3457,8 +3689,68 @@ export class SessionManager {
 		 *  mark the session titleGenerated, so the next real prompt still names it. */
 		suppressTitleGen?: boolean;
 	}): Promise<{ status: "dispatched" | "queued" }> {
+		// Replacement ownership is the first dispatch fence — before poison/error
+		// classification, revive logic, or any RPC. Every prompt accepted while a
+		// bridge is staged is persisted exactly once and released only after the
+		// final coordinated replacement commits or rolls back.
+		const staged = this._queuePromptBehindReplacement(sessionId, text, opts);
+		if (staged) return staged;
+
+		// An in-place poison respawn temporarily removes SessionInfo. Join before
+		// looking it up so prompts arriving in that window are not silently lost.
+		// If the shared replacement fails, this is a distinct accepted follow-up,
+		// not a duplicate Retry click: durably park it on the rollback capsule and
+		// report that acceptance as queued so the caller does not resubmit it.
+		const poisonRecovery = this._poisonedHistoryRecoveries.get(sessionId);
+		if (poisonRecovery) {
+			try {
+				await poisonRecovery;
+			} catch (err) {
+				const rollback = this.sessions.get(sessionId);
+				if (!rollback) throw err;
+				const source = opts?.source ?? "user";
+				const author = resolveAcceptedPromptAuthor(source, opts?.author);
+				rollback.lastPromptSource = source;
+				const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
+				const hasSkillExpansions = !!opts?.skillExpansions?.length;
+				const hasFileMentions = !!opts?.fileMentions?.length;
+				if (hasSkillExpansions || hasFileMentions) {
+					appendSkillSidecarEntry(sessionId, {
+						ts: this.clock.now(),
+						modelText: dispatchText,
+						originalText: text,
+						skillExpansions: opts?.skillExpansions ?? [],
+						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+					});
+					if (!rollback.pendingSkillExpansions) rollback.pendingSkillExpansions = [];
+					rollback.pendingSkillExpansions.push({
+						modelText: dispatchText,
+						originalText: text,
+						skillExpansions: opts?.skillExpansions ?? [],
+						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+					});
+				}
+				rollback.promptQueue.enqueue(dispatchText, {
+					images: opts?.images,
+					attachments: opts?.attachments,
+					isSteered: opts?.isSteered,
+					suppressTitleGen: opts?.suppressTitleGen,
+					source,
+					author,
+				});
+				this.broadcastQueue(rollback);
+				return { status: "queued" };
+			}
+			return this.enqueuePrompt(sessionId, text, opts);
+		}
 		let session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
+		let recoveredPoisonDuringRevive = false;
+		let revivedPoisonQueueIds: string[] | undefined;
+		let revivedPoisonOwnedQueueIds: string[] | undefined;
+		let revivedPoisonPromptEnvelopes: SessionInfo["pendingSkillExpansions"];
+		let revivedSessionOnlyGrantedTools: string[] | undefined;
+		let revivedOneTimeGrantedTools: string[] | undefined;
 
 		// REVIVE-WINDOW JOIN (CS-R2 follow-up). A prompt that arrives while the
 		// session is dormant/terminated/fenced — or while an `addClient` dormant
@@ -3469,23 +3761,61 @@ export class SessionManager {
 		// F7 stranded-prompt shape). Instead, JOIN the coalesced restore (it starts
 		// one or joins the in-flight one), then re-read the canonical revived session
 		// and dispatch against it via the normal path below.
-		const restoreInFlight = this._restoreCoordinators.has(sessionId);
+		const restoreCoordinator = this._sessionReplacementCoordinators.get(sessionId);
+		const restoreInFlight = !!restoreCoordinator;
 		const inReviveWindow = restoreInFlight
 			|| session.status === "terminated"
 			|| session.dormant === true
 			|| session.lifecycleFenced === true;
 		if (inReviveWindow) {
+			const poisonedDormant = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
+			if (poisonedDormant) {
+				revivedPoisonQueueIds = session.recoveredPromptDispatchQueueIds?.slice();
+				revivedPoisonOwnedQueueIds = session.poisonRecoveryPromptDispatchQueueIds?.slice();
+				revivedPoisonPromptEnvelopes = session.pendingSkillExpansions?.slice();
+				revivedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools?.slice();
+				revivedOneTimeGrantedTools = session.oneTimeGrantedTools?.slice();
+			}
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
 			if (ps && ps.agentSessionFile) {
-				// Coalesces: joins an in-flight restore or starts the single restore.
-				await this._restoreSessionCoalesced(ps);
+				// A failed poison respawn leaves the old object as a rollback capsule;
+				// revive it in place to carry clients and process-local intent forward.
+				// Other dormant restores retain the existing cold-restore path.
+				if (restoreInFlight) {
+					await restoreCoordinator?.tail;
+				} else if (poisonedDormant) {
+					const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
+					await this._respawnAgentInPlace(session, ps, {
+						preserveSandboxRealm: session.sandboxed === true,
+						deferQueueDrain: true,
+						mutatePs: p => {
+							if (overrideAllowedTools !== undefined) (p as any)._overrideAllowedTools = overrideAllowedTools;
+							if (revivedSessionOnlyGrantedTools !== undefined) (p as any)._overrideGrantedTools = revivedSessionOnlyGrantedTools;
+						},
+					});
+				} else {
+					await this._restoreSessionCoalesced(ps);
+				}
 				const revived = this.sessions.get(sessionId);
 				if (!revived) return { status: "queued" };
 				session = revived;
+				recoveredPoisonDuringRevive = poisonedDormant;
+				if (revivedSessionOnlyGrantedTools !== undefined) {
+					session.sessionOnlyGrantedTools = revivedSessionOnlyGrantedTools;
+				}
+				if (revivedOneTimeGrantedTools !== undefined) {
+					session.oneTimeGrantedTools = revivedOneTimeGrantedTools;
+				}
+				if (revivedPoisonPromptEnvelopes?.length) {
+					session.pendingSkillExpansions = [
+						...revivedPoisonPromptEnvelopes,
+						...(session.pendingSkillExpansions ?? []),
+					];
+				}
 			} else if (restoreInFlight) {
-				// No restorable record of our own, but a restore is already running for
+				// No restorable record of our own, but a replacement is already running for
 				// this session — join it rather than acting on the stale object.
-				await this._restoreCoordinators.get(sessionId)?.promise;
+				await restoreCoordinator?.tail;
 				const revived = this.sessions.get(sessionId);
 				if (!revived) return { status: "queued" };
 				session = revived;
@@ -3532,6 +3862,49 @@ export class SessionManager {
 			});
 		}
 
+		// A previous poison-repair attempt may have failed after killing the old
+		// bridge and left this same session dormant. The revive above already loaded
+		// the sanitized history into a fresh process, so dispatch this follow-up
+		// ahead of parked rows without respawning a second time. Give the accepted
+		// intent the same durable poison ownership as the primary recovery path:
+		// a pre-observation RPC rejection must preserve this exact row for eventual
+		// drain rather than turn it into an ordinary, supersedable dispatch copy.
+		if (recoveredPoisonDuringRevive) {
+			if (revivedPoisonQueueIds?.length) {
+				session.recoveredPromptDispatchQueueIds = revivedPoisonQueueIds;
+				session.poisonRecoveryPromptDispatchQueueIds = revivedPoisonOwnedQueueIds;
+				this.consumeRecoveredPromptDispatchRows(session);
+			}
+			const accepted = session.promptQueue.enqueue(dispatchText, {
+				images: opts?.images,
+				attachments: opts?.attachments,
+				isSteered: opts?.isSteered,
+				suppressTitleGen: opts?.suppressTitleGen,
+				source,
+				author,
+			});
+			this.markPoisonRecoveryPromptDispatchRow(session, accepted.id);
+			this.broadcastQueue(session);
+			session.lastTurnErrored = false;
+			session.lastTurnErrorMessage = undefined;
+			session.turnHadToolCalls = false;
+			session.transientRetryAttempts = 0;
+			session.lastPromptSource = opts?.source ?? "user";
+			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+			await this.dispatchDirectPrompt(
+				session,
+				dispatchText,
+				opts?.images,
+				opts?.attachments,
+				!!opts?.isSteered,
+				!!opts?.coldStart,
+				source,
+				author,
+				accepted.id,
+			);
+			return { status: "dispatched" };
+		}
+
 		// ERROR STATE GATING: if last turn errored, either implicitly unstick
 		// (up to MAX_CONSECUTIVE_ERROR_TURNS) or park the message in the queue.
 		if (session.lastTurnErrored) {
@@ -3543,6 +3916,65 @@ export class SessionManager {
 			// retry banner/timer running, since the user has signalled fresh intent
 			// and the next action will be an explicit Retry click or fix upstream.
 			this.cancelPendingAutoRetry(session, "new-prompt");
+
+			// Anthropic orphan tool-result ordering poison cannot be unstuck by
+			// sending another prompt to Pi's current in-memory history. Recover it
+			// before the generic error cap so a normal follow-up is itself the
+			// user-driven redrive, ahead of already parked queue rows.
+			if (isOrphanToolResultOrderingError(session.lastTurnErrorMessage)) {
+				const inFlight = this._poisonedHistoryRecoveries.get(session.id);
+				if (inFlight) {
+					await inFlight;
+					return this.enqueuePrompt(sessionId, text, opts);
+				}
+
+				// Persist the initiating follow-up before replacement starts. Prompts that
+				// arrive behind it use the coordinator's entry fence, preserving acceptance
+				// order even if startup fails. On success only this exact row is removed and
+				// dispatched ahead of older parked work.
+				const accepted = session.promptQueue.enqueue(dispatchText, {
+					images: opts?.images,
+					attachments: opts?.attachments,
+					isSteered: opts?.isSteered,
+					suppressTitleGen: opts?.suppressTitleGen,
+					source,
+					author,
+				});
+				this.markPoisonRecoveryPromptDispatchRow(session, accepted.id);
+				this.broadcastQueue(session);
+				const recovery = (async () => {
+					const recovered = await this._recoverPoisonedHistory(session, "follow-up", async (target) => {
+						target.lastTurnErrored = false;
+						target.lastTurnErrorMessage = undefined;
+						target.turnHadToolCalls = false;
+						target.transientRetryAttempts = 0;
+						target.lastPromptSource = opts?.source ?? "user";
+						if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+						try {
+							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+						} catch (err) {
+							target.lastTurnErrored = true;
+							target.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
+							throw err;
+						}
+						// A new follow-up supersedes recovered copies of the failed old turn,
+						// but only after the new intent was accepted by the canonical bridge.
+						this.consumeRecoveredPromptDispatchRows(target);
+					});
+					if (!recovered && this.sessions.has(session.id)) {
+						throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+					}
+				})();
+				this._poisonedHistoryRecoveries.set(session.id, recovery);
+				try {
+					await recovery;
+				} finally {
+					if (this._poisonedHistoryRecoveries.get(session.id) === recovery) {
+						this._poisonedHistoryRecoveries.delete(session.id);
+					}
+				}
+				return { status: "dispatched" };
+			}
 
 			if (consec >= MAX_CONSECUTIVE_ERROR_TURNS) {
 				// Cap reached — park. Human must click Retry (or fix upstream) to drain.
@@ -3570,9 +4002,10 @@ export class SessionManager {
 				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
 			);
 
-			// A fresh prompt supersedes any recovered dispatch-time copy of the
-			// failed prompt. Drop it before dispatching the new intent so a later
-			// agent_end drain cannot replay stale work after the follow-up succeeds.
+			// A fresh prompt supersedes ordinary recovered dispatch-time copies of
+			// the failed prompt. A poison-repair row is different: Bobbit already
+			// accepted it as a manual recovery action, so it remains durable until Pi
+			// accepts it and drains exactly once after this follow-up succeeds.
 			this.consumeRecoveredPromptDispatchRows(session);
 
 			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
@@ -3980,7 +4413,7 @@ export class SessionManager {
 		isSteered?: boolean;
 		source?: PromptSource;
 		author?: MessageAuthor;
-	}>, reason: string, source: string): void {
+	}>, reason: string, source: string, durableQueueRowIds?: Array<string | undefined>, manualRecoveryRequired = false): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
 		const providerAuthFailure = isProviderAuthFailure(reason);
 		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
@@ -3991,11 +4424,21 @@ export class SessionManager {
 			return;
 		}
 
-		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); re-enqueueing ${rows.length} row(s) at front`);
-		// Re-enqueue at front in original order so the next drain re-dispatches
-		// the same batch. Reverse iteration because enqueueAtFront unshifts.
+		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); preserving ${rows.length} row(s) at front`);
+		// A coordinated poison redrive keeps its initiating row durable until the
+		// bridge accepts the RPC. On rejection, reuse that exact row instead of
+		// enqueueing a duplicate. Other dispatch paths retain the normal front
+		// re-enqueue behavior. Reverse iteration because enqueueAtFront unshifts.
+		const currentIds = new Set(session.promptQueue.toArray().map(row => row.id));
+		const poisonOwnedIds = new Set(session.poisonRecoveryPromptDispatchQueueIds ?? []);
 		const recoveredIds: string[] = [];
-		for (const r of [...rows].reverse()) {
+		for (let index = rows.length - 1; index >= 0; index--) {
+			const durableId = durableQueueRowIds?.[index];
+			if (durableId && currentIds.has(durableId)) {
+				recoveredIds.push(durableId);
+				continue;
+			}
+			const r = rows[index];
 			const recovered = session.promptQueue.enqueueAtFront(r.text, {
 				images: r.images,
 				attachments: r.attachments,
@@ -4004,12 +4447,34 @@ export class SessionManager {
 				author: r.author,
 			});
 			recoveredIds.push(recovered.id);
+			if (durableId && poisonOwnedIds.has(durableId)) {
+				const wasExplicitRetry = session.explicitRetryQueueRowId === durableId;
+				this.clearRecoveredPromptDispatchOwnership(session, [durableId]);
+				this.markPoisonRecoveryPromptDispatchRow(session, recovered.id);
+				if (wasExplicitRetry) session.explicitRetryQueueRowId = recovered.id;
+			}
 		}
 		if (recoveredIds.length > 0) {
 			session.recoveredPromptDispatchQueueIds = [
-				...(session.recoveredPromptDispatchQueueIds ?? []),
-				...recoveredIds,
+				...new Set([
+					...(session.recoveredPromptDispatchQueueIds ?? []),
+					...recoveredIds,
+				]),
 			];
+			// A rejected poison follow-up/Retry remains the front-priority human
+			// recovery action. Move the exact durable rows by ID; never infer identity
+			// from equal text/images or let older parked work overtake them.
+			session.promptQueue.reorderByIds([...recoveredIds].reverse());
+		}
+		if (manualRecoveryRequired) {
+			session.lastTurnErrored = true;
+			session.lastTurnErrorMessage = safeReason;
+			session.turnHadToolCalls = false;
+			session.recoverDrainAttempts = 0;
+			if (providerAuthFailure) this.surfaceProviderAuthFailure(session, reason, source);
+			else broadcastStatus(session, "idle");
+			this.broadcastQueue(session);
+			return;
 		}
 		if (providerAuthFailure) {
 			this.surfaceProviderAuthFailure(session, reason, source);
@@ -4055,12 +4520,30 @@ export class SessionManager {
 		coldStart?: boolean,
 		source: PromptSource = "user",
 		author: MessageAuthor = LOCAL_USER_AUTHOR,
+		durableQueueRowId?: string,
 		promptId = `prompt:${randomUUID()}`,
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
+		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
+
+		const consumeDurableAcceptanceRow = () => {
+			if (!durableQueueRowId || !session.promptQueue.remove(durableQueueRowId)) return;
+			this.clearRecoveredPromptDispatchOwnership(session, [durableQueueRowId]);
+			this.broadcastQueue(session);
+		};
+		const acceptedBeforeAckFailure = (reason: string): boolean => {
+			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
+			if (observedTurnVersion === dispatchObservedTurnVersion) return false;
+			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
+			console.warn(`[session-manager] direct prompt dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); treating the dispatch as accepted`);
+			consumeDurableAcceptanceRow();
+			session.recoverDrainAttempts = 0;
+			return true;
+		};
 
 		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
 		this.recordPromptAuthorDispatch(session, promptId, text, source, author);
@@ -4075,17 +4558,21 @@ export class SessionManager {
 				: await session.rpcClient.prompt(text, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
+				if (acceptedBeforeAckFailure(reason)) return;
 				this.cancelPromptAuthorDispatch(session, promptId);
 				cancelled = true;
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 				recovered = true;
 				throw this.safeDispatchError(session, reason);
 			}
+			// The RPC accepted the intent; only now consume its durable acceptance row.
+			consumeDurableAcceptanceRow();
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
+			if (!recovered && acceptedBeforeAckFailure(reason)) return;
 			if (!cancelled) this.cancelPromptAuthorDispatch(session, promptId);
 			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 			}
 			if (isProviderAuthFailure(reason)) {
 				throw this.safeDispatchError(session, reason);
@@ -4150,6 +4637,10 @@ export class SessionManager {
 		const dispatchedRowsForRecovery = steered.length > 0
 			? steered.map(r => ({ text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, author: r.author }))
 			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, author: promptAuthor }];
+		const dispatchedQueueRowIds = steered.length > 0 ? steered.map(row => row.id) : [next.id];
+		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
+			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
+		);
 
 		const recoverDispatchedRows = (reason: string) => {
 			// Suppress recovery only after an inbound agent event proves the dequeued
@@ -4161,9 +4652,17 @@ export class SessionManager {
 			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
 			if (observedTurnVersion !== dispatchObservedTurnVersion) {
 				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+				this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 				return;
 			}
-			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
+			this.recoverPromptDispatch(
+				session,
+				dispatchedRowsForRecovery,
+				reason,
+				"drainQueue",
+				dispatchedQueueRowIds,
+				poisonOwnedDispatch,
+			);
 		};
 
 		this.recordPromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
@@ -4178,8 +4677,9 @@ export class SessionManager {
 					this.cancelPromptAuthorDispatch(session, promptId);
 					recoverDispatchedRows(resp.error || "unknown");
 				} else {
-					// Dispatch landed — clear the busy-guard retry budget so a
-					// future recovery starts fresh.
+					// Dispatch landed — clear the busy-guard retry budget and any
+					// ownership ledger for the dequeued durable row.
+					this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 					session.recoverDrainAttempts = 0;
 				}
 			})
@@ -4199,7 +4699,43 @@ export class SessionManager {
 	 * - Tracks message_end with stopReason "error" so we can suppress queue draining.
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
-	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+	private handleAgentLifecycle(
+		session: SessionInfo,
+		event: any,
+		opts?: { replacementOwnedTerminal?: boolean; deferQueueDrain?: boolean },
+	): void {
+		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
+		// Record it for the current canonical generation even while a replacement
+		// coordinator suppresses ordinary lifecycle effects: poison redrive and boot
+		// continuation deliberately dispatch before that coordinator releases.
+		const coordinator = this._sessionReplacementCoordinators.get(session.id);
+		const writerIsCurrent = this._sessionWriterIsCurrent(session);
+		const observesAcceptedTurn =
+			event.type === "agent_start" ||
+			event.type === "tool_execution_start" ||
+			(event.type === "message_end" && (
+				event.message?.role === "user" ||
+				event.message?.role === "user-with-attachments" ||
+				event.message?.role === "assistant"
+			));
+		if (observesAcceptedTurn && writerIsCurrent) {
+			session.agentObservedTurnVersion = (session.agentObservedTurnVersion ?? 0) + 1;
+			// Boot continuation may receive agent_start before its prompt RPC ack while
+			// coordinator ownership remains installed.
+			if (event.type === "agent_start") this._bootRepromptedSessions.delete(session.id);
+		}
+
+		// A coordinated replacement may keep a superseded bridge subscribed until its
+		// successor is validated. Fence only those stale writers. The final canonical
+		// bridge can already be running a poison redrive or boot continuation while its
+		// prompt RPC acknowledgement is pending; its terminal lifecycle must still make
+		// the session idle, record errors, and complete turn bookkeeping. Queue draining
+		// is deferred until coordinator release so the still-durable acceptance row is
+		// consumed before anything can be dispatched again.
+		if (coordinator && !opts?.replacementOwnedTerminal && !writerIsCurrent) return;
+		const deferQueueDrain = opts?.deferQueueDrain === true
+			|| (!!coordinator && !opts?.replacementOwnedTerminal);
+
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
 		// lifecycle events below. The agent flushes to `.jsonl` only on
@@ -4231,22 +4767,6 @@ export class SessionManager {
 					);
 				}
 			}
-		}
-
-		// Inbound agent events that carry turn progress prove a just-dispatched
-		// prompt was accepted. Keep this separate from statusVersion: local Stop /
-		// abort status broadcasts must not suppress recovery for a prompt that was
-		// dequeued but rejected before acceptance.
-		if (
-			event.type === "agent_start" ||
-			event.type === "tool_execution_start" ||
-			(event.type === "message_end" && (
-				event.message?.role === "user" ||
-				event.message?.role === "user-with-attachments" ||
-				event.message?.role === "assistant"
-			))
-		) {
-			session.agentObservedTurnVersion = (session.agentObservedTurnVersion ?? 0) + 1;
 		}
 
 		// Splice this echoed user message off the shadow ledger if it was a
@@ -4410,8 +4930,14 @@ export class SessionManager {
 				// Fresh budget for the one-microtask drainQueue→finishRun race on
 				// this turn boundary (see MAX_RECOVER_DRAIN_RETRIES).
 				session.recoverDrainAttempts = 0;
-				this.drainQueue(session);
-			} else {
+				// A graceful Stop or canonical coordinated prompt performs terminal
+				// bookkeeping while replacement ownership is still held. The coordinator
+				// performs the sole drain after prompt acknowledgement settles.
+				if (!deferQueueDrain) this.drainQueue(session);
+				else if (coordinator && writerIsCurrent && !opts?.replacementOwnedTerminal) {
+					coordinator.drainOnRelease = true;
+				}
+			} else if (!deferQueueDrain) {
 				// Auto-retry transient model/streaming glitches (e.g. malformed
 				// tool-call JSON from the model's streamed input_json_delta).
 				// Matches the set of patterns the verification harness already
@@ -4627,6 +5153,9 @@ export class SessionManager {
 		const GENERIC_RETRY_DELAYS_MS = [1000, 5000, 60_000] as const;
 		const errMsg = session.lastTurnErrorMessage || "";
 		if (!errMsg) return false;
+		// A poisoned transcript requires a user-driven sanitize/respawn. Never
+		// arm an automatic timer that could repeatedly redispatch the same 400.
+		if (isOrphanToolResultOrderingError(errMsg)) return false;
 		if (isNonRetryableAgentError(errMsg)) return false;
 
 		const isBackoff = isProviderBackoffError(errMsg);
@@ -4750,20 +5279,144 @@ export class SessionManager {
 		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
 		catch { ps = undefined; }
 		if (!ps?.agentSessionFile) return undefined;
-		const restored = await this._respawnAgentInPlace(session, ps);
+		const restored = await this._respawnAgentInPlace(session, ps, { deferQueueDrain: true });
 		return restored ?? this.sessions.get(session.id);
+	}
+
+	/**
+	 * Repair an Anthropic orphan-tool-result poison, then serialize its redrive
+	 * behind every lifecycle request accepted while repair was in flight. This
+	 * second coordinated operation is part of the poison single-flight: role or
+	 * restart replacement therefore commits first and the intent lands on the
+	 * final canonical bridge; Stop/terminate suppress it without deleting intent.
+	 */
+	private async _recoverPoisonedHistory(
+		session: SessionInfo,
+		boundary: "retry" | "follow-up",
+		redrive?: (target: SessionInfo) => Promise<void>,
+	): Promise<SessionInfo | undefined> {
+		const repaired = await this._coordinateSessionReplacement(session.id, "poison-recovery", async (token) => {
+			const current = this.sessions.get(session.id) ?? session;
+			let ps: PersistedSession | undefined;
+			try { ps = this.resolveStoreForSession(session.id).get(session.id); }
+			catch { ps = undefined; }
+			if (!ps?.agentSessionFile) return undefined;
+
+			const pendingPromptEnvelopes = current.pendingSkillExpansions?.slice();
+			const recoveredPromptDispatchQueueIds = current.recoveredPromptDispatchQueueIds?.slice();
+			const poisonRecoveryPromptDispatchQueueIds = current.poisonRecoveryPromptDispatchQueueIds?.slice();
+			const savedSessionOnlyGrantedTools = current.sessionOnlyGrantedTools?.slice();
+			const savedOneTimeGrantedTools = current.oneTimeGrantedTools?.slice();
+			const overrideAllowedTools = this.recomputeAllowedToolsForRestart(current, ps);
+			const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+			const repairedRecords = await sanitizeAgentTranscriptFile(fileCtx, ps.agentSessionFile, this.sandboxManager);
+			console.info(
+				`[session-manager] Poisoned-history repair session=${session.id} boundary=${boundary} repairedRecords=${repairedRecords} sandboxed=${ps.sandboxed === true} project=${current.projectId ?? ps.projectId ?? "unknown"}`,
+			);
+			const restored = await this._respawnAgentInPlaceOwned(session.id, current, ps, {
+				preserveSandboxRealm: current.sandboxed === true,
+				deferQueueDrain: true,
+				mutatePs: p => {
+					if (overrideAllowedTools !== undefined) (p as any)._overrideAllowedTools = overrideAllowedTools;
+					if (savedSessionOnlyGrantedTools !== undefined) (p as any)._overrideGrantedTools = savedSessionOnlyGrantedTools;
+				},
+			}, token);
+			const target = restored ?? this.sessions.get(session.id);
+			if (target && target !== current) {
+				if (savedSessionOnlyGrantedTools) target.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
+				if (savedOneTimeGrantedTools) target.oneTimeGrantedTools = savedOneTimeGrantedTools;
+				if (pendingPromptEnvelopes?.length) {
+					target.pendingSkillExpansions = [
+						...pendingPromptEnvelopes,
+						...(target.pendingSkillExpansions ?? []),
+					];
+				}
+				if (recoveredPromptDispatchQueueIds?.length) {
+					target.recoveredPromptDispatchQueueIds = [
+						...new Set([
+							...recoveredPromptDispatchQueueIds,
+							...(target.recoveredPromptDispatchQueueIds ?? []),
+						]),
+					];
+				}
+				if (poisonRecoveryPromptDispatchQueueIds?.length) {
+					target.poisonRecoveryPromptDispatchQueueIds = [
+						...new Set([
+							...poisonRecoveryPromptDispatchQueueIds,
+							...(target.poisonRecoveryPromptDispatchQueueIds ?? []),
+						]),
+					];
+				}
+			}
+			return target;
+		}, { coalesceKey: "poison-recovery", drainOnRelease: false, cancelOnTerminal: () => undefined });
+		if (!repaired || !redrive) return repaired;
+
+		return this._coordinateSessionReplacement(session.id, "poison-redrive", async (token) => {
+			if (token.coordinator.terminalRequest) return undefined;
+			const target = this.sessions.get(session.id);
+			if (!target || target.status === "terminated" || target.dormant || target.lifecycleFenced) return undefined;
+			// Dispatch recovery belongs to this generation. Make the canonical writer
+			// current before the RPC so a rejected redrive can restore its durable row
+			// and idle/error state instead of being discarded as a stale callback.
+			target.lifecycleGeneration = token.generation;
+			await redrive(target);
+			return target;
+		}, { coalesceKey: "poison-redrive", drainOnRelease: false, cancelOnTerminal: () => undefined });
+	}
+
+	private markPoisonRecoveryPromptDispatchRow(session: SessionInfo, id: string): void {
+		session.poisonRecoveryPromptDispatchQueueIds = [
+			...new Set([...(session.poisonRecoveryPromptDispatchQueueIds ?? []), id]),
+		];
+	}
+
+	private clearRecoveredPromptDispatchOwnership(session: SessionInfo, ids: Iterable<string>): void {
+		const cleared = new Set(ids);
+		if (cleared.size === 0) return;
+		session.recoveredPromptDispatchQueueIds = session.recoveredPromptDispatchQueueIds
+			?.filter(id => !cleared.has(id));
+		if (session.recoveredPromptDispatchQueueIds?.length === 0) {
+			session.recoveredPromptDispatchQueueIds = undefined;
+		}
+		session.poisonRecoveryPromptDispatchQueueIds = session.poisonRecoveryPromptDispatchQueueIds
+			?.filter(id => !cleared.has(id));
+		if (session.poisonRecoveryPromptDispatchQueueIds?.length === 0) {
+			session.poisonRecoveryPromptDispatchQueueIds = undefined;
+		}
+		if (session.explicitRetryQueueRowId && cleared.has(session.explicitRetryQueueRowId)) {
+			session.explicitRetryQueueRowId = undefined;
+		}
 	}
 
 	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
 		const ids = session.recoveredPromptDispatchQueueIds;
 		if (!ids?.length) return false;
+		const poisonOwned = new Set(session.poisonRecoveryPromptDispatchQueueIds ?? []);
+		const supersededIds = ids.filter(id => !poisonOwned.has(id));
 		let removedAny = false;
-		for (const id of ids) {
+		for (const id of supersededIds) {
 			removedAny = session.promptQueue.remove(id) || removedAny;
 		}
-		session.recoveredPromptDispatchQueueIds = undefined;
+		this.clearRecoveredPromptDispatchOwnership(session, supersededIds);
 		if (removedAny) this.broadcastQueue(session);
 		return removedAny;
+	}
+
+	private findQueuedRetryRow(
+		session: SessionInfo,
+		candidateTexts: Array<string | undefined>,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		excludeIds?: ReadonlySet<string>,
+	): QueuedMessage | undefined {
+		const textSet = new Set(candidateTexts.filter((text): text is string => typeof text === "string"));
+		if (textSet.size === 0) return undefined;
+		const imageSignature = JSON.stringify(images ?? []);
+		return session.promptQueue.toArray().find((queued) => {
+			if (excludeIds?.has(queued.id)) return false;
+			if (!textSet.has(queued.text)) return false;
+			return JSON.stringify(queued.images ?? []) === imageSignature;
+		});
 	}
 
 	private consumeQueuedRetryRow(
@@ -4772,18 +5425,58 @@ export class SessionManager {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>,
 		excludeIds?: ReadonlySet<string>,
 	): boolean {
-		const textSet = new Set(candidateTexts.filter((text): text is string => typeof text === "string"));
-		if (textSet.size === 0) return false;
-		const imageSignature = JSON.stringify(images ?? []);
-		const row = session.promptQueue.toArray().find((queued) => {
-			if (excludeIds?.has(queued.id)) return false;
-			if (!textSet.has(queued.text)) return false;
-			return JSON.stringify(queued.images ?? []) === imageSignature;
-		});
+		const row = this.findQueuedRetryRow(session, candidateTexts, images, excludeIds);
 		if (!row) return false;
 		const removed = session.promptQueue.remove(row.id);
 		if (removed) this.broadcastQueue(session);
 		return removed;
+	}
+
+	private enqueueDurableRetryRow(
+		session: SessionInfo,
+		text: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+	): QueuedMessage {
+		const existing = session.explicitRetryQueueRowId
+			? session.promptQueue.toArray().find(row => row.id === session.explicitRetryQueueRowId)
+			: undefined;
+		if (existing) {
+			existing.source = "system";
+			existing.author = BOBBIT_SYSTEM_AUTHOR;
+			session.recoveredPromptDispatchQueueIds = [
+				...new Set([...(session.recoveredPromptDispatchQueueIds ?? []), existing.id]),
+			];
+			session.promptQueue.reorderByIds([existing.id]);
+			this.broadcastQueue(session);
+			return existing;
+		}
+		const row = session.promptQueue.enqueueAtFront(text, {
+			images,
+			source: "system",
+			author: BOBBIT_SYSTEM_AUTHOR,
+		});
+		session.explicitRetryQueueRowId = row.id;
+		session.recoveredPromptDispatchQueueIds = [
+			...new Set([...(session.recoveredPromptDispatchQueueIds ?? []), row.id]),
+		];
+		// enqueueAtFront preserves the queue's steer grouping. Explicit Retry is a
+		// separate front-priority human action, so pin its unique row first by ID.
+		session.promptQueue.reorderByIds([row.id]);
+		this.broadcastQueue(session);
+		return row;
+	}
+
+	private ensureDurableRetryRow(session: SessionInfo, accepted: QueuedMessage): string {
+		if (!session.promptQueue.toArray().some(row => row.id === accepted.id)) {
+			// Replacement reconciliation normally carries the persisted row. Retain
+			// its original ID if a test/failure seam rebuilt SessionInfo without it.
+			session.promptQueue = new PromptQueue([accepted, ...session.promptQueue.toArray()]);
+		} else {
+			session.promptQueue.reorderByIds([accepted.id]);
+		}
+		session.explicitRetryQueueRowId = accepted.id;
+		this.broadcastQueue(session);
+		return accepted.id;
 	}
 
 	getErroredPromptRecoveryDecision(sessionId: string): ErroredPromptRecoveryDecision {
@@ -4827,17 +5520,74 @@ export class SessionManager {
 	 * - Mid-work error (tool calls already executed): sends a system continuation
 	 */
 	async retryLastPrompt(sessionId: string, opts?: { auto?: boolean; preserveQueueIds?: string[] }): Promise<void> {
+		// Join before looking up SessionInfo: a real in-place respawn removes the
+		// old entry briefly, and duplicate Retry clicks must not fail or redrive.
+		const poisonRecovery = this._poisonedHistoryRecoveries.get(sessionId);
+		if (poisonRecovery) return poisonRecovery;
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
 		const isAuto = opts?.auto === true;
 		const preserveQueueIds = new Set(opts?.preserveQueueIds ?? []);
 		const hadToolCalls = session.turnHadToolCalls;
-		// Capture before clearing — used to route a live blank-text-poisoned
-		// session through respawn so it rehydrates from the sanitized transcript.
+		// Capture all retry intent before any in-place respawn replaces SessionInfo.
 		const poisonedByBlankText = isBlankContentBlockError(session.lastTurnErrorMessage);
+		const poisonedByOrphanResult = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
 		const savedPromptText = session.lastPromptText;
 		const savedPromptImages = session.lastPromptImages;
+		const savedPromptSource = session.lastPromptSource;
+
+		if (poisonedByOrphanResult) {
+			if (isAuto) {
+				throw new Error("Poisoned session history requires a user Retry or follow-up prompt");
+			}
+			this.cancelPendingAutoRetry(session, "explicit-retry");
+			const retryText = hadToolCalls
+				? "[SYSTEM: The model API returned an error while you were mid-turn. " +
+					"Your previous work has been preserved. Please continue where you left off. " +
+					"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
+				: (savedPromptText || savedPromptImages?.length)
+					? synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages)
+					: "[SYSTEM: The model API returned an error on your last response. " +
+						"Please review your conversation history and retry what you were doing.]";
+			const retryImages = hadToolCalls ? undefined : savedPromptImages;
+			// Explicit Retry owns a newly allocated durable row. Equal text/images in
+			// the existing queue are independent accepted intent and must survive.
+			const acceptedRetry = this.enqueueDurableRetryRow(session, retryText, retryImages);
+			this.markPoisonRecoveryPromptDispatchRow(session, acceptedRetry.id);
+			const recovery = (async () => {
+				const target = await this._recoverPoisonedHistory(session, "retry", async (canonical) => {
+					canonical.lastTurnErrored = false;
+					canonical.lastTurnErrorMessage = undefined;
+					canonical.turnHadToolCalls = false;
+					canonical.consecutiveErrorTurns = 0;
+					canonical.transientRetryAttempts = 0;
+					canonical.lastPromptSource = savedPromptSource;
+					const durableId = this.ensureDurableRetryRow(canonical, acceptedRetry);
+					try {
+						await this.dispatchDirectPrompt(canonical, retryText, retryImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableId);
+					} catch (err) {
+						canonical.lastTurnErrored = true;
+						canonical.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
+						throw err;
+					}
+					this.consumeRecoveredPromptDispatchRows(canonical);
+				});
+				if (!target && this.sessions.has(session.id)) {
+					throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+				}
+			})();
+			this._poisonedHistoryRecoveries.set(sessionId, recovery);
+			try {
+				await recovery;
+			} finally {
+				if (this._poisonedHistoryRecoveries.get(sessionId) === recovery) {
+					this._poisonedHistoryRecoveries.delete(sessionId);
+				}
+			}
+			return;
+		}
+
 		session.lastTurnErrored = false;
 		session.turnHadToolCalls = false;
 		// Explicit retry resets the cap — human intervention gets a fresh budget.
@@ -4861,30 +5611,29 @@ export class SessionManager {
 		// persisted transcript file (e.g. unit harness) — the normal branch below
 		// already synthesizes text.
 		if (poisonedByBlankText) {
+			// We know this turn was a blank-content poison, so attachment/image
+			// content was present. For a legacy non-image attachment-only failure,
+			// synthesizeAttachmentText can still return blank; never resend it.
+			let retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
+			if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
+			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, savedPromptImages) : undefined;
 			const target = await this._recoverBlankTextPoison(session);
-			if (target) {
-				// We know this turn was a blank-content poison, so attachment/image
-				// content was present. For a legacy non-image attachment-only
-				// failure savedPromptText==="" and savedPromptImages===undefined, so
-				// synthesizeAttachmentText returns "" — fall back to the synthetic
-				// phrase unconditionally rather than re-send blank/invalid content.
-				let retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
-				if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
-				target.lastPromptText = retryText;
-				target.lastPromptImages = savedPromptImages;
-				await this.dispatchDirectPrompt(target, retryText, savedPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR);
-				return;
-			}
+			const dispatchTarget = target ?? session;
+			dispatchTarget.lastPromptText = retryText;
+			dispatchTarget.lastPromptImages = savedPromptImages;
+			const durableId = acceptedRetry ? this.ensureDurableRetryRow(dispatchTarget, acceptedRetry) : undefined;
+			await this.dispatchDirectPrompt(dispatchTarget, retryText, savedPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableId);
+			return;
 		}
 
 		if (hadToolCalls) {
-			// Agent was mid-work — send a system continuation prompt
-			await this.dispatchDirectPrompt(session,
+			// Agent was mid-work — send a system continuation prompt.
+			const continuation =
 				"[SYSTEM: The model API returned an error while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
-				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]",
-				undefined, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR,
-			);
+				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]";
+			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, continuation) : undefined;
+			await this.dispatchDirectPrompt(session, continuation, undefined, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, acceptedRetry?.id);
 		} else if (session.lastPromptText || session.lastPromptImages?.length) {
 			// Fresh response error — re-send the original prompt. Run the text
 			// through synthesizeAttachmentText so an already-stuck session whose
@@ -4894,22 +5643,21 @@ export class SessionManager {
 			// generic fallback branch (which drops the image).
 			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
 			// Dispatch failures before agent_start re-enqueue the failed row for
-			// recovery. Explicit/auto retry is the recovery dispatch, so consume
-			// that row first; otherwise the next successful agent_end drain would
-			// send it a second time. Prefer tracked recovery row IDs; fall back to
-			// text matching for sessions created before the ID ledger existed.
-			if (!this.consumeRecoveredPromptDispatchRows(session)) {
+			// recovery. Auto retry may use the legacy text fallback; explicit Retry
+			// consumes only the ID ledger and allocates its own unique durable row.
+			if (!this.consumeRecoveredPromptDispatchRows(session) && isAuto) {
 				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
-			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR);
+			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages) : undefined;
+			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, acceptedRetry?.id);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			this.consumeRecoveredPromptDispatchRows(session);
-			await this.dispatchDirectPrompt(session,
+			const fallback =
 				"[SYSTEM: The model API returned an error on your last response. " +
-				"Please review your conversation history and retry what you were doing.]",
-				undefined, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR,
-			);
+				"Please review your conversation history and retry what you were doing.]";
+			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, fallback) : undefined;
+			await this.dispatchDirectPrompt(session, fallback, undefined, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, acceptedRetry?.id);
 		}
 	}
 
@@ -5327,37 +6075,95 @@ export class SessionManager {
 	private async _respawnAgentInPlace(
 		session: SessionInfo,
 		ps: PersistedSession,
-		opts?: { mutatePs?: (ps: PersistedSession) => void; finalStatus?: SessionStatus },
+		opts?: {
+			mutatePs?: (ps: PersistedSession) => void;
+			finalStatus?: SessionStatus;
+			/** Fail closed rather than moving a sandbox transcript onto a host bridge. */
+			preserveSandboxRealm?: boolean;
+			/** Poison redrive must dispatch its superseding intent before parked rows. */
+			deferQueueDrain?: boolean;
+		},
 	): Promise<SessionInfo | undefined> {
-		return this._coalesceRestore(session.id, async (generation) => {
-			const savedClients = new Set(session.clients);
-			// Snapshot AFTER unsubscribe so no in-flight event races past lastSeq.
-			session.unsubscribe();
-			const frameOfRef = this._snapshotStreamingFrameOfReference(session);
-			this._fenceReplacedSession(session, generation);
-			try { await session.rpcClient.stop(); } catch { /* already dead */ }
+		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
+			this._respawnAgentInPlaceOwned(session.id, session, ps, opts, token), {
+				coalesceKey: "rehydrate",
+				drainOnRelease: opts?.deferQueueDrain !== true,
+				cancelOnTerminal: () => undefined,
+			});
+	}
 
-			this.sessions.delete(session.id);
-			(ps as any)._restartFrameOfReference = frameOfRef;
-			opts?.mutatePs?.(ps);
-			try {
-				await this.restoreSession(ps);
-			} finally {
-				delete (ps as any)._restartFrameOfReference;
-				delete (ps as any)._overrideAllowedTools;
-				delete (ps as any)._overrideGrantedTools;
-			}
-			const restored = this.sessions.get(session.id);
-			if (restored) {
-				restored.lifecycleGeneration = generation;
-				for (const ws of savedClients) {
-					if ((ws as any).readyState === 1) restored.clients.add(ws);
+	private async _respawnAgentInPlaceOwned(
+		id: string,
+		requestedSession: SessionInfo,
+		requestedPs: PersistedSession,
+		opts: {
+			mutatePs?: (ps: PersistedSession) => void;
+			finalStatus?: SessionStatus;
+			preserveSandboxRealm?: boolean;
+			deferQueueDrain?: boolean;
+		} | undefined,
+		token: SessionReplacementToken,
+	): Promise<SessionInfo | undefined> {
+		// A role/restart queued ahead of us may already have replaced the object.
+		// Resolve canonical ownership only when this serialized operation starts.
+		const session = this.sessions.get(id) ?? requestedSession;
+		const ps = this.resolveStoreForId(id)?.get(id) ?? requestedPs;
+		const savedClients = new Set(session.clients);
+		session.unsubscribe();
+		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
+		this._fenceReplacedSession(session, token.generation);
+		try { await session.rpcClient.stop(); } catch { /* already dead */ }
+		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+			throw new Error(`Session ${id} respawn replacement was superseded after old bridge stop`);
+		}
+
+		this.sessions.delete(id);
+		(ps as any)._restartFrameOfReference = frameOfRef;
+		if (opts?.preserveSandboxRealm) (ps as any)._preserveSandboxRealm = true;
+		opts?.mutatePs?.(ps);
+		try {
+			await this.restoreSession(ps);
+			if (token.coordinator.terminalRequest) {
+				const cancelled = this.sessions.get(id);
+				if (cancelled && cancelled !== session) {
+					try { cancelled.unsubscribe(); } catch { /* best-effort */ }
+					await cancelled.rpcClient.stop().catch(() => {});
+					this.sessions.delete(id);
 				}
-				broadcastStatus(restored, opts?.finalStatus ?? "idle");
-				this._trackConnectedSession(restored);
+				throw new Error(`Session ${id} respawn cancelled by ${token.coordinator.terminalRequest}`);
 			}
-			return restored;
-		});
+			if (!this._replacementTokenIsCurrent(id, token)) {
+				const stale = this.sessions.get(id);
+				if (stale && stale !== session) {
+					try { stale.unsubscribe(); } catch { /* best-effort */ }
+					await stale.rpcClient.stop().catch(() => {});
+				}
+				throw new Error(`Session ${id} respawn replacement was superseded during restore`);
+			}
+		} catch (err) {
+			this.sessions.set(id, session);
+			session.restoreError = err instanceof Error ? err.message : String(err);
+			for (const ws of savedClients) {
+				if ((ws as any).readyState === 1) session.clients.add(ws);
+			}
+			broadcastStatus(session, "terminated");
+			this._trackConnectedSession(session);
+			throw err;
+		} finally {
+			delete (ps as any)._restartFrameOfReference;
+			delete (ps as any)._overrideAllowedTools;
+			delete (ps as any)._overrideGrantedTools;
+			delete (ps as any)._preserveSandboxRealm;
+		}
+		const restored = this.sessions.get(id);
+		if (restored) {
+			for (const ws of savedClients) {
+				if ((ws as any).readyState === 1) restored.clients.add(ws);
+			}
+			broadcastStatus(restored, opts?.finalStatus ?? "idle");
+			this._trackConnectedSession(restored);
+		}
+		return restored;
 	}
 
 	/**
@@ -5814,6 +6620,86 @@ export class SessionManager {
 		});
 	}
 
+	/**
+	 * Sanitize and switch a replacement bridge onto durable history before it can
+	 * become canonical. Sandbox agents need the same longer switch window used by
+	 * initial setup because the first container RPC can include startup overhead.
+	 *
+	 * Callers own replacement-process cleanup so they can preserve their existing
+	 * restore/termination semantics when this throws.
+	 */
+	private async switchSessionForRehydration(
+		rpcClient: RpcBridge,
+		ps: PersistedSession,
+		agentSessionFile: string,
+	): Promise<void> {
+		trustPersistedAgentSessionFile(agentSessionFile);
+		await sanitizeAgentTranscriptFile(
+			sessionFsContextForAgentFile(ps, agentSessionFile),
+			agentSessionFile,
+			this.sandboxManager,
+		);
+		const switchResp = await rpcClient.sendCommand(
+			{ type: "switch_session", sessionPath: switchSessionPathForAgent(ps) },
+			ps.sandboxed ? 60_000 : 15_000,
+		);
+		if (!switchResp.success) {
+			throw new Error(`switch_session failed: ${switchResp.error ?? "unknown error"}`);
+		}
+	}
+
+	private async _dispatchBootContinuation(session: SessionInfo): Promise<boolean> {
+		this._bootRepromptedSessions.add(session.id);
+		// The coordinator remains installed while this cold-start RPC is pending.
+		// Mark streaming as a second fence for the instant after coordinator release,
+		// including the case where agent_start arrived before the RPC acknowledgement.
+		this.markPromptDispatchStreaming(session);
+		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
+		const markAccepted = (): boolean => {
+			if (!this._sessionWriterIsCurrent(session)) return false;
+			session.restoreStartupWasStreaming = false;
+			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false });
+			return true;
+		};
+		try {
+			const response = await session.rpcClient.promptWhenReady(
+				"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
+				"Your previous work has been preserved. Please continue where you left off. " +
+				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
+			);
+			if (response?.success === false) {
+				throw new Error(response.error ?? "boot continuation dispatch rejected");
+			}
+			// Keep the boot marker until agent_start so the team boot-resume pass cannot
+			// add a second continuation after restore returns. The pre-fence observer in
+			// handleAgentLifecycle clears it even when coordinator ownership suppresses
+			// the rest of agent_start bookkeeping.
+			// Clear the durable marker only after the final canonical bridge accepts
+			// the continuation. A gateway death during provisional restore therefore
+			// rehydrates wasStreaming=true and safely tries again on the next boot.
+			return markAccepted();
+		} catch (err) {
+			// A terminal event proves Pi accepted and completed the continuation even
+			// when the command acknowledgement subsequently rejects or times out. Keep
+			// that completed lifecycle and clear the durable boot marker rather than
+			// scheduling the same continuation again after a later gateway restart.
+			if ((session.agentObservedTurnVersion ?? 0) !== dispatchObservedTurnVersion && markAccepted()) {
+				this._bootRepromptedSessions.delete(session.id);
+				const reason = err instanceof Error ? err.message : String(err);
+				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
+				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
+				console.warn(`[session-manager] Boot continuation for ${session.id} reported ${safeReason} after agent observed the turn; treating the dispatch as accepted`);
+				return true;
+			}
+			this._bootRepromptedSessions.delete(session.id);
+			if (this._sessionWriterIsCurrent(session) && session.status === "streaming") {
+				broadcastStatus(session, "idle");
+			}
+			console.error(`[session-manager] Failed to re-prompt interrupted session ${session.id}:`, err);
+			return false;
+		}
+	}
+
 	private async restoreSession(ps: PersistedSession): Promise<void> {
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
@@ -5849,6 +6735,9 @@ export class SessionManager {
 				goalId: ps.goalId ?? ps.teamGoalId,
 			});
 			if (!restoredSandboxed) {
+				if ((ps as any)._preserveSandboxRealm) {
+					throw new Error(`Cannot respawn sandboxed session ${ps.id}: sandbox realm is unavailable`);
+				}
 				ps.sandboxed = false;
 				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
 				this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
@@ -5954,9 +6843,9 @@ export class SessionManager {
 		const hasExplicitAllowlist = overrideAllowedTools !== undefined || persistedAllowedTools !== undefined;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
 		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
-			? overrideAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			? tagAllowedTools(overrideAllowedTools, this.toolManager)
 			: persistedAllowedTools
-				? persistedAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+				? tagAllowedTools(persistedAllowedTools, this.toolManager)
 				: this.resolveEffectiveAllowedTools(restoredRole);
 		// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
 		// restored allowlist so the prompt tool-docs + persisted allowedTools stay
@@ -6089,13 +6978,19 @@ export class SessionManager {
 		// redundant initial `model_change` event with its hardcoded default.
 		// Prefer the persisted model if known (avoids surprising changes after
 		// restart); fall back to role/preference resolution.
-		const psPersistedModel = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined;
+		const psPersistedModel = ps.modelProvider && ps.modelId ? normalizeAigwModelString(`${ps.modelProvider}/${ps.modelId}`) : undefined;
 		// Keep an explicit, still-runnable persisted pin (incl. authenticated Code
 		// Assist), but fall back to role/pref resolution when the persisted model is
 		// no longer spawn-pinnable — e.g. a Code Assist model whose Google credential
 		// was removed/expired, which Pi could not resolve as `--model`.
 		if (psPersistedModel && isSpawnPinnableModelString(psPersistedModel)) {
 			bridgeOptions.initialModel = psPersistedModel;
+			const slash = psPersistedModel.indexOf("/");
+			const normalizedProvider = psPersistedModel.slice(0, slash);
+			const normalizedModelId = psPersistedModel.slice(slash + 1);
+			if (normalizedProvider !== ps.modelProvider || normalizedModelId !== ps.modelId) {
+				this.resolveStoreForSession(ps.id).update(ps.id, { modelProvider: normalizedProvider, modelId: normalizedModelId });
+			}
 		} else {
 			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
@@ -6191,18 +7086,21 @@ export class SessionManager {
 		const unsub = rpcClient.onEvent((event: any) => {
 			// During restore, switch_session replays every persisted message as an
 			// rpc event. Bumping lastActivity here would clobber the pre-restart
-			// timestamp with Date.now(). Gate on the restoring flag AND on
-			// isUserVisibleActivity so post-resume lifecycle frames (agent_start,
-			// agent_idle, connection_state, state, session_title) don't clobber it.
+			// timestamp with Date.now(). More importantly, replayed lifecycle frames
+			// must not drain the durable prompt queue or dispatch prompt() before the
+			// switch succeeds and this replacement becomes canonical.
+			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
 			if (!restoring) {
-				if (isUserVisibleActivity(event)) {
+				if (isUserVisibleActivity(preparedEvent)) {
 					session.lastActivity = Date.now();
 					restoreStore.update(ps.id, { lastActivity: session.lastActivity });
 				}
+				this.handleAgentLifecycle(session, preparedEvent);
+			} else {
+				// Preserve the narrow replay reconciliation that proves an accepted
+				// steer was already echoed, without running lifecycle dispatch hooks.
+				this._consumeSteerEcho(session, preparedEvent);
 			}
-
-			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-			this.handleAgentLifecycle(session, preparedEvent);
 
 			this.emitAgentEvent(session, preparedEvent);
 			if (!restoring) this.trackCostFromEvent(session, preparedEvent);
@@ -6211,41 +7109,56 @@ export class SessionManager {
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 		session.unsubscribe = unsub;
 
-		await rpcClient.start();
+		try {
+			await rpcClient.start();
+		} catch (err) {
+			// A partially started replacement must never survive a failed restore.
+			// The in-place caller will reinstall only its fenced dormant rollback.
+			try { await rpcClient.stop(); } catch { /* best-effort cleanup */ }
+			throw err;
+		}
 
 		// Resume the agent's previous session file. Persisted host paths are still
 		// readable by Bobbit; sandboxed agents receive the active mount's container
 		// path when the host path maps to the active sessions mount.
-		trustPersistedAgentSessionFile(ps.agentSessionFile);
-		const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-		const switchSessionPath = switchSessionPathForAgent(ps);
-		// Un-poison any blank-text user messages persisted before the
-		// attachment-only fix, so the agent doesn't re-send an invalid blank
-		// ContentBlock on resume (best-effort, non-fatal).
-		await sanitizeAgentTranscriptFile(
-			transcriptFileCtx,
-			ps.agentSessionFile,
-			this.sandboxManager,
-		);
-		const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
-		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: switchSessionPath },
-			switchTimeout,
-		);
-		restoring = false;
-		if (!switchResp.success) {
-			await rpcClient.stop();
-			throw new Error(`switch_session failed: ${switchResp.error}`);
+		try {
+			trustPersistedAgentSessionFile(ps.agentSessionFile);
+			const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+			const switchSessionPath = switchSessionPathForAgent(ps);
+			// Un-poison the persisted transcript before the agent rehydrates it
+			// (best-effort, non-fatal).
+			await sanitizeAgentTranscriptFile(
+				transcriptFileCtx,
+				ps.agentSessionFile,
+				this.sandboxManager,
+			);
+			const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
+			const switchResp = await rpcClient.sendCommand(
+				{ type: "switch_session", sessionPath: switchSessionPath },
+				switchTimeout,
+			);
+			if (!switchResp.success) {
+				throw new Error(`switch_session failed: ${switchResp.error}`);
+			}
+		} catch (err) {
+			// A thrown/timed-out switch is just as terminal as an explicit failure
+			// response. Detach its listener and fence the replacement before stopping
+			// it so replayed/late Pi events cannot mutate queues, status, or persisted
+			// intent after the rollback capsule becomes canonical again.
+			restoring = false;
+			try { unsub(); } catch { /* best-effort listener cleanup */ }
+			this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
+			try { await rpcClient.stop(); } catch { /* best-effort process cleanup */ }
+			throw err;
 		}
 
 		try {
 			await this.tryAutoSelectModel(session);
 		} catch (err) {
+			try { unsub(); } catch { /* best-effort listener cleanup */ }
 			await rpcClient.stop();
 			throw err;
 		}
-
-		broadcastStatus(session, "idle");
 
 		// For sandbox sessions, resolve the container ID so git-status and other
 		// host-side operations can run commands inside the container via docker exec.
@@ -6262,8 +7175,12 @@ export class SessionManager {
 			}
 		}
 
+		// Install the replacement before enabling lifecycle side effects. A replayed
+		// agent_end must never dequeue durable intent against a provisional bridge.
 		this.sessions.set(ps.id, session);
 		if (settledSteersPruned > 0) this.persistInFlightSteerLedger(session);
+		restoring = false;
+		broadcastStatus(session, "idle");
 
 		// `switch_session` replays durable user message echoes and `_consumeSteerEcho`
 		// clears matching ledger entries. Anything left here was accepted for
@@ -6285,31 +7202,25 @@ export class SessionManager {
 		// (`resumeInterruptedVerifications()` -> `_tryResumeFromSession`, which
 		// waits for readiness and sends its own reminder prompt). Firing the boot
 		// nudge here too would race two prompts on the same cold reviewer agent.
-		// We still clear `wasStreaming` so the flag doesn't leak across restarts.
+		// Non-interactive verification owns a separate durable re-drive marker, so
+		// this compatibility flag can clear when ownership is handed off.
 		if (ps.wasStreaming && ps.nonInteractive) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn but is nonInteractive — leaving re-drive to the verification harness`);
+			session.restoreStartupWasStreaming = false;
 			restoreStore.update(ps.id, { wasStreaming: false });
 		} else if (ps.wasStreaming) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn — re-prompting to continue`);
-			restoreStore.update(ps.id, { wasStreaming: false });
-			// Record a boot-coordination marker so the team-manager boot-resume
-			// nudge skips this lead and we don't race two prompts at the same
-			// cold agent. Cleared in handleAgentLifecycle on agent_start.
-			this._bootRepromptedSessions.add(ps.id);
-			// Cold agent: wait for readiness, then prompt with a generous timeout
-			// (the default 30s reliably times out on boot). Keep the .catch() so a
-			// failure is logged and never throws.
-			rpcClient.promptWhenReady(
-				"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
-				"Your previous work has been preserved. Please continue where you left off. " +
-				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
-			).catch((err: any) => {
-				console.error(`[session-manager] Failed to re-prompt interrupted session ${ps.id}:`, err);
-			});
+			// A restore may be only a provisional winner: role/restart/Stop/terminate
+			// requests can already be queued behind it. Defer the continuation until
+			// the coordinator releases its final canonical bridge. Direct test/legacy
+			// callers without a coordinator retain immediate behavior.
+			const coordinator = this._sessionReplacementCoordinators.get(ps.id);
+			if (coordinator) coordinator.bootContinuationPending = true;
+			else this._dispatchBootContinuation(session);
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePushPolicy?: WorktreePushPolicy; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -6331,7 +7242,7 @@ export class SessionManager {
 			}
 		}
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
-			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			? tagAllowedTools(opts.allowedTools, this.toolManager)
 			: undefined;
 		const sessionScopedAllowedTools = opts?.allowedTools && opts.allowedTools.length > 0
 			? [...opts.allowedTools]
@@ -6345,7 +7256,6 @@ export class SessionManager {
 		const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
 		const effectiveSandboxed = opts?.sandboxed && !sandboxExemptScope ? true : undefined;
 		const worktreeOpts = headquartersScope ? undefined : opts?.worktreeOpts;
-		const worktreePushPolicy = headquartersScope ? undefined : opts?.worktreePushPolicy;
 		const sandboxBranch = effectiveSandboxed ? opts?.sandboxBranch : undefined;
 		const sandboxBaseBranch = effectiveSandboxed ? opts?.sandboxBaseBranch : undefined;
 		await this.ensureMcpManagerForContext(projectId, cwd);
@@ -6435,7 +7345,6 @@ export class SessionManager {
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
 				worktreePath,
-				worktreePushPolicy,
 				projectId,
 				promptQueue: new PromptQueue(),
 			};
@@ -6475,7 +7384,6 @@ export class SessionManager {
 				readOnly: opts?.readOnly,
 				sessionScopedAllowedTools,
 				worktreePath,
-				worktreePushPolicy,
 				repoPath,
 				branch,
 				sandboxed: effectiveSandboxed,
@@ -6559,7 +7467,6 @@ export class SessionManager {
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
-			worktreePushPolicy,
 			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
@@ -6704,7 +7611,7 @@ export class SessionManager {
 			?? parentMeta?.goalId ?? parentMeta?.teamGoalId;
 		const sourceAllowedTools = opts.allowedTools ?? parentSession?.allowedTools;
 		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
-			? sourceAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			? tagAllowedTools(sourceAllowedTools, this.toolManager)
 			: undefined;
 		// H2 — PERSIST the (already-stripped) allow-list so restart/revive preserves
 		// the recursion guard (spawn verbs removed) AND read-only restrictions
@@ -7124,11 +8031,17 @@ export class SessionManager {
 			// `isSpawnPinnableModelString` additionally screens out Code Assist when
 			// no Google credential is present (unauthenticated `google-gemini-cli/*`
 			// would fail to resolve as Pi's `--model`).
-			if (m && /^[^/]+\/.+$/.test(m) && isSpawnPinnableModelString(m)) return m;
+			if (m && /^[^/]+\/.+$/.test(m)) {
+				const normalized = normalizeAigwModelString(m);
+				if (isSpawnPinnableModelString(normalized)) return normalized;
+			}
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref) && isSpawnPinnableModelString(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref)) {
+			const normalized = normalizeAigwModelString(pref);
+			if (isSpawnPinnableModelString(normalized)) return normalized;
+		}
 		return undefined;
 	}
 
@@ -7174,10 +8087,16 @@ export class SessionManager {
 	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
 		if (role) {
 			const m = this.resolveRoleModelValue(role, projectId);
-			if (m && /^[^/]+\/.+$/.test(m) && isSpawnPinnableModelString(m)) return m;
+			if (m && /^[^/]+\/.+$/.test(m)) {
+				const normalized = normalizeAigwModelString(m);
+				if (isSpawnPinnableModelString(normalized)) return normalized;
+			}
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref) && isSpawnPinnableModelString(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref)) {
+			const normalized = normalizeAigwModelString(pref);
+			if (isSpawnPinnableModelString(normalized)) return normalized;
+		}
 		return undefined;
 	}
 
@@ -7187,7 +8106,8 @@ export class SessionManager {
 		// and hard-fails on mismatch.
 		const spawnPinned = !!session.spawnPinnedModel;
 		const allowSessionModelFallback = this.preferencesStore?.get("allowSessionModelFallback") === true;
-		const fallbackSessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		const rawFallbackSessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		const fallbackSessionModel = rawFallbackSessionModel ? normalizeAigwModelString(rawFallbackSessionModel) : rawFallbackSessionModel;
 
 		// Spawn-pinned models are explicit selections too (restore/respawn persisted
 		// model, role/default pin from initial setup, or caller-supplied initialModel).
@@ -7195,7 +8115,7 @@ export class SessionManager {
 		// pinned model is stale or unavailable, never fall through to role/default
 		// resolution, AIGW discovery, or SDK/provider defaults; with the opt-in policy
 		// try only default.sessionModel.
-		const pinnedModel = session.spawnPinnedModel;
+		const pinnedModel = session.spawnPinnedModel ? normalizeAigwModelString(session.spawnPinnedModel) : session.spawnPinnedModel;
 		if (pinnedModel) {
 			const safePinnedModel = sanitizeModelErrorText(pinnedModel);
 			let pinnedModelError;
@@ -7265,7 +8185,8 @@ export class SessionManager {
 		// 0. Role override (highest explicit precedence). If it fails, never fall
 		// through to discovery/provider defaults. With the opt-in policy, try only
 		// default.sessionModel as the controlled fallback target.
-		const roleModel = this.resolveRoleModel(session);
+		const rawRoleModel = this.resolveRoleModel(session);
+		const roleModel = rawRoleModel ? normalizeAigwModelString(rawRoleModel) : rawRoleModel;
 		if (roleModel) {
 			const safeRoleModel = sanitizeModelErrorText(roleModel);
 			let roleModelError;
@@ -7277,7 +8198,7 @@ export class SessionManager {
 						sessionManager: this,
 						sessionId: session.id,
 						contextLabel: `role.${session.role}.model`,
-						skipSetModel: spawnPinned && session.spawnPinnedModel === roleModel,
+						skipSetModel: spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === roleModel,
 					});
 					this._writeModelNameFile(session.id, roleModel);
 					const slash = roleModel.indexOf("/");
@@ -7310,7 +8231,7 @@ export class SessionManager {
 							sessionManager: this,
 							sessionId: session.id,
 							contextLabel: "default.sessionModel fallback",
-							skipSetModel: spawnPinned && session.spawnPinnedModel === fallbackSessionModel,
+							skipSetModel: spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === fallbackSessionModel,
 						});
 						this._writeModelNameFile(session.id, fallbackSessionModel);
 						const slash = fallbackSessionModel.indexOf("/");
@@ -7339,7 +8260,8 @@ export class SessionManager {
 		// default.sessionModel itself is not fallback-eligible: any malformed,
 		// non-session-selectable, unavailable, or read-back-mismatched value fails
 		// loudly and never falls through to AIGW or provider defaults.
-		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
+		const rawSessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
+		const sessionModelPref = rawSessionModelPref ? normalizeAigwModelString(rawSessionModelPref) : rawSessionModelPref;
 		if (sessionModelPref) {
 			const safeSessionModelPref = sanitizeModelErrorText(sessionModelPref);
 			if (!isSessionSelectableModelString(sessionModelPref)) {
@@ -7348,7 +8270,7 @@ export class SessionManager {
 			const slash = sessionModelPref.indexOf("/");
 			const provider = sessionModelPref.slice(0, slash);
 			const modelId = sessionModelPref.slice(slash + 1);
-			const preSpawnPinned = spawnPinned && session.spawnPinnedModel === sessionModelPref;
+			const preSpawnPinned = spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === sessionModelPref;
 			try {
 				// Route through applyModelString to preserve the hard-fail-on-mismatch
 				// contract (read-back via getState()) regardless of whether we skipped
@@ -7944,28 +8866,58 @@ export class SessionManager {
 	}
 
 	/**
-	 * Assign a role to an existing session by killing the agent, reassembling
-	 * the system prompt with the role instructions, and respawning with
-	 * `switch_session` to preserve conversation history.
+	 * Assign a role to an existing session. Requests for the same session are
+	 * serialized. The first request marks the canonical session as `starting`, so
+	 * prompts accepted while any replacement is staged are durably queued instead
+	 * of being dispatched to a bridge that is about to stop. The final request
+	 * releases the fence and drains that queue against the committed replacement,
+	 * or against the original bridge after a clean rollback.
 	 */
 	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
+		const coordinator = this._sessionReplacementCoordinators.get(id);
+		const session = this.sessions.get(id);
+		// In-place restore/respawn deliberately removes SessionInfo while its
+		// replacement is prepared. A role request accepted in that map gap must join
+		// the active coordinator and look up the final canonical session when its turn
+		// starts, rather than returning a transient not-found result.
+		if (!session && !coordinator) return false;
+		if (!coordinator && session?.status === "streaming") {
+			throw new Error("Cannot assign role while agent is streaming");
+		}
+		if (!coordinator && session) broadcastStatus(session, "starting");
+		return this._coordinateSessionReplacement(id, "assign-role", (token) =>
+			this._assignRoleStaged(id, role, token), { drainOnRelease: true, cancelOnTerminal: () => false });
+	}
+
+	/** Prepare and commit one role replacement while the shared lifecycle coordinator owns the session. */
+	private async _assignRoleStaged(
+		id: string,
+		role: { name: string; promptTemplate: string; accessory: string },
+		token: SessionReplacementToken,
+	): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
-		if (session.status === "streaming") throw new Error("Cannot assign role while agent is streaming");
-
-		// Get the agent session file so we can restore conversation
-		let agentSessionFile: string | undefined;
+		if (!this._replacementTokenIsCurrent(id, token) || token.coordinator.terminalRequest) {
+			throw new Error(`Session ${id} role replacement was superseded before staging`);
+		}
+		// A request can join during a session-map gap, but the preceding coordinated
+		// operation may have dispatched a continuation/redrive before this queued turn
+		// starts. Re-check the final canonical state here so role assignment never stops
+		// an active bridge merely because a coordinator existed at API-entry time.
+		if (session.status === "streaming") {
+			throw new Error("Cannot assign role while agent is streaming");
+		}
+		// Get the agent session file so we can restore conversation. A structured
+		// getState rejection is just as much a fallback case as a thrown RPC error;
+		// start from the durable value and replace it only with a non-empty live one.
+		const persistedBeforeRole = this.resolveStoreForSession(id).get(id);
+		let agentSessionFile = persistedBeforeRole?.agentSessionFile;
 		try {
 			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
-		} catch {
-			const persisted = this.resolveStoreForSession(id).get(id);
-			agentSessionFile = persisted?.agentSessionFile;
-		}
-
-		// Kill the current process
-		session.unsubscribe();
-		await session.rpcClient.stop();
+			if (stateResp.success && stateResp.data?.sessionFile) {
+				agentSessionFile = stateResp.data.sessionFile;
+			}
+		} catch { /* retain the durable transcript path */ }
 
 		// Reassemble system prompt with role instructions as separate fields
 		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
@@ -8055,7 +9007,7 @@ export class SessionManager {
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
-				? `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`
+				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
 				: undefined;
 		// See spawn path: skip a persisted pin that is no longer spawn-pinnable
 		// (e.g. unauthenticated Code Assist) so the respawn falls back cleanly.
@@ -8067,61 +9019,128 @@ export class SessionManager {
 		}
 		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		if (!session.sandboxed) this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+
+		// Role assignment is an in-place rehydration, so the replacement must stay
+		// in the same filesystem realm as the durable transcript. In particular, a
+		// sandboxed session needs a container-backed bridge before switch_session is
+		// allowed to observe its container path. Fail closed if that realm can no
+		// longer be wired; silently launching Pi on the host would strand the
+		// container transcript and make an apparently successful role change lose
+		// model-visible history.
+		if (session.sandboxed) {
+			const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
+				projectId: session.projectId,
+				goalId: session.goalId ?? session.teamGoalId,
+			});
+			if (!sandboxApplied) {
+				throw new Error(`Cannot assign role for sandboxed session ${id}: sandbox realm is unavailable`);
+			}
+		} else {
+			this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+		}
 		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
 
+		// Build and fully validate the replacement while the original bridge stays
+		// subscribed and usable. Role assignment is a two-phase swap: start,
+		// rehydrate, and verify model binding first; only then stop the old process
+		// and commit the new bridge/metadata. Every preparation failure therefore
+		// fails closed without turning a healthy idle session into a dead one.
+		const oldRpcClient = session.rpcClient;
+		const oldUnsubscribe = session.unsubscribe;
 		const rpcClient = new RpcBridge(bridgeOptions);
-		session.spawnPinnedModel = bridgeOptions.initialModel;
-		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-		let switchingSession = true;
+		let replacementCommitted = false;
+		let oldBridgeStopped = false;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
-			if (isUserVisibleActivity(event)) {
+			// switch_session replays historical events and the replacement may emit
+			// readiness frames before commit. Ignore all of them while staged so a
+			// failed assignment is process-locally invisible as well as metadata-safe.
+			if (!replacementCommitted) return;
+			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+			if (isUserVisibleActivity(preparedEvent)) {
 				session.lastActivity = this.clock.now();
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
-			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
 			this.handleAgentLifecycle(session, preparedEvent);
 			this.emitAgentEvent(session, preparedEvent);
-			if (!switchingSession) this.trackCostFromEvent(session, preparedEvent);
+			this.trackCostFromEvent(session, preparedEvent);
 		});
 
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
-		await rpcClient.start();
-
-		// Restore conversation from session file.
 		const rolePs = { ...respawnPersisted, ...session, agentSessionFile } as PersistedSession;
 		const roleFileCtx = sessionFsContextForAgentFile(rolePs, agentSessionFile);
-		if (agentSessionFile) trustPersistedAgentSessionFile(agentSessionFile);
-		if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
-			await sanitizeAgentTranscriptFile(roleFileCtx, agentSessionFile, this.sandboxManager);
-			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: switchSessionPathForAgent(rolePs) },
-				15_000,
-			);
-			if (!switchResp.success) {
-				console.error(`[session-manager] switch_session failed after role assignment: ${switchResp.error}`);
-			}
-		}
-		switchingSession = false;
-
-		// Swap in the new bridge and update metadata
-		session.rpcClient = rpcClient;
-		session.unsubscribe = unsub;
-		session.role = role.name;
-		session.accessory = role.accessory;
-		session.allowedTools = effectiveAllowedNames;
-
-		roleStore.update(id, { role: role.name, accessory: role.accessory });
+		const stagedSession = {
+			...session,
+			rpcClient,
+			unsubscribe: unsub,
+			spawnPinnedModel: bridgeOptions.initialModel,
+			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
+			role: role.name,
+			accessory: role.accessory,
+			allowedTools: effectiveAllowedNames,
+			// Model verification must not broadcast replacement state before commit.
+			clients: new Set<WebSocket>(),
+		} as SessionInfo;
 
 		try {
-			await this.tryAutoSelectModel(session);
+			await rpcClient.start();
+			if (agentSessionFile) {
+				if (!await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
+					throw new Error(`Cannot assign role for session ${id}: persisted conversation history is unavailable`);
+				}
+				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
+			}
+			await this.tryAutoSelectModel(stagedSession);
+
+			// Another lifecycle replacement may have won while this bridge was being
+			// prepared. Never stop or overwrite that newer canonical session; the catch
+			// path below disposes this staged process and listener.
+			if (this.sessions.get(id) !== session || !this._replacementTokenIsCurrent(id, token) || token.coordinator.terminalRequest) {
+				throw new Error(`Session ${id} role replacement was superseded before old bridge stop`);
+			}
+
+			// Persist the metadata before the irreversible old-process stop. If the
+			// stop rejects, restore the prior durable values and retain its listener.
+			roleStore.update(id, { role: role.name, accessory: role.accessory });
+			try {
+				await oldRpcClient.stop();
+				oldBridgeStopped = true;
+			} catch (err) {
+				roleStore.update(id, { role: session.role, accessory: session.accessory });
+				throw err;
+			}
+			// The old stop is the irreversible await in the two-phase swap. Revalidate
+			// both identity and ownership afterwards; a stale staged bridge is disposed
+			// by the catch path and can never overwrite a newer canonical process.
+			if (this.sessions.get(id) !== session || !this._replacementTokenIsCurrent(id, token) || token.coordinator.terminalRequest) {
+				roleStore.update(id, { role: session.role, accessory: session.accessory });
+				throw new Error(`Session ${id} role replacement was superseded after old bridge stop`);
+			}
 		} catch (err) {
-			await rpcClient.stop();
+			unsub();
+			await rpcClient.stop().catch(() => {});
+			// If terminal cancellation landed during the irreversible old stop, both
+			// bridges are now gone. Surface that canonical capsule as terminated;
+			// never leave a dead old bridge looking idle after the staged one is disposed.
+			if (token.coordinator.terminalRequest && oldBridgeStopped && this.sessions.get(id) === session) {
+				broadcastStatus(session, "terminated");
+			}
 			throw err;
 		}
 
-		broadcastStatus(session, "idle");
+		try { oldUnsubscribe(); } catch { /* stopped old bridge; listener cleanup is best-effort */ }
+		session.rpcClient = rpcClient;
+		session.unsubscribe = unsub;
+		session.spawnPinnedModel = bridgeOptions.initialModel;
+		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+		session.role = role.name;
+		session.accessory = role.accessory;
+		session.allowedTools = effectiveAllowedNames;
+		replacementCommitted = true;
+
+		// assignRole owns the status fence until every concurrently queued role
+		// assignment has settled. The public coordinator releases it once and drains
+		// durable prompts only against the final committed bridge.
 
 		// Refresh messages and state for connected clients
 		try {
@@ -8415,8 +9434,24 @@ export class SessionManager {
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
+		// In-place restore temporarily removes the SessionInfo from the map. A
+		// terminate accepted during that gap must serialize behind the replacement,
+		// not report "not live" and let a successfully restored ghost survive after
+		// the caller archives its persisted record. Mark it synchronously so every
+		// queued non-terminal install observes cancellation before it can stage.
+		const coordinator = this._sessionReplacementCoordinators.get(id);
+		if (!this.sessions.has(id) && !coordinator) return false;
+		if (coordinator) coordinator.terminalRequest = "terminate";
+		return this._coordinateSessionReplacement(id, "terminate", (token) =>
+			this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
+	}
+
+	private async _terminateSessionOwned(id: string, token: SessionReplacementToken): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
+		if (!this._replacementTokenIsCurrent(id, token)) {
+			throw new Error(`Session ${id} termination was superseded before start`);
+		}
 
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id);
@@ -8464,6 +9499,9 @@ export class SessionManager {
 
 		session.unsubscribe();
 		await session.rpcClient.stop();
+		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+			throw new Error(`Session ${id} termination was superseded after bridge stop`);
+		}
 		broadcastStatus(session, "terminated");
 
 		// Clean up background processes (abort any in-flight waits first so
@@ -9582,10 +10620,10 @@ export class SessionManager {
 							return Promise.resolve();
 						}
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
-						return cleanupWorktree(repoPath, wt, ps.branch, true);
+						return cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 					}));
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
-					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
+					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
 				}
@@ -9933,25 +10971,35 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) return false;
 
-		// If session is dormant (failed restore), try to revive it
+		// If session is dormant (failed restore), try to revive it. A poisoned-history
+		// rollback is different: its fenced SessionInfo is the only process-local
+		// capsule for retry intent, prompt envelopes, grants, clients, and the prior
+		// event frame of reference. A reconnect is not user intent to retry, so keep
+		// that capsule attached and let the next explicit Retry/follow-up use the
+		// poison-aware in-place respawn (including the sandbox fail-closed guard).
 		if (session.status === "terminated") {
-			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
-			if (ps && ps.agentSessionFile) {
-				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
-				this._restoreSessionCoalesced(ps)
-					.then(() => {
-						console.log(`[session-manager] Revived dormant session: "${session.title}" (${sessionId})`);
-						// restoreSession replaces the map entry — add client to the canonical one.
-						const revived = this.sessions.get(sessionId);
-						if (revived && (ws as any).readyState === 1) {
-							revived.clients.add(ws);
-							this._trackConnectedSession(revived);
-						}
-					})
-					.catch((err) => {
-						console.error(`[session-manager] Failed to revive session ${sessionId}:`, err);
-					});
-				return true; // optimistically accept the client
+			const poisonedRollback = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
+			if (!poisonedRollback) {
+				const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
+				if (ps && ps.agentSessionFile) {
+					console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
+					this._restoreSessionCoalesced(ps)
+						.then(() => {
+							console.log(`[session-manager] Revived dormant session: "${session.title}" (${sessionId})`);
+							// restoreSession replaces the map entry — add client to the canonical one.
+							const revived = this.sessions.get(sessionId);
+							if (revived && (ws as any).readyState === 1) {
+								revived.clients.add(ws);
+								this._trackConnectedSession(revived);
+							}
+						})
+						.catch((err) => {
+							console.error(`[session-manager] Failed to revive session ${sessionId}:`, err);
+						});
+					return true; // optimistically accept the client
+				}
+			} else {
+				console.log(`[session-manager] Client reconnected to poisoned-history rollback session=${sessionId}; awaiting Retry/follow-up`);
 			}
 		}
 
@@ -9992,18 +11040,52 @@ export class SessionManager {
 	}
 
 	async forceAbort(id: string, gracePeriodMs = 3000): Promise<void> {
+		const coordinator = this._sessionReplacementCoordinators.get(id);
 		const session = this.sessions.get(id);
-		if (!session) return;
+		if (!session && !coordinator) return;
+
+		// A Stop accepted while restore has removed SessionInfo is still a real
+		// cancellation. Mark it synchronously so the active host/sandbox restore
+		// disposes its staged bridge before commit, then serialize the public call
+		// behind that owner. This mirrors terminate's map-gap join without allowing
+		// poison redrive or queue drain after Stop.
+		// Stop is sticky for the entire coordinator lifetime, regardless of which
+		// replacement is currently active. In particular, an assignRole/restart
+		// already queued behind recovery must observe this before it starts.
+		if (coordinator) coordinator.terminalRequest = "stop";
 
 		// S40: cancel any pending auto-retry timer regardless of streaming state.
 		// An abort during the post-error backoff window (status "idle") would
 		// otherwise leave the timer to fire a spurious retry on a session someone
 		// just stopped (reachable via the team-abort route). No-op when none pending.
-		this.cancelPendingAutoRetry(session, "terminated");
+		if (session) this.cancelPendingAutoRetry(session, "terminated");
 
-		// If not streaming, nothing more to abort
-		if (session.status !== "streaming") return;
+		// Outside a replacement, an idle abort remains a no-op. During replacement,
+		// queue behind the current owner so Stop has deterministic invocation order
+		// and can never race a staged bridge commit.
+		if (session && session.status !== "streaming" && !coordinator) return;
+		await this._coordinateSessionReplacement(id, "force-abort", (token) =>
+			this._forceAbortOwned(id, gracePeriodMs, token), {
+				coalesceKey: "force-abort",
+				drainOnRelease: true,
+			});
+	}
 
+	private async _forceAbortOwned(id: string, gracePeriodMs: number, token: SessionReplacementToken): Promise<void> {
+		const session = this.sessions.get(id);
+		if (!session) return;
+		if (session.status !== "streaming") {
+			// Stop may have cancelled a staged role bridge before the old idle bridge
+			// was touched. Restore that canonical bridge's visible idle state; the
+			// coordinator terminal fence intentionally suppresses its final release.
+			if (token.coordinator.terminalRequest === "stop" && session.status === "starting" && !session.lifecycleFenced) {
+				broadcastStatus(session, "idle");
+			}
+			return;
+		}
+		if (!this._replacementTokenIsCurrent(id, token)) {
+			throw new Error(`Session ${id} force-abort was superseded before start`);
+		}
 		// Broadcast aborting status so UI shows feedback during grace period
 		broadcastStatus(session, "aborting");
 
@@ -10017,17 +11099,23 @@ export class SessionManager {
 		// Result: the steered user-message echo renders but the agent process
 		// is killed before it can produce an assistant response.
 		let resolveSettled!: (v: boolean) => void;
+		const deferredTerminalEvents: any[] = [];
 		const settledPromise = new Promise<boolean>((resolve) => { resolveSettled = resolve; });
 		const settleTimer = this.clock.setTimeout(() => {
 			unsubSettle();
 			resolveSettled(false);
 		}, gracePeriodMs);
 		const unsubSettle = session.rpcClient.onEvent((event: any) => {
+			// The canonical listener is lifecycle-fenced while Stop owns the shared
+			// coordinator. Preserve its terminal sequence and replay bookkeeping once
+			// after graceful settlement; this listener never broadcasts the events.
+			if (event.type === "message_end") deferredTerminalEvents.push(event);
 			// A retryable agent_end (willRetry:true) means Pi is about to retry the
 			// attempt, not that the run stopped — treating it as settled would end
 			// the grace race early and skip force-kill while the agent is still
 			// live. Only a final (willRetry:false) agent_end settles the abort.
 			if (event.type === "agent_end" && event.willRetry !== true) {
+				deferredTerminalEvents.push(event);
 				this.clock.clearTimeout(settleTimer);
 				unsubSettle();
 				resolveSettled(true);
@@ -10046,21 +11134,33 @@ export class SessionManager {
 
 		const settled = await settledPromise;
 
-		if (settled) return;
+		if (settled) {
+			// The shared replacement fence suppressed the canonical listener. Replay
+			// the captured message_end/agent_end sequence through the same lifecycle
+			// bookkeeping exactly once. Queue draining is deferred to coordinator
+			// release so a graceful Stop cannot double-dispatch.
+			for (const event of deferredTerminalEvents) {
+				this.handleAgentLifecycle(session, event, {
+					replacementOwnedTerminal: true,
+					deferQueueDrain: true,
+				});
+			}
+			return;
+		}
 
 		// Graceful abort didn't work — force kill and restart the agent
 		console.log(`[session-manager] Force-aborting session ${id} — killing agent process`);
 
 		// Get the agent session file before killing so we can restore.
 		// Path is in the agent's coordinate system — no translation needed.
-		let agentSessionFile: string | undefined;
+		const persistedBeforeAbort = this.resolveStoreForSession(id).get(id);
+		let agentSessionFile = persistedBeforeAbort?.agentSessionFile;
 		try {
 			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
-		} catch {
-			const persisted = this.resolveStoreForSession(id).get(id);
-			agentSessionFile = persisted?.agentSessionFile;
-		}
+			if (stateResp.success && stateResp.data?.sessionFile) {
+				agentSessionFile = stateResp.data.sessionFile;
+			}
+		} catch { /* retain the durable transcript path */ }
 
 		// Kill the process
 		session.unsubscribe();
@@ -10072,18 +11172,28 @@ export class SessionManager {
 		// at front so the post-respawn drainQueue redispatches them once.
 		this._reconcileAfterAbort(session);
 
+		// Hard kill cannot emit Pi's terminal lifecycle event. Run the exact same
+		// canonical terminal bookkeeping once before deriving the replacement
+		// allowlist: revoke one-turn grants, count/notify the completed turn, settle
+		// idle waiters, clear streaming/error state, and persist wasStreaming=false.
+		// Queue draining remains owned by the coordinator's final release.
+		this.handleAgentLifecycle(session, { type: "agent_end", messages: [] }, {
+			replacementOwnedTerminal: true,
+			deferQueueDrain: true,
+		});
+
 		// Emit agent_end so clients know streaming stopped.
 		// WP4/RC3: route through emitSessionEvent so a client that resumes after a
 		// force-abort replays the agent_end (and clears its stale streaming partial)
 		// instead of relying on a later snapshot tick.
 		emitSessionEvent(session, { type: "agent_end", messages: [] });
-		broadcastStatus(session, "idle");
 
 		// Restart the agent process
 		try {
-			await this._coalesceRestore(id, async (generation) => {
-				session.lifecycleGeneration = generation;
-				const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+			if (!this._replacementTokenIsCurrent(id, token)) {
+				throw new Error(`Session ${id} force-abort recovery was superseded before replacement start`);
+			}
+			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -10092,16 +11202,18 @@ export class SessionManager {
 				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
 			};
 
-			// Apply sandbox wiring for sandboxed sessions (container spawn, token, etc.)
+			// Force-abort recovery must preserve the original filesystem realm. A
+			// sandbox transcript uses container coordinates; downgrading the replacement
+			// to a host bridge makes the later existence check miss that transcript and
+			// can drain queued intent against empty history. Fail closed instead, leaving
+			// the durable sandbox flag/path intact for a later recovery attempt.
 			if (session.sandboxed) {
 				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
 					projectId: session.projectId,
-					goalId: session.goalId,
+					goalId: session.goalId ?? session.teamGoalId,
 				});
 				if (!sandboxApplied) {
-					session.sandboxed = false;
-					this.resolveStoreForSession(id).update(id, { sandboxed: false });
-					this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
 				}
 			} else {
 				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
@@ -10137,9 +11249,12 @@ export class SessionManager {
 			// default (minus disabled names) on force-abort respawn. Mirrors the
 			// restore path's persisted-allowlist handling.
 			const forceAbortPersisted = this.resolveStoreForSession(id).get(id);
-			const forceAbortAllowedNames = forceAbortPersisted?.allowedTools ?? session.allowedTools;
+			// Terminal bookkeeping above has just revoked one-turn grants from the
+			// canonical live allowlist. Prefer that post-terminal value so a stale
+			// persisted snapshot cannot re-grant a spent capability on replacement.
+			const forceAbortAllowedNames = session.allowedTools ?? forceAbortPersisted?.allowedTools;
 			const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
-				? forceAbortAllowedNames.map(n => tagAllowedTool(n, this.toolManager))
+				? tagAllowedTools(forceAbortAllowedNames, this.toolManager)
 				: this.resolveEffectiveAllowedTools(role);
 			// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 			// distinction. A persisted `[]` means NO tools and MUST stay `[]` — never
@@ -10174,65 +11289,86 @@ export class SessionManager {
 			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceRespawnPersisted?.modelProvider);
 
 			const rpcClient = new RpcBridge(bridgeOptions);
-			session.spawnPinnedModel = bridgeOptions.initialModel;
-			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 			let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
-				if (isUserVisibleActivity(event)) {
+				// switch_session replays durable history. It restores Pi's model context,
+				// but it is not new live activity: do not rebroadcast it, append it to the
+				// resume EventBuffer, rewrite lastActivity, or run lifecycle/cost hooks.
+				// Preserve only steer-ledger reconciliation, matching cold restore.
+				if (switchingSession) {
+					this._consumeSteerEcho(session, event);
+					return;
+				}
+				const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+				if (isUserVisibleActivity(preparedEvent)) {
 					session.lastActivity = this.clock.now();
 					abortStore.update(id, { lastActivity: session.lastActivity });
 				}
-
-				const preparedEvent = this.prepareVisibleAgentEvent(session, event);
 				this.handleAgentLifecycle(session, preparedEvent);
-
 				this.emitAgentEvent(session, preparedEvent);
-				if (!switchingSession) this.trackCostFromEvent(session, preparedEvent);
+				this.trackCostFromEvent(session, preparedEvent);
 			});
 
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
-			await rpcClient.start();
+			try {
+				await rpcClient.start();
+			} catch (err) {
+				unsub();
+				await rpcClient.stop().catch(() => {});
+				throw err;
+			}
 
-			// Resume session if we have the session file.
+			// Resume session if we have the session file. Never install or drain a
+			// replacement process unless it accepted the sanitized durable history.
 			const abortPs = { ...forceRespawnPersisted, ...session, agentSessionFile } as PersistedSession;
 			const abortFileCtx = sessionFsContextForAgentFile(abortPs, agentSessionFile);
-			if (agentSessionFile) trustPersistedAgentSessionFile(agentSessionFile);
-			if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
-				// Un-poison blank-text user messages before rehydrating — this is
-				// the route a live already-stuck session takes (forceAbort →
-				// respawn), so the re-spawned agent reads a sanitized transcript.
-				await sanitizeAgentTranscriptFile(abortFileCtx, agentSessionFile, this.sandboxManager);
-				const switchResp = await rpcClient.sendCommand(
-					{ type: "switch_session", sessionPath: switchSessionPathForAgent(abortPs) },
-					15_000,
-				);
-				if (!switchResp.success) {
-					console.error(`[session-manager] switch_session failed after force abort: ${switchResp.error}`);
+			try {
+				if (agentSessionFile) {
+					if (!await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
+						throw new Error(`Cannot recover force-aborted session ${id}: persisted conversation history is unavailable`);
+					}
+					await this.switchSessionForRehydration(rpcClient, abortPs, agentSessionFile);
 				}
+			} catch (err) {
+				switchingSession = false;
+				unsub();
+				await rpcClient.stop().catch(() => {});
+				throw err;
 			}
 			switchingSession = false;
+			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+				unsub();
+				await rpcClient.stop().catch(() => {});
+				throw new Error(`Session ${id} force-abort replacement was superseded after rehydration`);
+			}
 
-			// Swap in the new bridge
+			// Swap in the new bridge only after history rehydration.
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
+			session.spawnPinnedModel = bridgeOptions.initialModel;
+			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 
 			try {
 				await this.tryAutoSelectModel(session);
 			} catch (err) {
-				await rpcClient.stop();
+				unsub();
+				await rpcClient.stop().catch(() => {});
 				throw err;
+			}
+			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session || session.rpcClient !== rpcClient) {
+				unsub();
+				await rpcClient.stop().catch(() => {});
+				throw new Error(`Session ${id} force-abort replacement was superseded during model verification`);
 			}
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
 
-				// Drain any queued messages (steered first, then normal). Fresh
-				// retry budget — the old process (and its busy guard) is gone.
-				session.recoverDrainAttempts = 0;
-				this.drainQueue(session);
-				return session;
-			});
+			// Fresh retry budget — the old process (and its busy guard) is gone.
+			// The shared coordinator performs the one queue drain after every queued
+			// lifecycle replacement has settled, never against an intermediate bridge.
+			session.recoverDrainAttempts = 0;
 		} catch (err) {
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
 			broadcastStatus(session, "terminated");

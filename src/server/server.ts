@@ -1,5 +1,5 @@
 import { exec } from "node:child_process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
@@ -37,9 +37,10 @@ import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
-import { PrStatusStore } from "./agent/pr-status-store.js";
-import { SessionManager, type SessionInfo, type ExtensionChannelServices } from "./agent/session-manager.js";
+import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
+import { SessionManager, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
+import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -54,6 +55,7 @@ import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettled
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
+import { freezeWorkflowDefinition } from "./agent/workflow-validator.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
@@ -66,7 +68,7 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore, type Role } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyDirRecursive, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
+import { ToolManager, copyToolGroupWithSharedDependencies, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
@@ -86,6 +88,8 @@ import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
+import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
+import { buildRunningGateSignalResponse, reuseCachedGateSignal } from "./gate-signal-response.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
 	GateArtifactResolutionError,
@@ -412,6 +416,7 @@ async function detectedRefExistsInAllComponents(
 	rootPath: string,
 	comps: Array<{ repo: string }>,
 	ref: string,
+	commandRunner: CommandRunner = realCommandRunner,
 ): Promise<boolean> {
 	try {
 		const seen = new Set<string>();
@@ -420,9 +425,9 @@ async function detectedRefExistsInAllComponents(
 			if (seen.has(c.repo)) continue;
 			seen.add(c.repo);
 			const repoPath = path.join(rootPath, c.repo);
-			if (!(await isGitRepo(repoPath).catch(() => false))) continue;
+			if (!(await isGitRepo(repoPath, commandRunner).catch(() => false))) continue;
 			checked++;
-			if (!(await refExistsInRepo(repoPath, ref))) return false;
+			if (!(await refExistsInRepo(repoPath, ref, commandRunner))) return false;
 		}
 		return checked > 0;
 	} catch {
@@ -430,13 +435,13 @@ async function detectedRefExistsInAllComponents(
 	}
 }
 
-async function resolveBaseRefDetectRepoPath(rootPath: string, comps: Array<{ repo: string }>): Promise<string | null> {
+async function resolveBaseRefDetectRepoPath(rootPath: string, comps: Array<{ repo: string }>, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
 	const isMultiRepo = comps.some(c => c.repo !== ".");
 	const primaryRepoPath = isMultiRepo
 		? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 		: rootPath;
-	if (!(await isGitRepo(primaryRepoPath).catch(() => false))) return null;
-	return isMultiRepo ? primaryRepoPath : await getRepoRoot(primaryRepoPath);
+	if (!(await isGitRepo(primaryRepoPath, commandRunner).catch(() => false))) return null;
+	return isMultiRepo ? primaryRepoPath : await getRepoRoot(primaryRepoPath, commandRunner);
 }
 
 function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
@@ -527,7 +532,8 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
+import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
@@ -559,7 +565,7 @@ import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
-import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
+import { launchSidebarSessionFork, resolveGoalGithubLink } from "./sidebar-actions.js";
 import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData, seedModelDefaultsFromLegacy } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -590,7 +596,7 @@ import {
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
-import { validateGoalInlineWorkflow } from "./proposals/proposal-types.js";
+import { prepareGoalProposalSeed } from "./proposals/goal-proposal-seed.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -1312,8 +1318,6 @@ async function publishCurrentBranchToOrigin(
 }
 
 /** Git status result shape (+ optional partial/untrackedIncluded flags). */
-export type GitStatusRemotePublication = "local-only-policy";
-
 export interface GitStatusResult {
 	branch: string; primaryBranch: string; isOnPrimary: boolean;
 	/**
@@ -1334,107 +1338,6 @@ export interface GitStatusResult {
 	partial?: boolean;
 	/** true only when ?untracked=1 was passed (-uall); false on default -uno */
 	untrackedIncluded?: boolean;
-	/** Set when status intentionally suppresses default publication by policy. */
-	remotePublication?: GitStatusRemotePublication;
-}
-
-type GitStatusPublicationPolicy = "legacy-auto-publish" | "local-only-policy";
-type WorktreePushPolicy = "local-only" | "publish";
-type SessionGitPublicationMetadata = Partial<Pick<SessionInfo, "teamGoalId" | "teamLeadSessionId" | "role" | "branch">> & {
-	worktreePushPolicy?: WorktreePushPolicy;
-	remotePublicationPolicy?: WorktreePushPolicy;
-};
-
-function normalizeWorktreePushPolicy(value: unknown): WorktreePushPolicy | undefined {
-	return value === "local-only" || value === "publish" ? value : undefined;
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function readSessionGitPublicationMetadata(sessionManager: unknown, sessionId: string, liveSession: unknown): SessionGitPublicationMetadata {
-	const live = liveSession as SessionGitPublicationMetadata | undefined;
-	const persisted = (sessionManager as { getPersistedSession?: (id: string) => unknown })
-		.getPersistedSession?.(sessionId) as SessionGitPublicationMetadata | undefined;
-	return {
-		teamGoalId: live?.teamGoalId ?? persisted?.teamGoalId,
-		teamLeadSessionId: live?.teamLeadSessionId ?? persisted?.teamLeadSessionId,
-		role: live?.role ?? persisted?.role,
-		branch: live?.branch ?? persisted?.branch,
-		worktreePushPolicy: normalizeWorktreePushPolicy(live?.worktreePushPolicy) ?? normalizeWorktreePushPolicy(persisted?.worktreePushPolicy),
-		remotePublicationPolicy: normalizeWorktreePushPolicy(live?.remotePublicationPolicy) ?? normalizeWorktreePushPolicy(persisted?.remotePublicationPolicy),
-	};
-}
-
-function explicitWorktreePushPolicy(session: SessionGitPublicationMetadata): WorktreePushPolicy | undefined {
-	return normalizeWorktreePushPolicy(session.worktreePushPolicy) ?? normalizeWorktreePushPolicy(session.remotePublicationPolicy);
-}
-
-function isLegacyScopedTeamMemberSession(session: SessionGitPublicationMetadata, branch: string | undefined): boolean {
-	if (!session.teamGoalId || !session.teamLeadSessionId || !session.role || !branch) return false;
-	if (session.role === "team-lead") return false;
-	const goalId8 = session.teamGoalId.slice(0, 8);
-	if (!/^[0-9a-f]{8}$/i.test(goalId8)) return false;
-	const rolePattern = escapeRegExp(session.role);
-	const branchPattern = new RegExp(`^goal/${escapeRegExp(goalId8)}/${rolePattern}-[0-9a-f]{4}$`, "i");
-	return branchPattern.test(branch);
-}
-
-function resolveSessionGitStatusPublicationPolicy(
-	session: SessionGitPublicationMetadata,
-	branch: string | undefined,
-): GitStatusPublicationPolicy {
-	const explicitPolicy = explicitWorktreePushPolicy(session);
-	if (explicitPolicy === "local-only") return "local-only-policy";
-	if (explicitPolicy === "publish") return "legacy-auto-publish";
-	return isLegacyScopedTeamMemberSession(session, branch) ? "local-only-policy" : "legacy-auto-publish";
-}
-
-function sessionGitStatusRemotePublication(
-	sessionManager: unknown,
-	sessionId: string,
-	liveSession: unknown,
-	branch: string | undefined,
-): GitStatusRemotePublication | undefined {
-	const metadata = readSessionGitPublicationMetadata(sessionManager, sessionId, liveSession);
-	return resolveSessionGitStatusPublicationPolicy(metadata, branch) === "local-only-policy"
-		? "local-only-policy"
-		: undefined;
-}
-
-export function sessionGitStatusAutoPublishDecision(
-	result: Pick<GitStatusResult, "isOnPrimary" | "ahead" | "hasUpstream" | "branch"> | null | undefined,
-	remotePublication?: GitStatusRemotePublication,
-): { branch: string; setUpstream?: boolean } | undefined {
-	if (!result || remotePublication) return undefined;
-	if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
-		return { branch: result.branch };
-	}
-	if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-		return { branch: result.branch, setUpstream: true };
-	}
-	return undefined;
-}
-
-export function __resolveSessionGitStatusPublicationPolicyForTests(
-	session: SessionGitPublicationMetadata,
-	branch: string | undefined,
-): GitStatusPublicationPolicy {
-	return resolveSessionGitStatusPublicationPolicy(session, branch);
-}
-
-export function __resolveSessionGitStatusPublicationForTests(
-	session: SessionGitPublicationMetadata,
-	result: GitStatusResult,
-): { policy: GitStatusPublicationPolicy; result: GitStatusResult; autoPublish: boolean } {
-	const policy = resolveSessionGitStatusPublicationPolicy(session, result.branch);
-	const remotePublication = policy === "local-only-policy" ? "local-only-policy" : undefined;
-	return {
-		policy,
-		result: remotePublication ? { ...result, remotePublication } : result,
-		autoPublish: !!sessionGitStatusAutoPublishDecision(result, remotePublication),
-	};
 }
 
 // ── Git status cache + single-flight ──
@@ -1636,37 +1539,61 @@ async function getCommitChangedFiles(cwd: string, sha: string, containerId?: str
 	return parseCommitChangedFiles(out);
 }
 
-function parseCommitLogWithShortstat(output: string): CommitInfo[] {
-	const lines = output.split("\n");
+function parseCommitLogWithFiles(output: string): CommitInfo[] {
 	const commits: CommitInfo[] = [];
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		if (!line.includes(COMMIT_LOG_SEPARATOR)) continue;
-		const parts = line.split(COMMIT_LOG_SEPARATOR);
-		if (parts.length < 5) continue;
-		const [sha, shortSha, message, author, timestamp] = parts;
-		let filesChanged = 0, insertions = 0, deletions = 0;
-		for (let j = i + 1; j < lines.length && !lines[j].includes(COMMIT_LOG_SEPARATOR); j++) {
-			const statLine = lines[j].trim();
-			if (!statLine.includes("changed")) continue;
-			const fm = statLine.match(/(\d+) file/);
-			const im = statLine.match(/(\d+) insertion/);
-			const dm = statLine.match(/(\d+) deletion/);
-			if (fm) filesChanged = parseInt(fm[1], 10);
-			if (im) insertions = parseInt(im[1], 10);
-			if (dm) deletions = parseInt(dm[1], 10);
-			break;
+	for (const record of output.split("\x1e")) {
+		const lines = record.split(/\r?\n/).filter(Boolean);
+		const metadata = lines.shift();
+		if (!metadata) continue;
+		const [sha, shortSha, message, author, timestamp] = metadata.split(COMMIT_LOG_SEPARATOR);
+		if (!sha || !shortSha || timestamp === undefined) continue;
+
+		const files: CommitChangedFile[] = [];
+		let insertions = 0;
+		let deletions = 0;
+		for (const line of lines) {
+			if (line.startsWith(":")) {
+				const [rawMetadata, ...paths] = line.split("\t");
+				const rawStatus = rawMetadata.trim().split(/\s+/).at(-1) ?? "";
+				const status = rawStatus.startsWith("R") ? "R" : rawStatus;
+				if (status === "R" && paths[0] && paths[1]) {
+					files.push({ path: paths[1], oldPath: paths[0], status, statusLabel: statusLabelForCommitFile(status) });
+				} else if (paths[0]) {
+					files.push({ path: paths[0], status, statusLabel: statusLabelForCommitFile(status) });
+				}
+				continue;
+			}
+			const numstat = line.match(/^(\d+|-)\t(\d+|-)\t/);
+			if (numstat) {
+				if (numstat[1] !== "-") insertions += Number(numstat[1]);
+				if (numstat[2] !== "-") deletions += Number(numstat[2]);
+			}
 		}
-		commits.push({ sha, shortSha, message, author, timestamp, filesChanged, insertions, deletions, files: [] });
+		commits.push({ sha, shortSha, message, author, timestamp, filesChanged: files.length, insertions, deletions, files });
 	}
 	return commits;
 }
 
-async function attachCommitFiles(commits: CommitInfo[], cwd: string, containerId?: string): Promise<CommitInfo[]> {
-	return Promise.all(commits.map(async commit => ({
-		...commit,
-		files: await getCommitChangedFiles(cwd, commit.sha, containerId),
-	})));
+export async function getCommitsWithFiles(
+	cwd: string,
+	rangeArgs: string[],
+	timeout = 5000,
+	containerId?: string,
+	commandRunner?: CommandRunner,
+): Promise<CommitInfo[]> {
+	// One real Git process returns metadata, statuses, renames, and numstat for
+	// the whole page. The former N-commit fan-out launched `cat-file` + `show`
+	// concurrently per commit; under full-suite contention one child could exceed
+	// its timeout and turn an otherwise valid commits response into HTTP 500.
+	const output = await execGitArgs([
+		"log",
+		`--format=%x1e${COMMIT_LOG_FORMAT}`,
+		"--raw",
+		"--numstat",
+		"--find-renames",
+		...rangeArgs,
+	], cwd, timeout, containerId, commandRunner);
+	return parseCommitLogWithFiles(output);
 }
 
 /**
@@ -1718,7 +1645,7 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
-async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
+export async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
 	let hasHead = true;
 	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId, commandRunner); } catch { hasHead = false; }
 
@@ -1829,6 +1756,26 @@ export interface GatewayConfig {
 	builtinPacksDir?: string;
 }
 
+export function installGatewayBridgeDeps(deps?: GatewayDeps) {
+	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
+	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
+	if (deps?.agentBridgeFactory) registerRpcBridgeFactory(deps.agentBridgeFactory);
+	const registeredRpcBridgeFactory = getRegisteredRpcBridgeFactory();
+	const gatewayDeps = resolveGatewayDeps({
+		...deps,
+		agentBridgeFactory: deps?.agentBridgeFactory ?? registeredRpcBridgeFactory ?? undefined,
+	});
+	let restored = false;
+	return {
+		gatewayDeps,
+		restoreExplicitRpcBridgeFactory(): void {
+			if (!hasExplicitAgentBridgeFactory || restored) return;
+			restored = true;
+			registerRpcBridgeFactory(previousRpcBridgeFactory);
+		},
+	};
+}
+
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Construction checkpoint timer — createGateway runs fully synchronously
 	// before start(), and earlier profiling showed ~19s of unattributed time
@@ -1842,16 +1789,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		__ckLast = now;
 		if (delta >= SLOW_PHASE_MS) bootLog(`[boot] ctor ${label} +${delta}ms (@${now - __ckT0}ms)`);
 	};
-	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
-	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
-	if (deps?.agentBridgeFactory) {
-		registerRpcBridgeFactory(deps.agentBridgeFactory);
-	}
-	const registeredRpcBridgeFactory = getRegisteredRpcBridgeFactory();
-	const gatewayDeps = resolveGatewayDeps({
-		...deps,
-		agentBridgeFactory: deps?.agentBridgeFactory ?? registeredRpcBridgeFactory ?? undefined,
-	});
+	const { gatewayDeps, restoreExplicitRpcBridgeFactory } = installGatewayBridgeDeps(deps);
 	serverCommandRunner = gatewayDeps.commandRunner;
 	const envRuntimeFlags = resolveLegacyTestRuntimeFlags();
 	const gatewayRuntimeFlags = {
@@ -1883,12 +1821,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	};
 	configureProfilingRuntime({ e2eProfile: gatewayRuntimeFlags.e2eProfile, e2eProfileFlushMs: gatewayRuntimeFlags.e2eProfileFlushMs });
 	configureAigwRuntimeFlags({ skipAigwDiscovery: gatewayRuntimeFlags.skipAigwDiscovery, testNoExternal: gatewayRuntimeFlags.testNoExternal, e2e: gatewayRuntimeFlags.e2e });
-	let rpcBridgeFactoryRestored = false;
-	const restoreExplicitRpcBridgeFactory = () => {
-		if (!hasExplicitAgentBridgeFactory || rpcBridgeFactoryRestored) return;
-		rpcBridgeFactoryRestored = true;
-		registerRpcBridgeFactory(previousRpcBridgeFactory);
-	};
 
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
@@ -2090,11 +2022,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
 	projectContextManager.setDependencies({ sessionManager });
-	// Wire gate status changes to bump goal generation for all project contexts
+	// Wire gate status changes to bump goal generation for all project contexts.
 	for (const ctx of projectContextManager.all()) {
-		ctx.gateStore.onStatusChange = () => {
-			ctx.goalStore.bumpGeneration();
-		};
+		wireGateStatusGenerationInvalidation(ctx.gateStore, ctx.goalStore);
 	}
 
 	const builtinConfigProvider = new BuiltinConfigProvider(config.builtinsDir);
@@ -2481,7 +2411,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 	});
 
-	const staffManager = new StaffManager(projectContextManager, { remotePolicy: remoteGitPolicy, worktreeSetupRuntime });
+	const staffManager = new StaffManager(projectContextManager, { commandRunner: gatewayDeps.commandRunner, remotePolicy: remoteGitPolicy, worktreeSetupRuntime });
 	sessionManager.setStaffManager(staffManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
@@ -3288,12 +3218,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					}
 				}
 
-				const isRepo = await isGitRepo(projectDir);
+				const isRepo = await isGitRepo(projectDir, serverCommandRunner);
 				if (!isRepo) {
 					console.log(`[sandbox] Project ${projectId} is not a git repo — sandbox disabled (worktrees require git)`);
 					return null;
 				}
-				const repoPath = await getRepoRoot(projectDir);
+				const repoPath = await getRepoRoot(projectDir, serverCommandRunner);
 
 				// Resolve the clone source for the container. Resolving via
 				// `resolveSandboxCloneSource` guarantees we NEVER hand git a raw host
@@ -3509,8 +3439,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							const components = ctx.projectConfigStore.getComponents();
 							const isMultiRepoProject = components.some(c => c.repo !== ".");
 							let sweepRootPath = ctx.project.rootPath;
-							if (!isMultiRepoProject && await isGitRepo(ctx.project.rootPath).catch(() => false)) {
-								sweepRootPath = await getRepoRoot(ctx.project.rootPath);
+							if (!isMultiRepoProject && await isGitRepo(ctx.project.rootPath, serverCommandRunner).catch(() => false)) {
+								sweepRootPath = await getRepoRoot(ctx.project.rootPath, serverCommandRunner);
 							}
 							sweepProjects.push({
 								id: ctx.project.id,
@@ -3600,10 +3530,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								for (const c of components) {
 									if (c.repo === "." || seen.has(c.repo)) continue;
 									seen.add(c.repo);
-									if (!(await isGitRepo(path.join(repoPath, c.repo)))) { poolReady = false; break; }
+									if (!(await isGitRepo(path.join(repoPath, c.repo), serverCommandRunner))) { poolReady = false; break; }
 								}
 							} else {
-								poolReady = await isGitRepo(repoPath);
+								poolReady = await isGitRepo(repoPath, serverCommandRunner);
 							}
 							if (poolReady) {
 								const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
@@ -3611,7 +3541,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								const pcs = ctx.projectConfigStore;
 								// Single-repo: resolve nested rootPath to the actual git toplevel so
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
-								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
+								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath, serverCommandRunner);
 								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
 								bootLog(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
@@ -5146,7 +5076,7 @@ async function handleApiRoute(
 					const isMultiRepo = comps.some(c => c.repo !== ".");
 					const primaryRepoPath = isMultiRepo
 						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
-						: await getRepoRoot(body.rootPath);
+						: await getRepoRoot(body.rootPath, serverCommandRunner);
 					const detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 					// Only pin when the detected ref is grammar-valid AND present in
 					// every component repo — otherwise a manual save would reject it
@@ -5154,7 +5084,7 @@ async function handleApiRoute(
 					if (
 						detected
 						&& isValidBaseRefBranchGrammar(detected)
-						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
+						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected, serverCommandRunner))
 					) {
 						cfg.set("base_ref", detected);
 					}
@@ -5176,10 +5106,10 @@ async function handleApiRoute(
 						for (const c of components) {
 							if (c.repo === "." || seen.has(c.repo)) continue;
 							seen.add(c.repo);
-							if (!(await isGitRepo(path.join(body.rootPath, c.repo)))) { poolReady = false; break; }
+							if (!(await isGitRepo(path.join(body.rootPath, c.repo), serverCommandRunner))) { poolReady = false; break; }
 						}
 					} else {
-						poolReady = await isGitRepo(body.rootPath);
+						poolReady = await isGitRepo(body.rootPath, serverCommandRunner);
 					}
 					if (poolReady) {
 						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
@@ -5187,7 +5117,7 @@ async function handleApiRoute(
 						const pcs = newCtx?.projectConfigStore;
 						// Single-repo: resolve nested rootPath to the actual git toplevel so
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
-						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
+						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath, serverCommandRunner);
 						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined, project.rootPath);
 					}
 				} catch { /* best-effort */ }
@@ -5246,9 +5176,9 @@ async function handleApiRoute(
 
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
-		// §3 accept invariant — an EDIT that names an explicit but unregistered
-		// project must fail with a clear UNKNOWN_PROJECT code rather than a
-		// generic 400 from the registry, and must never fall through to a create.
+		// Endpoint defense in depth: project-proposal acceptance classifies create
+		// versus edit from `fields.projectId` before dispatch. If a mutation still
+		// targets an unregistered id, return a clear UNKNOWN_PROJECT response.
 		if (!projectRegistry.get(projectGetMatch[1])) {
 			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectGetMatch[1]}` }, 422);
 			return;
@@ -5315,8 +5245,9 @@ async function handleApiRoute(
 	const projectPromoteMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/promote$/);
 	if (projectPromoteMatch && req.method === "POST") {
 		const projectId = projectPromoteMatch[1];
-		// §3 accept invariant — promoting an explicit but unregistered project
-		// is a clear UNKNOWN_PROJECT error, not a generic 400.
+		// Endpoint defense in depth: the acceptance dispatcher selects promotion
+		// from `fields.projectId`; this endpoint still reports an unregistered id
+		// as UNKNOWN_PROJECT rather than relying on a generic registry error.
 		if (!projectRegistry.get(projectId)) {
 			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectId}` }, 422);
 			return;
@@ -5337,14 +5268,14 @@ async function handleApiRoute(
 					const isMultiRepo = comps.some(c => c.repo !== ".");
 					const primaryRepoPath = isMultiRepo
 						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
-						: await getRepoRoot(rootPath);
+						: await getRepoRoot(rootPath, serverCommandRunner);
 					const detected = await detectBaseRefFromRemote(primaryRepoPath, serverCommandRunner, serverRemoteGitPolicy);
 					// Pin only if the detected ref exists in every component repo
 					// (mirrors save-time validation). See POST /api/projects above.
 					if (
 						detected
 						&& isValidBaseRefBranchGrammar(detected)
-						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected))
+						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected, serverCommandRunner))
 					) {
 						cfg.set("base_ref", detected);
 					}
@@ -5377,13 +5308,13 @@ async function handleApiRoute(
 		try {
 			const cfg = ctx.projectConfigStore;
 			const comps = cfg.getComponents();
-			const primaryRepoPath = await resolveBaseRefDetectRepoPath(rootPath, comps);
+			const primaryRepoPath = await resolveBaseRefDetectRepoPath(rootPath, comps, serverCommandRunner);
 			if (!primaryRepoPath) {
 				const parsed = parseBaseRef(cfg.get("base_ref") || "");
 				json({ resolved: parsed.ref || "", detected: null });
 				return;
 			}
-			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
+			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"), serverCommandRunner)).ref;
 			// `detected` must be SAVEABLE — null it out unless it passes the same
 			// checks add-time pinning applies (grammar + cross-component existence).
 			// The Settings "Detect from remote" button fills this value, so a
@@ -5392,7 +5323,7 @@ async function handleApiRoute(
 			if (
 				detected
 				&& (!isValidBaseRefBranchGrammar(detected)
-					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected)))
+					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected, serverCommandRunner)))
 			) {
 				detected = null;
 			}
@@ -5408,10 +5339,10 @@ async function handleApiRoute(
 	if (projectConfigMatch) {
 		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
 		if (!ctx) {
-			// §3 accept invariant — a config EDIT (PUT) that names an explicit
-			// but unregistered project must fail with a clear UNKNOWN_PROJECT
-			// code, never re-route into a create, and never be a generic 404.
-			// Reads keep the historical 404 shape.
+			// Endpoint defense in depth: `fields.projectId` drives create-versus-edit
+			// acceptance dispatch on the client. A config mutation that nevertheless
+			// targets an unregistered id gets UNKNOWN_PROJECT; reads keep the
+			// historical 404 shape.
 			if (req.method === "PUT") {
 				json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectConfigMatch[1]}` }, 422);
 			} else {
@@ -5527,7 +5458,7 @@ async function handleApiRoute(
 					let tagDetected = false;
 					for (const c of componentsToCheck) {
 						const repoPath = path.join(ctx.project.rootPath, c.repo);
-						const gitRepoCheck = await isGitRepo(repoPath).catch(() => false);
+						const gitRepoCheck = await isGitRepo(repoPath, serverCommandRunner).catch(() => false);
 						if (!gitRepoCheck) {
 							baseRefWarnings.push(baseRefSkippedRepoWarning(c.name, repoPath));
 							continue;
@@ -6642,7 +6573,7 @@ async function handleApiRoute(
 				// (staff-manager.ts) and goal path (goal-manager.ts).
 				const components = projCtx?.projectConfigStore.getComponents() ?? [];
 				const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
-				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd, undefined, { configuredBaseRef });
+				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd, undefined, { configuredBaseRef, commandRunner: serverCommandRunner });
 				if (support.supported && support.repoPath) {
 					worktreeOpts = { repoPath: support.repoPath };
 				}
@@ -7204,6 +7135,20 @@ async function handleApiRoute(
 				if (n >= 1 && n <= 8) effMaxConcurrentChildren = n;
 			}
 			const explicitWorktree = typeof body?.worktree === "boolean" ? body.worktree : undefined;
+			// Validate the raw definition before normalization can discard malformed
+			// aliases/metadata, then snapshot the same canonical deep clone used by
+			// goal-workflow replacement. Component/command references are deliberately
+			// not re-resolved here: the selected workflow may come from another cascade
+			// layer or predate the target project's current component commands. Project
+			// workflow mutations and the workflow PUT endpoint remain strict.
+			if (resolvedWorkflow) {
+				resolvedWorkflow = freezeWorkflowDefinition(
+					resolvedWorkflow,
+					targetCtx.projectConfigStore.getComponents(),
+					resolvedWorkflowId,
+					{ validateComponentReferences: false },
+				);
+			}
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -7287,6 +7232,80 @@ async function handleApiRoute(
 		} catch (err) {
 			jsonError(400, err);
 		}
+		return;
+	}
+
+	// PUT /api/goals/:goalId/workflow — replace the goal's complete frozen workflow snapshot.
+	const goalWorkflowPutMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/workflow$/);
+	if (goalWorkflowPutMatch && req.method === "PUT") {
+		const goalId = goalWorkflowPutMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!goal.workflow) { json({ error: "Goal has no workflow to replace" }, 400); return; }
+		const workflowCtx = projectContextManager.getContextForGoal(goalId);
+		if (!workflowCtx) { json({ error: "Goal project context not found" }, 404); return; }
+
+		// This is the only await in the route. The active-verification read and all
+		// mutations below intentionally form one synchronous continuation so a new
+		// verification cannot interleave with the conflict check.
+		const body = await readBody(req);
+		if (body === null || typeof body !== "object" || Array.isArray(body)) {
+			json({ error: "Workflow body must be a plain object" }, 400);
+			return;
+		}
+		const oldWorkflow = goal.workflow;
+		if (Object.prototype.hasOwnProperty.call(body, "id") && body.id !== oldWorkflow.id) {
+			json({ error: `Workflow id must remain "${oldWorkflow.id}"` }, 400);
+			return;
+		}
+
+		let frozen: Workflow;
+		try {
+			frozen = freezeWorkflowDefinition({
+				...body,
+				id: oldWorkflow.id,
+				createdAt: oldWorkflow.createdAt,
+				updatedAt: Date.now(),
+				hidden: oldWorkflow.hidden,
+			}, workflowCtx.projectConfigStore.getComponents(), oldWorkflow.id);
+		} catch (error) {
+			jsonError(400, error);
+			return;
+		}
+
+		// Gate array order is presentation-only. Compare canonical definitions by
+		// id; ordering inside dependsOn/verify remains significant via deep equality.
+		const oldById = new Map(oldWorkflow.gates.map(gate => [gate.id, gate]));
+		const newById = new Map(frozen.gates.map(gate => [gate.id, gate]));
+		const modifiedOrRemoved = new Set<string>();
+		for (const [gateId, oldGate] of oldById) {
+			const newGate = newById.get(gateId);
+			if (!newGate || !isDeepStrictEqual(oldGate, newGate)) modifiedOrRemoved.add(gateId);
+		}
+
+		const conflictingGateIds = [...new Set(
+			verificationHarness.getActiveVerifications(goalId)
+				.filter(active => !active.cancelled && active.overallStatus === "running" && modifiedOrRemoved.has(active.gateId))
+				.map(active => active.gateId),
+		)];
+		if (conflictingGateIds.length > 0) {
+			json({
+				error: "Workflow cannot modify or remove gates with active verifications",
+				code: "WORKFLOW_ACTIVE_VERIFICATION",
+				gateIds: conflictingGateIds,
+			}, 409);
+			return;
+		}
+
+		workflowCtx.goalManager.getGoalStore().update(goalId, { workflow: frozen });
+		goal.workflow = frozen;
+		type WorkflowGateReconciler = {
+			reconcileGatesForGoal(goalId: string, nextGateIds: Iterable<string>, modifiedGateIds?: Iterable<string>): void;
+		};
+		(workflowCtx.gateStore as typeof workflowCtx.gateStore & WorkflowGateReconciler)
+			.reconcileGatesForGoal(goalId, newById.keys(), modifiedOrRemoved);
+		broadcastToAll({ type: "goal_state_changed", goalId });
+		json(frozen);
 		return;
 	}
 
@@ -8489,12 +8508,11 @@ async function handleApiRoute(
 		}
 
 		const srcDir = path.join(actualSourceDir, groupDir);
-		const destDir = path.join(targetToolsDir, groupDir);
 
 		if (!fs.existsSync(srcDir)) { json({ error: "Source tool group not found" }, 404); return; }
 
-		// Copy entire group directory (recursively handles nested files)
-		copyDirRecursive(srcDir, destDir);
+		// Copy the whole group plus sibling modules imported through ../_shared/*.
+		copyToolGroupWithSharedDependencies(actualSourceDir, targetToolsDir, groupDir);
 
 		json({ ok: true, groupDir }, 201);
 		return;
@@ -9814,6 +9832,25 @@ async function handleApiRoute(
 
 	// ── AI Gateway ──
 
+	/**
+	 * Complete the observable side effects of an already-committed AIGW models
+	 * publication. Cache invalidation and client notification are independent of
+	 * Docker remount recovery: a remount failure must not make the durable config
+	 * mutation look rolled back or leave the UI/caches on the previous models.
+	 */
+	async function finalizeAigwPublication(): Promise<{ remountPending: boolean }> {
+		invalidateModelCache();
+		sessionManager.invalidateAigwModelCache();
+		broadcastPreferencesChanged();
+		try {
+			await sandboxManager?.refreshAgentModelMounts();
+			return { remountPending: false };
+		} catch (error: any) {
+			console.error("[aigw] Models/configuration committed; sandbox remount is pending normal recovery:", error?.message || error);
+			return { remountPending: true };
+		}
+	}
+
 	// GET /api/aigw/status — check if aigw is configured
 	if (url.pathname === "/api/aigw/status" && req.method === "GET") {
 		const aigwUrl = getAigwUrl(preferencesStore);
@@ -9840,9 +9877,8 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(body.url, preferencesStore);
-			invalidateModelCache();
-			broadcastPreferencesChanged();
-			json({ ok: true, models });
+			const remount = await finalizeAigwPublication();
+			json({ ok: true, models, ...(remount.remountPending ? { remountPending: true } : {}) });
 		} catch (err: any) {
 			jsonError(502, err, { error: `Failed to configure AI Gateway: ${err.message}` });
 		}
@@ -9852,9 +9888,8 @@ async function handleApiRoute(
 	// DELETE /api/aigw/configure — remove aigw config
 	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
 		removeAigw(preferencesStore);
-		invalidateModelCache();
-		broadcastPreferencesChanged();
-		json({ ok: true });
+		const remount = await finalizeAigwPublication();
+		json({ ok: true, ...(remount.remountPending ? { remountPending: true } : {}) });
 		return;
 	}
 
@@ -9883,9 +9918,8 @@ async function handleApiRoute(
 		}
 		try {
 			const models = await configureAigw(aigwUrl, preferencesStore);
-			invalidateModelCache();
-			broadcastPreferencesChanged();
-			json({ models });
+			const remount = await finalizeAigwPublication();
+			json({ models, ...(remount.remountPending ? { remountPending: true } : {}) });
 		} catch (err: any) {
 			jsonError(502, err);
 		}
@@ -9907,8 +9941,10 @@ async function handleApiRoute(
 			json({ ok: false, error: "Malformed pref — expected 'provider/modelId'" }, 400);
 			return;
 		}
-		const provider = pref.slice(0, slash);
-		const modelId = pref.slice(slash + 1);
+		const normalizedPref = normalizeAigwModelString(pref);
+		const normalizedSlash = normalizedPref.indexOf("/");
+		const provider = normalizedPref.slice(0, normalizedSlash);
+		const modelId = normalizedPref.slice(normalizedSlash + 1);
 		try {
 			const models = await getAvailableModels(preferencesStore);
 			const resolved = models.find((m) => m.provider === provider && m.id === modelId);
@@ -9930,57 +9966,58 @@ async function handleApiRoute(
 				return;
 			}
 			const baseUrl = aigwUrl.replace(/\/+$/, "");
-			const chatUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
-
-			// The aigw registry strips the provider prefix (e.g. "aws/") from Claude
-			// model IDs; reconstruct the full ID by querying the gateway's /v1/models.
-			let sendId = modelId;
-			try {
-				const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-				const r = await fetchImpl(modelsUrl, { signal: AbortSignal.timeout(5000) });
-				if (r.ok) {
-					const data = await r.json() as { data?: Array<{ id: string }> };
-					if (Array.isArray(data.data)) {
-						const exact = data.data.find((m) => m.id === modelId);
-						if (exact) sendId = exact.id;
-						else {
-							const match = data.data.find((m) => {
-								const idx = m.id.indexOf("/");
-								return idx >= 0 && m.id.slice(idx + 1) === modelId;
-							});
-							if (match) sendId = match.id;
-						}
-					}
-				}
-			} catch {
-				/* keep sendId = modelId — gateway will reject if wrong */
+			const modelBaseUrl = (resolved.baseUrl || baseUrl).replace(/\/+$/, "");
+			if (resolved.api !== "openai-responses" && resolved.api !== "openai-completions") {
+				// Converse and future provider-native APIs must be exercised through
+				// pi-ai; never relabel them as a root chat-completions request.
+				const result = await testModelPreference(preferencesStore, normalizedPref);
+				json(result, result.status || (result.ok ? 200 : 502));
+				return;
 			}
 			const started = Date.now();
 			try {
-				const resp = await fetchImpl(chatUrl, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({
-						model: sendId,
-						max_tokens: 5,
-						messages: [
-							{ role: "user", content: "Reply with OK" },
-						],
-					}),
-					signal: AbortSignal.timeout(15000),
-				});
+				let resp: Response;
+				let modelResolved = modelId;
+				if (resolved.api === "openai-responses") {
+					// Well-known AIGW entries may expose multiple OpenAI-compatible
+					// providers for the same model family (e.g. /openai/v1 and
+					// /aws/openai/v1). Probe the model's authoritative per-provider
+					// Responses endpoint instead of the multiplexed /v1/chat/completions
+					// root; otherwise models like openai.gpt-5.5 falsely fail the flask.
+					resp = await fetchImpl(`${modelBaseUrl}/responses`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders() },
+						body: JSON.stringify({
+							model: modelId,
+							max_output_tokens: 16,
+							input: "Reply with OK",
+						}),
+						signal: AbortSignal.timeout(15000),
+					});
+				} else {
+					resp = await fetchImpl(`${modelBaseUrl}/chat/completions`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders() },
+						body: JSON.stringify({
+							model: modelId,
+							max_tokens: 16,
+							messages: [{ role: "user", content: "Reply with OK" }],
+						}),
+						signal: AbortSignal.timeout(15000),
+					});
+				}
 				const latencyMs = Date.now() - started;
 				if (!resp.ok) {
 					const errText = (await resp.text().catch(() => "")).slice(0, 300);
-					json({ ok: false, modelResolved: sendId, latencyMs, error: `Gateway ${resp.status}: ${errText || resp.statusText}` });
+					json({ ok: false, modelResolved, latencyMs, error: `Gateway ${resp.status}: ${errText || resp.statusText}` });
 					return;
 				}
 				// Best-effort parse; we don't require specific text content—just a successful round-trip.
 				await resp.json().catch(() => ({}));
-				json({ ok: true, modelResolved: sendId, latencyMs });
+				json({ ok: true, modelResolved, latencyMs });
 			} catch (err: any) {
 				const latencyMs = Date.now() - started;
-				json({ ok: false, modelResolved: sendId, latencyMs, error: err?.message || "Request failed" });
+				json({ ok: false, modelResolved: modelId, latencyMs, error: err?.message || "Request failed" });
 			}
 		} catch (err: any) {
 			jsonError(500, err, { ok: false, error: err?.message || "Test failed" });
@@ -10718,7 +10755,7 @@ async function handleApiRoute(
 		});
 
 		for (const gate of affectedGates) {
-			broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId: gate.gateId, status: gate.status });
+			broadcastGateStatusChanged(broadcastToGoal, goalId, gate.gateId, gate.status);
 		}
 		broadcastToGoal(goalId, {
 			type: "gate_reset",
@@ -10830,7 +10867,7 @@ async function handleApiRoute(
 		const bypassSignal = gateStore.bypassGate(goalId, gateId, { whyBypassed, whoAmI });
 		const bypassedAt = bypassSignal.metadata?.bypassedAt ?? String(bypassSignal.timestamp);
 
-		broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "bypassed" });
+		broadcastGateStatusChanged(broadcastToGoal, goalId, gateId, "bypassed");
 
 		let teamLeadNotified = false;
 		try {
@@ -10969,72 +11006,29 @@ async function handleApiRoute(
 		}
 
 		// Auto-pass if a prior signal for the same commit already fully passed.
-		// Manual reset preserves signal history for auditability, so this route-level
-		// fast path must honor the same reset cache boundary as VerificationHarness.
-		// Human sign-offs are never reusable consent; let the harness run them again.
-		if (commitSha !== "unknown") {
-			const existingGateForCache = gateStore.getGate(goalId, gateId);
-			if (existingGateForCache) {
-				const cacheInvalidatedAt = existingGateForCache.verificationCacheInvalidatedAt;
-				const priorPassed = existingGateForCache.signals.find(s =>
-					s.commitSha === commitSha
-					&& s.verification?.status === "passed"
-					&& (cacheInvalidatedAt === undefined || s.timestamp > cacheInvalidatedAt)
-					&& !s.verification.steps.some(step => step.type === "human-signoff")
-				);
-				if (priorPassed?.verification) {
-					const phaseByStepName = new Map((gateDef.verify || []).map((s: any) => [s.name, s.phase ?? 0]));
-					const cachedSteps = priorPassed.verification.steps.map((s: any) => {
-						const status = s.skipped ? "skipped" : (s.status ?? (s.passed ? "passed" : "failed"));
-						return {
-							...s,
-							status,
-							...(status === "skipped" ? { skipped: true } : {}),
-							phase: s.phase ?? phaseByStepName.get(s.name) ?? 0,
-							output: `[cached from prior signal] ${s.output}`,
-						};
-					});
-					// Create a signal record with cached results
-					const cachedSignal = {
-						id: randomUUID(),
-						gateId,
-						goalId,
-						sessionId: body?.sessionId || "unknown",
-						timestamp: Date.now(),
-						commitSha,
-						metadata: body?.metadata,
-						content: body?.content,
-						contentVersion: body?.content ? (existingGateForCache.currentContentVersion || 0) + 1 : undefined,
-						verification: {
-							status: "passed" as const,
-							steps: cachedSteps,
-						},
-					};
-					gateStore.recordSignal(cachedSignal);
-					if (body?.content && cachedSignal.contentVersion) {
-						gateStore.updateGateContent(goalId, gateId, body.content, cachedSignal.contentVersion);
-					}
-					if (body?.metadata) {
-						gateStore.updateGateMetadata(goalId, gateId, body.metadata);
-					}
-					gateStore.updateGateStatus(goalId, gateId, "passed");
-					broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: cachedSignal.id });
-					broadcastToGoal(goalId, { type: "gate_verification_complete", goalId, gateId, signalId: cachedSignal.id, status: "passed" });
-					broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "passed" });
-					const verifySteps = cachedSignal.verification.steps.map((s: any) => ({
-						name: s.name,
-						type: s.type,
-						status: s.status,
-						passed: s.passed,
-						skipped: s.skipped,
-						phase: s.phase,
-						duration_ms: s.duration_ms,
-						output: s.output,
-					}));
-					json({ signal: { id: cachedSignal.id, gateId, goalId, status: "passed", steps: verifySteps, cached: true } }, 201);
-					return;
-				}
-			}
+		// The extracted decision core owns cache-boundary and response semantics so
+		// this route cannot drift from its deterministic store-level coverage.
+		const cachedResponse = reuseCachedGateSignal({
+			gateStore,
+			goalId,
+			gate: gateDef,
+			commitSha,
+			body,
+			notifier: {
+				signalReceived: (notifiedGoalId, notifiedGateId, signalId) => {
+					broadcastToGoal(notifiedGoalId, { type: "gate_signal_received", goalId: notifiedGoalId, gateId: notifiedGateId, signalId });
+				},
+				verificationComplete: (notifiedGoalId, notifiedGateId, signalId, status) => {
+					broadcastToGoal(notifiedGoalId, { type: "gate_verification_complete", goalId: notifiedGoalId, gateId: notifiedGateId, signalId, status });
+				},
+				statusChanged: (notifiedGoalId, notifiedGateId, status) => {
+					broadcastGateStatusChanged(broadcastToGoal, notifiedGoalId, notifiedGateId, status);
+				},
+			},
+		});
+		if (cachedResponse) {
+			json(cachedResponse, 201);
+			return;
 		}
 
 		// Compute content version
@@ -11049,7 +11043,7 @@ async function handleApiRoute(
 				if (g.dependsOn.includes(gateId) || hasTransitiveDep(goal.workflow, g.id, gateId)) {
 					const downstream = gateStore.getGate(goalId, g.id);
 					if (downstream) {
-						broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId: g.id, status: downstream.status });
+						broadcastGateStatusChanged(broadcastToGoal, goalId, g.id, downstream.status);
 					}
 				}
 			}
@@ -11134,21 +11128,10 @@ async function handleApiRoute(
 			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
-		const verifySteps = initialSteps.map((s: any) => ({
-			name: s.name,
-			type: s.type,
-			status: s.status,
-			passed: s.passed,
-			skipped: s.skipped,
-			phase: s.phase,
-			duration_ms: s.duration_ms,
-			output: s.output,
-		}));
-		const signalResponse = { id: signal.id, gateId, goalId, status: "running", steps: verifySteps };
-		const response: { signal: typeof signalResponse; agentReminder?: string } = { signal: signalResponse };
-		if (verificationHarness.getActiveVerification(signal.id)?.overallStatus === "running") {
-			response.agentReminder = "Gate signal accepted. Verification is running asynchronously. Do not poll with `gate_status` or `gate_inspect`. Go idle now and wait for the server to deliver verification results or further instructions.";
-		}
+		const response = buildRunningGateSignalResponse(
+			signal,
+			verificationHarness.getActiveVerification(signal.id)?.overallStatus === "running",
+		);
 		json(response, 201);
 		return;
 	}
@@ -11162,7 +11145,13 @@ async function handleApiRoute(
 		const gateStore = gateSignalsCtx.gateStore;
 		const gate = gateStore.getGate(goalId, gateId);
 		if (!gate) { json({ error: "Gate not found" }, 404); return; }
-		json({ signals: gate.signals });
+		const goal = gateSignalsCtx.goalStore.get(goalId);
+		const gateName = goal?.workflow?.gates.find(def => def.id === gateId)?.name;
+		json({
+			signals: gate.signals,
+			...(goal?.title ? { goalTitle: goal.title } : {}),
+			...(gateName ? { gateName } : {}),
+		});
 		return;
 	}
 
@@ -11652,22 +11641,21 @@ async function handleApiRoute(
 		try {
 			let primaryBranch = "master";
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", goal.cwd);
+				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", goal.cwd, 5000, undefined, commandRunner);
 				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
 			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", goal.cwd); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", goal.cwd); primaryBranch = "main"; } catch { /* keep default */ } }
+				try { await execGit("git rev-parse --verify refs/heads/master", goal.cwd, 5000, undefined, commandRunner); primaryBranch = "master"; }
+				catch { try { await execGit("git rev-parse --verify refs/heads/main", goal.cwd, 5000, undefined, commandRunner); primaryBranch = "main"; } catch { /* keep default */ } }
 			}
 
 			let rangeSpec = `-${limit} ${branch}`;
 			if (branch !== primaryBranch && branch !== "HEAD") {
 				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, goal.cwd); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
-				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, goal.cwd, 5000, undefined, commandRunner); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+				try { await execGit(`git rev-parse ${primaryRef}`, goal.cwd, 5000, undefined, commandRunner); rangeSpec = `-${limit} ${primaryRef}..${branch}`; } catch { /* fall back */ }
 			}
 
-			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], goal.cwd);
-			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), goal.cwd);
+			const commits = await getCommitsWithFiles(goal.cwd, rangeSpec.split(" ").filter(Boolean), 5000, undefined, commandRunner);
 			json({ commits });
 		} catch (e: any) {
 			json({ error: "Failed to read git log", detail: e.message }, 500);
@@ -11800,40 +11788,23 @@ async function handleApiRoute(
 	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
 	if (goalGithubLinkMatch && req.method === "GET") {
 		const goalId = goalGithubLinkMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) { json({ available: false, reason: "goal-not-found" } satisfies GoalGithubLinkResponse); return; }
-		if (!hasGoalGitWorktree(goal)) { json({ available: false, reason: "no-worktree", message: noWorktreeGoalGitMessage(goal) } satisfies GoalGithubLinkResponse); return; }
-
-		const cached = prStatusStore.get(goalId);
-		if (cached?.url) {
-			json({ available: true, kind: "pr", url: cached.url } satisfies GoalGithubLinkResponse);
-			return;
-		}
-
-		if (goal.branch && fs.existsSync(goal.cwd)) {
-			const fresh = await getCachedPrStatus(goal.cwd, goal.branch, process.cwd()).catch(() => null);
-			if (fresh?.url) {
-				prStatusStore.set(goalId, fresh);
-				json({ available: true, kind: "pr", url: fresh.url } satisfies GoalGithubLinkResponse);
-				return;
-			}
-		}
-
-		if (!goal.branch) { json({ available: false, reason: "no-branch" } satisfies GoalGithubLinkResponse); return; }
-
-		const remoteCwd = goal.repoPath || goal.cwd;
-		try {
-			const { stdout } = await serverCommandRunner.execFile("git", ["remote", "get-url", "origin"], {
-				cwd: remoteCwd,
-				encoding: "utf-8",
-				timeout: 5_000,
-			});
-			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(String(stdout).trim()), goal.branch);
-			if (!branchUrl) { json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse); return; }
-			json({ available: true, kind: "branch", url: branchUrl } satisfies GoalGithubLinkResponse);
-		} catch {
-			json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse);
-		}
+		json(await resolveGoalGithubLink<PersistedGoal, PrStatusEntry>(goalId, {
+			getGoal: getGoalAcrossProjects,
+			hasGitWorktree: hasGoalGitWorktree,
+			noWorktreeMessage: noWorktreeGoalGitMessage,
+			getCachedPr: id => prStatusStore.get(id),
+			getFreshPr: (cwd, branch) => getCachedPrStatus(cwd, branch, process.cwd()),
+			setCachedPr: (id, pr) => prStatusStore.set(id, pr),
+			pathExists: fs.existsSync,
+			getOriginRemote: async cwd => {
+				const { stdout } = await serverCommandRunner.execFile("git", ["remote", "get-url", "origin"], {
+					cwd,
+					encoding: "utf-8",
+					timeout: 5_000,
+				});
+				return stripTokenFromGitUrl(String(stdout).trim());
+			},
+		}));
 		return;
 	}
 
@@ -12350,29 +12321,6 @@ async function handleApiRoute(
 		}
 
 		const projCwd = projectRegistry.get(projectId)!.rootPath;
-		// Worktree choice:
-		//  • newWorktree=true  → create a fresh worktree/branch off the project repo
-		//    (or a plain project-root session when the project isn't a git repo),
-		//    matching the Continue-Archived flow.
-		//  • newWorktree=false → reuse the source's existing worktree directly. Two
-		//    live sessions intentionally share the tree, so we deliberately do NOT
-		//    register worktree metadata on the fork — terminating either session
-		//    must never tear down the shared worktree/branch.
-		let sessionCwd: string;
-		let worktreeOpts: { repoPath: string } | undefined;
-		if (newWorktree) {
-			sessionCwd = projCwd;
-			try {
-				if (await isGitRepo(projCwd)) worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
-			} catch { /* not a git repo — plain project-root session */ }
-		} else {
-			// Prefer the source's own cwd when it has no worktree so a standalone
-			// non-worktree session keeps its working directory instead of landing
-			// in the project root.
-			sessionCwd = ps.worktreePath || ps.cwd || projCwd;
-			worktreeOpts = undefined;
-		}
-
 		const forkId = randomUUID();
 		// Use the project root for the cloned `.jsonl` slug (same as /continue);
 		// worktree-backed sessions rotate to the final cwd-derived file after the
@@ -12396,61 +12344,77 @@ async function handleApiRoute(
 			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
 		}
 
-		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath, source.cwd]
-			.filter((v): v is string => typeof v === "string" && v.length > 0)));
-		const createOpts: any = {
-			sessionId: forkId,
-			projectId,
-			sandboxed: !!ps.sandboxed,
-			worktreeOpts,
-			preExistingAgentSessionFile: destJsonl,
-			preExistingAgentSessionOldCwds: oldTranscriptCwds,
-			taskId: ps.taskId,
-			reattemptGoalId: ps.reattemptGoalId,
-			staffId: ps.staffId,
-			allowedTools: ps.allowedTools,
-		};
-		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
-		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
-			createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
-		}
-
-		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
-		if (staff) {
-			createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager, resolveRoleForProject);
-			createOpts.roleName = staff.roleId;
-			createOpts.accessory = staff.accessory;
-			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
-		} else {
-			const role = ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
-			if (role) {
-				const opts = roleCreateOptions(role);
-				if (createOpts.initialModel) delete opts.initialModel;
-				Object.assign(createOpts, opts);
-			} else if (ps.role) {
-				createOpts.role = ps.role;
-				createOpts.roleName = ps.role;
-				if (ps.accessory) createOpts.accessory = ps.accessory;
-			} else if (ps.accessory) {
-				createOpts.accessory = ps.accessory;
-			}
-		}
-
 		try {
-			const fork = await sessionManager.createSession(sessionCwd, undefined, ps.goalId, ps.assistantType, createOpts);
-			copyAuthorSidecar(sourceId, fork.id);
-			const baseTitle = (ps.title || source.title || "session").trim() || "session";
-			const title = `Fork: ${baseTitle}`;
-			sessionManager.setTitle(fork.id, title, { markGenerated: true });
-			if (ps.staffId) fork.staffId = ps.staffId;
-
-			json({
-				id: fork.id,
-				cwd: fork.cwd,
-				status: fork.status,
+			const launched = await launchSidebarSessionFork({
+				forkId,
 				projectId,
-				goalId: ps.goalId,
-				title,
+				projectRoot: projCwd,
+				destJsonl,
+				newWorktree,
+				source,
+				persisted: ps,
+			}, {
+				resolveNewWorktreeRepoPath: async projectRoot => {
+					try {
+						return await isGitRepo(projectRoot, serverCommandRunner)
+							? await getRepoRoot(projectRoot, serverCommandRunner)
+							: undefined;
+					} catch {
+						return undefined;
+					}
+				},
+				buildCreateOptions: ({ worktreeOpts, oldTranscriptCwds }) => {
+					const createOpts: any = {
+						sessionId: forkId,
+						projectId,
+						sandboxed: !!ps.sandboxed,
+						worktreeOpts,
+						preExistingAgentSessionFile: destJsonl,
+						preExistingAgentSessionOldCwds: oldTranscriptCwds,
+						taskId: ps.taskId,
+						reattemptGoalId: ps.reattemptGoalId,
+						staffId: ps.staffId,
+						allowedTools: ps.allowedTools,
+					};
+					if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+					if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+						createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
+					}
+
+					const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+					if (staff) {
+						createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager, resolveRoleForProject);
+						createOpts.roleName = staff.roleId;
+						createOpts.accessory = staff.accessory;
+						createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+					} else {
+						const role = ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
+						if (role) {
+							const opts = roleCreateOptions(role);
+							if (createOpts.initialModel) delete opts.initialModel;
+							Object.assign(createOpts, opts);
+						} else if (ps.role) {
+							createOpts.role = ps.role;
+							createOpts.roleName = ps.role;
+							if (ps.accessory) createOpts.accessory = ps.accessory;
+						} else if (ps.accessory) {
+							createOpts.accessory = ps.accessory;
+						}
+					}
+					return createOpts;
+				},
+				createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
+				setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
+			});
+			copyAuthorSidecar(sourceId, launched.fork.id);
+			if (ps.staffId) launched.fork.staffId = ps.staffId;
+			json({
+				id: launched.fork.id,
+				cwd: launched.fork.cwd,
+				status: launched.fork.status,
+				projectId: launched.projectId,
+				goalId: launched.goalId,
+				title: launched.title,
 			}, 201);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
@@ -12918,7 +12882,7 @@ async function handleApiRoute(
 			const projCtx = projectContextManager.getOrCreate(ps.projectId);
 			const components = projCtx?.projectConfigStore.getComponents() ?? [];
 			const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
-			const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef });
+			const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef, commandRunner: serverCommandRunner });
 			if (!support.supported || !support.repoPath) {
 				json({
 					error: "failed to resolve current project repository for fresh continue worktree creation: project does not currently support git worktrees",
@@ -13324,8 +13288,9 @@ async function handleApiRoute(
 			// onto the draft, making `proposal.fields.projectId` the single
 			// source of truth for acceptance routing. When projectId is omitted
 			// this reduces to the previous behaviour byte-for-byte. `project`
-			// proposals are excluded — they may name a brand-new, not-yet-
-			// registered project (validated at the accept/mutation boundary).
+			// proposals are excluded: their client acceptance mode and dispatch are
+			// determined solely by `proposal.fields.projectId`; mutation endpoints
+			// validate any dispatched explicit target as defense in depth.
 			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;
@@ -13355,50 +13320,14 @@ async function handleApiRoute(
 				}
 				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
 			}
+			// Resolve workflow membership from the stamped TARGET project, then run
+			// parent injection and validation through the state-independent core.
 			if (proposalType === "goal") {
-				const sess = sessionManager.getSession(sessionId);
-				if (sess?.role === "team-lead" && sess.teamGoalId) {
-					const existingParent = enrichedArgs.parentGoalId;
-					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
-						const parent = getGoalAcrossProjects(sess.teamGoalId);
-						// Only auto-inject the team-lead's goal as parent when the
-						// proposal targets the SAME project as that parent. §1 above
-						// stamps the resolved TARGET project onto enrichedArgs.projectId;
-						// for a cross-project goal proposal the parent belongs to the
-						// SOURCE project, so injecting it would make accept fail with
-						// PARENT_CROSS_PROJECT. Cross-project goals must stay top-level
-						// in the target project. Same-project / no-explicit-target path
-						// is preserved byte-for-byte.
-						const targetProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-							? enrichedArgs.projectId.trim()
-							: undefined;
-						const sameProjectParent = !!parent && (!targetProjectId || parent.projectId === targetProjectId);
-						const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
-						const canSpawnImplicitChild = !!parent && sameProjectParent && checkCanSpawnChild(
-							parent,
-							prefs,
-							(id) => getGoalAcrossProjects(id),
-						).ok;
-						if (canSpawnImplicitChild) {
-							enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
-						}
-					}
-				}
-			}
-			// Validate workflow + optional steps for goal proposals BEFORE persisting,
-			// so a stale/hallucinated workflow never produces a broken draft. Skipped
-			// when the session has no resolvable project or the project has zero
-			// workflows (empty-state behaviour preserved).
-			if (proposalType === "goal") {
-				// §2 Resolve workflows against the RESOLVED TARGET project
-				// (enrichedArgs.projectId, stamped by §1 above), not the session's
-				// project. A goal targeting project X must validate against X's
-				// registered workflows. Fall back to the session's project only if
-				// the target is somehow absent (defensive; §1 always stamps it).
+				const liveSession = sessionManager.getSession(sessionId);
 				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
 					? enrichedArgs.projectId.trim()
 					: undefined)
-					?? (sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId))?.projectId;
+					?? (liveSession ?? sessionManager.getPersistedSession(sessionId))?.projectId;
 				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
 				if (projectId) {
 					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
@@ -13407,8 +13336,14 @@ async function handleApiRoute(
 						if (ctx) workflows = ctx.workflowStore.getAll();
 					}
 				}
-				const wfErr = validateGoalProposalWorkflow(enrichedArgs, workflows);
-				if (wfErr) { json(wfErr, 400); return; }
+				const prepared = prepareGoalProposalSeed(enrichedArgs, {
+					session: liveSession,
+					workflows,
+					getGoal: (id) => getGoalAcrossProjects(id),
+					getPreference: (key) => preferencesStore.get(key),
+				});
+				if (!prepared.ok) { json(prepared.body, prepared.status); return; }
+				enrichedArgs = prepared.args;
 			}
 			try {
 				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
@@ -13840,21 +13775,7 @@ async function handleApiRoute(
 			// Single-repo / no repoWorktrees: keep back-compat flat shape plus
 			// `repos: { ".": result }, aggregate: result`.
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-			const remotePublication = sessionGitStatusRemotePublication(sessionManager, id, session, result.branch);
-			const shapedResult = remotePublication ? { ...result, remotePublication } : result;
-			json({ ...shapedResult, aggregate: shapedResult, repos: { ".": shapedResult } });
-
-			// Auto-push: for feature branches with unpushed commits, publish the
-			// current branch to its matching remote ref regardless of inherited
-			// upstream config. Local-only sessions are explicitly durable via their
-			// local worktree and must not publish just because status was queried.
-			const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
-			if (publishDecision && !shouldSkipRemotePush(serverRemoteGitPolicy)) {
-				publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
-					containerId: cid,
-					setUpstream: publishDecision.setUpstream,
-				}).catch(() => {});
-			}
+			json({ ...result, aggregate: result, repos: { ".": result } });
 			return;
 		}
 
@@ -13907,22 +13828,7 @@ async function handleApiRoute(
 			};
 		}
 
-		const remotePublication = sessionGitStatusRemotePublication(sessionManager, id, session, aggregate.branch);
-		const shapedAggregate = remotePublication ? { ...aggregate, remotePublication } : aggregate;
-		json({ ...shapedAggregate, aggregate: shapedAggregate, repos });
-
-		// Auto-push only when the root container IS a git repo. Session branches
-		// are published at worktree-claim time, so skipping container auto-push
-		// for a true (non-git-container) polyrepo is fine. Local-only sessions are
-		// explicitly durable via their local worktree and must not publish just
-		// because status was queried.
-		const publishDecision = sessionGitStatusAutoPublishDecision(result, remotePublication);
-		if (publishDecision && !shouldSkipRemotePush(serverRemoteGitPolicy)) {
-			publishCurrentBranchToOrigin(cwd, publishDecision.branch, {
-				containerId: cid,
-				setUpstream: publishDecision.setUpstream,
-			}).catch(() => {});
-		}
+		json({ ...aggregate, aggregate, repos });
 		return;
 	}
 	// GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex — lazy-load full tool input content
@@ -14145,11 +14051,11 @@ async function handleApiRoute(
 		if (!cid && !fs.existsSync(cwd)) { json({ commits: [] }); return; }
 		try {
 			let branch = '';
-			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd, 5000, cid); }
+			try { branch = await execGit('git rev-parse --abbrev-ref HEAD', cwd, 5000, cid, commandRunner); }
 			catch { json({ commits: [] }); return; }
 
 			let hasUpstream = false;
-			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid); hasUpstream = true; } catch {}
+			try { await execGit(`git rev-parse --abbrev-ref ${branch}@{u}`, cwd, 5000, cid, commandRunner); hasUpstream = true; } catch {}
 
 			const limit = 50;
 			const direction = url.searchParams.get('direction'); // 'behind' to show incoming commits
@@ -14159,14 +14065,14 @@ async function handleApiRoute(
 				// Compare against origin/<primary>
 				let primaryBranch = 'master';
 				try {
-					const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd, 5000, cid);
+					const remoteHead = await execGit('git symbolic-ref refs/remotes/origin/HEAD', cwd, 5000, cid, commandRunner);
 					primaryBranch = remoteHead.replace('refs/remotes/origin/', '');
 				} catch {
-					try { await execGit('git rev-parse --verify refs/heads/master', cwd, 5000, cid); primaryBranch = 'master'; }
-					catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd, 5000, cid); primaryBranch = 'main'; } catch {} }
+					try { await execGit('git rev-parse --verify refs/heads/master', cwd, 5000, cid, commandRunner); primaryBranch = 'master'; }
+					catch { try { await execGit('git rev-parse --verify refs/heads/main', cwd, 5000, cid, commandRunner); primaryBranch = 'main'; } catch {} }
 				}
 				let primaryRef = primaryBranch;
-				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch {}
+				try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid, commandRunner); primaryRef = `origin/${primaryBranch}`; } catch {}
 				rangeSpec = direction === 'behind' ? `HEAD..${primaryRef}` : `${primaryRef}..HEAD`;
 			} else {
 				rangeSpec = direction === 'behind' && hasUpstream
@@ -14174,8 +14080,7 @@ async function handleApiRoute(
 					: hasUpstream ? '@{u}..HEAD' : `-${limit} HEAD`;
 			}
 
-			const out = await execGitArgs(["log", `--format=${COMMIT_LOG_FORMAT}`, "--shortstat", ...rangeSpec.split(" ").filter(Boolean)], cwd, 10000, cid);
-			const commits = await attachCommitFiles(parseCommitLogWithShortstat(out), cwd, cid);
+			const commits = await getCommitsWithFiles(cwd, rangeSpec.split(" ").filter(Boolean), 10000, cid, commandRunner);
 
 			json({ commits });
 		} catch (e: any) {
@@ -16445,44 +16350,8 @@ async function handleApiRoute(
 		const hasRequestBody = contentLengthHeader !== undefined
 			? Number(contentLengthHeader) > 0
 			: req.headers["transfer-encoding"] !== undefined;
-		const isPlainObjectBody = body !== null && typeof body === "object" && !Array.isArray(body);
-		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "mode")) {
-			const mode = (body as any).mode;
-			if (mode !== "all-safe" && mode !== "selected") {
-				json({ error: "mode must be all-safe or selected" }, 400);
-				return;
-			}
-			if (mode === "all-safe") {
-				if (Object.prototype.hasOwnProperty.call(body, "itemIds") || Object.prototype.hasOwnProperty.call(body, "worktrees")) {
-					json({ error: "mode=all-safe does not accept selectors" }, 400);
-					return;
-				}
-			} else if (!Array.isArray((body as any).itemIds) || (body as any).itemIds.some((id: unknown) => typeof id !== "string")) {
-				json({ error: "itemIds must be an array of strings" }, 400);
-				return;
-			}
-			json(await worktreeInventory().cleanup(body as any));
-			return;
-		}
-		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "itemIds")) {
-			json({ error: "mode is required when itemIds is provided" }, 400);
-			return;
-		}
-		if ((body === null && hasRequestBody) || (body !== null && !isPlainObjectBody)) {
-			json({ error: "cleanup-worktrees body must be an object" }, 400);
-			return;
-		}
-		const legacyBodyKeys = isPlainObjectBody ? Object.keys(body as Record<string, unknown>) : [];
-		if (legacyBodyKeys.some(key => key !== "worktrees")) {
-			json({ error: "legacy cleanup-worktrees body accepts worktrees only" }, 400);
-			return;
-		}
-		if (isPlainObjectBody && Object.prototype.hasOwnProperty.call(body, "worktrees") && (!Array.isArray((body as any).worktrees) || (body as any).worktrees.some((wt: unknown) => !wt || typeof wt !== "object" || Array.isArray(wt) || typeof (wt as any).path !== "string" || typeof (wt as any).branch !== "string" || typeof (wt as any).repoPath !== "string"))) {
-			json({ error: "worktrees must be an array of { path, branch, repoPath }" }, 400);
-			return;
-		}
-		const result = await worktreeInventory().cleanup({ mode: "legacy-orphaned", worktrees: isPlainObjectBody ? (body as any).worktrees : undefined });
-		json({ cleaned: result.counts.cleaned });
+		const result = await executeCleanupWorktreesRequest(body, hasRequestBody, worktreeInventory());
+		json(result.body, result.status);
 		return;
 	}
 
@@ -16691,96 +16560,6 @@ async function handleApiRoute(
 	}
 
 	json({ error: "Not found" }, 404);
-}
-
-/**
- * Validate a goal proposal's `workflow` / `inlineWorkflow` / `options` args.
- * Returns a structured error object to send as 400, or null if valid. Pure —
- * caller resolves the workflow list (see seed handler).
- *
- * Rules (see docs/design — Validate goal workflow):
- * - A structurally valid `inlineWorkflow` is a bespoke snapshot and takes
- *   precedence over any `workflow` id. It satisfies the project workflow
- *   requirement and `options` are validated against the inline snapshot.
- * - A malformed `inlineWorkflow` fails structurally before project-workflow
- *   validation so it never degrades into MISSING_WORKFLOW/UNKNOWN_WORKFLOW.
- * - Without `inlineWorkflow`, zero project workflows ⇒ no validation.
- * - Without `inlineWorkflow`, empty/omitted `workflow` ⇒ MISSING_WORKFLOW when
- *   workflows are available.
- * - Without `inlineWorkflow`, an explicit `workflow` not among the configured
- *   ids ⇒ UNKNOWN_WORKFLOW.
- * - `options` are comma-separated optional-step names matched ONLY by canonical
- *   `verify[].name` where `optional: true`. The runtime (verification-logic.ts)
- *   and UI both key on step.name, so accepting optionalLabel/label would be a
- *   false-success path that later fails to enable the step.
- */
-function validateGoalProposalWorkflow(
-	args: Record<string, unknown>,
-	workflows: Workflow[],
-): { ok: false; code: string; message: string; availableWorkflows?: { id: string; name: string }[]; validOptionalSteps?: string[] } | null {
-	const inlineWorkflow = args.inlineWorkflow;
-	if (inlineWorkflow !== undefined && inlineWorkflow !== null) {
-		const inlineErr = validateGoalInlineWorkflow(inlineWorkflow);
-		if (inlineErr) return inlineErr;
-		return validateGoalProposalOptions(args, inlineWorkflow as Workflow);
-	}
-
-	if (workflows.length === 0) return null;
-
-	const wfArg = typeof args.workflow === "string" ? args.workflow.trim() : "";
-	const available = workflows.map(w => ({ id: w.id, name: w.name }));
-	const availableIds = available.map(w => w.id).join(", ");
-
-	// 1. Workflow id is required when this session has resolvable workflows.
-	if (!wfArg) {
-		return {
-			ok: false,
-			code: "MISSING_WORKFLOW",
-			message: `Workflow is required for this project. Re-call propose_goal with one of these workflow IDs: ${availableIds}.`,
-			availableWorkflows: available,
-		};
-	}
-
-	// 2. Unknown explicit workflow id.
-	const chosen = workflows.find(w => w.id === wfArg);
-	if (!chosen) {
-		return {
-			ok: false,
-			code: "UNKNOWN_WORKFLOW",
-			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${availableIds}. Re-call propose_goal with one of these IDs.`,
-			availableWorkflows: available,
-		};
-	}
-
-	// 3. Validate optional-step names against the chosen explicit workflow.
-	return validateGoalProposalOptions(args, chosen);
-}
-
-function validateGoalProposalOptions(
-	args: Record<string, unknown>,
-	workflow: Workflow,
-): { ok: false; code: "UNKNOWN_OPTIONAL_STEP"; message: string; validOptionalSteps: string[] } | null {
-	const optsArg = typeof args.options === "string" ? args.options : "";
-	const requested = optsArg.split(",").map(s => s.trim()).filter(Boolean);
-	if (requested.length === 0) return null;
-
-	const validNames = new Set<string>();
-	for (const g of workflow.gates) {
-		for (const s of (g.verify ?? [])) {
-			// Only the canonical step.name is a valid enable key (runtime + UI both
-			// match on name); accepting optionalLabel/label would be a false success.
-			if (s.optional === true) validNames.add(s.name);
-		}
-	}
-	const validList = [...validNames];
-	const unknown = requested.filter(n => !validNames.has(n));
-	if (unknown.length === 0) return null;
-	return {
-		ok: false,
-		code: "UNKNOWN_OPTIONAL_STEP",
-		message: `Unknown optional step(s) [${unknown.join(", ")}] for workflow "${workflow.id}". Valid optional steps: ${validList.length ? validList.join(", ") : "(none)"}.`,
-		validOptionalSteps: validList,
-	};
 }
 
 /** Return a gate plus every transitive dependent in workflow-DAG order. */

@@ -11,23 +11,19 @@ import { openApp, navigateToHash } from "./ui-helpers.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
 
 type BrowserPage = Parameters<typeof openApp>[0];
 
-function gitInit(dir: string, opts?: { tags?: string[]; remoteRefs?: string[] }): void {
-	mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir });
-	execFileSync("git", ["checkout", "--quiet", "-b", "master"], { cwd: dir });
-	writeFileSync(join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: dir });
-	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf-8" }).trim();
+// Base repo comes from the immutable committed template (master + README.md +
+// .gitattributes + one commit); tags and fake remote refs stay real git.
+async function gitInit(dir: string, opts?: { tags?: string[]; remoteRefs?: string[] }): Promise<void> {
+	await prepareGitTemplate();
+	copyGitTemplate(dir);
+	const head = (await runFixtureCommand("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
 	for (const t of opts?.tags ?? []) {
-		execFileSync("git", ["tag", t], { cwd: dir });
+		await runFixtureCommand("git", ["tag", t], { cwd: dir });
 	}
 	for (const r of opts?.remoteRefs ?? []) {
 		const refPath = join(dir, ".git", "refs", "remotes", "origin", r);
@@ -97,7 +93,7 @@ test.describe("Settings → Base Ref field", () => {
 		const projectIds: string[] = [];
 		try {
 			const dir = uniqueProjectDir("happy");
-			gitInit(dir, { remoteRefs: ["develop"] });
+			await gitInit(dir, { remoteRefs: ["develop"] });
 			const project = await createProject(`baseref-ui-happy-${Date.now()}`, dir);
 			projectIds.push(project.id);
 
@@ -127,17 +123,17 @@ test.describe("Settings → Base Ref field", () => {
 		const projectIds: string[] = [];
 		try {
 			const tagDir = uniqueProjectDir("tag");
-			gitInit(tagDir, { tags: ["v1.2.3"] });
+			await gitInit(tagDir, { tags: ["v1.2.3"] });
 			const tagProject = await createProject(`baseref-ui-tag-${Date.now()}`, tagDir);
 			projectIds.push(tagProject.id);
 
 			const grammarDir = uniqueProjectDir("grammar");
-			gitInit(grammarDir);
+			await gitInit(grammarDir);
 			const grammarProject = await createProject(`baseref-ui-grammar-${Date.now()}`, grammarDir);
 			projectIds.push(grammarProject.id);
 
 			const sandboxDir = uniqueProjectDir("sandbox");
-			gitInit(sandboxDir);
+			await gitInit(sandboxDir);
 			const sandboxProject = await createProject(`baseref-ui-sandbox-${Date.now()}`, sandboxDir);
 			projectIds.push(sandboxProject.id);
 			// Pre-set sandbox=docker via API so the UI only needs to drive base_ref.
@@ -151,9 +147,9 @@ test.describe("Settings → Base Ref field", () => {
 			const repoA = join(root, "api");
 			const repoB = join(root, "web");
 			const repoC = join(root, "shared");
-			gitInit(repoA, { remoteRefs: ["develop"] });
-			gitInit(repoB); // missing origin/develop
-			gitInit(repoC); // missing origin/develop
+			await gitInit(repoA, { remoteRefs: ["develop"] });
+			await gitInit(repoB); // missing origin/develop
+			await gitInit(repoC); // missing origin/develop
 			const multiProject = await createProject(
 				`baseref-ui-multi-${Date.now()}`,
 				root,

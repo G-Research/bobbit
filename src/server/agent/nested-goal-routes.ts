@@ -75,8 +75,16 @@ const HEADQUARTERS_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This Headquarters goal run
 const GENERIC_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
 
 function goalMergeGitUnavailable(parent: PersistedGoal, child: PersistedGoal): Record<string, unknown> | null {
-	const parentWorktree = parent.repoWorktrees?.["."] ?? parent.worktreePath;
-	if (parent.branch && child.branch && parentWorktree) return null;
+	const parentRepos = parent.repoWorktrees;
+	const childRepos = child.repoWorktrees;
+	const hasParentRepos = !!parentRepos && Object.keys(parentRepos).length > 0;
+	const matchingRepo = hasParentRepos && childRepos
+		? Object.keys(parentRepos).find(repo => !!childRepos[repo])
+		: undefined;
+	const parentWorktreePath = hasParentRepos
+		? (matchingRepo ? parentRepos?.[matchingRepo] : undefined)
+		: parent.worktreePath;
+	if (parent.branch && child.branch && parentWorktreePath) return null;
 	const message = parent.projectId === HEADQUARTERS_PROJECT_ID
 		? HEADQUARTERS_NO_WORKTREE_CHILD_MERGE_MESSAGE
 		: GENERIC_NO_WORKTREE_CHILD_MERGE_MESSAGE;
@@ -87,7 +95,7 @@ function goalMergeGitUnavailable(parent: PersistedGoal, child: PersistedGoal): R
 		childGoalId: child.id,
 		parentBranch: parent.branch ?? null,
 		childBranch: child.branch ?? null,
-		parentWorktreePath: parentWorktree ?? null,
+		parentWorktreePath: parentWorktreePath ?? null,
 	};
 }
 
@@ -1136,7 +1144,13 @@ export async function tryHandleNestedGoalRoute(
 				}
 				broadcastToAll({ type: "goal_state_changed", goalId: childId });
 				broadcastToAll({ type: "goal_state_changed", goalId: parentId });
-				json({ merged: true, alreadyMerged: !!outcome.alreadyMerged, pushed: !!outcome.pushed });
+				json({
+					merged: !!outcome.merged,
+					alreadyMerged: !!outcome.alreadyMerged,
+					conflict: false,
+					output: outcome.output ?? "",
+					...(outcome.repos ? { repos: outcome.repos } : {}),
+				});
 				return true;
 			}
 			if (outcome.conflict) {
@@ -1148,7 +1162,13 @@ export async function tryHandleNestedGoalRoute(
 				} catch (err) {
 					console.warn(`[integrate-child] failed to set mergeConflict (non-fatal):`, err);
 				}
-				json({ conflict: true, output: outcome.output ?? "" }, 409);
+				json({
+					merged: false,
+					alreadyMerged: false,
+					conflict: true,
+					output: outcome.output ?? "",
+					...(outcome.repos ? { repos: outcome.repos } : {}),
+				}, 409);
 				return true;
 			}
 			json({ error: "Unexpected merge outcome", output: outcome.output ?? "" }, 500);

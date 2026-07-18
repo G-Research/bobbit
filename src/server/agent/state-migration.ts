@@ -191,6 +191,7 @@ const SERVER_STATE_ENTRIES = new Set([
 	"tool-result-error-bridge",
 	"provider-bridge",
 	"google-code-assist",
+	"aigw-dns-guard",
 	"ext-store",
 	"marketplace-cache",
 	"pr-walkthrough",

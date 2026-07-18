@@ -32,7 +32,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
-const VERIFICATION_HARNESS_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/verification-harness.ts");
 const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");
 const WS_HANDLER_SOURCE = path.join(PROJECT_ROOT, "src/server/ws/handler.ts");
 
@@ -69,6 +68,12 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		.replace(/\s+as\s+string\s*\|\s*undefined/g, "")
 		.replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
 
+	// The extracted production method now normalizes legacy provider-prefixed AIGW
+	// preferences before selecting or comparing them. Keep that dependency explicit
+	// in the eval harness and model one known migration; the normalizer itself has
+	// exhaustive models.json-backed coverage in aigw-wellknown-translate.test.ts.
+	const normalizeAigwModelString = (modelString: string) =>
+		modelString === "aigw/openai/legacy-model" ? "aigw/legacy-model" : modelString;
 	const applyModelString = async (rpc: any, modelString: string, opts: any = {}) => {
 		const slash = modelString.indexOf("/");
 		if (slash <= 0 || slash >= modelString.length - 1) {
@@ -105,6 +110,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 
 	// eslint-disable-next-line no-new-func
 	return new Function(
+		"normalizeAigwModelString",
 		"applyModelString",
 		"isSessionSelectableModelString",
 		"getAigwUrl",
@@ -117,6 +123,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"buildModelStateData",
 		`return async function tryAutoSelectModel(session) {${body}\n};`,
 	)(
+		normalizeAigwModelString,
 		applyModelString,
 		isSessionSelectableModelString,
 		getAigwUrl,
@@ -326,6 +333,18 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		);
 		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
 		assert.deepEqual(result.modelFiles, ["openai/fallback-session"]);
+	});
+
+	it("normalizes a legacy provider-prefixed AIGW default before selecting and persisting it", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: { "default.sessionModel": "aigw/openai/legacy-model" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["aigw", "legacy-model"]]);
+		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "legacy-model" }]);
+		assert.deepEqual(result.modelFiles, ["aigw/legacy-model"]);
+		assert.deepEqual(result.broadcastModels, [{ provider: "aigw", id: "legacy-model" }]);
 	});
 
 	it("enabled setting: malformed explicit default.sessionModel fails loudly and never chooses AIGW/hardcoded fallback", async () => {
@@ -630,18 +649,32 @@ describe("controlled model fallback policy — restore/respawn lifecycle", () =>
 
 	it("role assignment and force-abort respawns verify spawn-pinned model before idle", () => {
 		const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
-		for (const [label, marker] of [
-			["role assignment", "): Promise<boolean> {\n\t\tconst session = this.sessions.get(id);"],
-			["force abort", "async forceAbort(id: string"],
-		] as const) {
-			const body = extractMethodBody(src, marker);
-			const pinnedIdx = body.indexOf("session.spawnPinnedModel = bridgeOptions.initialModel");
-			const verifyIdx = body.indexOf("await this.tryAutoSelectModel(session)", pinnedIdx);
-			const idleIdx = body.indexOf('broadcastStatus(session, "idle")', verifyIdx);
-			assert.ok(pinnedIdx >= 0, `${label}: respawn must carry initialModel as spawnPinnedModel`);
-			assert.ok(verifyIdx > pinnedIdx, `${label}: respawn must verify spawn-pinned model`);
-			assert.ok(idleIdx > verifyIdx, `${label}: respawn must verify model before broadcasting idle`);
-		}
+
+		// Role assignment now stages and verifies a replacement before committing it.
+		// The shared coordinator broadcasts idle only after the staged operation
+		// resolves, so pin/verify/commit and operation/idle ordering are separate
+		// source-level invariants rather than one contiguous method-body sequence.
+		const roleBody = extractMethodBody(src, "token: SessionReplacementToken,\n\t): Promise<boolean> {");
+		const stagedPinnedIdx = roleBody.indexOf("spawnPinnedModel: bridgeOptions.initialModel");
+		const stagedVerifyIdx = roleBody.indexOf("await this.tryAutoSelectModel(stagedSession)", stagedPinnedIdx);
+		const roleCommitIdx = roleBody.indexOf("session.spawnPinnedModel = bridgeOptions.initialModel", stagedVerifyIdx);
+		assert.ok(stagedPinnedIdx >= 0, "role assignment: staged respawn must carry initialModel as spawnPinnedModel");
+		assert.ok(stagedVerifyIdx > stagedPinnedIdx, "role assignment: staged respawn must verify spawn-pinned model");
+		assert.ok(roleCommitIdx > stagedVerifyIdx, "role assignment: verified model must precede replacement commit");
+
+		const coordinatorBody = extractMethodBody(src, "): Promise<T> {\n\t\tlet coordinator = this._sessionReplacementCoordinators.get(sessionId);");
+		const operationIdx = coordinatorBody.indexOf("const result = await operation(token)");
+		const coordinatorIdleIdx = coordinatorBody.indexOf('broadcastStatus(canonical, "idle")', operationIdx);
+		assert.ok(operationIdx >= 0, "role assignment: coordinator must await staged replacement");
+		assert.ok(coordinatorIdleIdx > operationIdx, "role assignment: coordinator must not broadcast idle before verification completes");
+
+		const forceBody = extractMethodBody(src, "private async _forceAbortOwned(");
+		const forcePinnedIdx = forceBody.indexOf("session.spawnPinnedModel = bridgeOptions.initialModel");
+		const forceVerifyIdx = forceBody.indexOf("await this.tryAutoSelectModel(session)", forcePinnedIdx);
+		const forceIdleIdx = forceBody.indexOf('broadcastStatus(session, "idle")', forceVerifyIdx);
+		assert.ok(forcePinnedIdx >= 0, "force abort: respawn must carry initialModel as spawnPinnedModel");
+		assert.ok(forceVerifyIdx > forcePinnedIdx, "force abort: respawn must verify spawn-pinned model");
+		assert.ok(forceIdleIdx > forceVerifyIdx, "force abort: respawn must verify model before broadcasting idle");
 	});
 });
 
@@ -680,14 +713,12 @@ describe("controlled model fallback policy — direct host provider env", () => 
 		);
 	});
 
-	it("normal setup, restore/respawn, and legacy verification use the fallback provider allowlist", () => {
+	it("normal setup and restore/respawn use the fallback provider allowlist", () => {
 		const setupSrc = readFileSync(SESSION_SETUP_SOURCE, "utf-8");
 		const managerSrc = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
-		const verificationSrc = readFileSync(VERIFICATION_HARNESS_SOURCE, "utf-8");
 
 		assert.match(setupSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(ctx\.preferencesStore\)/);
 		assert.match(managerSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
-		assert.match(verificationSrc, /providers:\s*fallbackProviderAllowlistFromPrefs\(this\.preferencesStore\)/);
 	});
 });
 

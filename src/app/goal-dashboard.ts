@@ -7,7 +7,7 @@ import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { isHeadquartersProject } from "./headquarters.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, isGoalPauseResumeActionPending, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, isGoalPauseResumeActionPending, type GateState, type GateSignal, type VerificationTimeoutInfo } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
@@ -262,7 +262,7 @@ let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 interface LiveVerification {
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: string; phase?: number; durationMs?: number; output?: string; liveOutput?: string; startedAt: number; sessionId?: string }>;
+	steps: Array<{ name: string; type: string; status: string; phase?: number; durationMs?: number; output?: string; liveOutput?: string; startedAt: number; sessionId?: string; timeoutSec?: number; timeout?: VerificationTimeoutInfo }>;
 	overallStatus: string;
 	currentPhase?: number;
 }
@@ -1164,6 +1164,7 @@ function handleLiveVerificationEvent(e: Event) {
 					phase: detail.phase ?? entry.steps[detail.stepIndex].phase,
 					startedAt: detail.startedAt || entry.steps[detail.stepIndex].startedAt,
 					sessionId: detail.sessionId,
+					timeoutSec: detail.timeoutSec ?? entry.steps[detail.stepIndex].timeoutSec,
 				};
 				renderApp();
 			}
@@ -1189,6 +1190,7 @@ function handleLiveVerificationEvent(e: Event) {
 				durationMs: detail.durationMs,
 				output: detail.output,
 				sessionId: detail.sessionId ?? entry.steps[detail.stepIndex].sessionId,
+				timeout: detail.timeout ?? entry.steps[detail.stepIndex].timeout,
 			};
 			renderApp();
 			break;
@@ -2184,7 +2186,6 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.deletionsVsPrimary=${gs?.deletionsVsPrimary ?? 0}
 						.mergedIntoPrimary=${gs?.mergedIntoPrimary ?? false}
 						.unpushed=${gs?.unpushed ?? false}
-						.remotePublication=${(gs as { remotePublication?: 'local-only-policy' } | null | undefined)?.remotePublication}
 						.statusFiles=${gs?.status ?? []}
 						.repos=${gs?.repos as any}
 						.loading=${!gs && !!branch}

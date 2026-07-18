@@ -6,22 +6,86 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import { buildDockerRunArgs } from "../../src/server/agent/docker-args.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
+import {
+	initializeAgentDirState,
+	resetAgentDirStateForTests,
+	setProjectRoot,
+} from "../../src/server/bobbit-dir.ts";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+
+const FIXTURE_ROOT = path.resolve("/memfs/docker-args");
+let fixtureSequence = 0;
+let restoreFs: () => void;
+
+beforeAll(() => {
+	const scoped = installScopedMemFs([
+		"chmodSync", "existsSync", "mkdirSync", "readFileSync", "renameSync", "rmSync",
+		"statSync", "symlinkSync", "writeFileSync",
+	]);
+	restoreFs = scoped.restore;
+	process.env.BOBBIT_DIR = path.join(FIXTURE_ROOT, "headquarters");
+	process.env.BOBBIT_SECRETS_DIR = path.join(FIXTURE_ROOT, "secrets");
+	process.env.BOBBIT_AGENT_DIR = path.join(FIXTURE_ROOT, "agent");
+	delete process.env.PI_CODING_AGENT_DIR;
+	resetAgentDirStateForTests();
+	setProjectRoot(path.join(FIXTURE_ROOT, "project"));
+	initializeAgentDirState({ env: process.env, projectRoot: path.join(FIXTURE_ROOT, "project") });
+});
+
+afterAll(() => restoreFs());
+
+function fixtureDir(label: string): string {
+	const dir = path.join(FIXTURE_ROOT, `${label}-${fixtureSequence++}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+const NOOP_COMMAND_RUNNER: CommandRunner = {
+	async execFile() { return { stdout: "", stderr: "" }; },
+	execFileSync() { return ""; },
+};
+
+function sanitizedCloneRunner(): CommandRunner {
+	const packageBlob = "a".repeat(40);
+	const authBlob = "b".repeat(40);
+	return {
+		async execFile() { return { stdout: "", stderr: "" }; },
+		execFileSync(file, args, options) {
+			assert.equal(file, "git");
+			if (args[0] === "rev-parse") return "c".repeat(40);
+			if (args[0] === "ls-tree") {
+				return Buffer.from(`100644 blob ${packageBlob}\tpackage.json\0` +
+					`100644 blob ${authBlob}\t.bobbit/agent/auth.json\0`);
+			}
+			if (args[0] === "cat-file" && args[2] === packageBlob) {
+				return Buffer.from(JSON.stringify({ name: "remote-less" }));
+			}
+			if (args[0] === "symbolic-ref") return "master";
+			if (args[0] === "check-ref-format") return "";
+			if (args[0] === "init") {
+				fs.mkdirSync(path.join(String(options?.cwd), ".git"), { recursive: true });
+				return "";
+			}
+			if (["checkout", "add"].includes(args[0]) || args.includes("commit")) return "";
+			throw new Error(`unexpected fake git command: ${args.join(" ")}`);
+		},
+	};
+}
 
 describe("buildDockerRunArgs", () => {
 	it("includes resource limits", () => {
 		const args = buildDockerRunArgs({
 			image: "test", workspaceDir: "/tmp/test",
 			label: "test", labelPrefix: "bobbit-sandbox",
-		});
+		}, NOOP_COMMAND_RUNNER);
 		assert.ok(args.includes("--memory=32g"));
 		assert.ok(args.includes("--cpus=12"));
 		assert.ok(args.includes("--pids-limit=512"));
@@ -32,7 +96,7 @@ describe("buildDockerRunArgs", () => {
 			image: "test", workspaceDir: "/tmp/test",
 			label: "test", labelPrefix: "bobbit-sandbox",
 			memoryLimit: "8g", cpuLimit: "4", pidsLimit: "512",
-		});
+		}, NOOP_COMMAND_RUNNER);
 		assert.ok(args.includes("--memory=8g"));
 		assert.ok(args.includes("--cpus=4"));
 		assert.ok(args.includes("--pids-limit=512"));
@@ -42,7 +106,7 @@ describe("buildDockerRunArgs", () => {
 		const args = buildDockerRunArgs({
 			image: "test", workspaceDir: "/tmp/test",
 			sandboxNetwork: "bobbit-sandbox-net",
-		});
+		}, NOOP_COMMAND_RUNNER);
 		assert.ok(args.some(a => a.includes("169.254.169.254")));
 		assert.ok(args.some(a => a.includes("metadata.google.internal")));
 		assert.ok(args.some(a => a.includes("metadata.internal")));
@@ -53,7 +117,7 @@ describe("buildDockerRunArgs", () => {
 		const args = buildDockerRunArgs({
 			image: "test", workspaceDir: "/tmp/test",
 			projectId,
-		});
+		}, NOOP_COMMAND_RUNNER);
 		assert.ok(
 			args.includes(`bobbit-workspace-${projectId}:/workspace`),
 			"should mount workspace named volume",
@@ -67,7 +131,7 @@ describe("buildDockerRunArgs", () => {
 	it("does not mount worktrees volume when projectId is not set", () => {
 		const args = buildDockerRunArgs({
 			image: "test", workspaceDir: "/tmp/test",
-		});
+		}, NOOP_COMMAND_RUNNER);
 		assert.ok(
 			!args.some(a => a.includes("/workspace-wt")),
 			"should not mount worktrees volume without projectId",
@@ -75,12 +139,12 @@ describe("buildDockerRunArgs", () => {
 	});
 
 	it("mounts the google-code-assist state subdir so sandboxed agents can load the provider extension", () => {
-		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-gca-"));
+		const stateDir = fixtureDir("gca");
 		try {
 			const args = buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test",
 				stateDir,
-			});
+			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			assert.ok(
 				mounts.some((m) => m.includes(":/bobbit-state/google-code-assist")),
@@ -101,14 +165,14 @@ describe("buildDockerRunArgs", () => {
 	});
 
 	it("mounts generated extension state subdirs READ-ONLY so a compromised sandbox cannot tamper with reused source", () => {
-		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-generated-ext-ro-"));
+		const stateDir = fixtureDir("generated-ext-ro");
 		try {
 			const args = buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test",
 				stateDir,
-			});
+			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
-			for (const sub of ["google-code-assist", "tool-result-error-bridge"]) {
+			for (const sub of ["google-code-assist", "tool-result-error-bridge", "aigw-dns-guard"]) {
 				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
 				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
 				assert.ok(
@@ -133,7 +197,7 @@ describe("buildDockerRunArgs", () => {
 
 	it("mounts config tools, builtin tools, and builtin first-party pack roots read-only", () => {
 		const previousBuiltinPacksDir = process.env.BOBBIT_BUILTIN_PACKS_DIR;
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-pack-mounts-"));
+		const root = fixtureDir("pack-mounts");
 		const builtinToolsDir = path.join(root, "defaults", "tools");
 		const builtinPacksDir = path.join(root, "builtin-packs", "market-packs");
 		fs.mkdirSync(builtinToolsDir, { recursive: true });
@@ -143,7 +207,7 @@ describe("buildDockerRunArgs", () => {
 			const args = buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test",
 				toolManager: { getBuiltinToolsDir: () => builtinToolsDir } as any,
-			});
+			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			assert.ok(mounts.some((m) => m.endsWith(":/tools:ro")), "config tools mount stays /tools:ro");
 			assert.ok(mounts.some((m) => m.endsWith(":/tools-builtin:ro")), "builtin tools mount stays /tools-builtin:ro");
@@ -155,7 +219,7 @@ describe("buildDockerRunArgs", () => {
 	});
 
 	it("mounts the configured active agent sessions and models but never host auth.json", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-agent-dir-"));
+		const root = fixtureDir("agent-dir");
 		const agentDir = path.join(root, "active-agent");
 		const stateDir = path.join(root, "state");
 		fs.mkdirSync(agentDir, { recursive: true });
@@ -175,7 +239,7 @@ describe("buildDockerRunArgs", () => {
 			const args = buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test",
 				stateDir,
-			});
+			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			const hostSessionsDir = path.join(agentDir, "sessions");
 			const hostModelsJson = path.join(agentDir, "models.json");
@@ -212,7 +276,7 @@ describe("buildDockerRunArgs", () => {
 	});
 
 	it("mounts a sanitized remote-less clone source without exposing project-local agent auth", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-clone-source-"));
+		const root = fixtureDir("clone-source");
 		const projectDir = path.join(root, "project");
 		const stateDir = path.join(projectDir, ".bobbit", "state");
 		const agentDir = path.join(projectDir, ".bobbit", "agent");
@@ -224,11 +288,13 @@ describe("buildDockerRunArgs", () => {
 			fs.mkdirSync(agentDir, { recursive: true });
 			fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({ name: "remote-less" }));
 			fs.writeFileSync(hostAuthJson, JSON.stringify({ secret: "host-auth-must-not-leak" }));
-			runGit(projectDir, ["init"]);
-			runGit(projectDir, ["add", "package.json", ".bobbit/agent/auth.json"]);
-			runGit(projectDir, ["commit", "-m", "init"]);
 
-			const sanitizedSource = prepareSanitizedSandboxCloneSource({ repoPath: projectDir, stateDir, key: "root" });
+			const sanitizedSource = prepareSanitizedSandboxCloneSource({
+				repoPath: projectDir,
+				stateDir,
+				key: "root",
+				commandRunner: sanitizedCloneRunner(),
+			});
 			assert.ok(fs.existsSync(path.join(sanitizedSource, ".git")), "sanitized source should be a git repo");
 			assert.ok(
 				!fs.existsSync(path.join(sanitizedSource, ".bobbit", "agent", "auth.json")),
@@ -249,7 +315,7 @@ describe("buildDockerRunArgs", () => {
 				projectId: "remote-less-default-agent-dir",
 				stateDir,
 				extraReadonlyMounts: [{ hostPath: cloneSource.hostPath, mountPath: cloneSource.mountPath }],
-			});
+			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
 			assert.ok(
 				mounts.includes(`${toDockerPath(sanitizedSource)}:/workspace-src:ro`),
@@ -279,28 +345,8 @@ describe("buildDockerRunArgs", () => {
 	});
 });
 
-function runGit(cwd: string, args: string[]): void {
-	execFileSync("git", args, {
-		cwd,
-		stdio: "ignore",
-		env: {
-			...process.env,
-			GIT_AUTHOR_NAME: "Bobbit Test",
-			GIT_AUTHOR_EMAIL: "bobbit-test@example.com",
-			GIT_COMMITTER_NAME: "Bobbit Test",
-			GIT_COMMITTER_EMAIL: "bobbit-test@example.com",
-		},
-	});
-}
-
 async function configureAgentDirForDockerTest(agentDir: string, projectRoot: string): Promise<void> {
-	const mod = await import("../../src/server/bobbit-dir.ts") as Record<string, any>;
-	const reset = mod.resetAgentDirStateForTests || mod.resetAgentDirRuntimeForTests;
-	if (typeof reset === "function") reset();
-	if (typeof mod.setProjectRoot === "function") mod.setProjectRoot(projectRoot);
-	if (typeof mod.initializeAgentDirState === "function") {
-		mod.initializeAgentDirState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
-	} else if (typeof mod.initializeAgentDirRuntimeState === "function") {
-		mod.initializeAgentDirRuntimeState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
-	}
+	resetAgentDirStateForTests();
+	setProjectRoot(projectRoot);
+	initializeAgentDirState({ env: { BOBBIT_AGENT_DIR: agentDir }, projectRoot });
 }

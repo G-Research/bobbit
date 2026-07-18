@@ -11,16 +11,18 @@
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
+import { createManualClock } from "../harness/clock.js";
 import {
 	DEFAULT_INLINE_ENTRY,
 	mountDir,
 	mountFile,
 	PreviewMountError,
 	removeMount,
+	setPreviewFsForTesting,
 	setPreviewRootForTesting,
+	watchMount,
 	writeInline,
 } from "../../src/server/preview/mount.ts";
 
@@ -28,33 +30,35 @@ const SID = "11111111-2222-3333-4444-555555555555";
 const SID_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
 let root: string;
+let testFs: typeof import("node:fs");
+let dirSequence = 0;
 
-// Detect symlink capability at COLLECTION time (module top-level) so the
-// `{ skip: !supportsSymlink }` test option is evaluated correctly. vitest reads
-// the option when the test is registered — before beforeAll runs — so the probe
-// cannot live in beforeAll (it would always read the initial value).
-function detectSymlinkSupport(): boolean {
-	try {
-		const probeDir = mkdtempSync(path.join(tmpdir(), "bobbit-symprobe-"));
-		const probe = path.join(probeDir, "_probe");
-		writeFileSync(probe, "x");
-		symlinkSync(probe, path.join(probeDir, "_probe-link"));
-		rmSync(probeDir, { recursive: true, force: true });
-		return true;
-	} catch {
-		return false;
-	}
+function makeDir(label: string): string {
+	const dir = path.join(root, "fixtures", `${label}-${dirSequence++}`);
+	testFs.mkdirSync(dir, { recursive: true });
+	return dir;
 }
-const supportsSymlink = detectSymlinkSupport();
 
 beforeAll(() => {
-	root = mkdtempSync(path.join(tmpdir(), "bobbit-mount-"));
+	const volumeFs = createFsFromVolume(new Volume()) as unknown as typeof import("node:fs");
+	// memfs exposes canonical POSIX paths even on Windows. Keep production's
+	// containment checks host-shaped while retaining memfs's symlink resolution.
+	const rawRealpathSync = volumeFs.realpathSync.bind(volumeFs);
+	const drive = path.parse(process.cwd()).root.slice(0, 2);
+	volumeFs.realpathSync = ((value: import("node:fs").PathLike) => {
+		const canonical = String(rawRealpathSync(value)).replace(/\//g, path.sep);
+		return path.resolve(`${drive}${canonical}`);
+	}) as typeof volumeFs.realpathSync;
+	testFs = volumeFs;
+	root = path.resolve("/memfs/preview-mount");
+	testFs.mkdirSync(root, { recursive: true });
+	setPreviewFsForTesting(testFs);
 	setPreviewRootForTesting(root);
 });
 
 afterAll(() => {
 	setPreviewRootForTesting(undefined);
-	try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+	setPreviewFsForTesting(undefined);
 });
 
 function assertHash(value: string): void {
@@ -65,7 +69,7 @@ function listMount(sid: string): string[] {
 	const base = mountDir(sid);
 	const out: string[] = [];
 	const walk = (dir: string, prefix: string) => {
-		for (const ent of readdirSync(dir, { withFileTypes: true })) {
+		for (const ent of testFs.readdirSync(dir, { withFileTypes: true })) {
 			const rel = prefix === "" ? ent.name : `${prefix}/${ent.name}`;
 			if (ent.isDirectory()) walk(path.join(dir, ent.name), rel);
 			else if (ent.isFile()) out.push(rel);
@@ -79,7 +83,7 @@ describe("mountDir / sessionId validation", () => {
 	it("creates the mount directory for a valid sid", () => {
 		const dir = mountDir(SID);
 		assert.equal(dir, path.join(root, SID));
-		assert.equal(statSync(dir).isDirectory(), true);
+		assert.equal(testFs.statSync(dir).isDirectory(), true);
 	});
 	it("rejects an invalid sessionId with status 400", () => {
 		assert.throws(() => mountDir("not-a-uuid"), (err: any) => {
@@ -94,7 +98,7 @@ describe("writeInline", () => {
 		assert.equal(r.entry, DEFAULT_INLINE_ENTRY);
 		assert.equal(r.url, `/preview/${SID}/${DEFAULT_INLINE_ENTRY}`);
 		assert.equal(r.path, path.join(root, SID, DEFAULT_INLINE_ENTRY));
-		assert.equal(statSync(r.path).size, Buffer.byteLength("<h1>hello</h1>"));
+		assert.equal(testFs.statSync(r.path).size, Buffer.byteLength("<h1>hello</h1>"));
 		assertHash(r.contentHash);
 	});
 	it("accepts a custom single-segment entry", () => {
@@ -112,7 +116,7 @@ describe("writeInline", () => {
 	it("overwrites the same entry atomically", () => {
 		writeInline(SID, "first", "rep.html");
 		const r = writeInline(SID, "second-much-longer", "rep.html");
-		assert.equal(statSync(r.path).size, "second-much-longer".length);
+		assert.equal(testFs.statSync(r.path).size, "second-much-longer".length);
 	});
 	it("updates contentHash when inline content changes", () => {
 		const r1 = writeInline(SID, "same-entry-v1", "hash.html");
@@ -125,16 +129,16 @@ describe("writeInline", () => {
 
 describe("mountFile — explicit asset opt-in", () => {
 	function makeSrc(): string {
-		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mountfile-src-"));
-		writeFileSync(path.join(src, "report.html"), "<h1>r</h1>");
-		writeFileSync(path.join(src, "styles.css"), "body{}");
-		writeFileSync(path.join(src, "secret.env"), "KEY=shh");
-		mkdirSync(path.join(src, "img"));
-		writeFileSync(path.join(src, "img", "a.png"), "pngA");
-		writeFileSync(path.join(src, "img", "b.png"), "pngB");
-		writeFileSync(path.join(src, "img", "c.svg"), "<svg/>");
-		mkdirSync(path.join(src, "sub"));
-		writeFileSync(path.join(src, "sub", "file.png"), "subpng");
+		const src = makeDir("mountfile-src");
+		testFs.writeFileSync(path.join(src, "report.html"), "<h1>r</h1>");
+		testFs.writeFileSync(path.join(src, "styles.css"), "body{}");
+		testFs.writeFileSync(path.join(src, "secret.env"), "KEY=shh");
+		testFs.mkdirSync(path.join(src, "img"));
+		testFs.writeFileSync(path.join(src, "img", "a.png"), "pngA");
+		testFs.writeFileSync(path.join(src, "img", "b.png"), "pngB");
+		testFs.writeFileSync(path.join(src, "img", "c.svg"), "<svg/>");
+		testFs.mkdirSync(path.join(src, "sub"));
+		testFs.writeFileSync(path.join(src, "sub", "file.png"), "subpng");
 		return src;
 	}
 
@@ -146,7 +150,7 @@ describe("mountFile — explicit asset opt-in", () => {
 			assert.deepEqual(r.assets, []);
 			assert.deepEqual(listMount(SID_B), ["report.html"]);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -159,7 +163,7 @@ describe("mountFile — explicit asset opt-in", () => {
 			assert.deepEqual(listMount(SID_B), ["report.html", "styles.css"]);
 			assertHash(r.contentHash);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -168,13 +172,13 @@ describe("mountFile — explicit asset opt-in", () => {
 		const src = makeSrc();
 		try {
 			const r1 = mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
-			writeFileSync(path.join(src, "styles.css"), "body{color:red}");
+			testFs.writeFileSync(path.join(src, "styles.css"), "body{color:red}");
 			const r2 = mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
 			assertHash(r1.contentHash);
 			assertHash(r2.contentHash);
 			assert.notEqual(r1.contentHash, r2.contentHash);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -186,7 +190,7 @@ describe("mountFile — explicit asset opt-in", () => {
 			assert.deepEqual(r.assets, ["sub/file.png"]);
 			assert.deepEqual(listMount(SID_B), ["report.html", "sub/file.png"]);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -199,7 +203,7 @@ describe("mountFile — explicit asset opt-in", () => {
 			// img/c.svg must NOT be present.
 			assert.deepEqual(listMount(SID_B), ["img/a.png", "img/b.png", "report.html"]);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -212,7 +216,7 @@ describe("mountFile — explicit asset opt-in", () => {
 				(err: any) => err instanceof PreviewMountError && err.statusCode === 400,
 			);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -229,7 +233,7 @@ describe("mountFile — explicit asset opt-in", () => {
 				(err: any) => err instanceof PreviewMountError && err.statusCode === 400,
 			);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -242,7 +246,7 @@ describe("mountFile — explicit asset opt-in", () => {
 				(err: any) => err instanceof PreviewMountError && err.statusCode === 400,
 			);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -259,7 +263,7 @@ describe("mountFile — explicit asset opt-in", () => {
 				(err: any) => err instanceof PreviewMountError && err.statusCode === 400,
 			);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -272,7 +276,7 @@ describe("mountFile — explicit asset opt-in", () => {
 				(err: any) => err instanceof PreviewMountError && err.statusCode === 400,
 			);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -285,24 +289,24 @@ describe("mountFile — explicit asset opt-in", () => {
 				(err: any) => err instanceof PreviewMountError && err.statusCode === 404,
 			);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
 
-	it("symlink asset escaping the source dir → 403", { skip: !supportsSymlink }, () => {
-		const outside = mkdtempSync(path.join(tmpdir(), "bobbit-mountfile-out-"));
-		writeFileSync(path.join(outside, "secret.txt"), "shh");
+	it("symlink asset escaping the source dir → 403", () => {
+		const outside = makeDir("mountfile-out");
+		testFs.writeFileSync(path.join(outside, "secret.txt"), "shh");
 		const src = makeSrc();
 		try {
-			symlinkSync(path.join(outside, "secret.txt"), path.join(src, "leak.txt"));
+			testFs.symlinkSync(path.join(outside, "secret.txt"), path.join(src, "leak.txt"));
 			assert.throws(
 				() => mountFile(SID_B, path.join(src, "report.html"), ["leak.txt"]),
 				(err: any) => err instanceof PreviewMountError && err.statusCode === 403,
 			);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
-			rmSync(outside, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(outside, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -328,7 +332,7 @@ describe("mountFile — explicit asset opt-in", () => {
 			assert.deepEqual(r.assets, []);
 			assert.deepEqual(listMount(SID_B), ["report.html"]);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -337,13 +341,13 @@ describe("mountFile — explicit asset opt-in", () => {
 		const src = makeSrc();
 		try {
 			mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
-			assert.ok(existsSync(path.join(mountDir(SID_B), "styles.css")));
+			assert.ok(testFs.existsSync(path.join(mountDir(SID_B), "styles.css")));
 			// Re-mount with no assets → styles.css should be gone.
 			mountFile(SID_B, path.join(src, "report.html"));
-			assert.ok(!existsSync(path.join(mountDir(SID_B), "styles.css")));
-			assert.ok(existsSync(path.join(mountDir(SID_B), "report.html")));
+			assert.ok(!testFs.existsSync(path.join(mountDir(SID_B), "styles.css")));
+			assert.ok(testFs.existsSync(path.join(mountDir(SID_B), "report.html")));
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -358,32 +362,29 @@ describe("mountFile \u2014 re-open same source file (Bug 4)", () => {
 	 * Both tests must FAIL on master and pass after the atomic stage-then-swap fix.
 	 */
 	it("two consecutive mountFile() calls with the same external source succeed", () => {
-		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mount-bug4a-"));
+		const src = makeDir("mount-bug4a");
 		try {
 			const entry = path.join(src, "report.html");
-			writeFileSync(entry, "<h1>v1</h1>");
+			testFs.writeFileSync(entry, "<h1>v1</h1>");
 			const r1 = mountFile(SID_B, entry);
-			const t1 = statSync(r1.path).mtimeMs;
-			// Ensure mtime can move forward across platforms with coarse granularity.
-			const sleep = Date.now() + 25;
-			while (Date.now() < sleep) { /* busy-wait — short, deterministic */ }
-			writeFileSync(entry, "<h1>v2-longer</h1>");
+			const t1 = testFs.statSync(r1.path).mtimeMs;
+			testFs.writeFileSync(entry, "<h1>v2-longer</h1>");
 			const r2 = mountFile(SID_B, entry);
-			const t2 = statSync(r2.path).mtimeMs;
+			const t2 = testFs.statSync(r2.path).mtimeMs;
 			assert.equal(r2.entry, "report.html");
 			assert.ok(t2 >= t1, `second mtime (${t2}) should be >= first (${t1})`);
-			assert.equal(statSync(r2.path).size, "<h1>v2-longer</h1>".length);
+			assert.equal(testFs.statSync(r2.path).size, "<h1>v2-longer</h1>".length);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
 
 	it("mountFile() succeeds when srcFile is a path inside the existing mount", () => {
-		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mount-bug4b-"));
+		const src = makeDir("mount-bug4b");
 		try {
 			const originalEntry = path.join(src, "report.html");
-			writeFileSync(originalEntry, "<h1>seed</h1>");
+			testFs.writeFileSync(originalEntry, "<h1>seed</h1>");
 			const r1 = mountFile(SID_B, originalEntry);
 			// r1.path now points inside mountDir(SID_B). Simulate the agent passing
 			// that very path back into preview_open(file=...).
@@ -392,16 +393,16 @@ describe("mountFile \u2014 re-open same source file (Bug 4)", () => {
 				insideMount.startsWith(mountDir(SID_B)),
 				`expected ${insideMount} to be inside ${mountDir(SID_B)}`,
 			);
-			assert.ok(existsSync(insideMount));
+			assert.ok(testFs.existsSync(insideMount));
 
 			// Currently: wipeContents(destRoot) deletes insideMount before the copy,
 			// so this throws or produces an empty/stale file.
 			const r2 = mountFile(SID_B, insideMount);
 			assert.equal(r2.entry, "report.html");
-			assert.ok(existsSync(r2.path), "mount entry must exist after re-mount from inside-mount source");
-			assert.equal(statSync(r2.path).size, "<h1>seed</h1>".length, "entry contents must be preserved");
+			assert.ok(testFs.existsSync(r2.path), "mount entry must exist after re-mount from inside-mount source");
+			assert.equal(testFs.statSync(r2.path).size, "<h1>seed</h1>".length, "entry contents must be preserved");
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
@@ -409,28 +410,28 @@ describe("mountFile \u2014 re-open same source file (Bug 4)", () => {
 
 describe("mountFile \u2014 atomic stage-then-swap (Bug 4 follow-ups)", () => {
 	it("leaves no .<sid>.tmp-* dir behind after a successful mountFile", () => {
-		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mount-cleanup-"));
+		const src = makeDir("mount-cleanup");
 		try {
-			writeFileSync(path.join(src, "report.html"), "<h1>x</h1>");
-			writeFileSync(path.join(src, "styles.css"), "body{}");
+			testFs.writeFileSync(path.join(src, "report.html"), "<h1>x</h1>");
+			testFs.writeFileSync(path.join(src, "styles.css"), "body{}");
 			mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
-			const leftovers = readdirSync(root).filter(n => n.startsWith(`.${SID_B}.tmp-`));
+			const leftovers = testFs.readdirSync(root).filter(n => n.startsWith(`.${SID_B}.tmp-`));
 			assert.deepEqual(leftovers, [], `no tmp dirs should remain, found: ${leftovers.join(", ")}`);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
 
 	it("on staging failure, prior mount contents are preserved", () => {
-		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mount-rollback-"));
+		const src = makeDir("mount-rollback");
 		try {
-			writeFileSync(path.join(src, "report.html"), "<h1>v1</h1>");
-			writeFileSync(path.join(src, "styles.css"), "original-css");
+			testFs.writeFileSync(path.join(src, "report.html"), "<h1>v1</h1>");
+			testFs.writeFileSync(path.join(src, "styles.css"), "original-css");
 			// Initial successful mount.
 			mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
-			assert.ok(existsSync(path.join(mountDir(SID_B), "report.html")));
-			assert.ok(existsSync(path.join(mountDir(SID_B), "styles.css")));
+			assert.ok(testFs.existsSync(path.join(mountDir(SID_B), "report.html")));
+			assert.ok(testFs.existsSync(path.join(mountDir(SID_B), "styles.css")));
 			const priorListing = listMount(SID_B);
 
 			// Second call: missing literal asset → 404 during staging.
@@ -442,29 +443,44 @@ describe("mountFile \u2014 atomic stage-then-swap (Bug 4 follow-ups)", () => {
 			// destRoot must be unchanged.
 			assert.deepEqual(listMount(SID_B), priorListing);
 			// And no tmp dirs left behind.
-			const leftovers = readdirSync(root).filter(n => n.startsWith(`.${SID_B}.tmp-`));
+			const leftovers = testFs.readdirSync(root).filter(n => n.startsWith(`.${SID_B}.tmp-`));
 			assert.deepEqual(leftovers, []);
 		} finally {
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});
 
 	it("watcher fires after a re-mount (handle survives the swap)", async () => {
-		const { watchMount } = await import("../../src/server/preview/mount.ts");
-		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mount-watch-"));
+		const src = makeDir("mount-watch");
+		const clock = createManualClock();
 		let calls = 0;
-		const unsubscribe = watchMount(SID_B, () => { calls++; });
+		let fsEventCount = 0;
+		const waiters: Array<() => void> = [];
+		const waitForFsEventAfter = (previous: number): Promise<void> => {
+			if (fsEventCount > previous) return Promise.resolve();
+			return new Promise(resolve => waiters.push(resolve));
+		};
+		const unsubscribe = watchMount(SID_B, () => { calls++; }, {
+			clock,
+			onFsEvent: () => {
+				fsEventCount++;
+				for (const resolve of waiters.splice(0)) resolve();
+			},
+		});
 		try {
-			writeFileSync(path.join(src, "report.html"), "<h1>v1</h1>");
+			testFs.writeFileSync(path.join(src, "report.html"), "<h1>v1</h1>");
+			let observed = fsEventCount;
 			mountFile(SID_B, path.join(src, "report.html"));
-			// Wait past the 50ms watcher debounce + filesystem propagation.
-			await new Promise(r => setTimeout(r, 200));
+			await waitForFsEventAfter(observed);
+			clock.advance(50);
 			const callsAfterFirst = calls;
 
-			writeFileSync(path.join(src, "report.html"), "<h1>v2-longer</h1>");
+			testFs.writeFileSync(path.join(src, "report.html"), "<h1>v2-longer</h1>");
+			observed = fsEventCount;
 			mountFile(SID_B, path.join(src, "report.html"));
-			await new Promise(r => setTimeout(r, 250));
+			await waitForFsEventAfter(observed);
+			clock.advance(50);
 
 			assert.ok(
 				calls > callsAfterFirst,
@@ -472,7 +488,7 @@ describe("mountFile \u2014 atomic stage-then-swap (Bug 4 follow-ups)", () => {
 			);
 		} finally {
 			unsubscribe();
-			rmSync(src, { recursive: true, force: true });
+			testFs.rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);
 		}
 	});

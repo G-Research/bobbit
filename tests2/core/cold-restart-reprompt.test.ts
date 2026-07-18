@@ -224,6 +224,192 @@ describe("cold-restart re-prompt (reproducing)", () => {
 		);
 	});
 
+	it.each(["assign-role", "restart"])("defers wasStreaming continuation until queued %s installs the final bridge", async (kind) => {
+		const provisionalPrompts: string[] = [];
+		const finalPrompts: string[] = [];
+		const provisional: any = {
+			running: true,
+			async start() {}, async stop() {}, async waitForReady() {},
+			async promptWhenReady(text: string) { provisionalPrompts.push(text); return { success: true }; },
+			async prompt() { return { success: true }; }, async steer() { return { success: true }; },
+			async abort() { return { success: true }; }, async getState() { return { success: true, data: {} }; },
+			async getMessages() { return { success: true, data: { messages: [] } }; },
+			async setModel() { return { success: true }; }, async setThinkingLevel() { return { success: true }; },
+			async compact() { return { success: true }; }, async sendCommand() { return { success: true }; },
+			onEvent() { return () => {}; },
+		};
+		const finalBridge = {
+			...provisional,
+			async promptWhenReady(text: string) { finalPrompts.push(text); return { success: true }; },
+		};
+		const m = makeManager(provisional);
+		const ps = makeMidTurnPersistedSession(`boot-final-${kind}`);
+		let releaseRestore!: () => void;
+		let restored!: () => void;
+		const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
+		const restoredGate = new Promise<void>((resolve) => { restored = resolve; });
+
+		const restore = m._coordinateSessionReplacement(ps.id, "restore", async () => {
+			await m.restoreSession(ps);
+			restored();
+			await restoreGate;
+			return m.sessions.get(ps.id);
+		}, { cancelOnTerminal: () => undefined });
+		await restoredGate;
+		assert.deepEqual(provisionalPrompts, [], "provisional restore bridge must not receive continuation");
+		const replacement = m._coordinateSessionReplacement(ps.id, kind, async () => {
+			m.sessions.get(ps.id).rpcClient = finalBridge;
+			return undefined;
+		}, { cancelOnTerminal: () => undefined });
+		releaseRestore();
+		await Promise.all([restore, replacement]);
+		await flush();
+
+		assert.deepEqual(provisionalPrompts, []);
+		assert.equal(finalPrompts.length, 1, "only the final canonical bridge receives boot continuation");
+		assert.match(finalPrompts[0], /server restarted while you were mid-turn/i);
+	});
+
+	it("keeps boot continuation durable across a restart between provisional install and finalizer", async () => {
+		const firstPrompts: string[] = [];
+		const secondPrompts: string[] = [];
+		const baseBridge: any = {
+			running: true,
+			async start() {}, async stop() {}, async waitForReady() {},
+			async prompt() { return { success: true }; }, async steer() { return { success: true }; },
+			async abort() { return { success: true }; }, async getState() { return { success: true, data: {} }; },
+			async getMessages() { return { success: true, data: { messages: [] } }; },
+			async setModel() { return { success: true }; }, async setThinkingLevel() { return { success: true }; },
+			async compact() { return { success: true }; }, async sendCommand() { return { success: true }; },
+			onEvent() { return () => {}; },
+		};
+		const firstBridge = {
+			...baseBridge,
+			async promptWhenReady(text: string) { firstPrompts.push(text); return { success: true }; },
+		};
+		const ps = makeMidTurnPersistedSession("boot-restart-provisional");
+		const first = makeManager(firstBridge);
+		first._testStore = {
+			get: () => ps,
+			update: (_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates),
+			archive: () => {},
+		};
+		let release!: () => void;
+		let installed!: () => void;
+		const hold = new Promise<void>((resolve) => { release = resolve; });
+		const installedGate = new Promise<void>((resolve) => { installed = resolve; });
+		const restore = first._coordinateSessionReplacement(ps.id, "restore", async () => {
+			await first.restoreSession(ps);
+			installed();
+			await hold;
+		}, { cancelOnTerminal: () => undefined });
+		await installedGate;
+
+		assert.equal(ps.wasStreaming, true, "provisional restore must not clear durable continuation intent");
+		assert.deepEqual(firstPrompts, []);
+		// Model the old gateway disappearing before its coordinator finalizer.
+		first._sessionReplacementCoordinators.get(ps.id).terminalRequest = "terminate";
+		release();
+		await restore;
+
+		const secondBridge = {
+			...baseBridge,
+			async promptWhenReady(text: string) { secondPrompts.push(text); return { success: true }; },
+		};
+		const second = makeManager(secondBridge);
+		second._testStore = first._testStore;
+		await second.restoreSession(ps);
+		await flush();
+
+		assert.equal(firstPrompts.length, 0);
+		assert.equal(secondPrompts.length, 1, "next boot must deliver the still-durable continuation once");
+		assert.equal(ps.wasStreaming, false, "only accepted canonical dispatch clears the marker");
+	});
+
+	it("dispatches boot continuation once after a queued final replacement fails", async () => {
+		const prompts: string[] = [];
+		const bridge: any = {
+			running: true,
+			async start() {}, async stop() {}, async waitForReady() {},
+			async promptWhenReady(text: string) { prompts.push(text); return { success: true }; },
+			async prompt() { return { success: true }; }, async steer() { return { success: true }; },
+			async abort() { return { success: true }; }, async getState() { return { success: true, data: {} }; },
+			async getMessages() { return { success: true, data: { messages: [] } }; },
+			async setModel() { return { success: true }; }, async setThinkingLevel() { return { success: true }; },
+			async compact() { return { success: true }; }, async sendCommand() { return { success: true }; },
+			onEvent() { return () => {}; },
+		};
+		const m = makeManager(bridge);
+		const ps = makeMidTurnPersistedSession("boot-final-replacement-fails");
+		m._testStore = {
+			get: () => ps,
+			update: (_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates),
+			archive: () => {},
+		};
+		let release!: () => void;
+		let installed!: () => void;
+		const hold = new Promise<void>((resolve) => { release = resolve; });
+		const installedGate = new Promise<void>((resolve) => { installed = resolve; });
+		const restore = m._coordinateSessionReplacement(ps.id, "restore", async () => {
+			await m.restoreSession(ps);
+			installed();
+			await hold;
+		}, { cancelOnTerminal: () => undefined });
+		await installedGate;
+		const failedFinal = m._coordinateSessionReplacement(ps.id, "assign-role", async () => {
+			throw new Error("fixture final replacement failed");
+		}, { cancelOnTerminal: () => undefined });
+
+		release();
+		await restore;
+		await assert.rejects(failedFinal, /fixture final replacement failed/);
+		await flush();
+
+		assert.equal(prompts.length, 1, "rollback canonical bridge receives one continuation, never a provisional duplicate");
+		assert.equal(ps.wasStreaming, false);
+	});
+
+	it.each(["stop", "terminate"])("cancels deferred wasStreaming continuation when queued %s wins", async (terminal) => {
+		const bootPrompts: string[] = [];
+		const bridge: any = {
+			running: true,
+			async start() {}, async stop() {}, async waitForReady() {},
+			async promptWhenReady(text: string) { bootPrompts.push(text); return { success: true }; },
+			async prompt() { return { success: true }; }, async steer() { return { success: true }; },
+			async abort() { return { success: true }; }, async getState() { return { success: true, data: {} }; },
+			async getMessages() { return { success: true, data: { messages: [] } }; },
+			async setModel() { return { success: true }; }, async setThinkingLevel() { return { success: true }; },
+			async compact() { return { success: true }; }, async sendCommand() { return { success: true }; },
+			onEvent() { return () => {}; },
+		};
+		const m = makeManager(bridge);
+		const ps = makeMidTurnPersistedSession(`boot-cancel-${terminal}`);
+		m._testStore.get = () => ps;
+		m._testStore.getLive = () => [ps];
+		let releaseRestore!: () => void;
+		let restored!: () => void;
+		const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
+		const restoredGate = new Promise<void>((resolve) => { restored = resolve; });
+		const restore = m._coordinateSessionReplacement(ps.id, "restore", async () => {
+			await m.restoreSession(ps);
+			restored();
+			await restoreGate;
+			return m.sessions.get(ps.id);
+		}, { cancelOnTerminal: () => undefined });
+		await restoredGate;
+
+		const terminalRequest = terminal === "stop"
+			? m.forceAbort(ps.id, 5)
+			: m.terminateSession(ps.id);
+		releaseRestore();
+		await restore;
+		await terminalRequest;
+		await flush();
+
+		assert.deepEqual(bootPrompts, [], `${terminal} must suppress provisional boot continuation`);
+		assert.equal(m._sessionReplacementCoordinators.has(ps.id), false);
+	});
+
 	it("boot-resume nudge never escapes as an unhandled rejection", async () => {
 		// The real SessionManager.enqueuePrompt drains ASYNCHRONOUSLY: for an idle
 		// lead with an empty queue it `await`s dispatchDirectPrompt → rpcClient

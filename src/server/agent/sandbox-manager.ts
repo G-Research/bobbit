@@ -204,6 +204,27 @@ export class SandboxManager {
 		return this.sandboxes.has(projectId);
 	}
 
+	/**
+	 * Rebind immutable models.json file mounts after atomic host publication.
+	 * Every tracked sandbox observes every publication, including one currently
+	 * remounting or recovering from an error. ProjectSandbox's generation drain
+	 * serializes the actual recreations. Wait for all projects before reporting
+	 * an aggregate failure so one broken container cannot hide another result.
+	 */
+	async refreshAgentModelMounts(): Promise<void> {
+		const sandboxes = [...this.sandboxes.values()];
+		const results = await Promise.allSettled(sandboxes.map((sandbox) => sandbox.refreshAgentModelMount()));
+		const failures = results.flatMap((result, index) => result.status === "rejected"
+			? [{ projectId: sandboxes[index].getStatus().projectId, reason: result.reason }]
+			: []);
+		if (failures.length > 0) {
+			throw new AggregateError(
+				failures.map((failure) => failure.reason),
+				`Failed to refresh AIGW models mount for project(s): ${failures.map((failure) => failure.projectId).join(", ")}`,
+			);
+		}
+	}
+
 	/** Get stats for all sandboxes. */
 	getStats(): SandboxManagerStats {
 		const containers: ContainerState[] = [];

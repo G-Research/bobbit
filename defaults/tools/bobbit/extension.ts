@@ -24,6 +24,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
+import { contextHeavyLimitError } from "../_shared/context-heavy-guard.ts";
+import { projectBobbitResponse, type BobbitToolName } from "./compact-projection.ts";
 
 /** Error carrying the gateway's HTTP status + machine-readable `code`. */
 class ApiError extends Error {
@@ -648,7 +650,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** Dispatch an operation through a tier's OpSpec table. */
-	async function dispatch(ops: Record<string, OpSpec>, params: Params, options?: { pageResults?: boolean }) {
+	async function dispatch(tool: BobbitToolName, ops: Record<string, OpSpec>, params: Params, options?: { pageResults?: boolean }) {
 		const spec = ops[params.operation];
 		if (!spec) return err(`unknown operation '${params.operation}'`);
 		for (const field of spec.required) {
@@ -657,14 +659,17 @@ export default function (pi: ExtensionAPI) {
 				return err(`operation '${params.operation}' requires param '${field}'`);
 			}
 		}
+		const pageSpec = options?.pageResults ? resolvePageSpec(spec, params) : undefined;
+		const guardError = contextHeavyLimitError(tool, params, pageSpec !== undefined);
+		if (guardError) return err(JSON.stringify(guardError));
 		try {
 			const method = typeof spec.method === "function" ? spec.method(params) : spec.method;
 			const urlPath = spec.buildPath(params);
 			const body = spec.buildBody ? spec.buildBody(params) : undefined;
 			const data = await api(method, urlPath, body);
 			const processed = spec.postProcess ? spec.postProcess(data, params) : data;
-			const pageSpec = options?.pageResults ? resolvePageSpec(spec, params) : undefined;
-			return ok(pageSpec ? pageResult(processed, params, pageSpec) : processed);
+			const paged = pageSpec ? pageResult(processed, params, pageSpec) : processed;
+			return ok(params.verbose === true ? paged : projectBobbitResponse(tool, params.operation, paged));
 		} catch (e: any) {
 			return err(e.message);
 		}
@@ -699,9 +704,10 @@ export default function (pi: ExtensionAPI) {
 			includeArchived: Type.Optional(Type.Boolean({ description: "REST-style search archive opt-in." })),
 			view: Type.Optional(Type.String({ description: "Response view, e.g. 'summary'." })),
 			probe: Type.Optional(Type.String({ description: "maintenance_inspect probe selector." })),
+			verbose: Type.Optional(Type.Boolean({ description: "Full JSON; default compact. Paged operations require explicit limit <= 10." })),
 		}),
 		async execute(_id: string, params: Params) {
-			return dispatch(READ_OPS, params, { pageResults: true });
+			return dispatch("bobbit_read", READ_OPS, params, { pageResults: true });
 		},
 	});
 
@@ -729,9 +735,10 @@ export default function (pi: ExtensionAPI) {
 			body: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
 				description: "Operation body fields; see detail_docs per operation.",
 			})),
+			verbose: Type.Optional(Type.Boolean({ description: "Full JSON; default compact. Limit applies only to future paged operations." })),
 		}),
 		async execute(_id: string, params: Params) {
-			return dispatch(ORCH_OPS, params);
+			return dispatch("bobbit_orchestrate", ORCH_OPS, params);
 		},
 	});
 
@@ -762,9 +769,10 @@ export default function (pi: ExtensionAPI) {
 			body: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
 				description: "Operation body fields; see detail_docs per operation.",
 			})),
+			verbose: Type.Optional(Type.Boolean({ description: "Full JSON; default compact. Limit applies only to future paged operations." })),
 		}),
 		async execute(_id: string, params: Params) {
-			return dispatch(ADMIN_OPS, params);
+			return dispatch("bobbit_admin", ADMIN_OPS, params);
 		},
 	});
 

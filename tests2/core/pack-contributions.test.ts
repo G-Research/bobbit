@@ -21,11 +21,11 @@
  *   - activation filtering (§7): disabled entrypoints/providers are omitted.
  *   - a no-tools pack still registers panels/entrypoints/routes.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { createMemFs } from "../harness/mem-fs.js";
 import { validateManifest } from "../../src/server/agent/pack-manifest.ts";
 import { loadPackContributions, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../../src/shared/extension-host/host-api.ts";
@@ -33,9 +33,31 @@ import { PackContributionRegistry } from "../../src/server/extension-host/pack-c
 import { isPackPathWithinRoot } from "../../src/server/extension-host/path-guard.ts";
 import type { PackEntry, PackManifest } from "../../src/server/agent/pack-types.ts";
 
-let tmp: string;
-beforeAll(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pack-contributions-")); });
-afterAll(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } });
+// This suite exercises declaration parsing and resolver semantics, not NTFS. A
+// single process-local tree avoids rebuilding dozens of Defender-scanned pack
+// directories in every concurrent unit run. Each declaration owns a distinct
+// path below this immutable root; only the invalidate() test mutates its panel.
+const memoryFs = createMemFs();
+const tmp = path.resolve("/memfs/pack-contributions");
+const fsSpies: Array<{ mockRestore(): void }> = [];
+
+beforeAll(() => {
+	memoryFs.mkdirSync(tmp, { recursive: true });
+	for (const name of ["existsSync", "mkdirSync", "readFileSync", "readdirSync", "rmSync", "writeFileSync"] as const) {
+		fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
+	}
+	fsSpies.push(vi.spyOn(fs, "realpathSync").mockImplementation(((file: fs.PathLike) => {
+		const resolved = path.resolve(String(file));
+		if (!memoryFs.existsSync(resolved)) {
+			throw Object.assign(new Error(`ENOENT: no such file or directory, realpath '${resolved}'`), { code: "ENOENT", path: resolved });
+		}
+		return resolved;
+	}) as typeof fs.realpathSync));
+});
+
+afterAll(() => {
+	for (const spy of fsSpies.reverse()) spy.mockRestore();
+});
 
 describe("Extension Host channel contract", () => {
 	it("keeps HOST_API_VERSION stable and bumps HOST_CONTRACT_VERSION for channel contracts", () => {

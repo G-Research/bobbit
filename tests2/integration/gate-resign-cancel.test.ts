@@ -1,272 +1,235 @@
-import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connectWs, type WsConnection } from "./_e2e/e2e-setup.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { expect, test } from "vitest";
 
-/**
- * E2E test for gate re-signal cancellation.
- *
- * Verifies that when a gate is re-signaled while verification is running:
- * 1. The old verification is cancelled (removed from active verifications)
- * 2. Only the new signal's verification is active/completed
- * 3. The gate status reflects the new signal's result
- *
- * TIER-1 FAKE COMMAND-STEP RUNNER: this spec runs in the `v2-integration-fake`
- * project (see vitest.config.ts). It asserts gate-level resignal/cancel
- * BOOKKEEPING only — the old verification is dropped from the active set, the
- * `gate_verification_complete` "cancelled" event fires, and the NEW signal
- * determines the gate status. It does NOT assert a real OS subprocess-tree kill;
- * that fidelity is covered on the REAL command-step path by
- * cancel-verification.test.ts (kept out of the fake set). The fake's killTree()
- * closes the scripted child so the harness records the cancelled tracked key,
- * which is exactly the bookkeeping these assertions check.
- */
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
+import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.js";
+import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
+import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.js";
+import { createManualClock, type ManualClock } from "../harness/clock.js";
+import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
-const SLOW_WORKFLOW_ID = `test-slow-${Date.now()}`;
+const GOAL_ID = "gate-resignal-suite-goal";
+const GATE_ID = "slow-gate";
+const START_TIME = 1_700_000_000_000;
 
-/** Create a workflow with a slow verification command for testing cancellation. */
-async function createSlowWorkflow(): Promise<void> {
-	const res = await apiFetch("/api/workflows", {
-		method: "POST",
-		body: JSON.stringify({
-			id: SLOW_WORKFLOW_ID,
-			name: "Test Slow Verification",
-			description: "Workflow with a slow command for testing re-signal cancellation",
-			gates: [
-				{
-					id: "slow-gate",
-					name: "Slow Gate",
-					dependsOn: [],
-					verify: [
-						{
-							name: "Slow check",
-							type: "command",
-							// Delay long enough to re-signal before it finishes.
-						// 500ms comfortably exceeds the WS roundtrip + cancellation latency
-						// (we send the next signal immediately on `gate_verification_started`).
-							run: 'node -e "setTimeout(()=>{console.log(\'done\');process.exit(0)},500)"',
-						},
-					],
-				},
-			],
-		}),
-	});
-	expect(res.status).toBe(201);
+const GATE: WorkflowGate = {
+	id: GATE_ID,
+	name: "Slow Gate",
+	dependsOn: [],
+	verify: [
+		{
+			name: "Optional approval",
+			type: "human-signoff",
+			prompt: "Approve the suite-owned fixture",
+			label: "Approve fixture",
+			optional: true,
+			phase: 0,
+		},
+		{ name: "Final signal check", type: "command", run: "echo final-signal", phase: 1 },
+	],
+};
+
+const WORKFLOW: Workflow = {
+	id: "gate-resignal-suite-workflow",
+	name: "Gate Re-signal Suite Workflow",
+	description: "Suite-owned workflow for verification cancellation coverage.",
+	gates: [GATE],
+	createdAt: START_TIME,
+	updatedAt: START_TIME,
+};
+
+const ROLE_STORE = Object.freeze({ get: () => undefined, getAll: () => [] });
+
+let stateDir: string;
+let clock: ManualClock;
+let goalStore: GoalStore;
+let gateStore: GateStore;
+let harness: VerificationHarness;
+let events: any[];
+let notifications: Array<{ goalId: string; message: string }>;
+let signalSequence: number;
+
+const fakeGitRunner: CommandRunner = {
+	execFile: async (file, args) => {
+		if (file === "git" && args.join(" ") === "symbolic-ref refs/remotes/origin/HEAD") {
+			return { stdout: "refs/remotes/origin/master\n", stderr: "" };
+		}
+		throw new Error(`Unexpected command in gate re-signal fixture: ${file} ${args.join(" ")}`);
+	},
+};
+
+function makeGoal(): PersistedGoal {
+	return {
+		id: GOAL_ID,
+		title: "Gate Re-signal Cancellation",
+		cwd: stateDir,
+		state: "in-progress",
+		spec: "Exercise stale verification cancellation.",
+		createdAt: START_TIME,
+		updatedAt: START_TIME,
+		workflowId: WORKFLOW.id,
+		workflow: WORKFLOW,
+		enabledOptionalSteps: [],
+	};
 }
 
-/** Delete the slow workflow (cleanup). */
-async function deleteSlowWorkflow(): Promise<void> {
-	await apiFetch(`/api/workflows/${SLOW_WORKFLOW_ID}`, { method: "DELETE" }).catch(() => {});
+function declareSignal(content: string): GateSignal {
+	const sequence = ++signalSequence;
+	const signal: GateSignal = {
+		id: `resignal-${sequence}`,
+		goalId: GOAL_ID,
+		gateId: GATE_ID,
+		sessionId: "gate-resignal-suite-owner",
+		timestamp: clock.now() + sequence,
+		commitSha: "0123456789abcdef0123456789abcdef01234567",
+		content,
+		contentVersion: sequence,
+		verification: { status: "running", steps: [] },
+	};
+
+	// Mirror the production signal ordering: enumerate synchronously, persist the
+	// authored signal, then let asynchronous verification run separately.
+	signal.verification.steps = harness.beginVerification(signal, GATE);
+	gateStore.recordSignal(signal);
+	return signal;
 }
 
-/** Get active verifications for a goal. */
-async function getActiveVerifications(goalId: string): Promise<any[]> {
-	const res = await apiFetch(`/api/goals/${goalId}/verifications/active`);
-	expect(res.ok).toBe(true);
-	const data = await res.json();
-	return data.verifications || [];
+async function resignal(content: string): Promise<GateSignal> {
+	await harness.cancelStaleVerifications(GOAL_ID, GATE_ID);
+	return declareSignal(content);
 }
 
-/** Get signal history for a gate. */
-async function getSignals(goalId: string, gateId: string): Promise<any[]> {
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
-	expect(res.ok).toBe(true);
-	const data = await res.json();
-	return data.signals || [];
+async function completeSignal(signal: GateSignal): Promise<void> {
+	await harness.verifyGateSignal(signal, GATE, stateDir);
 }
+
+function activeVerifications() {
+	return harness.getActiveVerifications(GOAL_ID);
+}
+
+function signals(): GateSignal[] {
+	return gateStore.getGate(GOAL_ID, GATE_ID)?.signals ?? [];
+}
+
+test.beforeEach(() => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-resignal-core-"));
+	clock = createManualClock(START_TIME);
+	goalStore = new GoalStore(stateDir);
+	gateStore = new GateStore(stateDir);
+	goalStore.put(makeGoal());
+	gateStore.initGatesForGoal(GOAL_ID, WORKFLOW.gates.map((gate) => gate.id));
+	events = [];
+	notifications = [];
+	signalSequence = 0;
+
+	const context = {
+		goalStore,
+		gateStore,
+		projectConfigStore: undefined,
+		project: { id: "gate-resignal-suite-project", name: "Gate Re-signal Suite" },
+		goalManager: { resolveRootMaxConcurrentChildren: () => 3 },
+	};
+	const projectContextManager = {
+		getContextForGoal: (goalId: string) => goalId === GOAL_ID ? context : undefined,
+	};
+
+	harness = new VerificationHarness(
+		stateDir,
+		gateStore,
+		(goalId, event) => events.push({ ...event, goalId }),
+		ROLE_STORE as any,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		projectContextManager as any,
+		undefined,
+		{
+			clock,
+			commandRunner: fakeGitRunner,
+			commandStepRunner: createFakeVerificationCommandRunner(),
+		},
+	);
+	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
+});
+
+test.afterEach(() => {
+	fs.rmSync(stateDir, { recursive: true, force: true });
+});
 
 test.describe("Gate Re-signal Cancellation", () => {
-	// These tests use slow verification commands (5s each), so they need more time
-	test.setTimeout(60_000);
-
-	test.beforeAll(async () => {
-		await createSlowWorkflow();
-	});
-
-	test.afterAll(async () => {
-		await deleteSlowWorkflow();
-	});
-
 	test("re-signaling a gate cancels the previous verification", async () => {
-		// 1. Create a goal with the slow workflow
-		const goal = await createGoal({
-			title: `Re-signal Cancel Test ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
-			worktree: false,
+		const signal1 = declareSignal("Signal v1");
+
+		expect(activeVerifications()).toEqual([
+			expect.objectContaining({ signalId: signal1.id, overallStatus: "running" }),
+		]);
+
+		const signal2 = await resignal("Signal v2");
+		expect(signal2.id).not.toBe(signal1.id);
+		expect(events).toContainEqual(expect.objectContaining({
+			type: "gate_verification_complete",
+			goalId: GOAL_ID,
+			gateId: GATE_ID,
+			signalId: signal1.id,
+			status: "cancelled",
+		}));
+		expect(activeVerifications()).toEqual([
+			expect.objectContaining({ signalId: signal2.id, overallStatus: "running" }),
+		]);
+
+		await completeSignal(signal2);
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("passed");
+		expect(events).toContainEqual(expect.objectContaining({
+			type: "gate_verification_complete",
+			signalId: signal2.id,
+			status: "passed",
+		}));
+
+		const history = signals();
+		expect(history).toHaveLength(2);
+		expect(history[0].verification).toMatchObject({
+			status: "failed",
+			steps: [{ name: "Cancelled", status: "failed" }],
 		});
-		const goalId = goal.id;
-
-		// Open a matching goal-session WS connection to receive gate events.
-		// Goal broadcasts intentionally skip unrelated regular sessions.
-		const sessionId = await createSession({ goalId });
-		let conn: WsConnection | undefined;
-
-		try {
-			conn = await connectWs(sessionId);
-
-			// 2. Signal the gate — starts verification with the 2s command.
-			// Capture WS cursor BEFORE the POST so waitForFrom is race-safe
-			// (won't match any stale buffered event from before the action).
-			const cursor1 = conn.messageCount();
-			const signal1Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Signal v1" }),
-			});
-			expect(signal1Res.status).toBe(201);
-			const signal1Data = await signal1Res.json();
-			const signal1Id = signal1Data.signal.id;
-
-			// 3. Wait for verification to start via WS event
-			await conn.waitForFrom(
-				cursor1,
-				(m) => m.type === "gate_verification_started" && m.gateId === "slow-gate" && m.signalId === signal1Id,
-				5000,
-			);
-
-			// 4. Verify the first signal's verification is active via REST
-			const activeBeforeResignal = await getActiveVerifications(goalId);
-			expect(activeBeforeResignal.length).toBeGreaterThanOrEqual(1);
-			const firstVerification = activeBeforeResignal.find(v => v.signalId === signal1Id);
-			expect(firstVerification).toBeTruthy();
-			expect(firstVerification.overallStatus).toBe("running");
-
-			// 5. Re-signal the same gate (second signal)
-			const cursor2 = conn.messageCount();
-			const signal2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Signal v2" }),
-			});
-			expect(signal2Res.status).toBe(201);
-			const signal2Data = await signal2Res.json();
-			const signal2Id = signal2Data.signal.id;
-			expect(signal2Id).not.toBe(signal1Id);
-
-			// 6. Wait for old verification to be cancelled via WS event
-			//    (signal 1's cancellation is broadcast as gate_verification_complete/cancelled)
-			await conn.waitForFrom(
-				cursor2,
-				(m) => m.type === "gate_verification_complete" && m.signalId === signal1Id && m.status === "cancelled",
-				10_000,
-			);
-
-			// Confirm old verification is no longer in active list
-			const activeAfterResignal = await getActiveVerifications(goalId);
-			expect(activeAfterResignal.find(v => v.signalId === signal1Id)).toBeFalsy();
-
-			// 7. Wait for the gate to pass via WS event (from signal 2's cursor to
-			//    ensure we match the NEW status_changed event, not a stale one).
-			const wsMsg = await conn.waitForFrom(
-				cursor2,
-				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
-				20_000,
-			);
-
-			// 8. Gate status should be determined by the new signal (passed, since command exits 0)
-			expect(wsMsg.status).toBe("passed");
-
-			// Verify signal history: both signals recorded, latest is v2
-			const signals = await getSignals(goalId, "slow-gate");
-			expect(signals.length).toBe(2);
-
-			// The latest signal (v2) should have passed verification
-			const latestSignal = signals[signals.length - 1];
-			expect(latestSignal.id).toBe(signal2Id);
-			expect(latestSignal.verification.status).toBe("passed");
-		} finally {
-			conn?.close();
-			await deleteGoal(goalId).catch(() => {});
-			await deleteSession(sessionId).catch(() => {});
-		}
+		expect(history.at(-1)).toMatchObject({
+			id: signal2.id,
+			verification: {
+				status: "passed",
+				steps: [
+					{ name: "Optional approval", status: "skipped" },
+					{ name: "Final signal check", status: "passed" },
+				],
+			},
+		});
+		expect(notifications).toEqual([
+			expect.objectContaining({ goalId: GOAL_ID, message: expect.stringContaining("PASSED") }),
+		]);
 	});
 
 	test("triple re-signal — only final signal determines outcome", async () => {
-		const goal = await createGoal({
-			title: `Triple Re-signal Test ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
-			worktree: false,
-		});
-		const goalId = goal.id;
+		const signal1 = declareSignal("Signal v1");
+		const signal2 = await resignal("Signal v2");
+		const signal3 = await resignal("Signal v3");
 
-		// Open a matching goal-session WS connection to receive gate events.
-		// Goal broadcasts intentionally skip unrelated regular sessions.
-		const sessionId = await createSession({ goalId });
-		let conn: WsConnection | undefined;
+		const cancellations = events.filter((event) =>
+			event.type === "gate_verification_complete" && event.status === "cancelled");
+		expect(cancellations.map((event) => event.signalId)).toEqual([signal1.id, signal2.id]);
+		expect(activeVerifications()).toEqual([
+			expect.objectContaining({ signalId: signal3.id, overallStatus: "running" }),
+		]);
 
-		try {
-			conn = await connectWs(sessionId);
-
-			// Signal 1 — capture cursor before each POST so waitForFrom matches
-			// ONLY events produced by the action (race-safe, no stale-event match).
-			const c1 = conn.messageCount();
-			const s1Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Signal v1" }),
-			});
-			expect(s1Res.status).toBe(201);
-			const signal1Id = (await s1Res.json()).signal.id;
-
-			// Wait for signal 1's verification to start via WS
-			await conn.waitForFrom(
-				c1,
-				(m) => m.type === "gate_verification_started" && m.gateId === "slow-gate" && m.signalId === signal1Id,
-				5000,
-			);
-
-			// Signal 2 (cancels signal 1)
-			const c2 = conn.messageCount();
-			const s2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Signal v2" }),
-			});
-			expect(s2Res.status).toBe(201);
-			const signal2Id = (await s2Res.json()).signal.id;
-
-			// Wait for signal 2's verification to start (event-driven)
-			await conn.waitForFrom(
-				c2,
-				(m) => m.type === "gate_verification_started" && m.gateId === "slow-gate" && m.signalId === signal2Id,
-				5000,
-			);
-
-			// Signal 3 (cancels signal 2)
-			const c3 = conn.messageCount();
-			const s3Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Signal v3" }),
-			});
-			expect(s3Res.status).toBe(201);
-			const signal3Id = (await s3Res.json()).signal.id;
-
-			// Event-driven: wait for signal 3's verification to actually start.
-			// This replaces the previous `pollUntil` on /verifications/active,
-			// which used a 100ms fixed-interval REST poll and was the main
-			// source of run-to-run variance. A started-event proves signal 3
-			// is the active verification (signals 1 and 2 are cancelled).
-			await conn.waitForFrom(
-				c3,
-				(m) => m.type === "gate_verification_started" && m.gateId === "slow-gate" && m.signalId === signal3Id,
-				5000,
-			);
-
-			// Confirm via REST that only signal 3's verification is active.
-			const activeNow = await getActiveVerifications(goalId);
-			expect(activeNow.length).toBeLessThanOrEqual(1);
-			if (activeNow.length === 1) expect(activeNow[0].signalId).toBe(signal3Id);
-
-			// Wait for the gate to pass via WS event (from signal 3's cursor so
-			// we only match the outcome produced by the final verification).
-			const wsMsg = await conn.waitForFrom(
-				c3,
-				(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "slow-gate" && (m.status === "passed" || m.status === "failed"),
-				20_000,
-			);
-			expect(wsMsg.status).toBe("passed");
-
-			// Verify no stale verifications remain active
-			const activeAfter = await getActiveVerifications(goalId);
-			expect(activeAfter.length).toBe(0);
-		} finally {
-			conn?.close();
-			await deleteGoal(goalId).catch(() => {});
-			await deleteSession(sessionId).catch(() => {});
-		}
+		await completeSignal(signal3);
+		expect(activeVerifications()).toHaveLength(0);
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("passed");
+		expect(signals().map((signal) => signal.verification.status)).toEqual(["failed", "failed", "passed"]);
+		expect(events.filter((event) => event.type === "gate_verification_complete" && event.status === "passed"))
+			.toEqual([expect.objectContaining({ signalId: signal3.id })]);
+		expect(notifications).toEqual([
+			expect.objectContaining({ goalId: GOAL_ID, message: expect.stringContaining("PASSED") }),
+		]);
 	});
 });

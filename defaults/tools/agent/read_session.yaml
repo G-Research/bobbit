@@ -8,7 +8,7 @@ provider:
 group: Agent
 renderer: src/ui/tools/renderers/ReadSessionRenderer.ts
 docs: |-
-  Read transcripts in a token-efficient way. `offset`/`limit` paginate; negative `offset` indexes from end (-1 = last). `pattern` filters to a regex match list before paginating; `context` expands ±N neighbours around each match. By default, tool result bodies are omitted and replaced with compact metadata placeholders. Pass `include_tool_results: true` only for narrow, deliberate raw-output reads. `verbose: true` includes full content blocks but still omits tool result bodies unless `include_tool_results: true` is also set.
+  Read transcripts in a token-efficient way. `offset`/`limit` paginate; negative `offset` indexes from end (-1 = last). `pattern` filters to a regex match list before paginating; `context` expands ±N neighbours around each match. By default, tool result bodies are omitted and replaced with compact metadata placeholders. Either `verbose: true` or `include_tool_results: true` requires an explicit `limit <= 10`; fetch additional raw content in smaller batches and watch token consumption.
 detail_docs: >-
   ## Purpose
 
@@ -31,7 +31,7 @@ detail_docs: >-
 
   | `offset` | number | no | Default `0`. Negative indexes from the end (Python-style). `-1` is the last message; `-20` is the start of the last 20. |
 
-  | `limit` | number | no | Default `20`. Clamped to `[1, 200]`. |
+  | `limit` | number | no | Ordinary reads default to `20` and accept `[1, 200]`. Either context-heavy flag requires an explicit integer in `[1, 10]`. |
 
   | `pattern` | string | no | Regex to filter messages. Matches against the flattened text (text blocks + tool inputs + tool results). |
 
@@ -39,9 +39,19 @@ detail_docs: >-
 
   | `context` | number | no | `0..5`. Only meaningful with `pattern`. Expands each match by ±N neighbours; the deduplicated match-with-context list is what `offset`/`limit` then paginate. |
 
-  | `verbose` | boolean | no | Default `false`. When true, returns full content blocks instead of compact summaries. Tool result bodies are still omitted unless `include_tool_results: true` is also set. |
+  | `verbose` | boolean | no | Default `false`. Returns full content blocks; requires explicit `limit <= 10`. Tool result bodies remain omitted unless separately enabled. |
 
-  | `include_tool_results` | boolean | no | Default `false`. Opt in to raw tool result bodies/previews. Use only after narrowing with `pattern`, `context`, `offset`, and `limit`. Subject to the 32 KB tool-result cap (with lazy-load). |
+  | `include_tool_results` | boolean | no | Default `false`. Includes raw tool result bodies/previews; requires explicit `limit <= 10`. Subject to the 32 KB tool-result cap (with lazy-load). |
+
+
+  ## Context-heavy reads
+
+
+  This agent-tool policy rejects `verbose: true` or
+  `include_tool_results: true` when `limit` is omitted or exceeds `10`, even
+  though ordinary reads default to `20`. Narrow first, then fetch full content
+  in batches of at most 10 while monitoring token consumption. The REST API's
+  existing paging behavior is unchanged.
 
 
   ## Indexing & filter semantics
@@ -113,7 +123,9 @@ detail_docs: >-
 
   | `invalid_regex` | 400 | `pattern` failed to compile. |
 
-  | `invalid_params` | 400 | `limit` outside `[1, 200]`, `context` outside `[0, 5]`, etc. |
+  | `invalid_params` | 400 | REST parameter validation failed (`limit` outside `[1, 200]`, `context` outside `[0, 5]`, etc.). |
+
+  | `CONTEXT_HEAVY_LIMIT_REQUIRED` | tool layer | A context-heavy flag lacks an explicit integer `limit` in `[1, 10]`; no request is sent. |
 
 
   ## Examples

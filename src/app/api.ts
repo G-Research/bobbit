@@ -83,9 +83,9 @@ export function goalDeepLink(goalId: string): string {
 }
 
 /** Copy text via the async Clipboard API, falling back to a legacy
- *  execCommand("copy") path so links are still copied in insecure contexts
+ *  execCommand("copy") path so text is still copied in insecure contexts
  *  (e.g. plain http:// over NordLynx) where the Clipboard API is blocked. */
-async function copyTextToClipboard(text: string): Promise<boolean> {
+export async function copyTextToClipboard(text: string): Promise<boolean> {
 	try {
 		if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
 			await navigator.clipboard.writeText(text);
@@ -1538,7 +1538,6 @@ export interface GitStatusData {
 	insertionsVsPrimary: number;
 	deletionsVsPrimary: number;
 	unpushed: boolean;
-	remotePublication?: 'local-only-policy';
 	status: Array<{ file: string; status: string }>;
 }
 
@@ -2218,6 +2217,11 @@ export interface GateState {
 	signalCount?: number;
 }
 
+export interface VerificationTimeoutInfo {
+	configuredSeconds: number;
+	elapsedMs: number;
+}
+
 export interface GateSignal {
 	id: string;
 	gateId: string;
@@ -2243,7 +2247,9 @@ export interface GateSignal {
 				metadata?: Record<string, string>;
 			};
 			/** Lifecycle status for in-flight rows seeded by beginVerification. */
-			status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+			status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+			/** Present only when a review turn exhausted its configured allowance. */
+			timeout?: VerificationTimeoutInfo;
 			/** Optional phase number, mirrored from the workflow VerifyStep. */
 			phase?: number;
 			/** True when the step was skipped (optional step or phase abort). */

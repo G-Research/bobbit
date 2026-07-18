@@ -7,13 +7,13 @@ import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import fs from "node:fs";
 import path from "node:path";
-import { test } from "vitest";
+import { afterAll, beforeAll, beforeEach, test, vi } from "vitest";
 
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, getImageModelByPref, parseImageModelPref } from "../../src/server/agent/image-generation.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
+import { globalAuthPath } from "../../src/server/bobbit-dir.js";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 import { createMemFs } from "../harness/mem-fs.js";
 
@@ -22,6 +22,27 @@ function withPrefs<T>(fn: (prefs: PreferencesStore) => T): T {
 	const dir = path.resolve("/memfs/image-models");
 	return fn(new PreferencesStore(dir, memfs));
 }
+
+const virtualAgentDir = path.resolve("/virtual/image-generation-agent");
+let authDocument: Record<string, unknown> | undefined;
+
+beforeAll(() => {
+	pinAgentDirForTest(virtualAgentDir);
+	vi.spyOn(fs, "existsSync").mockImplementation((file) => path.resolve(String(file)) === globalAuthPath() && authDocument !== undefined);
+	vi.spyOn(fs, "readFileSync").mockImplementation(((file: fs.PathLike) => {
+		if (path.resolve(String(file)) !== globalAuthPath() || authDocument === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+		return JSON.stringify(authDocument);
+	}) as typeof fs.readFileSync);
+});
+
+beforeEach(() => {
+	authDocument = undefined;
+});
+
+afterAll(() => {
+	vi.restoreAllMocks();
+	resetAgentDirForTest();
+});
 
 test("image model registry includes GPT Image 2 and Google image models", () => {
 	withPrefs((prefs) => {
@@ -49,31 +70,16 @@ test("image model registry marks provider auth from preferences", () => {
 });
 
 test("image model registry marks OpenAI auth from Codex auth.json API key", () => {
-	const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
-	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-image-auth-"));
-	try {
-		process.env.BOBBIT_AGENT_DIR = dir;
-		pinAgentDirForTest(dir);
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({
-			"openai-codex": {
-				type: "api_key",
-				key: "test-openai-codex-key",
-			},
-		}), "utf-8");
-		withPrefs((prefs) => {
-			const model = getAvailableImageModels(prefs).find((m) => m.provider === "openai" && m.id === "gpt-image-2");
-			assert.equal(model?.authenticated, true);
-		});
-	} finally {
-		if (previousAgentDir === undefined) {
-			delete process.env.BOBBIT_AGENT_DIR;
-		} else {
-			process.env.BOBBIT_AGENT_DIR = previousAgentDir;
-		}
-		resetAgentDirForTest();
-		rmSync(dir, { recursive: true, force: true });
-	}
+	authDocument = {
+		"openai-codex": {
+			type: "api_key",
+			key: "test-openai-codex-key",
+		},
+	};
+	withPrefs((prefs) => {
+		const model = getAvailableImageModels(prefs).find((m) => m.provider === "openai" && m.id === "gpt-image-2");
+		assert.equal(model?.authenticated, true);
+	});
 });
 
 function testJwt(): string {
@@ -86,56 +92,36 @@ function testJwt(): string {
 }
 
 test("image model registry marks OpenAI auth from Codex OAuth", () => {
-	const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
 	const previousOpenAiKey = process.env.OPENAI_API_KEY;
-	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-image-auth-"));
 	try {
-		process.env.BOBBIT_AGENT_DIR = dir;
-		pinAgentDirForTest(dir);
 		delete process.env.OPENAI_API_KEY;
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({
+		authDocument = {
 			"openai-codex": {
 				type: "oauth",
 				access: testJwt(),
 			},
-		}), "utf-8");
+		};
 		withPrefs((prefs) => {
 			const model = getAvailableImageModels(prefs).find((m) => m.provider === "openai" && m.id === "gpt-image-2");
 			assert.equal(model?.authenticated, true);
 		});
 	} finally {
-		if (previousAgentDir === undefined) {
-			delete process.env.BOBBIT_AGENT_DIR;
-		} else {
-			process.env.BOBBIT_AGENT_DIR = previousAgentDir;
-		}
-		if (previousOpenAiKey === undefined) {
-			delete process.env.OPENAI_API_KEY;
-		} else {
-			process.env.OPENAI_API_KEY = previousOpenAiKey;
-		}
-		resetAgentDirForTest();
-		rmSync(dir, { recursive: true, force: true });
+		if (previousOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+		else process.env.OPENAI_API_KEY = previousOpenAiKey;
 	}
 });
 
 test("OpenAI image generation can use Codex OAuth backend", async () => {
-	const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
 	const previousOpenAiKey = process.env.OPENAI_API_KEY;
 	const previousFetch = globalThis.fetch;
-	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-image-auth-"));
 	try {
-		process.env.BOBBIT_AGENT_DIR = dir;
-		pinAgentDirForTest(dir);
 		delete process.env.OPENAI_API_KEY;
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({
+		authDocument = {
 			"openai-codex": {
 				type: "oauth",
 				access: testJwt(),
 			},
-		}), "utf-8");
+		};
 		globalThis.fetch = (async (url: any, init?: any) => {
 			assert.equal(String(url), "https://chatgpt.com/backend-api/codex/responses");
 			const body = JSON.parse(init.body);
@@ -159,18 +145,8 @@ test("OpenAI image generation can use Codex OAuth backend", async () => {
 		});
 	} finally {
 		globalThis.fetch = previousFetch;
-		if (previousAgentDir === undefined) {
-			delete process.env.BOBBIT_AGENT_DIR;
-		} else {
-			process.env.BOBBIT_AGENT_DIR = previousAgentDir;
-		}
-		if (previousOpenAiKey === undefined) {
-			delete process.env.OPENAI_API_KEY;
-		} else {
-			process.env.OPENAI_API_KEY = previousOpenAiKey;
-		}
-		resetAgentDirForTest();
-		rmSync(dir, { recursive: true, force: true });
+		if (previousOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+		else process.env.OPENAI_API_KEY = previousOpenAiKey;
 	}
 });
 

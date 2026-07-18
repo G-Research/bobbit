@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal, type MergeChildResult, shouldSkipRemotePush, type RemoteGitPolicy } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal, type MergeChildResult, type RemoteGitPolicy } from "../skills/git.js";
 import { resolveWorktreeSupport } from "./worktree-support.js";
 import { normalizeWorkflow, type WorkflowStore, type Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
@@ -57,12 +57,10 @@ export function toBranchName(title: string): string {
 /** Defensive cap on parent-chain walks. See deriveNestingFields(). */
 export const NESTING_WALK_DEPTH_CAP = 64;
 
-/** Outcome of mergeChild — push is best-effort and never fails the merge. */
+/** Outcome of locally merging a child goal into its parent. */
 export interface MergeChildOutcome extends MergeChildResult {
-	/** True when `git push origin <parent.branch>` succeeded (or push was skipped via `shouldSkipRemotePush`). */
-	pushed: boolean;
-	/** Error message from a failed push — non-fatal, surfaced for logging. */
-	pushError?: string;
+	/** Per-component outcomes for multi-repo goals, keyed by component repo. */
+	repos?: Record<string, MergeChildResult>;
 }
 
 /**
@@ -363,7 +361,7 @@ export class GoalManager {
 			const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
 			const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
 			const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
-			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef });
+			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
 			if (support.supported) repoPath = support.repoPath;
 		}
 
@@ -797,8 +795,13 @@ export class GoalManager {
 
 	/**
 	 * Locally merge a child's branch into its parent's branch (child goals
-	 * merge LOCALLY into parent branch — no PR). Best-effort push of the
-	 * parent branch so siblings see the new tip.
+	 * merge LOCALLY into parent branch — no PR and no remote publication).
+	 * Publication, when explicitly requested elsewhere, is a separate operation.
+	 *
+	 * Multi-repo component repositories merge sequentially and expose each result
+	 * in `repos`. If a later component conflicts, an earlier component may remain
+	 * successfully merged locally: successful merges are not destructively rolled
+	 * back. The child remains live so callers can repair the conflict and retry.
 	 *
 	 * Security invariant: `child.parentGoalId === parentGoalId` MUST hold;
 	 * mismatch throws PARENT_MISMATCH (prevents cross-tree merges).
@@ -828,32 +831,49 @@ export class GoalManager {
 			throw err;
 		}
 
-		// repoWorktrees["."] is canonical primary in multi-repo; worktreePath
-		// is authoritative in single-repo.
-		const parentCwd = parent.repoWorktrees?.["."] ?? parent.worktreePath;
-		if (!parentCwd) {
+		const parentRepoWorktrees = parent.repoWorktrees;
+		const childRepoWorktrees = child.repoWorktrees;
+		if (parentRepoWorktrees && Object.keys(parentRepoWorktrees).length > 0) {
+			const matchingRepos = childRepoWorktrees
+				? Object.keys(parentRepoWorktrees).filter(repo => !!childRepoWorktrees[repo])
+				: [];
+			if (matchingRepos.length === 0) {
+				const err = new Error(`mergeChild: parent and child have no matching repository worktrees`);
+				(err as any).code = "GOAL_GIT_UNAVAILABLE";
+				throw err;
+			}
+
+			const repos: Record<string, MergeChildResult> = {};
+			for (const repo of matchingRepos) {
+				repos[repo] = await mergeChildBranchLocal(
+					parent.branch,
+					child.branch,
+					parentRepoWorktrees[repo],
+					this.commandRunner,
+					this.remotePolicy,
+				);
+			}
+			const results = Object.values(repos);
+			const conflict = results.some(result => result.conflict);
+			const allTerminal = results.every(result => result.merged || result.alreadyMerged);
+			return {
+				merged: !conflict && allTerminal && results.some(result => result.merged),
+				alreadyMerged: !conflict && results.every(result => result.alreadyMerged),
+				conflict,
+				output: matchingRepos
+					.map(repo => `[${repo}] ${repos[repo].output}`.trimEnd())
+					.join("\n"),
+				repos,
+			};
+		}
+
+		if (!parent.worktreePath) {
 			const err = new Error(`mergeChild: parent ${parentGoalId} has no worktreePath`);
 			(err as any).code = "GOAL_GIT_UNAVAILABLE";
 			throw err;
 		}
 
-		const result = await mergeChildBranchLocal(parent.branch, child.branch, parentCwd, this.commandRunner, this.remotePolicy);
-
-		const outcome: MergeChildOutcome = { ...result, pushed: false };
-
-		// Best-effort push so siblings see the merge tip. Skip on conflict
-		// (worktree stays diagnostic).
-		if (!result.conflict && (result.merged || result.alreadyMerged) && !shouldSkipRemotePush(this.remotePolicy)) {
-			try {
-				await this.commandRunner.execFile("git", ["push", "origin", parent.branch], { cwd: parentCwd, timeout: 30_000 });
-				outcome.pushed = true;
-			} catch (err) {
-				outcome.pushError = err instanceof Error ? err.message : String(err);
-				console.warn(`[goal-manager] mergeChild: push of "${parent.branch}" failed (non-fatal):`, outcome.pushError);
-			}
-		}
-
-		return outcome;
+		return mergeChildBranchLocal(parent.branch, child.branch, parent.worktreePath, this.commandRunner, this.remotePolicy);
 	}
 
 	/**
@@ -976,7 +996,7 @@ export class GoalManager {
 					return Promise.resolve();
 				}
 				const repoPath = repo === "." ? goal.repoPath! : path.join(goal.repoPath!, repo);
-				return cleanupWorktree(repoPath, wt, goal.branch, true);
+				return cleanupWorktree(repoPath, wt, goal.branch, true, this.commandRunner, this.remotePolicy);
 			})).catch(() => { /* swallow — best-effort */ });
 		}
 		return archived;

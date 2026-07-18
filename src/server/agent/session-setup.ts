@@ -13,8 +13,9 @@
 import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
+import type { CommandRunner } from "../gateway-deps.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent } from "./session-manager.js";
+import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, switchSessionPathForAgent } from "./session-manager.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
@@ -23,7 +24,8 @@ import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
-import type { SessionStore, WorktreePushPolicy } from "./session-store.js";
+import type { PersistedSession, SessionStore } from "./session-store.js";
+import { sessionFsContextForAgentFile } from "./session-fs.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
@@ -46,6 +48,7 @@ import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExten
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
+import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
@@ -259,7 +262,6 @@ export interface SessionSetupPlan {
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
 	worktreePath?: string;
-	worktreePushPolicy?: WorktreePushPolicy;
 	repoPath?: string;
 	branch?: string;
 	sandboxed?: boolean;
@@ -352,6 +354,8 @@ export interface PipelineContext {
 	searchIndex: SearchService;
 	sessions: Map<string, SessionInfo>;
 	listPersistedSessionsForWorktreeGuard?: () => WorktreeReferenceRecord[];
+	/** Injected command boundary used by setup-failure worktree cleanup. */
+	commandRunner?: CommandRunner;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
@@ -994,6 +998,11 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	if (codeAssistPath) {
 		plan.bridgeOptions.args.push("--extension", codeAssistPath);
 	}
+
+	const aigwDnsGuardPath = writeAigwDnsGuardExtension();
+	if (aigwDnsGuardPath) {
+		plan.bridgeOptions.args.push("--extension", aigwDnsGuardPath);
+	}
 }
 
 // ── Event subscription ─────────────────────────────────────────────────────
@@ -1039,7 +1048,6 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		assistantType: plan.assistantType,
 		role: plan.role ?? plan.roleName,
 		worktreePath: plan.worktreePath,
-		worktreePushPolicy: plan.worktreePushPolicy,
 		repoPath: plan.repoPath,
 		branch: plan.branch,
 		taskId: plan.taskId,
@@ -1199,13 +1207,12 @@ export async function executeWorktreeAsync(
 		type WorktreeCreationOptions = {
 			worktreeRoot?: string;
 			configuredBaseRef?: string;
-			pushPolicy?: WorktreePushPolicy;
 			remotePolicy?: RemoteGitPolicy;
 		};
 		if (isMulti) {
 			const { createWorktreeSet } = await import("../skills/git.js");
 			const worktreeRoot = ctx.projectConfigStore?.get("worktree_root") || undefined;
-			const worktreeOptions: WorktreeCreationOptions = { worktreeRoot, configuredBaseRef, pushPolicy: plan.worktreePushPolicy, remotePolicy: ctx.remoteGitPolicy };
+			const worktreeOptions: WorktreeCreationOptions = { worktreeRoot, configuredBaseRef, remotePolicy: ctx.remoteGitPolicy };
 			const result = await withRetry(
 				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, worktreeOptions),
 				{ retries: 2, delays: [1000, 2000], label: "createWorktreeSet", sessionId: plan.id },
@@ -1227,7 +1234,7 @@ export async function executeWorktreeAsync(
 			try {
 				worktreeCwd = await withRetry(
 					async () => {
-						const worktreeOptions: WorktreeCreationOptions = { configuredBaseRef, pushPolicy: plan.worktreePushPolicy, remotePolicy: ctx.remoteGitPolicy };
+						const worktreeOptions: WorktreeCreationOptions = { configuredBaseRef, remotePolicy: ctx.remoteGitPolicy };
 						const result = await createWorktree(plan.repoPath!, plan.branch!, worktreeOptions);
 						return result.worktreePath;
 					},
@@ -1423,27 +1430,36 @@ export async function executeWorktreeAsync(
 		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
 		if (correctPath !== plan.preExistingAgentSessionFile) {
 			const { sessionFileCopy, sessionFileDelete } = await import("./session-fs.js");
-			const fsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
-			if (plan.sandboxed) {
-				// Container-side: copy via docker exec then delete the old file.
-				await sessionFileCopy(fsCtx, plan.preExistingAgentSessionFile, fsCtx, correctPath, ctx.sandboxManager);
-				await sessionFileDelete(fsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
+			const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
+			// Preserve the source transcript's filesystem realm while moving it to
+			// the cwd-derived slot. The formatter returns the host mount path; a
+			// container-side source needs the corresponding container path instead.
+			const correctAgentPath = sourceFsCtx.sandboxed
+				? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
+				: correctPath;
+			const correctFsCtx = sessionFsContextForAgentFile(plan, correctAgentPath);
+			if (sourceFsCtx.sandboxed || correctFsCtx.sandboxed) {
+				// Container-side paths use the session filesystem abstraction. A
+				// host-absolute transcript owned by a sandboxed session deliberately
+				// remains host-side so it is never passed to docker exec as a host path.
+				await sessionFileCopy(sourceFsCtx, plan.preExistingAgentSessionFile, correctFsCtx, correctAgentPath, ctx.sandboxManager);
+				await sessionFileDelete(sourceFsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
 			} else {
 				// Host-side: prefer rename, fall back to copy+unlink for cross-device.
 				const fsp = await import("node:fs/promises");
-				await fsp.mkdir(path.dirname(correctPath), { recursive: true });
+				await fsp.mkdir(path.dirname(correctAgentPath), { recursive: true });
 				try {
-					await fsp.rename(plan.preExistingAgentSessionFile, correctPath);
+					await fsp.rename(plan.preExistingAgentSessionFile, correctAgentPath);
 				} catch (err) {
-					await fsp.copyFile(plan.preExistingAgentSessionFile, correctPath);
+					await fsp.copyFile(plan.preExistingAgentSessionFile, correctAgentPath);
 					await fsp.unlink(plan.preExistingAgentSessionFile).catch(() => {});
 				}
 			}
-			plan.preExistingAgentSessionFile = correctPath;
-			ctx.store.update(session.id, { agentSessionFile: correctPath });
+			plan.preExistingAgentSessionFile = correctAgentPath;
+			ctx.store.update(session.id, { agentSessionFile: correctAgentPath });
 		}
 
-		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
+		const transcriptFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
 				transcriptFsCtx,
@@ -1461,8 +1477,12 @@ export async function executeWorktreeAsync(
 			ctx.sandboxManager,
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
+		const switchSessionPath = switchSessionPathForAgent({
+			sandboxed: plan.sandboxed,
+			agentSessionFile: plan.preExistingAgentSessionFile,
+		} as PersistedSession);
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			{ type: "switch_session", sessionPath: switchSessionPath },
 			switchTimeout,
 		);
 		if (!switchResp.success) {
@@ -1592,7 +1612,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
 	if (plan.preExistingAgentSessionFile) {
-		const transcriptFsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
+		const transcriptFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
 				transcriptFsCtx,
@@ -1607,8 +1627,12 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			ctx.sandboxManager,
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
+		const switchSessionPath = switchSessionPathForAgent({
+			sandboxed: plan.sandboxed,
+			agentSessionFile: plan.preExistingAgentSessionFile,
+		} as PersistedSession);
 		const switchResp = await rpcClient.sendCommand(
-			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			{ type: "switch_session", sessionPath: switchSessionPath },
 			switchTimeout,
 		);
 		if (!switchResp.success) {
@@ -1750,7 +1774,7 @@ export function handleSetupFailure(
 	if (plan.worktreePath && plan.repoPath && plan.branch) {
 		const persistedSessions = ctx.listPersistedSessionsForWorktreeGuard?.() ?? ctx.store.getAll();
 		if (!isWorktreePathReferencedByLiveSession(plan.worktreePath, persistedSessions, { ignoreSessionId: session.id })) {
-			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true, undefined, ctx.remoteGitPolicy).catch(() => {});
+			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true, ctx.commandRunner, ctx.remoteGitPolicy).catch(() => {});
 		} else {
 			console.log(`[session-setup] Skipping setup-failure cleanup for shared worktree ${plan.worktreePath} (session ${session.id})`);
 		}

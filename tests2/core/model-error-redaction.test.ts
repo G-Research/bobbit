@@ -97,6 +97,10 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
 	let body = extractFunctionBody(src, "private async tryAutoSelectModel(session: SessionInfo)");
 	body = stripTypesForEval(body).replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
+	// Keep every free dependency of the extracted production method explicit. This
+	// test does not need a models.json fixture, so normalization is an identity stub;
+	// migration behavior is exercised by controlled-model-fallback and AIGW tests.
+	const normalizeAigwModelString = (modelString: string) => modelString;
 	const applyModelString = async (_rpc: any, modelString: string) => {
 		throw new Error(`provider rejected ${modelString}: api_key=${API_KEY}; Authorization: Bearer ${BEARER}; cause=provider unavailable`);
 	};
@@ -107,6 +111,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	const inferMeta = () => ({ reasoning: false });
 	const broadcast = () => {};
 	return new Function(
+		"normalizeAigwModelString",
 		"applyModelString",
 		"isSessionSelectableModelString",
 		"getAigwUrl",
@@ -118,6 +123,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"broadcast",
 		`return async function tryAutoSelectModel(session) {${body}\n};`,
 	)(
+		normalizeAigwModelString,
 		applyModelString,
 		isSessionSelectableModelString,
 		getAigwUrl,

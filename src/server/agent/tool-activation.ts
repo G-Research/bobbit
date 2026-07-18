@@ -228,6 +228,7 @@ export function resolveGrantPolicy(
 	toolManager: ToolManager | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	scopedContext?: ScopedToolContext,
+	knownTool?: { grantPolicy?: string },
 ): GrantPolicy {
 	// Step 0: system-scope Subgoals feature gate. When the flag is OFF, every
 	// tool in the `Children` group resolves to `never` regardless of role /
@@ -287,9 +288,13 @@ export function resolveGrantPolicy(
 		if (gp) return normalizePolicy(gp);
 	}
 
-	// 5. Tool definition default from YAML
-	const toolDef = toolManager?.getToolByName(toolName, scopedContext);
-	if (toolDef?.grantPolicy) return normalizePolicy(toolDef.grantPolicy);
+	// 5. Tool definition default from YAML. Bulk resolution passes the tool
+	// snapshot it is already iterating so one coherent allowlist does not re-scan
+	// the directory once per tool. Single-tool callers retain live lookup.
+	const toolGrantPolicy = knownTool
+		? knownTool.grantPolicy
+		: toolManager?.getToolByName(toolName, scopedContext)?.grantPolicy;
+	if (toolGrantPolicy) return normalizePolicy(toolGrantPolicy);
 
 	// 6. Non-MCP group-level default policy.
 	if (groupPolicyStore && !mcpKeys && toolGroup) {
@@ -438,16 +443,39 @@ export type EffectiveTool =
  *   3. Otherwise → `yaml` (so unknown-tool typos still surface through the
  *      provider-lookup `"has no provider"` warn in `computeToolActivationArgs`).
  */
+function tagAllowedToolFromProviders(
+	name: string,
+	providers?: ReadonlyMap<string, { type?: string }>,
+): EffectiveTool {
+	const provider = providers?.get(name);
+	if (provider?.type === "pi-extension") return { kind: "pi-extension", name };
+	if (provider) return { kind: "yaml", name };
+	if (mcpPolicyKeys(name)) return { kind: "mcp", name };
+	return { kind: "yaml", name };
+}
+
 export function tagAllowedTool(name: string, toolManager?: ToolManager, scopedContext?: ScopedToolContext): EffectiveTool {
 	if (toolManager) {
 		try {
-			const provider = toolManager.getToolProviders(scopedContext).get(name);
-			if (provider?.type === "pi-extension") return { kind: "pi-extension", name };
-			if (provider) return { kind: "yaml", name };
+			return tagAllowedToolFromProviders(name, toolManager.getToolProviders(scopedContext));
 		} catch { /* providers unavailable; fall through */ }
 	}
-	if (mcpPolicyKeys(name)) return { kind: "mcp", name };
-	return { kind: "yaml", name };
+	return tagAllowedToolFromProviders(name);
+}
+
+/**
+ * Tag one logical allowlist against one provider snapshot. Besides avoiding
+ * repeated directory scans, this prevents a live config edit from producing a
+ * mixed old/new classification within a single session's allowlist.
+ */
+export function tagAllowedTools(names: readonly string[], toolManager?: ToolManager, scopedContext?: ScopedToolContext): EffectiveTool[] {
+	if (toolManager) {
+		try {
+			const providers = toolManager.getToolProviders(scopedContext);
+			return names.map((name) => tagAllowedToolFromProviders(name, providers));
+		} catch { /* providers unavailable; fall through */ }
+	}
+	return names.map((name) => tagAllowedToolFromProviders(name));
 }
 
 /**
@@ -496,16 +524,13 @@ export function computeEffectiveAllowedTools(
 	for (const tool of availableTools) {
 		if (seen.has(tool.name.toLowerCase())) continue;
 		seen.add(tool.name.toLowerCase());
-		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore, scopedContext);
+		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore, scopedContext, { grantPolicy: tool.grantPolicy });
 		// Include tools with allow OR ask policy (not never)
 		if (!isNeverPolicy(policy)) {
-			let provider: ToolProvider | undefined;
-			if (typeof (toolManager as any).getToolProvider === "function") {
-				provider = toolManager.getToolProvider(tool.name, scopedContext);
-			} else if (typeof (toolManager as any).getToolProviders === "function") {
-				provider = toolManager.getToolProviders(scopedContext).get(tool.name);
-			}
-			result.push({ kind: provider?.type === "pi-extension" ? "pi-extension" : "yaml", name: tool.name });
+			// getAvailableTools() already resolved the winning catalogue and marks
+			// pi-only entries. Re-querying getToolProvider() for every tool rescans
+			// the same directories and can mix catalogue versions within one result.
+			result.push({ kind: tool.providerType === "pi-extension" ? "pi-extension" : "yaml", name: tool.name });
 		}
 	}
 
@@ -515,7 +540,7 @@ export function computeEffectiveAllowedTools(
 	// Flat servers (no sub) collapse to one meta-tool `mcp_<server>`.
 	const byKey = new Map<string /* server\0sub */, { server: string; sub?: string }>();
 	for (const info of mcpInfos) {
-		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
+		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext, {});
 		if (isNeverPolicy(opPolicy)) continue;
 		const parsed = parseMcpToolName(info.name);
 		if (!parsed) continue;
@@ -540,7 +565,8 @@ export function computeEffectiveAllowedTools(
 	// unless policy denies it (role override or group policy on `mcp_describe`).
 	// `mcp_describe` is a YAML-backed builtin discovery tool, NOT an MCP meta-tool.
 	if (mcpInfos.length > 0 && !seen.has('mcp_describe')) {
-		const policy = resolveGrantPolicy('mcp_describe', 'MCP', role, toolManager, groupPolicyStore, scopedContext);
+		const mcpDescribe = availableTools.find((tool) => tool.name === 'mcp_describe');
+		const policy = resolveGrantPolicy('mcp_describe', 'MCP', role, toolManager, groupPolicyStore, scopedContext, { grantPolicy: mcpDescribe?.grantPolicy });
 		if (!isNeverPolicy(policy)) result.push({ kind: "yaml", name: 'mcp_describe' });
 	}
 
@@ -843,7 +869,7 @@ export function computeToolPolicies(
 
 	// Builtin + bobbit-extension tools
 	for (const tool of availableTools) {
-		const rawPolicy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore, scopedContext);
+		const rawPolicy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore, scopedContext, { grantPolicy: tool.grantPolicy });
 		let policy: string;
 		if (isAllowPolicy(rawPolicy)) policy = 'allow';
 		else if (isAskPolicy(rawPolicy)) policy = 'ask';
@@ -857,7 +883,7 @@ export function computeToolPolicies(
 	// tool name and rejects `never` ops even when the meta-tool is granted).
 	for (const info of mcpInfos) {
 		if (result[info.name]) continue; // already seen
-		const rawPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
+		const rawPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext, {});
 		let policy: string;
 		if (isAllowPolicy(rawPolicy)) policy = 'allow';
 		else if (isAskPolicy(rawPolicy)) policy = 'ask';
@@ -884,7 +910,7 @@ export function computeToolPolicies(
 	for (const info of mcpInfos) {
 		const parsed = parseMcpToolName(info.name);
 		if (!parsed) continue;
-		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
+		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext, {});
 		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
 		let entry = opsByKey.get(k);
 		if (!entry) {
@@ -957,7 +983,6 @@ export function writeToolGuardExtension(
 	// when non-empty so the empty case keeps today's key.
 	const genKey = hashKey({
 		kind: 'guardCode',
-		sessionId,
 		policies,
 		grantedTools: (grantedTools ?? []).slice().sort(),
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
@@ -1116,7 +1141,7 @@ export function writeMcpProxyExtensions(
 		// policy allowed. An explicit role policy on the model-facing meta-tool
 		// can still hide the whole generated proxy.
 		if (role || toolManager || groupPolicyStore) {
-			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext);
+			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore, scopedContext, {});
 			if (isNeverPolicy(p)) continue;
 			const metaName = makeMetaToolName(parsed.server, parsed.sub);
 			const exactMetaRolePolicy = role?.toolPolicies?.[metaName];

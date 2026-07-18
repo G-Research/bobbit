@@ -22,11 +22,13 @@
  * from other workers.
  */
 import { test, expect } from "./in-process-harness-realpush.js";
-import { execFileSync, execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
 import { apiFetch } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
@@ -41,17 +43,18 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 	let projectId: string;
 
 	test.beforeAll(async () => {
-		// 1. Local bare-repo "origin" + a clone with an initial master commit.
+		// 1. Local bare-repo "origin" + a working repo with an initial master
+		//    commit. The working repo comes from the immutable committed template
+		//    (master + README.md + .gitattributes + one commit, identity already
+		//    configured); wiring it to the bare origin stays real git.
 		tmpRoot = mkdtempSync(join(tmpdir(), "bobbit-bare-"));
 		bareRepo = join(tmpRoot, "origin.git");
 		workRepo = join(tmpRoot, "work");
-		execFileSync("git", ["init", "--bare", "-b", "master", bareRepo]);
-		execFileSync("git", ["clone", bareRepo, workRepo]);
-		// Identity is required for the empty commit on some CI images.
-		execFileSync("git", ["-C", workRepo, "config", "user.email", "test@bobbit.local"]);
-		execFileSync("git", ["-C", workRepo, "config", "user.name", "bobbit-e2e"]);
-		execFileSync("git", ["-C", workRepo, "commit", "--allow-empty", "-m", "init"]);
-		execFileSync("git", ["-C", workRepo, "push", "-u", "origin", "master"]);
+		await runFixtureCommand("git", ["init", "--bare", "-b", "master", bareRepo]);
+		await prepareGitTemplate();
+		copyGitTemplate(workRepo);
+		await runFixtureCommand("git", ["remote", "add", "origin", bareRepo], { cwd: workRepo });
+		await runFixtureCommand("git", ["push", "-u", "origin", "master"], { cwd: workRepo });
 
 		// 2. Register the clone as a project via REST. We talk to the
 		//    realpush harness's gateway via the standard apiFetch helper.
@@ -120,21 +123,14 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 
 		const branch: string = readyGoal.branch;
 
-		const lsBefore = await pollUntil(async () => {
-			const { stdout } = await execFileAsync(
-				"git", ["ls-remote", "--heads", bareRepo, branch],
-				{ encoding: "utf-8" },
-			);
-			return stdout.includes(branch) ? stdout : null;
-		}, { timeoutMs: 30_000, intervalMs: 500, label: `goal branch ${branch} pushed to origin` });
-		expect(lsBefore, `branch ${branch} should have been pushed`).toContain(branch);
-
-		execFileSync("git", ["-C", workRepo, "push", "origin", "--delete", branch]);
-		const { stdout: lsAfterPredelete } = await execFileAsync(
+		const { stdout: lsBeforeArchive } = await execFileAsync(
 			"git", ["ls-remote", "--heads", bareRepo, branch],
 			{ encoding: "utf-8" },
 		);
-		expect(lsAfterPredelete, `branch ${branch} should have been pre-deleted from origin`).not.toContain(branch);
+		expect(
+			lsBeforeArchive,
+			`lifecycle-created goal branch ${branch} must remain unpublished before archive`,
+		).not.toContain(branch);
 
 		const originalWarn = console.warn;
 		const warnings: string[] = [];

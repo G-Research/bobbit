@@ -33,7 +33,7 @@ All numbers below measured on the 24-core dev box (AMD Ryzen AI 9 HX 370), Node 
   shared by every integration file that fork runs.
 - **Not per-test, not per-file.** Measured: a full `v2-integration` run of **167
   files / 895 tests** produced **6 `[boot] sweeper start` lines = 6 boots** with
-  `VITEST_MAX_FORKS=6`. Boots == fork count.
+  `VITEST_MAX_WORKERS=6`. Boots == worker count.
 - 166 of 167 integration files use the shared fixture.
 
 Per-test isolation on the shared gateway is handled by `createScope()` +
@@ -188,13 +188,13 @@ with zero flakes. To hit 4–5 way reliably the higher-impact levers are, in ord
   already shared per fork (D3) and lean (~470 ms). The bottleneck is test-work CPU +
   uncounted verification command-step process spawns.
 - **Best boot-cost action = esbuild prebundle** of the src/server graph: ~11 s/fork →
-  ~0.4 s/fork, helping both isolated and concurrent runs. Moderate effort (~1–2 days
-  incl. the `import.meta.url` shims + a bundle/source parity check), moderate risk.
-- **Do it in the SPIN-OFF, not this goal.** This goal's acceptance is already capped
-  at 3-way (D9) and the prebundle does not change that bar. The spin-off should
-  sequence: (1) verification-spawn reduction (the real 4–5-way enabler), then (2) the
-  prebundle. Track the "ledger doesn't count command-step child processes" gap there
-  too.
+  ~0.4 s/fork, helping both isolated and concurrent runs.
+- **Follow-up status:** implemented by `scripts/testing-v2/server-prebundle.mjs` and
+  `tests2/harness/server-runtime.ts`. The bundle is content-addressed, source-mapped,
+  validates its namespace/boot surface before atomic publication, and rewrites only
+  executable `import.meta.url` expressions while preserving generated child-module
+  source strings. The unit runner passes the validated bundle to integration workers.
+  Process-amplification reduction remains the larger wall-time lever.
 
 ### If a heavy isolated confirmation run is wanted
 
@@ -211,9 +211,9 @@ requires the machine-quiet window and the shim work above. Not run in this study
 npm ci
 # Runtime boot + phase breakdown: add a throwaway tests2/integration/*.test.ts that
 # times getGateway() (total) and the replicated boot phases, then:
-VITEST_MAX_FORKS=1 npx vitest run --project v2-integration <bench>.test.ts   # ~470 ms boot; transform 2.2s + collect 3.5s
-# Full tier split (boots == forks; work vs transform):
-VITEST_MAX_FORKS=6 npx vitest run --project v2-integration --reporter=verbose  # 144s; 6 boots; tests 478 CPU-s
+VITEST_MAX_WORKERS=1 npx vitest run --project v2-integration <bench>.test.ts   # ~470 ms boot; transform 2.2s + collect 3.5s
+# Full tier split (boots == workers; work vs transform):
+VITEST_MAX_WORKERS=6 npx vitest run --project v2-integration --reporter=verbose  # 144s; 6 boots; tests 478 CPU-s
 # esbuild prebundle prototype:
 npx esbuild src/server/server.ts --bundle --platform=node --format=esm --packages=external --outfile=bundle.mjs  # ~1.7s, 3.3MB
 node -e 'const t=performance.now();import("./bundle.mjs").catch(()=>{});Promise.resolve().then(()=>console.log(performance.now()-t))'  # ~425 ms import

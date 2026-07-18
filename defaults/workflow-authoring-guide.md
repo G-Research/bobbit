@@ -236,7 +236,7 @@ Common optional fields (apply to all three shapes):
 |---|---|
 | `phase: <int>` | groups parallel-runnable steps; phases run in ascending order |
 | `expect: success \| failure` | flips pass/fail (use `failure` for TDD reproducing-tests) |
-| `timeout: <seconds>` | per-step timeout (default 300s) |
+| `timeout: <seconds>` | Type-specific timeout. Commands default to 300s; component `command: unit` defaults to 1200s. Review-agent rules are described below. |
 | `optional: true` + `optionalLabel:` + `description:` | renders as a user-toggleable "Enable X" affordance |
 
 > **Field split.** `optionalLabel:` is the goal-creation opt-in toggle
@@ -248,7 +248,7 @@ Common optional fields (apply to all three shapes):
 
 ### 4.2 `type: llm-review`
 
-Reviewer agent. Runs against the diff between the goal's branch and the configured integration branch, with access to repo files and gate content.
+Reviewer agent. Runs against the diff between the goal's branch and the configured integration branch, with access to repo files and gate content. With no explicit `timeout`, each active review turn gets 1200 seconds.
 
 ```yaml
 - name: "Code quality review"
@@ -276,6 +276,20 @@ QA agent. Stands up the owning component's `config.qa_start_command` testbed (as
     Stand up the ephemeral testbed (the owning component's `config.qa_start_command`),
     plan 3-5 scenarios, drive the browser, submit `verification_result`.
 ```
+
+#### Review-agent timeout rules
+
+For both `llm-review` and `agent-qa`, `timeout` is a per-active-turn allowance rather than a deadline for the whole verification step:
+
+- Omitted `llm-review` timeout: 1200 seconds.
+- Omitted `agent-qa` timeout: the greater of 1200 seconds and `(qa_max_duration_minutes + 5) * 60` seconds. The component QA duration defaults to 10 minutes.
+- Explicit timeout: any positive whole-second value, minimum one second. It is authoritative even below the omitted default.
+- Fresh allowance: every attempt, same-session reminder, auto-retry, restart continuation/reminder, step-level retry, and same-session process recovery gets the full resolved window after streaming starts.
+- Excluded time: setup, readiness, prompt transport, fixed settle/flush windows, and provider overload/rate-limit backoff do not consume the active allowance. Provider backoff remains on its existing retry path until cancellation or goal completion.
+
+Leave `timeout` empty to use these defaults; the workflow editor does not serialize placeholder values. Set a larger explicit value when unusually large diffs or long QA scenarios need more uninterrupted active time. Set a shorter value only when the workflow intentionally prefers a faster failure.
+
+Project workflow edits apply to goals created afterward because each goal freezes a workflow snapshot at creation. When a review step times out, its **Change timeout** dialog can update the current goal snapshot, the project template for future goals, or both explicitly. Current-goal replacement validates the complete workflow and resets the changed gate to `pending`; future-only never retroactively changes active goals. This split lets authors improve the reusable default without silently changing an in-progress goal's acceptance contract. See [Goals, Workflows, Tasks & Gates](../docs/goals-workflows-tasks.md#changing-a-timed-out-review-allowance).
 
 ### 4.4 `type: human-signoff`
 

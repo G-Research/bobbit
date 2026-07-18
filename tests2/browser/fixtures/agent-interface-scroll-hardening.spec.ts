@@ -22,6 +22,7 @@
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
+import { waitForFrames } from "../_helpers/stable-wait.js";
 
 const TEST_PAGE = `file://${path.resolve("tests/fixtures/agent-interface-scroll-hardening.html")}`;
 
@@ -80,12 +81,14 @@ test.describe("AgentInterface scroll hardening (post-redesign)", () => {
 	test("RO ticks on growth re-pin while sticking; viewport stays within sub-pixel tail", async ({ page }) => {
 		await page.evaluate(() => (window as any).__startAtBottom());
 		// Three staggered growths — async markdown / code-block layout.
+		// A frame boundary between ticks guarantees the async scroll events
+		// from each re-pin have been delivered before the next growth.
 		for (let i = 0; i < 3; i++) {
 			await page.evaluate(() => {
 				(window as any).__appendMessages(20);
 				(window as any).__fireResizeObserver();
 			});
-			await page.waitForTimeout(20);
+			await waitForFrames(page);
 		}
 		const after = await page.evaluate(() => (window as any).__getState());
 		const tail = after.scrollHeight - after.scrollTop - after.clientHeight;

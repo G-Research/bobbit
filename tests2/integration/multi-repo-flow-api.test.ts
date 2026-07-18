@@ -4,30 +4,61 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
-function gitInit(dir: string): void {
-	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
+let restoreCommandRunner: (() => void) | undefined;
+
+function fakeRepo(dir: string): void {
+	fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+	fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/master\n");
 	fs.writeFileSync(path.join(dir, "README.md"), "fixture\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: dir });
-	// Ensure an `origin` exists so worktree push targets resolve. Fake it via
-	// a bare clone alongside.
-	const bare = `${dir}-bare`;
-	execFileSync("git", ["clone", "--bare", "--quiet", dir, bare], { stdio: "pipe" });
-	execFileSync("git", ["remote", "add", "origin", bare], { cwd: dir });
+}
+
+function cannedGit(cwd: string, args: readonly string[]): string {
+	const key = args.join(" ");
+	if (key === "rev-parse --show-toplevel") return cwd;
+	if (key === "rev-parse --is-inside-work-tree") return "true";
+	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master" || key === "rev-parse --verify origin/master") return "a".repeat(40);
+	if (key === "symbolic-ref refs/remotes/origin/HEAD") return "refs/remotes/origin/master";
+	if (args[0] === "rev-parse" && args[1] === "--verify") throw new Error(`missing ref: ${args[2]}`);
+	if (args[0] === "worktree" && args[1] === "add") {
+		const wtPath = args[2] === "-b" ? args[4] : args[2];
+		fs.mkdirSync(wtPath, { recursive: true });
+		fs.writeFileSync(path.join(wtPath, ".git"), "gitdir: canned\n");
+		return "";
+	}
+	if (args[0] === "worktree" && args[1] === "remove") {
+		fs.rmSync(args[2], { recursive: true, force: true });
+		return "";
+	}
+	if (args[0] === "branch" || args[0] === "push" || args[0] === "fetch") return "";
+	if (args[0] === "remote" && args[1] === "get-url") throw new Error("no remote");
+	throw new Error(`unexpected canned git command (${cwd}): ${key}`);
+}
+
+async function installCannedGitRunner(): Promise<void> {
+	const runtime = await loadServerTestRuntime();
+	const runner = runtime.gatewayDeps.realCommandRunner;
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	runner.execFile = async (file, args, options) => {
+		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return { stdout: cannedGit(String(options?.cwd ?? ""), args), stderr: "" };
+	};
+	runner.execFileSync = (file, args, options) => {
+		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return cannedGit(String(options?.cwd ?? ""), args);
+	};
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
 }
 
 async function registerMultiRepoProject(): Promise<{ id: string; rootPath: string; cleanup: () => void }> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-api-"));
-	gitInit(path.join(root, "api"));
-	gitInit(path.join(root, "web"));
+	fakeRepo(path.join(root, "api"));
+	fakeRepo(path.join(root, "web"));
 	fs.mkdirSync(path.join(root, "shared"), { recursive: true });  // data-only repo
 
 	const res = await apiFetch("/api/projects", {
@@ -66,22 +97,23 @@ async function registerMultiRepoProject(): Promise<{ id: string; rootPath: strin
 		rootPath: root,
 		cleanup: () => {
 			try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
-			try { fs.rmSync(path.join(root, "api-bare"), { recursive: true, force: true }); } catch { /* ignore */ }
-			try { fs.rmSync(path.join(root, "web-bare"), { recursive: true, force: true }); } catch { /* ignore */ }
 		},
 	};
 }
 
 test.describe("multi-repo flow API/data paths", () => {
+	test.beforeAll(async () => installCannedGitRunner());
+	test.afterAll(() => restoreCommandRunner?.());
+
 	test("multi-repo project exposes structured data and per-repo worktree lifecycle", async () => {
-		test.setTimeout(120_000);
 		const project = await registerMultiRepoProject();
+		const worktreeOwnerRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-mr-wt-${process.pid}-`));
+		const customRoot = path.join(worktreeOwnerRoot, "worktrees");
 		let goalId: string | undefined;
 
 		try {
 			// Keep the two structured endpoint assertions in the representative
 			// route-flow test so this suite pays the expensive project cleanup once.
-			const customRoot = path.join(os.tmpdir(), `bobbit-wt-${Date.now()}`);
 			const put = await apiFetch(`/api/projects/${project.id}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ worktree_root: customRoot }),
@@ -160,6 +192,7 @@ test.describe("multi-repo flow API/data paths", () => {
 			if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
+			fs.rmSync(worktreeOwnerRoot, { recursive: true, force: true });
 		}
 	});
 });

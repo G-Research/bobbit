@@ -31,6 +31,7 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createSession, deleteSession } from "./_e2e/e2e-setup.js";
+import fs from "node:fs";
 import { buildPreviewSnapshotV3Block, parseSnapshot } from "../../defaults/tools/html/snapshot.ts";
 
 let sessionId: string;
@@ -53,7 +54,9 @@ test("50 × 100 KB mount calls → snapshot blocks sum ≤ 12 500 B; each ≤ 25
 	for (let i = 0; i < 50; i++) {
 		const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 			method: "POST",
-			body: JSON.stringify({ html: huge, entry: `iter-${i}.html` }),
+			// Side-panel tab persistence is orthogonal to the mount response/snapshot
+			// contract and would repeatedly serialize the growing 50-tab workspace.
+			body: JSON.stringify({ html: huge, entry: `iter-${i}.html`, workspaceTab: false }),
 		});
 		expect(resp.status, `iteration ${i} mount POST should succeed`).toBe(200);
 		const body = await resp.json();
@@ -95,6 +98,10 @@ test("50 × 100 KB mount calls → snapshot blocks sum ≤ 12 500 B; each ≤ 25
 		}
 		blocks.push(block);
 		total += block.length;
+
+		// Each immutable artifact already captured the response identity. Remove the
+		// live entry so the next call does not recopy an ever-growing mount fixture.
+		fs.rmSync(body.path, { force: true });
 	}
 
 	// Sum across 50 iterations ≤ 12 500 bytes (50 × 250 B per-block cap).

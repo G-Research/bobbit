@@ -171,19 +171,20 @@ describe("revive-window prompt dispatch (CS-R2 follow-up)", () => {
 		await flushMicrotasks();
 		assert.equal(manager.restoreSession.mock.calls.length, 1, "one restore in flight");
 
-		const enqueuePromise = manager.enqueuePrompt(sessionId, "queued during revive");
-		await flushMicrotasks();
-		// enqueue must NOT have started a second restore — it joins the in-flight one.
+		const result = await manager.enqueuePrompt(sessionId, "queued during revive");
+		// The coordinator is already the dispatch fence, so the accepted prompt is
+		// truthfully reported as queued while restore is blocked. It is drained once
+		// against the final bridge when that coordinator releases.
+		assert.equal(result.status, "queued", "enqueue reports the prompt's status at acceptance time");
+		assert.deepEqual(promptCalls, [], "queued prompt must not dispatch against a bridge before restore completes");
 		assert.equal(manager.restoreSession.mock.calls.length, 1, "enqueue must join the in-flight restore, not start a second");
 
 		restoreGate.resolve();
 		await inFlight;
-		const result = await enqueuePromise;
 		await flushMicrotasks();
 
 		assert.equal(restoredSessions.length, 1, "only one restore occurred");
-		assert.deepEqual(promptCalls, ["queued during revive"], "prompt dispatched after the in-flight revive resolved");
-		assert.equal(result.status, "dispatched", "enqueue reports dispatched");
+		assert.deepEqual(promptCalls, ["queued during revive"], "prompt dispatched exactly once after the in-flight revive resolved");
 	});
 
 	it("drains a queue restored from the persisted record once the revive reaches idle", async () => {

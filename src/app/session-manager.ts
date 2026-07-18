@@ -12,6 +12,7 @@ import {
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
 	type GatewaySession,
+	type Project,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, type GitStatusData } from "./api.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
@@ -232,31 +233,57 @@ export function applyProjectPalette(projectId?: string): void {
 // goal-only call shape used by render.ts:goalProposalPanel.
 // ============================================================================
 
-/** Resolve provisional/registered mode for a project proposal slot.
+export type ProjectProposalTarget =
+	| { kind: "create" }
+	| { kind: "existing"; projectId: string; provisional: boolean }
+	| { kind: "unknown"; projectId: string };
+
+export type ProjectProposalMode = "create" | "provisional" | "registered" | "invalid";
+
+type ProjectTargetLookup = Pick<Project, "id" | "provisional">;
+
+/** Resolve project-proposal intent exclusively from `fields.projectId`.
  *
- *  When the proposal carries an explicit `fields.projectId` naming an EXISTING
- *  project, mode derives from THAT target: a provisional target takes the
- *  "provisional" (promote/provision) path and a registered target takes the
- *  "registered" (EDIT) path — regardless of the source session's own mode. This
- *  ensures a cross-project proposal targeting a provisional project still
- *  promotes it rather than skipping straight to a config EDIT. An explicit
- *  target that is unknown/not-found falls through to the source-session default.
- *  When `projectId` is absent (the common new-project flow) mode derives from
- *  the source session's project, returning "provisional" if no project is
- *  registered yet.
- *  Extracted for the unified onProposal callback (Slice E gap-closure). */
-export function resolveProjectMode(sessionId: string, fields?: Record<string, unknown>): "provisional" | "registered" {
-	const explicit = typeof fields?.projectId === "string" ? (fields.projectId as string).trim() : "";
-	if (explicit) {
-		const target = state.projects.find(p => p.id === explicit);
-		// Explicit KNOWN target → mode from that target (provisional target →
-		// promote/provision; registered target → EDIT). Unknown target falls
-		// through to the source-session default below.
-		if (target) return target.provisional ? "provisional" : "registered";
-	}
-	const session = state.gatewaySessions.find(s => s.id === sessionId);
-	const project = state.projects.find(p => p.id === session?.projectId);
-	return project?.provisional ? "provisional" : "registered";
+ *  Omitted/blank means create, an explicit registered id means existing, and an
+ *  explicit unknown id is invalid. Source-session and proposal provenance are
+ *  deliberately absent from this resolver and must never be target fallbacks. */
+export function resolveProjectProposalTarget(
+	fields?: Record<string, unknown>,
+	projects: readonly ProjectTargetLookup[] = state.projects,
+): ProjectProposalTarget {
+	const explicit = typeof fields?.projectId === "string" ? fields.projectId.trim() : "";
+	if (!explicit) return { kind: "create" };
+	const project = projects.find(candidate => candidate.id === explicit);
+	if (!project) return { kind: "unknown", projectId: explicit };
+	return { kind: "existing", projectId: explicit, provisional: project.provisional === true };
+}
+
+/** Project proposal render mode projected from the source-independent target.
+ *  The legacy two-argument overload is temporary call-site compatibility; its
+ *  session id is ignored and cannot affect classification. */
+export function resolveProjectMode(
+	fields?: Record<string, unknown>,
+	projects?: readonly ProjectTargetLookup[],
+): ProjectProposalMode;
+export function resolveProjectMode(
+	_legacySessionId: string,
+	fields?: Record<string, unknown>,
+): ProjectProposalMode;
+export function resolveProjectMode(
+	fieldsOrLegacySessionId?: Record<string, unknown> | string,
+	projectsOrFields?: readonly ProjectTargetLookup[] | Record<string, unknown>,
+): ProjectProposalMode {
+	const legacyCall = typeof fieldsOrLegacySessionId === "string";
+	const fields = legacyCall
+		? (!Array.isArray(projectsOrFields) ? projectsOrFields as Record<string, unknown> | undefined : undefined)
+		: fieldsOrLegacySessionId;
+	const projects = !legacyCall && Array.isArray(projectsOrFields)
+		? projectsOrFields as readonly ProjectTargetLookup[]
+		: state.projects;
+	const target = resolveProjectProposalTarget(fields, projects);
+	if (target.kind === "create") return "create";
+	if (target.kind === "unknown") return "invalid";
+	return target.provisional ? "provisional" : "registered";
 }
 
 function isAssistantProposalType(type: ProposalType): boolean {
@@ -779,13 +806,24 @@ export function deleteRoleDraft(sessionId: string): void { roleDraft.delete(sess
 
 const projectDraft = createDraftManager({
 	type: 'project',
-	serialize: (sessionId) => ({
-		sessionId,
-		activeProjectProposal: state.activeProposals.project ?? undefined,
-		hasReceivedProposal: state.assistantHasProposal,
-		assistantTab: state.assistantTab,
-		accepted: state.projectProposalAcceptedBySessionId[sessionId] ?? false,
-	}),
+	serialize: (sessionId) => {
+		const proposal = state.activeProposals.project;
+		return {
+			sessionId,
+			activeProjectProposal: proposal ? {
+				sessionId: proposal.sessionId,
+				fields: proposal.fields,
+				streaming: proposal.streaming,
+				mode: proposal.mode,
+				...(proposal.sourceProjectId ? { sourceProjectId: proposal.sourceProjectId } : {}),
+				...(proposal.createdProjectId ? { createdProjectId: proposal.createdProjectId } : {}),
+				rev: proposal.rev,
+			} : undefined,
+			hasReceivedProposal: state.assistantHasProposal,
+			assistantTab: state.assistantTab,
+			accepted: state.projectProposalAcceptedBySessionId[sessionId] ?? false,
+		};
+	},
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
 		if (draft.activeProjectProposal) {
@@ -795,11 +833,19 @@ const projectDraft = createDraftManager({
 				delete state.activeProposals.project;
 				dismissed = true;
 			} else {
+				// `projectId` was the legacy name for source provenance. It is read
+				// only during restoration and is never serialized again.
+				const legacyCompatibleSourceProjectId = p.sourceProjectId ?? p.projectId;
 				state.activeProposals.project = {
-					sessionId: p.sessionId,
+					sessionId: typeof p.sessionId === "string" && p.sessionId ? p.sessionId : _sessionId,
 					fields,
-					mode: p.mode,
-					...(typeof p.projectId === "string" && p.projectId.trim() ? { projectId: p.projectId.trim() } : {}),
+					mode: resolveProjectMode(fields),
+					...(typeof legacyCompatibleSourceProjectId === "string" && legacyCompatibleSourceProjectId.trim()
+						? { sourceProjectId: legacyCompatibleSourceProjectId.trim() }
+						: {}),
+					...(typeof p.createdProjectId === "string" && p.createdProjectId.trim()
+						? { createdProjectId: p.createdProjectId.trim() }
+						: {}),
 					streaming: typeof p.streaming === "boolean" ? p.streaming : false,
 					rev: typeof p.rev === "number" ? p.rev : 1,
 				};
@@ -2013,19 +2059,20 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				sessionId,
 				fields: merged,
 				streaming: false,
-				// Always recompute for project proposals: resolveProjectMode is a pure
-				// function of the CURRENT merged fields + registry/session state, so a
-				// later revision that adds/changes fields.projectId (e.g. a cross-project
-				// target) must re-evaluate the mode. Preferring a sticky prev.mode here
-				// left accept on a stale promote/edit branch (Greptile P1, PR #1005).
+				// Always recompute from CURRENT fields. The source session and slot
+				// provenance are intentionally excluded from create/edit classification.
 				mode: type === "project"
-					? resolveProjectMode(sessionId, merged)
+					? resolveProjectMode(merged)
 					: undefined,
-				// Pin the target project id on project proposals so accept promotes
-				// the intended project even if a background session refresh mutates
-				// the session→project link afterwards. Preserve an already-pinned id.
+				// Preserve source provenance independently from the semantic target.
+				// A partial direct-create checkpoint likewise remains metadata only.
 				...(type === "project"
-					? { projectId: prev?.projectId ?? projectIdForSession(sessionId) }
+					? {
+						sourceProjectId: (prev?.sessionId === sessionId ? prev.sourceProjectId : undefined) ?? projectIdForSession(sessionId),
+						...(prev?.sessionId === sessionId && prev.createdProjectId
+							? { createdProjectId: prev.createdProjectId }
+							: {}),
+					}
 					: {}),
 				rev: nextRev,
 				...(preservedWorkflowValidation ? { workflowValidationError: preservedWorkflowValidation } : {}),

@@ -20,6 +20,10 @@ The `GET/POST /api/preview` endpoints accept an optional `sessionId` query param
 - **Vite filesystem deny**: `server.fs.deny` rules block the `.bobbit` directory and `node_modules/.vite`, preventing Vite's `/@fs/` route from serving sensitive files.
 - **Vite plugin hardening**: `blockDangerousGlobs` rejects `import.meta.glob` calls targeting `.bobbit` paths. `localhostGuard` rejects non-localhost requests to the Vite dev server, preventing sandbox containers from reaching it over the Docker bridge network.
 
+## AI Gateway discovery boundaries
+
+AI Gateway well-known documents may name a one-hop remote config and cross-origin provider endpoints. Bobbit treats those URLs as untrusted: cross-origin targets require HTTPS and public DNS answers, discovery pins validated answers, redirects are refused, and the configured-origin bearer token never crosses origins. The gateway revalidates admitted provider DNS at connection time; agent processes do so through a generated extension when it can be written and activated. Extension-write failure is logged but does not block agent startup, so operators using cross-origin providers must treat that warning as security-relevant. See [AI Gateway routing — Remote config security](ai-gateway-routing.md#remote-config-security) for the complete URL, header, deadline, and container-guard policy.
+
 ## Sandbox agent-directory boundaries
 
 The configurable agent directory can contain provider credentials, so sandbox containers receive only narrow mounts:

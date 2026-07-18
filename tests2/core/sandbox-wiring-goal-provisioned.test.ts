@@ -262,6 +262,11 @@ describe("applySandboxWiring — goalProvisioned marker actually writes host-sid
 			});
 
 			const bridgeOptions: any = { env: {}, cwd: hostWorktree };
+			// Re-add the worker resolver immediately before the production invocation.
+			// Under pool:"forks" + isolate:false, a sibling file's env guard can restore
+			// NODE_OPTIONS after collection or a file-level beforeAll. Keeping this next
+			// to ModuleHost worker creation makes the test independent of file ordering.
+			enableTsWorkerResolver();
 			const ok = await sm.applySandboxWiring(bridgeOptions, "sess-fs", {
 				projectId: "proj-1",
 				goalId: "goal-g1",

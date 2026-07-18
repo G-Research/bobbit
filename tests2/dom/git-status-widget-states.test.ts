@@ -203,6 +203,44 @@ describe("GitStatusWidget render states", () => {
 		expect(p.textContent).not.toContain("-4");
 	});
 
+	it("hides remote publication controls for non-primary session branches", async () => {
+		const el = await mount({
+			loading: false,
+			branch: "session/manual-publish",
+			primaryBranch: "master",
+			primaryRef: "origin/master",
+			isOnPrimary: false,
+			clean: true,
+			hasUpstream: true,
+			ahead: 3,
+			sessionId: "session-manual",
+		});
+
+		await openDropdown(el);
+		expect(dd()!.textContent).not.toContain("Remote publication is manual.");
+		expect(btnByText(dd()!, "Push")).toBeUndefined();
+	});
+
+	it("hides remote publication controls without an upstream or base_ref", async () => {
+		const el = await mount({
+			loading: false,
+			branch: "goal/local-only",
+			primaryBranch: "master",
+			primaryRef: "origin/master",
+			isOnPrimary: false,
+			clean: true,
+			hasUpstream: false,
+			ahead: 0,
+			unpushed: true,
+			sessionId: "session-local",
+		});
+
+		await openDropdown(el);
+		expect(dd()!.textContent).not.toContain("Remote publication is manual.");
+		expect(btnByText(dd()!, "Push")).toBeUndefined();
+		expect(dd()!.querySelector('[data-testid="git-local-only-policy"]')).toBeFalsy();
+	});
+
 	it("skeleton is non-interactive (no dropdown-open event)", async () => {
 		const el = await mount({ loading: true, branch: "" });
 		let openEvents = 0;

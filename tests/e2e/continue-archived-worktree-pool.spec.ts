@@ -7,10 +7,11 @@ import { test, expect } from "./in-process-harness.js";
 import { agentEndPredicate, apiFetch, connectWs, registerProject } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 import { waitForPool } from "./test-utils/pool-polling.mjs";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
+import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
 
 // This spec intentionally exercises the host-side worktree pool.
 test.use({ enableWorktreePool: true });
@@ -28,18 +29,18 @@ async function sendPromptAndWait(id: string, text: string): Promise<void> {
 	}
 }
 
-function initRepo(repoPath: string): void {
-	mkdirSync(repoPath, { recursive: true });
-	execFileSync("git", ["init", "--initial-branch=master"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: repoPath, stdio: "pipe" });
-	execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: repoPath, stdio: "pipe" });
+// Repo comes from the immutable committed template (master + README.md +
+// .gitattributes + one commit); nothing here asserts on tree contents.
+async function initRepo(repoPath: string): Promise<void> {
+	await prepareGitTemplate();
+	copyGitTemplate(repoPath);
 }
 
-function branchExists(repoPath: string, branch: string): boolean {
+// attempts: 1 — a missing branch is an accepted outcome for this probe;
+// retrying would only change timing, not semantics.
+async function branchExists(repoPath: string, branch: string): Promise<boolean> {
 	try {
-		execFileSync("git", ["rev-parse", "--verify", `refs/heads/${branch}`], { cwd: repoPath, stdio: "pipe" });
+		await runFixtureCommand("git", ["rev-parse", "--verify", `refs/heads/${branch}`], { cwd: repoPath, attempts: 1 });
 		return true;
 	} catch {
 		return false;
@@ -118,7 +119,7 @@ test.describe("Continue-Archived worktree pool", () => {
 		let newId: string | undefined;
 
 		try {
-			initRepo(repoPath);
+			await initRepo(repoPath);
 			const project = await registerProject({ name: `cont-wt-pool-${Date.now()}`, rootPath: repoPath });
 			projectId = project.id;
 
@@ -167,7 +168,7 @@ test.describe("Continue-Archived worktree pool", () => {
 			const readyBeforeContinue = await readyPoolEntry(gateway, projectId);
 			expect(readyBeforeContinue.branchName).toMatch(/^pool\/_pool-/);
 			expect(existsSync(readyBeforeContinue.worktreePath), "captured ready pool worktree should exist before continue").toBe(true);
-			expect(branchExists(repoPath, readyBeforeContinue.branchName), "captured ready pool branch should exist before continue").toBe(true);
+			expect(await branchExists(repoPath, readyBeforeContinue.branchName), "captured ready pool branch should exist before continue").toBe(true);
 
 			const continueResp = await apiFetch(`/api/sessions/${srcId}/continue`, {
 				method: "POST",
@@ -196,7 +197,7 @@ test.describe("Continue-Archived worktree pool", () => {
 			expect(normalize(newRec.worktreePath)).toBe(normalize(expectedClaimedPath));
 			expect(newRec.cwd).toBe(newRec.worktreePath);
 			expect(existsSync(newRec.worktreePath), "continued session worktree should exist at the claimed pool path").toBe(true);
-			expect(branchExists(repoPath, expectedBranch), "continued session branch should exist").toBe(true);
+			expect(await branchExists(repoPath, expectedBranch), "continued session branch should exist").toBe(true);
 
 			const sessionsDir = globalAgentSessionsDir();
 			const projectSlugFile = findClonedJsonl(join(sessionsDir, `--${slugifyCwd(repoPath)}--`), newId);
@@ -216,7 +217,7 @@ test.describe("Continue-Archived worktree pool", () => {
 
 			// Reproducer: with bypassWorktreePool still true, Continue-Archived takes
 			// the cold createWorktree path and leaves this captured pool entry intact.
-			expect(branchExists(repoPath, readyBeforeContinue.branchName), "continued session must claim the ready pool branch and rename it").toBe(false);
+			expect(await branchExists(repoPath, readyBeforeContinue.branchName), "continued session must claim the ready pool branch and rename it").toBe(false);
 			expect(existsSync(readyBeforeContinue.worktreePath), "continued session must move the ready pool worktree to the session path").toBe(false);
 		} finally {
 			if (newId) await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" }).catch(() => {});

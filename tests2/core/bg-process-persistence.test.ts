@@ -7,19 +7,41 @@
  *
  * No real OS processes: the SpawnFn returns a fake EventEmitter child, the
  * TailerFactory is faked (the test drives chunks through `spec.onChunk`), the
- * BgEnv (host liveness / host kill / docker CLI) is faked, and durable
- * log/status/spool/pid files are real files in an isolated temp state dir —
- * never the real `.bobbit/`.
+ * BgEnv (host liveness / host kill / docker CLI) is faked, and each case gets a
+ * scoped in-memory filesystem plus a manual clock. Persistence still crosses
+ * fresh store/manager instances, without Defender-scanned NTFS or real waits.
  */
-import { describe, it, vi, afterEach } from "vitest";
-// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
-afterEach(() => { vi.useRealTimers(); });
+import { beforeEach, describe, it, vi, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
+
+let memoryFs: typeof fs;
+let fsSpies: Array<{ mockRestore(): void }> = [];
+const FS_METHODS = [
+	"appendFileSync", "closeSync", "copyFileSync", "existsSync", "fsyncSync",
+	"mkdirSync", "openSync", "readFileSync", "readSync", "renameSync",
+	"statSync", "truncateSync", "unlinkSync", "writeFileSync",
+] as const;
+const suiteRoot = path.resolve("/memfs/bg-process-persistence");
+let fixtureSequence = 0;
+
+beforeEach(() => {
+	memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+	fixtureSequence = 0;
+	fsSpies = FS_METHODS.map((name) =>
+		(vi.spyOn as any)(fs, name).mockImplementation((...args: unknown[]) => (memoryFs[name] as any)(...args)),
+	);
+	memoryFs.mkdirSync(suiteRoot, { recursive: true });
+});
+
+function fixtureDir(label: string): string {
+	const dir = path.join(suiteRoot, `${label}-${++fixtureSequence}`);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
 
 import {
 	BgProcessManager,
@@ -36,14 +58,31 @@ import {
 } from "../../src/server/agent/bg-process-manager.ts";
 import { BgProcessStore } from "../../src/server/agent/bg-process-store.ts";
 import { runBgRunner } from "../../src/server/agent/bg-runner.ts";
+import { createManualClock, type ManualClock } from "../harness/clock.js";
+
+const activeManagers: BgProcessManager[] = [];
+const activeSessions: string[] = [];
+afterEach(() => {
+	try {
+		for (const mgr of activeManagers) {
+			for (const sessionId of activeSessions) mgr.cleanup(sessionId);
+		}
+	} finally {
+		activeManagers.length = 0;
+		activeSessions.length = 0;
+		for (const spy of fsSpies.reverse()) spy.mockRestore();
+		fsSpies = [];
+	}
+});
 
 const MAX_LOG_BYTES = 512 * 1024;
 
 // ── fakes ─────────────────────────────────────────────────────────────────
 
+let nextFakePid = 10000;
 function makeFakeChild(): any {
 	const c = new EventEmitter() as any;
-	c.pid = 10000 + Math.floor(Math.random() * 50000);
+	c.pid = nextFakePid++;
 	c.stdout = Object.assign(new EventEmitter(), { destroy() {} });
 	c.stderr = Object.assign(new EventEmitter(), { destroy() {} });
 	c.kill = () => true;
@@ -55,6 +94,7 @@ interface Harness {
 	stateDir: string;
 	store: () => BgProcessStore;
 	mgr: BgProcessManager;
+	clock: ManualClock;
 	specs: TailerSpec[];
 	sent: any[];
 	dockerCalls: string[][];
@@ -63,8 +103,9 @@ interface Harness {
 }
 
 function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string }): Harness {
-	const stateDir = opts?.stateDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bg-"));
-	let store = new BgProcessStore(stateDir);
+	const stateDir = opts?.stateDir ?? fixtureDir("harness");
+	const clock = createManualClock(1_700_000_000_000);
+	const store = new BgProcessStore(stateDir, clock);
 	const specs: TailerSpec[] = [];
 	const tailerFactory: TailerFactory = (spec) => {
 		specs.push(spec);
@@ -89,12 +130,16 @@ function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string }): Harnes
 		() => store,
 		tailerFactory,
 		env,
+		clock,
+		memoryFs,
 	);
+	activeManagers.push(mgr);
 
 	const h: Harness = {
 		stateDir,
 		store: () => store,
 		mgr,
+		clock,
 		specs,
 		sent,
 		dockerCalls,
@@ -104,7 +149,19 @@ function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string }): Harnes
 	return h;
 }
 
-function freshSession() { return `s-${randomUUID()}`; }
+let sessionSequence = 0;
+function freshSession() {
+	const sessionId = `s-${++sessionSequence}`;
+	activeSessions.push(sessionId);
+	return sessionId;
+}
+
+async function advanceClock(clock: ManualClock, ms: number, step = 20): Promise<void> {
+	for (let elapsed = 0; elapsed < ms; elapsed += step) {
+		clock.advance(Math.min(step, ms - elapsed));
+		await Promise.resolve();
+	}
+}
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
@@ -283,7 +340,6 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 	}
 
 	it("ALIVE (nonce match) → re-attach reads spool tail then captures eventual real exit code", async () => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
 		const h = makeHarness({ env: { isHostPidAlive: () => true } });
 		const S = freshSession();
 		const rec = seedRunningHostRecord(h, S);
@@ -299,7 +355,7 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 
 		// Later the status file gains the real exit code → status watcher captures it.
 		fs.writeFileSync(rec.statusSnapshot, "0\n");
-		vi.advanceTimersByTime(200);
+		h.clock.advance(200);
 		const exited = h.sent.find(m => m.type === "bg_process_exited" && m.processId === rec.id);
 		assert.ok(exited, "bg_process_exited broadcast");
 		assert.equal(exited.exitCode, 0);
@@ -340,7 +396,9 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		// Persisted right after spawn; the gateway crashed in the create→pidfile window,
 		// so the process is still running with a valid persisted processPid but NO pidfile.
 		fs.writeFileSync(rec.outSpool, "still-running\n");
-		await h.mgr.restoreSession(S);
+		const restoring = h.mgr.restoreSession(S);
+		await advanceClock(h.clock, 100);
+		await restoring;
 		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
 		assert.equal(p.status, "running", "re-attached the still-running process, NOT marked unrecoverable");
 		const logs = h.mgr.getLogs(S, rec.id)!;
@@ -356,8 +414,10 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		const rec = seedRunningHostRecord(h, S);
 		fs.writeFileSync(rec.outSpool, "live\n");
 		// The wrapper writes the pidfile shortly after restore begins (within the retry window).
-		setTimeout(() => { try { fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n"); } catch { /* ignore */ } }, 25);
-		await h.mgr.restoreSession(S);
+		h.clock.setTimeout(() => { try { fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n"); } catch { /* ignore */ } }, 25);
+		const restoring = h.mgr.restoreSession(S);
+		await advanceClock(h.clock, 40, 5);
+		await restoring;
 		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
 		assert.equal(p.status, "running", "re-attached after the pidfile appeared mid-retry");
 		h.mgr.cleanup(S);
@@ -547,7 +607,6 @@ describe("BgProcessManager — kill terminal states", () => {
 	});
 
 	it("Fix (HIGH): hard kill with NO status within the grace window → killed/null only AFTER the grace window", () => {
-		vi.useFakeTimers({ toFake: ["setInterval", "Date"] });
 		const killCalls: any[] = [];
 		const h = makeHarness({ env: { isHostPidAlive: () => false, killHostTree: (pid, sig) => killCalls.push([pid, sig]) } });
 		const S = freshSession();
@@ -558,7 +617,7 @@ describe("BgProcessManager — kill terminal states", () => {
 		assert.equal(h.mgr.list(S).find(x => x.id === info.id)!.status, "running", "not finalized before grace window");
 		// No status ever appears → once the grace window elapses the watcher marks it
 		// killed/null (a KNOWN outcome — the user asked to kill it — not a fabrication).
-		vi.advanceTimersByTime(2000);
+		h.clock.advance(2000);
 		const p = h.mgr.list(S).find(x => x.id === info.id)!;
 		assert.equal(p.status, "exited");
 		assert.equal(p.exitCode, null);
@@ -567,7 +626,6 @@ describe("BgProcessManager — kill terminal states", () => {
 	});
 
 	it("Fix (HIGH): killed process whose status lands AFTER liveness goes false → REAL exit code captured (not killed/null)", () => {
-		vi.useFakeTimers({ toFake: ["setInterval", "Date"] });
 		const h = makeHarness({ env: { isHostPidAlive: () => false } }); // dead the instant we check
 		const S = freshSession();
 		const info = h.mgr.create(S, "loop.sh", h.stateDir);
@@ -579,7 +637,7 @@ describe("BgProcessManager — kill terminal states", () => {
 		// The wrapper writes the REAL (signal-derived) exit code milliseconds later,
 		// still inside the grace window. The status file is always preferred.
 		fs.writeFileSync(rec.statusSnapshot, "143\n"); // 128 + SIGTERM(15) — a REAL exit code
-		vi.advanceTimersByTime(200); // status watcher polls and reads it
+		h.clock.advance(200); // status watcher polls and reads it
 		const p = h.mgr.list(S).find(x => x.id === info.id)!;
 		assert.equal(p.status, "exited");
 		assert.equal(p.exitCode, 143, "real exit code captured, NOT killed/null");
@@ -742,7 +800,9 @@ describe("BgProcessManager — disk caps", () => {
 		const info = h.mgr.create(S, "chatty.sh", h.stateDir);
 		const spec = h.specs[0];
 		let off = 0;
-		// Feed ~2MB across both streams without exiting.
+		// Feed ~2MB across both streams without exiting. The repeated incremental
+		// updates are part of the cap/persistence protocol, not interchangeable with
+		// one bulk chunk.
 		for (let i = 0; i < 8000; i++) {
 			const line = `line-${i}-${"x".repeat(200)}\n`;
 			off += line.length;
@@ -779,33 +839,33 @@ describe("BgProcessManager — disk caps", () => {
 
 describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 	it("rebases offset to 0 when spool shrinks below it (no stall)", () => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
+		const clock = createManualClock();
+		const dir = fixtureDir("poll");
 		const file = path.join(dir, "x.spool");
 		fs.writeFileSync(file, "short\n"); // 6 bytes
 		const chunks: string[] = [];
-		const tailer = new PollTailer(file, "stdout", (_s, text) => chunks.push(text));
+		const tailer = new PollTailer(file, "stdout", (_s, text) => chunks.push(text), undefined, clock);
 		tailer.start(9999); // stale offset > size
-		vi.advanceTimersByTime(200);
+		clock.advance(200);
 		assert.ok(chunks.join("").includes("short"), "rebased to 0 and read the retained content");
 		tailer.stop();
 	});
 
 	it("copytruncates the spool once consumed and over cap", () => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
+		const clock = createManualClock();
+		const dir = fixtureDir("poll");
 		const file = path.join(dir, "x.spool");
 		fs.writeFileSync(file, "z".repeat(MAX_LOG_BYTES + 1000));
-		const tailer = new PollTailer(file, "stdout", () => {});
+		const tailer = new PollTailer(file, "stdout", () => {}, undefined, clock);
 		tailer.start(0);
-		vi.advanceTimersByTime(200);
+		clock.advance(200);
 		assert.equal(fs.statSync(file).size, 0, "spool truncated to 0 after consume + over cap");
 		tailer.stop();
 	});
 
 	it("Fix 2: a delta larger than the cap reads only the last cap bytes (bounded allocation)", () => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
+		const clock = createManualClock();
+		const dir = fixtureDir("poll");
 		const file = path.join(dir, "x.spool");
 		const head = Buffer.alloc(1000, 0x41); // 'A' — older bytes beyond the window
 		const tail = Buffer.alloc(MAX_LOG_BYTES, 0x42); // 'B' — the last cap bytes
@@ -813,9 +873,9 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 		const size = fs.statSync(file).size;
 		let received = "";
 		let lastOffset = -1;
-		const tailer = new PollTailer(file, "stdout", (_s, text, off) => { received += text; lastOffset = off; });
+		const tailer = new PollTailer(file, "stdout", (_s, text, off) => { received += text; lastOffset = off; }, undefined, clock);
 		tailer.start(0);
-		vi.advanceTimersByTime(200);
+		clock.advance(200);
 		assert.equal(received.length, MAX_LOG_BYTES, "read exactly the last cap bytes, not the whole delta");
 		assert.ok(!received.includes("A"), "older bytes beyond the retained window were skipped");
 		assert.equal(lastOffset, size, "offset advanced to size");
@@ -832,19 +892,19 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 	}
 
 	it("rebases the offset DOWN to the current size when the spool is copytruncated mid-tail", () => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
+		const clock = createManualClock();
 		let size = 0;
 		const child = fakeChild();
 		const deps: DockerExec = { probeSize: () => size, follow: () => child };
 		const resets: number[] = [];
 		const tailer = new DockerTailer("/tmp/s.out.spool", "cid", "stdout",
-			() => {}, (_s, off) => resets.push(off), deps);
+			() => {}, (_s, off) => resets.push(off), deps, clock);
 		tailer.start(0);
 		// `tail -F` streams 100 bytes live; our offset climbs to 100.
 		child.stdout.emit("data", Buffer.alloc(100, 0x61));
 		// The in-container trimmer copytruncated the spool to 20 bytes.
 		size = 20;
-		vi.advanceTimersByTime(1000);
+		clock.advance(1000);
 		// Offset rebased to the current size + persisted, so a later finalFlush/restore
 		// (which rebases-to-0 only when size < offset) won't re-read & DUPLICATE bytes.
 		assert.deepEqual(resets, [20], "offset rebased to the current size on copytruncate");
@@ -852,17 +912,17 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 	});
 
 	it("does NOT rebase while the spool only grows", () => {
-		vi.useFakeTimers({ toFake: ["setInterval"] });
+		const clock = createManualClock();
 		let size = 0;
 		const child = fakeChild();
 		const deps: DockerExec = { probeSize: () => size, follow: () => child };
 		const resets: number[] = [];
 		const tailer = new DockerTailer("/tmp/s.out.spool", "cid", "stdout",
-			() => {}, (_s, off) => resets.push(off), deps);
+			() => {}, (_s, off) => resets.push(off), deps, clock);
 		tailer.start(0);
 		child.stdout.emit("data", Buffer.alloc(50, 0x61)); // offset 50
 		size = 200; // spool grew
-		vi.advanceTimersByTime(1000);
+		clock.advance(1000);
 		assert.deepEqual(resets, [], "no rebase while the spool grows");
 		tailer.stop();
 	});
@@ -870,7 +930,7 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 
 describe("bg-runner helper — bounded ring + real exit code", () => {
 	it("trims spools to ≤ maxBytes and writes the real exit code + pid/nonce", () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-runner-"));
+		const dir = fixtureDir("runner");
 		const child = new EventEmitter() as any;
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
@@ -892,7 +952,7 @@ describe("bg-runner helper — bounded ring + real exit code", () => {
 	});
 
 	it("Fix 1: trims an oversize spool to ≤ maxBytes on child exit (before the status write)", () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-runner-"));
+		const dir = fixtureDir("runner");
 		const child = new EventEmitter() as any;
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();

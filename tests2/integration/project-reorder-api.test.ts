@@ -2,6 +2,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, bobbitDir } from "./_e2e/e2e-setup.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const createdProjectIds = new Set<string>();
@@ -179,7 +180,7 @@ test.describe("PUT /api/projects/order", () => {
 			expect(storedVisible.map(project => project.id)).toEqual(normalOrder);
 			expect(storedVisible.map(project => project.position)).toEqual([1, 2, 3]);
 
-			const { ProjectRegistry } = await import("../../src/server/agent/project-registry.js");
+			const { ProjectRegistry } = (await loadServerTestRuntime()).projectRegistry;
 			const reloaded = new ProjectRegistry(join(gateway.bobbitDir, "state"));
 			const reloadedList = reloaded.list() as ProjectSummary[];
 			expect(reloadedList[0]).toMatchObject({ id: HEADQUARTERS_PROJECT_ID, kind: "headquarters" });

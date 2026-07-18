@@ -367,7 +367,7 @@ export class TeamManager {
 			const dir = stateDir ?? bobbitStateDir();
 			this.localStore = new TeamStore(dir);
 			// Non-PCM test path: create a local GoalManager from the same stateDir
-			this._localGoalManager = new GoalManager(new GoalStore(dir));
+			this._localGoalManager = new GoalManager(new GoalStore(dir), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock });
 		}
 		this.restoreTeams();
 		this.startStuckSweep();
@@ -2027,9 +2027,9 @@ export class TeamManager {
 				// via ProjectSandbox.createWorktree(). Use goal.cwd as placeholder.
 				agentCwd = goal.cwd; // placeholder — sandbox wiring overrides this
 			} else {
-				// Non-sandboxed: create a local-only member worktree. Goal branches may be
-				// unpublished, so prefer local refs before falling back to origin refs.
-				const worktreeOptions = { startPoint: memberStartPoint, pushPolicy: "local-only" as const, commandRunner: this.commandRunner };
+				// Non-sandboxed: create the member worktree from local goal state. Goal
+				// branches may be unpublished, so prefer local refs before origin refs.
+				const worktreeOptions = { startPoint: memberStartPoint, commandRunner: this.commandRunner };
 				worktreeResult = await createWorktree(goal.repoPath!, branchName, worktreeOptions);
 				// Apply subdirectory offset to member worktree cwd
 				agentCwd = memberSubdirOffset && memberSubdirOffset !== "."
@@ -2112,7 +2112,6 @@ export class TeamManager {
 				worktreePath: actualWorktreePath,
 				accessory: roleAccessory,
 				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
-				worktreePushPolicy: branchName ? "local-only" : undefined,
 			};
 			this.sessionManager.updateSessionMeta(session.id, memberSessionMeta as any);
 

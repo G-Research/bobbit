@@ -11,7 +11,6 @@ import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import yaml from "yaml";
 
 let token: string;
@@ -21,14 +20,9 @@ const headers = () => ({
 	"Content-Type": "application/json",
 });
 
-function gitInit(dir: string): void {
+function projectDir(dir: string): void {
 	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
 	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: dir });
 }
 
 function readProjectYaml(root: string): Record<string, unknown> | null {
@@ -50,7 +44,7 @@ test.beforeAll(() => { token = readE2EToken(); });
 test.describe("No default workflow scaffold", () => {
 	test("Case A — POST /api/projects without workflows persists with zero workflows", async () => {
 		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-a-")));
-		gitInit(root);
+		projectDir(root);
 
 		const projName = `nodef-a-${Date.now()}`;
 		// seedWorkflows:false suppresses apiFetch's auto-seed helper, which would
@@ -84,7 +78,7 @@ test.describe("No default workflow scaffold", () => {
 
 	test("Case B — workflows in proposal are kept exactly, no defaults merged", async () => {
 		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-b-")));
-		gitInit(root);
+		projectDir(root);
 
 		const projName = `nodef-b-${Date.now()}`;
 		const inlineWorkflows = {
@@ -123,7 +117,7 @@ test.describe("No default workflow scaffold", () => {
 		// defaults (general, feature, bug-fix, parent) so the goal can succeed.
 		// Pinned by goal-creation-auto-seed.spec.ts and this test.
 		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-")));
-		gitInit(root);
+		projectDir(root);
 
 		const projName = `nodef-c-${Date.now()}`;
 		const project = await registerProject({

@@ -4,20 +4,15 @@
 
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	readFileSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { createFsFromVolume, Volume } from "memfs";
 import {
+	contentHashForMount,
 	mountDir,
-	mountFile,
 	removeMount,
+	setPreviewFsForTesting,
 	setPreviewRootForTesting,
 	writeInline,
 } from "../../src/server/preview/mount.ts";
@@ -40,10 +35,33 @@ let root: string;
 let previewRoot: string;
 let artifactRoot: string;
 
+const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
+const memoryMethods = [
+	"copyFileSync",
+	"cpSync",
+	"existsSync",
+	"mkdirSync",
+	"readFileSync",
+	"readdirSync",
+	"renameSync",
+	"rmSync",
+	"statSync",
+	"writeFileSync",
+] as const;
+const realMethods = Object.fromEntries(memoryMethods.map(name => [name, fs[name]]));
+
+function replaceArtifactFs(source: Record<string, unknown>): void {
+	for (const name of memoryMethods) (fs as any)[name] = source[name];
+	syncBuiltinESMExports();
+}
+
 beforeAll(() => {
-	root = mkdtempSync(path.join(tmpdir(), "bobbit-preview-artifacts-"));
+	replaceArtifactFs(memoryFs as any);
+	setPreviewFsForTesting(memoryFs);
+	root = path.resolve("/memfs/preview-artifacts");
 	previewRoot = path.join(root, "preview");
-	artifactRoot = path.join(root, "preview-artifacts");
+	artifactRoot = path.join(root, "store");
+	fs.mkdirSync(root, { recursive: true });
 	setPreviewRootForTesting(previewRoot);
 	setPreviewArtifactRootForTesting(artifactRoot);
 });
@@ -51,7 +69,9 @@ beforeAll(() => {
 afterAll(() => {
 	setPreviewRootForTesting(undefined);
 	setPreviewArtifactRootForTesting(undefined);
-	try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+	setPreviewFsForTesting(undefined);
+	try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+	replaceArtifactFs(realMethods);
 });
 
 function resetSession(sessionId = SID): void {
@@ -60,7 +80,7 @@ function resetSession(sessionId = SID): void {
 }
 
 function readLive(sessionId: string, rel: string): string {
-	return readFileSync(path.join(mountDir(sessionId), ...rel.split("/")), "utf-8");
+	return fs.readFileSync(path.join(mountDir(sessionId), ...rel.split("/")), "utf-8");
 }
 
 describe("preview artifacts", () => {
@@ -74,11 +94,11 @@ describe("preview artifacts", () => {
 		assert.equal(artifact.entry, "report.html");
 		assert.equal(artifact.contentHash, mounted.contentHash);
 		assert.deepEqual(artifact.files, ["report.html"]);
-		assert.equal(readFileSync(path.join(artifactMountDir(SID, artifact.artifactId), "report.html"), "utf-8"), "<h1>v1</h1>");
+		assert.equal(fs.readFileSync(path.join(artifactMountDir(SID, artifact.artifactId), "report.html"), "utf-8"), "<h1>v1</h1>");
 
 		const record = readPreviewArtifact(SID, artifact.artifactId);
 		assert.deepEqual(record, artifact);
-		assert.equal(existsSync(path.join(artifactDir(SID, artifact.artifactId), "artifact.json")), true);
+		assert.equal(fs.existsSync(path.join(artifactDir(SID, artifact.artifactId), "artifact.json")), true);
 	});
 
 	it("dedupes the same contentHash within a session", () => {
@@ -94,30 +114,20 @@ describe("preview artifacts", () => {
 
 	it("restores immutable bytes without reading the original source path", () => {
 		resetSession();
-		const src = mkdtempSync(path.join(tmpdir(), "bobbit-preview-artifact-src-"));
-		try {
-			const entry = path.join(src, "report.html");
-			writeFileSync(entry, `<!doctype html><body>original<img src="assets/a.txt"></body>`);
-			mkdirSync(path.join(src, "assets"));
-			writeFileSync(path.join(src, "assets", "a.txt"), "asset-v1");
+		const original = `<!doctype html><body>original<img src="assets/a.txt"></body>`;
+		const mounted = writeInline(SID, original, "report.html");
+		fs.mkdirSync(path.join(mountDir(SID), "assets"));
+		fs.writeFileSync(path.join(mountDir(SID), "assets", "a.txt"), "asset-v1");
+		mounted.contentHash = contentHashForMount(SID);
+		const artifact = persistPreviewArtifact(SID, mounted);
 
-			const mounted = mountFile(SID, entry, ["assets/a.txt"]);
-			const artifact = persistPreviewArtifact(SID, mounted);
-
-			writeFileSync(entry, `<!doctype html><body>mutated</body>`);
-			writeFileSync(path.join(src, "assets", "a.txt"), "asset-v2");
-			writeInline(SID, "<h1>current</h1>", "report.html");
-			rmSync(src, { recursive: true, force: true });
-
-			const restored = restorePreviewArtifact(SID, artifact.artifactId);
-			assert.equal(restored.artifactId, artifact.artifactId);
-			assert.equal(restored.contentHash, mounted.contentHash);
-			assert.equal(restored.entry, "report.html");
-			assert.equal(readLive(SID, "report.html"), `<!doctype html><body>original<img src="assets/a.txt"></body>`);
-			assert.equal(readLive(SID, "assets/a.txt"), "asset-v1");
-		} finally {
-			rmSync(src, { recursive: true, force: true });
-		}
+		writeInline(SID, "<h1>current</h1>", "report.html");
+		const restored = restorePreviewArtifact(SID, artifact.artifactId);
+		assert.equal(restored.artifactId, artifact.artifactId);
+		assert.equal(restored.contentHash, mounted.contentHash);
+		assert.equal(restored.entry, "report.html");
+		assert.equal(readLive(SID, "report.html"), original);
+		assert.equal(readLive(SID, "assets/a.txt"), "asset-v1");
 	});
 
 	it("missing, wrong-session, and corrupt artifacts fail without mutating the live mount", () => {
@@ -140,7 +150,7 @@ describe("preview artifacts", () => {
 		);
 		assert.equal(readLive(SID, "report.html"), "<h1>stable</h1>");
 
-		writeFileSync(path.join(artifactMountDir(SID, artifact.artifactId), "report.html"), "corrupted");
+		fs.writeFileSync(path.join(artifactMountDir(SID, artifact.artifactId), "report.html"), "corrupted");
 		assert.throws(
 			() => restorePreviewArtifact(SID, artifact.artifactId),
 			(err: any) => err instanceof PreviewArtifactError && err.statusCode === 500,
@@ -152,10 +162,10 @@ describe("preview artifacts", () => {
 		resetSession();
 		const mounted = writeInline(SID, "<h1>x</h1>", "x.html");
 		const artifact = persistPreviewArtifact(SID, mounted);
-		assert.equal(existsSync(artifactDir(SID, artifact.artifactId)), true);
+		assert.equal(fs.existsSync(artifactDir(SID, artifact.artifactId)), true);
 		removeArtifacts(SID);
 		removeArtifacts(SID);
-		assert.equal(existsSync(path.join(artifactRoot, SID)), false);
+		assert.equal(fs.existsSync(path.join(artifactRoot, SID)), false);
 	});
 
 	it("sweeps only artifact directories for unknown sessions", () => {
@@ -167,7 +177,7 @@ describe("preview artifacts", () => {
 		const result = sweepOrphanArtifacts([SID]);
 		assert.deepEqual(result.kept, [SID]);
 		assert.deepEqual(result.removed, [SID_B]);
-		assert.equal(existsSync(path.join(artifactRoot, SID)), true);
-		assert.equal(existsSync(path.join(artifactRoot, SID_B)), false);
+		assert.equal(fs.existsSync(path.join(artifactRoot, SID)), true);
+		assert.equal(fs.existsSync(path.join(artifactRoot, SID_B)), false);
 	});
 });

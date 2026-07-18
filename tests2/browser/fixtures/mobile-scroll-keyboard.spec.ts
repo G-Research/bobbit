@@ -1,7 +1,37 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
+import { waitForStableScroll, waitForFrames } from "../_helpers/stable-wait.js";
 
 const TEST_PAGE = `file://${path.resolve("tests/mobile-scroll-keyboard.html")}`;
+
+const SCROLLER = "#scroll-container";
+
+/** Wait until the stick-to-bottom flag reaches the expected value (scroll events are async). */
+async function waitForStick(page: import("@playwright/test").Page, expected: boolean) {
+	await page.waitForFunction(
+		(want) => (window as any).__getState().stickToBottom === want,
+		expected,
+	);
+}
+
+/** Append one message and observe its layout growth and completed bottom re-pin. */
+async function appendMessageAtBottom(page: import("@playwright/test").Page, text: string) {
+	const previousHeight = await page.evaluate(
+		() => document.getElementById("scroll-container")!.scrollHeight,
+	);
+	await page.evaluate((message) => (window as any).__addMessage(message), text);
+	await page.waitForFunction(
+		(priorHeight) => {
+			const el = document.getElementById("scroll-container")!;
+			return el.scrollHeight > priorHeight
+				&& el.scrollHeight - el.scrollTop - el.clientHeight < 5;
+		},
+		previousHeight,
+	);
+	// The stable sample also lets the resulting scroll event update the sticky
+	// flag before the next append, avoiding a later growth being misclassified.
+	await waitForStableScroll(page, SCROLLER);
+}
 
 test.describe("Stick-to-bottom scroll behavior", () => {
 	test.use({ viewport: { width: 375, height: 667 } }); // iPhone SE
@@ -14,10 +44,11 @@ test.describe("Stick-to-bottom scroll behavior", () => {
 		expect(state0.stickToBottom).toBe(true);
 		expect(state0.distanceFromBottom).toBeLessThan(5);
 
-		// Add content — should auto-scroll to bottom
+		// Add content — should auto-scroll to bottom. Wait for the observable
+		// outcome of each append: the ResizeObserver re-pin brings us back to
+		// the bottom before the next message lands.
 		for (let i = 0; i < 5; i++) {
-			await page.evaluate((n) => (window as any).__addMessage(`New ${n}`), i);
-			await page.waitForTimeout(30);
+			await appendMessageAtBottom(page, `New ${i}`);
 		}
 
 		const state1 = await page.evaluate(() => (window as any).__getState());
@@ -29,22 +60,26 @@ test.describe("Stick-to-bottom scroll behavior", () => {
 		await page.goto(TEST_PAGE);
 		await page.waitForFunction(() => (window as any).__ready === true);
 
-		// Scroll up
+		// Scroll up — wait for the async scroll event to flip the flag
 		await page.evaluate(() => {
 			document.getElementById("scroll-container")!.scrollTop = 200;
 		});
-		await page.waitForTimeout(50);
+		await waitForStick(page, false);
 
 		const state = await page.evaluate(() => (window as any).__getState());
 		expect(state.stickToBottom).toBe(false);
 
 		const scrollBefore = state.scrollTop;
 
-		// New content arrives — should NOT scroll
+		// New content arrives — should NOT scroll. Frame waits guarantee the
+		// ResizeObserver callback for each append has been delivered (a buggy
+		// re-pin would have fired by then); the final stability wait catches
+		// any straggling scroll adjustment before we read the outcome.
 		for (let i = 0; i < 5; i++) {
 			await page.evaluate((n) => (window as any).__addMessage(`Stream ${n}`), i);
-			await page.waitForTimeout(30);
+			await waitForFrames(page);
 		}
+		await waitForStableScroll(page, SCROLLER);
 
 		const scrollAfter = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,
@@ -56,27 +91,30 @@ test.describe("Stick-to-bottom scroll behavior", () => {
 		await page.goto(TEST_PAGE);
 		await page.waitForFunction(() => (window as any).__ready === true);
 
-		// Scroll up
+		// Scroll up — wait for the async scroll event to flip the flag
 		await page.evaluate(() => {
 			document.getElementById("scroll-container")!.scrollTop = 200;
 		});
-		await page.waitForTimeout(50);
+		await waitForStick(page, false);
 		expect((await page.evaluate(() => (window as any).__getState())).stickToBottom).toBe(false);
 
-		// Scroll back to bottom
+		// Scroll back to bottom — wait for the flag to re-stick
 		await page.evaluate(() => {
 			const el = document.getElementById("scroll-container")!;
 			el.scrollTop = el.scrollHeight;
 		});
-		await page.waitForTimeout(50);
+		await waitForStick(page, true);
 		expect((await page.evaluate(() => (window as any).__getState())).stickToBottom).toBe(true);
 
-		// New content should auto-scroll
+		// New content should auto-scroll — wait for the observable scroll
 		const scrollBefore = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,
 		);
 		await page.evaluate(() => (window as any).__addMessage("Re-stuck content"));
-		await page.waitForTimeout(50);
+		await page.waitForFunction(
+			(prev) => document.getElementById("scroll-container")!.scrollTop > prev,
+			scrollBefore,
+		);
 		const scrollAfter = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,
 		);
@@ -90,9 +128,17 @@ test.describe("Stick-to-bottom scroll behavior", () => {
 		// At bottom, stuck
 		expect((await page.evaluate(() => (window as any).__getState())).stickToBottom).toBe(true);
 
-		// Open keyboard — shrinks container
+		// Open keyboard — shrinks container. Wait for the layout change to be
+		// observable, then for any resulting scroll adjustment to settle.
+		const heightBefore = await page.evaluate(
+			() => document.getElementById("scroll-container")!.clientHeight,
+		);
 		await page.evaluate(() => (window as any).__simulateKeyboardOpen(300));
-		await page.waitForTimeout(200);
+		await page.waitForFunction(
+			(h) => document.getElementById("scroll-container")!.clientHeight < h,
+			heightBefore,
+		);
+		await waitForStableScroll(page, SCROLLER);
 
 		// Container shrank, but we were at the bottom so still stuck
 		const state = await page.evaluate(() => (window as any).__getState());
@@ -105,26 +151,37 @@ test.describe("Stick-to-bottom scroll behavior", () => {
 		await page.goto(TEST_PAGE);
 		await page.waitForFunction(() => (window as any).__ready === true);
 
-		// Scroll to middle
+		// Scroll to middle — wait for the async scroll event to flip the flag
 		await page.evaluate(() => {
 			document.getElementById("scroll-container")!.scrollTop = 300;
 		});
-		await page.waitForTimeout(50);
+		await waitForStick(page, false);
 		expect((await page.evaluate(() => (window as any).__getState())).stickToBottom).toBe(false);
 
 		const scrollBefore = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,
 		);
 
-		// Open keyboard
+		// Open keyboard — wait for the layout shrink to be observable and
+		// any resulting scroll adjustment to settle
+		const heightBefore = await page.evaluate(
+			() => document.getElementById("scroll-container")!.clientHeight,
+		);
 		await page.evaluate(() => (window as any).__simulateKeyboardOpen(300));
-		await page.waitForTimeout(200);
+		await page.waitForFunction(
+			(h) => document.getElementById("scroll-container")!.clientHeight < h,
+			heightBefore,
+		);
+		await waitForStableScroll(page, SCROLLER);
 
-		// Add content
+		// Add content — frame waits guarantee each ResizeObserver tick has
+		// been delivered; the stability wait catches any straggling (buggy)
+		// scroll before we read the outcome.
 		for (let i = 0; i < 3; i++) {
 			await page.evaluate((n) => (window as any).__addMessage(`Msg ${n}`), i);
-			await page.waitForTimeout(30);
+			await waitForFrames(page);
 		}
+		await waitForStableScroll(page, SCROLLER);
 
 		const scrollAfter = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,
@@ -140,17 +197,20 @@ test.describe("Stick-to-bottom scroll behavior", () => {
 		await page.evaluate(() => {
 			document.getElementById("scroll-container")!.scrollTop = 400;
 		});
-		await page.waitForTimeout(50);
+		await waitForStableScroll(page, SCROLLER);
 
 		const scrollBefore = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,
 		);
 
-		// Repeated workflow bar updates
+		// Repeated workflow bar updates — a frame wait per update lets any
+		// (buggy) vertical scroll side-effect land; final stability wait
+		// ensures the smooth horizontal scroll has settled before we read.
 		for (let i = 0; i < 10; i++) {
 			await page.evaluate(() => (window as any).__simulateWorkflowBarUpdate());
-			await page.waitForTimeout(20);
+			await waitForFrames(page);
 		}
+		await waitForStableScroll(page, SCROLLER);
 
 		const scrollAfter = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,
@@ -162,22 +222,29 @@ test.describe("Stick-to-bottom scroll behavior", () => {
 		await page.goto(TEST_PAGE);
 		await page.waitForFunction(() => (window as any).__ready === true);
 
-		// Scroll to middle
+		// Scroll to middle — wait for scroll state to settle
 		await page.evaluate(() => {
 			document.getElementById("scroll-container")!.scrollTop = 400;
 		});
-		await page.waitForTimeout(50);
+		await waitForStableScroll(page, SCROLLER);
 
 		await page.locator("#chat-input").focus();
+		const heightBefore = await page.evaluate(
+			() => document.getElementById("scroll-container")!.clientHeight,
+		);
 		await page.evaluate(() => (window as any).__simulateKeyboardOpen(300));
-		await page.waitForTimeout(100);
+		await page.waitForFunction(
+			(h) => document.getElementById("scroll-container")!.clientHeight < h,
+			heightBefore,
+		);
+		await waitForStableScroll(page, SCROLLER);
 
 		const scrollBefore = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,
 		);
 
 		await page.locator("#chat-input").type("Hello world test", { delay: 20 });
-		await page.waitForTimeout(50);
+		await waitForStableScroll(page, SCROLLER);
 
 		const scrollAfter = await page.evaluate(
 			() => document.getElementById("scroll-container")!.scrollTop,

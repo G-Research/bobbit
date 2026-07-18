@@ -68,7 +68,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
-| `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
+| `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. |
 | `GET` | `/api/sessions/:id/commits` | Commit list for the session branch. Supports `direction=behind` and `vs=primary`; includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/sessions/:id/git-diff` | Unified diff for the working tree, or for one committed file when `commit=<sha>&file=<path>` is supplied. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the session exists. |
@@ -92,7 +92,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 `GET /api/sessions/:id/transcript` and the `read_session` tool share the same transcript reader but use different defaults. Direct REST calls keep the legacy behavior and leave tool results unredacted when `include_tool_results` / `includeToolResults` is omitted. Pass `include_tool_results=false`, `includeToolResults=false`, or `0` to get the redacted shape. The agent-facing `read_session` tool always sends the include flag and defaults it to false, so tool result bodies are omitted unless the agent passes `include_tool_results: true`.
 
-`verbose` changes compact summaries into full content blocks; it does not override result-body redaction. For `read_session`, `verbose: true` still omits tool result bodies unless `include_tool_results: true` is also set. Use `pattern`, `context`, `offset`, and `limit` to find a large output first, then run a narrow opt-in read. Redacted placeholders carry metadata such as tool name/id, status, and size or line counts. See [Transcript reads and tool-result redaction](read-session.md) for examples and response details.
+`verbose` changes compact summaries into full content blocks; it does not override result-body redaction. For `read_session`, `verbose: true` still omits tool result bodies unless `include_tool_results: true` is also set. Either flag is context-heavy at the agent-tool layer and requires an explicit integer `limit` from 1 through 10; rejected tool calls return `CONTEXT_HEAVY_LIMIT_REQUIRED` without reaching this route. Direct REST and other programmatic callers retain the endpoint's existing limits and behavior. Use `pattern`, `context`, `offset`, and `limit` to find a large output first, then fetch narrow batches while monitoring token consumption. Redacted placeholders carry metadata such as tool name/id, status, and size or line counts. See [Transcript reads and tool-result redaction](read-session.md) for examples and response details.
 
 ### Archived session list and query search
 
@@ -324,15 +324,81 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, projectId?, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. `projectId: "headquarters"` is valid; with `worktree: false`, a Headquarters goal can run data-only with no branch/worktree. See [Hierarchical goal metadata](design/goal-metadata.md). |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
+| `PUT` | `/api/goals/:id/workflow` | Replace the goal's complete frozen workflow snapshot, validate it, and reconcile gate state. See [Goal workflow replacement](#goal-workflow-replacement). |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
-| `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/git-status` | Read-only Git status for the goal worktree (branch, ahead/behind primary, clean). Never publishes or updates a remote branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `GET` | `/api/goals/:id/git-diff` | Unified diff for the goal worktree, or for one committed file when `commit=<sha>&file=<path>` is supplied. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `POST` | `/api/goals/:id/integrate-child/:childId` | Locally merge a direct child's branch into the parent and auto-archive it on success. Body `{ force?: boolean }`. Never pushes either branch. See [Child-goal integration](#child-goal-integration). |
+
+### Child-goal integration
+
+`POST /api/goals/:id/integrate-child/:childId` is the REST contract behind
+`goal_merge_child`. It runs `git merge --no-ff` in the parent worktree. For a
+multi-repo goal, it merges every matching component worktree and includes a
+`repos` map keyed by component repo. The operation may fetch the child ref
+best-effort, but it does not push the parent or child branch; publication is a
+separate explicit user, agent, Ready-to-Merge, or PR action.
+
+By default, the child's `ready-to-merge` gate must have passed. Send
+`{ "force": true }` to bypass that check for a workflow without the gate or
+a manually approved recovery. Parent/child identity is enforced; cross-tree
+merges return `400 PARENT_MISMATCH`.
+
+A clean or already-complete merge returns `200`:
+
+```json
+{
+  "merged": true,
+  "alreadyMerged": false,
+  "conflict": false,
+  "output": "Merge made by the 'ort' strategy."
+}
+```
+
+`repos` is omitted for a single-repo goal. A clean or already-merged result
+tears down the child's team and archives the child. A conflict aborts the Git
+merge, preserves the child, and returns `409` with
+`{ merged: false, alreadyMerged: false, conflict: true, output, repos? }`.
+A missing/unpassed gate returns `409 RTM_NOT_PASSED`; goals without usable Git
+worktrees return `409 GOAL_GIT_UNAVAILABLE`. Responses intentionally omit the
+legacy `pushed` field because integration has no remote side effect.
+
+### Goal workflow replacement
+
+`PUT /api/goals/:id/workflow` replaces an existing goal's **entire frozen workflow snapshot**. This is a general workflow mutation endpoint, not a timeout-specific patch: callers send the complete workflow definition and may change its name, description, gates, dependencies, gate metadata, or verification steps. The workflow id is immutable. If the body includes `id`, it must equal the current snapshot id; the server preserves the snapshot's `id`, `createdAt`, and `hidden` fields and stamps a new `updatedAt`.
+
+The body uses the same workflow shape and full-definition validator as project workflow authoring. It must be a plain object with a non-empty `name` and `gates` array. Validation covers gate and step shape, unique gate ids, dependency references and cycles, component/command references, subgoal dependencies, and finite positive-integer `timeout` values. Replacement is atomic: validation and conflict checks happen before either the goal or gate store is changed.
+
+On success, the server persists and returns the normalized workflow snapshot, broadcasts `goal_state_changed`, and reconciles stored gates:
+
+- unchanged gate definitions keep their status, signal history, and cache state;
+- changed gate definitions are reset to `pending` and their verification cache is invalidated, while their signal history remains available for audit;
+- removed gates and their stored state are deleted;
+- newly added gates start as `pending` with empty signal history.
+
+Gate array order is presentation-only for conflict detection. Reordering otherwise-identical gates does not reset them. Changes inside a gate, including its dependencies or `verify` array, count as a gate modification.
+
+To avoid orphaning a live verifier, changing or removing a gate whose verification is currently running returns:
+
+```json
+{
+  "error": "Workflow cannot modify or remove gates with active verifications",
+  "code": "WORKFLOW_ACTIVE_VERIFICATION",
+  "gateIds": ["review"]
+}
+```
+
+The status is `409`, and neither store is mutated. An unrelated gate may still be changed while another gate is verifying. The conflict read and subsequent persistence run without an asynchronous gap, so a new verification cannot interleave after the guard.
+
+Other errors are `400` for a non-object body, a goal without a workflow, an id change, or any workflow validation failure; and `404` for an unknown goal or missing project context.
+
+This endpoint changes only the active goal snapshot. Project workflow endpoints remain the source for future goals; see [Changing a timed-out review allowance](goals-workflows-tasks.md#changing-a-timed-out-review-allowance) for the UI's current/future/both scope behavior.
 
 ### Git commit lists and commit-scoped diffs
 
@@ -448,6 +514,8 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 | `GET` | `/api/goals/:id/gates` | List gates for a goal |
 | `GET` | `/api/goals/:id/gates/:gateId` | Get gate detail (status, signals, definition) |
 | `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, or signal history) |
+| `GET` | `/api/goals/:id/gates/:gateId/signals` | Return signal history plus optional human-readable goal and gate names. See [Signal history endpoint](#signal-history-endpoint). |
+| `GET` | `/api/goals/:id/verifications/active` | Return the goal's in-flight verification snapshots for live UI reconciliation. |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
 | `POST` | `/api/goals/:id/gates/:gateId/reset` | Reset the gate plus transitive downstream dependents to `pending`; preserves signal history. See [Gate reset endpoint](#gate-reset-endpoint). |
 | `POST` | `/api/goals/:id/gates/:gateId/bypass` | **Human-only.** Force a not-yet-passed gate to `bypassed` (`{ whyBypassed, whoAmI, isInitiatedByHuman: true }`); persists a synthetic audit signal. Never advertised to agents. See [Gate bypass endpoint](#gate-bypass-endpoint). |
@@ -899,13 +967,13 @@ interface AgentDirApiState {
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/models` | List currently available models (`ApiModel[]`) |
-| `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 10s timeout. |
+| `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 15s timeout. |
 | `GET` | `/api/pi-ai/providers` | List built-in pi-ai provider IDs through a browser-safe server boundary |
 | `POST` | `/api/pi-ai/provider-key-test` | Test a built-in provider API key without persisting it |
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
-`GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`, plus optional `cost.tiers[]` when Pi exposes tiered pricing metadata. Reasoning-capable models may also include `thinkingLevelMap`; Pi `0.80.6` uses that map to expose `max` thinking support for GPT 5.6 and Fable-class models. For AI Gateway models, Bobbit derives cost from `/v1/models` `pricing.prompt` and `pricing.completion` metadata and does not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
+`GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`, plus optional `cost.tiers[]` when Pi exposes tiered pricing metadata. Reasoning-capable models may also include `thinkingLevelMap`; Pi `0.80.6` uses that map to expose `max` thinking support for GPT 5.6 and Fable-class models. AI Gateway models may also include `upstreamProvider`, which the UI uses for badges and search while preferences remain `aigw/<bare-id>`. Bobbit takes AIGW cost from well-known per-million-token `cost` metadata or converts legacy `/v1/models` per-token `pricing`; it does not call aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
 
 `GET /api/pi-ai/providers` and `POST /api/pi-ai/provider-key-test` are an internal browser-safe pi-ai boundary. Browser UI uses them instead of runtime bare value imports from `@earendil-works/pi-ai`, because the package index traverses Node-only exports such as environment API-key probing and causes browser builds to externalize `node:fs`. Keep provider catalog reads and key tests behind these server endpoints; first-message streaming is the separate lazy `@earendil-works/pi-ai/api/*` boundary documented in [Pi runtime compatibility](pi-runtime-compatibility.md).
 
@@ -929,27 +997,33 @@ The key is used only for a one-off minimal completion probe (`"Reply with: OK"`)
 - `404 { ok: false, status: 404, error: "Model \"<provider>/<modelId>\" is not in the built-in pi-ai catalog." }` — the requested built-in model cannot be resolved.
 - `502 { ok: false, modelResolved, latencyMs, error }` — pi-ai resolved the model but the provider request failed or timed out. The body has no `status` field in this path.
 
-`POST /api/models/test` responses:
+`POST /api/models/test` resolves the current model record before probing. AIGW Responses models call their per-model `{baseUrl}/responses`; AIGW completions models call `{baseUrl}/chat/completions`; Converse, future provider-native APIs, and non-AIGW models run through pi-ai. A failed route is not retried through another API.
+
+Responses:
 
 - `200 { ok: true, modelResolved, latencyMs }` — success.
-- `400 { ok: false, error: "Malformed pref" }` — pref could not be parsed as `provider/modelId`.
+- `200 { ok: false, modelResolved, latencyMs, error }` — a direct AIGW Responses/completions probe reached an upstream or transport failure.
+- `400 { ok: false, error }` — pref is missing or could not be parsed as `provider/modelId`.
 - `404 { ok: false, error: "Model \"...\" is not in the current available-models list..." }` — pref does not resolve against `/api/models`.
-- `422 { ok: false, error: "Test not supported for this provider yet..." }` — non-aigw providers are not probed.
+- `502 { ok: false, modelResolved, latencyMs, error }` — a pi-ai-backed provider/native-API probe failed.
+- `500 { ok: false, error }` — unexpected model discovery or probe setup failure.
 
-Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debug a review or naming model picking the wrong model under AI Gateway](../AGENTS.md).
+Used by the Settings → Models tab per-row Test button. See [AI Gateway routing — Model probes](ai-gateway-routing.md#model-probes) and [Debugging](debugging.md#reviewnaming-model-mismatch-under-ai-gateway).
 
 ### AI Gateway
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Check if AI gateway is configured, return available models |
-| `POST` | `/api/aigw/configure` | Set AI gateway URL, discover models (`{ url }`) |
-| `DELETE` | `/api/aigw/configure` | Remove AI gateway configuration |
-| `POST` | `/api/aigw/test` | Test connection to a URL without saving (`{ url }`) |
-| `POST` | `/api/aigw/refresh` | Re-discover models from configured gateway |
-| `*` | `/api/aigw/v1/*` | Proxy requests to configured AI gateway |
+| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh, with failures represented by `models: []` |
+| `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url }`), publish `models.json`, and refresh sandbox mounts |
+| `DELETE` | `/api/aigw/configure` | Remove gateway configuration and its generated provider |
+| `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url }` without saving or changing active routing |
+| `POST` | `/api/aigw/refresh` | Repeat configuration for the saved URL and refresh models/default seeding |
+| `*` | `/api/aigw/v1/*` | Append `/v1/*` to the configured URL and proxy the request; save the gateway origin, not an already suffixed `/v1`, when using this route |
 
-Outbound requests that these endpoints make to the configured/tested AI Gateway carry Bobbit's canonical AI Gateway user agent. Model discovery also consumes `/v1/models` pricing metadata and persists converted costs into generated agent `models.json` entries. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) and [AI Gateway model pricing](internals.md#ai-gateway-model-pricing).
+Configure, refresh, and delete return `remountPending: true` when the durable configuration succeeded but one or more tracked sandbox containers could not yet remount the atomically replaced `models.json`. Callers must not interpret that flag as a rollback; normal container health recovery continues.
+
+Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md) for precedence, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
 
 ### OAuth
 
@@ -1448,6 +1522,20 @@ A completed or cached signal may include terminal rows such as:
 ```
 
 Skipped rows are intentional non-runs and are ignored by aggregate pass calculation; consumers should render them distinctly instead of inferring pass/fail from `passed` alone.
+
+### Signal history endpoint
+
+**`GET /api/goals/:id/gates/:gateId/signals`** returns the gate's complete stored signal history. The response also carries display metadata so identifier-only clients, such as gate-card sign-off launchers, can present readable review titles without making separate goal and workflow requests.
+
+```json
+{
+  "signals": [{ "id": "sig-22", "content": "# Release candidate", "timestamp": 1775853741666 }],
+  "goalTitle": "Ship release",
+  "gateName": "Human approval"
+}
+```
+
+`signals` is always present. `goalTitle` is included when the goal has a non-empty title, and `gateName` when the gate definition has a non-empty display name; either metadata field may be omitted. Consumers should prefer display names already present in their local context, then use this response metadata, and finally fall back to stable goal and gate identifiers. The signal history remains the content source of truth: launchers must select the exact signal by `id` rather than assuming the latest history row.
 
 ### Sign-off endpoint
 
