@@ -29,7 +29,7 @@ import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { AlertTriangle, CheckCircle2, Eye, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
-import { completeTeam, scheduleGateStatusRefreshForGoal } from "../../app/api.js";
+import { completeTeam, refreshSessions, scheduleGateStatusRefreshForGoal } from "../../app/api.js";
 import type { SignoffReviewTarget } from "../../app/signoff-review-launch.js";
 import "./SignoffReviewLauncher.js";
 import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
@@ -85,11 +85,11 @@ export class GoalStatusWidget extends LitElement {
 	@state() private _bypassErrors: Map<string, string> = new Map();
 	@state() private _confirmCompletionLoading = false;
 	@state() private _confirmCompletionError = "";
-	/** Set true once this goal has been completed (locally or per app state) so
-	 * the widget gives immediate feedback and stops offering the override. */
-	@state() private _completed = false;
+	/** Reversible snapshot of the authoritative app goal lifecycle. */
+	@state() private _goalState: string | undefined;
 	@state() private _closing = false;
 
+	private _goalStateWatchFrame: number | null = null;
 	private _ws: WebSocket | null = null;
 	private _wsIntentionalClose = false;
 	private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -139,6 +139,7 @@ export class GoalStatusWidget extends LitElement {
 		window.addEventListener("hashchange", this._onHashChange);
 		window.addEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
 		this._ensureWidgetStyles();
+		this._syncGoalStateFromApp();
 		if (this.goalId) {
 			void this._fetchInitial();
 			this._connectWs();
@@ -151,6 +152,7 @@ export class GoalStatusWidget extends LitElement {
 		document.removeEventListener("keydown", this._onEscapeKey, true);
 		window.removeEventListener("hashchange", this._onHashChange);
 		window.removeEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
+		this._stopGoalStateWatch();
 		this._closeToken++;
 		this._removeDropdown();
 		this._disconnectWs();
@@ -175,7 +177,7 @@ export class GoalStatusWidget extends LitElement {
 			this._bypassErrors = new Map();
 			this._confirmCompletionLoading = false;
 			this._confirmCompletionError = "";
-			this._completed = false;
+			this._goalState = appState.goals.find(g => g.id === this.goalId)?.state;
 			this._loading = true;
 			this._disconnectWs();
 			if (this.goalId) {
@@ -183,7 +185,11 @@ export class GoalStatusWidget extends LitElement {
 				this._connectWs();
 			}
 		}
-		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_resetLoading") || changed.has("_resetErrors") || changed.has("_bypassing") || changed.has("_bypassWhy") || changed.has("_bypassWho") || changed.has("_bypassLoading") || changed.has("_bypassErrors") || changed.has("_confirmCompletionLoading") || changed.has("_confirmCompletionError") || changed.has("_completed")) {
+		if (changed.has("_expanded")) {
+			if (this._expanded) this._startGoalStateWatch();
+			else this._stopGoalStateWatch();
+		}
+		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_resetLoading") || changed.has("_resetErrors") || changed.has("_bypassing") || changed.has("_bypassWhy") || changed.has("_bypassWho") || changed.has("_bypassLoading") || changed.has("_bypassErrors") || changed.has("_confirmCompletionLoading") || changed.has("_confirmCompletionError") || changed.has("_goalState")) {
 			this._syncDropdown();
 		}
 	}
@@ -236,6 +242,40 @@ export class GoalStatusWidget extends LitElement {
 				this._activeGateIds = this._extractActiveGateIds(data.verifications);
 			}
 		} catch { /* non-fatal */ }
+	}
+
+	private _syncGoalStateFromApp(): void {
+		const goal = appState.goals.find(g => g.id === this.goalId);
+		if (goal && goal.state !== this._goalState) this._goalState = goal.state;
+	}
+
+	/**
+	 * App goal refreshes replace `appState.goals` but do not remount this custom
+	 * element or emit a component-local event. While the lifecycle UI is visible,
+	 * observe that authoritative state once per paint so completion from
+	 * team_complete, another tab, or polling is reflected without a monotonic
+	 * local latch. Opening the popover also synchronizes before its first paint.
+	 */
+	private _startGoalStateWatch(): void {
+		if (this._goalStateWatchFrame !== null) return;
+		const watch = () => {
+			this._goalStateWatchFrame = null;
+			if (!this.isConnected || !this._expanded) return;
+			this._syncGoalStateFromApp();
+			this._goalStateWatchFrame = requestAnimationFrame(watch);
+		};
+		watch();
+	}
+
+	private _stopGoalStateWatch(): void {
+		if (this._goalStateWatchFrame === null) return;
+		cancelAnimationFrame(this._goalStateWatchFrame);
+		this._goalStateWatchFrame = null;
+	}
+
+	private async _refreshGoalState(): Promise<void> {
+		await refreshSessions();
+		this._syncGoalStateFromApp();
 	}
 
 	private async _fetch(path: string, init?: RequestInit): Promise<Response | null> {
@@ -425,6 +465,15 @@ export class GoalStatusWidget extends LitElement {
 			void this._refreshActive();
 		}
 		switch (t) {
+			case "goal_state_changed":
+				// This widget has its own goal-scoped viewer subscription, so reconcile
+				// completion even when the app-wide RemoteAgent socket is not mounted.
+				void Promise.all([
+					this._refreshGoalState(),
+					this._refreshGates(),
+					this._refreshActive(),
+				]);
+				break;
 			case "gate_verification_awaiting_human": {
 				const signalId = typeof msg.signalId === "string" ? msg.signalId : null;
 				const gateId = typeof msg.gateId === "string" ? msg.gateId : null;
@@ -484,6 +533,7 @@ export class GoalStatusWidget extends LitElement {
 		if (this._expanded && !this._closing) {
 			this._closeDropdown();
 		} else {
+			this._syncGoalStateFromApp();
 			this._closeToken++;
 			this._closing = false;
 			this._expanded = true;
@@ -596,7 +646,23 @@ export class GoalStatusWidget extends LitElement {
 			});
 			if (!resp) throw new Error("Unable to reset gate (network)");
 			if (!resp.ok) throw new Error(await this._resetErrorMessage(resp));
-			await Promise.all([this._refreshGates(), this._refreshActive()]);
+			const data = await resp.json().catch(() => null);
+			const reopen = data?.reopen;
+			if (typeof reopen?.state === "string") this._goalState = reopen.state;
+
+			// Reflect the successful reset before the follow-up reads complete. The
+			// server returns the full affected set (selected plus dependants).
+			const affectedGateIds = Array.isArray(data?.affectedGateIds)
+				? data.affectedGateIds.filter((id: unknown): id is string => typeof id === "string")
+				: [gate.id];
+			const affected = new Set(affectedGateIds);
+			this._gates = this._gates.map(current => affected.has(current.id)
+				? { ...current, status: "pending", latestPassedSignalId: undefined }
+				: current);
+			this._activeGateIds = new Set([...this._activeGateIds].filter(id => !affected.has(id)));
+			this._awaitingSignoffs = this._awaitingSignoffs.filter(signoff => !affected.has(signoff.gateId));
+
+			await Promise.all([this._refreshGoalState(), this._refreshGates(), this._refreshActive()]);
 		} catch (err) {
 			const next = new Map(this._resetErrors);
 			next.set(gate.id, err instanceof Error ? err.message : "Unable to reset gate");
@@ -681,10 +747,9 @@ export class GoalStatusWidget extends LitElement {
 				this._confirmCompletionError = "Unable to complete goal";
 				return;
 			}
-			// Reflect completion immediately: the gates themselves don't change, so
-			// without this the button would persist and the click would look like a
-			// no-op. Swaps the override for a “Completed” indicator.
-			this._completed = true;
+			// Reflect the successful authoritative mutation immediately; completeTeam()
+			// has already refreshed appState, and the watcher keeps this reversible.
+			this._goalState = "complete";
 			await Promise.all([this._refreshGates(), this._refreshActive()]);
 		} catch (err) {
 			this._confirmCompletionError = err instanceof Error ? err.message : "Unable to complete goal";
@@ -704,11 +769,7 @@ export class GoalStatusWidget extends LitElement {
 		// human "Confirm completion" override must not be offered yet.
 		const allGatesResolved = this._gates.length > 0
 			&& this._gates.every(g => !this._activeGateIds.has(g.id) && (g.status === "passed" || g.status === "bypassed"));
-		// The goal is complete once the server marks it so (or we just completed it
-		// locally). A completed goal must not keep offering the override — instead we
-		// surface a clear “completed” indicator so clicking the button has visible
-		// feedback rather than appearing to do nothing.
-		const goalComplete = this._completed || appState.goals.find(g => g.id === this.goalId)?.state === "complete";
+		const goalComplete = this._goalState === "complete";
 		const canConfirmCompletion = anyBypassed && allGatesResolved && !goalComplete;
 		return html`
 			<div class="flex items-center justify-between gap-2 mb-2 text-foreground font-medium text-sm">

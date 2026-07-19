@@ -148,6 +148,18 @@ A sibling notification mechanism on the server side: when a team-lead session go
 
 Tests: [`tests/team-manager-idle-nudge-backoff.test.ts`](../../tests/team-manager-idle-nudge-backoff.test.ts). Diagnostic entry: [docs/debugging.md — Auto-nudge cadence never escapes base delay](../debugging.md#auto-nudge-cadence-never-escapes-base-delay).
 
+### Reset-driven rearm
+
+Completing a team clears its idle timers and removes the team-lead event subscription, while deliberately preserving the team record and lead session. If a human later resets a gate, an active completed goal has concrete work again, so the reset lifecycle changes it to `in-progress` and rearms that same runtime. The rearm replaces the lead subscription, clears completion-era nudge timestamps and counters, and starts the ordinary base-delay no-workers/workers timers when the lead is idle. It never creates or replaces a team or session.
+
+Rearm succeeds only after the old unsubscribe callback has completed and the new event subscription has been installed. A callback failure returns a retryable `TEAM_REOPEN_FAILED` while the project-scoped reset intent remains durable; the next matching reset request retries from clean runtime state. The failed attempt does not seed watchdog timestamps, timers, or the success marker, so retry cannot duplicate a subscription or timer.
+
+This rearm is idempotent until the team completes again. An exact reset retry cannot stack subscriptions, timers, or prompts. Archived, shelved, and paused goals reject reset with `409`, so a watchdog cannot accidentally reverse deliberate operator dormancy. If the completed team was explicitly torn down, reset still reopens the goal and gates but treats the missing runtime as authoritative: it creates no lead or timer and there is nothing to nudge until the operator starts a team. Once a runtime is reopened, the normal suppressors still apply: an active verification, in-flight child, non-idle lead, or pending nudge prevents premature delivery.
+
+`completeTeam` also closes the race in the other direction. It validates required gates before worker dismissal, then validates them again after all asynchronous dismissals and immediately before persisting `complete`. If a reset interleaves during dismissal, completion aborts and rearms the lead at base delay rather than overwriting the new pending work with a completed state.
+
+The immediate gate-reset notice and later recovery nudge are separate signals. A live lead receives the reset notice only when the request reopened the goal or changed at least one gate; the notice includes the lifecycle outcome. A no-op or retained-intent retry sends no duplicate notice. If the reopened lead remains idle, normal no-workers, workers-idle, and stuck-sweep policy may nudge it later; after restart, an unresolved `pending` gate also qualifies a restored team for the one-shot boot-resume nudge. See [Cold-restart re-prompt recovery](../cold-restart-reprompt.md) and [Goals, Workflows & Tasks — Reset-driven goal reopening](../goals-workflows-tasks.md#reset-driven-goal-reopening).
+
 ### 9.1 The bug
 
 `TeamManager` runs two parallel idle-nudge schedulers keyed by goal id:

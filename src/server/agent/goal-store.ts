@@ -1,6 +1,7 @@
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 import { recordDeletionTombstone } from "./deletion-tombstones.js";
 
@@ -244,6 +245,29 @@ export class GoalStore {
 		}
 	}
 
+	/**
+	 * Persist the current snapshot atomically and propagate failures. This is
+	 * intentionally separate from the legacy best-effort save path: lifecycle
+	 * transactions need a durable acknowledgement, while changing every caller's
+	 * historical error contract would be destabilizing.
+	 */
+	private saveStrict(): void {
+		if (!this.fs.existsSync(this.storeDir)) {
+			this.fs.mkdirSync(this.storeDir, { recursive: true });
+		}
+		const tempFile = `${this.storeFile}.reset-${randomUUID()}.tmp`;
+		try {
+			const data = Array.from(this.goals.values());
+			this.fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), "utf-8");
+			this.fs.renameSync(tempFile, this.storeFile);
+		} catch (err) {
+			try {
+				if (this.fs.existsSync(tempFile)) this.fs.unlinkSync(tempFile);
+			} catch { /* best-effort temp cleanup */ }
+			throw err;
+		}
+	}
+
 	/** Current generation counter — bumped on every mutation. */
 	getGeneration(): number {
 		return this.generation;
@@ -326,6 +350,19 @@ export class GoalStore {
 	}
 
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
+		return this.updateInternal(id, updates, false);
+	}
+
+	/** Update a goal with atomic, fail-loud persistence for lifecycle transactions. */
+	updateStrict(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
+		return this.updateInternal(id, updates, true);
+	}
+
+	private updateInternal(
+		id: string,
+		updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>,
+		strict: boolean,
+	): boolean {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
 		// Strip undefined values to avoid overwriting existing fields
@@ -342,9 +379,21 @@ export class GoalStore {
 		const existingAsRec = existing as unknown as Record<string, unknown>;
 		const changed = Object.keys(cleaned).some(k => existingAsRec[k] !== cleaned[k]);
 		if (!changed) return true;
+
+		const previous = { ...existing };
 		this.generation++;
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
-		this.save();
+		try {
+			if (strict) this.saveStrict();
+			else this.save();
+		} catch (err) {
+			this.generation--;
+			for (const key of Object.keys(existing)) {
+				if (!(key in previous)) delete (existing as unknown as Record<string, unknown>)[key];
+			}
+			Object.assign(existing, previous);
+			throw err;
+		}
 		this.onIndexUpdate?.(existing);
 		return true;
 	}

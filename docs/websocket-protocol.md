@@ -119,7 +119,8 @@ Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` fr
 | `gate_verification_awaiting_human` | `goalId`, `gateId`, `signalId`, `stepIndex`, `stepName`, `label`, `prompt` | A `human-signoff` step parked waiting on a human decision. Resolution emits `gate_verification_step_complete` (no separate event). See [goals-workflows-tasks.md — Human sign-off steps](goals-workflows-tasks.md#human-sign-off-steps). |
 | `gate_verification_complete` | `goalId`, `gateId`, `signalId`, `status` | All verification steps finished |
 | `gate_status_changed` | `goalId`, `gateId`, `status` | Gate status changed |
-| `gate_reset` | `goalId`, `gateId`, `affectedGateIds`, `changedGateIds`, `unchangedGateIds` | A gate reset invalidated the requested gate and downstream dependents. Clients should refresh gate summaries for all affected ids. |
+| `gate_reset` | `goalId`, `gateId`, `affectedGateIds`, `changedGateIds`, `unchangedGateIds`, `reopen` | A gate reset invalidated the requested gate and downstream dependents. `reopen` is the lifecycle outcome described below. Clients should refresh gate summaries for all affected ids. |
+| `goal_state_changed` | `goalId` | Goal persistence changed. Treat as an invalidation and refresh goal-list state; reset-driven reopening emits this globally only when it performs `complete` → `in-progress`. |
 | `goal_setup_complete` | `goalId` | Goal worktree/team setup finished |
 | `goal_setup_error` | `goalId`, `error` | Goal setup failed |
 | `team_agent_spawned` | `goalId`, `sessionId`, `role`, `name` | Team agent was spawned |
@@ -134,6 +135,34 @@ Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` fr
 | `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for a staff agent (trigger fire, `POST /api/staff/:id/inbox`, or UI "+ Add to inbox"). See [staff-inbox.md](staff-inbox.md). |
 | `inbox.entry.updated` | `staffId`, `entry` | A staff agent transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`. |
 | `inbox.entry.removed` | `staffId`, `entryId` | An inbox entry was pruned (`DELETE /api/staff/:id/inbox/:entryId`). Entry body not echoed — clients reconcile by id. |
+
+### Gate reset lifecycle payload
+
+Every `gate_reset` event includes this additive object, matching the REST reset response exactly:
+
+```json
+{
+  "reopen": {
+    "reopened": true,
+    "previousState": "complete",
+    "state": "in-progress"
+  }
+}
+```
+
+- `reopened: boolean` — `true` only when this request changed an active completed goal to `in-progress`.
+- `previousState` — the goal state observed for this reset.
+- `state` — the resulting goal state. Both state fields use `todo | in-progress | complete | shelved | blocked`.
+
+A new successful reset emits `gate_reset`, including a no-op retry after a previously finalized reset. For an already reopened goal, that retry carries `{ "reopened": false, "previousState": "in-progress", "state": "in-progress" }`. It does not emit a second `goal_state_changed` or duplicate the team runtime rearm/lead notice when no gates changed.
+
+A retry that resumes a retained write-ahead intent is different: its job is to finish runtime rearm or intent cleanup after the goal and gates already committed. It returns the original affected scope and reopen outcome through REST, but suppresses duplicate `gate_status_changed`, `gate_reset`, `goal_state_changed`, and lead notification. This makes transport effects idempotent as well as persistence.
+
+On an actual reopen, `goal_state_changed { goalId }` is broadcast globally so sidebar, dashboard, status widget, and other browser contexts refresh their goal-list cache immediately. Goal-scoped `gate_status_changed` and `gate_reset` events update gate views. The widget's own viewer subscription refreshes goals, gates, and active verifications on `goal_state_changed`, so an external reopen reconciles even without an active chat socket.
+
+The widget does not treat completion as a permanent local latch. While its popover is open it mirrors the authoritative app goal cache, so an external `team_complete` observed by the normal goal refresh/poll switches it to completed; the same mirror can later switch back on reopen. For an initiating reset it applies the REST `reopen.state` and affected pending gates immediately, then performs authoritative goal/gate/verification reads. The response is therefore a latency optimization, not a second source of lifecycle truth.
+
+Dormant archived, shelved, or paused goals return REST `409`; they produce no `gate_reset` or reopen-driven `goal_state_changed` event. See [REST API — Durable reset transaction](rest-api.md#durable-reset-transaction) and [Goals, Workflows & Tasks — Reset-driven goal reopening](goals-workflows-tasks.md#reset-driven-goal-reopening).
 
 ### Background process events
 
