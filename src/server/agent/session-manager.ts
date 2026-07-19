@@ -873,6 +873,170 @@ function resolveAcceptedPromptAuthor(source: PromptSource, explicit?: MessageAut
 	});
 }
 
+function recordPromptAuthorBinding(
+	session: SessionInfo,
+	promptId: string,
+	modelText: string,
+	source: PromptSource,
+	author: MessageAuthor,
+	now: number,
+): PendingPromptAuthorRecord {
+	const pending: PendingPromptAuthorRecord = {
+		promptId,
+		dispatchedAt: now,
+		modelText,
+		source,
+		author,
+	};
+	if (!session.pendingPromptAuthors) session.pendingPromptAuthors = [];
+	session.pendingPromptAuthors.push(pending);
+	// A newly accepted same-text occurrence supersedes only the live keyless
+	// terminal guard. Restore replay guards remain authoritative until replay ends.
+	session.lastKeylessPromptAuthorEnd = undefined;
+	void appendPromptAuthorDispatch(session.id, {
+		schemaVersion: 1,
+		type: "prompt-author",
+		...pending,
+	});
+	return pending;
+}
+
+function cancelPromptAuthorBinding(session: SessionInfo, promptId: string, now: number): void {
+	const idx = session.pendingPromptAuthors?.findIndex((record) => record.promptId === promptId) ?? -1;
+	if (idx !== -1) session.pendingPromptAuthors!.splice(idx, 1);
+	void appendPromptAuthorSettlement(session.id, {
+		schemaVersion: 1,
+		type: "prompt-author-settlement",
+		promptId,
+		settledAt: now,
+		outcome: "cancelled",
+	});
+}
+
+export type SystemPromptSource = Exclude<PromptSource, "user" | "agent">;
+
+const ARCHIVED_SNAPSHOT_CORRELATIONS = Symbol("archived-snapshot-correlations");
+const ARCHIVED_ROW_CORRELATION = Symbol("archived-row-correlation");
+
+type ArchivedSnapshotCorrelation = {
+	id?: string;
+	timestamp?: string | number;
+};
+
+type ArchivedRowOriginals = {
+	hadId: boolean;
+	id: unknown;
+	hadTimestamp: boolean;
+	timestamp: unknown;
+};
+
+/** Retain outer JSONL correlation metadata out-of-band until snapshot authoring. */
+export function prepareArchivedMessageSnapshot(entries: readonly unknown[]): unknown[] {
+	const messages: unknown[] = [];
+	const correlations: ArchivedSnapshotCorrelation[] = [];
+	for (const value of entries) {
+		if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+		const entry = value as Record<string, unknown>;
+		if (entry.type !== "message" || !entry.message) continue;
+		messages.push(entry.message);
+		const outerTimestamp = entry.timestamp ?? entry.ts;
+		const validOuterTimestamp = typeof outerTimestamp === "string"
+			|| (typeof outerTimestamp === "number" && Number.isFinite(outerTimestamp));
+		correlations.push({
+			...(typeof entry.id === "string" && entry.id ? { id: entry.id } : {}),
+			...(validOuterTimestamp ? { timestamp: outerTimestamp as string | number } : {}),
+		});
+	}
+	const normalized = normalizeToolResultErrorSnapshot(messages) as unknown[];
+	Object.defineProperty(normalized, ARCHIVED_SNAPSHOT_CORRELATIONS, {
+		value: correlations,
+		configurable: true,
+	});
+	return normalized;
+}
+
+function applyArchivedSnapshotCorrelations<T>(snapshot: T): T {
+	if (!Array.isArray(snapshot)) return snapshot;
+	const correlations = (snapshot as any)[ARCHIVED_SNAPSHOT_CORRELATIONS] as ArchivedSnapshotCorrelation[] | undefined;
+	if (!correlations) return snapshot;
+	return snapshot.map((message, index) => {
+		const correlation = correlations[index];
+		if (!correlation || !message || typeof message !== "object" || Array.isArray(message)) return message;
+		const row = message as Record<string | symbol, unknown>;
+		const originals: ArchivedRowOriginals = {
+			hadId: Object.prototype.hasOwnProperty.call(row, "id"),
+			id: row.id,
+			hadTimestamp: Object.prototype.hasOwnProperty.call(row, "timestamp"),
+			timestamp: row.timestamp,
+		};
+		return {
+			...row,
+			...(correlation.id === undefined ? {} : { id: correlation.id }),
+			...(correlation.timestamp === undefined ? {} : { timestamp: correlation.timestamp }),
+			[ARCHIVED_ROW_CORRELATION]: originals,
+		};
+	}) as T;
+}
+
+function stripArchivedSnapshotCorrelations<T>(snapshot: T): T {
+	const stripRows = (rows: unknown[]): unknown[] => rows.map((message) => {
+		if (!message || typeof message !== "object" || Array.isArray(message)) return message;
+		const marker = (message as any)[ARCHIVED_ROW_CORRELATION] as ArchivedRowOriginals | undefined;
+		if (!marker) return message;
+		const { [ARCHIVED_ROW_CORRELATION]: _marker, ...visible } = message as Record<string | symbol, unknown>;
+		if (marker.hadId) visible.id = marker.id;
+		else delete visible.id;
+		if (marker.hadTimestamp) visible.timestamp = marker.timestamp;
+		else delete visible.timestamp;
+		return visible;
+	});
+	if (Array.isArray(snapshot)) return stripRows(snapshot) as T;
+	if (snapshot && typeof snapshot === "object" && Array.isArray((snapshot as any).messages)) {
+		return { ...(snapshot as any), messages: stripRows((snapshot as any).messages) } as T;
+	}
+	return snapshot;
+}
+
+/**
+ * Dispatch a Bobbit-generated prompt through Pi without changing its bytes,
+ * while creating the same durable author binding as SessionManager queues.
+ * A late negative acknowledgement cannot cancel a turn Pi already observed.
+ */
+export async function dispatchTrackedSystemPrompt(
+	session: SessionInfo,
+	text: string,
+	opts: {
+		source?: SystemPromptSource;
+		whenReady?: boolean;
+		now?: () => number;
+	} = {},
+): Promise<unknown> {
+	const source = opts.source ?? "system";
+	const now = opts.now ?? Date.now;
+	const promptId = `prompt:${randomUUID()}`;
+	const observedBeforeDispatch = session.agentObservedTurnVersion ?? 0;
+	const author = resolveAcceptedPromptAuthor(source, BOBBIT_SYSTEM_AUTHOR);
+	session.lastPromptSource = source;
+	recordPromptAuthorBinding(session, promptId, text, source, author, now());
+
+	try {
+		const response = opts.whenReady
+			? await session.rpcClient.promptWhenReady(text, undefined)
+			: await session.rpcClient.prompt(text);
+		if ((response as any)?.success === false) {
+			throw new Error((response as any).error || "prompt dispatch rejected");
+		}
+		return response;
+	} catch (error) {
+		if ((session.agentObservedTurnVersion ?? 0) !== observedBeforeDispatch) {
+			console.warn(`[session-manager] tracked system prompt for ${session.id} reported a failure after the agent observed the turn; treating the dispatch as accepted`);
+			return { success: true };
+		}
+		cancelPromptAuthorBinding(session, promptId, now());
+		throw error;
+	}
+}
+
 function sameAuthor(left: MessageAuthor, right: MessageAuthor): boolean {
 	return left.kind === right.kind && left.id === right.id && left.label === right.label;
 }
@@ -4280,39 +4444,11 @@ export class SessionManager {
 		source: PromptSource,
 		author: MessageAuthor,
 	): PendingPromptAuthorRecord {
-		const pending: PendingPromptAuthorRecord = {
-			promptId,
-			dispatchedAt: this.clock.now(),
-			modelText,
-			source,
-			author,
-		};
-		if (!session.pendingPromptAuthors) session.pendingPromptAuthors = [];
-		session.pendingPromptAuthors.push(pending);
-		// A keyless terminal binding is idempotent only within the dispatch
-		// occurrence that produced it. Once Bobbit accepts another dispatch, its
-		// same-text keyless echo must be allowed to bind the new pending record.
-		// Restore-only replay bindings remain intact and continue to protect an
-		// unresolved steer from historical transcript frames.
-		session.lastKeylessPromptAuthorEnd = undefined;
-		void appendPromptAuthorDispatch(session.id, {
-			schemaVersion: 1,
-			type: "prompt-author",
-			...pending,
-		});
-		return pending;
+		return recordPromptAuthorBinding(session, promptId, modelText, source, author, this.clock.now());
 	}
 
 	private cancelPromptAuthorDispatch(session: SessionInfo, promptId: string): void {
-		const idx = session.pendingPromptAuthors?.findIndex((record) => record.promptId === promptId) ?? -1;
-		if (idx !== -1) session.pendingPromptAuthors!.splice(idx, 1);
-		void appendPromptAuthorSettlement(session.id, {
-			schemaVersion: 1,
-			type: "prompt-author-settlement",
-			promptId,
-			settledAt: this.clock.now(),
-			outcome: "cancelled",
-		});
+		cancelPromptAuthorBinding(session, promptId, this.clock.now());
 	}
 
 	/**
@@ -4766,19 +4902,19 @@ export class SessionManager {
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
 		);
 
-		const recoverDispatchedRows = (reason: string) => {
-			// Suppress recovery only after an inbound agent event proves the dequeued
-			// turn was accepted/observed. Local status changes such as Stop →
-			// "aborting" can happen before prompt() is accepted; those rows must be
-			// recovered or the queued prompt is lost.
+		const acceptedBeforeAckFailure = (reason: string): boolean => {
+			// Apply this fence before cancellation: the echo may already have settled
+			// the sidecar, and a later cancelled row must never overwrite acceptance.
+			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
+			if (observedTurnVersion === dispatchObservedTurnVersion) return false;
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
-			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
-			if (observedTurnVersion !== dispatchObservedTurnVersion) {
-				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
-				this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
-				return;
-			}
+			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+			this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
+			return true;
+		};
+
+		const recoverDispatchedRows = (reason: string) => {
 			this.recoverPromptDispatch(
 				session,
 				dispatchedRowsForRecovery,
@@ -4798,8 +4934,10 @@ export class SessionManager {
 				// race below). Treat that the same as a thrown rejection — recover
 				// the dequeued rows so a future drain can redispatch them.
 				if (resp && resp.success === false) {
+					const reason = resp.error || "unknown";
+					if (acceptedBeforeAckFailure(reason)) return;
 					this.cancelPromptAuthorDispatch(session, promptId);
-					recoverDispatchedRows(resp.error || "unknown");
+					recoverDispatchedRows(reason);
 				} else {
 					// Dispatch landed — clear the busy-guard retry budget and any
 					// ownership ledger for the dequeued durable row.
@@ -4808,8 +4946,9 @@ export class SessionManager {
 				}
 			})
 			.catch((err: any) => {
-				this.cancelPromptAuthorDispatch(session, promptId);
 				const reason = err?.message || String(err);
+				if (acceptedBeforeAckFailure(reason)) return;
+				this.cancelPromptAuthorDispatch(session, promptId);
 				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}: ${safeReason}`);
@@ -6822,14 +6961,15 @@ export class SessionManager {
 			return true;
 		};
 		try {
-			const response = await session.rpcClient.promptWhenReady(
+			const continuationPrompt =
 				"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
-				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
-			);
-			if (response?.success === false) {
-				throw new Error(response.error ?? "boot continuation dispatch rejected");
-			}
+				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]";
+			await dispatchTrackedSystemPrompt(session, continuationPrompt, {
+				source: "system",
+				whenReady: true,
+				now: () => this.clock.now(),
+			});
 			// Keep the boot marker until agent_start so the team boot-resume pass cannot
 			// add a second continuation after restore returns. The pre-fence observer in
 			// handleAgentLifecycle clears it even when coordinator ownership suppresses
@@ -8663,7 +8803,8 @@ export class SessionManager {
 		const live = this.sessions.get(id);
 		const persisted = this.resolveStoreForId(id)?.get(id);
 		const identity = live ?? persisted;
-		return buildVisibleMessageSnapshotData(snapshot, {
+		const correlatedSnapshot = applyArchivedSnapshotCorrelations(snapshot);
+		const visible = buildVisibleMessageSnapshotData(correlatedSnapshot, {
 			sessionId: id,
 			session: {
 				id,
@@ -8678,6 +8819,7 @@ export class SessionManager {
 			latestMessageUpdate: live?.latestMessageUpdate,
 			inFlightSteerTexts: live?.inFlightSteerTexts,
 		});
+		return stripArchivedSnapshotCorrelations(visible);
 	}
 
 	/**
@@ -9886,19 +10028,16 @@ export class SessionManager {
 			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (!content) return [];
 			const lines = content.trim().split("\n");
-			const messages: unknown[] = [];
+			const entries: unknown[] = [];
 			for (const line of lines) {
 				if (!line.trim()) continue;
 				try {
-					const entry = JSON.parse(line);
-					if (entry.type === "message" && entry.message) {
-						messages.push(entry.message);
-					}
+					entries.push(JSON.parse(line));
 				} catch {
 					// Skip malformed lines
 				}
 			}
-			return normalizeToolResultErrorSnapshot(messages) as unknown[];
+			return prepareArchivedMessageSnapshot(entries);
 		} catch {
 			return [];
 		}

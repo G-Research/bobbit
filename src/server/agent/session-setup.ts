@@ -15,7 +15,7 @@ import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { CommandRunner } from "../gateway-deps.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, switchSessionPathForAgent } from "./session-manager.js";
+import { dispatchTrackedSystemPrompt, emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, switchSessionPathForAgent } from "./session-manager.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
@@ -1689,8 +1689,10 @@ export async function sendDelegatePrompt(
 	_instructions: string,
 	timeoutMs: number,
 ): Promise<void> {
-	await session.rpcClient.prompt(
+	await dispatchTrackedSystemPrompt(
+		session,
 		"Execute the task described in your system prompt. Follow the instructions carefully.",
+		{ source: "system" },
 	);
 
 	// Wait for agent_start event (session.status becomes "streaming")
