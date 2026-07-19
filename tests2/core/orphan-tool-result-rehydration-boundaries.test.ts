@@ -541,7 +541,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(factory).toHaveBeenCalledTimes(2);
 		expect(restoreBridge.promptWhenReady).toHaveBeenCalledTimes(1);
 		expect(roleBridge.promptWhenReady).toHaveBeenCalledTimes(1);
-		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(expect.stringMatching(/server restarted while you were mid-turn/i));
+		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(
+			expect.stringMatching(/server restarted while you were mid-turn/i),
+			undefined,
+		);
 		expect(roleBridge.prompt).not.toHaveBeenCalled();
 		const canonical = manager.sessions.get(ps.id);
 		expect(canonical?.rpcClient).toBe(roleBridge);
