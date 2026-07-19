@@ -18,7 +18,13 @@ function isVirtualSidecarPath(value: fs.PathLike): boolean {
 	return target === VIRTUAL_SIDECAR_DIR || target.startsWith(`${VIRTUAL_SIDECAR_DIR}${path.sep}`);
 }
 
-const { SessionManager, restorePromptAuthorBindings } = await import("../../src/server/agent/session-manager.ts");
+const {
+	SessionManager,
+	dispatchTrackedSystemPrompt,
+	prepareArchivedMessageSnapshot,
+	restorePromptAuthorBindings,
+} = await import("../../src/server/agent/session-manager.ts");
+const { sendDelegatePrompt } = await import("../../src/server/agent/session-setup.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const {
@@ -192,6 +198,164 @@ afterAll(() => {
 });
 
 describe("SessionManager direct idle prompt lifecycle", () => {
+	it("durably tracks direct delegate, verification, and restart system producers without changing bytes", async () => {
+		const manager = makeManager();
+		const delegateText = "Execute the task described in your system prompt. Follow the instructions carefully.";
+		const delegatePrompt = vi.fn(async (_text: string) => {
+			delegateSession.status = "streaming";
+			return { success: true };
+		});
+		const { session: delegateSession } = putSession(manager, {
+			id: "s-delegate-producer",
+			rpcClient: { prompt: delegatePrompt },
+		});
+
+		await sendDelegatePrompt(delegateSession, "not model-facing", 1_000);
+		assert.deepEqual(delegatePrompt.mock.calls[0], [delegateText]);
+		const delegateBinding = readAuthorSidecar(delegateSession.id)[0];
+		assert.equal(delegateBinding.modelText, delegateText);
+		assert.equal(delegateBinding.source, "system");
+		assert.deepEqual(delegateBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+
+		const verificationText = "Return the verification_result now.";
+		const verificationPrompt = vi.fn(async () => ({ success: true }));
+		const { session: verificationSession } = putSession(manager, {
+			id: "s-verification-producer",
+			rpcClient: { prompt: verificationPrompt },
+		});
+		await dispatchTrackedSystemPrompt(verificationSession, verificationText, {
+			source: "verification",
+			now: () => manager._testClock.now(),
+		});
+		assert.deepEqual(verificationPrompt.mock.calls[0], [verificationText]);
+		const verificationBinding = readAuthorSidecar(verificationSession.id)[0];
+		assert.equal(verificationBinding.modelText, verificationText);
+		assert.equal(verificationBinding.source, "verification");
+		assert.deepEqual(verificationBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+
+		const restartPrompt = vi.fn(async (_text: string) => ({ success: true }));
+		const { session: restartSession } = putSession(manager, {
+			id: "s-restart-producer",
+			rpcClient: { promptWhenReady: restartPrompt },
+		});
+		assert.equal(await manager._dispatchBootContinuation(restartSession), true);
+		assert.equal(restartPrompt.mock.calls.length, 1);
+		const restartText = restartPrompt.mock.calls[0][0];
+		assert.match(restartText, /infrastructure server restarted while you were mid-turn/i);
+		const restartBinding = readAuthorSidecar(restartSession.id)[0];
+		assert.equal(restartBinding.modelText, restartText);
+		assert.equal(restartBinding.source, "system");
+		assert.deepEqual(restartBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+	});
+
+	it.each([
+		{ ordering: "agent-start-before-echo", source: "verification", author: { kind: "system", id: "system:bobbit", label: "Bobbit" } },
+		{ ordering: "echo-before-rejection", source: "verification", author: { kind: "system", id: "system:bobbit", label: "Bobbit" } },
+		{ ordering: "agent-start-before-echo", source: "agent", author: { kind: "agent", id: "session:caller", label: "Caller" } },
+		{ ordering: "echo-before-rejection", source: "agent", author: { kind: "agent", id: "session:caller", label: "Caller" } },
+	] as const)(
+		"keeps an accepted queued $author.kind author when the late RPC rejection arrives $ordering",
+		async ({ ordering, source, author }) => {
+			const manager = makeManager();
+			const pending = deferred<any>();
+			const prompt = vi.fn(() => pending.promise);
+			const { session } = putSession(manager, {
+				id: `s-late-ack-${author.kind}-${ordering}`,
+				rpcClient: { prompt },
+			});
+			const text = `${author.kind}-owned queued prompt`;
+			const queued = session.promptQueue.enqueue(text, { source, author });
+
+			manager.drainQueue(session);
+			assert.equal(prompt.mock.calls.length, 1);
+			assert.deepEqual(prompt.mock.calls[0], [text, undefined]);
+
+			if (ordering === "agent-start-before-echo") {
+				manager.handleAgentLifecycle(session, { type: "agent_start" });
+			} else {
+				const echo: any = manager.prepareVisibleAgentEvent(session, {
+					type: "message_end",
+					message: { id: `m-${ordering}`, role: "user", content: text },
+				});
+				assert.deepEqual(echo.message.author, author);
+				manager.handleAgentLifecycle(session, echo);
+			}
+
+			pending.resolve({ success: false, error: "late negative acknowledgement" });
+			await flushAsyncWork();
+
+			assert.equal(session.promptQueue.length, 0, "an observed turn must not be recovered");
+			const afterAck = readAuthorSidecar(session.id).find((row) => row.promptId === queued.id);
+			assert.notEqual(afterAck?.settlement?.outcome, "cancelled");
+
+			if (ordering === "agent-start-before-echo") {
+				const echo: any = manager.prepareVisibleAgentEvent(session, {
+					type: "message_end",
+					message: { id: `m-${ordering}`, role: "user", content: text },
+				});
+				assert.deepEqual(echo.message.author, author);
+				manager.handleAgentLifecycle(session, echo);
+			}
+			assert.equal(
+				readAuthorSidecar(session.id).find((row) => row.promptId === queued.id)?.settlement?.outcome,
+				"echoed",
+				"late rejection must not overwrite the durable echoed settlement",
+			);
+		},
+	);
+
+	it("correlates archived duplicate prompts by outer id/timestamp and strips correlation-only fields", () => {
+		const manager = makeManager();
+		const sessionId = "s-archived-correlation";
+		const text = "duplicate archived bytes";
+		const agentAuthor = { kind: "agent", id: "session:caller", label: "Caller" } as const;
+		const systemAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		const records = [
+			{ promptId: "p-id-agent", dispatchedAt: 1, author: agentAuthor, messageId: "outer-id-agent", settledAt: 100 },
+			{ promptId: "p-id-system", dispatchedAt: 2, author: systemAuthor, messageId: "outer-id-system", settledAt: 200 },
+			{ promptId: "p-ts-agent", dispatchedAt: 3, author: agentAuthor, messageTimestamp: 30_000, settledAt: 30_000 },
+			{ promptId: "p-ts-system", dispatchedAt: 4, author: systemAuthor, messageTimestamp: 40_000, settledAt: 40_000 },
+		];
+		for (const record of records) {
+			appendPromptAuthorDispatch(sessionId, {
+				promptId: record.promptId,
+				dispatchedAt: record.dispatchedAt,
+				modelText: text,
+				source: record.author.kind === "agent" ? "agent" : "system",
+				author: record.author,
+			});
+			appendPromptAuthorSettlement(sessionId, {
+				promptId: record.promptId,
+				settledAt: record.settledAt,
+				outcome: "echoed",
+				...(record.messageId ? { messageId: record.messageId } : {}),
+				...(record.messageTimestamp ? { messageTimestamp: record.messageTimestamp } : {}),
+			});
+		}
+
+		const archived = prepareArchivedMessageSnapshot([
+			{
+				type: "message",
+				id: "outer-id-system",
+				timestamp: 200,
+				message: { role: "user", content: text, id: "inner-id", timestamp: 999 },
+			},
+			{ type: "message", id: "outer-id-agent", timestamp: 100, message: { role: "user", content: text } },
+			{ type: "message", id: "unsettled-ts-system", timestamp: 40_000, message: { role: "user", content: text } },
+			{ type: "message", id: "unsettled-ts-agent", ts: 30_000, message: { role: "user", content: text } },
+		]);
+		const visible = manager.buildVisibleMessageSnapshot(sessionId, archived) as any[];
+
+		assert.deepEqual(visible.map((message) => message.author), [systemAuthor, agentAuthor, systemAuthor, agentAuthor]);
+		assert.equal(visible[0].id, "inner-id", "the original inner id remains visible");
+		assert.equal(visible[0].timestamp, 999, "the original inner timestamp remains visible");
+		for (const message of visible.slice(1)) {
+			assert.equal("id" in message, false, "outer entry id is correlation-only");
+			assert.equal("timestamp" in message, false, "outer entry timestamp is correlation-only");
+			assert.equal(Object.getOwnPropertySymbols(message).length, 0, "private correlation markers are stripped");
+		}
+	});
+
 	it("marks idle+empty direct prompts as streaming before rpcClient.prompt resolves", async () => {
 		const manager = makeManager();
 		const pending = deferred<any>();
