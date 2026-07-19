@@ -813,6 +813,15 @@
       }
     },
     {
+      "path": "tests2/core/verification-author-producer.test.ts",
+      "reason": "Deterministic in-process core regression proving the actual VerificationHarness resumed-review reminder call site persists source=verification with Bobbit's system author while preserving the exact prompt bytes and RPC argument shape.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/message-author.test.ts",
       "reason": "Subprocess-free pure/memfs core coverage for PromptSource mapping, identity construction, legacy/tool-result inference, queue and in-flight steer restore compatibility, and authored assistant/steer snapshot splices.",
       "execution": {
@@ -1057,7 +1066,16 @@
     },
     {
       "path": "tests2/core/session-manager-snapshot-memo.test.ts",
-      "reason": "Native v2 core coverage for sequence-keyed snapshot coalescing, invalidation, failure retry, and stale-promise fencing.",
+      "reason": "Native v2 core coverage for sequence-keyed snapshot coalescing, invalidation, failure retry, stale-promise fencing, and immutable memoized bases with fresh author/steer/compaction/display overlays.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/splice-inflight-steer-occurrence.test.ts",
+      "reason": "Native v2 core coverage for occurrence-aware in-flight steer splicing: historical same-text rows cannot hide newer structured steers, settled ids suppress only their own occurrence, repeated authors remain distinct, and legacy string multiset behavior remains compatible.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
