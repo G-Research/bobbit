@@ -22,11 +22,11 @@
   "v2Native": [
     {
       "path": "tests2/core/file-mentions-authenticated-boundary.test.ts",
-      "reason": "Exact authenticated 8 MiB code-dense and deep-list Markdown boundary coverage is isolated from the main resource suite to preserve the tier-1 per-file wall budget.",
+      "reason": "Exact authenticated 8 MiB code-dense and deep-list Markdown resource coverage runs in a constrained child Node heap so an AST-allocation regression cannot crash the unit coordinator.",
       "execution": {
         "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
+        "tier": "e2e",
+        "project": "e2e"
       }
     },
     {
