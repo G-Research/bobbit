@@ -1006,8 +1006,9 @@ export function handleWebSocketConnection(
 					// Stop has two coordinated paths. Cancel the running pre-dispatch
 					// command so a prompt still resolving mentions cannot enqueue after
 					// Stop, and abort active agent work immediately for low latency. The
-					// ordered second attempt closes the race where dispatch crossed the
-					// cancellation check just before the immediate abort observed idle.
+					// deduplicated control reservation runs after every command already
+					// accepted for this session, closing the enqueue/abort race even when
+					// ordinary count or byte admission is saturated.
 					SESSION_COMMAND_SERIALISER.cancelActive(commandSerialisationKey);
 					let abortErrorReported = false;
 					const reportAbortError = (err: unknown): void => {
@@ -1015,21 +1016,25 @@ export function handleWebSocketConnection(
 						abortErrorReported = true;
 						send(ws, { type: "error", message: `Abort failed: ${err}`, code: "ABORT_ERROR" });
 					};
-					const immediateAbort = sessionManager.forceAbort(sessionId).catch(reportAbortError);
-					const reportOrderedAbortError = (err: unknown): void => {
-						if (err instanceof SessionCommandQueueFullError) {
-							send(ws, { type: "error", message: err.message, code: err.code });
-							return;
-						}
-						reportAbortError(err);
-					};
 					try {
-						void SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, async () => {
+						let immediateAbort!: Promise<void>;
+						const control = SESSION_COMMAND_SERIALISER.serialiseControl(commandSerialisationKey, async () => {
 							await immediateAbort;
 							await sessionManager.forceAbort(sessionId);
-						}, frameBytes).catch(reportOrderedAbortError);
+						});
+						if (control.created) {
+							// Reserve first so repeated Stop frames share both the immediate
+							// attempt and ordered fallback instead of adding promise listeners.
+							// The ordered callback crosses a microtask, so this assignment always
+							// happens before it can observe immediateAbort.
+							immediateAbort = sessionManager.forceAbort(sessionId).catch(reportAbortError);
+							void control.promise.catch(reportAbortError);
+						}
 					} catch (err) {
-						reportOrderedAbortError(err);
+						// Reservation itself is synchronous and allocation-only. Keep Stop's
+						// immediate path even if an unexpected serializer defect escapes.
+						void sessionManager.forceAbort(sessionId).catch(reportAbortError);
+						reportAbortError(err);
 					}
 					break;
 				}
