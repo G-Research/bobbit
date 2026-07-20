@@ -97,10 +97,8 @@ export const MAX_MENTION_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_MENTION_AGGREGATE_BYTES = 20 * 1024 * 1024; // 20 MiB
 /** Max existing `@path` targets resolved per send. Extra existing targets → unresolved (too-many-mentions). */
 export const MAX_MENTIONS_PER_SEND = 50;
-/** Max UTF-16 code units admitted to synchronous Markdown mention scanning. Oversized prompts stay plain. */
-export const MAX_MENTION_SCAN_CHARS = 256 * 1024;
-/** Max distinct lexical targets synchronously probed for existence per send. Unseen overflow candidates stay plain. */
-export const MAX_UNIQUE_MENTION_PROBES = 100;
+/** Fixed width of the asynchronous existence-classification worker pool. */
+export const FILE_MENTION_PROBE_CONCURRENCY = 8;
 
 /** Image extensions → MIME type. */
 const IMAGE_MIME: Record<string, string> = {
@@ -938,7 +936,13 @@ function scanMarkdownCodeRanges(text: string): SourceRange[] {
 /** Scan prose for `@path` tokens while preserving original UTF-16 indices. */
 function scanTokens(text: string): ScannedToken[] {
 	const re = /(^|\s)@([^\s@]+)/g;
-	const excluded = scanMarkdownCodeRanges(text);
+	// Ordinary prompts need no Markdown token tree or normalized-source copy.
+	// Backticks can introduce inline/fenced code; a run of 3+ tildes can
+	// introduce a fenced block. Only those delimiter-bearing prompts pay for
+	// Marked and sparse original-offset mapping.
+	const excluded = text.includes("`") || /~{3,}/.test(text)
+		? scanMarkdownCodeRanges(text)
+		: undefined;
 	const out: ScannedToken[] = [];
 	let excludedIndex = 0;
 	let m: RegExpExecArray | null;
@@ -946,15 +950,17 @@ function scanTokens(text: string): ScannedToken[] {
 		const prefixLen = m[1].length; // 0 at string start, 1 after whitespace
 		const tokenStart = m.index + prefixLen; // position of "@"
 		const untrimmedEnd = tokenStart + 1 + m[2].length;
-		while (
-			excludedIndex < excluded.length &&
-			excluded[excludedIndex].end <= tokenStart
-		) {
-			excludedIndex++;
-		}
-		const codeRange = excluded[excludedIndex];
-		if (codeRange && codeRange.start < untrimmedEnd && codeRange.end > tokenStart) {
-			continue;
+		if (excluded) {
+			while (
+				excludedIndex < excluded.length &&
+				excluded[excludedIndex].end <= tokenStart
+			) {
+				excludedIndex++;
+			}
+			const codeRange = excluded[excludedIndex];
+			if (codeRange && codeRange.start < untrimmedEnd && codeRange.end > tokenStart) {
+				continue;
+			}
 		}
 
 		let token = m[2];
@@ -972,6 +978,47 @@ function scanTokens(text: string): ScannedToken[] {
 function isMissingPathError(error: unknown): boolean {
 	const code = (error as NodeJS.ErrnoException | undefined)?.code;
 	return code === "ENOENT" || code === "ENOTDIR";
+}
+
+export type FileMentionTargetClassification = "exists" | "missing" | "unreadable";
+
+/**
+ * Classify each distinct lexical target with a small, fixed asynchronous
+ * worker pool. The returned map is both the de-duplication cache and the
+ * complete classification set: unlike a probe budget, it never silently
+ * suppresses a later valid target. Map key order follows first appearance.
+ */
+export async function classifyFileMentionTargets(
+	lexicalTargets: Iterable<string>,
+): Promise<ReadonlyMap<string, FileMentionTargetClassification>> {
+	const classifications = new Map<string, FileMentionTargetClassification>();
+	for (const target of lexicalTargets) {
+		if (!classifications.has(target)) classifications.set(target, "unreadable");
+	}
+
+	// A shared synchronous iterator hands each key to exactly one async worker;
+	// the map itself is the de-duplication cache, so no second unique-target
+	// array is needed for very large candidate sets.
+	const targets = classifications.keys();
+	const workerCount = Math.min(FILE_MENTION_PROBE_CONCURRENCY, classifications.size);
+	const workers = Array.from({ length: workerCount }, async () => {
+		while (true) {
+			const next = targets.next();
+			if (next.done) return;
+			const target = next.value;
+			try {
+				await fs.promises.lstat(target);
+				classifications.set(target, "exists");
+			} catch (error) {
+				classifications.set(
+					target,
+					isMissingPathError(error) ? "missing" : "unreadable",
+				);
+			}
+		}
+	});
+	await Promise.all(workers);
+	return classifications;
 }
 
 /** True when `target` is not contained within `baseDir` (escape via `..` / absolute). */
@@ -1000,15 +1047,95 @@ function isLikelyText(buf: Buffer): boolean {
 	return control / sample.length < 0.3;
 }
 
+const FILE_READ_CHUNK_BYTES = 64 * 1024;
+
+type DescriptorSnapshot =
+	| { ok: true; buffer: Buffer; size: number }
+	| { ok: false; reason: string; size?: number };
+
+function configuredCap(value: number | undefined, hardLimit: number): number {
+	if (value === undefined) return hardLimit;
+	if (!Number.isFinite(value)) return hardLimit;
+	return Math.min(hardLimit, Math.max(0, Math.floor(value)));
+}
+
+/** Read no more than `limit + 1` bytes so growth races cannot allocate freely. */
+function readBoundedDescriptor(fd: number, limit: number): Buffer {
+	const readLimit = limit + 1;
+	const chunks: Buffer[] = [];
+	let total = 0;
+	while (total < readLimit) {
+		const chunk = Buffer.allocUnsafe(Math.min(FILE_READ_CHUNK_BYTES, readLimit - total));
+		const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
+		if (bytesRead === 0) break;
+		chunks.push(bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead));
+		total += bytesRead;
+	}
+	if (chunks.length === 0) return Buffer.alloc(0);
+	if (chunks.length === 1) return chunks[0];
+	return Buffer.concat(chunks, total);
+}
+
+/**
+ * Bind validation and reads to one descriptor. O_NOFOLLOW closes the final
+ * pathname-component race on platforms that expose it; O_RDONLY is the only
+ * portable fallback (notably on Windows). The descriptor is always closed.
+ */
+function snapshotCanonicalFile(
+	absPath: string,
+	perFileCap: number,
+	aggregateRemaining: number,
+): DescriptorSnapshot {
+	let fd: number | undefined;
+	let result: DescriptorSnapshot = { ok: false, reason: "unreadable" };
+	try {
+		const noFollow = fs.constants.O_NOFOLLOW;
+		const flags = fs.constants.O_RDONLY |
+			(typeof noFollow === "number" ? noFollow : 0);
+		fd = fs.openSync(absPath, flags);
+		const stat = fs.fstatSync(fd);
+		if (!stat.isFile()) {
+			result = { ok: false, reason: "missing", size: stat.size };
+		} else if (stat.size > perFileCap) {
+			result = { ok: false, reason: "too-large", size: stat.size };
+		} else if (stat.size > aggregateRemaining) {
+			result = { ok: false, reason: "aggregate-cap", size: stat.size };
+		} else {
+			const readCap = Math.min(perFileCap, aggregateRemaining);
+			const buffer = readBoundedDescriptor(fd, readCap);
+			if (buffer.length > readCap) {
+				result = {
+					ok: false,
+					reason: perFileCap <= aggregateRemaining ? "too-large" : "aggregate-cap",
+					size: stat.size,
+				};
+			} else {
+				result = { ok: true, buffer, size: buffer.length };
+			}
+		}
+	} catch {
+		result = { ok: false, reason: "unreadable" };
+	} finally {
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				result = { ok: false, reason: "unreadable" };
+			}
+		}
+	}
+	return result;
+}
+
 /**
  * Resolve all `@path` file mentions in `text`, relative to `cwd`.
  * See module doc for semantics. Pure — only reads the referenced files.
  */
-export function resolveFileMentions(
+export async function resolveFileMentions(
 	text: string,
 	cwd: string,
 	opts?: ResolveFileMentionsOptions,
-): ResolvedMentions {
+): Promise<ResolvedMentions> {
 	const originalText = text;
 	const plainResult = (): ResolvedMentions => ({
 		originalText,
@@ -1016,23 +1143,40 @@ export function resolveFileMentions(
 		mentions: [],
 		warnings: [],
 	});
-	// Avoid Markdown/parser setup for the overwhelmingly common plain prompt,
-	// and keep the synchronous send path bounded for mention-bearing payloads.
 	if (!text.includes("@")) return plainResult();
-	if (text.length > MAX_MENTION_SCAN_CHARS) return plainResult();
 
-	const maxTextBytes = opts?.maxFileBytes ?? MAX_INLINE_TEXT_BYTES;
-	const maxFileBytes = opts?.maxMentionFileBytes ?? MAX_MENTION_FILE_BYTES;
-	const maxAggregate = opts?.maxAggregateBytes ?? MAX_MENTION_AGGREGATE_BYTES;
+	const maxTextBytes = configuredCap(opts?.maxFileBytes, MAX_INLINE_TEXT_BYTES);
+	const maxFileBytes = configuredCap(opts?.maxMentionFileBytes, MAX_MENTION_FILE_BYTES);
+	const maxAggregate = configuredCap(opts?.maxAggregateBytes, MAX_MENTION_AGGREGATE_BYTES);
 
 	const tokens = scanTokens(text);
+	if (tokens.length === 0) return plainResult();
+
 	const mentions: FileMention[] = [];
 	const warnings: string[] = [];
 	const replacements: Array<{ start: number; end: number; expanded: string }> = [];
+	const resolvedCwd = path.resolve(cwd);
+
+	// Classify every distinct lexical target before applying delivery limits.
+	// Missing candidates neither consume the existing-reference cap nor prevent
+	// a later valid target from being discovered.
+	const lexicalTargets = function* (): Generator<string> {
+		for (const token of tokens) {
+			yield path.resolve(resolvedCwd, token.rawPath.replace(/\\/g, "/"));
+		}
+	};
+	const classificationCache = await classifyFileMentionTargets(lexicalTargets());
+	let hasExistingCandidate = false;
+	for (const classification of classificationCache.values()) {
+		if (classification !== "missing") {
+			hasExistingCandidate = true;
+			break;
+		}
+	}
+	if (!hasExistingCandidate) return plainResult();
 
 	// Canonicalize cwd once for symlink-safe containment checks. Fall back to
 	// the lexically-resolved cwd if it cannot be realpath'd (e.g. missing).
-	const resolvedCwd = path.resolve(cwd);
 	let canonicalCwd: string;
 	try {
 		canonicalCwd = fs.realpathSync.native(resolvedCwd);
@@ -1042,9 +1186,6 @@ export function resolveFileMentions(
 
 	let aggregateUsed = 0;
 	let resolvedCount = 0;
-	type CandidateClassification = "exists" | "missing" | "unreadable";
-	const classificationCache = new Map<string, CandidateClassification>();
-	let uniqueProbeCount = 0;
 
 	for (const tok of tokens) {
 		const rawPath = tok.rawPath;
@@ -1059,26 +1200,11 @@ export function resolveFileMentions(
 		};
 
 		const lexicalAbs = path.resolve(resolvedCwd, normRel);
-
-		// Existence classification is deliberately metadata-only and separate from
-		// canonicalization/delivery. Bound probes by distinct lexical target and
-		// reuse classifications for repeats; unseen overflow candidates stay plain.
-		let classification = classificationCache.get(lexicalAbs);
-		if (!classification) {
-			if (uniqueProbeCount >= MAX_UNIQUE_MENTION_PROBES) continue;
-			uniqueProbeCount++;
-			try {
-				fs.lstatSync(lexicalAbs);
-				classification = "exists";
-			} catch (error) {
-				classification = isMissingPathError(error) ? "missing" : "unreadable";
-			}
-			classificationCache.set(lexicalAbs, classification);
-		}
+		const classification = classificationCache.get(lexicalAbs) ?? "unreadable";
 		if (classification === "missing") continue;
 
 		// Missing candidates do not consume this cap. Extra existing candidates
-		// require only the metadata classification above, never realpath/stat/read.
+		// require only the metadata classification above, never realpath/open/read.
 		if (resolvedCount >= MAX_MENTIONS_PER_SEND) {
 			markUnresolved("too-many-mentions");
 			continue;
@@ -1102,69 +1228,31 @@ export function resolveFileMentions(
 		try {
 			absPath = fs.realpathSync.native(lexicalAbs);
 		} catch (error) {
+			// The target existed during classification; disappearance here is a
+			// delivery race and therefore remains a visible unresolved mention.
 			markUnresolved(isMissingPathError(error) ? "missing" : "unreadable");
 			continue;
 		}
 
 		// Path safety, step 2: canonical containment defeats symlink escapes before
-		// any stat/read, so an inside-cwd link cannot leak outside file bytes.
+		// any open/read, so an inside-cwd link cannot leak outside file bytes.
 		if (escapesDir(canonicalCwd, absPath)) {
 			markUnresolved("outside-cwd");
 			continue;
 		}
 
-		// Stat the (canonical) file.
-		let size: number;
-		try {
-			const st = fs.statSync(absPath);
-			if (!st.isFile()) {
-				markUnresolved("missing");
-				continue;
-			}
-			size = st.size;
-		} catch (error) {
-			markUnresolved(isMissingPathError(error) ? "missing" : "unreadable");
+		const aggregateRemaining = Math.max(0, maxAggregate - aggregateUsed);
+		const snapshot = snapshotCanonicalFile(absPath, maxFileBytes, aggregateRemaining);
+		if (snapshot.size !== undefined) base.bytes = snapshot.size;
+		if (!snapshot.ok) {
+			markUnresolved(snapshot.reason);
 			continue;
 		}
 
 		base.absPath = absPath;
-		base.bytes = size;
+		const buf = snapshot.buffer;
+		base.bytes = buf.length;
 		const ext = path.extname(normRel).toLowerCase();
-
-		// Per-file cap, checked against the STAT size before any read so a giant
-		// file is never loaded. (Text has a smaller cap, applied post-read on
-		// the decoded content below.)
-		if (size > maxFileBytes) {
-			markUnresolved("too-large");
-			continue;
-		}
-		// Aggregate gate BEFORE reading/encoding: with up to 50 mentions × 10 MiB
-		// each, unconditional reads would block the WS handler with hundreds of
-		// MiB despite the 20 MiB cap. Pre-check using the known stat size; only
-		// read when it fits, then account the actual bytes.
-		if (aggregateUsed + size > maxAggregate) {
-			markUnresolved("aggregate-cap");
-			continue;
-		}
-
-		let buf: Buffer;
-		try {
-			buf = fs.readFileSync(absPath);
-		} catch {
-			markUnresolved("unreadable");
-			continue;
-		}
-		// TOCTOU: the file may have grown between stat and read. Re-validate the
-		// per-file cap and remaining aggregate budget against the bytes we
-		// actually got; never emit oversized content.
-		if (buf.length > maxFileBytes) {
-			markUnresolved("too-large");
-			continue;
-		}
-		if (aggregateUsed + buf.length > maxAggregate) {
-			markUnresolved("aggregate-cap");
-			continue;
-		}
 
 		// ── Image (by extension) ──────────────────────────────────────
 		if (IMAGE_MIME[ext]) {
@@ -1172,7 +1260,6 @@ export function resolveFileMentions(
 			base.kind = "image";
 			base.data = buf.toString("base64");
 			base.mimeType = IMAGE_MIME[ext];
-			base.bytes = buf.length;
 			mentions.push(base);
 			continue;
 		}
@@ -1181,12 +1268,11 @@ export function resolveFileMentions(
 		if (isLikelyText(buf)) {
 			const content = buf.toString("utf-8");
 			const contentBytes = Buffer.byteLength(content, "utf-8");
-			// Text has a smaller per-file cap, applied to the decoded content.
+			// Text has a smaller per-file cap, applied after type sniffing.
 			if (contentBytes > maxTextBytes) {
 				markUnresolved("too-large");
 				continue;
 			}
-			// Re-check aggregate against the actual content bytes (TOCTOU).
 			if (aggregateUsed + contentBytes > maxAggregate) {
 				markUnresolved("aggregate-cap");
 				continue;
@@ -1194,7 +1280,6 @@ export function resolveFileMentions(
 			aggregateUsed += contentBytes;
 			base.kind = "text";
 			base.content = content;
-			base.bytes = buf.length;
 			mentions.push(base);
 			replacements.push({
 				start: tok.range[0],
@@ -1204,15 +1289,12 @@ export function resolveFileMentions(
 			continue;
 		}
 
-		// Non-image binary (per frozen design §2): snapshot base64 in `data`,
-		// ext-derived mimeType. The handler routes this to attachments[] as a
-		// document for UI chip + snapshot parity. `modelText` is left untouched
-		// (literal `@path` kept). Caps already enforced above.
+		// Non-image binary snapshot. `modelText` stays literal and the handler
+		// routes the bytes through the document-attachment pipeline.
 		aggregateUsed += buf.length;
 		base.kind = "binary";
 		base.data = buf.toString("base64");
 		base.mimeType = binaryMimeForExt(ext);
-		base.bytes = buf.length;
 		mentions.push(base);
 	}
 
