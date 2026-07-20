@@ -17,12 +17,18 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
-import { mapWithConcurrency, RECOVERY_IO_CONCURRENCY } from "../agent/bounded-async-work.js";
+import {
+	mapWithConcurrency,
+	RECOVERY_IO_CONCURRENCY,
+	removeTree,
+	walkTree,
+	type AsyncTreeDirectory,
+	type AsyncTreeStats,
+} from "../agent/bounded-async-work.js";
 import { realClock, type Clock, type TimerHandle } from "../gateway-deps.js";
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const HASH_READ_BUFFER_BYTES = 64 * 1024;
-const REMOVE_DIRECTORY_BATCH = 128;
 
 /**
  * @deprecated The 100 MiB mount ceiling was removed when asset inclusion
@@ -197,7 +203,8 @@ export async function writeInline(sessionId: string, html: string, entry?: strin
 		throw err;
 	}
 
-	const stat = await mountAsyncFs.stat(target);
+	const stat = await mountAsyncFs.lstat(target);
+	if (!stat.isFile() || stat.isSymbolicLink()) throw new PreviewMountError(500, "Inline preview entry is not a regular file");
 	return {
 		url: `/preview/${sessionId}/${safeEntry}`,
 		path: target,
@@ -290,9 +297,9 @@ export async function mountFile(
 
 	const target = path.join(destRoot, entry);
 	let stat: fs.Stats;
-	try { stat = await mountAsyncFs.stat(target); }
+	try { stat = await mountAsyncFs.lstat(target); }
 	catch { throw new PreviewMountError(500, "Entry file missing after swap"); }
-	if (!stat.isFile()) throw new PreviewMountError(500, "Entry file missing after swap");
+	if (!stat.isFile() || stat.isSymbolicLink()) throw new PreviewMountError(500, "Entry file missing after swap");
 
 	return {
 		url: `/preview/${sessionId}/${entry}`,
@@ -377,88 +384,58 @@ export function watchMount(sessionId: string, onChange: () => void, options?: Wa
 // Shared bounded tree helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-interface DynamicQueueOptions<T> {
-	initial: T[];
-	limit: number;
-	worker: (item: T, enqueue: (item: T) => void) => Promise<void>;
-}
-
-async function runDynamicQueue<T>({ initial, limit, worker }: DynamicQueueOptions<T>): Promise<void> {
-	if (!Number.isInteger(limit) || limit <= 0) throw new RangeError("concurrency limit must be a positive integer");
-	if (initial.length === 0) return;
-	await new Promise<void>((resolve, reject) => {
-		const queue = [...initial];
-		let active = 0;
-		let firstError: unknown;
-		let settled = false;
-		const enqueue = (item: T) => {
-			queue.push(item);
-			pump();
-		};
-		const pump = () => {
-			if (settled) return;
-			while (active < limit && queue.length > 0) {
-				const item = queue.shift()!;
-				active++;
-				void worker(item, enqueue)
-					.catch(err => { firstError ??= err; })
-					.finally(() => {
-						active--;
-						if (active === 0 && queue.length === 0) {
-							settled = true;
-							if (firstError !== undefined) reject(firstError);
-							else resolve();
-							return;
-						}
-						pump();
-					});
-			}
-		};
-		pump();
-	});
-}
-
 export interface PreviewTreeOptions {
 	fs?: PreviewAsyncFs;
 	concurrency?: number;
 }
 
-interface DirectoryJob {
-	absolute: string;
-	prefix: string;
+const UNREADABLE_TREE_STATS: AsyncTreeStats = {
+	isDirectory: () => false,
+	isFile: () => false,
+	isSymbolicLink: () => false,
+};
+
+/**
+ * Adapt the preview seam to the canonical streaming walker while retaining the
+ * legacy list semantics: an unreadable directory contributes no descendants.
+ */
+function skippablePreviewTraversalFs(io: PreviewAsyncFs): {
+	lstat(filePath: string): Promise<AsyncTreeStats>;
+	opendir(dirPath: string): Promise<AsyncTreeDirectory>;
+} {
+	return {
+		async lstat(filePath) {
+			try { return await io.lstat(filePath); }
+			catch { return UNREADABLE_TREE_STATS; }
+		},
+		async opendir(dirPath) {
+			let directory: fs.Dir;
+			try { directory = await io.opendir(dirPath); }
+			catch {
+				return { read: async () => null, close: async () => undefined };
+			}
+			return {
+				async read() {
+					try { return await directory.read(); }
+					catch { return null; }
+				},
+				async close() {
+					try { await directory.close(); } catch { /* read failure may close the handle */ }
+				},
+			};
+		},
+	};
 }
 
 /** Sorted POSIX relative regular-file paths. Directory read failures are skipped. */
 export async function listMountFiles(root: string, options: PreviewTreeOptions = {}): Promise<string[]> {
 	const io = options.fs ?? mountAsyncFs;
-	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
 	const out: string[] = [];
-	await runDynamicQueue<DirectoryJob>({
-		initial: [{ absolute: root, prefix: "" }],
-		limit,
-		worker: async (job, enqueue) => {
-			let dir: fs.Dir;
-			try { dir = await io.opendir(job.absolute); }
-			catch { return; }
-			const childDirectories: DirectoryJob[] = [];
-			const childFiles: string[] = [];
-			try {
-				for (;;) {
-					const ent = await dir.read();
-					if (!ent) break;
-					const rel = job.prefix ? `${job.prefix}/${ent.name}` : ent.name;
-					if (ent.isDirectory()) childDirectories.push({ absolute: path.join(job.absolute, ent.name), prefix: rel });
-					else if (ent.isFile()) childFiles.push(rel);
-				}
-			} catch {
-				// Match the legacy scanner: an unreadable directory contributes no descendants.
-				return;
-			} finally {
-				try { await dir.close(); } catch { /* a failed read may already close it */ }
-			}
-			for (const child of childDirectories) enqueue(child);
-			out.push(...childFiles);
-		},
+	await walkTree(root, (entry) => {
+		if (entry.kind === "file" && entry.relativePath) out.push(entry.relativePath);
+	}, {
+		concurrency: options.concurrency ?? RECOVERY_IO_CONCURRENCY,
+		fs: skippablePreviewTraversalFs(io),
 	});
 	return out.sort();
 }
@@ -492,42 +469,44 @@ export async function hashMountDirectory(root: string, options: PreviewTreeOptio
 	return hash.digest("hex");
 }
 
-/** Copy regular files without traversing symlinks. */
+/** Copy regular files through the shared bounded streaming walker. */
 export async function copyPreviewDirectory(src: string, dst: string, options: PreviewTreeOptions = {}): Promise<void> {
 	const io = options.fs ?? mountAsyncFs;
 	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
-	const files = await listMountFiles(src, { fs: io, concurrency: limit });
 	await io.mkdir(path.dirname(dst), { recursive: true });
-	await io.mkdir(dst, { recursive: false });
-	await mapWithConcurrency(files, limit, async rel => {
-		const from = path.join(src, ...rel.split("/"));
-		const to = path.join(dst, ...rel.split("/"));
-		await io.mkdir(path.dirname(to), { recursive: true });
-		const stat = await io.lstat(from);
-		if (!stat.isFile()) throw new Error(`Preview copy source is no longer a regular file: ${rel}`);
-		await io.copyFile(from, to, fs.constants.COPYFILE_EXCL);
-		await io.utimes(to, stat.atime, stat.mtime);
+	await walkTree(src, async (entry) => {
+		const target = entry.relativePath
+			? path.join(dst, ...entry.relativePath.split("/"))
+			: dst;
+		if (entry.kind === "directory") {
+			await io.mkdir(target, { recursive: false });
+			return;
+		}
+		if (entry.kind !== "file") {
+			if (!entry.relativePath) throw new Error("Preview copy source is not a directory");
+			return;
+		}
+		// Classification from the queued traversal is not trusted after awaits.
+		// Revalidate immediately before copy so a substituted link is not read.
+		const current = await io.lstat(entry.absolutePath);
+		if (!current.isFile() || current.isSymbolicLink()) {
+			throw new Error(`Preview copy source is no longer a regular file: ${entry.relativePath}`);
+		}
+		await io.copyFile(entry.absolutePath, target, fs.constants.COPYFILE_EXCL);
+		await io.utimes(target, current.atime, current.mtime);
+	}, {
+		concurrency: limit,
+		fs: {
+			lstat: filePath => io.lstat(filePath),
+			opendir: dirPath => io.opendir(dirPath),
+		},
 	});
 }
 
-interface RemovalNode {
-	absolute: string;
-	parent?: RemovalNode;
-	rootIndex: number;
-	pending: number;
-	afterChildren: "scan" | "rmdir";
-	retries?: number;
-}
-
-type RemovalJob =
-	| { kind: "inspect"; absolute: string; rootIndex: number }
-	| { kind: "scan"; node: RemovalNode }
-	| { kind: "unlink"; absolute: string; parent?: RemovalNode; rootIndex: number }
-	| { kind: "rmdir"; node: RemovalNode };
-
 /**
- * Delete several independent trees through one operation-level queue. Each
- * result is null on success/missing, otherwise the first error for that root.
+ * Delete independent roots with bounded lanes. Each lane uses the canonical
+ * iterative streaming remover, so no per-node queue or recursive promise tree
+ * is materialised. Results retain root order.
  */
 export async function removePreviewTrees(
 	roots: readonly string[],
@@ -535,102 +514,14 @@ export async function removePreviewTrees(
 ): Promise<Array<unknown | null>> {
 	const io = options.fs ?? mountAsyncFs;
 	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
-	const errors: Array<unknown | null> = roots.map(() => null);
-	let enqueueJob: (job: RemovalJob) => void = () => undefined;
-	const recordError = (rootIndex: number, error: unknown) => {
-		if (!isEnoent(error) && errors[rootIndex] === null) errors[rootIndex] = error;
-	};
-	const completeNode = (node: RemovalNode) => {
-		node.pending--;
-		if (node.pending === 0) enqueueJob({ kind: node.afterChildren, node });
-	};
-
-	await runDynamicQueue<RemovalJob>({
-		initial: roots.map((absolute, rootIndex) => ({ kind: "inspect" as const, absolute, rootIndex })),
-		limit,
-		worker: async (job, enqueue) => {
-			enqueueJob = enqueue;
-			if (job.kind === "inspect") {
-				try {
-					const stat = await io.lstat(job.absolute);
-					if (stat.isDirectory()) {
-						enqueue({
-							kind: "scan",
-							node: { absolute: job.absolute, rootIndex: job.rootIndex, pending: 1, afterChildren: "rmdir" },
-						});
-					} else {
-						enqueue({ kind: "unlink", absolute: job.absolute, rootIndex: job.rootIndex });
-					}
-				} catch (err) { recordError(job.rootIndex, err); }
-				return;
-			}
-			if (job.kind === "unlink") {
-				try { await io.unlink(job.absolute); }
-				catch (err) { recordError(job.rootIndex, err); }
-				if (job.parent) completeNode(job.parent);
-				return;
-			}
-			if (job.kind === "rmdir") {
-				try {
-					await io.rmdir(job.node.absolute);
-				} catch (err) {
-					const code = (err as NodeJS.ErrnoException | undefined)?.code;
-					if ((code === "ENOTEMPTY" || code === "EEXIST") && (job.node.retries ?? 0) < 2) {
-						// A sibling operation (or an external writer) may have populated the
-						// directory after its scan. Re-scan rather than recursively deleting.
-						job.node.pending = 1;
-						job.node.retries = (job.node.retries ?? 0) + 1;
-						enqueue({ kind: "scan", node: job.node });
-						return;
-					}
-					recordError(job.node.rootIndex, err);
-				}
-				if (job.node.parent) completeNode(job.node.parent);
-				return;
-			}
-
-			const node = job.node;
-			let dir: fs.Dir | undefined;
-			const entries: fs.Dirent[] = [];
-			let exhausted = false;
-			try {
-				dir = await io.opendir(node.absolute);
-				while (entries.length < REMOVE_DIRECTORY_BATCH) {
-					const ent = await dir.read();
-					if (!ent) { exhausted = true; break; }
-					entries.push(ent);
-				}
-			} catch (err) {
-				recordError(node.rootIndex, err);
-				exhausted = true;
-			} finally {
-				if (dir) {
-					try { await dir.close(); } catch { /* ignore close after read failure */ }
-				}
-			}
-			node.afterChildren = exhausted ? "rmdir" : "scan";
-			for (const ent of entries) {
-				const absolute = path.join(node.absolute, ent.name);
-				node.pending++;
-				if (ent.isDirectory()) {
-					enqueue({
-						kind: "scan",
-						node: {
-							absolute,
-							parent: node,
-							rootIndex: node.rootIndex,
-							pending: 1,
-							afterChildren: "rmdir",
-						},
-					});
-				} else {
-					enqueue({ kind: "unlink", absolute, parent: node, rootIndex: node.rootIndex });
-				}
-			}
-			completeNode(node);
-		},
+	return mapWithConcurrency(roots, limit, async root => {
+		try {
+			await removeTree(root, { fs: io, force: true });
+			return null;
+		} catch (error) {
+			return isEnoent(error) ? null : error;
+		}
 	});
-	return errors;
 }
 
 export async function removePreviewTree(root: string, options: PreviewTreeOptions = {}): Promise<void> {
@@ -649,15 +540,11 @@ export async function wipePreviewDirectory(
 	suppressErrors = false,
 ): Promise<void> {
 	const io = options.fs ?? mountAsyncFs;
-	let entries: fs.Dirent[];
-	try { entries = await io.readdir(dir, { withFileTypes: true }); }
-	catch { return; }
-	const errors = await removePreviewTrees(entries.map(ent => path.join(dir, ent.name)), {
-		fs: io,
-		concurrency: options.concurrency,
-	});
-	const error = errors.find(item => item !== null);
-	if (!suppressErrors && error !== undefined) throw error;
+	try {
+		await removeTree(dir, { fs: io, force: true, preserveRoot: true });
+	} catch (error) {
+		if (!suppressErrors) throw error;
+	}
 }
 
 export async function movePreviewDirectoryContents(
@@ -666,26 +553,57 @@ export async function movePreviewDirectoryContents(
 	options: PreviewTreeOptions = {},
 ): Promise<void> {
 	const io = options.fs ?? mountAsyncFs;
-	let entries: fs.Dirent[];
-	try { entries = await io.readdir(srcDir, { withFileTypes: true }); }
-	catch { return; }
+	let directory: fs.Dir;
+	try {
+		const sourceStats = await io.lstat(srcDir);
+		if (!sourceStats.isDirectory() || sourceStats.isSymbolicLink()) return;
+		directory = await io.opendir(srcDir);
+	} catch { return; }
 	await io.mkdir(dstDir, { recursive: true });
-	for (const ent of entries) {
-		const from = path.join(srcDir, ent.name);
-		const to = path.join(dstDir, ent.name);
-		try {
-			await io.rename(from, to);
-		} catch {
-			await removePreviewTree(to, { fs: io, concurrency: options.concurrency });
-			if (ent.isDirectory()) await copyPreviewDirectory(from, to, { fs: io, concurrency: options.concurrency });
-			else if (ent.isFile()) await copyOneFile(from, to, io);
-			else throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
-			await removePreviewTree(from, { fs: io, concurrency: options.concurrency });
+	try {
+		for (;;) {
+			const ent = await directory.read();
+			if (!ent) break;
+			const from = path.join(srcDir, ent.name);
+			const to = path.join(dstDir, ent.name);
+			const current = await io.lstat(from);
+			if ((!current.isDirectory() && !current.isFile()) || current.isSymbolicLink()) {
+				throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
+			}
+			try {
+				await io.rename(from, to);
+				const moved = await io.lstat(to);
+				if (moved.isSymbolicLink() || moved.isDirectory() !== current.isDirectory() || moved.isFile() !== current.isFile()) {
+					await removePreviewTree(to, { fs: io, concurrency: options.concurrency });
+					throw new PreviewMountError(500, "Preview staging changed while it was moved");
+				}
+			} catch (renameError) {
+				if (renameError instanceof PreviewMountError) throw renameError;
+				await removePreviewTree(to, { fs: io, concurrency: options.concurrency });
+				const fallbackStats = await io.lstat(from);
+				if (fallbackStats.isSymbolicLink()) {
+					throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
+				}
+				if (fallbackStats.isDirectory()) {
+					await copyPreviewDirectory(from, to, { fs: io, concurrency: options.concurrency });
+				} else if (fallbackStats.isFile()) {
+					await copyOneFile(from, to, io);
+				} else {
+					throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
+				}
+				await removePreviewTree(from, { fs: io, concurrency: options.concurrency });
+			}
 		}
+	} finally {
+		try { await directory.close(); } catch { /* read failure may already close the handle */ }
 	}
 }
 
 async function copyOneFile(src: string, dst: string, io = mountAsyncFs): Promise<void> {
+	const sourceStats = await io.lstat(src);
+	if (!sourceStats.isFile() || sourceStats.isSymbolicLink()) {
+		throw new PreviewMountError(500, "Copy source is no longer a regular file");
+	}
 	try { await io.unlink(dst); }
 	catch (err) { if (!isEnoent(err)) throw err; }
 	try {
@@ -693,6 +611,11 @@ async function copyOneFile(src: string, dst: string, io = mountAsyncFs): Promise
 	} catch {
 		try { await io.copyFile(src, dst); }
 		catch (err) { throw new PreviewMountError(500, `Copy failed: ${(err as Error).message}`); }
+	}
+	const copiedStats = await io.lstat(dst);
+	if (!copiedStats.isFile() || copiedStats.isSymbolicLink()) {
+		try { await io.unlink(dst); } catch { /* preserve the integrity error */ }
+		throw new PreviewMountError(500, "Copy destination is not a regular file");
 	}
 }
 
@@ -708,20 +631,30 @@ async function expandGlob(srcRoot: string, spec: string): Promise<string[]> {
 		for (const cand of candidates) {
 			const candAbs = cand ? path.join(srcRoot, cand) : srcRoot;
 			if (wildcard) {
+				let candidateStats: fs.Stats;
 				let entries: fs.Dirent[];
-				try { entries = await mountAsyncFs.readdir(candAbs, { withFileTypes: true }); }
-				catch { continue; }
+				try {
+					candidateStats = await mountAsyncFs.lstat(candAbs);
+					if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) continue;
+					entries = await mountAsyncFs.readdir(candAbs, { withFileTypes: true });
+				} catch { continue; }
 				for (const ent of entries) {
 					if (!re!.test(ent.name)) continue;
+					const childAbs = path.join(candAbs, ent.name);
+					let childStats: fs.Stats;
+					try { childStats = await mountAsyncFs.lstat(childAbs); }
+					catch { continue; }
 					const rel = cand ? `${cand}/${ent.name}` : ent.name;
-					if (final ? (ent.isFile() || ent.isSymbolicLink()) : ent.isDirectory()) next.push(rel);
+					if (final
+						? (childStats.isFile() || childStats.isSymbolicLink())
+						: (childStats.isDirectory() && !childStats.isSymbolicLink())) next.push(rel);
 				}
 			} else {
 				const childAbs = path.join(candAbs, seg);
 				let st: fs.Stats;
 				try { st = await mountAsyncFs.lstat(childAbs); } catch { continue; }
 				const rel = cand ? `${cand}/${seg}` : seg;
-				if (final ? st.isFile() : st.isDirectory()) next.push(rel);
+				if (final ? st.isFile() : (st.isDirectory() && !st.isSymbolicLink())) next.push(rel);
 			}
 		}
 		candidates = next;

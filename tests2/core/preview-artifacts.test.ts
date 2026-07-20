@@ -6,9 +6,13 @@ import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
 import {
 	contentHashForMount,
+	copyPreviewDirectory,
 	createPreviewAsyncFs,
+	hashMountDirectory,
+	listMountFiles,
 	mountPath,
 	removeMount,
+	removePreviewTree,
 	setPreviewFsForTesting,
 	setPreviewRootForTesting,
 	writeInline,
@@ -72,6 +76,56 @@ function deferred<T = void>() {
 
 async function nextTurn(): Promise<void> {
 	await new Promise<void>(resolve => setImmediate(resolve));
+}
+
+async function waitUntil(predicate: () => boolean, attempts = 1_000): Promise<void> {
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		if (predicate()) return;
+		await nextTurn();
+	}
+	throw new Error("condition did not become true");
+}
+
+function substituteDirectoryAfterEnumeration(
+	treeRoot: string,
+	victim: string,
+	outside: string,
+	calls: string[],
+): PreviewAsyncFs {
+	let substituted = false;
+	return {
+		...baseAsyncFs,
+		opendir: async filePath => {
+			const absolute = path.resolve(String(filePath));
+			calls.push(`opendir:${absolute}`);
+			const directory = await baseAsyncFs.opendir(filePath);
+			if (absolute !== path.resolve(treeRoot)) return directory;
+			return {
+				read: async () => {
+					const entry = await directory.read();
+					if (!substituted && entry?.name === path.basename(victim)) {
+						substituted = true;
+						memoryFs.rmSync(victim, { recursive: true, force: true });
+						memoryFs.symlinkSync(outside, victim);
+					}
+					return entry;
+				},
+				close: () => directory.close(),
+			} as fs.Dir;
+		},
+		open: async (filePath, flags) => {
+			calls.push(`open:${path.resolve(String(filePath))}`);
+			return baseAsyncFs.open(filePath, flags);
+		},
+		copyFile: async (source, destination, mode) => {
+			calls.push(`copy:${path.resolve(String(source))}`);
+			await baseAsyncFs.copyFile(source, destination, mode);
+		},
+		unlink: async filePath => {
+			calls.push(`unlink:${path.resolve(String(filePath))}`);
+			await baseAsyncFs.unlink(filePath);
+		},
+	};
 }
 
 function candidateRecord(
@@ -249,6 +303,131 @@ describe("preview artifacts", () => {
 		gate.resolve();
 		await pending;
 		setPreviewArtifactFsForTesting(memoryFs);
+	});
+
+	it("backpressures wide scans and walks deep mounts without recursive scheduling", async () => {
+		const wideRoot = path.join(root, "bounded-wide");
+		memoryFs.mkdirSync(wideRoot, { recursive: true });
+		const width = 512;
+		for (let index = 0; index < width; index++) {
+			const child = path.join(wideRoot, `child-${String(index).padStart(4, "0")}`);
+			memoryFs.mkdirSync(child);
+			memoryFs.writeFileSync(path.join(child, "value.txt"), String(index));
+		}
+
+		const gate = deferred();
+		let rootReads = 0;
+		let active = 0;
+		let maximum = 0;
+		const isDirectChild = (filePath: fs.PathLike): boolean => {
+			const relative = path.relative(wideRoot, path.resolve(String(filePath)));
+			return relative.length > 0 && !relative.includes(path.sep);
+		};
+		const hold = async (): Promise<void> => {
+			active++;
+			maximum = Math.max(maximum, active);
+			await gate.promise;
+			active--;
+		};
+		const boundedFs: PreviewAsyncFs = {
+			...baseAsyncFs,
+			lstat: async filePath => {
+				if (isDirectChild(filePath)) await hold();
+				return baseAsyncFs.lstat(filePath);
+			},
+			opendir: async filePath => {
+				if (isDirectChild(filePath)) await hold();
+				const directory = await baseAsyncFs.opendir(filePath);
+				if (path.resolve(String(filePath)) !== path.resolve(wideRoot)) return directory;
+				return {
+					read: async () => {
+						rootReads++;
+						return directory.read();
+					},
+					close: () => directory.close(),
+				} as fs.Dir;
+			},
+		};
+		const pending = listMountFiles(wideRoot, { fs: boundedFs, concurrency: 2 });
+		await waitUntil(() => active === 2);
+		assert.ok(rootReads <= 6, `wide directory read ahead was not backpressured: ${rootReads}`);
+		assert.ok(maximum <= 2, `scan concurrency exceeded injected ceiling: ${maximum}`);
+		gate.resolve();
+		const wideFiles = await pending;
+		assert.equal(wideFiles.length, width);
+		assert.deepEqual(wideFiles, [...wideFiles].sort());
+
+		const deepRoot = path.join(root, "bounded-deep");
+		let leaf = deepRoot;
+		for (let depth = 0; depth < 512; depth++) leaf = path.join(leaf, "d");
+		memoryFs.mkdirSync(leaf, { recursive: true });
+		memoryFs.writeFileSync(path.join(leaf, "tail.txt"), "tail");
+		const deepFiles = await listMountFiles(deepRoot, { fs: baseAsyncFs, concurrency: 2 });
+		assert.equal(deepFiles.length, 1);
+		assert.equal(deepFiles[0]!.split("/").at(-1), "tail.txt");
+		memoryFs.rmSync(wideRoot, { recursive: true, force: true });
+		memoryFs.rmSync(deepRoot, { recursive: true, force: true });
+	});
+
+	it("does not hash or copy through a directory replaced by a symlink after enumeration", async () => {
+		const outside = path.join(root, "race-outside-read");
+		memoryFs.mkdirSync(outside, { recursive: true });
+		memoryFs.writeFileSync(path.join(outside, "secret.txt"), "outside-secret");
+
+		const makeTree = (label: string) => {
+			const tree = path.join(root, label);
+			const victim = path.join(tree, "switch");
+			memoryFs.mkdirSync(victim, { recursive: true });
+			memoryFs.writeFileSync(path.join(tree, "safe.txt"), "safe");
+			memoryFs.writeFileSync(path.join(victim, "inside.txt"), "inside");
+			return { tree, victim };
+		};
+
+		const hashTree = makeTree("race-hash");
+		const hashCalls: string[] = [];
+		const hashFs = substituteDirectoryAfterEnumeration(hashTree.tree, hashTree.victim, outside, hashCalls);
+		const actualHash = await hashMountDirectory(hashTree.tree, { fs: hashFs, concurrency: 2 });
+		const expectedHash = crypto.createHash("sha256")
+			.update("safe.txt", "utf-8").update("\0").update("safe").update("\0").digest("hex");
+		assert.equal(actualHash, expectedHash);
+		assert.equal(hashCalls.includes(`opendir:${path.resolve(hashTree.victim)}`), false);
+		assert.equal(hashCalls.some(call => call.includes("secret.txt")), false);
+
+		const copyTree = makeTree("race-copy");
+		const copyTarget = path.join(root, "race-copy-target");
+		const copyCalls: string[] = [];
+		const copyFs = substituteDirectoryAfterEnumeration(copyTree.tree, copyTree.victim, outside, copyCalls);
+		await copyPreviewDirectory(copyTree.tree, copyTarget, { fs: copyFs, concurrency: 2 });
+		assert.deepEqual(memoryFs.readdirSync(copyTarget), ["safe.txt"]);
+		assert.equal(memoryFs.readFileSync(path.join(copyTarget, "safe.txt"), "utf-8"), "safe");
+		assert.equal(copyCalls.includes(`opendir:${path.resolve(copyTree.victim)}`), false);
+		assert.equal(copyCalls.some(call => call.includes("secret.txt")), false);
+		assert.equal(memoryFs.readFileSync(path.join(outside, "secret.txt"), "utf-8"), "outside-secret");
+		memoryFs.rmSync(hashTree.tree, { recursive: true, force: true });
+		memoryFs.rmSync(copyTree.tree, { recursive: true, force: true });
+		memoryFs.rmSync(copyTarget, { recursive: true, force: true });
+		memoryFs.rmSync(outside, { recursive: true, force: true });
+	});
+
+	it("unlinks a directory symlink substituted after enumeration without deleting its target", async () => {
+		const tree = path.join(root, "race-delete");
+		const victim = path.join(tree, "switch");
+		const outside = path.join(root, "race-outside-delete");
+		memoryFs.mkdirSync(victim, { recursive: true });
+		memoryFs.writeFileSync(path.join(victim, "inside.txt"), "inside");
+		memoryFs.mkdirSync(outside, { recursive: true });
+		memoryFs.writeFileSync(path.join(outside, "secret.txt"), "outside-secret");
+		const calls: string[] = [];
+		const raceFs = substituteDirectoryAfterEnumeration(tree, victim, outside, calls);
+
+		await removePreviewTree(tree, { fs: raceFs, concurrency: 2 });
+
+		assert.equal(memoryFs.existsSync(tree), false);
+		assert.equal(memoryFs.readFileSync(path.join(outside, "secret.txt"), "utf-8"), "outside-secret");
+		assert.equal(calls.includes(`opendir:${path.resolve(victim)}`), false);
+		assert.equal(calls.some(call => call.includes("secret.txt")), false);
+		assert.ok(calls.includes(`unlink:${path.resolve(victim)}`));
+		memoryFs.rmSync(outside, { recursive: true, force: true });
 	});
 
 	it("cleanup yields while deletion is deferred, is idempotent, and isolates sweep failures", async () => {
