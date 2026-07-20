@@ -50,6 +50,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { marked, type Token, type Tokens } from "marked";
 
 /** Char range, in UTF-16 code units (matches `String.prototype.slice`). */
 export type MentionRange = [number, number];
@@ -183,396 +184,523 @@ interface SourceRange {
 	end: number;
 }
 
-interface SourceLine extends SourceRange {
-	/** End before the original CR, LF, or CRLF line ending. */
-	contentEnd: number;
+interface MappedSource {
+	/** Markdown source after Marked's CR/CRLF-to-LF normalization. */
+	text: string;
+	/** Original UTF-16 start offset for each code unit in {@link text}. */
+	starts: number[];
+	/** Original UTF-16 end offset for each code unit in {@link text}. */
+	ends: number[];
 }
 
-/** Split without normalizing line endings so all offsets remain source offsets. */
-function scanSourceLines(
-	text: string,
-	start = 0,
-	end = text.length,
-): SourceLine[] {
-	const lines: SourceLine[] = [];
-	let lineStart = start;
-	while (lineStart < end) {
-		let contentEnd = lineStart;
+interface SourceAlignment {
+	/** Cursor immediately after the aligned text in the parent source. */
+	next: number;
+	/** Present only when the caller needs to inspect descendants. */
+	source?: MappedSource;
+}
+
+/**
+ * Marked normalizes CR and CRLF to LF before lexing. Mirror that operation
+ * while retaining a direct map to the untouched prompt. JavaScript string
+ * offsets are UTF-16 code units, so iterating by numeric index also preserves
+ * astral-character ranges without conversion.
+ */
+function normalizeMarkdownSource(text: string): MappedSource {
+	const chars: string[] = [];
+	const starts: number[] = [];
+	const ends: number[] = [];
+	let cursor = 0;
+	while (cursor < text.length) {
+		const start = cursor;
+		if (text[cursor] === "\r") {
+			cursor += text[cursor + 1] === "\n" ? 2 : 1;
+			chars.push("\n");
+		} else {
+			chars.push(text[cursor]);
+			cursor++;
+		}
+		starts.push(start);
+		ends.push(cursor);
+	}
+	return { text: chars.join(""), starts, ends };
+}
+
+/**
+ * Align a child token's `raw` text with its containing token. Marked retains
+ * exact raw source for leaf blocks, but removes list/blockquote container
+ * prefixes before recursively tokenizing their children. Those removals make
+ * child raw text an ordered subsequence rather than necessarily a substring.
+ * A monotonic cursor makes alignment linear within each token level and keeps
+ * every mapped offset tied to the original prompt.
+ */
+function alignRawSource(
+	raw: string,
+	parent: MappedSource,
+	start: number,
+	map: boolean,
+): SourceAlignment | undefined {
+	let cursor = start;
+	const starts = map ? ([] as number[]) : undefined;
+	const ends = map ? ([] as number[]) : undefined;
+	for (let rawIndex = 0; rawIndex < raw.length; rawIndex++) {
 		while (
-			contentEnd < end &&
-			text[contentEnd] !== "\r" &&
-			text[contentEnd] !== "\n"
+			cursor < parent.text.length &&
+			parent.text[cursor] !== raw[rawIndex]
 		) {
-			contentEnd++;
+			cursor++;
 		}
-		let lineEnd = contentEnd;
-		if (lineEnd < end) {
-			if (
-				text[lineEnd] === "\r" &&
-				lineEnd + 1 < end &&
-				text[lineEnd + 1] === "\n"
-			) {
-				lineEnd += 2;
-			} else {
-				lineEnd++;
+		if (cursor === parent.text.length) return undefined;
+		starts?.push(parent.starts[cursor]);
+		ends?.push(parent.ends[cursor]);
+		cursor++;
+	}
+	return {
+		next: cursor,
+		source: map
+			? { text: raw, starts: starts!, ends: ends! }
+			: undefined,
+	};
+}
+
+function mappedRange(source: MappedSource): SourceRange | undefined {
+	if (source.text.length === 0) return undefined;
+	return {
+		start: source.starts[0],
+		end: source.ends[source.ends.length - 1],
+	};
+}
+
+/** Append or merge a range; parser traversal already emits source order. */
+function appendRange(ranges: SourceRange[], range: SourceRange): void {
+	let start = range.start;
+	let end = range.end;
+	while (ranges.length > 0) {
+		const previous = ranges[ranges.length - 1];
+		if (start > previous.end) break;
+		start = Math.min(start, previous.start);
+		end = Math.max(end, previous.end);
+		ranges.pop();
+	}
+	ranges.push({ start, end });
+}
+
+function appendMappedRange(
+	ranges: SourceRange[],
+	source: MappedSource,
+): void {
+	const range = mappedRange(source);
+	if (range) appendRange(ranges, range);
+}
+
+function isListToken(token: Token): token is Tokens.List {
+	return token.type === "list" && "items" in token;
+}
+
+function isBlockquoteToken(token: Token): token is Tokens.Blockquote {
+	return token.type === "blockquote" && "tokens" in token;
+}
+
+function isTableToken(token: Token): token is Tokens.Table {
+	return token.type === "table" && "header" in token && "rows" in token;
+}
+
+function tokenChildren(token: Token): readonly Token[] {
+	return "tokens" in token && token.tokens ? token.tokens : [];
+}
+
+/**
+ * Flatten only Markdown block containers. Each leaf's raw text is aligned once
+ * against the normalized prompt, so deeply nested same-line list markers do
+ * not trigger a raw-prefix rescan at every container depth.
+ */
+function collectBlockLeaves(tokens: readonly Token[]): Token[] {
+	const leaves: Token[] = [];
+	const pending = [...tokens].reverse();
+	while (pending.length > 0) {
+		const token = pending.pop()!;
+		if (isListToken(token)) {
+			for (let itemIndex = token.items.length - 1; itemIndex >= 0; itemIndex--) {
+				const itemTokens = token.items[itemIndex].tokens;
+				for (let tokenIndex = itemTokens.length - 1; tokenIndex >= 0; tokenIndex--) {
+					pending.push(itemTokens[tokenIndex]);
+				}
 			}
+		} else if (isBlockquoteToken(token)) {
+			for (let index = token.tokens.length - 1; index >= 0; index--) {
+				pending.push(token.tokens[index]);
+			}
+		} else {
+			leaves.push(token);
 		}
-		lines.push({ start: lineStart, contentEnd, end: lineEnd });
-		lineStart = lineEnd;
 	}
-	return lines;
+	return leaves;
 }
 
-interface QuotePrefix {
-	depth: number;
-	offset: number;
+function inlineTokensForLeaf(token: Token): Token[] {
+	if (isTableToken(token)) {
+		return [token.header, ...token.rows]
+			.flat()
+			.flatMap((cell) => cell.tokens);
+	}
+	return [...tokenChildren(token)];
 }
 
-/** Consume all common block-quote markers (`>`, optionally indented/spaced). */
-function consumeQuotePrefix(line: string): QuotePrefix {
-	let offset = 0;
-	let depth = 0;
-	while (offset < line.length) {
-		let marker = offset;
-		let spaces = 0;
-		while (spaces < 3 && line[marker] === " ") {
-			marker++;
-			spaces++;
+/** Mark code spans and all inline ancestors without recursive call-stack use. */
+function findInlineCodeBranches(tokens: readonly Token[]): WeakSet<object> {
+	const codeBranches = new WeakSet<object>();
+	const pending: Array<{ token: Token; visited: boolean }> = [];
+	for (let index = tokens.length - 1; index >= 0; index--) {
+		pending.push({ token: tokens[index], visited: false });
+	}
+	while (pending.length > 0) {
+		const entry = pending.pop()!;
+		const children = tokenChildren(entry.token);
+		if (!entry.visited && children.length > 0) {
+			pending.push({ token: entry.token, visited: true });
+			for (let index = children.length - 1; index >= 0; index--) {
+				pending.push({ token: children[index], visited: false });
+			}
+			continue;
 		}
-		if (line[marker] !== ">") break;
-		offset = marker + 1;
-		if (line[offset] === " " || line[offset] === "\t") offset++;
-		depth++;
-	}
-	return { depth, offset };
-}
-
-/** Consume exactly the outer quote containers of an already-open fence. */
-function consumeRequiredQuotePrefix(
-	line: string,
-	depth: number,
-): number | undefined {
-	let offset = 0;
-	for (let i = 0; i < depth; i++) {
-		let marker = offset;
-		let spaces = 0;
-		while (spaces < 3 && line[marker] === " ") {
-			marker++;
-			spaces++;
+		if (
+			entry.token.type === "codespan" ||
+			children.some((child) => codeBranches.has(child))
+		) {
+			codeBranches.add(entry.token);
 		}
-		if (line[marker] !== ">") return undefined;
-		offset = marker + 1;
-		if (line[offset] === " " || line[offset] === "\t") offset++;
 	}
-	return offset;
+	return codeBranches;
 }
 
-function sourceColumns(text: string, start: number, end: number): number {
-	let columns = 0;
-	for (let i = start; i < end; i++) {
-		if (text[i] === "\t") columns += 4 - (columns % 4);
-		else columns++;
-	}
-	return columns;
+interface InlineSequenceFrame {
+	tokens: readonly Token[];
+	parent: MappedSource;
+	cursor: number;
+	index: number;
 }
 
-/** Consume at least `required` indentation columns, returning the source offset. */
-function consumeIndentation(
+/** Align inline descendants with explicit frames, preserving wrapper scopes. */
+function collectInlineCodeRanges(
+	tokens: readonly Token[],
+	branches: WeakSet<object>,
+	parent: MappedSource,
+	ranges: SourceRange[],
+): boolean {
+	const frames: InlineSequenceFrame[] = [
+		{ tokens, parent, cursor: 0, index: 0 },
+	];
+	while (frames.length > 0) {
+		const frame = frames[frames.length - 1];
+		if (frame.index === frame.tokens.length) {
+			frames.pop();
+			continue;
+		}
+		const token = frame.tokens[frame.index++];
+		const containsCode = branches.has(token);
+		const alignment = alignRawSource(
+			token.raw,
+			frame.parent,
+			frame.cursor,
+			containsCode,
+		);
+		if (!alignment) return false;
+		frame.cursor = alignment.next;
+		if (!containsCode) continue;
+		if (token.type === "codespan") {
+			appendMappedRange(ranges, alignment.source!);
+			continue;
+		}
+		const children = tokenChildren(token);
+		frames.push({
+			tokens: children,
+			parent: alignment.source!,
+			cursor: 0,
+			index: 0,
+		});
+	}
+	return true;
+}
+
+interface BlockLeafCodeInfo {
+	token: Token;
+	inlineTokens: Token[];
+	inlineBranches: WeakSet<object>;
+	containsCode: boolean;
+}
+
+function blockLeafCodeInfo(token: Token): BlockLeafCodeInfo {
+	const inlineTokens = inlineTokensForLeaf(token);
+	const inlineBranches = findInlineCodeBranches(inlineTokens);
+	return {
+		token,
+		inlineTokens,
+		inlineBranches,
+		containsCode:
+			token.type === "code" ||
+			inlineTokens.some((inlineToken) => inlineBranches.has(inlineToken)),
+	};
+}
+
+function collectCodeRangesFromLeaves(
+	leaves: readonly BlockLeafCodeInfo[],
+	source: MappedSource,
+	ranges: SourceRange[],
+): boolean {
+	let cursor = 0;
+	for (const leaf of leaves) {
+		const alignment = alignRawSource(
+			leaf.token.raw,
+			source,
+			cursor,
+			leaf.containsCode,
+		);
+		if (!alignment) return false;
+		cursor = alignment.next;
+		if (!leaf.containsCode) continue;
+		if (leaf.token.type === "code") {
+			appendMappedRange(ranges, alignment.source!);
+		} else if (
+			!collectInlineCodeRanges(
+				leaf.inlineTokens,
+				leaf.inlineBranches,
+				alignment.source!,
+				ranges,
+			)
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function scanMarkedCodeRanges(source: MappedSource): SourceRange[] {
+	const leaves = collectBlockLeaves(
+		marked.lexer(source.text, { async: false }),
+	).map(blockLeafCodeInfo);
+	if (!leaves.some((leaf) => leaf.containsCode)) return [];
+	const ranges: SourceRange[] = [];
+	if (!collectCodeRangesFromLeaves(leaves, source, ranges)) {
+		appendMappedRange(ranges, source);
+	}
+	return ranges;
+}
+
+interface NormalizedRange extends SourceRange {
+	original: SourceRange;
+}
+
+function lineEnd(text: string, start: number): { contentEnd: number; end: number } {
+	const newline = text.indexOf("\n", start);
+	return newline === -1
+		? { contentEnd: text.length, end: text.length }
+		: { contentEnd: newline, end: newline + 1 };
+}
+
+function indentationEnd(
 	text: string,
 	start: number,
-	required: number,
+	end: number,
+	requiredColumns: number,
 ): number | undefined {
-	let columns = 0;
 	let offset = start;
-	while (offset < text.length && columns < required) {
+	let columns = 0;
+	while (offset < end && columns < requiredColumns) {
 		if (text[offset] === " ") columns++;
 		else if (text[offset] === "\t") columns += 4 - (columns % 4);
 		else return undefined;
 		offset++;
 	}
-	return columns >= required ? offset : undefined;
-}
-
-interface ListMarker {
-	contentOffset: number;
-}
-
-/** Find a bullet/ordered-list marker at a container content boundary. */
-function findListMarker(line: string, offset: number): ListMarker | undefined {
-	const match = /^( {0,3})(?:[*+-]|\d{1,9}[.)])([ \t]+)/.exec(
-		line.slice(offset),
-	);
-	if (!match) return undefined;
-	return { contentOffset: offset + match[0].length };
-}
-
-interface ListContext {
-	quoteDepth: number;
-	/** Content indentation relative to the end of the quote prefix. */
-	indentColumns: number;
-}
-
-interface FenceState {
-	start: number;
-	char: string;
-	length: number;
-	quoteDepth: number;
-	listIndentColumns: number;
-}
-
-interface FenceOpeningContext {
-	contentOffset: number;
-	listContext?: ListContext;
+	return columns >= requiredColumns ? offset : undefined;
 }
 
 /**
- * Locate possible fence content on a prose line while tracking the common list
- * forms that put a fence after a marker or on an indented continuation line.
+ * Marked recursively tokenizes list items and can exhaust the JS stack on an
+ * adversarial same-line list depth. Detect only that overflow shape with an
+ * iterative fence scanner, then mask it before a second Marked pass. Normal
+ * Markdown always stays on Marked's maintained lexer path.
  */
-function fenceOpeningContext(
-	line: string,
-	quote: QuotePrefix,
-	previousList?: ListContext,
-): FenceOpeningContext {
-	let listContext =
-		previousList?.quoteDepth === quote.depth ? previousList : undefined;
-	let contentOffset = quote.offset;
-	let marker = findListMarker(line, quote.offset);
-
-	if (marker) {
-		contentOffset = marker.contentOffset;
-		listContext = {
-			quoteDepth: quote.depth,
-			indentColumns: sourceColumns(line, quote.offset, contentOffset),
-		};
-	} else if (listContext) {
-		const continuation = consumeIndentation(
-			line,
-			quote.offset,
-			listContext.indentColumns,
-		);
-		if (continuation === undefined) {
-			listContext = undefined;
-		} else {
-			contentOffset = continuation;
-		}
-	}
-
-	// Handle common nested-list prefixes on the same line/continuation.
-	while ((marker = findListMarker(line, contentOffset)) !== undefined) {
-		contentOffset = marker.contentOffset;
-		listContext = {
-			quoteDepth: quote.depth,
-			indentColumns: sourceColumns(line, quote.offset, contentOffset),
-		};
-	}
-
-	return { contentOffset, listContext };
-}
-
-function parseFenceOpening(
-	line: string,
-	contentOffset: number,
-): { char: string; length: number } | undefined {
-	const opening = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line.slice(contentOffset));
-	if (!opening) return undefined;
-	const delimiter = opening[2];
-	const info = opening[3];
-	// CommonMark does not allow a backtick in a backtick fence's info string.
-	if (delimiter[0] === "`" && info.includes("`")) return undefined;
-	return { char: delimiter[0], length: delimiter.length };
-}
-
-/** Return the literal-content offset, or undefined when a container ended. */
-function fenceContentOffset(
-	line: string,
-	fence: FenceState,
-): number | undefined {
-	// A markerless blank line cannot expose a mention and may sit between quoted
-	// container lines, so retaining it avoids prematurely splitting the range.
-	if (/^[ \t]*$/.test(line)) return line.length;
-	const quoteOffset = consumeRequiredQuotePrefix(line, fence.quoteDepth);
-	if (quoteOffset === undefined) return undefined;
-	if (fence.listIndentColumns === 0) return quoteOffset;
-	return consumeIndentation(line, quoteOffset, fence.listIndentColumns);
-}
-
-/** Find fenced code, including container-scoped and unterminated fences. */
-function scanFencedCodeRanges(text: string): SourceRange[] {
-	const ranges: SourceRange[] = [];
-	const lines = scanSourceLines(text);
-	let fence: FenceState | undefined;
-	let listContext: ListContext | undefined;
-
-	for (const sourceLine of lines) {
-		const line = text.slice(sourceLine.start, sourceLine.contentEnd);
-
-		if (fence) {
-			const contentOffset = fenceContentOffset(line, fence);
+function scanDeepListFenceRanges(source: MappedSource): NormalizedRange[] {
+	const ranges: NormalizedRange[] = [];
+	let open:
+		| { start: number; char: string; length: number; indentColumns: number }
+		| undefined;
+	let lineStart = 0;
+	while (lineStart < source.text.length) {
+		const line = lineEnd(source.text, lineStart);
+		if (open) {
+			const contentOffset = indentationEnd(
+				source.text,
+				lineStart,
+				line.contentEnd,
+				open.indentColumns,
+			);
 			if (contentOffset !== undefined) {
-				const closing = /^( {0,3})(`{3,}|~{3,})[ \t]*$/.exec(
-					line.slice(contentOffset),
-				);
-				if (
-					closing &&
-					closing[2][0] === fence.char &&
-					closing[2].length >= fence.length
-				) {
-					ranges.push({ start: fence.start, end: sourceLine.end });
-					fence = undefined;
+				let offset = contentOffset;
+				let spaces = 0;
+				while (spaces < 3 && source.text[offset] === " ") {
+					offset++;
+					spaces++;
 				}
-				continue;
+				const delimiterStart = offset;
+				while (source.text[offset] === open.char) offset++;
+				if (
+					offset - delimiterStart >= open.length &&
+					/^[ \t]*$/.test(source.text.slice(offset, line.contentEnd))
+				) {
+					ranges.push({
+						start: open.start,
+						end: line.end,
+						original: {
+							start: source.starts[open.start],
+							end: source.ends[line.end - 1],
+						},
+					});
+					open = undefined;
+				}
 			}
-
-			// A block-quote/list container ended an otherwise unterminated fence.
-			ranges.push({ start: fence.start, end: sourceLine.start });
-			fence = undefined;
-		}
-
-		const quote = consumeQuotePrefix(line);
-		const openingContext = fenceOpeningContext(line, quote, listContext);
-		listContext = /^[ \t]*$/.test(line)
-			? listContext
-			: openingContext.listContext;
-		const opening = parseFenceOpening(line, openingContext.contentOffset);
-		if (opening) {
-			fence = {
-				start: sourceLine.start,
-				char: opening.char,
-				length: opening.length,
-				quoteDepth: quote.depth,
-				listIndentColumns: openingContext.listContext?.indentColumns ?? 0,
-			};
-		}
-	}
-
-	if (fence) ranges.push({ start: fence.start, end: text.length });
-	return ranges;
-}
-
-function isEscapedBacktickRun(text: string, start: number): boolean {
-	let backslashes = 0;
-	for (let i = start - 1; i >= 0 && text[i] === "\\"; i--) backslashes++;
-	return backslashes % 2 === 1;
-}
-
-/** Pair inline delimiters only inside one Markdown inline block. */
-function scanInlineBlock(text: string, block: SourceRange): SourceRange[] {
-	const runs: Array<SourceRange & { length: number }> = [];
-	let cursor = block.start;
-	while (cursor < block.end) {
-		const start = text.indexOf("`", cursor);
-		if (start === -1 || start >= block.end) break;
-		let end = start + 1;
-		while (end < block.end && text[end] === "`") end++;
-		if (!isEscapedBacktickRun(text, start)) {
-			runs.push({ start, end, length: end - start });
-		}
-		cursor = end;
-	}
-
-	// Pair each opening run with the next maximal run of exactly the same
-	// length. Precomputing the next equal run keeps adversarial input linear.
-	const nextEqual = new Array<number>(runs.length).fill(-1);
-	const nextByLength = new Map<number, number>();
-	for (let i = runs.length - 1; i >= 0; i--) {
-		nextEqual[i] = nextByLength.get(runs[i].length) ?? -1;
-		nextByLength.set(runs[i].length, i);
-	}
-
-	const ranges: SourceRange[] = [];
-	let runIndex = 0;
-	while (runIndex < runs.length) {
-		const closingIndex = nextEqual[runIndex];
-		if (closingIndex === -1) {
-			runIndex++;
+			lineStart = line.end;
 			continue;
 		}
-		ranges.push({ start: runs[runIndex].start, end: runs[closingIndex].end });
-		runIndex = closingIndex + 1;
+
+		let offset = lineStart;
+		let columns = 0;
+		let markers = 0;
+		while (offset < line.contentEnd) {
+			const markerStart = offset;
+			let leadingSpaces = 0;
+			while (
+				leadingSpaces < 3 &&
+				source.text[offset] === " "
+			) {
+				offset++;
+				columns++;
+				leadingSpaces++;
+			}
+			if (source.text[offset] === "*" || source.text[offset] === "+" || source.text[offset] === "-") {
+				offset++;
+				columns++;
+			} else {
+				let digits = 0;
+				while (digits < 9 && /[0-9]/.test(source.text[offset] ?? "")) {
+					offset++;
+					columns++;
+					digits++;
+				}
+				if (
+					digits === 0 ||
+					(source.text[offset] !== "." && source.text[offset] !== ")")
+				) {
+					offset = markerStart;
+					break;
+				}
+				offset++;
+				columns++;
+			}
+			if (source.text[offset] !== " " && source.text[offset] !== "\t") {
+				offset = markerStart;
+				break;
+			}
+			while (source.text[offset] === " " || source.text[offset] === "\t") {
+				if (source.text[offset] === " ") columns++;
+				else columns += 4 - (columns % 4);
+				offset++;
+			}
+			markers++;
+		}
+		if (markers >= 256) {
+			let fenceOffset = offset;
+			let spaces = 0;
+			while (spaces < 3 && source.text[fenceOffset] === " ") {
+				fenceOffset++;
+				spaces++;
+			}
+			const char = source.text[fenceOffset];
+			if (char === "`" || char === "~") {
+				let delimiterEnd = fenceOffset;
+				while (source.text[delimiterEnd] === char) delimiterEnd++;
+				const length = delimiterEnd - fenceOffset;
+				const info = source.text.slice(delimiterEnd, line.contentEnd);
+				if (length >= 3 && (char !== "`" || !info.includes("`"))) {
+					open = { start: lineStart, char, length, indentColumns: columns };
+				}
+			}
+		}
+		lineStart = line.end;
+	}
+	if (open) {
+		ranges.push({
+			start: open.start,
+			end: source.text.length,
+			original: {
+				start: source.starts[open.start],
+				end: source.ends[source.ends.length - 1],
+			},
+		});
 	}
 	return ranges;
 }
 
-interface InlineLineContext {
-	blank: boolean;
-	quoteDepth: number;
-	startsListItem: boolean;
-	standaloneBlock: boolean;
-}
-
-function inlineLineContext(line: string): InlineLineContext {
-	const quote = consumeQuotePrefix(line);
-	const content = line.slice(quote.offset);
-	const blank = /^[ \t]*$/.test(content);
-	const startsListItem = findListMarker(line, quote.offset) !== undefined;
-	const standaloneBlock =
-		/^( {0,3})#{1,6}(?:[ \t]+|$)/.test(content) ||
-		/^( {0,3})(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(
-			content,
-		) ||
-		/^( {0,3})(?:=+|-+)[ \t]*$/.test(content);
-	return { blank, quoteDepth: quote.depth, startsListItem, standaloneBlock };
+function mergeOrderedRanges(
+	left: readonly SourceRange[],
+	right: readonly SourceRange[],
+): SourceRange[] {
+	const merged: SourceRange[] = [];
+	let leftIndex = 0;
+	let rightIndex = 0;
+	while (leftIndex < left.length || rightIndex < right.length) {
+		const next =
+			rightIndex >= right.length ||
+			(leftIndex < left.length && left[leftIndex].start <= right[rightIndex].start)
+				? left[leftIndex++]
+				: right[rightIndex++];
+		appendRange(merged, next);
+	}
+	return merged;
 }
 
 /**
- * Split non-fenced source into Markdown inline blocks. Blank lines, distinct
- * list items, quote-container changes, and line-level blocks are hard
- * boundaries, so unmatched delimiters cannot pair across unrelated blocks.
+ * Find Markdown code ranges using Marked's maintained block/inline lexer.
+ * Marked supplies faithful fence-container, leaf-block, ordered-list
+ * interruption, and code-span semantics; raw-token alignment preserves exact
+ * indices without rewriting the prompt or sorting the resulting ranges.
  */
-function scanInlineCodeRanges(
-	text: string,
-	segmentStart: number,
-	segmentEnd: number,
-): SourceRange[] {
-	const blocks: SourceRange[] = [];
-	let blockStart: number | undefined;
-	let blockEnd = segmentStart;
-	let quoteDepth = 0;
-
-	const flush = () => {
-		if (blockStart !== undefined)
-			blocks.push({ start: blockStart, end: blockEnd });
-		blockStart = undefined;
-	};
-
-	for (const sourceLine of scanSourceLines(text, segmentStart, segmentEnd)) {
-		const line = text.slice(sourceLine.start, sourceLine.contentEnd);
-		const context = inlineLineContext(line);
-		if (context.blank) {
-			flush();
-			continue;
-		}
-
-		const startsNewBlock =
-			blockStart !== undefined &&
-			(context.startsListItem ||
-				context.standaloneBlock ||
-				context.quoteDepth !== quoteDepth);
-		if (startsNewBlock) flush();
-		if (blockStart === undefined) {
-			blockStart = sourceLine.start;
-			quoteDepth = context.quoteDepth;
-		}
-		blockEnd = sourceLine.end;
-		if (context.standaloneBlock) flush();
-	}
-	flush();
-
-	return blocks.flatMap((block) => scanInlineBlock(text, block));
-}
-
-/** Find source ranges in which file-mention candidates must stay verbatim. */
 function scanMarkdownCodeRanges(text: string): SourceRange[] {
-	const fenced = scanFencedCodeRanges(text);
-	const inline: SourceRange[] = [];
-	let segmentStart = 0;
-	for (const fence of fenced) {
-		inline.push(...scanInlineCodeRanges(text, segmentStart, fence.start));
-		segmentStart = fence.end;
+	if (text.length === 0) return [];
+	const source = normalizeMarkdownSource(text);
+	try {
+		return scanMarkedCodeRanges(source);
+	} catch (error) {
+		if (error instanceof RangeError) {
+			const deepFences = scanDeepListFenceRanges(source);
+			if (deepFences.length > 0) {
+				const masked = source.text.split("");
+				for (const range of deepFences) {
+					for (let index = range.start; index < range.end; index++) {
+						if (masked[index] !== "\n") masked[index] = " ";
+					}
+				}
+				try {
+					const outsideRanges = scanMarkedCodeRanges({
+						text: masked.join(""),
+						starts: source.starts,
+						ends: source.ends,
+					});
+					return mergeOrderedRanges(
+						deepFences.map((range) => range.original),
+						outsideRanges,
+					);
+				} catch {
+					return deepFences.map((range) => range.original);
+				}
+			}
+		}
+		// The resolver must never throw. Fail closed so parser failures cannot
+		// turn code-contained paths into filesystem reads.
+		const ranges: SourceRange[] = [];
+		appendMappedRange(ranges, source);
+		return ranges;
 	}
-	inline.push(...scanInlineCodeRanges(text, segmentStart, text.length));
-	return [...fenced, ...inline].sort((a, b) => a.start - b.start);
 }
 
 /** Scan prose for `@path` tokens while preserving original UTF-16 indices. */
