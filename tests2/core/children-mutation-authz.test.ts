@@ -17,8 +17,9 @@
  * Mutations are split into two CLASSES (blast-radius reduction):
  *
  *   ORCHESTRATION (spawn-child, plan PATCH, integrate-child, policy) — the
- *   cookie does NOT bypass (it is mintable by any holder of the shared admin
- *   Bearer token). Authentic-team-lead-only:
+ *   cookie does NOT bypass. A shared-admin-token holder can obtain one through
+ *   an eligible browser request, whose metadata is not an identity boundary.
+ *   Authentic-team-lead-only:
  *     - no authentic caller (no/unknown secret) → DENY (no-authentic-caller)
  *     - authentic caller, no team-lead known    → DENY (no-team-lead)
  *     - authentic caller == team-lead           → ALLOW (team-lead-match)
@@ -100,8 +101,8 @@ describe("authorizeChildrenMutation (S1) — ORCHESTRATION class (cookie does NO
 	const mutationClass: ChildrenMutationClass = "orchestration";
 
 	it("IGNORES a verified human cookie — a cookie-only caller with no secret is denied", () => {
-		// The cookie is mintable by any holder of the shared admin token, so it
-		// must NOT bypass an orchestration (team-lead-only) mutation.
+		// Browser-signaled issuance does not prove a human identity, so the signed
+		// cookie must NOT bypass an orchestration (team-lead-only) mutation.
 		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: true, authenticCallerSessionId: undefined, teamLeadSessionId: "tl-1" });
 		assert.equal(r.ok, false);
 		assert.equal(!r.ok && r.reason, "no-authentic-caller");

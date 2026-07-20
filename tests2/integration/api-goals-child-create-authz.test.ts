@@ -9,7 +9,7 @@
  * goal and bypass the Children tool policy + per-session secret binding.
  *
  * This is an OPERATOR-class verb (see `src/server/auth/children-mutation-authz.ts`):
- *   - a verified human `bobbit_session` cookie is accepted (proposal-UI path), and
+ *   - a verified stateless signed `bobbit_session` cookie is accepted (proposal-UI path), and
  *   - otherwise the AUTHENTIC caller (derived server-side from the unforgeable
  *     per-session `X-Bobbit-Session-Secret`) must match the team-lead of the
  *     parent's ROOT goal.
@@ -31,9 +31,24 @@ import {
 // The in-process gateway (worker-scoped) — needed to seed a team-lead + its
 // capability secret for the authentic-team-lead allow path.
 let gw: any;
+let humanCookie = "";
 test.beforeAll(async ({ gateway }) => {
 	gw = gateway;
+	// Cookie bootstrap models a same-origin browser API request. Fetch Metadata
+	// classifies issuance eligibility; the valid Bearer remains the authority.
+	const probe = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
+		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
+	humanCookie = setCookies.map((cookie) => cookie.split(";")[0])
+		.find((cookie) => cookie.startsWith("bobbit_session=")) ?? "";
+	expect(humanCookie, "browser-signaled Bearer auth must mint a signed bobbit_session cookie").not.toBe("");
 });
+
+function humanHeaders(): Record<string, string> {
+	return { Cookie: humanCookie };
+}
 
 const CHILD_SPEC =
 	"Child goal for the POST /api/goals Children-authz E2E — padded to satisfy the spec minimum length validator.";
@@ -44,6 +59,7 @@ const PARENT_SPEC =
 async function createParent(): Promise<string> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
+		headers: humanHeaders(),
 		body: JSON.stringify({
 			title: `child-authz parent ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 			cwd: nonGitCwd(),
@@ -78,8 +94,8 @@ test.describe("POST /api/goals child-creation Children authz (S1)", () => {
 	test("agent without cookie or secret → 403, nothing created @smoke", async () => {
 		const parentId = await createParent();
 		try {
-			// rawApiFetch carries only the shared Bearer token — no cookie, no
-			// session secret — exactly the rogue/non-team-lead agent profile.
+			// rawApiFetch carries only the shared Bearer token — no cookie, browser
+			// signaling, or session secret — exactly the rogue/non-team-lead agent profile.
 			const resp = await rawApiFetch("/api/goals", {
 				method: "POST",
 				body: await childBody(parentId),
@@ -123,10 +139,11 @@ test.describe("POST /api/goals child-creation Children authz (S1)", () => {
 		const parentId = await createParent();
 		let childId: string | undefined;
 		try {
-			// apiFetch auto-injects the gateway-minted `bobbit_session` cookie for
-			// `POST /api/goals` (the human/proposal-UI operator path).
+			// Present the signed cookie bootstrapped by the browser-signaled request;
+			// no team-lead secret is needed on the human/proposal-UI operator path.
 			const resp = await apiFetch("/api/goals", {
 				method: "POST",
+				headers: humanHeaders(),
 				body: await childBody(parentId),
 			});
 			expect(resp.status).toBe(201);

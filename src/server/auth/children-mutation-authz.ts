@@ -6,12 +6,15 @@
  * Two authorization CLASSES — blast-radius reduction
  * ---------------------------------------------------
  * The original single policy keyed the human-operator signal off the
- * server-verified `bobbit_session` cookie (minted only on a successful Bearer
- * auth, never sent by agents). That closed the absent-header bypass, but the
- * cookie is still only a WEAK human signal: agents read the SHARED gateway
- * admin Bearer token off disk, and any holder of that token can mint a
- * `bobbit_session` cookie. A compromised/rogue agent could therefore forge the
- * cookie and drive ANY Children mutation on ANY goal.
+ * server-verified `bobbit_session` cookie. The gateway now issues that signed
+ * cookie only after successful admin Bearer or localhost-trusted auth on an
+ * eligible browser-signaled API request; normal session-bound agent traffic
+ * never receives it. That closed the absent-header bypass, but the cookie is
+ * still only a WEAK human signal: agents read the SHARED gateway admin Bearer
+ * token off disk, and any holder can deliberately send otherwise eligible
+ * browser metadata and obtain a `bobbit_session` cookie from the gateway.
+ * Browser headers are not a security boundary. A compromised/rogue agent could
+ * therefore obtain the cookie and drive ANY Children mutation on ANY goal.
  *
  * To shrink the blast radius we split the mutations into two classes:
  *
@@ -24,8 +27,9 @@
  *     pause/resume and `children-mutation-approval`'s decision POST). We
  *     therefore require the AUTHENTIC caller session (see below) to match the
  *     goal's team-lead, and IGNORE the cookie entirely: the cookie does NOT
- *     bypass an orchestration check. A forged cookie can no longer spawn
- *     children, mutate plans, integrate branches, or change policy.
+ *     bypass an orchestration check. A shared-token holder's obtained cookie
+ *     can no longer spawn children, mutate plans, integrate branches, or change
+ *     policy.
  *     Orchestration is refused on a missing/unknown secret, a teamless goal, or
  *     a non-team-lead caller.
  *
@@ -58,9 +62,11 @@
  *
  * RESIDUAL RISK (documented, accepted, future work)
  * --------------------------------------------------
- * The OPERATOR endpoints still trust the shared admin Bearer token: any holder
- * of that token can mint the `bobbit_session` cookie and therefore drive the
- * operator verbs. This is an INHERENT property of Bobbit's current single
+ * The OPERATOR endpoints still indirectly trust the shared admin Bearer token:
+ * any holder can make an otherwise eligible browser-shaped request, obtain a
+ * gateway-signed `bobbit_session` cookie, and then drive the operator verbs.
+ * Fetch Metadata and Origin only classify issuance traffic; they do not prove a
+ * human caller. This is an INHERENT property of Bobbit's current single
  * shared-credential model — agents and the human operate the gateway with the
  * same token, so there is no cryptographic way to tell a human operator apart
  * from a token-holding agent on the cookie path. FULL separation requires a
@@ -117,12 +123,13 @@ export interface ChildrenMutationAuthzInput {
 	 */
 	mutationClass: ChildrenMutationClass;
 	/**
-	 * True when the request carries a server-verified `bobbit_session` cookie
-	 * (computed via `cookieTryAuth(req, cookieStore)` at the call site). This
-	 * is the human-operator/UI signal — agents never carry the cookie. It is
-	 * honoured ONLY for the `operator` class; the `orchestration` class ignores
-	 * it because the cookie is mintable by any holder of the shared admin
-	 * Bearer token (a weak human signal — see the module header).
+	 * True when the request carries a server-verified signed `bobbit_session`
+	 * cookie (computed via `cookieTryAuth(req, cookieStore)` at the call site).
+	 * This is the weak human-operator/UI signal — normal agent traffic never
+	 * receives the cookie, but a shared-admin-token holder can deliberately make
+	 * an eligible browser-shaped request and obtain one. It is honoured ONLY for
+	 * the `operator` class; the `orchestration` class ignores it (see the module
+	 * header).
 	 */
 	isHumanOperator: boolean;
 	/**
@@ -157,10 +164,11 @@ export function authorizeChildrenMutation(
 	input: ChildrenMutationAuthzInput,
 ): ChildrenMutationAuthzResult {
 	// 1. OPERATOR class only: a verified human/UI cookie is allowed. Gateway
-	//    auth is checked upstream and agents never carry this cookie. The
-	//    ORCHESTRATION class deliberately skips this branch — the cookie is
-	//    mintable by any holder of the shared admin token, so it must not
-	//    bypass an orchestration (team-lead-only) mutation.
+	//    auth is checked upstream and normal agent traffic never receives this
+	//    cookie. The ORCHESTRATION class deliberately skips this branch — a
+	//    shared-admin-token holder can obtain a signed cookie by deliberately
+	//    making an eligible browser-shaped request, so it must not bypass an
+	//    orchestration (team-lead-only) mutation.
 	if (input.mutationClass === "operator" && input.isHumanOperator) {
 		return { ok: true, reason: "human-cookie" };
 	}

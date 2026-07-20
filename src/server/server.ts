@@ -16,6 +16,7 @@ import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
 import {
 	bobbitStateDir,
+	serverSecretsDir,
 	bobbitConfigDir,
 	bobbitDir,
 	headquartersDir,
@@ -514,7 +515,9 @@ import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.j
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
-import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
+import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
+import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
+import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
@@ -1989,7 +1992,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	ck("getPackStore");
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
-	const cookieStore = new CookieStore(stateDir);
+	const cookieSigningKey = loadOrCreateCookieSigningKey(serverSecretsDir());
+	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
@@ -2620,12 +2624,34 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Public endpoints — no auth required (CA cert is inherently public).
 			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
 
-			// Cookie auth short-circuit — if the browser presents a known
-			// bobbit_session cookie, treat the request as admin-authenticated
-			// and skip the bearer-token check below.
-			const hasValidCookie = cookieTryAuth(req, cookieStore);
+			// Extract and verify the signed cookie exactly once in the global auth
+			// flow. The verification result also carries the renewal decision.
+			const cookieValue = extractCookieValue(req);
+			const cookieVerification = cookieValue === undefined ? undefined : cookieStore.verify(cookieValue);
+			const hasValidCookie = cookieVerification !== undefined;
+			let authentication: BrowserCookieAuthentication = cookieVerification
+				? { source: "signed-cookie", needsRenewal: cookieVerification.needsRenewal }
+				: { source: "other" };
 
-			// Auth check — skipped in localhost mode (only local processes can connect)
+			// Inspect every presented Bearer/query credential for sandbox identity,
+			// independently of which credential wins the existing auth precedence.
+			// This prevents an admin Bearer plus sandbox query token from minting.
+			const presentedBearerTokens: string[] = [];
+			for (let i = 0; i < req.rawHeaders.length; i += 2) {
+				if (req.rawHeaders[i]?.toLowerCase() !== "authorization") continue;
+				const value = req.rawHeaders[i + 1];
+				if (value?.startsWith("Bearer ")) presentedBearerTokens.push(value.slice(7));
+			}
+			if (presentedBearerTokens.length === 0) {
+				const authorization = req.headers.authorization;
+				if (authorization?.startsWith("Bearer ")) presentedBearerTokens.push(authorization.slice(7));
+			}
+			const presentedTokens = [...presentedBearerTokens, ...url.searchParams.getAll("token")];
+			const hasSandboxCredential = presentedTokens.some((token) => sandboxTokenStore.lookup(token) !== undefined);
+
+			// Auth check — skipped in localhost mode (only local processes can connect).
+			// Signed-cookie auth retains precedence over any simultaneously presented
+			// credential, matching the previous short-circuit behavior.
 			let sandboxScope: SandboxScope | undefined;
 			if (!isLocalhostMode && !isPublicEndpoint && !hasValidCookie) {
 				const authHeader = req.headers.authorization;
@@ -2645,7 +2671,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					return;
 				}
 
-				// Admin token first, then sandbox token
+				// Admin token first, then sandbox token.
 				if (!validateToken(token, config.authToken)) {
 					const scope = sandboxTokenStore.lookup(token);
 					if (!scope) {
@@ -2656,16 +2682,28 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					}
 					sandboxScope = scope;
 				} else {
-					// Successful admin Bearer auth — mint session cookie if absent
-					// so subsequent requests (including iframe content origin) can
-					// authenticate without the Bearer token leaking into URLs.
-					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode });
+					authentication = { source: "admin-bearer" };
 				}
-			} else if (!isPublicEndpoint && isLocalhostMode) {
-				// Localhost mode: skip auth check, still mint the cookie so the
-				// browser can use the same cookie auth path on non-localhost
-				// deployments later (and the SSE endpoint below remains uniform).
-				issueCookieIfMissing(req, res, cookieStore, { localhost: true });
+			} else if (!isPublicEndpoint && isLocalhostMode && !hasValidCookie) {
+				authentication = { source: "localhost-trusted" };
+			}
+
+			if (!isPublicEndpoint) {
+				const isTls = Boolean((req.socket as { encrypted?: boolean }).encrypted);
+				const cookieEligibility = classifyBrowserCookieEligibility({
+					method: req.method,
+					pathname: url.pathname,
+					headers: req.headers,
+					isTls,
+				}, {
+					deployment: config.staticDir ? "direct" : "vite",
+					configuredHost: config.host,
+					authentication,
+					hasSandboxCredential,
+				});
+				if (cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) {
+					issueCookie(res, cookieStore, { localhost: isLocalhostMode && !isTls });
+				}
 			}
 
 			// Enforce sandbox route guard
@@ -13745,8 +13783,9 @@ async function handleApiRoute(
 	// way the spawned pi-coding-agent runtime obtains credentials for
 	// google-gemini-cli session models, so it can refresh per request instead of
 	// relying on a stale env-only token. Never returns the OAuth refresh token.
-	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/google-code-assist/token')) {
-		const id = url.pathname.split('/')[3];
+	const googleCodeAssistTokenMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/google-code-assist\/token$/);
+	if (req.method === 'GET' && googleCodeAssistTokenMatch) {
+		const id = googleCodeAssistTokenMatch[1];
 		const session = sessionManager.getSession(id);
 		if (!session) {
 			json({ error: "Session not found" }, 404);

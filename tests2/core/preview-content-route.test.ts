@@ -19,7 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { handlePreviewRequest, pickEntry } from "../../src/server/preview/content-route.ts";
-import { COOKIE_NAME, type CookieStore } from "../../src/server/auth/cookie.ts";
+import { COOKIE_NAME, CookieStore } from "../../src/server/auth/cookie.ts";
 import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
 // `mountDir(sid)` reads BOBBIT_DIR on demand, so one immutable in-memory tree
@@ -136,15 +136,7 @@ function bodyText(res: FakeRes): string {
 }
 
 function memoryCookieStore(): CookieStore {
-	const values = new Set<string>();
-	return {
-		mint() {
-			const value = "a".repeat(64);
-			values.add(value);
-			return value;
-		},
-		verify(value: string) { return values.has(value); },
-	} as CookieStore;
+	return new CookieStore(Buffer.alloc(32, 0x50));
 }
 
 function makeOpts(localhost: boolean) {
