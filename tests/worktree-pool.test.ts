@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { WorktreePool, isPoolBranch } from "../src/server/agent/worktree-pool.ts";
 import type { Component } from "../src/server/agent/project-config-store.ts";
+import type { CommandRunner, ExecFileResult } from "../src/server/gateway-deps.ts";
 import { makeTmpDir } from "./helpers/tmp.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,6 +48,24 @@ async function initGitRepo(dir: string): Promise<void> {
 	await execFile("git", ["config", "user.email", "test@test"], { cwd: dir });
 	await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
 	await execFile("git", ["commit", "--allow-empty", "-m", "init"], { cwd: dir });
+}
+
+function deferred<T>(): {
+	promise: Promise<T>;
+	resolve: (value: T | PromiseLike<T>) => void;
+	reject: (reason?: unknown) => void;
+} {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+async function yieldToEventLoop(): Promise<void> {
+	await new Promise<void>(resolve => setImmediate(resolve));
 }
 
 describe("WorktreePool — Phase 3 claim sequence", () => {
@@ -661,6 +680,68 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 		} finally {
 			await rmRepo(repo);
 		}
+	});
+
+	it("stop() waits for a foreground claim mutation", async () => {
+		const branchRename = deferred<ExecFileResult>();
+		let branchRenameStarted = false;
+		const commandRunner: CommandRunner = {
+			execFile: async (_file, args) => {
+				if (args[0] === "branch" && args[1] === "-m" && !branchRenameStarted) {
+					branchRenameStarted = true;
+					return await branchRename.promise;
+				}
+				return { stdout: "", stderr: "" };
+			},
+		};
+		const pool = new WorktreePool({ repoPath: path.resolve("virtual-pool-repo"), targetSize: 0, commandRunner });
+		pool.registerExternalEntry("pool/_pool-deferred", path.resolve("virtual-pool-wt", "pool-_pool-deferred"));
+
+		const claiming = pool.claim("session/deferred1");
+		assert.equal(branchRenameStarted, true, "claim should reach the deferred Git mutation");
+		let stopSettled = false;
+		const stopping = pool.stop().then(() => { stopSettled = true; });
+		await yieldToEventLoop();
+		assert.equal(stopSettled, false, "stop must remain pending while the foreground claim mutates Git");
+
+		branchRename.resolve({ stdout: "", stderr: "" });
+		const claimed = await claiming;
+		assert.ok(claimed, "claim semantics should remain successful after the deferred rename resumes");
+		await stopping;
+		assert.equal(stopSettled, true);
+	});
+
+	it("drain() waits for deferred failure cleanup scheduled by claim", async () => {
+		const cleanup = deferred<void>();
+		let cleanupStarted = false;
+		const commandRunner: CommandRunner = {
+			execFile: async () => { throw new Error("deferred claim failure"); },
+		};
+		const pool = new WorktreePool({
+			repoPath: path.resolve("virtual-pool-repo"),
+			targetSize: 0,
+			commandRunner,
+			cleanupWorktreeImpl: async () => {
+				cleanupStarted = true;
+				await cleanup.promise;
+			},
+		});
+		pool.registerExternalEntry("pool/_pool-cleanup", path.resolve("virtual-pool-wt", "pool-_pool-cleanup"));
+
+		const claimed = await pool.claim("session/fallback1");
+		assert.equal(claimed, null, "claim failure should preserve the cold-create fallback");
+		await yieldToEventLoop();
+		assert.equal(cleanupStarted, true, "claim failure should start best-effort cleanup");
+
+		let drainSettled = false;
+		const draining = pool.drain().then(() => { drainSettled = true; });
+		await yieldToEventLoop();
+		assert.equal(drainSettled, false, "drain must remain pending while failure cleanup mutates the worktree");
+
+		cleanup.resolve(undefined);
+		await draining;
+		assert.equal(drainSettled, true);
+		assert.equal(pool.size, 0);
 	});
 
 	it("drain() is idempotent and safe on a pool that never started", async () => {
