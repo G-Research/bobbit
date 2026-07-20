@@ -30,9 +30,8 @@
  *                   aggregate cap / beyond the mention-count cap. Literal
  *                   `@path` is left in `modelText`, with `reason` set.
  *       • genuinely missing targets are ordinary text and are omitted from
- *                   mentions and warnings. Admitted prompts degrade delivery
- *                   failures gracefully; oversized/adversarial inputs throw a
- *                   typed admission error so the caller rejects the whole send.
+ *                   mentions and warnings. Delivery failures for existing
+ *                   targets degrade gracefully without rejecting the prompt.
  *
  *   - **Snapshot at resolve time** — text content and image/binary base64
  *     bytes are captured now so replaying a `.jsonl` later renders the same
@@ -99,36 +98,12 @@ export const MAX_MENTION_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_MENTION_AGGREGATE_BYTES = 20 * 1024 * 1024; // 20 MiB
 /** Max existing `@path` targets resolved per send. Extra existing targets → unresolved (too-many-mentions). */
 export const MAX_MENTIONS_PER_SEND = 50;
-/** Fixed width of each resolver's asynchronous existence-classification pool. */
+/** Fixed width of each resolver's streaming existence-classification pool. */
 export const FILE_MENTION_PROBE_CONCURRENCY = 8;
-/** Maximum UTF-16 source length admitted when file-mention syntax is present. */
-export const MAX_FILE_MENTION_TEXT_CHARS = 1024 * 1024; // 1 Mi UTF-16 code units
-/** Maximum candidate tokens admitted before Markdown parsing or filesystem work. */
-export const MAX_FILE_MENTION_CANDIDATES = 512;
 /** Process-wide cap for resolver calls doing Markdown/filesystem work. */
 export const FILE_MENTION_RESOLUTION_CONCURRENCY = 4;
 /** Process-wide cap for in-flight lstat probes across every session. */
 export const FILE_MENTION_LSTAT_CONCURRENCY = 8;
-
-export type FileMentionResolutionLimitKind = "text-length" | "candidate-count";
-
-/** Explicit, protocol-safe rejection for resolver admission limits. */
-export class FileMentionResolutionLimitError extends Error {
-	readonly code = "FILE_MENTION_RESOLUTION_LIMIT";
-
-	constructor(
-		readonly limitKind: FileMentionResolutionLimitKind,
-		readonly limit: number,
-		readonly observed: number,
-	) {
-		super(
-			limitKind === "text-length"
-				? `File-mention source exceeds the ${limit}-character admission limit`
-				: `Prompt exceeds the ${limit}-candidate file-mention admission limit`,
-		);
-		this.name = "FileMentionResolutionLimitError";
-	}
-}
 
 // Module-global FIFO semaphores prevent independent sessions from multiplying
 // resolver/parser and metadata-probe concurrency. Each acquire is released in
@@ -969,82 +944,13 @@ function scanMarkdownCodeRanges(text: string): SourceRange[] {
 	}
 }
 
-const WHITESPACE_CODE_UNIT = /\s/;
-
-function isWhitespaceCodeUnit(value: string): boolean {
-	return WHITESPACE_CODE_UNIT.test(value);
-}
-
-/**
- * Count raw candidate syntax without constructing token objects or invoking
- * Markdown. Stops at `limit + 1`, so hostile inputs cannot make admission
- * allocate an unbounded candidate list before rejection.
- */
-function boundedCandidateCount(text: string, limit: number): number {
-	let count = 0;
-	let searchFrom = 0;
-	while (searchFrom < text.length) {
-		const tokenStart = text.indexOf("@", searchFrom);
-		if (tokenStart < 0) break;
-		searchFrom = tokenStart + 1;
-		if (tokenStart > 0 && !isWhitespaceCodeUnit(text[tokenStart - 1])) continue;
-		if (
-			searchFrom >= text.length ||
-			text[searchFrom] === "@" ||
-			isWhitespaceCodeUnit(text[searchFrom])
-		) continue;
-
-		let tokenEnd = searchFrom + 1;
-		while (
-			tokenEnd < text.length &&
-			text[tokenEnd] !== "@" &&
-			!isWhitespaceCodeUnit(text[tokenEnd])
-		) tokenEnd++;
-		let trimmedEnd = tokenEnd;
-		while (trimmedEnd > searchFrom && TRAILING_PUNCT.has(text[trimmedEnd - 1])) {
-			trimmedEnd--;
-		}
-		if (trimmedEnd > searchFrom) {
-			count++;
-			if (count > limit) return count;
-		}
-		searchFrom = tokenEnd;
-	}
-	return count;
-}
-
-/** Return whether resolver work is needed, throwing before parser/fs work. */
-function admitFileMentionSource(text: string): boolean {
-	if (!text.includes("@")) return false;
-	// Oversized ordinary text that merely contains a non-candidate @ remains
-	// ordinary text. Once real candidate syntax is present, reject explicitly.
-	const scanLimit = text.length > MAX_FILE_MENTION_TEXT_CHARS
-		? 0
-		: MAX_FILE_MENTION_CANDIDATES;
-	const candidateCount = boundedCandidateCount(text, scanLimit);
-	if (candidateCount === 0) return false;
-	if (text.length > MAX_FILE_MENTION_TEXT_CHARS) {
-		throw new FileMentionResolutionLimitError(
-			"text-length",
-			MAX_FILE_MENTION_TEXT_CHARS,
-			text.length,
-		);
-	}
-	if (candidateCount > MAX_FILE_MENTION_CANDIDATES) {
-		throw new FileMentionResolutionLimitError(
-			"candidate-count",
-			MAX_FILE_MENTION_CANDIDATES,
-			candidateCount,
-		);
-	}
-	return true;
-}
-
 const WINDOWS_DOS_DEVICE_SEGMENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?=$|[.:])/i;
 
-/** Windows network/device namespaces and reserved DOS devices are never
- * filesystem mention targets, regardless of the resolver host platform. */
+/** On Win32, network/device namespaces and reserved DOS devices are ordinary
+ * text rather than filesystem mention targets. POSIX has no such namespaces:
+ * double-slash absolute paths and names such as NUL must be classified there. */
 function isWindowsNamespaceToken(rawPath: string): boolean {
+	if (process.platform !== "win32") return false;
 	const normalized = rawPath.replace(/\\/g, "/");
 	if (normalized.startsWith("//") || normalized.startsWith("/??/")) return true;
 
@@ -1104,56 +1010,52 @@ function isMissingPathError(error: unknown): boolean {
 	return code === "ENOENT" || code === "ENOTDIR";
 }
 
-export type FileMentionTargetClassification = "exists" | "missing" | "unreadable";
+type FileMentionTargetClassification = "exists" | "missing" | "unreadable";
 
 /**
- * Classify each distinct lexical target with a small, fixed asynchronous
- * worker pool. The returned map is both the de-duplication cache and the
- * complete classification set: unlike a probe budget, it never silently
- * suppresses a later valid target. Map key order follows first appearance.
+ * Classify every distinct lexical target with a fixed asynchronous worker
+ * pool. Workers pull directly from the source iterator, so classification does
+ * not prebuild a task/promise per candidate. The result map doubles as the
+ * de-duplication set; inserting before the probe retains first-source order
+ * even when lstat calls finish out of order. Every target is consumed, so a
+ * long run of missing candidates cannot hide a later existing target.
  */
-export async function classifyFileMentionTargets(
+async function classifyFileMentionTargets(
 	lexicalTargets: Iterable<string>,
 ): Promise<ReadonlyMap<string, FileMentionTargetClassification>> {
 	const classifications = new Map<string, FileMentionTargetClassification>();
-	for (const target of lexicalTargets) {
-		if (classifications.has(target)) continue;
-		if (classifications.size >= MAX_FILE_MENTION_CANDIDATES) {
-			throw new FileMentionResolutionLimitError(
-				"candidate-count",
-				MAX_FILE_MENTION_CANDIDATES,
-				MAX_FILE_MENTION_CANDIDATES + 1,
-			);
-		}
-		classifications.set(target, "unreadable");
-	}
-
-	// A shared synchronous iterator hands each key to exactly one async worker;
-	// the map itself is the de-duplication cache, so no second unique-target
-	// array is needed for very large candidate sets.
-	const targets = classifications.keys();
-	const workerCount = Math.min(FILE_MENTION_PROBE_CONCURRENCY, classifications.size);
-	const workers = Array.from({ length: workerCount }, async () => {
-		while (true) {
-			const next = targets.next();
-			if (next.done) return;
-			const target = next.value;
-			await lstatSemaphore.acquire();
-			try {
-				try {
-					await fs.promises.lstat(target);
-					classifications.set(target, "exists");
-				} catch (error) {
-					classifications.set(
-						target,
-						isMissingPathError(error) ? "missing" : "unreadable",
-					);
+	const targets = lexicalTargets[Symbol.iterator]();
+	const workers = Array.from(
+		{ length: FILE_MENTION_PROBE_CONCURRENCY },
+		async () => {
+			while (true) {
+				let target: string;
+				while (true) {
+					const next = targets.next();
+					if (next.done) return;
+					target = next.value;
+					if (classifications.has(target)) continue;
+					classifications.set(target, "unreadable");
+					break;
 				}
-			} finally {
-				lstatSemaphore.release();
+
+				await lstatSemaphore.acquire();
+				try {
+					try {
+						await fs.promises.lstat(target);
+						classifications.set(target, "exists");
+					} catch (error) {
+						classifications.set(
+							target,
+							isMissingPathError(error) ? "missing" : "unreadable",
+						);
+					}
+				} finally {
+					lstatSemaphore.release();
+				}
 			}
-		}
-	});
+		},
+	);
 	await Promise.all(workers);
 	return classifications;
 }
@@ -1365,8 +1267,8 @@ function snapshotCanonicalFile(
 	return result;
 }
 
-/** Resolve a source that already passed cheap admission checks. */
-async function resolveAdmittedFileMentions(
+/** Resolve a source while holding one process-wide resolver permit. */
+async function resolveFileMentionsUnderPermit(
 	text: string,
 	cwd: string,
 	opts?: ResolveFileMentionsOptions,
@@ -1385,9 +1287,10 @@ async function resolveAdmittedFileMentions(
 	const tokens = scanTokens(text);
 	if (tokens.length === 0) return plainResult();
 
-	// UNC and Windows device-namespace tokens are ordinary text on every host.
-	// Return before path resolution or filesystem I/O when they are the only
-	// candidates, and never pass them to the lexical-target classifier.
+	// Win32 network/device-namespace tokens are ordinary text. Return before
+	// path resolution or filesystem I/O when they are the only candidates, and
+	// never pass them to the lexical-target classifier. On POSIX these tokens
+	// follow the normal existence-first path.
 	if (!tokens.some((token) => !isWindowsNamespaceToken(token.rawPath))) {
 		return plainResult();
 	}
@@ -1559,21 +1462,21 @@ async function resolveAdmittedFileMentions(
 }
 
 /**
- * Resolve all admitted `@path` file mentions relative to `cwd`. Admission is
- * intentionally outside the process-wide semaphore and before Markdown/fs
- * work, so rejected prompts fail promptly and consume no shared capacity.
+ * Resolve all `@path` file mentions relative to `cwd`. The process-wide FIFO
+ * permit bounds Markdown and filesystem work across sessions; classification
+ * then streams candidates through a fixed, module-global-lstat-limited pool.
  */
 export async function resolveFileMentions(
 	text: string,
 	cwd: string,
 	opts?: ResolveFileMentionsOptions,
 ): Promise<ResolvedMentions> {
-	if (!admitFileMentionSource(text)) {
+	if (!text.includes("@")) {
 		return { originalText: text, modelText: text, mentions: [], warnings: [] };
 	}
 	await resolutionSemaphore.acquire();
 	try {
-		return await resolveAdmittedFileMentions(text, cwd, opts);
+		return await resolveFileMentionsUnderPermit(text, cwd, opts);
 	} finally {
 		resolutionSemaphore.release();
 	}
