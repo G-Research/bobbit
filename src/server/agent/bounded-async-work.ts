@@ -319,6 +319,7 @@ export async function walkTree(
 	const concurrency = options.concurrency ?? BACKGROUND_IO_CONCURRENCY;
 	validateConcurrency(concurrency);
 	const treeFs = options.fs ?? realAsyncTreeFs;
+	let operationStepsSinceYield = 0;
 
 	await processDynamicQueue<TreeWork>(
 		[{ absolutePath: root, relativePath: "", depth: 0 }],
@@ -326,7 +327,6 @@ export async function walkTree(
 		async (seed, queue) => {
 			const frames: TreeFrame[] = [];
 			let next: TreeWork | undefined = seed;
-			let stepsSinceYield = 0;
 			try {
 				while (next || frames.length > 0) {
 					if (next) {
@@ -336,15 +336,29 @@ export async function walkTree(
 						const kind = entryKind(stats);
 						await visitor({ ...current, kind, stats });
 						if (kind === "directory") {
-							frames.push({
-								...current,
-								directory: await treeFs.opendir(current.absolutePath),
-							});
+							// Visitors may await destination I/O. Reclassify at the point of
+							// traversal so a directory substituted during that wait is not
+							// opened as a symlink.
+							const traversalStats = await treeFs.lstat(current.absolutePath);
+							if (traversalStats.isDirectory() && !traversalStats.isSymbolicLink()) {
+								frames.push({
+									...current,
+									directory: await treeFs.opendir(current.absolutePath),
+								});
+							}
 						}
 					} else {
 						const frame = frames[frames.length - 1]!;
 						const dirent = await frame.directory.read();
-						if (!dirent) {
+						// The open handle may still enumerate the original directory after
+						// its path has been replaced. Revalidate the frame path before using
+						// a returned name, otherwise joining that name could follow a newly
+						// substituted directory symlink outside the tree.
+						const frameStats = await treeFs.lstat(frame.absolutePath);
+						if (!frameStats.isDirectory() || frameStats.isSymbolicLink()) {
+							frames.pop();
+							await frame.directory.close();
+						} else if (!dirent) {
 							frames.pop();
 							await frame.directory.close();
 						} else {
@@ -361,9 +375,9 @@ export async function walkTree(
 						}
 					}
 
-					stepsSinceYield++;
-					if (stepsSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
-						stepsSinceYield = 0;
+					operationStepsSinceYield++;
+					if (operationStepsSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
+						operationStepsSinceYield = 0;
 						await yieldToEventLoop();
 					}
 				}
@@ -491,6 +505,8 @@ export interface RemoveTreeOptions {
 	fs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir">;
 	/** Ignore a missing root or entries removed concurrently (default true). */
 	force?: boolean;
+	/** Delete descendants while retaining the root directory (default false). */
+	preserveRoot?: boolean;
 }
 
 function isMissing(error: unknown): boolean {
@@ -506,6 +522,7 @@ function isMissing(error: unknown): boolean {
 export async function removeTree(root: string, options: RemoveTreeOptions = {}): Promise<void> {
 	const treeFs = options.fs ?? realAsyncTreeFs;
 	const force = options.force ?? true;
+	const preserveRoot = options.preserveRoot ?? false;
 	let rootStats: AsyncTreeStats;
 	try {
 		rootStats = await treeFs.lstat(root);
@@ -541,13 +558,44 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 		while (frames.length > 0) {
 			const frame = frames[frames.length - 1]!;
 			const dirent = await frame.directory.read();
-			if (!dirent) {
+			let frameStats: AsyncTreeStats;
+			try {
+				// An open directory handle survives a rename/replacement. Check the
+				// path again after every streamed read before joining a child name;
+				// a substituted symlink must be unlinked, never traversed.
+				frameStats = await treeFs.lstat(frame.absolutePath);
+			} catch (error) {
+				if (!force || !isMissing(error)) throw error;
+				frames.pop();
+				await frame.directory.close();
+				continue;
+			}
+			if (!frameStats.isDirectory() || frameStats.isSymbolicLink()) {
 				frames.pop();
 				await frame.directory.close();
 				try {
-					await treeFs.rmdir(frame.absolutePath);
+					await treeFs.unlink(frame.absolutePath);
 				} catch (error) {
 					if (!force || !isMissing(error)) throw error;
+				}
+				continue;
+			}
+			if (!dirent) {
+				frames.pop();
+				await frame.directory.close();
+				if (!preserveRoot || frame.depth > 0) {
+					try {
+						// Revalidate immediately before deletion so a directory changed to
+						// a symlink is removed with unlink rather than left or followed.
+						const deletionStats = await treeFs.lstat(frame.absolutePath);
+						if (deletionStats.isDirectory() && !deletionStats.isSymbolicLink()) {
+							await treeFs.rmdir(frame.absolutePath);
+						} else {
+							await treeFs.unlink(frame.absolutePath);
+						}
+					} catch (error) {
+						if (!force || !isMissing(error)) throw error;
+					}
 				}
 			} else {
 				const childPath = path.join(frame.absolutePath, dirent.name);

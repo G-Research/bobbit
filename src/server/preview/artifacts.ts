@@ -82,8 +82,8 @@ export async function persistPreviewArtifact(
 
 	const liveMount = previewMount.mountPath(sessionId);
 	const liveEntry = path.join(liveMount, mountResult.entry);
-	const entryStat = await safeStat(liveEntry);
-	if (!entryStat?.isFile()) {
+	const entryStat = await safeLstat(liveEntry);
+	if (!entryStat?.isFile() || entryStat.isSymbolicLink()) {
 		throw new PreviewArtifactError(500, "Preview entry missing before artifact capture");
 	}
 
@@ -140,11 +140,19 @@ export async function persistPreviewArtifact(
 export async function readPreviewArtifact(sessionId: string, artifactId: string): Promise<PreviewArtifactRecord> {
 	validateSessionId(sessionId);
 	validateArtifactId(artifactId);
-	const file = path.join(artifactDir(sessionId, artifactId), "artifact.json");
+	const directory = artifactDir(sessionId, artifactId);
+	const file = path.join(directory, "artifact.json");
 	let parsed: unknown;
 	try {
+		const directoryStats = await artifactFs.lstat(directory);
+		const metadataStats = await artifactFs.lstat(file);
+		if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()
+			|| !metadataStats.isFile() || metadataStats.isSymbolicLink()) {
+			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
+		}
 		parsed = JSON.parse(await artifactFs.readFile(file, "utf-8"));
 	} catch (err) {
+		if (err instanceof PreviewArtifactError) throw err;
 		if (isEnoent(err)) throw new PreviewArtifactError(404, "Preview artifact not found");
 		throw new PreviewArtifactError(500, `Preview artifact metadata is unreadable: ${errorMessage(err)}`);
 	}
@@ -180,8 +188,8 @@ export async function restorePreviewArtifact(
 		if (await hashDirectory(tmpRestore) !== record.contentHash) {
 			throw new PreviewArtifactError(500, "Preview artifact staged hash mismatch");
 		}
-		const stagedEntry = await safeStat(path.join(tmpRestore, record.entry));
-		if (!stagedEntry?.isFile()) {
+		const stagedEntry = await safeLstat(path.join(tmpRestore, record.entry));
+		if (!stagedEntry?.isFile() || stagedEntry.isSymbolicLink()) {
 			throw new PreviewArtifactError(500, "Preview artifact staged entry missing");
 		}
 
@@ -219,8 +227,10 @@ export async function restorePreviewArtifact(
 
 	const entryPath = path.join(liveMount, record.entry);
 	let stat: fs.Stats;
-	try { stat = await artifactFs.stat(entryPath); }
-	catch (err) {
+	try {
+		stat = await artifactFs.lstat(entryPath);
+		if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("restored entry is not a regular file");
+	} catch (err) {
 		throw new PreviewArtifactError(500, `Preview artifact restored entry missing: ${errorMessage(err)}`);
 	}
 	return {
@@ -250,22 +260,44 @@ export async function sweepOrphanArtifacts(
 	}
 	const removed: string[] = [];
 	const kept: string[] = [];
-	let entries: fs.Dirent[];
-	try { entries = await artifactFs.readdir(artifactRoot(), { withFileTypes: true }); }
-	catch { return { removed, kept }; }
+	let directory: fs.Dir;
+	try {
+		const rootStats = await artifactFs.lstat(artifactRoot());
+		if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) return { removed, kept };
+		directory = await artifactFs.opendir(artifactRoot());
+	} catch { return { removed, kept }; }
 
-	const candidates: string[] = [];
-	for (const ent of entries) {
-		if (!ent.isDirectory()) continue;
-		if (VALID_SESSION_ID.test(ent.name) && known.has(ent.name.toLowerCase())) kept.push(ent.name);
-		else candidates.push(ent.name);
-	}
-	const outcomes = await previewMount.removePreviewTrees(
-		candidates.map(id => path.join(artifactRoot(), id)),
-		{ fs: artifactFs, concurrency: RECOVERY_IO_CONCURRENCY },
-	);
-	for (let index = 0; index < candidates.length; index++) {
-		if (outcomes[index] === null) removed.push(candidates[index]!);
+	let candidates: string[] = [];
+	const flushCandidates = async (): Promise<void> => {
+		if (candidates.length === 0) return;
+		const batch = candidates;
+		candidates = [];
+		const outcomes = await previewMount.removePreviewTrees(
+			batch.map(id => path.join(artifactRoot(), id)),
+			{ fs: artifactFs, concurrency: RECOVERY_IO_CONCURRENCY },
+		);
+		for (let index = 0; index < batch.length; index++) {
+			if (outcomes[index] === null) removed.push(batch[index]!);
+		}
+	};
+	try {
+		for (;;) {
+			const ent = await directory.read();
+			if (!ent) break;
+			const candidatePath = path.join(artifactRoot(), ent.name);
+			let candidateStats: fs.Stats;
+			try { candidateStats = await artifactFs.lstat(candidatePath); }
+			catch { continue; }
+			// Preserve the cleanup policy of ignoring non-directories. In
+			// particular, a directory substituted with a symlink is not followed.
+			if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) continue;
+			if (VALID_SESSION_ID.test(ent.name) && known.has(ent.name.toLowerCase())) kept.push(ent.name);
+			else candidates.push(ent.name);
+			if (candidates.length >= RECOVERY_IO_CONCURRENCY) await flushCandidates();
+		}
+		await flushCandidates();
+	} finally {
+		try { await directory.close(); } catch { /* read failure may close the handle */ }
 	}
 	return { removed: removed.sort(), kept: kept.sort() };
 }
@@ -277,21 +309,34 @@ export async function findPreviewArtifactByHash(
 ): Promise<PreviewArtifactRecord | null> {
 	validateSessionId(sessionId);
 	validateContentHash(contentHash);
-	let entries: fs.Dirent[];
-	try { entries = await artifactFs.readdir(artifactSessionDir(sessionId), { withFileTypes: true }); }
-	catch { return null; }
-	for (const ent of entries) {
-		if (!ent.isDirectory() || !VALID_ARTIFACT_ID.test(ent.name)) continue;
-		try {
-			const record = await readPreviewArtifact(sessionId, ent.name);
-			if (record.contentHash !== contentHash) continue;
-			await validateArtifactMount(record, artifactMountDir(sessionId, record.artifactId));
-			return record;
-		} catch {
-			// Corrupt/mismatched entries are not reusable; leave them for maintenance.
+	const sessionDir = artifactSessionDir(sessionId);
+	let directory: fs.Dir;
+	try {
+		const sessionStats = await artifactFs.lstat(sessionDir);
+		if (!sessionStats.isDirectory() || sessionStats.isSymbolicLink()) return null;
+		directory = await artifactFs.opendir(sessionDir);
+	} catch { return null; }
+	try {
+		for (;;) {
+			const ent = await directory.read();
+			if (!ent) break;
+			if (!VALID_ARTIFACT_ID.test(ent.name)) continue;
+			try {
+				const candidateDir = artifactDir(sessionId, ent.name);
+				const candidateStats = await artifactFs.lstat(candidateDir);
+				if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) continue;
+				const record = await readPreviewArtifact(sessionId, ent.name);
+				if (record.contentHash !== contentHash) continue;
+				await validateArtifactMount(record, artifactMountDir(sessionId, record.artifactId));
+				return record;
+			} catch {
+				// Corrupt/mismatched entries are not reusable; leave them for maintenance.
+			}
 		}
+		return null;
+	} finally {
+		try { await directory.close(); } catch { /* read failure may close the handle */ }
 	}
-	return null;
 }
 
 async function validateArtifactMount(record: PreviewArtifactRecord, mountDir: string): Promise<void> {
@@ -396,10 +441,6 @@ function isSafeRelativeFile(rel: string): boolean {
 	if (!rel || rel.includes("\0") || rel.includes("\\")) return false;
 	if (rel.startsWith("/") || path.isAbsolute(rel) || /^[a-zA-Z]:\//.test(rel)) return false;
 	return rel.split("/").every(seg => seg.length > 0 && seg !== "." && seg !== "..");
-}
-
-async function safeStat(file: string): Promise<fs.Stats | null> {
-	try { return await artifactFs.stat(file); } catch { return null; }
 }
 
 async function safeLstat(file: string): Promise<fs.Stats | null> {
