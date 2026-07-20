@@ -60,7 +60,7 @@ async function makeHarness(): Promise<Harness> {
 	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
 
 	const goalStore = new GoalStore(stateDir);
-	const cookieStore = new CookieStore(stateDir);
+	const cookieStore = new CookieStore(Buffer.alloc(32, 0x42));
 	// These tests exercise dependsOn scheduling, not authz. spawn-child /
 	// integrate-child are ORCHESTRATION-class verbs (the cookie does NOT
 	// bypass), so authenticate as the goal's team-lead via a matching
