@@ -9227,7 +9227,7 @@ export class SessionManager {
 		for (const ps of allLiveForTerminate) {
 			const isChild = ps.delegateOf === id || (!!ps.childKind && ps.parentSessionId === id);
 			if (isChild && !this.sessions.has(ps.id)) {
-				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
+				try { await this.getSessionStore(ps.projectId).archiveAsync(ps.id); } catch { /* project gone */ }
 			}
 		}
 		// Keep the OrchestrationCore in-memory index consistent.
@@ -9278,7 +9278,7 @@ export class SessionManager {
 		}
 		const target = store ?? this.resolveStoreForId(id);
 		if (!target) return false;
-		try { return target.archive(id); } catch { return false; }
+		try { return await target.archiveAsync(id); } catch { return false; }
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
@@ -9444,7 +9444,7 @@ export class SessionManager {
 		// Always archive — even without an agentSessionFile the metadata
 		// (title, goal association, timestamps) is valuable and the search
 		// index may reference this session.  Purge will clean it up later.
-		terminateStore.archive(id);
+		await terminateStore.archiveAsync(id);
 
 		// Bug 2 (docs/design/orphan-remote-branch-cleanup.md): eagerly push-delete
 		// the remote branch for non-delegate `session/*` sessions whose branch is

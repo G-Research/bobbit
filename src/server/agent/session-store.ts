@@ -871,6 +871,30 @@ export class SessionStore {
 		return true;
 	}
 
+	/**
+	 * Promise-based archive. Preserves archive()'s record mutation and immediate
+	 * durability without writing a deletion tombstone. Concurrent synchronous
+	 * mutations fold into the same serialized writer rather than racing its
+	 * snapshot.
+	 */
+	async archiveAsync(id: string): Promise<boolean> {
+		const existing = this.sessions.get(id);
+		if (!existing) {
+			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
+			return false;
+		}
+		this.generation++;
+		existing.archived = true;
+		existing.archivedAt = this.clock.now();
+		if (this.saveTimer) {
+			this.clock.clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+		}
+		await this.requestAsyncSave();
+		this.onIndexUpdate?.(existing);
+		return true;
+	}
+
 	/** Get all archived sessions. */
 	getArchived(): PersistedSession[] {
 		return Array.from(this.sessions.values()).filter(s => s.archived === true);
