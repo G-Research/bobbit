@@ -43,6 +43,24 @@ const MAX_PENDING_SESSION_COMMAND_BYTES = Reflect.get(
 	serialiserModule,
 	"MAX_PENDING_SESSION_COMMAND_BYTES",
 ) as number;
+const SATURATED_STOP_SPAM_COUNT = 8;
+
+interface PromptFrame extends Record<string, unknown> {
+	type: "prompt";
+	text: string;
+}
+
+function promptFrameWithTotalBytes(text: string, totalBytes: number): PromptFrame {
+	const emptyFrame: PromptFrame = { type: "prompt", text, padding: "" };
+	const fixedBytes = Buffer.byteLength(JSON.stringify(emptyFrame), "utf8");
+	if (fixedBytes > totalBytes) throw new RangeError("Prompt frame metadata exceeds requested size");
+	const padding = "x".repeat(totalBytes - fixedBytes);
+	const frame: PromptFrame = { type: "prompt", text, padding };
+	// `padding` is ASCII with no escaping, so its character count is its exact
+	// contribution to the raw JSON WebSocket frame retained by the serialiser.
+	expect(fixedBytes + padding.length).toBe(totalBytes);
+	return frame;
+}
 
 interface Deferred<T> {
 	promise: Promise<T>;
@@ -451,6 +469,188 @@ test.describe("WebSocket frame size routing", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	for (const saturationLimit of ["count", "bytes"] as const) {
+		test(`admits and deduplicates Stop control fallback when the ordinary ${saturationLimit} lane is saturated`, async ({ gateway }) => {
+			expect(Number.isInteger(MAX_PENDING_SESSION_COMMANDS)).toBe(true);
+			expect(Number.isInteger(MAX_PENDING_SESSION_COMMAND_BYTES)).toBe(true);
+
+			const sessionId = await createSession();
+			const conn = await connectWs(sessionId);
+			const live = gateway.sessionManager.getSession(sessionId);
+			expect(live, "created saturated-Stop session must be live").toBeTruthy();
+			await conn.waitFor((m) => m.type === "queue_update");
+
+			const previousStatus = live.status;
+			live.status = "streaming";
+			const mentionName = `ws-saturated-stop-${saturationLimit}-${sessionId}.txt`;
+			const mentionPath = path.resolve(live.worktreePath || live.cwd, mentionName);
+			const activeText = `CANCELLED_ACTIVE_${saturationLimit.toUpperCase()} @${mentionName}`;
+			const overflowText = `REJECTED_${saturationLimit.toUpperCase()}_OVERFLOW`;
+			const laterText = `ACCEPTED_AFTER_${saturationLimit.toUpperCase()}_STOP`;
+			const acceptedFrames: PromptFrame[] = saturationLimit === "count"
+				? Array.from(
+					{ length: MAX_PENDING_SESSION_COMMANDS },
+					(_, index) => ({ type: "prompt", text: `COUNT_PENDING_${index}` }),
+				)
+				: [promptFrameWithTotalBytes("BYTE_CAP_PENDING", MAX_PENDING_SESSION_COMMAND_BYTES)];
+			const acceptedTexts = acceptedFrames.map((frame) => frame.text);
+
+			const probeStarted = deferred<void>();
+			const releaseProbe = deferred<void>();
+			const acceptedDrained = deferred<void>();
+			const firstImmediateAbort = deferred<void>();
+			const releaseImmediateAborts = deferred<void>();
+			const orderedFallback = deferred<void>();
+			const laterEnqueued = deferred<void>();
+			const freshStopComplete = deferred<void>();
+			const events: string[] = [];
+			const enqueuedTexts: string[] = [];
+			let probeReleased = false;
+			let immediateGateReleased = false;
+			let forceAbortCalls = 0;
+			let freshStopTarget: number | undefined;
+			const releasePendingProbe = () => {
+				if (probeReleased) return;
+				probeReleased = true;
+				releaseProbe.resolve();
+			};
+			const releaseAbortGate = () => {
+				if (immediateGateReleased) return;
+				immediateGateReleased = true;
+				releaseImmediateAborts.resolve();
+			};
+
+			const originalLstat = fs.promises.lstat.bind(fs.promises);
+			const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((target: fs.PathLike) => {
+				if (path.resolve(String(target)) !== mentionPath) return originalLstat(target);
+				probeStarted.resolve();
+				return releaseProbe.promise.then(() => {
+					throw Object.assign(new Error("missing deterministic saturated-Stop fixture"), { code: "ENOENT" });
+				});
+			}) as typeof fs.promises.lstat);
+			const originalEnqueue = gateway.sessionManager.enqueuePrompt.bind(gateway.sessionManager);
+			const enqueueSpy = vi.spyOn(gateway.sessionManager, "enqueuePrompt").mockImplementation(async (
+				id,
+				text,
+				opts,
+			) => {
+				if (typeof text !== "string") throw new TypeError("enqueuePrompt text must be a string");
+				if (id !== sessionId) return originalEnqueue(id, text, opts);
+				enqueuedTexts.push(text);
+				events.push(`enqueue:${text}`);
+				if (text === acceptedTexts.at(-1)) acceptedDrained.resolve();
+				if (text === laterText) laterEnqueued.resolve();
+				return { status: "queued" };
+			});
+			const originalForceAbort = gateway.sessionManager.forceAbort.bind(gateway.sessionManager);
+			const abortSpy = vi.spyOn(gateway.sessionManager, "forceAbort").mockImplementation(async (id, gracePeriodMs) => {
+				if (id !== sessionId) return originalForceAbort(id, gracePeriodMs);
+				forceAbortCalls += 1;
+				events.push(`force-abort:${forceAbortCalls}`);
+				firstImmediateAbort.resolve();
+				if (immediateGateReleased) orderedFallback.resolve();
+				if (freshStopTarget !== undefined && forceAbortCalls === freshStopTarget) freshStopComplete.resolve();
+				await releaseImmediateAborts.promise;
+			});
+
+			try {
+				conn.send({ type: "prompt", text: activeText });
+				await waitForSignal(probeStarted.promise, `${saturationLimit} saturated-Stop mention barrier`);
+
+				for (const frame of acceptedFrames) conn.send(frame);
+				const admissionPingCursor = conn.messageCount();
+				conn.send({ type: "ping" });
+				await conn.waitForFrom(admissionPingCursor, (m) => m.type === "pong", 10_000);
+
+				const overflowCursor = conn.messageCount();
+				conn.send({ type: "prompt", text: overflowText });
+				const overflow = await conn.waitForFrom(
+					overflowCursor,
+					(m) => m.type === "error" && m.code === "SESSION_COMMAND_QUEUE_FULL",
+					10_000,
+				);
+				expect(overflow.message ?? "").toMatch(new RegExp(saturationLimit, "i"));
+				expect(enqueuedTexts).toEqual([]);
+
+				const stopCursor = conn.messageCount();
+				for (let index = 0; index < SATURATED_STOP_SPAM_COUNT; index++) {
+					conn.send({ type: "abort" });
+				}
+				await waitForSignal(firstImmediateAbort.promise, "immediate Stop dispatch while saturated");
+				const stopPingCursor = conn.messageCount();
+				conn.send({ type: "ping" });
+				await conn.waitForFrom(stopPingCursor, (m) => m.type === "pong", 10_000);
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				const immediateCalls = forceAbortCalls;
+				expect(
+					immediateCalls,
+					"Stop spam must share the reserved control path and its single immediate abort",
+				).toBe(1);
+
+				await waitForSignal(
+					acceptedDrained.promise,
+					`${saturationLimit} accepted ordinary queue drain after Stop`,
+					10_000,
+				);
+				expect(enqueuedTexts).toEqual(acceptedTexts);
+				expect(enqueuedTexts).not.toContain(activeText);
+				expect(enqueuedTexts).not.toContain(overflowText);
+				expect(
+					probeReleased,
+					"Stop cancellation must release the serial queue without waiting for the stalled lstat",
+				).toBe(false);
+
+				const stopQueueErrors = conn.messages.slice(stopCursor).filter(
+					(m) => m.type === "error" && m.code === "SESSION_COMMAND_QUEUE_FULL",
+				);
+				expect(
+					stopQueueErrors,
+					"Stop control fallback must bypass the saturated ordinary queue without a queue-full error",
+				).toEqual([]);
+
+				releaseAbortGate();
+				await waitForSignal(orderedFallback.promise, "deduplicated ordered Stop fallback", 5_000);
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				expect(
+					forceAbortCalls,
+					"Stop spam must produce exactly one immediate attempt and one ordered fallback",
+				).toBe(2);
+				const fallbackIndex = events.lastIndexOf(`force-abort:${forceAbortCalls}`);
+				const lastPendingIndex = events.lastIndexOf(`enqueue:${acceptedTexts.at(-1)}`);
+				expect(fallbackIndex).toBeGreaterThan(lastPendingIndex);
+
+				conn.send({ type: "prompt", text: laterText });
+				await waitForSignal(laterEnqueued.promise, "ordinary work after saturated Stop drain", 5_000);
+				expect(enqueuedTexts).toEqual([...acceptedTexts, laterText]);
+
+				const callsBeforeFreshStop = forceAbortCalls;
+				freshStopTarget = callsBeforeFreshStop + 2;
+				const freshStopCursor = conn.messageCount();
+				conn.send({ type: "abort" });
+				await waitForSignal(freshStopComplete.promise, "fresh Stop after control-slot cleanup", 5_000);
+				const cleanupPingCursor = conn.messageCount();
+				conn.send({ type: "ping" });
+				await conn.waitForFrom(cleanupPingCursor, (m) => m.type === "pong", 5_000);
+				expect(forceAbortCalls).toBe(callsBeforeFreshStop + 2);
+				expect(
+					conn.messages.slice(freshStopCursor).filter(
+						(m) => m.type === "error" && m.code === "SESSION_COMMAND_QUEUE_FULL",
+					),
+					"drained ordinary accounting and the control slot must both be reusable",
+				).toEqual([]);
+			} finally {
+				releaseAbortGate();
+				releasePendingProbe();
+				abortSpy.mockRestore();
+				enqueueSpy.mockRestore();
+				lstatSpy.mockRestore();
+				live.status = previousStatus;
+				conn.close();
+				await deleteSession(sessionId);
+			}
+		});
+	}
 
 	test("does not let a valid default-resume extension post overtake earlier mention preprocessing", async ({ gateway }) => {
 		const sessionId = await createSession();
