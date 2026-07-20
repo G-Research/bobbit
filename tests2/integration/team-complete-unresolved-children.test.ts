@@ -33,14 +33,20 @@ let gw: any;
 test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
 	gw = gateway;
-	// archive-child (used below) is an OPERATOR Children verb authorized by the
-	// verified-human cookie. The gateway mints bobbit_session on the first
-	// authed request; capture it.
-	const probe = await rawApiFetch("/api/goals", { headers: { Authorization: `Bearer ${token}` } });
+	// archive-child (used below) is an OPERATOR Children verb authorized by a
+	// verified stateless signed cookie. Bootstrap it with a realistic same-origin
+	// browser request; Fetch Metadata controls eligibility, not authority.
+	const probe = await rawApiFetch("/api/goals", {
+		headers: {
+			Authorization: `Bearer ${token}`,
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+		},
+	});
 	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
 		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
 	humanCookie = setCookies.map((c) => c.split(";")[0]).find((c) => c.startsWith("bobbit_session=")) ?? "";
-	expect(humanCookie, "harness must mint a bobbit_session cookie for the human/UI authz path").not.toBe("");
+	expect(humanCookie, "browser-signaled Bearer auth must mint a signed bobbit_session cookie").not.toBe("");
 });
 
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -55,6 +61,7 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 async function createParentGoal(): Promise<{ id: string }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
+		headers: { Cookie: humanCookie },
 		body: JSON.stringify({
 			title: `unresolved-children parent ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 			cwd: nonGitCwd(),
@@ -211,6 +218,7 @@ test.describe("request body-size cap — 413 BODY_TOO_LARGE", () => {
 	test("a normal-sized POST body is accepted (cap does not reject legitimate payloads)", async () => {
 		const resp = await apiFetch("/api/goals", {
 			method: "POST",
+			headers: { Cookie: humanCookie },
 			body: JSON.stringify({
 				title: `body-cap sanity ${Date.now()}`,
 				cwd: nonGitCwd(),
