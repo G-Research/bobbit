@@ -48,6 +48,7 @@ const {
 	MAX_MENTION_FILE_BYTES,
 	MAX_MENTION_AGGREGATE_BYTES,
 	MAX_MENTIONS_PER_SEND,
+	MAX_UNIQUE_MENTION_PROBES,
 } = resolverModule;
 const MAX_MENTION_SCAN_CHARS = (resolverModule as Record<string, unknown>).MAX_MENTION_SCAN_CHARS;
 const EXPECTED_MAX_MENTION_SCAN_CHARS = 256 * 1024;
@@ -83,6 +84,11 @@ describe("resolveFileMentions", () => {
 		assert.equal(MAX_MENTION_AGGREGATE_BYTES, 20 * 1024 * 1024);
 		assert.equal(MAX_MENTIONS_PER_SEND, 50);
 		assert.equal(MAX_MENTION_SCAN_CHARS, EXPECTED_MAX_MENTION_SCAN_CHARS);
+	});
+
+	it("exports the documented unique mention probe budget independently of the delivery cap", () => {
+		assert.equal(MAX_UNIQUE_MENTION_PROBES, 100);
+		assert.ok(MAX_UNIQUE_MENTION_PROBES > MAX_MENTIONS_PER_SEND);
 	});
 
 	it("no mentions → text unchanged, empty mentions", () => {
@@ -821,7 +827,7 @@ describe("resolveFileMentions", () => {
 	});
 
 	it("bounds unique existence probes for a large set of missing candidates", () => {
-		const candidateCount = MAX_MENTIONS_PER_SEND * 10;
+		const candidateCount = MAX_UNIQUE_MENTION_PROBES * 10;
 		const text = Array.from(
 			{ length: candidateCount },
 			(_, index) => `@resource-bound-missing-${index}.txt`,
@@ -831,8 +837,8 @@ describe("resolveFileMentions", () => {
 			const r = resolveFileMentions(text, cwdDir);
 			assert.equal(
 				lstatSpy.mock.calls.length,
-				MAX_MENTIONS_PER_SEND,
-				"unique synchronous existence probes must stop at the documented send budget",
+				MAX_UNIQUE_MENTION_PROBES,
+				"unique synchronous existence probes must stop at the documented probe budget",
 			);
 			assert.equal(r.originalText, text);
 			assert.equal(r.modelText, text);
@@ -869,14 +875,14 @@ describe("resolveFileMentions", () => {
 
 	it("resolves valid references admitted at the end of the unique probe budget", () => {
 		const missing = Array.from(
-			{ length: MAX_MENTIONS_PER_SEND - 2 },
+			{ length: MAX_UNIQUE_MENTION_PROBES - 2 },
 			(_, index) => `@within-budget-missing-${index}.txt`,
 		).join(" ");
 		const text = `${missing} @notes.txt @pixel.png`;
 		const lstatSpy = vi.spyOn(fs, "lstatSync");
 		try {
 			const r = resolveFileMentions(text, cwdDir);
-			assert.equal(lstatSpy.mock.calls.length, MAX_MENTIONS_PER_SEND);
+			assert.equal(lstatSpy.mock.calls.length, MAX_UNIQUE_MENTION_PROBES);
 			assert.deepEqual(
 				r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
 				[
