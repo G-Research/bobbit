@@ -125,6 +125,15 @@ function responseFor(input: RequestInfo | URL, init?: RequestInit): Response {
 	if (method === "DELETE") return new Response(null, { status: 204 });
 	if (url.pathname.endsWith("/draft") && method === "GET") return new Response(null, { status: 204 });
 	if (url.pathname === "/api/preview/mount") return new Response(null, { status: 404 });
+	if (url.pathname.endsWith("/side-panel-workspace")) {
+		return Response.json({
+			version: 1,
+			tabs: [],
+			activeTabId: "",
+			sizeMode: "split",
+			metadata: { migratedFromLocalStorageAt: 1 },
+		});
+	}
 	if (url.pathname.includes("/inbox")) return Response.json({ entries: [] });
 	if (url.pathname.endsWith("/git-status")) {
 		return Response.json({ branch: "master", status: [], clean: true });
@@ -195,6 +204,7 @@ beforeEach(() => {
 
 	freshConnectSpy = vi.spyOn(RemoteAgent.prototype, "connect")
 		.mockRejectedValue(new Error("SESSION_NOT_FOUND: deterministic fresh-connect boundary"));
+	vi.spyOn(RemoteAgent.prototype, "requestMessages").mockImplementation(() => {});
 	vi.spyOn(dialogsLazy, "confirmAction").mockResolvedValue(true);
 	vi.spyOn(dialogsLazy, "showConnectionError").mockImplementation(() => {});
 	vi.spyOn(packRenderers, "reconcilePackRenderersForProject").mockResolvedValue();
@@ -290,6 +300,8 @@ describe("portrait session-list cache ownership", () => {
 		"disconnected agent",
 		"wrong agent session",
 		"unbound panel",
+		"missing panel agent",
+		"missing panel interface session",
 		"wrong panel agent",
 		"wrong panel interface session",
 	] as const)("rejects %s and performs safe teardown", (scenario) => {
@@ -314,6 +326,12 @@ describe("portrait session-list cache ownership", () => {
 			panel = new MockChatPanel(activeAgent!);
 		} else if (scenario === "unbound panel") {
 			panel = new MockChatPanel(undefined, undefined);
+		} else if (scenario === "missing panel agent") {
+			panel = new MockChatPanel(activeAgent!);
+			panel.agent = undefined;
+		} else if (scenario === "missing panel interface session") {
+			panel = new MockChatPanel(activeAgent!);
+			panel.agentInterface!.session = undefined;
 		} else if (scenario === "wrong panel agent") {
 			const foreign = new MockRemoteAgent(SESSION_B);
 			detachedAgents.push(foreign);
@@ -410,6 +428,29 @@ describe("portrait session-list cache ownership", () => {
 
 		expect(freshConnectSpy).toHaveBeenCalledOnce();
 		expect(freshConnectSpy.mock.instances[0]).not.toBe(agent);
+	});
+
+	it("evicts a cached session removed externally and forces a fresh connect", async () => {
+		const { agent: cachedAgent } = cacheThroughDesktopSwitch(SESSION_A, SESSION_B);
+		freshConnectSpy.mockResolvedValue(undefined);
+
+		await connectToSession(SESSION_B, true, { onMissing: "toast" });
+		const notifyingAgent = state.remoteAgent;
+		expect(notifyingAgent).toBeInstanceOf(RemoteAgent);
+		expect(notifyingAgent).not.toBe(cachedAgent);
+		expect(notifyingAgent?.onSessionRemoved).toEqual(expect.any(Function));
+		freshConnectSpy.mockClear();
+
+		notifyingAgent!.onSessionRemoved!(SESSION_A, "archived");
+
+		expect(cachedAgent.disconnect).toHaveBeenCalledOnce();
+		expect(state.gatewaySessions.some((session) => session.id === SESSION_A)).toBe(false);
+
+		await connectToSession(SESSION_A, true, { onMissing: "toast" });
+
+		expect(freshConnectSpy).toHaveBeenCalledOnce();
+		expect(freshConnectSpy.mock.instances[0]).not.toBe(cachedAgent);
+		expect(state.remoteAgent).not.toBe(cachedAgent);
 	});
 
 	it("disconnectGateway disconnects active and cached agents and leaves no reusable entry", async () => {
