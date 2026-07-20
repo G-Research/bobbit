@@ -6,17 +6,25 @@
 export class SessionCommandSerialiser {
 	private readonly tails = new Map<string, Promise<void>>();
 
-	serialise<T>(key: string, command: () => Promise<T> | T): Promise<T> {
+	get size(): number {
+		return this.tails.size;
+	}
+
+	run<T>(key: string, command: () => Promise<T> | T): Promise<T> {
 		const previous = this.tails.get(key) ?? Promise.resolve();
-		const result = previous.then(command);
-		const tail = result.then(
+		let tail!: Promise<void>;
+		const result = previous.then(command).finally(() => {
+			if (this.tails.get(key) === tail) this.tails.delete(key);
+		});
+		tail = result.then(
 			() => undefined,
 			() => undefined,
 		);
 		this.tails.set(key, tail);
-		void tail.then(() => {
-			if (this.tails.get(key) === tail) this.tails.delete(key);
-		});
 		return result;
+	}
+
+	serialise<T>(key: string, command: () => Promise<T> | T): Promise<T> {
+		return this.run(key, command);
 	}
 }
