@@ -26,12 +26,23 @@ afterAll(() => {
 });
 
 const resolverModule = await import("../../src/server/skills/resolve-file-mentions.ts");
-const { resolveFileMentions, buildFileReferenceBlock, MAX_MENTIONS_PER_SEND } = resolverModule;
+const {
+	resolveFileMentions,
+	preflightFileMentionAdmission,
+	buildFileReferenceBlock,
+	MAX_MENTIONS_PER_SEND,
+} = resolverModule;
 const MAX_FILE_MENTION_RAW_CANDIDATES = Reflect.get(resolverModule, "MAX_FILE_MENTION_RAW_CANDIDATES") as number;
 const MAX_FILE_MENTION_UNIQUE_PROBES = Reflect.get(resolverModule, "MAX_FILE_MENTION_UNIQUE_PROBES") as number;
 const FileMentionBudgetError = Reflect.get(resolverModule, "FileMentionBudgetError") as unknown;
 const EXPECTED_RAW_CANDIDATE_LIMIT = 8_192;
 const EXPECTED_UNIQUE_PROBE_LIMIT = 4_096;
+const EXPECTED_AUTHENTICATED_PROMPT_TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
+// The exact 8 MiB form takes longer than this tier's hard 15 s file wall on
+// the vulnerable object-per-CRLF map. This bounded form still forces 65k+
+// normalization discontinuities without destabilizing later cases; the WS
+// integration suite separately pins the exact authenticated byte ceiling.
+const BOUNDED_CRLF_MAP_STRESS_BYTES = 192 * 1024;
 const FILE_MENTION_RESOLUTION_CONCURRENCY = (
 	Reflect.get(resolverModule, "FILE_MENTION_RESOLUTION_CONCURRENCY")
 		?? Reflect.get(resolverModule, "FILE_MENTION_RESOLVER_CONCURRENCY")
@@ -93,11 +104,140 @@ function requestedReadLength(call: unknown[]): number {
 	return call[3] as number;
 }
 
+function repeatedBacktickCrlfPrompt(minBytes: number, suffix: string): string {
+	const unit = "`\r\n";
+	// Keep one explicitly unmatched backtick in its own Markdown paragraph so
+	// candidate scanning after it cannot be suppressed by a cross-line pairing.
+	const tail = `\r\n\r\nunmatched \` marker\r\n\r\n${suffix}`;
+	const repetitions = Math.max(
+		1,
+		Math.ceil((minBytes - Buffer.byteLength(tail, "utf8")) / Buffer.byteLength(unit, "utf8")),
+	);
+	return unit.repeat(repetitions) + tail;
+}
+
 describe("resolveFileMentions resource limits", () => {
 	it("exports the documented admission cap constants", async () => {
 		assert.equal(MAX_FILE_MENTION_RAW_CANDIDATES, EXPECTED_RAW_CANDIDATE_LIMIT);
 		assert.equal(MAX_FILE_MENTION_UNIQUE_PROBES, EXPECTED_UNIQUE_PROBE_LIMIT);
 		assert.equal(typeof FileMentionBudgetError, "function");
+	});
+
+	it("preflights bounded 8 MiB-density backtick/CRLF input atomically without filesystem work", async () => {
+		const text = repeatedBacktickCrlfPrompt(
+			BOUNDED_CRLF_MAP_STRESS_BYTES,
+			"missing @compact-map-boundary-missing.txt",
+		);
+		const original = text;
+		const bytes = Buffer.byteLength(text, "utf8");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			assert.ok(bytes >= BOUNDED_CRLF_MAP_STRESS_BYTES);
+			assert.ok(bytes < BOUNDED_CRLF_MAP_STRESS_BYTES + 3);
+			assert.ok(bytes < EXPECTED_AUTHENTICATED_PROMPT_TEXT_LIMIT_BYTES);
+			// Awaiting also preserves the contract if the public preflight later
+			// becomes asynchronous to share a parser-concurrency permit.
+			await preflightFileMentionAdmission(text, cwdDir);
+			assert.equal(text, original, "admission must not rewrite authenticated prompt bytes");
+			assert.equal(lstatSpy.mock.calls.length, 0, "pure admission must not classify a missing target");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0);
+			assert.equal(realpathSpy.mock.calls.length, 0);
+			assert.equal(openSpy.mock.calls.length, 0);
+			assert.equal(readSpy.mock.calls.length, 0);
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			realpathSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
+	}, 3_000);
+
+	it("maps nested CRLF code compactly while preserving an outside UTF-16 mention range", async () => {
+		const nestedCodeLine = "  > ` keep @notes.txt and @nested-code-missing.txt literal\r\n";
+		const text = [
+			"- > ```text\r\n",
+			nestedCodeLine.repeat(2_048),
+			"  > ```\r\n",
+			"\r\n",
+			"unmatched ` marker\r\n",
+			"\r\n",
+			"😀 outside @notes.txt; missing @nested-map-missing.txt",
+		].join("");
+		const token = "@notes.txt";
+		const start = text.lastIndexOf(token);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const openSpy = vi.spyOn(fs, "openSync");
+
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(
+				Buffer.byteLength(text.slice(0, start), "utf8"),
+				start + 2,
+				"the astral prefix must distinguish UTF-8 bytes from UTF-16 code units",
+			);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "notes.txt", range: [start, start + token.length] }],
+			);
+			assert.equal(
+				result.modelText,
+				text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + token.length),
+				"nested code and the missing outside token must remain byte-for-byte literal",
+			);
+			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, 2, "only the two outside-code targets may be classified");
+			assert.equal(openSpy.mock.calls.length, 1, "the missing outside target must never be opened");
+			assert.match(String(openSpy.mock.calls[0][0]), /notes\.txt$/);
+		} finally {
+			openSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("rejects a CRLF/backtick candidate overflow atomically before filesystem work", async () => {
+		const overflow = Array.from(
+			{ length: EXPECTED_RAW_CANDIDATE_LIMIT + 1 },
+			() => "@compact-map-overflow.txt",
+		).join(" ");
+		const text = repeatedBacktickCrlfPrompt(32 * 1024, overflow);
+		const original = text;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			await assert.rejects(
+				async () => { await preflightFileMentionAdmission(text, cwdDir); },
+				(error: unknown) => {
+					const record = error as { name?: unknown; code?: unknown; message?: unknown };
+					assert.equal(record.name, "FileMentionBudgetError");
+					assert.equal(record.code, "FILE_MENTION_CANDIDATE_LIMIT");
+					assert.match(String(record.message), /8192.*non-code file-mention candidates/i);
+					return true;
+				},
+			);
+			assert.equal(text, original, "rejected admission must not rewrite any source text");
+			assert.equal(lstatSpy.mock.calls.length, 0);
+			assert.equal(promiseOpenSpy.mock.calls.length, 0);
+			assert.equal(realpathSpy.mock.calls.length, 0);
+			assert.equal(openSpy.mock.calls.length, 0);
+			assert.equal(readSpy.mock.calls.length, 0);
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			realpathSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
 	});
 
 	it("resolves a valid file in more than 256 KiB of ordinary prose without invoking Marked", async () => {
