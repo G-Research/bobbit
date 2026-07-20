@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WorktreeInventoryService, classifyPoolReclaimCandidate, isContainerInternalWorktreePath } from "../../src/server/agent/worktree-inventory.ts";
+import { WorktreeInventoryService, classifyPoolReclaimCandidate, isContainerInternalWorktreePath, type WorktreeInventoryFs } from "../../src/server/agent/worktree-inventory.ts";
+import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?: any[]; archivedSessions?: any[]; goals?: any[]; teams?: any[]; staff?: any[]; components?: any[]; filesystem?: MemFs | typeof fs }) {
@@ -25,7 +26,12 @@ function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?
 	};
 }
 
-function makeService(ctx: any, porcelain: string | ((repoPath: string, args: readonly string[]) => string), pools = new Map()) {
+function makeService(
+	ctx: any,
+	porcelain: string | ((repoPath: string, args: readonly string[]) => string),
+	pools = new Map(),
+	opts?: { fs?: WorktreeInventoryFs; ioConcurrency?: number; commandRunner?: CommandRunner },
+) {
 	return new WorktreeInventoryService({
 		projectContextManager: { visible: function* () { yield ctx; }, all: function* () { yield ctx; } } as any,
 		sessionManager: {
@@ -34,8 +40,10 @@ function makeService(ctx: any, porcelain: string | ((repoPath: string, args: rea
 			listArchivedSessionWorktrees: async () => { throw new Error("inventory must not use legacy archived scanner"); },
 		} as any,
 		execGit: async (repoPath, args) => args[0] === "worktree" ? (typeof porcelain === "function" ? porcelain(repoPath, args) : porcelain) : "",
+		commandRunner: opts?.commandRunner,
 		clock: () => 1,
-		fs: ctx._inventoryFs,
+		fs: opts?.fs ?? ctx._inventoryFs?.promises,
+		ioConcurrency: opts?.ioConcurrency,
 	});
 }
 
@@ -58,6 +66,14 @@ function tmpProject(realFilesystem = false) {
 	const repo = path.join(root, "repo");
 	filesystem.mkdirSync(path.join(repo, ".git"), { recursive: true });
 	return { root, repo, filesystem, cleanup: () => {} };
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+	for (let turn = 0; turn < 1_000; turn++) {
+		if (predicate()) return;
+		await new Promise<void>(resolve => setImmediate(resolve));
+	}
+	assert.fail(message);
 }
 
 describe("worktree inventory classifier", () => {
@@ -88,6 +104,7 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.classification, "archived-owned");
 			assert.equal(item.disposition, "ready-to-clean");
 			assert.equal(item.defaultSelected, true);
+			assert.equal(item.legacy?.archivedSession?.item.pathExists, true);
 		} finally { cleanup(); }
 	});
 
@@ -268,6 +285,117 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.reason, "safe-pool-entry");
 			assert.equal(item.defaultSelected, false);
 			assert.equal(report.counts.poolEntries, 1);
+		} finally { cleanup(); }
+	});
+
+	it("yields during deferred discovery, caps path checks, and sorts out-of-order results", async () => {
+		const { root, repo, filesystem, cleanup } = tmpProject();
+		try {
+			const candidatePaths = ["candidate-z", "candidate-a", "candidate-m", "candidate-b", "candidate-y"]
+				.map(name => path.join(root, "repo-wt", name));
+			for (const candidatePath of candidatePaths) filesystem.mkdirSync(candidatePath, { recursive: true });
+			const pending: Array<{ path: string; release: () => void }> = [];
+			const completionOrder: string[] = [];
+			let active = 0;
+			let maxActive = 0;
+			const asyncFs: WorktreeInventoryFs = {
+				access: async filePath => {
+					if (!candidatePaths.includes(filePath)) return filesystem.promises.access(filePath);
+					active++;
+					maxActive = Math.max(maxActive, active);
+					try {
+						await new Promise<void>(resolve => pending.push({ path: filePath, release: resolve }));
+						completionOrder.push(filePath);
+						await filesystem.promises.access(filePath);
+					} finally {
+						active--;
+					}
+				},
+				readdir: (dirPath, options) => filesystem.promises.readdir(dirPath, options) as any,
+			};
+			const commandRunner: CommandRunner = { execFile: async () => { throw new Error("branch missing"); } };
+			const service = makeService(makeCtx(repo, { filesystem }), `worktree ${repo}\nbranch refs/heads/master\n`, new Map(), { fs: asyncFs, ioConcurrency: 2, commandRunner });
+			let settled = false;
+			const scanPromise = service.scan().finally(() => { settled = true; });
+			await waitFor(() => pending.length === 2, "inventory did not reach deferred path checks");
+			let unrelatedTurnRan = false;
+			await new Promise<void>(resolve => setImmediate(() => { unrelatedTurnRan = true; resolve(); }));
+			assert.equal(unrelatedTurnRan, true);
+			assert.equal(settled, false);
+			while (!settled) {
+				await waitFor(() => pending.length > 0 || settled, "inventory path-check workers stalled");
+				const wave = pending.splice(0);
+				for (const operation of wave.reverse()) operation.release();
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			const report = await scanPromise;
+			const filesystemPaths = report.items.filter(item => candidatePaths.includes(item.path)).map(item => item.path);
+			assert.deepEqual(filesystemPaths, [...candidatePaths].sort((a, b) => a.localeCompare(b)));
+			assert.ok(completionOrder.some((candidatePath, index) => index > 0 && candidatePath.localeCompare(completionOrder[index - 1]!) < 0), "fake I/O should complete out of order");
+			assert.equal(maxActive, 2);
+		} finally { cleanup(); }
+	});
+
+	it("bounds deferred cleanup verification and preserves selected result order", async () => {
+		const { root, repo, filesystem, cleanup } = tmpProject(true);
+		try {
+			const candidatePaths = ["session-z", "session-a", "session-m", "session-b", "session-y"]
+				.map(name => path.join(root, "repo-wt", name));
+			for (const candidatePath of candidatePaths) fs.mkdirSync(candidatePath, { recursive: true });
+			const attached = new Set(candidatePaths);
+			const removed = new Set<string>();
+			const pending: Array<{ path: string; release: () => void }> = [];
+			const completionOrder: string[] = [];
+			let active = 0;
+			let maxActive = 0;
+			const asyncFs: WorktreeInventoryFs = {
+				access: async filePath => {
+					if (!removed.has(filePath)) return fs.promises.access(filePath);
+					active++;
+					maxActive = Math.max(maxActive, active);
+					try {
+						await new Promise<void>(resolve => pending.push({ path: filePath, release: resolve }));
+						completionOrder.push(filePath);
+						await fs.promises.access(filePath);
+					} finally {
+						active--;
+					}
+				},
+				readdir: (dirPath, options) => fs.promises.readdir(dirPath, options),
+			};
+			const commandRunner: CommandRunner = {
+				execFile: async (_file, args) => {
+					if (args[0] === "show-ref") throw new Error("branch missing");
+					if (args[0] === "worktree" && args[1] === "remove") {
+						const candidatePath = args[2]!;
+						await fs.promises.rm(candidatePath, { recursive: true, force: true });
+						attached.delete(candidatePath);
+						removed.add(candidatePath);
+					}
+					return { stdout: "", stderr: "" };
+				},
+			};
+			const porcelain = () => [
+				`worktree ${repo}\nbranch refs/heads/master`,
+				...[...attached].map(candidatePath => `worktree ${candidatePath}\nbranch refs/heads/session/${path.basename(candidatePath)}`),
+			].join("\n\n") + "\n";
+			const service = makeService(makeCtx(repo, { filesystem }), porcelain, new Map(), { fs: asyncFs, ioConcurrency: 2, commandRunner });
+			let settled = false;
+			const cleanupPromise = service.cleanup({ mode: "all-safe" }).finally(() => { settled = true; });
+			await waitFor(() => pending.length === 2, "cleanup did not reach deferred removal verification");
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(settled, false);
+			while (!settled) {
+				await waitFor(() => pending.length > 0 || settled, "cleanup verification workers stalled");
+				const wave = pending.splice(0);
+				for (const operation of wave.reverse()) operation.release();
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			const response = await cleanupPromise;
+			assert.equal(response.counts.cleaned, candidatePaths.length);
+			assert.deepEqual(response.results.map(result => result.path), [...candidatePaths].sort((a, b) => a.localeCompare(b)));
+			assert.ok(completionOrder.some((candidatePath, index) => index > 0 && candidatePath.localeCompare(completionOrder[index - 1]!) < 0), "verification should finish out of order");
+			assert.equal(maxActive, 2);
 		} finally { cleanup(); }
 	});
 });
