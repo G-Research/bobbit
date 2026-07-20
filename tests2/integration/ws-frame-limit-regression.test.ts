@@ -11,6 +11,11 @@ import {
 	harnessDefaultProjectRoot,
 	messageEndPredicate,
 } from "./_e2e/e2e-setup.js";
+import { mintSurfaceToken } from "../../src/server/extension-host/surface-binding.ts";
+import {
+	computeContentHash,
+	mintWritePermit,
+} from "../../src/server/extension-host/session-write-permit.ts";
 
 const EXTENSION_CHANNEL_ENVELOPE_CAP_BYTES = 1024 * 1024;
 const EXPECTED_AUTHENTICATED_PROMPT_TEXT_CAP_BYTES = 8 * 1024 * 1024;
@@ -27,6 +32,19 @@ const MAX_FILE_MENTION_RAW_CANDIDATES = Reflect.get(
 	"MAX_FILE_MENTION_RAW_CANDIDATES",
 ) as number;
 
+interface Deferred<T> {
+	promise: Promise<T>;
+	resolve(value: T): void;
+}
+
+function deferred<T>(): Deferred<T> {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((onResolve) => {
+		resolve = onResolve;
+	});
+	return { promise, resolve };
+}
+
 async function waitForSignal<T>(signal: Promise<T>, label: string, timeoutMs = 1_000): Promise<T> {
 	let timer: NodeJS.Timeout | undefined;
 	try {
@@ -39,6 +57,28 @@ async function waitForSignal<T>(signal: Promise<T>, label: string, timeoutMs = 1
 	} finally {
 		if (timer) clearTimeout(timer);
 	}
+}
+
+function validDefaultResumeExtensionPost(sessionId: string, requestId: string, text: string) {
+	const surfaceToken = mintSurfaceToken({
+		sessionId,
+		packId: "terminal",
+		contributionId: "panel:terminal.panel",
+	});
+	const nonce = mintWritePermit({
+		sessionId,
+		packId: "terminal",
+		tool: "",
+		contentHash: computeContentHash("user", text),
+	});
+	return {
+		type: "ext_session_post",
+		requestId,
+		surfaceToken,
+		role: "user",
+		text,
+		nonce,
+	};
 }
 
 const STRUCTURALLY_INVALID_JSON_FRAMES: ReadonlyArray<{ label: string; value: unknown }> = [
@@ -201,6 +241,173 @@ test.describe("WebSocket frame size routing", () => {
 			conn.close();
 			await deleteSession(sessionId);
 			fs.rmSync(fixtureCwd, { recursive: true, force: true });
+		}
+	});
+
+	test("does not let a valid default-resume extension post overtake earlier mention preprocessing", async ({ gateway }) => {
+		const sessionId = await createSession();
+		const conn = await connectWs(sessionId);
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live, "created ordering session must be live").toBeTruthy();
+		await conn.waitFor((m) => m.type === "queue_update");
+
+		const mentionName = `ws-ordered-mention-${sessionId}.txt`;
+		const mentionPath = path.resolve(live.worktreePath || live.cwd, mentionName);
+		fs.rmSync(mentionPath, { force: true });
+		const promptText = `EARLIER_PROMPT @${mentionName}`;
+		const extensionText = "DEFAULT_RESUME_EXTENSION";
+		const requestId = `ordered-extension-${sessionId}`;
+		const probeStarted = deferred<void>();
+		const releaseProbe = deferred<void>();
+		const promptEnqueued = deferred<void>();
+		const extensionEnqueued = deferred<void>();
+		const enqueuedTexts: string[] = [];
+		let probeReleased = false;
+		const releasePendingProbe = () => {
+			if (probeReleased) return;
+			probeReleased = true;
+			releaseProbe.resolve();
+		};
+
+		const originalLstat = fs.promises.lstat.bind(fs.promises);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((target: fs.PathLike) => {
+			if (path.resolve(String(target)) !== mentionPath) return originalLstat(target);
+			probeStarted.resolve();
+			return releaseProbe.promise.then(() => {
+				throw Object.assign(new Error("missing deterministic ordering fixture"), { code: "ENOENT" });
+			});
+		}) as typeof fs.promises.lstat);
+		const originalEnqueue = gateway.sessionManager.enqueuePrompt.bind(gateway.sessionManager);
+		const enqueueSpy = vi.spyOn(gateway.sessionManager, "enqueuePrompt").mockImplementation(async (
+			id,
+			text,
+			opts,
+		) => {
+			if (typeof text !== "string") throw new TypeError("enqueuePrompt text must be a string");
+			if (id !== sessionId) return originalEnqueue(id, text, opts);
+			enqueuedTexts.push(text);
+			if (text === promptText) promptEnqueued.resolve();
+			if (text === extensionText) extensionEnqueued.resolve();
+			return { status: "queued" };
+		});
+
+		try {
+			conn.send({ type: "prompt", text: promptText });
+			await waitForSignal(probeStarted.promise, "earlier prompt mention preprocessing");
+
+			conn.send(validDefaultResumeExtensionPost(sessionId, requestId, extensionText));
+			const pingCursor = conn.messageCount();
+			conn.send({ type: "ping" });
+			await conn.waitForFrom(pingCursor, (m) => m.type === "pong", 1_000);
+
+			expect(
+				[...enqueuedTexts],
+				"the extension default-resume must remain behind the earlier prompt while its mention probe is pending",
+			).toEqual([]);
+
+			releasePendingProbe();
+			await waitForSignal(extensionEnqueued.promise, "ordered extension enqueue");
+			const result = await conn.waitFor(
+				(m) => m.type === "ext_session_post_result" && m.requestId === requestId,
+				1_000,
+			);
+			expect(result).toMatchObject({ type: "ext_session_post_result", requestId, ok: true });
+			expect(enqueuedTexts).toEqual([promptText, extensionText]);
+		} finally {
+			releasePendingProbe();
+			await waitForSignal(promptEnqueued.promise, "earlier prompt cleanup", 1_000).catch(() => {});
+			await conn.waitFor(
+				(m) => m.type === "ext_session_post_result" && m.requestId === requestId,
+				1_000,
+			).catch(() => {});
+			enqueueSpy.mockRestore();
+			lstatSpy.mockRestore();
+			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("dispatches abort during mention preprocessing and cancels only the delayed prompt", async ({ gateway }) => {
+		const sessionId = await createSession();
+		const conn = await connectWs(sessionId);
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live, "created abort-ordering session must be live").toBeTruthy();
+		await conn.waitFor((m) => m.type === "queue_update");
+
+		const previousStatus = live.status;
+		live.status = "streaming";
+		const mentionName = `ws-aborted-mention-${sessionId}.txt`;
+		const mentionPath = path.resolve(live.worktreePath || live.cwd, mentionName);
+		fs.rmSync(mentionPath, { force: true });
+		const delayedPrompt = `ABORTED_PROMPT @${mentionName}`;
+		const laterPrompts = ["LATER_PROMPT_ONE", "LATER_PROMPT_TWO"];
+		const probeStarted = deferred<void>();
+		const releaseProbe = deferred<void>();
+		const abortDispatched = deferred<void>();
+		const laterQueueDrained = deferred<void>();
+		const enqueuedTexts: string[] = [];
+		let probeReleased = false;
+		const releasePendingProbe = () => {
+			if (probeReleased) return;
+			probeReleased = true;
+			releaseProbe.resolve();
+		};
+
+		const originalLstat = fs.promises.lstat.bind(fs.promises);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((target: fs.PathLike) => {
+			if (path.resolve(String(target)) !== mentionPath) return originalLstat(target);
+			probeStarted.resolve();
+			return releaseProbe.promise.then(() => {
+				throw Object.assign(new Error("missing deterministic abort fixture"), { code: "ENOENT" });
+			});
+		}) as typeof fs.promises.lstat);
+		const originalEnqueue = gateway.sessionManager.enqueuePrompt.bind(gateway.sessionManager);
+		const enqueueSpy = vi.spyOn(gateway.sessionManager, "enqueuePrompt").mockImplementation(async (
+			id,
+			text,
+			opts,
+		) => {
+			if (typeof text !== "string") throw new TypeError("enqueuePrompt text must be a string");
+			if (id !== sessionId) return originalEnqueue(id, text, opts);
+			enqueuedTexts.push(text);
+			if (text === laterPrompts[1]) laterQueueDrained.resolve();
+			return { status: "queued" };
+		});
+		const originalForceAbort = gateway.sessionManager.forceAbort.bind(gateway.sessionManager);
+		const abortSpy = vi.spyOn(gateway.sessionManager, "forceAbort").mockImplementation(async (id, gracePeriodMs) => {
+			if (id !== sessionId) return originalForceAbort(id, gracePeriodMs);
+			abortDispatched.resolve();
+		});
+
+		try {
+			conn.send({ type: "prompt", text: delayedPrompt });
+			await waitForSignal(probeStarted.promise, "abort target mention preprocessing");
+
+			conn.send({ type: "abort" });
+			await waitForSignal(abortDispatched.promise, "abort dispatch while preprocessing remains blocked");
+			expect(probeReleased).toBe(false);
+
+			for (const text of laterPrompts) conn.send({ type: "prompt", text });
+			const pingCursor = conn.messageCount();
+			conn.send({ type: "ping" });
+			await conn.waitForFrom(pingCursor, (m) => m.type === "pong", 1_000);
+			expect(enqueuedTexts).toEqual([]);
+
+			releasePendingProbe();
+			await waitForSignal(laterQueueDrained.promise, "post-abort FIFO drain");
+			expect(
+				enqueuedTexts,
+				"abort must discard the in-flight preprocessed prompt without dropping or reordering later commands",
+			).toEqual(laterPrompts);
+		} finally {
+			releasePendingProbe();
+			await waitForSignal(laterQueueDrained.promise, "post-abort cleanup", 1_000).catch(() => {});
+			abortSpy.mockRestore();
+			enqueueSpy.mockRestore();
+			lstatSpy.mockRestore();
+			live.status = previousStatus;
+			conn.close();
+			await deleteSession(sessionId);
 		}
 	});
 
