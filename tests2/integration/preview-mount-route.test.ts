@@ -9,6 +9,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
+import { createHmac } from "node:crypto";
 import { Writable } from "node:stream";
 import type http from "node:http";
 import type { CookieStore } from "../../src/server/auth/cookie.js";
@@ -34,6 +35,7 @@ const pngBytes = Buffer.from([
 	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 	0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
 ]);
+const SIGNED_COOKIE_VALUE = String.raw`v1\.[1-9]\d*\.[1-9]\d*\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`;
 
 interface RouteInit {
 	method?: string;
@@ -43,17 +45,45 @@ interface RouteInit {
 
 class MemoryCookieStore {
 	private readonly values = new Set<string>();
+	private readonly signingKey = Buffer.alloc(32, 0x5a);
 	private sequence = 1;
 
 	mint(): string {
-		const value = (this.sequence++).toString(16).padStart(64, "0");
+		const issuedAt = 1_700_000_000 + this.sequence;
+		const expiresAt = issuedAt + 2_592_000;
+		const nonceBytes = Buffer.alloc(16);
+		nonceBytes.writeUInt32BE(this.sequence++, 12);
+		const prefix = `v1.${issuedAt}.${expiresAt}.${nonceBytes.toString("base64url")}`;
+		const signature = createHmac("sha256", this.signingKey).update(prefix, "ascii").digest("base64url");
+		const value = `${prefix}.${signature}`;
 		this.values.add(value);
 		return value;
 	}
 
-	verify(value: string): boolean {
-		return this.values.has(value);
+	verify(value: string): { valid: true; issuedAt: number; expiresAt: number; needsRenewal: false } | undefined {
+		if (!this.values.has(value)) return undefined;
+		const [, issuedAt, expiresAt] = value.split(".");
+		return {
+			valid: true,
+			issuedAt: Number(issuedAt),
+			expiresAt: Number(expiresAt),
+			needsRenewal: false,
+		};
 	}
+}
+
+function headerValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+	const match = Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase());
+	return match?.[1];
+}
+
+function hasTrustedBrowserMetadata(url: URL, headers: Record<string, string> | undefined): boolean {
+	const site = headerValue(headers, "sec-fetch-site")?.trim().toLowerCase();
+	const mode = headerValue(headers, "sec-fetch-mode")?.trim().toLowerCase();
+	const origin = headerValue(headers, "origin");
+	return site === "same-origin"
+		&& (mode === "cors" || mode === "same-origin")
+		&& (origin === undefined || origin === url.origin);
 }
 
 class MemoryServerResponse extends Writable {
@@ -142,8 +172,11 @@ class PreviewMountRouteFixture {
 
 		if (url.pathname === "/api/health") {
 			if (init.headers?.Authorization !== `Bearer ${this.token}`) return this.json({ error: "Unauthorized" }, 401);
+			if (!hasTrustedBrowserMetadata(url, init.headers)) return this.json({ ok: true });
 			const cookie = this.cookies.mint();
-			return this.json({ ok: true }, 200, { "set-cookie": `${COOKIE_NAME}=${cookie}; HttpOnly; SameSite=Lax; Path=/` });
+			return this.json({ ok: true }, 200, {
+				"set-cookie": `${COOKIE_NAME}=${cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000; Secure`,
+			});
 		}
 
 		if (url.pathname.startsWith("/preview/")) {
@@ -320,17 +353,22 @@ test.afterAll(() => {
 	restoreFs?.();
 });
 
-/** Hit an authed endpoint to provoke the cookie mint, return the raw value. */
+/** Use an authenticated, same-origin browser request to bootstrap a signed cookie. */
 async function mintCookie(): Promise<string> {
 	const resp = await route.fetch(`${base()}/api/health`, {
-		headers: { Authorization: `Bearer ${token}` },
+		headers: {
+			Authorization: `Bearer ${token}`,
+			Origin: base(),
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+		},
 	});
 	expect(resp.status).toBe(200);
 	const setCookie = resp.headers.get("set-cookie");
-	expect(setCookie, "Server must mint bobbit_session on Bearer auth").toBeTruthy();
-	const m = String(setCookie).match(/bobbit_session=([0-9a-f]{64})/i);
-	expect(m, `Set-Cookie did not include bobbit_session: ${setCookie}`).not.toBeNull();
-	return `bobbit_session=${m![1]}`;
+	expect(setCookie, "Server must mint bobbit_session for trusted browser auth").toBeTruthy();
+	const m = String(setCookie).match(new RegExp(`${COOKIE_NAME}=(${SIGNED_COOKIE_VALUE})(?:;|$)`));
+	expect(m, `Set-Cookie did not include a signed bobbit_session: ${setCookie}`).not.toBeNull();
+	return `${COOKIE_NAME}=${m![1]}`;
 }
 
 test.describe("POST /api/preview/mount (v3)", () => {
