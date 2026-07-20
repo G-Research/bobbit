@@ -53,33 +53,70 @@ describe("SessionCommandSerialiser", () => {
 		expect(events).toEqual(["first:start", "first:end", "second", "third"]);
 	});
 
-	it("allows different session keys to start concurrently", async () => {
+	it("holds default-resume extension posts and later commands behind delayed mention preprocessing", async () => {
+		const serialiser = new SessionCommandSerialiser();
+		const releaseMentionProbe = deferred<void>();
+		const mentionProbeStarted = deferred<void>();
+		const events: string[] = [];
+
+		const prompt = serialiser.serialise("session-a", async () => {
+			events.push("prompt:preprocess:start");
+			mentionProbeStarted.resolve();
+			await releaseMentionProbe.promise;
+			events.push("prompt:enqueue");
+		});
+		const extensionResume = serialiser.serialise("session-a", async () => {
+			events.push("extension:enqueue");
+		});
+		const laterPrompt = serialiser.serialise("session-a", async () => {
+			events.push("later:enqueue");
+		});
+
+		await mentionProbeStarted.promise;
+		await drainMicrotasks();
+		expect(events).toEqual(["prompt:preprocess:start"]);
+
+		releaseMentionProbe.resolve();
+		await Promise.all([prompt, extensionResume, laterPrompt]);
+		expect(events).toEqual([
+			"prompt:preprocess:start",
+			"prompt:enqueue",
+			"extension:enqueue",
+			"later:enqueue",
+		]);
+	});
+
+	it("allows another session to run while one session's mention preprocessing is delayed", async () => {
 		const serialiser = new SessionCommandSerialiser();
 		const sessionAMayFinish = deferred<void>();
 		const sessionAStarted = deferred<void>();
 		const events: string[] = [];
 
 		const sessionA = serialiser.run("session-a", async () => {
-			events.push("a:start");
+			events.push("a:mention-preprocess:start");
 			sessionAStarted.resolve();
 			await sessionAMayFinish.promise;
-			events.push("a:end");
+			events.push("a:mention-preprocess:end");
 		});
 		await sessionAStarted.promise;
 
 		const sessionB = serialiser.run("session-b", async () => {
-			events.push("b");
+			events.push("b:extension-resume");
 			return "session-b-result";
 		});
 		await drainMicrotasks();
 
-		expect(events).toEqual(["a:start", "b"]);
+		expect(events).toEqual(["a:mention-preprocess:start", "b:extension-resume"]);
 		await expect(sessionB).resolves.toBe("session-b-result");
-		expect(events).toEqual(["a:start", "b"]);
+		expect(events).toEqual(["a:mention-preprocess:start", "b:extension-resume"]);
 
 		sessionAMayFinish.resolve();
 		await sessionA;
-		expect(events).toEqual(["a:start", "b", "a:end"]);
+		expect(events).toEqual([
+			"a:mention-preprocess:start",
+			"b:extension-resume",
+			"a:mention-preprocess:end",
+		]);
 	});
 
 	it("rejects only the failed command and continues the same-session queue", async () => {
