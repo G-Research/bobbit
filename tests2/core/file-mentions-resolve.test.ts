@@ -39,6 +39,7 @@ afterAll(() => {
 	try { fs.rmSync(cwdDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
+const resolverModule = await import("../../src/server/skills/resolve-file-mentions.ts");
 const {
 	resolveFileMentions,
 	buildFileReferenceBlock,
@@ -47,7 +48,33 @@ const {
 	MAX_MENTION_FILE_BYTES,
 	MAX_MENTION_AGGREGATE_BYTES,
 	MAX_MENTIONS_PER_SEND,
-} = await import("../../src/server/skills/resolve-file-mentions.ts");
+} = resolverModule;
+const MAX_MENTION_SCAN_CHARS = (resolverModule as Record<string, unknown>).MAX_MENTION_SCAN_CHARS;
+const EXPECTED_MAX_MENTION_SCAN_CHARS = 256 * 1024;
+
+function observeMentionScanWork() {
+	const markdownLexer = vi.spyOn(marked, "lexer");
+	const lstat = vi.spyOn(fs, "lstatSync");
+	const realpath = vi.spyOn(fs.realpathSync, "native");
+	const stat = vi.spyOn(fs, "statSync");
+	const readFile = vi.spyOn(fs, "readFileSync");
+	return {
+		counts: () => ({
+			markdownLexer: markdownLexer.mock.calls.length,
+			lstat: lstat.mock.calls.length,
+			realpath: realpath.mock.calls.length,
+			stat: stat.mock.calls.length,
+			readFile: readFile.mock.calls.length,
+		}),
+		restore: () => {
+			readFile.mockRestore();
+			stat.mockRestore();
+			realpath.mockRestore();
+			lstat.mockRestore();
+			markdownLexer.mockRestore();
+		},
+	};
+}
 
 describe("resolveFileMentions", () => {
 	it("exports the documented cap constants", () => {
@@ -55,6 +82,7 @@ describe("resolveFileMentions", () => {
 		assert.equal(MAX_MENTION_FILE_BYTES, 10 * 1024 * 1024);
 		assert.equal(MAX_MENTION_AGGREGATE_BYTES, 20 * 1024 * 1024);
 		assert.equal(MAX_MENTIONS_PER_SEND, 50);
+		assert.equal(MAX_MENTION_SCAN_CHARS, EXPECTED_MAX_MENTION_SCAN_CHARS);
 	});
 
 	it("no mentions → text unchanged, empty mentions", () => {
@@ -64,6 +92,50 @@ describe("resolveFileMentions", () => {
 		assert.equal(r.modelText, text);
 		assert.deepEqual(r.mentions, []);
 		assert.deepEqual(r.warnings, []);
+	});
+
+	it("bypasses Markdown and filesystem probes for very large text without an at-sign", () => {
+		const text = "x".repeat(EXPECTED_MAX_MENTION_SCAN_CHARS * 4);
+		const work = observeMentionScanWork();
+		try {
+			const r = resolveFileMentions(text, cwdDir);
+			assert.deepEqual(work.counts(), {
+				markdownLexer: 0,
+				lstat: 0,
+				realpath: 0,
+				stat: 0,
+				readFile: 0,
+			});
+			assert.equal(r.originalText, text);
+			assert.equal(r.modelText, text);
+			assert.deepEqual(r.mentions, []);
+			assert.deepEqual(r.warnings, []);
+		} finally {
+			work.restore();
+		}
+	});
+
+	it("keeps mention-bearing text above the scan ceiling literal without parser or filesystem probes", () => {
+		const token = " @notes.txt";
+		const text = "x".repeat(EXPECTED_MAX_MENTION_SCAN_CHARS - token.length + 1) + token;
+		assert.equal(text.length, EXPECTED_MAX_MENTION_SCAN_CHARS + 1);
+		const work = observeMentionScanWork();
+		try {
+			const r = resolveFileMentions(text, cwdDir);
+			assert.deepEqual(work.counts(), {
+				markdownLexer: 0,
+				lstat: 0,
+				realpath: 0,
+				stat: 0,
+				readFile: 0,
+			});
+			assert.equal(r.originalText, text);
+			assert.equal(r.modelText, text);
+			assert.deepEqual(r.mentions, []);
+			assert.deepEqual(r.warnings, []);
+		} finally {
+			work.restore();
+		}
 	});
 
 	it("nonexistent identifiers and relative paths remain literal without mention metadata", () => {
@@ -746,6 +818,82 @@ describe("resolveFileMentions", () => {
 		assert.equal(big.reason, "aggregate-cap");
 		assert.equal(big.data, undefined, "over-budget mention must not be read/encoded");
 		assert.equal(big.content, undefined);
+	});
+
+	it("bounds unique existence probes for a large set of missing candidates", () => {
+		const candidateCount = MAX_MENTIONS_PER_SEND * 10;
+		const text = Array.from(
+			{ length: candidateCount },
+			(_, index) => `@resource-bound-missing-${index}.txt`,
+		).join(" ");
+		const lstatSpy = vi.spyOn(fs, "lstatSync");
+		try {
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(
+				lstatSpy.mock.calls.length,
+				MAX_MENTIONS_PER_SEND,
+				"unique synchronous existence probes must stop at the documented send budget",
+			);
+			assert.equal(r.originalText, text);
+			assert.equal(r.modelText, text);
+			assert.deepEqual(r.mentions, []);
+			assert.deepEqual(r.warnings, []);
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("reuses identical-path existence classification while preserving the existing mention limit", () => {
+		const n = MAX_MENTIONS_PER_SEND + 3;
+		const text = Array.from({ length: n }, () => "@notes.txt").join(" ");
+		const lstatSpy = vi.spyOn(fs, "lstatSync");
+		try {
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(lstatSpy.mock.calls.length, 1, "one lexical target requires one existence probe");
+			assert.equal(r.mentions.length, n);
+			assert.ok(
+				r.mentions.slice(0, MAX_MENTIONS_PER_SEND).every(
+					(mention) => mention.kind === "text" && mention.path === "notes.txt",
+				),
+			);
+			assert.ok(
+				r.mentions.slice(MAX_MENTIONS_PER_SEND).every(
+					(mention) => mention.kind === "unresolved" && mention.reason === "too-many-mentions",
+				),
+			);
+			assert.equal(r.warnings.length, 3);
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("resolves valid references admitted at the end of the unique probe budget", () => {
+		const missing = Array.from(
+			{ length: MAX_MENTIONS_PER_SEND - 2 },
+			(_, index) => `@within-budget-missing-${index}.txt`,
+		).join(" ");
+		const text = `${missing} @notes.txt @pixel.png`;
+		const lstatSpy = vi.spyOn(fs, "lstatSync");
+		try {
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(lstatSpy.mock.calls.length, MAX_MENTIONS_PER_SEND);
+			assert.deepEqual(
+				r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
+				[
+					{ kind: "text", path: "notes.txt" },
+					{ kind: "image", path: "pixel.png" },
+				],
+			);
+			assert.equal(r.mentions[0].content, NOTES_CONTENT);
+			assert.equal(r.mentions[1].data, PIXEL_BYTES.toString("base64"));
+			assert.equal(
+				r.modelText,
+				`${missing} ${buildFileReferenceBlock("notes.txt", NOTES_CONTENT)} @pixel.png`,
+			);
+			assert.deepEqual(r.warnings, []);
+		} finally {
+			lstatSpy.mockRestore();
+		}
 	});
 
 	it("more than MAX_MENTIONS_PER_SEND existing targets leaves extras unresolved", () => {
