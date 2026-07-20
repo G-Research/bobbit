@@ -256,6 +256,91 @@ describe("resolveFileMentions resource limits", () => {
 		}
 	});
 
+	it("preserves large flat mixed-run Markdown fidelity across LF, CRLF, and CR source offsets", async () => {
+		const backtick = "`";
+		const missingToken = "@flat-scanner-missing.txt";
+		const validToken = "@notes.txt";
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+
+		try {
+			for (const eol of ["\n", "\r\n", "\r"]) {
+				const sections: string[] = [];
+				for (let repetition = 0; repetition < 32; repetition++) {
+					for (let runLength = 1; runLength <= 12; runLength++) {
+						const run = backtick.repeat(runLength);
+						const shorterRun = backtick.repeat(Math.max(0, runLength - 1));
+						sections.push(
+							`matched ${run}keep ${shorterRun} ${validToken} literal${run}`,
+							`multiline ${run}first line${eol}second ${validToken} literal${run}`,
+							`unmatched ${run} stays prose with ${missingToken}`,
+							"",
+						);
+					}
+				}
+
+				const three = backtick.repeat(3);
+				const five = backtick.repeat(5);
+				const deepInline = `${"- ".repeat(4_096)}${backtick}deep ${validToken} literal${backtick}`;
+				const text = [
+					...sections,
+					three + "text",
+					`${validToken} ${"x".repeat(192 * 1024)}`,
+					five,
+					`container fences ${eol}> ${three}text${eol}> ${validToken}${eol}> ${three}`,
+					`- ${five}text${eol}  ${validToken}${eol}  ${five}`,
+					`    indented ${validToken}`,
+					deepInline,
+					`😀 outside ${validToken}; missing ${missingToken}.`,
+				].join(eol);
+				const start = text.lastIndexOf(validToken);
+				const firstLstatCall = lstatSpy.mock.calls.length;
+
+				assert.ok(text.length > 256 * 1024, "fixture must exercise a large flat Markdown scan");
+				assert.throws(
+					() => marked.lexer(deepInline, { async: false }),
+					(error: unknown) => error instanceof RangeError && /call stack/i.test(error.message),
+					"the terminal container must exercise the non-recursive deep-list fallback",
+				);
+				assert.equal(
+					Buffer.byteLength(text.slice(0, start), "utf8"),
+					start + 2,
+					"the final astral prefix must preserve UTF-16 rather than byte offsets",
+				);
+
+				const result = await resolveFileMentions(text, cwdDir);
+				assert.equal(result.originalText, text);
+				assert.deepEqual(
+					result.mentions.map((mention) => ({
+						kind: mention.kind,
+						path: mention.path,
+						range: mention.range,
+					})),
+					[{ kind: "text", path: "notes.txt", range: [start, start + validToken.length] }],
+				);
+				assert.equal(
+					result.modelText,
+					text.slice(0, start)
+						+ buildFileReferenceBlock("notes.txt", NOTES_CONTENT)
+						+ text.slice(start + validToken.length),
+					"matched inline spans, multiline spans, fences, indentation, and fallback containers must stay literal",
+				);
+				assert.deepEqual(result.warnings, []);
+				assert.deepEqual(
+					lstatSpy.mock.calls.slice(firstLstatCall)
+						.map(([target]) => path.resolve(String(target)))
+						.sort(),
+					[
+						path.join(cwdDir, "flat-scanner-missing.txt"),
+						path.join(cwdDir, "notes.txt"),
+					].sort(),
+					"only the repeated unmatched prose token and final valid token may reach the filesystem",
+				);
+			}
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
 	it("rejects a CRLF/backtick candidate overflow atomically before filesystem work", async () => {
 		const overflow = Array.from(
 			{ length: EXPECTED_RAW_CANDIDATE_LIMIT + 1 },
@@ -1000,6 +1085,88 @@ describe("resolveFileMentions resource limits", () => {
 			openSpy.mockRestore();
 			realpathSpy.mockRestore();
 			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("does not retain thousands of canceled global lstat waiters ahead of a legitimate resolver", async () => {
+		const waveCount = 128;
+		const callersPerWave = FILE_MENTION_RESOLUTION_CONCURRENCY;
+		const candidatesPerCaller = EXPECTED_LSTAT_CONCURRENCY;
+		const canceledAcquisitions = waveCount * callersPerWave * candidatesPerCaller;
+		const stalledGates: Array<Deferred<fs.Stats>> = [];
+		const probedTargets: string[] = [];
+		const notesPath = path.join(cwdDir, "notes.txt");
+		const originalLstat = fs.promises.lstat.bind(fs.promises);
+		let stalledProbeCount = 0;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((target: fs.PathLike) => {
+			const resolvedTarget = path.resolve(String(target));
+			probedTargets.push(resolvedTarget);
+			if (stalledProbeCount++ < EXPECTED_LSTAT_CONCURRENCY) {
+				const gate = deferred<fs.Stats>();
+				stalledGates.push(gate);
+				return gate.promise;
+			}
+			return originalLstat(target);
+		}) as typeof fs.promises.lstat);
+
+		let legitimate: Promise<Awaited<ReturnType<typeof resolveFileMentions>>> | undefined;
+		try {
+			for (let wave = 0; wave < waveCount; wave++) {
+				const controllers = Array.from(
+					{ length: callersPerWave },
+					() => new AbortController(),
+				);
+				const resolutions = controllers.map((controller, caller) => {
+					const text = Array.from(
+						{ length: candidatesPerCaller },
+						(_, candidate) => `@canceled-wait-${wave}-${caller}-${candidate}.txt`,
+					).join(" ");
+					return resolveWithSignal(text, cwdDir, { signal: controller.signal });
+				});
+
+				// Four resolver permits and eight workers per resolver make 32
+				// lstat acquisition attempts per wave. Let them all reach the shared
+				// semaphore before canceling the callers.
+				for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+				for (const controller of controllers) controller.abort();
+				const outcomes = await Promise.allSettled(resolutions);
+				assert.ok(outcomes.every(
+					(outcome) => outcome.status === "rejected"
+						&& (outcome.reason as { name?: unknown }).name === "AbortError",
+				), `wave ${wave} must abort atomically`);
+			}
+
+			assert.ok(canceledAcquisitions > 4_000, "fixture must cancel thousands of semaphore acquisitions");
+			assert.equal(
+				probedTargets.length,
+				EXPECTED_LSTAT_CONCURRENCY,
+				"only the initial live OS probes may start while every permit is held",
+			);
+
+			legitimate = resolveFileMentions("@notes.txt", cwdDir);
+			for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+			assert.ok(!probedTargets.includes(notesPath));
+			for (const gate of stalledGates.splice(0)) gate.reject(missingPathError());
+
+			let microtaskTurns = 0;
+			while (!probedTargets.includes(notesPath) && microtaskTurns < 10_000) {
+				microtaskTurns++;
+				await Promise.resolve();
+			}
+			const result = await settleWithin(legitimate, 1_000, "legitimate resolver after cancellation storm");
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
+				[{ kind: "text", path: "notes.txt" }],
+			);
+			assert.deepEqual(result.warnings, []);
+			assert.ok(
+				microtaskTurns <= 32,
+				`legitimate probe was delayed ${microtaskTurns} microtask turns by ${canceledAcquisitions} canceled semaphore waiters`,
+			);
+		} finally {
+			for (const gate of stalledGates.splice(0)) gate.reject(missingPathError());
+			if (legitimate) await Promise.allSettled([legitimate]);
 			lstatSpy.mockRestore();
 		}
 	});

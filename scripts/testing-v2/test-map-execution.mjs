@@ -7,6 +7,7 @@ export const REPO_ROOT = resolve(HERE, "..", "..");
 export const DEFAULT_TEST_MAP_PATH = join(REPO_ROOT, "tests2", "tests-map.json");
 
 export const APPROVED_E2E_VITEST_PATHS = Object.freeze([
+	"tests2/core/file-mentions-authenticated-boundary.test.ts",
 	"tests2/core/git-lifecycle-no-publication-real-git.test.ts",
 	"tests2/core/marketplace-install.test.ts",
 	"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
