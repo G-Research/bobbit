@@ -32,6 +32,8 @@
  *       • genuinely missing targets are ordinary text and are omitted from
  *                   mentions and warnings. Delivery failures for existing
  *                   targets degrade gracefully without rejecting the prompt.
+ *       • prompts above the explicit raw-candidate or unique-probe budgets are
+ *                   rejected as a whole; candidates are never silently dropped.
  *
  *   - **Snapshot at resolve time** — text content and image/binary base64
  *     bytes are captured now so replaying a `.jsonl` later renders the same
@@ -104,6 +106,25 @@ export const FILE_MENTION_PROBE_CONCURRENCY = 8;
 export const FILE_MENTION_RESOLUTION_CONCURRENCY = 4;
 /** Process-wide cap for in-flight lstat probes across every session. */
 export const FILE_MENTION_LSTAT_CONCURRENCY = 8;
+/** Max retained non-code `@path` candidates in one prompt. */
+export const MAX_FILE_MENTION_RAW_CANDIDATES = 8_192;
+/** Max distinct lexical filesystem targets probed in one prompt. */
+export const MAX_FILE_MENTION_UNIQUE_PROBES = 4_096;
+
+export type FileMentionBudgetErrorCode =
+	| "FILE_MENTION_CANDIDATE_LIMIT"
+	| "FILE_MENTION_PROBE_LIMIT";
+
+/** Typed admission failure: callers must reject the whole prompt explicitly. */
+export class FileMentionBudgetError extends Error {
+	readonly code: FileMentionBudgetErrorCode;
+
+	constructor(code: FileMentionBudgetErrorCode, message: string) {
+		super(message);
+		this.name = "FileMentionBudgetError";
+		this.code = code;
+	}
+}
 
 // Module-global FIFO semaphores prevent independent sessions from multiplying
 // resolver/parser and metadata-probe concurrency. Each acquire is released in
@@ -938,8 +959,8 @@ function scanMarkdownCodeRanges(text: string): SourceRange[] {
 				);
 			}
 		}
-		// The resolver must never throw. Isolate parser failures by Markdown
-		// block and fail closed only for blocks that still cannot be parsed.
+		// Markdown parser failures must not escape. Isolate them by block and
+		// fail closed only for blocks that still cannot be parsed.
 		return scanMarkedCodeRangesByBlock(source);
 	}
 }
@@ -963,7 +984,10 @@ function isWindowsNamespaceToken(rawPath: string): boolean {
 		.some((segment) => WINDOWS_DOS_DEVICE_SEGMENT.test(segment));
 }
 
-/** Scan prose for `@path` tokens while preserving original UTF-16 indices. */
+/**
+ * Scan prose for `@path` tokens while preserving original UTF-16 indices.
+ * Code-contained matches are excluded before they can consume the budget.
+ */
 function scanTokens(text: string): ScannedToken[] {
 	const re = /(^|\s)@([^\s@]+)/g;
 	// Ordinary prompts need no Markdown token tree or normalized-source copy.
@@ -1001,6 +1025,12 @@ function scanTokens(text: string): ScannedToken[] {
 		if (token.length === 0) continue;
 		const tokenEnd = tokenStart + 1 + token.length; // covers "@" + path
 		out.push({ rawPath: token, range: [tokenStart, tokenEnd] });
+		if (out.length > MAX_FILE_MENTION_RAW_CANDIDATES) {
+			throw new FileMentionBudgetError(
+				"FILE_MENTION_CANDIDATE_LIMIT",
+				`Prompt contains more than ${MAX_FILE_MENTION_RAW_CANDIDATES} non-code file-mention candidates`,
+			);
+		}
 	}
 	return out;
 }
@@ -1010,18 +1040,51 @@ function isMissingPathError(error: unknown): boolean {
 	return code === "ENOENT" || code === "ENOTDIR";
 }
 
-type FileMentionTargetClassification = "exists" | "missing" | "unreadable";
+type FileMentionTargetClassification =
+	| { kind: "exists"; lstat: fs.Stats }
+	| { kind: "missing" }
+	| { kind: "unreadable" };
 
 /**
- * Classify every distinct lexical target with a fixed asynchronous worker
- * pool. Workers pull directly from the source iterator, so classification does
- * not prebuild a task/promise per candidate. The result map doubles as the
- * de-duplication set; inserting before the probe retains first-source order
- * even when lstat calls finish out of order. Every target is consumed, so a
- * long run of missing candidates cannot hide a later existing target.
+ * Retain distinct lexical probes only up to the explicit budget. This pass
+ * completes before lstat workers start, so an over-budget prompt is rejected
+ * atomically without partially probing the filesystem.
+ */
+function collectUniqueLexicalTargets(
+	tokens: readonly ScannedToken[],
+	resolvedCwd: string,
+): string[] {
+	const seen = new Set<string>();
+	const targets: string[] = [];
+	for (const token of tokens) {
+		if (isWindowsNamespaceToken(token.rawPath)) continue;
+		const target = path.resolve(
+			resolvedCwd,
+			token.rawPath.replace(/\\/g, "/"),
+		);
+		if (seen.has(target)) continue;
+		seen.add(target);
+		targets.push(target);
+		if (targets.length > MAX_FILE_MENTION_UNIQUE_PROBES) {
+			throw new FileMentionBudgetError(
+				"FILE_MENTION_PROBE_LIMIT",
+				`Prompt contains more than ${MAX_FILE_MENTION_UNIQUE_PROBES} distinct file-mention targets`,
+			);
+		}
+	}
+	return targets;
+}
+
+/**
+ * Classify every budgeted lexical target with a fixed asynchronous worker
+ * pool. Workers pull directly from the bounded source iterator, so
+ * classification does not prebuild a task/promise per candidate. The result
+ * map retains lstat type information, allowing direct non-regular targets to
+ * be rejected before any open. Every admitted target is consumed, so a long
+ * run of missing candidates cannot hide a later existing target.
  */
 async function classifyFileMentionTargets(
-	lexicalTargets: Iterable<string>,
+	lexicalTargets: readonly string[],
 ): Promise<ReadonlyMap<string, FileMentionTargetClassification>> {
 	const classifications = new Map<string, FileMentionTargetClassification>();
 	const targets = lexicalTargets[Symbol.iterator]();
@@ -1035,19 +1098,21 @@ async function classifyFileMentionTargets(
 					if (next.done) return;
 					target = next.value;
 					if (classifications.has(target)) continue;
-					classifications.set(target, "unreadable");
+					classifications.set(target, { kind: "unreadable" });
 					break;
 				}
 
 				await lstatSemaphore.acquire();
 				try {
 					try {
-						await fs.promises.lstat(target);
-						classifications.set(target, "exists");
+						const lstat = await fs.promises.lstat(target);
+						classifications.set(target, { kind: "exists", lstat });
 					} catch (error) {
 						classifications.set(
 							target,
-							isMissingPathError(error) ? "missing" : "unreadable",
+							isMissingPathError(error)
+								? { kind: "missing" }
+								: { kind: "unreadable" },
 						);
 					}
 				} finally {
@@ -1206,7 +1271,8 @@ function validateOpenedDescriptor(
 
 /**
  * Bind validation and bounded reads to one descriptor. O_NOFOLLOW closes the
- * final-component race where available; descriptor containment/identity closes
+ * final-component race where available; O_NONBLOCK prevents a raced-in special
+ * file from blocking the event loop; descriptor containment/identity closes
  * the parent-component race. The descriptor is always closed.
  */
 function snapshotCanonicalFile(
@@ -1219,13 +1285,15 @@ function snapshotCanonicalFile(
 	let result: DescriptorSnapshot = { ok: false, reason: "unreadable" };
 	try {
 		const noFollow = fs.constants.O_NOFOLLOW;
+		const nonBlock = fs.constants.O_NONBLOCK;
 		const flags = fs.constants.O_RDONLY |
-			(typeof noFollow === "number" ? noFollow : 0);
+			(typeof noFollow === "number" ? noFollow : 0) |
+			(typeof nonBlock === "number" ? nonBlock : 0);
 		fd = fs.openSync(absPath, flags);
 		const stat = fs.fstatSync(fd, { bigint: true });
 		const size = boundedBigIntSize(stat.size);
 		if (!stat.isFile()) {
-			result = { ok: false, reason: "missing", size };
+			result = { ok: false, reason: "unreadable", size };
 		} else {
 			const validation = validateOpenedDescriptor(fd, absPath, canonicalCwd, stat);
 			if (!validation.ok) {
@@ -1300,19 +1368,15 @@ async function resolveFileMentionsUnderPermit(
 	const replacements: Array<{ start: number; end: number; expanded: string }> = [];
 	const resolvedCwd = path.resolve(cwd);
 
-	// Classify every distinct lexical target before applying delivery limits.
-	// Missing candidates neither consume the existing-reference cap nor prevent
-	// a later valid target from being discovered.
-	const lexicalTargets = function* (): Generator<string> {
-		for (const token of tokens) {
-			if (isWindowsNamespaceToken(token.rawPath)) continue;
-			yield path.resolve(resolvedCwd, token.rawPath.replace(/\\/g, "/"));
-		}
-	};
-	const classificationCache = await classifyFileMentionTargets(lexicalTargets());
+	// Bound and classify every distinct lexical target before applying delivery
+	// limits. Missing candidates neither consume the existing-reference cap nor
+	// prevent a later valid target from being discovered. Budget overflow is
+	// detected before the first lstat, so the whole prompt is rejected atomically.
+	const lexicalTargets = collectUniqueLexicalTargets(tokens, resolvedCwd);
+	const classificationCache = await classifyFileMentionTargets(lexicalTargets);
 	let hasExistingCandidate = false;
 	for (const classification of classificationCache.values()) {
-		if (classification !== "missing") {
+		if (classification.kind !== "missing") {
 			hasExistingCandidate = true;
 			break;
 		}
@@ -1345,8 +1409,8 @@ async function resolveFileMentionsUnderPermit(
 		};
 
 		const lexicalAbs = path.resolve(resolvedCwd, normRel);
-		const classification = classificationCache.get(lexicalAbs) ?? "unreadable";
-		if (classification === "missing") continue;
+		const classification = classificationCache.get(lexicalAbs) ?? { kind: "unreadable" as const };
+		if (classification.kind === "missing") continue;
 
 		// Missing candidates do not consume this cap. Extra existing candidates
 		// require only the metadata classification above, never realpath/open/read.
@@ -1364,7 +1428,15 @@ async function resolveFileMentionsUnderPermit(
 			continue;
 		}
 
-		if (classification === "unreadable") {
+		if (classification.kind === "unreadable") {
+			markUnresolved("unreadable");
+			continue;
+		}
+
+		// lstat does not follow the final component. A direct FIFO, socket,
+		// device, or directory is therefore rejected without ever opening it.
+		// Symlinks proceed to canonical containment and a following stat below.
+		if (!classification.lstat.isFile() && !classification.lstat.isSymbolicLink()) {
 			markUnresolved("unreadable");
 			continue;
 		}
@@ -1383,6 +1455,19 @@ async function resolveFileMentionsUnderPermit(
 		// any open/read, so an inside-cwd link cannot leak outside file bytes.
 		if (escapesDir(canonicalCwd, absPath)) {
 			markUnresolved("outside-cwd");
+			continue;
+		}
+
+		// Following stat is metadata-only and catches symlinks to non-regular
+		// targets plus type changes since lstat. O_NONBLOCK and fd-fstat below
+		// remain the race-safe defense in depth between this check and open.
+		try {
+			if (!fs.statSync(absPath).isFile()) {
+				markUnresolved("unreadable");
+				continue;
+			}
+		} catch {
+			markUnresolved("unreadable");
 			continue;
 		}
 
