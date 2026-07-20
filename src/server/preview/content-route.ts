@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import type http from "node:http";
 
-import { mountDir } from "./mount.js";
+import { mountDir, readMountDirectory } from "./mount.js";
 import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
@@ -61,10 +61,10 @@ function isAuthorized(req: http.IncomingMessage, opts: ContentRouteOptions): boo
  * Pick the entry file when the user requests `/preview/<sid>/`.
  * Order: `index.html` → `inline.html` → first `.html` alphabetically.
  */
-export function pickEntry(dir: string): string | null {
+export async function pickEntry(dir: string): Promise<string | null> {
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
+		entries = await readMountDirectory(dir);
 	} catch {
 		return null;
 	}
@@ -155,7 +155,7 @@ export async function handlePreviewRequest(
 			send(res, 404, JSON.stringify({ error: "Preview mount not found" }));
 			return true;
 		}
-		const entry = pickEntry(baseDir);
+		const entry = await pickEntry(baseDir);
 		if (!entry) {
 			send(res, 404, JSON.stringify({ error: "Preview mount is empty" }));
 			return true;
