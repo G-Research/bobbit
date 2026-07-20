@@ -97,6 +97,10 @@ export const MAX_MENTION_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_MENTION_AGGREGATE_BYTES = 20 * 1024 * 1024; // 20 MiB
 /** Max existing `@path` targets resolved per send. Extra existing targets → unresolved (too-many-mentions). */
 export const MAX_MENTIONS_PER_SEND = 50;
+/** Max UTF-16 code units admitted to synchronous Markdown mention scanning. Oversized prompts stay plain. */
+export const MAX_MENTION_SCAN_CHARS = 256 * 1024;
+/** Max distinct lexical targets synchronously probed for existence per send. Unseen overflow candidates stay plain. */
+export const MAX_UNIQUE_MENTION_PROBES = 100;
 
 /** Image extensions → MIME type. */
 const IMAGE_MIME: Record<string, string> = {
@@ -184,13 +188,21 @@ interface SourceRange {
 	end: number;
 }
 
+interface SourceMapSegment {
+	/** Half-open offsets in the current mapped source. */
+	sourceStart: number;
+	sourceEnd: number;
+	/** Half-open offsets in the untouched prompt. */
+	originalStart: number;
+	originalEnd: number;
+}
+
 interface MappedSource {
 	/** Markdown source after Marked's CR/CRLF-to-LF normalization. */
 	text: string;
-	/** Original UTF-16 start offset for each code unit in {@link text}. */
-	starts: number[];
-	/** Original UTF-16 end offset for each code unit in {@link text}. */
-	ends: number[];
+	/** Ordered mapping runs. Ordinary text is one linear run; only normalized
+	 *  CRLFs and syntax skipped while aligning descendants split runs. */
+	segments: SourceMapSegment[];
 }
 
 interface SourceAlignment {
@@ -200,30 +212,116 @@ interface SourceAlignment {
 	source?: MappedSource;
 }
 
+function appendSourceSegment(
+	segments: SourceMapSegment[],
+	sourceStart: number,
+	sourceEnd: number,
+	originalStart: number,
+	originalEnd: number,
+): void {
+	if (sourceStart === sourceEnd) return;
+	const previous = segments[segments.length - 1];
+	const sourceLength = sourceEnd - sourceStart;
+	const originalLength = originalEnd - originalStart;
+	if (
+		previous &&
+		previous.sourceEnd === sourceStart &&
+		previous.originalEnd === originalStart &&
+		previous.sourceEnd - previous.sourceStart ===
+			previous.originalEnd - previous.originalStart &&
+		sourceLength === originalLength
+	) {
+		previous.sourceEnd = sourceEnd;
+		previous.originalEnd = originalEnd;
+		return;
+	}
+	segments.push({ sourceStart, sourceEnd, originalStart, originalEnd });
+}
+
+function sourceSegmentIndexAt(source: MappedSource, offset: number): number {
+	let low = 0;
+	let high = source.segments.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if (source.segments[middle].sourceEnd <= offset) low = middle + 1;
+		else high = middle;
+	}
+	return low;
+}
+
+function originalBoundary(segment: SourceMapSegment, offset: number): number {
+	const sourceLength = segment.sourceEnd - segment.sourceStart;
+	const originalLength = segment.originalEnd - segment.originalStart;
+	if (sourceLength === originalLength) {
+		return segment.originalStart + offset - segment.sourceStart;
+	}
+	// The only non-linear base mapping is one normalized LF for a CRLF pair.
+	return offset === segment.sourceStart
+		? segment.originalStart
+		: segment.originalEnd;
+}
+
+function mappedUnitRange(source: MappedSource, offset: number): SourceRange {
+	const segment = source.segments[sourceSegmentIndexAt(source, offset)];
+	return {
+		start: originalBoundary(segment, offset),
+		end: originalBoundary(segment, offset + 1),
+	};
+}
+
 /**
  * Marked normalizes CR and CRLF to LF before lexing. Mirror that operation
- * while retaining a direct map to the untouched prompt. JavaScript string
- * offsets are UTF-16 code units, so iterating by numeric index also preserves
- * astral-character ranges without conversion.
+ * with sparse mapping runs rather than three arrays per UTF-16 code unit.
+ * Ordinary text stays in one run; each CRLF contributes only one exceptional
+ * boundary whose normalized LF covers both original code units.
  */
 function normalizeMarkdownSource(text: string): MappedSource {
-	const chars: string[] = [];
-	const starts: number[] = [];
-	const ends: number[] = [];
-	let cursor = 0;
-	while (cursor < text.length) {
-		const start = cursor;
-		if (text[cursor] === "\r") {
-			cursor += text[cursor + 1] === "\n" ? 2 : 1;
-			chars.push("\n");
-		} else {
-			chars.push(text[cursor]);
-			cursor++;
-		}
-		starts.push(start);
-		ends.push(cursor);
+	if (!text.includes("\r")) {
+		return {
+			text,
+			segments: text.length === 0
+				? []
+				: [{ sourceStart: 0, sourceEnd: text.length, originalStart: 0, originalEnd: text.length }],
+		};
 	}
-	return { text: chars.join(""), starts, ends };
+
+	const segments: SourceMapSegment[] = [];
+	const carriageReturn = /\r\n?/g;
+	let originalCursor = 0;
+	let sourceCursor = 0;
+	let match: RegExpExecArray | null;
+	while ((match = carriageReturn.exec(text)) !== null) {
+		if (match.index > originalCursor) {
+			const chunkLength = match.index - originalCursor;
+			appendSourceSegment(
+				segments,
+				sourceCursor,
+				sourceCursor + chunkLength,
+				originalCursor,
+				match.index,
+			);
+			sourceCursor += chunkLength;
+		}
+		appendSourceSegment(
+			segments,
+			sourceCursor,
+			sourceCursor + 1,
+			match.index,
+			match.index + match[0].length,
+		);
+		sourceCursor++;
+		originalCursor = match.index + match[0].length;
+	}
+	if (originalCursor < text.length) {
+		appendSourceSegment(
+			segments,
+			sourceCursor,
+			sourceCursor + text.length - originalCursor,
+			originalCursor,
+			text.length,
+		);
+	}
+	return { text: text.replace(/\r\n?/g, "\n"), segments };
 }
 
 /**
@@ -241,8 +339,8 @@ function alignRawSource(
 	map: boolean,
 ): SourceAlignment | undefined {
 	let cursor = start;
-	const starts = map ? ([] as number[]) : undefined;
-	const ends = map ? ([] as number[]) : undefined;
+	let segmentIndex = map ? sourceSegmentIndexAt(parent, cursor) : 0;
+	const segments = map ? ([] as SourceMapSegment[]) : undefined;
 	for (let rawIndex = 0; rawIndex < raw.length; rawIndex++) {
 		while (
 			cursor < parent.text.length &&
@@ -251,23 +349,30 @@ function alignRawSource(
 			cursor++;
 		}
 		if (cursor === parent.text.length) return undefined;
-		starts?.push(parent.starts[cursor]);
-		ends?.push(parent.ends[cursor]);
+		if (segments) {
+			while (parent.segments[segmentIndex].sourceEnd <= cursor) segmentIndex++;
+			const parentSegment = parent.segments[segmentIndex];
+			appendSourceSegment(
+				segments,
+				rawIndex,
+				rawIndex + 1,
+				originalBoundary(parentSegment, cursor),
+				originalBoundary(parentSegment, cursor + 1),
+			);
+		}
 		cursor++;
 	}
 	return {
 		next: cursor,
-		source: map
-			? { text: raw, starts: starts!, ends: ends! }
-			: undefined,
+		source: map ? { text: raw, segments: segments! } : undefined,
 	};
 }
 
 function mappedRange(source: MappedSource): SourceRange | undefined {
 	if (source.text.length === 0) return undefined;
 	return {
-		start: source.starts[0],
-		end: source.ends[source.ends.length - 1],
+		start: source.segments[0].originalStart,
+		end: source.segments[source.segments.length - 1].originalEnd,
 	};
 }
 
@@ -532,8 +637,8 @@ function originalRange(
 	end: number,
 ): SourceRange {
 	return {
-		start: source.starts[start],
-		end: source.ends[end - 1],
+		start: mappedUnitRange(source, start).start,
+		end: mappedUnitRange(source, end - 1).end,
 	};
 }
 
@@ -691,8 +796,7 @@ function recoverDeepLists(source: MappedSource): DeepListRecovery {
 	return {
 		source: {
 			text: masked.join(""),
-			starts: source.starts,
-			ends: source.ends,
+			segments: source.segments,
 		},
 		fences,
 		found,
@@ -722,11 +826,24 @@ function mappedSlice(
 	start: number,
 	end: number,
 ): MappedSource {
-	return {
-		text: source.text.slice(start, end),
-		starts: source.starts.slice(start, end),
-		ends: source.ends.slice(start, end),
-	};
+	const segments: SourceMapSegment[] = [];
+	let segmentIndex = sourceSegmentIndexAt(source, start);
+	while (
+		segmentIndex < source.segments.length &&
+		source.segments[segmentIndex].sourceStart < end
+	) {
+		const segment = source.segments[segmentIndex++];
+		const overlapStart = Math.max(start, segment.sourceStart);
+		const overlapEnd = Math.min(end, segment.sourceEnd);
+		appendSourceSegment(
+			segments,
+			overlapStart - start,
+			overlapEnd - start,
+			originalBoundary(segment, overlapStart),
+			originalBoundary(segment, overlapEnd),
+		);
+	}
+	return { text: source.text.slice(start, end), segments };
 }
 
 /**
@@ -893,6 +1010,17 @@ export function resolveFileMentions(
 	opts?: ResolveFileMentionsOptions,
 ): ResolvedMentions {
 	const originalText = text;
+	const plainResult = (): ResolvedMentions => ({
+		originalText,
+		modelText: originalText,
+		mentions: [],
+		warnings: [],
+	});
+	// Avoid Markdown/parser setup for the overwhelmingly common plain prompt,
+	// and keep the synchronous send path bounded for mention-bearing payloads.
+	if (!text.includes("@")) return plainResult();
+	if (text.length > MAX_MENTION_SCAN_CHARS) return plainResult();
+
 	const maxTextBytes = opts?.maxFileBytes ?? MAX_INLINE_TEXT_BYTES;
 	const maxFileBytes = opts?.maxMentionFileBytes ?? MAX_MENTION_FILE_BYTES;
 	const maxAggregate = opts?.maxAggregateBytes ?? MAX_MENTION_AGGREGATE_BYTES;
@@ -914,6 +1042,9 @@ export function resolveFileMentions(
 
 	let aggregateUsed = 0;
 	let resolvedCount = 0;
+	type CandidateClassification = "exists" | "missing" | "unreadable";
+	const classificationCache = new Map<string, CandidateClassification>();
+	let uniqueProbeCount = 0;
 
 	for (const tok of tokens) {
 		const rawPath = tok.rawPath;
@@ -930,16 +1061,21 @@ export function resolveFileMentions(
 		const lexicalAbs = path.resolve(resolvedCwd, normRel);
 
 		// Existence classification is deliberately metadata-only and separate from
-		// canonicalization/delivery. Only a genuine initial ENOENT/ENOTDIR is plain
-		// text. Once lstat establishes an entry (including a symlink), every later
-		// realpath/stat/access failure retains unresolved mention metadata.
-		let classificationError: unknown;
-		try {
-			fs.lstatSync(lexicalAbs);
-		} catch (error) {
-			if (isMissingPathError(error)) continue;
-			classificationError = error;
+		// canonicalization/delivery. Bound probes by distinct lexical target and
+		// reuse classifications for repeats; unseen overflow candidates stay plain.
+		let classification = classificationCache.get(lexicalAbs);
+		if (!classification) {
+			if (uniqueProbeCount >= MAX_UNIQUE_MENTION_PROBES) continue;
+			uniqueProbeCount++;
+			try {
+				fs.lstatSync(lexicalAbs);
+				classification = "exists";
+			} catch (error) {
+				classification = isMissingPathError(error) ? "missing" : "unreadable";
+			}
+			classificationCache.set(lexicalAbs, classification);
 		}
+		if (classification === "missing") continue;
 
 		// Missing candidates do not consume this cap. Extra existing candidates
 		// require only the metadata classification above, never realpath/stat/read.
@@ -957,7 +1093,7 @@ export function resolveFileMentions(
 			continue;
 		}
 
-		if (classificationError) {
+		if (classification === "unreadable") {
 			markUnresolved("unreadable");
 			continue;
 		}

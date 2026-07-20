@@ -853,9 +853,9 @@ export function handleWebSocketConnection(
 
 					// Resolve `@path` file mentions on the SAME verbatim text. The
 					// `/` and `@` token sets are disjoint by construction, so the
-					// two resolvers never produce overlapping ranges. A bad
-					// reference never tears down the send — it degrades to a
-					// literal `@path` plus a warning.
+					// two resolvers never produce overlapping ranges. Genuine
+					// absence stays plain text without a warning; only an existing
+					// target that later fails delivery stays literal and warns.
 					//
 					// IMPORTANT: file mentions resolve against the session's HOST
 					// worktree, NOT skillCwd. skillCwd redirects to the project
