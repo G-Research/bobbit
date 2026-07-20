@@ -136,3 +136,50 @@ describe("WorktreePool — nested project rootPath", () => {
 		);
 	});
 });
+
+describe("WorktreePool — nested project with relative worktreeRoot", () => {
+	it("uses one project-relative absolute root for reclaim and replacement fill", async () => {
+		const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pool-relative-root-"));
+		const repo = path.join(fixture, "repo");
+		const project = path.join(repo, "packages", "nested-app");
+		const configuredRoot = path.join(fixture, "configured-worktrees");
+		const relativeRoot = path.relative(project, configuredRoot);
+		let relativePool: WorktreePool | undefined;
+		try {
+			fs.mkdirSync(project, { recursive: true });
+			git(repo, "init", "-q", "-b", "master");
+			git(repo, "config", "user.email", "test@bobbit.local");
+			git(repo, "config", "user.name", "Bobbit Test");
+			git(repo, "config", "commit.gpgsign", "false");
+			fs.writeFileSync(path.join(project, "package.json"), "{}\n");
+			git(repo, "add", ".");
+			git(repo, "commit", "-q", "-m", "init");
+
+			fs.mkdirSync(configuredRoot, { recursive: true });
+			const orphanPath = path.join(configuredRoot, "pool-_pool-relative");
+			git(repo, "worktree", "add", "-q", "-b", "pool/_pool-relative", orphanPath, "HEAD");
+
+			relativePool = new WorktreePool({
+				repoPath: project,
+				projectRoot: project,
+				worktreeRoot: relativeRoot,
+				targetSize: 2,
+			});
+			await relativePool.initialize();
+			await waitFor(() => relativePool!.size === 2, 30_000, "orphan reclaim plus replacement fill");
+
+			const entries = relativePool.snapshotEntries().entries;
+			assert.equal(entries.some(entry => entry.worktreePath === orphanPath), true, "startup should reclaim the existing relative-root entry");
+			assert.equal(
+				entries.every(entry => path.dirname(entry.worktreePath) === configuredRoot),
+				true,
+				`reclaim and fill must share ${configuredRoot}; got ${entries.map(entry => entry.worktreePath).join(", ")}`,
+			);
+		} finally {
+			if (relativePool) {
+				try { await relativePool.drain(); } catch { /* best-effort */ }
+			}
+			try { fs.rmSync(fixture, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	});
+});
