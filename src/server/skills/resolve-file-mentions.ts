@@ -992,10 +992,14 @@ function scanTokens(text: string): ScannedToken[] {
 	// Backticks and 3+ tildes can delimit code; four columns of leading
 	// indentation can introduce a code block. A tab reaches the next four-column
 	// stop, so up to three preceding spaces still form a valid indented start.
-	// Only prompts with one of those code markers pay for Marked and sparse
-	// original-offset mapping.
+	// Container starts also need Marked because their prefixes can make later
+	// indentation code-significant (for example `>     @notes.txt`). Route
+	// blockquotes and both list-marker forms to the maintained parser rather than
+	// trying to reproduce their nesting rules here. Only prompts with one of
+	// these Markdown signals pay for Marked and sparse original-offset mapping.
 	const hasIndentedCodeLine = /(?:^|\r\n?|\n)(?: {4}| {0,3}\t)/.test(text);
-	const excluded = text.includes("`") || /~{3,}/.test(text) || hasIndentedCodeLine
+	const hasMarkdownContainerLine = /(?:^|\r\n?|\n) {0,3}(?:>|[-+*](?=[ \t\r\n]|$)|\d{1,9}[.)](?=[ \t\r\n]|$))/.test(text);
+	const excluded = text.includes("`") || /~{3,}/.test(text) || hasIndentedCodeLine || hasMarkdownContainerLine
 		? scanMarkdownCodeRanges(text)
 		: undefined;
 	const out: ScannedToken[] = [];
