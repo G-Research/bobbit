@@ -153,6 +153,45 @@ describe("resolveFileMentions", () => {
 		assert.deepEqual(r.warnings, []);
 	});
 
+	it("resolves a prose mention immediately adjacent to matched inline-code delimiters", async () => {
+		const cases = [
+			"😀 resolve @notes.txt`keep @src/a.ts literal` after",
+			"😀 resolve @notes.txt;``keep @src/a.ts and a ` tick literal`` after",
+		];
+		const token = "@notes.txt";
+
+		for (const text of cases) {
+			const start = text.indexOf(token);
+			const codeStart = text.indexOf("`", start + token.length);
+			assert.ok(codeStart >= start + token.length, "fixture must place inline code directly after the prose token or its punctuation");
+			assert.equal(
+				[...text.slice(0, start)].length,
+				start - 1,
+				"the astral prefix must distinguish UTF-16 ranges from code-point offsets",
+			);
+
+			const r = await resolveFileMentions(text, cwdDir);
+			const referenceBlock = buildFileReferenceBlock("notes.txt", NOTES_CONTENT);
+			assert.equal(r.originalText, text);
+			assert.deepEqual(
+				r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "notes.txt", range: [start, start + token.length] }],
+				text,
+			);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + referenceBlock + text.slice(start + token.length),
+				"only the prose token may be spliced; adjacent punctuation and inline code must remain literal",
+			);
+			assert.equal(
+				r.modelText.slice(start + referenceBlock.length),
+				text.slice(start + token.length),
+				"the complete delimiter-adjacent suffix must remain byte-for-byte literal",
+			);
+			assert.deepEqual(r.warnings, []);
+		}
+	});
+
 	it("does not treat backslash-escaped backticks as inline code delimiters", async () => {
 		const text = "escaped \\` marker @notes.txt and another \\` marker";
 		const start = text.indexOf("@notes.txt");
