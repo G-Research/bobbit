@@ -29,6 +29,8 @@ const {
 	assembleSystemPrompt,
 	getPromptSections,
 	cleanupSessionPrompt,
+	cleanupSessionPromptAsync,
+	purgePromptSectionsJsonAsync,
 	initPromptDirs,
 } = await import("../../src/server/agent/system-prompt.ts");
 
@@ -377,6 +379,24 @@ describe("cleanupSessionPrompt", () => {
 	it("does not throw when prompt file does not exist", () => {
 		cleanupSessionPrompt("nonexistent-session");
 		// Should not throw
+	});
+
+	it("awaits purge-specific prompt, section snapshot, and preview-mount deletion", async () => {
+		const sessionId = "11111111-1111-4111-8111-111111111111";
+		const promptPath = assembleSystemPrompt(sessionId, { cwd: cwdDir, goalSpec: "purge me" });
+		assert.ok(promptPath);
+		const sectionsPath = path.join(promptsDir, `${sessionId}-prompt.json`);
+		fs.writeFileSync(sectionsPath, "{}", "utf-8");
+		const mountDir = path.join(stateDir, "preview", sessionId);
+		fs.mkdirSync(mountDir, { recursive: true });
+		fs.writeFileSync(path.join(mountDir, "inline.html"), "<p>purge</p>", "utf-8");
+
+		await cleanupSessionPromptAsync(sessionId, stateDir);
+		await purgePromptSectionsJsonAsync(sessionId, stateDir);
+
+		assert.equal(fs.existsSync(promptPath), false);
+		assert.equal(fs.existsSync(sectionsPath), false);
+		assert.equal(fs.existsSync(mountDir), false);
 	});
 
 });

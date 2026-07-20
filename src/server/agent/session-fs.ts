@@ -13,6 +13,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { SandboxManager } from "./sandbox-manager.js";
+import { sidecarPathFor } from "./session-sidecar.js";
+
+type SessionDeleteFs = Pick<typeof fs.promises, "unlink">;
 
 async function containerPathToHostLazy(filePath: string): Promise<string> {
 	const { containerPathToHost } = await import("./rpc-bridge.js");
@@ -242,10 +245,11 @@ export async function sessionFileDelete(
 	ctx: SessionFsContext,
 	filePath: string,
 	sandboxManager: SandboxManager | null,
+	fsImpl: SessionDeleteFs = fs.promises,
 ): Promise<boolean> {
 	if (!ctx.sandboxed) {
 		try {
-			fs.unlinkSync(filePath);
+			await fsImpl.unlink(filePath);
 			return true;
 		} catch (err: any) {
 			// ENOENT is fine — file already gone
@@ -279,9 +283,28 @@ export async function sessionFileDelete(
 	}
 	console.warn(`[session-fs] Container unavailable for delete, falling back to host path: ${hostPath}`);
 	try {
-		fs.unlinkSync(hostPath);
+		await fsImpl.unlink(hostPath);
 		return true;
 	} catch (err: any) {
 		return err?.code === "ENOENT";
+	}
+}
+
+/**
+ * Delete the Bobbit-owned metadata sidecar for a trusted transcript path.
+ *
+ * The caller remains responsible for applying the transcript trust boundary
+ * before passing `jsonlPath`; deriving the target here guarantees cleanup can
+ * only reach the sidecar adjacent to that already-approved transcript. Missing
+ * sidecars are an idempotent success.
+ */
+export async function sessionSidecarDelete(
+	jsonlPath: string,
+	fsImpl: SessionDeleteFs = fs.promises,
+): Promise<void> {
+	try {
+		await fsImpl.unlink(sidecarPathFor(jsonlPath));
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") throw err;
 	}
 }
