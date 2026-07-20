@@ -43,7 +43,11 @@ import { applyRuntimeSessionModelSelection, broadcastRuntimeSessionActualModelSt
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
-import { SessionCommandSerialiser } from "./session-command-serialiser.js";
+import {
+	SESSION_COMMAND_QUEUE_FULL,
+	SessionCommandQueueFullError,
+	SessionCommandSerialiser,
+} from "./session-command-serialiser.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -835,8 +839,12 @@ export function handleWebSocketConnection(
 					// pure check as defense in depth using the same scanner.
 					const fileMentionCwd = session.worktreePath || session.cwd;
 					try {
-						await preflightFileMentionAdmission(msg.text, fileMentionCwd);
+						// The resolver's optional signal abandons semaphore waits and
+						// preprocessing when Stop cancels this active session command.
+						// @ts-ignore — public signal options land in the resolver sibling change.
+						await preflightFileMentionAdmission(msg.text, fileMentionCwd, { signal: commandSignal });
 					} catch (error) {
+						if (commandSignal?.aborted) return;
 						if (error instanceof FileMentionBudgetError) {
 							send(ws, { type: "error", message: error.message, code: error.code });
 							return;
@@ -904,10 +912,9 @@ export function handleWebSocketConnection(
 					// and gitignored files. worktreePath is the host path; for
 					// sandboxed sessions session.cwd is a container path, so
 					// worktreePath is required to reach the real files.
-					const fileMentionResult = await resolveFileMentions(
-						msg.text,
-						fileMentionCwd,
-					).catch((error: unknown) => {
+					// @ts-ignore — public signal options land in the resolver sibling change.
+					const fileMentionResult = await resolveFileMentions(msg.text, fileMentionCwd, { signal: commandSignal }).catch((error: unknown) => {
+						if (commandSignal?.aborted) return undefined;
 						if (error instanceof FileMentionBudgetError) {
 							send(ws, { type: "error", message: error.message, code: error.code });
 							return undefined;
@@ -1009,16 +1016,29 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Abort failed: ${err}`, code: "ABORT_ERROR" });
 					};
 					const immediateAbort = sessionManager.forceAbort(sessionId).catch(reportAbortError);
-					void SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, async () => {
-						await immediateAbort;
-						await sessionManager.forceAbort(sessionId);
-					}).catch(reportAbortError);
+					const reportOrderedAbortError = (err: unknown): void => {
+						if (err instanceof SessionCommandQueueFullError) {
+							send(ws, { type: "error", message: err.message, code: err.code });
+							return;
+						}
+						reportAbortError(err);
+					};
+					try {
+						void SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, async () => {
+							await immediateAbort;
+							await sessionManager.forceAbort(sessionId);
+						}, frameBytes).catch(reportOrderedAbortError);
+					} catch (err) {
+						reportOrderedAbortError(err);
+					}
 					break;
 				}
 				case "retry":
-					sessionManager.retryLastPrompt(sessionId).catch((err) => {
+					try {
+						await sessionManager.retryLastPrompt(sessionId);
+					} catch (err) {
 						send(ws, { type: "error", message: `Retry failed: ${err}`, code: "RETRY_ERROR" });
-					});
+					}
 					break;
 				case "set_model":
 					try {
@@ -1629,6 +1649,19 @@ export function handleWebSocketConnection(
 					const mintMsg = msg as Extract<ClientMessage, { type: "ext_session_write_permit" }>;
 					const requestId = typeof mintMsg.requestId === "string" ? mintMsg.requestId : "";
 					const contentHash = typeof mintMsg.contentHash === "string" ? mintMsg.contentHash : "";
+					// Validate the fixed-width digest before any authorization lookup or
+					// permit mint. In particular, never retain an attacker-sized string in
+					// the permit store.
+					if (!/^[0-9a-fA-F]{64}$/.test(contentHash)) {
+						send(ws, {
+							type: "ext_session_write_permit_result",
+							requestId,
+							ok: false,
+							error: "content hash must be exactly 64 hexadecimal SHA-256 characters",
+						});
+						break;
+					}
+					const normalizedContentHash = contentHash.toLowerCase();
 					const projectTm = session.projectId && projectContextManager
 						? projectContextManager.getOrCreate(session.projectId)?.toolManager
 						: undefined;
@@ -1641,13 +1674,13 @@ export function handleWebSocketConnection(
 					const surf = extToolManager
 						? resolveSurfaceIdentity({ token: mintMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager, contributions: packContributionRegistry, projectId: session.projectId })
 						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack contributions" } as const);
-					if (!surf.ok || !contentHash) {
-						send(ws, { type: "ext_session_write_permit_result", requestId, ok: false, error: surf.ok ? "missing content hash" : surf.error });
+					if (!surf.ok) {
+						send(ws, { type: "ext_session_write_permit_result", requestId, ok: false, error: surf.error });
 						break;
 					}
 					// Pack-bound surfaces (no tool) bind the permit with an empty tool
 					// surrogate — packId is the server-derived scope key either way.
-					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool ?? "", contentHash });
+					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool ?? "", contentHash: normalizedContentHash });
 					send(ws, { type: "ext_session_write_permit_result", requestId, ok: true, nonce });
 					break;
 				}
@@ -1717,7 +1750,14 @@ export function handleWebSocketConnection(
 							if (!opts.resume && target?.status === "streaming") {
 								await deliver();
 							} else {
-								await SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, deliver);
+								try {
+									await SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, deliver, frameBytes);
+								} catch (err) {
+									// Preserve the structured overload code through the pure post
+									// handler, which otherwise serializes thrown errors by message.
+									if (err instanceof SessionCommandQueueFullError) throw new Error(err.code);
+									throw err;
+								}
 							}
 						},
 						audit: (rec) => {
@@ -1781,11 +1821,31 @@ export function handleWebSocketConnection(
 			: undefined;
 		const liveStreamingSteer = msg.type === "steer" && liveSession?.status === "streaming";
 		const serialisedSessionCommand = msg.type === "prompt" ||
+			msg.type === "retry" ||
 			(msg.type === "steer" && !liveStreamingSteer);
-		const result = authenticated && serialisedSessionCommand
-			? SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, dispatch)
-			: dispatch();
+		let result: Promise<void>;
+		try {
+			result = authenticated && serialisedSessionCommand
+				? SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, dispatch, frameBytes)
+				: dispatch();
+		} catch (err) {
+			// Admission is synchronous and atomic: a rejected parsed frame is never
+			// attached to the FIFO tail, so its closure becomes collectible now.
+			if (err instanceof SessionCommandQueueFullError) {
+				send(ws, { type: "error", message: err.message, code: SESSION_COMMAND_QUEUE_FULL });
+				return;
+			}
+			console.error(`[ws-handler] Command admission failure for ${sessionId}:`, err);
+			sendCommandFailure(err);
+			return;
+		}
 		void result.catch((err) => {
+			// Queue admission rejects without linking the parsed-message closure to
+			// the FIFO tail. Surface the stable code and isolate later commands.
+			if (err instanceof SessionCommandQueueFullError) {
+				send(ws, { type: "error", message: err.message, code: err.code });
+				return;
+			}
 			// Covers authentication/archive branches and any future routing added
 			// outside the command-level try/catch. The serialiser's fulfilled tail
 			// still permits the next same-session ordered delivery to run.
