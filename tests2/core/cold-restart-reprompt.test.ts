@@ -99,6 +99,7 @@ function makeManager(bridge: any): any {
 		get: () => undefined,
 		getLive: () => [],
 		archive: () => {},
+		archiveAsync: async () => {},
 	};
 	m.projectContextManager = {
 		all: () => [],
