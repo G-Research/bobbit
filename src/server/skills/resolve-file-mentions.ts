@@ -124,6 +124,90 @@ export class FileMentionBudgetError extends Error {
 	}
 }
 
+/** Stable cancellation outcome consumed silently by command handlers. */
+export class FileMentionAbortError extends Error {
+	readonly code = "FILE_MENTION_ABORTED" as const;
+	readonly aborted = true as const;
+
+	constructor(reason?: unknown) {
+		super("File mention resolution aborted", { cause: reason });
+		this.name = "AbortError";
+	}
+}
+
+function throwIfFileMentionAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw new FileMentionAbortError(signal.reason);
+}
+
+/** Abort the caller-facing semaphore wait; an abandoned queued permit returns itself. */
+async function acquireSemaphoreLease(
+	semaphore: Semaphore,
+	signal?: AbortSignal,
+): Promise<() => void> {
+	throwIfFileMentionAborted(signal);
+	if (!signal) {
+		await semaphore.acquire();
+		return () => semaphore.release();
+	}
+
+	const acquisition = semaphore.acquire();
+	return await new Promise<() => void>((resolve, reject) => {
+		let cancelled = false;
+		const onAbort = () => {
+			if (cancelled) return;
+			cancelled = true;
+			signal.removeEventListener("abort", onAbort);
+			reject(new FileMentionAbortError(signal.reason));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+		void acquisition.then(() => {
+			if (cancelled) {
+				semaphore.release();
+				return;
+			}
+			signal.removeEventListener("abort", onAbort);
+			let released = false;
+			resolve(() => {
+				if (released) return;
+				released = true;
+				semaphore.release();
+			});
+		});
+	});
+}
+
+/** Race only a caller-facing wait while continuing to observe the operation. */
+async function waitForPromiseOrAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	throwIfFileMentionAborted(signal);
+	if (!signal) return await promise;
+	return await new Promise<T>((resolve, reject) => {
+		let settled = false;
+		const onAbort = () => {
+			if (settled) return;
+			settled = true;
+			signal.removeEventListener("abort", onAbort);
+			reject(new FileMentionAbortError(signal.reason));
+		};
+		promise.then(
+			(value) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error: unknown) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+	});
+}
+
 // Module-global FIFO semaphores prevent independent sessions from multiplying
 // resolver/parser and metadata-probe concurrency. Each acquire is released in
 // a finally block; Semaphore hands permits to waiters in arrival order.
@@ -196,6 +280,8 @@ export function toWireMention(m: FileMention): FileMention {
 }
 
 export interface ResolveFileMentionsOptions {
+	/** Advisory cancellation for scanning and filesystem resolution. */
+	signal?: AbortSignal;
 	/** Text inlining cap (default {@link MAX_INLINE_TEXT_BYTES}). */
 	maxFileBytes?: number;
 	/** Image/binary per-file cap (default {@link MAX_MENTION_FILE_BYTES}). */
@@ -617,10 +703,15 @@ function collectCodeRangesFromLeaves(
 	return true;
 }
 
-function scanMarkedCodeRanges(source: MappedSource): SourceRange[] {
+function scanMarkedCodeRanges(
+	source: MappedSource,
+	signal?: AbortSignal,
+): SourceRange[] {
+	throwIfFileMentionAborted(signal);
 	const leaves = collectBlockLeaves(
 		marked.lexer(source.text, { async: false }),
 	).map(blockLeafCodeInfo);
+	throwIfFileMentionAborted(signal);
 	if (!leaves.some((leaf) => leaf.containsCode)) return [];
 	const ranges: SourceRange[] = [];
 	if (!collectCodeRangesFromLeaves(leaves, source, ranges)) {
@@ -867,12 +958,16 @@ function mergeOrderedRanges(
  * contributes its normal code ranges. This cannot fail open and does not make
  * an unrelated prose block disappear because another block exhausted Marked.
  */
-function scanMarkedCodeRangesByBlock(source: MappedSource): SourceRange[] {
+function scanMarkedCodeRangesByBlock(
+	source: MappedSource,
+	signal?: AbortSignal,
+): SourceRange[] {
 	const blocks: MappedSource[] = [];
 	let blockStart = 0;
 	let openFence: { char: string; length: number } | undefined;
 	let lineStart = 0;
 	while (lineStart < source.text.length) {
+		throwIfFileMentionAborted(signal);
 		const line = lineEnd(source.text, lineStart);
 		const content = source.text.slice(lineStart, line.contentEnd);
 		const fenceRuns = [...content.matchAll(/`{3,}|~{3,}/g)];
@@ -907,8 +1002,9 @@ function scanMarkedCodeRangesByBlock(source: MappedSource): SourceRange[] {
 
 	const ranges: SourceRange[] = [];
 	for (const block of blocks) {
+		throwIfFileMentionAborted(signal);
 		try {
-			for (const range of scanMarkedCodeRanges(block)) appendRange(ranges, range);
+			for (const range of scanMarkedCodeRanges(block, signal)) appendRange(ranges, range);
 		} catch {
 			appendMappedRange(ranges, block);
 		}
@@ -922,20 +1018,24 @@ function scanMarkedCodeRangesByBlock(source: MappedSource): SourceRange[] {
  * interruption, and code-span semantics; raw-token alignment preserves exact
  * indices without rewriting the prompt or sorting the resulting ranges.
  */
-function scanMarkdownCodeRanges(text: string): SourceRange[] {
+function scanMarkdownCodeRanges(text: string, signal?: AbortSignal): SourceRange[] {
 	if (text.length === 0) return [];
+	throwIfFileMentionAborted(signal);
 	const source = normalizeMarkdownSource(text);
+	throwIfFileMentionAborted(signal);
 	try {
-		return scanMarkedCodeRanges(source);
+		return scanMarkedCodeRanges(source, signal);
 	} catch (error) {
+		if (error instanceof FileMentionAbortError) throw error;
 		if (error instanceof RangeError) {
 			const recovery = recoverDeepLists(source);
 			if (recovery.found) {
 				let parsedRanges: SourceRange[];
 				try {
-					parsedRanges = scanMarkedCodeRanges(recovery.source);
-				} catch {
-					parsedRanges = scanMarkedCodeRangesByBlock(recovery.source);
+					parsedRanges = scanMarkedCodeRanges(recovery.source, signal);
+				} catch (recoveryError) {
+					if (recoveryError instanceof FileMentionAbortError) throw recoveryError;
+					parsedRanges = scanMarkedCodeRangesByBlock(recovery.source, signal);
 				}
 				return mergeOrderedRanges(
 					recovery.fences.map((range) => range.original),
@@ -945,7 +1045,7 @@ function scanMarkdownCodeRanges(text: string): SourceRange[] {
 		}
 		// Markdown parser failures must not escape. Isolate them by block and
 		// fail closed only for blocks that still cannot be parsed.
-		return scanMarkedCodeRangesByBlock(source);
+		return scanMarkedCodeRangesByBlock(source, signal);
 	}
 }
 
@@ -972,7 +1072,8 @@ function isWindowsNamespaceToken(rawPath: string): boolean {
  * Scan prose for `@path` tokens while preserving original UTF-16 indices.
  * Code-contained matches are excluded before they can consume the budget.
  */
-function scanTokens(text: string): ScannedToken[] {
+function scanTokens(text: string, signal?: AbortSignal): ScannedToken[] {
+	throwIfFileMentionAborted(signal);
 	const re = /(^|\s)@([^\s@]+)/g;
 	// Ordinary prompts need no Markdown token tree or normalized-source copy.
 	// Backticks and 3+ tildes can delimit code; four columns of leading
@@ -986,12 +1087,13 @@ function scanTokens(text: string): ScannedToken[] {
 	const hasIndentedCodeLine = /(?:^|\r\n?|\n)(?: {4}| {0,3}\t)/.test(text);
 	const hasMarkdownContainerLine = /(?:^|\r\n?|\n) {0,3}(?:>|[-+*](?=[ \t\r\n]|$)|\d{1,9}[.)](?=[ \t\r\n]|$))/.test(text);
 	const excluded = text.includes("`") || /~{3,}/.test(text) || hasIndentedCodeLine || hasMarkdownContainerLine
-		? scanMarkdownCodeRanges(text)
+		? scanMarkdownCodeRanges(text, signal)
 		: undefined;
 	const out: ScannedToken[] = [];
 	let excludedIndex = 0;
 	let m: RegExpExecArray | null;
 	while ((m = re.exec(text)) !== null) {
+		throwIfFileMentionAborted(signal);
 		const prefixLen = m[1].length; // 0 at string start, 1 after whitespace
 		const tokenStart = m.index + prefixLen; // position of "@"
 		let untrimmedEnd = tokenStart + 1 + m[2].length;
@@ -1029,6 +1131,7 @@ function scanTokens(text: string): ScannedToken[] {
 			);
 		}
 	}
+	throwIfFileMentionAborted(signal);
 	return out;
 }
 
@@ -1046,10 +1149,12 @@ type FileMentionTargetClassification =
 function collectUniqueLexicalTargets(
 	tokens: readonly ScannedToken[],
 	resolvedCwd: string,
+	signal?: AbortSignal,
 ): string[] {
 	const seen = new Set<string>();
 	const targets: string[] = [];
 	for (const token of tokens) {
+		throwIfFileMentionAborted(signal);
 		if (isWindowsNamespaceToken(token.rawPath)) continue;
 		const target = path.resolve(
 			resolvedCwd,
@@ -1075,13 +1180,19 @@ interface FileMentionAdmission {
 }
 
 /** Single source of truth for pure candidate/target admission. */
-function prepareFileMentionAdmission(text: string, cwd: string): FileMentionAdmission {
-	const tokens = scanTokens(text);
+function prepareFileMentionAdmission(
+	text: string,
+	cwd: string,
+	signal?: AbortSignal,
+): FileMentionAdmission {
+	throwIfFileMentionAborted(signal);
+	const tokens = scanTokens(text, signal);
+	throwIfFileMentionAborted(signal);
 	const resolvedCwd = path.resolve(cwd);
 	return {
 		tokens,
 		resolvedCwd,
-		lexicalTargets: collectUniqueLexicalTargets(tokens, resolvedCwd),
+		lexicalTargets: collectUniqueLexicalTargets(tokens, resolvedCwd, signal),
 	};
 }
 
@@ -1090,13 +1201,21 @@ function prepareFileMentionAdmission(text: string, cwd: string): FileMentionAdmi
  * runs this before slash-skill discovery; resolution repeats it as defense in
  * depth and consumes the same shared scan/target logic to prevent drift.
  */
-export async function preflightFileMentionAdmission(text: string, cwd: string): Promise<void> {
+export async function preflightFileMentionAdmission(
+	text: string,
+	cwd: string,
+	opts?: AbortSignal | { signal?: AbortSignal },
+): Promise<void> {
+	const signal = opts && "aborted" in opts ? opts : opts?.signal;
+	throwIfFileMentionAborted(signal);
 	if (!text.includes("@")) return;
-	await resolutionSemaphore.acquire();
+	const release = await acquireSemaphoreLease(resolutionSemaphore, signal);
 	try {
-		prepareFileMentionAdmission(text, cwd);
+		throwIfFileMentionAborted(signal);
+		prepareFileMentionAdmission(text, cwd, signal);
+		throwIfFileMentionAborted(signal);
 	} finally {
-		resolutionSemaphore.release();
+		release();
 	}
 }
 
@@ -1108,15 +1227,49 @@ export async function preflightFileMentionAdmission(text: string, cwd: string): 
  * be rejected before any open. Every admitted target is consumed, so a long
  * run of missing candidates cannot hide a later existing target.
  */
+async function lstatWithGlobalPermit(
+	target: string,
+	signal?: AbortSignal,
+): Promise<fs.Stats> {
+	const release = await acquireSemaphoreLease(lstatSemaphore, signal);
+	try {
+		throwIfFileMentionAborted(signal);
+	} catch (error) {
+		release();
+		throw error;
+	}
+
+	let operation: Promise<fs.Stats>;
+	try {
+		operation = fs.promises.lstat(target);
+	} catch (error) {
+		release();
+		throw error;
+	}
+	// Observe the uncancellable OS probe to settlement and retain its global
+	// permit even when only the caller-facing wait exits promptly on abort.
+	const completion = operation.then(
+		(value) => ({ ok: true as const, value }),
+		(error: unknown) => ({ ok: false as const, error }),
+	).finally(release);
+	const outcome = await waitForPromiseOrAbort(completion, signal);
+	throwIfFileMentionAborted(signal);
+	if (!outcome.ok) throw outcome.error;
+	return outcome.value;
+}
+
 async function classifyFileMentionTargets(
 	lexicalTargets: readonly string[],
+	signal?: AbortSignal,
 ): Promise<ReadonlyMap<string, FileMentionTargetClassification>> {
+	throwIfFileMentionAborted(signal);
 	const classifications = new Map<string, FileMentionTargetClassification>();
 	const targets = lexicalTargets[Symbol.iterator]();
 	const workers = Array.from(
 		{ length: FILE_MENTION_PROBE_CONCURRENCY },
 		async () => {
 			while (true) {
+				throwIfFileMentionAborted(signal);
 				let target: string;
 				while (true) {
 					const next = targets.next();
@@ -1127,26 +1280,25 @@ async function classifyFileMentionTargets(
 					break;
 				}
 
-				await lstatSemaphore.acquire();
 				try {
-					try {
-						const lstat = await fs.promises.lstat(target);
-						classifications.set(target, { kind: "exists", lstat });
-					} catch (error) {
-						classifications.set(
-							target,
-							isMissingPathError(error)
-								? { kind: "missing" }
-								: { kind: "unreadable" },
-						);
-					}
-				} finally {
-					lstatSemaphore.release();
+					const lstat = await lstatWithGlobalPermit(target, signal);
+					throwIfFileMentionAborted(signal);
+					classifications.set(target, { kind: "exists", lstat });
+				} catch (error) {
+					if (error instanceof FileMentionAbortError) throw error;
+					throwIfFileMentionAborted(signal);
+					classifications.set(
+						target,
+						isMissingPathError(error)
+							? { kind: "missing" }
+							: { kind: "unreadable" },
+					);
 				}
 			}
 		},
 	);
 	await Promise.all(workers);
+	throwIfFileMentionAborted(signal);
 	return classifications;
 }
 
@@ -1367,6 +1519,8 @@ async function resolveFileMentionsUnderPermit(
 	opts?: ResolveFileMentionsOptions,
 ): Promise<ResolvedMentions> {
 	const originalText = text;
+	const signal = opts?.signal;
+	throwIfFileMentionAborted(signal);
 	const plainResult = (): ResolvedMentions => ({
 		originalText,
 		modelText: originalText,
@@ -1379,7 +1533,8 @@ async function resolveFileMentionsUnderPermit(
 
 	// Repeat whole-send admission under the resolver permit as defense in depth.
 	// This is the same pure scan/target check used by the WebSocket preflight.
-	const { tokens, resolvedCwd, lexicalTargets } = prepareFileMentionAdmission(text, cwd);
+	const { tokens, resolvedCwd, lexicalTargets } = prepareFileMentionAdmission(text, cwd, signal);
+	throwIfFileMentionAborted(signal);
 	if (tokens.length === 0 || lexicalTargets.length === 0) return plainResult();
 
 	// Win32 network/device-namespace tokens are ordinary text and are omitted
@@ -1392,7 +1547,8 @@ async function resolveFileMentionsUnderPermit(
 	// Classify every distinct lexical target before applying delivery limits.
 	// Missing candidates neither consume the existing-reference cap nor prevent
 	// a later valid target from being discovered.
-	const classificationCache = await classifyFileMentionTargets(lexicalTargets);
+	const classificationCache = await classifyFileMentionTargets(lexicalTargets, signal);
+	throwIfFileMentionAborted(signal);
 	let hasExistingCandidate = false;
 	for (const classification of classificationCache.values()) {
 		if (classification.kind !== "missing") {
@@ -1415,6 +1571,7 @@ async function resolveFileMentionsUnderPermit(
 	let resolvedCount = 0;
 
 	for (const tok of tokens) {
+		throwIfFileMentionAborted(signal);
 		const rawPath = tok.rawPath;
 		if (isWindowsNamespaceToken(rawPath)) continue;
 		const normRel = rawPath.replace(/\\/g, "/");
@@ -1463,10 +1620,10 @@ async function resolveFileMentionsUnderPermit(
 		let absPath: string;
 		try {
 			absPath = fs.realpathSync.native(lexicalAbs);
-		} catch (error) {
-			// The target existed during classification; disappearance here is a
-			// delivery race and therefore remains a visible unresolved mention.
-			markUnresolved(isMissingPathError(error) ? "missing" : "unreadable");
+		} catch {
+			// lstat already proved existence. Any later canonicalization failure,
+			// including ENOENT disappearance, is a delivery failure.
+			markUnresolved("unreadable");
 			continue;
 		}
 
@@ -1553,6 +1710,7 @@ async function resolveFileMentionsUnderPermit(
 	}
 
 	// Build modelText by splicing text mentions right-to-left.
+	throwIfFileMentionAborted(signal);
 	let modelText = text;
 	if (replacements.length > 0) {
 		replacements.sort((a, b) => a.start - b.start);
@@ -1562,6 +1720,7 @@ async function resolveFileMentionsUnderPermit(
 		}
 	}
 
+	throwIfFileMentionAborted(signal);
 	return { originalText, modelText, mentions, warnings };
 }
 
@@ -1575,13 +1734,16 @@ export async function resolveFileMentions(
 	cwd: string,
 	opts?: ResolveFileMentionsOptions,
 ): Promise<ResolvedMentions> {
+	const signal = opts?.signal;
+	throwIfFileMentionAborted(signal);
 	if (!text.includes("@")) {
 		return { originalText: text, modelText: text, mentions: [], warnings: [] };
 	}
-	await resolutionSemaphore.acquire();
+	const release = await acquireSemaphoreLease(resolutionSemaphore, signal);
 	try {
+		throwIfFileMentionAborted(signal);
 		return await resolveFileMentionsUnderPermit(text, cwd, opts);
 	} finally {
-		resolutionSemaphore.release();
+		release();
 	}
 }
