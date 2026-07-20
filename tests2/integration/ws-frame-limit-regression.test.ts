@@ -3,14 +3,28 @@ import path from "node:path";
 import { vi } from "vitest";
 import { expect } from "./_e2e/in-process-harness.js";
 import { test } from "./_e2e/in-process-harness.js";
-import { connectWs, createSession, deleteSession, messageEndPredicate } from "./_e2e/e2e-setup.js";
+import {
+	connectWs,
+	createSession,
+	defaultProjectId,
+	deleteSession,
+	harnessDefaultProjectRoot,
+	messageEndPredicate,
+} from "./_e2e/e2e-setup.js";
 
 const EXTENSION_CHANNEL_ENVELOPE_CAP_BYTES = 1024 * 1024;
 const EXPECTED_AUTHENTICATED_PROMPT_TEXT_CAP_BYTES = 8 * 1024 * 1024;
+const EXPECTED_FILE_MENTION_CANDIDATE_LIMIT = 8_192;
 const handlerModule = await import("../../src/server/ws/handler.ts");
+const resolverModule = await import("../../src/server/skills/resolve-file-mentions.ts");
+const slashSkillsModule = await import("../../src/server/skills/slash-skills.ts");
 const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = Reflect.get(
 	handlerModule,
 	"MAX_AUTHENTICATED_PROMPT_TEXT_BYTES",
+) as number;
+const MAX_FILE_MENTION_RAW_CANDIDATES = Reflect.get(
+	resolverModule,
+	"MAX_FILE_MENTION_RAW_CANDIDATES",
 ) as number;
 
 async function waitForSignal<T>(signal: Promise<T>, label: string, timeoutMs = 1_000): Promise<T> {
@@ -116,6 +130,79 @@ test.describe("WebSocket frame size routing", () => {
 			}
 		});
 	}
+
+	test("rejects candidate overflow before slash-skill discovery, filesystem probing, or enqueue", async ({ gateway }) => {
+		expect(MAX_FILE_MENTION_RAW_CANDIDATES).toBe(EXPECTED_FILE_MENTION_CANDIDATE_LIMIT);
+		const skillName = `admission-preflight-${process.pid}-${Date.now()}`;
+		const fixtureCwd = path.join(
+			harnessDefaultProjectRoot(),
+			".e2e-workspaces",
+			`ws-admission-preflight-${process.pid}-${Date.now()}`,
+		);
+		const skillDir = path.join(fixtureCwd, ".claude", "skills", skillName);
+		const skillFile = path.join(skillDir, "SKILL.md");
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(skillFile, "---\ndescription: admission preflight probe\n---\nSHOULD_NOT_BE_DISCOVERED\n");
+
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		const sessionId = await createSession({ cwd: fixtureCwd, projectId: projectId! });
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live, "created admission-preflight session must be live").toBeTruthy();
+		const mentionPath = path.resolve(live.worktreePath || live.cwd, "admission-overflow.txt");
+		const conn = await connectWs(sessionId);
+		await conn.waitFor((m) => m.type === "queue_update");
+		slashSkillsModule.invalidateSlashSkillsCache();
+
+		const existsSpy = vi.spyOn(fs, "existsSync");
+		const readFileSpy = vi.spyOn(fs, "readFileSync");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const enqueueSpy = vi.spyOn(gateway.sessionManager, "enqueuePrompt");
+
+		try {
+			const candidates = Array.from(
+				{ length: MAX_FILE_MENTION_RAW_CANDIDATES + 1 },
+				() => "@admission-overflow.txt",
+			).join(" ");
+			const promptText = `/${skillName} ${candidates}`;
+			expect(Buffer.byteLength(promptText, "utf8")).toBeLessThan(MAX_AUTHENTICATED_PROMPT_TEXT_BYTES);
+
+			const cursor = conn.messageCount();
+			conn.send({ type: "prompt", text: promptText });
+			const outcome = await conn.waitForFrom(
+				cursor,
+				(m) => m.type === "error" || messageEndPredicate("user")(m),
+				5_000,
+			);
+
+			expect(outcome).toMatchObject({ type: "error", code: "FILE_MENTION_CANDIDATE_LIMIT" });
+			expect(outcome.message ?? "").toMatch(/8192.*non-code file-mention candidates/i);
+			expect(
+				existsSpy.mock.calls.filter(([target]) => path.resolve(String(target)).startsWith(path.resolve(skillDir))).length,
+				"whole-send admission must run before slash-skill discovery touches its fixture",
+			).toBe(0);
+			expect(
+				readFileSpy.mock.calls.filter(([target]) => path.resolve(String(target)) === path.resolve(skillFile)).length,
+				"whole-send admission must run before reading a matching SKILL.md",
+			).toBe(0);
+			expect(
+				lstatSpy.mock.calls.filter(([target]) => path.resolve(String(target)) === mentionPath).length,
+				"candidate overflow must reject before file-mention lstat probing",
+			).toBe(0);
+			expect(
+				enqueueSpy.mock.calls.filter(([id]) => id === sessionId).length,
+				"an inadmissible prompt must never be partially enqueued",
+			).toBe(0);
+		} finally {
+			enqueueSpy.mockRestore();
+			lstatSpy.mockRestore();
+			readFileSpy.mockRestore();
+			existsSpy.mockRestore();
+			conn.close();
+			await deleteSession(sessionId);
+			fs.rmSync(fixtureCwd, { recursive: true, force: true });
+		}
+	});
 
 	test("dispatches live steer before pending asynchronous prompt mention preprocessing completes", async ({ gateway }) => {
 		const sessionId = await createSession();
