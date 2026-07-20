@@ -259,6 +259,22 @@ describe("browser cookie eligibility", () => {
 		}
 	});
 
+	it("never bootstraps or renews on the preview SSE route", () => {
+		const request = { method: "GET", pathname: "/api/sessions/session-1/preview-events" };
+		assertDenied("internal-callback-route", request);
+		assertDenied("internal-callback-route", request, {
+			authentication: { source: "signed-cookie", needsRenewal: true },
+		});
+	});
+
+	it("keeps the ordinary preview API eligible", () => {
+		const request = { method: "GET", pathname: "/api/preview/mount" };
+		assert.equal(classify(request).mayBootstrap, true);
+		assert.equal(classify(request, {
+			authentication: { source: "signed-cookie", needsRenewal: true },
+		}).mayRenew, true);
+	});
+
 	it("keeps callback exclusions method- and path-specific", () => {
 		for (const [method, pathname] of [
 			["GET", "/api/internalish"],
@@ -266,6 +282,8 @@ describe("browser cookie eligibility", () => {
 			["POST", "/api/sessions/session-1/google-code-assist/token"],
 			["GET", "/api/sessions/session-1/tool-grant-request"],
 			["POST", "/api/sessions/session-1/provider-hooks/before-prompt/"],
+			["POST", "/api/sessions/session-1/preview-events"],
+			["GET", "/api/sessions/session-1/preview-events/"],
 		] as const) {
 			assert.equal(classify({ method, pathname }).mayBootstrap, true);
 		}

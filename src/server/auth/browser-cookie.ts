@@ -157,7 +157,7 @@ function isInternalCallbackRoute(pathname: string, method: string | undefined): 
 	if (normalizedMethod === "POST" && /^\/api\/sessions\/[^/]+\/provider-hooks\/(?:before-prompt|before-compact)$/.test(pathname)) {
 		return true;
 	}
-	if (normalizedMethod === "GET" && /^\/api\/sessions\/[^/]+\/google-code-assist\/token$/.test(pathname)) {
+	if (normalizedMethod === "GET" && /^\/api\/sessions\/[^/]+\/(?:google-code-assist\/token|preview-events)$/.test(pathname)) {
 		return true;
 	}
 	return normalizedMethod === "POST" && /^\/api\/sessions\/[^/]+\/tool-grant-request$/.test(pathname);
