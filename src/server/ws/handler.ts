@@ -835,7 +835,7 @@ export function handleWebSocketConnection(
 					// pure check as defense in depth using the same scanner.
 					const fileMentionCwd = session.worktreePath || session.cwd;
 					try {
-						preflightFileMentionAdmission(msg.text, fileMentionCwd);
+						await preflightFileMentionAdmission(msg.text, fileMentionCwd);
 					} catch (error) {
 						if (error instanceof FileMentionBudgetError) {
 							send(ws, { type: "error", message: error.message, code: error.code });

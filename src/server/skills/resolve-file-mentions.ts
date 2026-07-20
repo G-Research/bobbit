@@ -216,21 +216,32 @@ interface SourceRange {
 	end: number;
 }
 
-interface SourceMapSegment {
-	/** Half-open offsets in the current mapped source. */
-	sourceStart: number;
-	sourceEnd: number;
-	/** Half-open offsets in the untouched prompt. */
-	originalStart: number;
-	originalEnd: number;
+interface MarkdownRootMap {
+	/** Normalized offsets whose one LF represents two original CRLF code units. */
+	crlfOffsets: Uint32Array;
 }
+
+type SourceUnitMap =
+	| {
+		/** Every source unit maps to the next normalized root unit. */
+		kind: "linear";
+		rootStart: number;
+	}
+	| {
+		/** Packed normalized-root offset for each source unit. Descendant slices
+		 *  retain this array with a shifted index instead of copying it. */
+		kind: "indexed";
+		rootOffsets: Uint32Array;
+		indexStart: number;
+	};
 
 interface MappedSource {
 	/** Markdown source after Marked's CR/CRLF-to-LF normalization. */
 	text: string;
-	/** Ordered mapping runs. Ordinary text is one linear run; only normalized
-	 *  CRLFs and syntax skipped while aligning descendants split runs. */
-	segments: SourceMapSegment[];
+	/** Shared compact translation from normalized root units to the prompt. */
+	root: MarkdownRootMap;
+	/** Translation from this aligned source's units to normalized root units. */
+	units: SourceUnitMap;
 }
 
 interface SourceAlignment {
@@ -240,116 +251,95 @@ interface SourceAlignment {
 	source?: MappedSource;
 }
 
-function appendSourceSegment(
-	segments: SourceMapSegment[],
-	sourceStart: number,
-	sourceEnd: number,
-	originalStart: number,
-	originalEnd: number,
-): void {
-	if (sourceStart === sourceEnd) return;
-	const previous = segments[segments.length - 1];
-	const sourceLength = sourceEnd - sourceStart;
-	const originalLength = originalEnd - originalStart;
-	if (
-		previous &&
-		previous.sourceEnd === sourceStart &&
-		previous.originalEnd === originalStart &&
-		previous.sourceEnd - previous.sourceStart ===
-			previous.originalEnd - previous.originalStart &&
-		sourceLength === originalLength
-	) {
-		previous.sourceEnd = sourceEnd;
-		previous.originalEnd = originalEnd;
-		return;
-	}
-	segments.push({ sourceStart, sourceEnd, originalStart, originalEnd });
+const EMPTY_SOURCE_OFFSETS = new Uint32Array(0);
+
+function sourceRootOffset(source: MappedSource, offset: number): number {
+	return source.units.kind === "linear"
+		? source.units.rootStart + offset
+		: source.units.rootOffsets[source.units.indexStart + offset];
 }
 
-function sourceSegmentIndexAt(source: MappedSource, offset: number): number {
+function lowerBoundOffset(offsets: Uint32Array, target: number): number {
 	let low = 0;
-	let high = source.segments.length;
+	let high = offsets.length;
 	while (low < high) {
 		const middle = (low + high) >>> 1;
-		if (source.segments[middle].sourceEnd <= offset) low = middle + 1;
+		if (offsets[middle] < target) low = middle + 1;
 		else high = middle;
 	}
 	return low;
 }
 
-function originalBoundary(segment: SourceMapSegment, offset: number): number {
-	const sourceLength = segment.sourceEnd - segment.sourceStart;
-	const originalLength = segment.originalEnd - segment.originalStart;
-	if (sourceLength === originalLength) {
-		return segment.originalStart + offset - segment.sourceStart;
-	}
-	// The only non-linear base mapping is one normalized LF for a CRLF pair.
-	return offset === segment.sourceStart
-		? segment.originalStart
-		: segment.originalEnd;
-}
-
 function mappedUnitRange(source: MappedSource, offset: number): SourceRange {
-	const segment = source.segments[sourceSegmentIndexAt(source, offset)];
-	return {
-		start: originalBoundary(segment, offset),
-		end: originalBoundary(segment, offset + 1),
-	};
+	const rootOffset = sourceRootOffset(source, offset);
+	const crlfIndex = lowerBoundOffset(source.root.crlfOffsets, rootOffset);
+	const isCrlf = source.root.crlfOffsets[crlfIndex] === rootOffset;
+	const start = rootOffset + crlfIndex;
+	return { start, end: start + (isCrlf ? 2 : 1) };
 }
 
 /**
- * Marked normalizes CR and CRLF to LF before lexing. Mirror that operation
- * with sparse mapping runs rather than three arrays per UTF-16 code unit.
- * Ordinary text stays in one run; each CRLF contributes only one exceptional
- * boundary whose normalized LF covers both original code units.
+ * Marked normalizes CR and CRLF to LF before lexing. A CR keeps its source
+ * width, while each CRLF removes exactly one normalized code unit. Retaining
+ * only the normalized CRLF offsets bounds the map to four packed bytes per
+ * pair instead of one heap object (and its fields) per line ending.
  */
 function normalizeMarkdownSource(text: string): MappedSource {
 	if (!text.includes("\r")) {
 		return {
 			text,
-			segments: text.length === 0
-				? []
-				: [{ sourceStart: 0, sourceEnd: text.length, originalStart: 0, originalEnd: text.length }],
+			root: { crlfOffsets: EMPTY_SOURCE_OFFSETS },
+			units: { kind: "linear", rootStart: 0 },
 		};
 	}
 
-	const segments: SourceMapSegment[] = [];
-	const carriageReturn = /\r\n?/g;
-	let originalCursor = 0;
-	let sourceCursor = 0;
-	let match: RegExpExecArray | null;
-	while ((match = carriageReturn.exec(text)) !== null) {
-		if (match.index > originalCursor) {
-			const chunkLength = match.index - originalCursor;
-			appendSourceSegment(
-				segments,
-				sourceCursor,
-				sourceCursor + chunkLength,
-				originalCursor,
-				match.index,
-			);
-			sourceCursor += chunkLength;
+	let crlfCount = 0;
+	for (let index = 0; index + 1 < text.length; index++) {
+		if (text.charCodeAt(index) === 13 && text.charCodeAt(index + 1) === 10) {
+			crlfCount++;
+			index++;
 		}
-		appendSourceSegment(
-			segments,
-			sourceCursor,
-			sourceCursor + 1,
-			match.index,
-			match.index + match[0].length,
-		);
-		sourceCursor++;
-		originalCursor = match.index + match[0].length;
 	}
-	if (originalCursor < text.length) {
-		appendSourceSegment(
-			segments,
-			sourceCursor,
-			sourceCursor + text.length - originalCursor,
-			originalCursor,
-			text.length,
-		);
+	const crlfOffsets = crlfCount === 0
+		? EMPTY_SOURCE_OFFSETS
+		: new Uint32Array(crlfCount);
+	let sourceOffset = 0;
+	let crlfIndex = 0;
+	for (let index = 0; index < text.length; index++) {
+		if (text.charCodeAt(index) === 13) {
+			if (text.charCodeAt(index + 1) === 10) {
+				crlfOffsets[crlfIndex++] = sourceOffset;
+				index++;
+			}
+			sourceOffset++;
+		} else {
+			sourceOffset++;
+		}
 	}
-	return { text: text.replace(/\r\n?/g, "\n"), segments };
+	return {
+		text: text.replace(/\r\n?/g, "\n"),
+		root: { crlfOffsets },
+		units: { kind: "linear", rootStart: 0 },
+	};
+}
+
+/** Return a zero-copy mapping view over one source substring. */
+function mappedSlice(
+	source: MappedSource,
+	start: number,
+	end: number,
+): MappedSource {
+	return {
+		text: source.text.slice(start, end),
+		root: source.root,
+		units: source.units.kind === "linear"
+			? { kind: "linear", rootStart: source.units.rootStart + start }
+			: {
+				kind: "indexed",
+				rootOffsets: source.units.rootOffsets,
+				indexStart: source.units.indexStart + start,
+			},
+	};
 }
 
 /**
@@ -359,6 +349,10 @@ function normalizeMarkdownSource(text: string): MappedSource {
  * child raw text an ordered subsequence rather than necessarily a substring.
  * A monotonic cursor makes alignment linear within each token level and keeps
  * every mapped offset tied to the original prompt.
+ *
+ * Exact child substrings retain a zero-copy mapping view. Non-contiguous child
+ * alignments use one packed Uint32 offset per UTF-16 unit; they never recreate
+ * the former per-newline/per-segment JS object graph.
  */
 function alignRawSource(
 	raw: string,
@@ -366,9 +360,16 @@ function alignRawSource(
 	start: number,
 	map: boolean,
 ): SourceAlignment | undefined {
+	if (parent.text.startsWith(raw, start)) {
+		return {
+			next: start + raw.length,
+			source: map ? mappedSlice(parent, start, start + raw.length) : undefined,
+		};
+	}
+
 	let cursor = start;
-	let segmentIndex = map ? sourceSegmentIndexAt(parent, cursor) : 0;
-	const segments = map ? ([] as SourceMapSegment[]) : undefined;
+	let firstRootOffset = 0;
+	let rootOffsets: Uint32Array | undefined;
 	for (let rawIndex = 0; rawIndex < raw.length; rawIndex++) {
 		while (
 			cursor < parent.text.length &&
@@ -377,30 +378,39 @@ function alignRawSource(
 			cursor++;
 		}
 		if (cursor === parent.text.length) return undefined;
-		if (segments) {
-			while (parent.segments[segmentIndex].sourceEnd <= cursor) segmentIndex++;
-			const parentSegment = parent.segments[segmentIndex];
-			appendSourceSegment(
-				segments,
-				rawIndex,
-				rawIndex + 1,
-				originalBoundary(parentSegment, cursor),
-				originalBoundary(parentSegment, cursor + 1),
-			);
+		if (map) {
+			const rootOffset = sourceRootOffset(parent, cursor);
+			if (rawIndex === 0) {
+				firstRootOffset = rootOffset;
+			} else if (!rootOffsets && rootOffset !== firstRootOffset + rawIndex) {
+				rootOffsets = new Uint32Array(raw.length);
+				for (let index = 0; index < rawIndex; index++) {
+					rootOffsets[index] = firstRootOffset + index;
+				}
+			}
+			if (rootOffsets) rootOffsets[rawIndex] = rootOffset;
 		}
 		cursor++;
 	}
 	return {
 		next: cursor,
-		source: map ? { text: raw, segments: segments! } : undefined,
+		source: map
+			? {
+				text: raw,
+				root: parent.root,
+				units: rootOffsets
+					? { kind: "indexed", rootOffsets, indexStart: 0 }
+					: { kind: "linear", rootStart: firstRootOffset },
+			}
+			: undefined,
 	};
 }
 
 function mappedRange(source: MappedSource): SourceRange | undefined {
 	if (source.text.length === 0) return undefined;
 	return {
-		start: source.segments[0].originalStart,
-		end: source.segments[source.segments.length - 1].originalEnd,
+		start: mappedUnitRange(source, 0).start,
+		end: mappedUnitRange(source, source.text.length - 1).end,
 	};
 }
 
@@ -824,7 +834,8 @@ function recoverDeepLists(source: MappedSource): DeepListRecovery {
 	return {
 		source: {
 			text: masked.join(""),
-			segments: source.segments,
+			root: source.root,
+			units: source.units,
 		},
 		fences,
 		found,
@@ -847,31 +858,6 @@ function mergeOrderedRanges(
 		appendRange(merged, next);
 	}
 	return merged;
-}
-
-function mappedSlice(
-	source: MappedSource,
-	start: number,
-	end: number,
-): MappedSource {
-	const segments: SourceMapSegment[] = [];
-	let segmentIndex = sourceSegmentIndexAt(source, start);
-	while (
-		segmentIndex < source.segments.length &&
-		source.segments[segmentIndex].sourceStart < end
-	) {
-		const segment = source.segments[segmentIndex++];
-		const overlapStart = Math.max(start, segment.sourceStart);
-		const overlapEnd = Math.min(end, segment.sourceEnd);
-		appendSourceSegment(
-			segments,
-			overlapStart - start,
-			overlapEnd - start,
-			originalBoundary(segment, overlapStart),
-			originalBoundary(segment, overlapEnd),
-		);
-	}
-	return { text: source.text.slice(start, end), segments };
 }
 
 /**
@@ -1104,9 +1090,14 @@ function prepareFileMentionAdmission(text: string, cwd: string): FileMentionAdmi
  * runs this before slash-skill discovery; resolution repeats it as defense in
  * depth and consumes the same shared scan/target logic to prevent drift.
  */
-export function preflightFileMentionAdmission(text: string, cwd: string): void {
+export async function preflightFileMentionAdmission(text: string, cwd: string): Promise<void> {
 	if (!text.includes("@")) return;
-	prepareFileMentionAdmission(text, cwd);
+	await resolutionSemaphore.acquire();
+	try {
+		prepareFileMentionAdmission(text, cwd);
+	} finally {
+		resolutionSemaphore.release();
+	}
 }
 
 /**
