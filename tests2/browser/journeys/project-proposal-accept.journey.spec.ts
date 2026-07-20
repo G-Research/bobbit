@@ -53,9 +53,19 @@ type ProjectRouteControls = {
 async function openSession(page: Page, sessionId: string): Promise<void> {
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
-	await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? null), {
+	await expect.poll(() => page.evaluate((expectedSessionId) => {
+		const state = (window as any).bobbitState;
+		const remote = state?.remoteAgent;
+		return state?.selectedSessionId === expectedSessionId
+			&& state?.connectingSessionId === null
+			&& state?.connectionStatus === "connected"
+			&& remote?.gatewaySessionId === expectedSessionId
+			&& typeof remote?.onProposal === "function"
+			? expectedSessionId
+			: null;
+	}, sessionId), {
 		timeout: 10_000,
-		message: "selected session should hydrate before injecting project proposal",
+		message: "selected session should finish proposal hydration before injecting project proposal",
 	}).toBe(sessionId);
 }
 
