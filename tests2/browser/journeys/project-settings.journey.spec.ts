@@ -240,6 +240,30 @@ test.describe("Journey: Settings App Version", () => {
 		expect(restartBox).not.toBeNull();
 		expect(headerBox!.y + headerBox!.height).toBeLessThanOrEqual(restartBox!.y);
 	});
+
+	test("retries app info after a transient failure", async ({ page }) => {
+		let appInfoAvailable = false;
+		let attempts = 0;
+		await page.route("**/api/app-info", route => {
+			attempts++;
+			return appInfoAvailable
+				? route.fulfill({ json: { version: "0.14.1", buildType: "installed" } })
+				: route.fulfill({ status: 503, json: { error: "temporarily unavailable" } });
+		});
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+
+		await expect.poll(() => attempts).toBeGreaterThan(0);
+		await expect(page.getByTestId("settings-app-version")).toHaveCount(0);
+
+		await navigateToHash(page, "#/");
+		appInfoAvailable = true;
+		await navigateToHash(page, "#/settings/system/general");
+
+		await expect(page.getByTestId("app-header-row").getByTestId("settings-app-version"))
+			.toHaveText("Bobbit v0.14.1");
+		expect(attempts).toBeGreaterThan(1);
+	});
 });
 
 // Ported from settings-restart-button.spec.ts (audit: project-settings GAP,

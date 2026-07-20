@@ -120,6 +120,13 @@ function loadSettingsAppInfo(): void {
 	settingsAppInfoLoadStarted = true;
 	fetchAppInfo().then(info => {
 		settingsAppInfo = info;
+		if (!info) {
+			// Allow a later render (including navigating away and back or a gateway
+			// reconnect) to retry. Do not render here: a persistent failure would
+			// otherwise create an immediate fetch/render retry loop.
+			settingsAppInfoLoadStarted = false;
+			return;
+		}
 		renderApp();
 	});
 }
