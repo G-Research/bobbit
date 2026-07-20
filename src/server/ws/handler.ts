@@ -14,6 +14,7 @@ import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import {
 	FileMentionBudgetError,
+	preflightFileMentionAdmission,
 	resolveFileMentions,
 	toWireMention,
 } from "../skills/resolve-file-mentions.js";
@@ -829,6 +830,20 @@ export function handleWebSocketConnection(
 					// The prompt text is rendered in the UI transcript — debug-only here.
 					if (process.env.BOBBIT_DEBUG) console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
 
+					// Reject whole-send mention admission failures before slash-skill
+					// discovery or any filesystem probe/enqueue. Resolution repeats this
+					// pure check as defense in depth using the same scanner.
+					const fileMentionCwd = session.worktreePath || session.cwd;
+					try {
+						preflightFileMentionAdmission(msg.text, fileMentionCwd);
+					} catch (error) {
+						if (error instanceof FileMentionBudgetError) {
+							send(ws, { type: "error", message: error.message, code: error.code });
+							return;
+						}
+						throw error;
+					}
+
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path
 					// (e.g. /workspace-wt/<branch>) that doesn't exist on the host.
@@ -888,7 +903,6 @@ export function handleWebSocketConnection(
 					// and gitignored files. worktreePath is the host path; for
 					// sandboxed sessions session.cwd is a container path, so
 					// worktreePath is required to reach the real files.
-					const fileMentionCwd = session.worktreePath || session.cwd;
 					const fileMentionResult = await resolveFileMentions(
 						msg.text,
 						fileMentionCwd,
