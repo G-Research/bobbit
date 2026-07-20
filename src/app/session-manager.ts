@@ -1738,6 +1738,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// dominant 'badge stuck after Reconnecting' E2E flake cluster (RP-18,
 		// CT-01-d, S-02). Cheap, idempotent, runs only on non-initial connects.
 		remote.onReconnect = async () => {
+			if (activeSessionId() !== sessionId) return;
 			try { refreshGitStatusForSession(sessionId); } catch { /* ignore */ }
 			try { refreshBgProcessesForSession(sessionId); } catch { /* ignore */ }
 			try {
