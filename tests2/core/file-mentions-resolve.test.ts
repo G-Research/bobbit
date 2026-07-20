@@ -136,6 +136,40 @@ describe("resolveFileMentions", () => {
 		assert.deepEqual(r.warnings, []);
 	});
 
+	it("treats a backslash before an inline-code closer as literal code content", () => {
+		const text = "inline `keep @notes.txt then\\` resolve @src/a.ts";
+		const start = text.indexOf("@src/a.ts");
+		const r = resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1, "the existing target inside code must stay literal");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "src/a.ts");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it.each([
+		"partially escaped \\``keep @notes.txt here` then resolve @src/a.ts",
+		"partially escaped \\```keep @notes.txt here`` then resolve @src/a.ts",
+	])("uses the unescaped suffix of a partially escaped multi-backtick run: %s", (text) => {
+		const start = text.indexOf("@src/a.ts");
+		const r = resolveFileMentions(text, cwdDir);
+		assert.equal(r.mentions.length, 1, text);
+		assert.equal(r.mentions[0].kind, "text", text);
+		assert.equal(r.mentions[0].path, "src/a.ts", text);
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length], text);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+			text,
+		);
+		assert.deepEqual(r.warnings, [], text);
+	});
+
 	it("does not suppress mentions after unmatched backtick runs", () => {
 		const cases = [
 			"an unmatched ` run before @notes.txt",
@@ -174,6 +208,44 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
+	it("keeps a non-interrupting ordered marker in its active paragraph code span", () => {
+		const text = [
+			"paragraph `inline code continues",
+			"2. keep @notes.txt literal` then resolve @src/a.ts",
+		].join("\n");
+		const start = text.indexOf("@src/a.ts");
+		const r = resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1, "an ordered marker starting at 2 cannot interrupt the paragraph");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "src/a.ts");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("does not pair backticks across a list-item heading and its following paragraph", () => {
+		const text = [
+			"- # heading has an unmatched ` run",
+			"  following paragraph resolves @notes.txt before another unmatched ` run",
+		].join("\n");
+		const start = text.indexOf("@notes.txt");
+		const r = resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1, "the heading and following paragraph are distinct inline blocks");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "notes.txt");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + "@notes.txt".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
 	it("ignores fenced code inside common blockquote and list containers", () => {
 		const cases = [
 			["> ~~~text", "> @notes.txt", "> ~~~", "outside @src/a.ts"].join("\n"),
@@ -192,6 +264,51 @@ describe("resolveFileMentions", () => {
 				text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
 			);
 		}
+	});
+
+	it("ignores a fenced code block nested list then blockquote", () => {
+		const text = [
+			"- > ~~~text",
+			"  > @notes.txt",
+			"  > ~~~",
+			"outside @src/a.ts",
+		].join("\n");
+		const start = text.indexOf("@src/a.ts");
+		const r = resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1, "the existing target inside the nested fence must stay literal");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "src/a.ts");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("keeps long same-line nested-marker fences structurally bounded", () => {
+		const depth = 2_048;
+		const indentation = "  ".repeat(depth);
+		const text = [
+			`${"- ".repeat(depth)}~~~text`,
+			`${indentation}@notes.txt`,
+			`${indentation}~~~`,
+			"outside @src/a.ts",
+		].join("\n");
+		const start = text.indexOf("@src/a.ts");
+		const r = resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.originalText, text);
+		assert.equal(r.mentions.length, 1, "only the prose reference after the deeply nested fence may resolve");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "src/a.ts");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+		);
+		assert.deepEqual(r.warnings, []);
 	});
 
 	it("recognizes fenced code with CR-only, LF, and CRLF line endings", () => {
