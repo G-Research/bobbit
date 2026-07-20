@@ -77,6 +77,7 @@ A small set of UI probe endpoints accept `optional=1` to represent expected abse
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/health` | Health check + session count |
+| `GET` | `/api/app-info` | Running Bobbit package version and build provenance: `{ version, buildType: "installed" | "source", commitSha? }` |
 | `GET` | `/api/connection-info` | List network interface addresses for multi-device access |
 | `GET` | `/api/ca-cert` | Download the Bobbit CA certificate for device trust |
 

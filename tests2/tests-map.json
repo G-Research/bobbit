@@ -75,6 +75,24 @@
       }
     },
     {
+      "path": "tests2/core/app-info.test.ts",
+      "reason": "Pins installed-versus-source build detection and short commit SHA normalization for the Settings version label.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/app-info-api.test.ts",
+      "reason": "Exercises the running package version and build provenance endpoint against a real in-process gateway.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/core/unit-inventory-git.test.ts",
       "reason": "Pins the unit inventory audit's optional historical migration source policy with an injected Git reader: the exact absent-path-at-revision error returns empty text while unrelated Git failures remain fatal, without spawning a subprocess.",
       "execution": {
