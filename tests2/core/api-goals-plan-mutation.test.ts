@@ -69,7 +69,7 @@ interface GoalShape {
 }
 
 /** Mirror of the handler's decision matrix. */
-function planMutationVerdict(
+async function planMutationVerdict(
 	current: ClassifierPlanStep[],
 	proposed: ClassifierPlanStep[],
 	rootSpec: string,
@@ -77,7 +77,7 @@ function planMutationVerdict(
 	goal: GoalShape,
 	store: PlanMutationStore,
 	goalId: string,
-): Verdict {
+): Promise<Verdict> {
 	const v = classifyMutation({ current, proposed, rootAcceptanceCriteria: criteria, rootSpec });
 	const policy = goal.divergencePolicy ?? "balanced";
 	if (v.kind === "criteria-drop") return { kind: v.kind, status: 409, uncoveredCriteria: v.uncoveredCriteria };
@@ -97,7 +97,7 @@ function planMutationVerdict(
 		createdAt: now,
 		expiresAt: now + DEFAULT_MUTATION_TTL_MS,
 	};
-	store.put(pending);
+	await store.put(pending);
 	return { kind: v.kind, requiresApproval: true, requestId };
 }
 
@@ -106,77 +106,77 @@ function step(planId: string, phase: number, spec = `spec-${planId}`, title = `t
 }
 
 describe("plan-mutation decision matrix", () => {
-	it("noop applied", () => {
+	it("noop applied", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
-		const r = planMutationVerdict(cur, cur, "", [], {}, store, "g1");
+		const r = await planMutationVerdict(cur, cur, "", [], {}, store, "g1");
 		assert.equal(r.kind, "noop");
 		assert.equal((r as any).applied, true);
 	});
 
-	it("fix-up under balanced → applied", () => {
+	it("fix-up under balanced → applied", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 1)];
-		const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: "balanced" }, store, "g1");
+		const r = await planMutationVerdict(cur, next, "", [], { divergencePolicy: "balanced" }, store, "g1");
 		assert.equal(r.kind, "fix-up");
 		assert.equal((r as any).applied, true);
 	});
 
-	it("fix-up under autonomous → applied", () => {
+	it("fix-up under autonomous → applied", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 1)];
-		const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: "autonomous" }, store, "g1");
+		const r = await planMutationVerdict(cur, next, "", [], { divergencePolicy: "autonomous" }, store, "g1");
 		assert.equal((r as any).applied, true);
 	});
 
-	it("fix-up under strict → requires approval (request stored)", () => {
+	it("fix-up under strict → requires approval (request stored)", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 1)];
-		const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: "strict" }, store, "g1");
+		const r = await planMutationVerdict(cur, next, "", [], { divergencePolicy: "strict" }, store, "g1");
 		assert.equal(r.kind, "fix-up");
 		assert.equal((r as any).requiresApproval, true);
 		const reqId = (r as any).requestId as string;
-		assert.ok(store.get("g1", reqId));
+		assert.ok(await store.get("g1", reqId));
 	});
 
-	it("expansion always requires approval (any policy)", () => {
+	it("expansion always requires approval (any policy)", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 2)]; // phase 2 > max(current.phase) = 1.
 		for (const policy of ["strict", "balanced", "autonomous"] as const) {
-			const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: policy }, store, `g-${policy}`);
+			const r = await planMutationVerdict(cur, next, "", [], { divergencePolicy: policy }, store, `g-${policy}`);
 			assert.equal(r.kind, "expansion");
 			assert.equal((r as any).requiresApproval, true, `${policy}: expansion must always require approval`);
 		}
 	});
 
-	it("restructure on non-paused goal → 409", () => {
+	it("restructure on non-paused goal → 409", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1), step("b", 2)];
 		const next = [step("a", 1)]; // b removed.
-		const r = planMutationVerdict(cur, next, "", [], { paused: false }, store, "g1");
+		const r = await planMutationVerdict(cur, next, "", [], { paused: false }, store, "g1");
 		assert.equal(r.kind, "restructure");
 		assert.equal((r as any).status, 409);
 	});
 
-	it("restructure on paused goal → requires approval", () => {
+	it("restructure on paused goal → requires approval", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1), step("b", 2)];
 		const next = [step("a", 1)];
-		const r = planMutationVerdict(cur, next, "", [], { paused: true }, store, "g1");
+		const r = await planMutationVerdict(cur, next, "", [], { paused: true }, store, "g1");
 		assert.equal(r.kind, "restructure");
 		assert.equal((r as any).requiresApproval, true);
 	});
 
-	it("criteria-drop always 409 (no policy override)", () => {
+	it("criteria-drop always 409 (no policy override)", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1, "")];
 		const next = [step("a", 1, ""), step("b", 1, "unrelated")];
 		for (const policy of ["strict", "balanced", "autonomous"] as const) {
-			const r = planMutationVerdict(cur, next, "", ["foo"], { divergencePolicy: policy }, store, `g-${policy}`);
+			const r = await planMutationVerdict(cur, next, "", ["foo"], { divergencePolicy: policy }, store, `g-${policy}`);
 			assert.equal(r.kind, "criteria-drop");
 			assert.equal((r as any).status, 409);
 		}
@@ -200,16 +200,16 @@ describe("plan-mutation decision matrix", () => {
 		assert.equal(u2.paused, undefined);
 	});
 
-	it("approve flow: requestId resolves and request is removed on apply", () => {
+	it("approve flow: requestId resolves and request is removed on apply", async () => {
 		const store = makePlanMutationStore();
 		const cur = [step("a", 1)];
 		const next = [...cur, step("b", 2)];
-		const r = planMutationVerdict(cur, next, "", [], { divergencePolicy: "balanced" }, store, "g1");
+		const r = await planMutationVerdict(cur, next, "", [], { divergencePolicy: "balanced" }, store, "g1");
 		const reqId = (r as any).requestId as string;
-		assert.ok(store.get("g1", reqId));
+		assert.ok(await store.get("g1", reqId));
 		// Mirror approve:
-		assert.equal(store.remove("g1", reqId), true);
-		assert.equal(store.get("g1", reqId), undefined);
+		assert.equal(await store.remove("g1", reqId), true);
+		assert.equal(await store.get("g1", reqId), undefined);
 	});
 });
 

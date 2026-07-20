@@ -948,7 +948,7 @@ export async function tryHandleNestedGoalRoute(
 			createdAt: now,
 			expiresAt: now + DEFAULT_MUTATION_TTL_MS,
 		};
-		planMutationStore.put(pending);
+		await planMutationStore.put(pending);
 		broadcastToAll({
 			type: "mutation_pending",
 			goalId: goal.id,
@@ -1029,8 +1029,8 @@ export async function tryHandleNestedGoalRoute(
 		const resolved = resolvePlanContext(id);
 		if (!resolved) return true;
 		const now = Date.now();
-		const pending = resolved.ctx.planMutationStore
-			.listForGoal(id)
+		const pending = (await resolved.ctx.planMutationStore
+			.listForGoal(id))
 			.filter(m => m.expiresAt > now)
 			.map(m => ({
 				requestId: m.requestId,
@@ -1324,10 +1324,10 @@ export async function tryHandleNestedGoalRoute(
 		if (!ctx) { json({ error: "Project context not found" }, 404); return true; }
 		const planMutationStore = ctx.planMutationStore;
 		const goalManager = ctx.goalManager;
-		const pending = planMutationStore.get(goalId, requestId);
+		const pending = await planMutationStore.get(goalId, requestId);
 		if (!pending) { json({ error: "Mutation request not found", code: "REQUEST_NOT_FOUND" }, 404); return true; }
 		if (decision === "reject") {
-			planMutationStore.remove(goalId, requestId);
+			await planMutationStore.remove(goalId, requestId);
 			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision });
 			json({ applied: false });
 			return true;
@@ -1343,7 +1343,7 @@ export async function tryHandleNestedGoalRoute(
 			const { newReplanCount, autoPaused } = await applyReplanAndMaybeAutopause(
 				goal, goalManager, readCallerSessionId(),
 			);
-			planMutationStore.remove(goalId, requestId);
+			await planMutationStore.remove(goalId, requestId);
 			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused });
 			// Cross-team propagation: when a child goal is auto-paused,
 			// notify the PARENT's team-lead — without this the parent sits

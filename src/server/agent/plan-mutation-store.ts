@@ -13,9 +13,9 @@
  * inspect. 24h expiry on each request — `pruneExpired` is idempotent and
  * cheap to call from a periodic sweep.
  *
- * Threading model: synchronous JSON-file rewrites mirror `GoalStore` —
- * the volume is tiny (a handful of entries per goal at most) and we want
- * the same crash-recovery semantics.
+ * Persistence is asynchronous. Read-modify-write operations are serialized
+ * per goal so route writes and the periodic prune cannot lose one another's
+ * updates, while pruning separate goals uses a small concurrency ceiling.
  */
 
 import type { Clock, FsLike } from "../gateway-deps.js";
@@ -42,11 +42,20 @@ export const DEFAULT_MUTATION_TTL_MS = 24 * 60 * 60 * 1000;
 /** Daily sweep cadence for `pruneExpired`. */
 export const DEFAULT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/** Keep a wide mutation directory from issuing unbounded concurrent I/O. */
+export const PLAN_MUTATION_PRUNE_CONCURRENCY = 4;
+
+function isEnoent(err: unknown): boolean {
+	return !!err && typeof err === "object" && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
+}
+
 export class PlanMutationStore {
 	private readonly dir: string;
 	private readonly fs: FsLike;
 	private readonly clock: Clock;
+	private readonly goalOperations = new Map<string, Promise<void>>();
 	private sweepTimer?: ReturnType<Clock["setInterval"]>;
+	private sweepRun?: Promise<number>;
 
 	constructor(stateDir: string, opts?: { startSweep?: boolean; sweepIntervalMs?: number }, fsImpl: FsLike = realFs, clock: Clock = realClock) {
 		this.fs = fsImpl;
@@ -60,87 +69,133 @@ export class PlanMutationStore {
 		if (startSweep) {
 			const interval = opts?.sweepIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS;
 			this.sweepTimer = this.clock.setInterval(() => {
-				try { this.pruneExpired(); } catch (err) { console.warn("[plan-mutation-store] periodic sweep failed:", err); }
+				void this.runScheduledSweep();
 			}, interval);
 			this.sweepTimer.unref?.();
 		}
 	}
 
-	/** Cancel the periodic sweep timer (idempotent). */
-	stopSweep(): void {
+	/** Cancel future sweeps and wait until the active sweep, if any, settles. */
+	async stopSweep(): Promise<void> {
 		if (this.sweepTimer) {
 			this.clock.clearInterval(this.sweepTimer);
 			this.sweepTimer = undefined;
 		}
+		const active = this.sweepRun;
+		if (active) await active.catch(() => undefined);
+	}
+
+	private runScheduledSweep(): Promise<number> {
+		if (this.sweepRun) return this.sweepRun;
+
+		const run = this.pruneExpired();
+		this.sweepRun = run;
+		void run.then(
+			() => {
+				if (this.sweepRun === run) this.sweepRun = undefined;
+			},
+			(err) => {
+				console.warn("[plan-mutation-store] periodic sweep failed:", err);
+				if (this.sweepRun === run) this.sweepRun = undefined;
+			},
+		);
+		return run;
 	}
 
 	private fileFor(goalId: string): string {
 		return path.join(this.dir, `${goalId}.json`);
 	}
 
-	private ensureDir(): void {
+	private async ensureDir(): Promise<void> {
 		try {
-			if (!this.fs.existsSync(this.dir)) this.fs.mkdirSync(this.dir, { recursive: true });
+			await this.fs.promises.mkdir(this.dir, { recursive: true });
 		} catch (err) {
 			console.error("[plan-mutation-store] Failed to mkdir:", err);
 		}
 	}
 
-	private readFile(goalId: string): PendingMutation[] {
+	private async readFile(goalId: string): Promise<PendingMutation[]> {
 		try {
-			const f = this.fileFor(goalId);
-			if (!this.fs.existsSync(f)) return [];
-			const raw = this.fs.readFileSync(f, "utf-8");
+			const raw = await this.fs.promises.readFile(this.fileFor(goalId), "utf-8");
 			const parsed = JSON.parse(raw);
 			if (!Array.isArray(parsed)) return [];
 			return parsed as PendingMutation[];
 		} catch (err) {
-			console.warn(`[plan-mutation-store] Failed to read mutations for ${goalId}:`, err);
+			if (!isEnoent(err)) {
+				console.warn(`[plan-mutation-store] Failed to read mutations for ${goalId}:`, err);
+			}
 			return [];
 		}
 	}
 
-	private writeFile(goalId: string, mutations: PendingMutation[]): void {
-		this.ensureDir();
+	private async writeFile(goalId: string, mutations: PendingMutation[]): Promise<void> {
+		await this.ensureDir();
 		try {
-			const f = this.fileFor(goalId);
+			const file = this.fileFor(goalId);
 			if (mutations.length === 0) {
-				if (this.fs.existsSync(f)) this.fs.unlinkSync(f);
+				try {
+					await this.fs.promises.unlink(file);
+				} catch (err) {
+					if (!isEnoent(err)) throw err;
+				}
 				return;
 			}
-			this.fs.writeFileSync(f, JSON.stringify(mutations, null, 2), "utf-8");
+			await this.fs.promises.writeFile(file, JSON.stringify(mutations, null, 2), "utf-8");
 		} catch (err) {
 			console.error(`[plan-mutation-store] Failed to write mutations for ${goalId}:`, err);
 		}
 	}
 
-	put(m: PendingMutation): void {
-		const list = this.readFile(m.goalId);
-		// Replace if requestId already exists, otherwise append.
-		const idx = list.findIndex(x => x.requestId === m.requestId);
-		if (idx >= 0) {
-			list[idx] = m;
-		} else {
-			list.push(m);
-		}
-		this.writeFile(m.goalId, list);
+	/** Queue a read-modify-write operation behind earlier operations for one goal. */
+	private mutateGoal<T>(goalId: string, operation: () => Promise<T>): Promise<T> {
+		const preceding = this.goalOperations.get(goalId) ?? Promise.resolve();
+		const run = preceding.then(operation);
+		const settled = run.then(() => undefined, () => undefined);
+		this.goalOperations.set(goalId, settled);
+		void settled.then(() => {
+			if (this.goalOperations.get(goalId) === settled) this.goalOperations.delete(goalId);
+		});
+		return run;
 	}
 
-	get(goalId: string, requestId: string): PendingMutation | undefined {
-		return this.readFile(goalId).find(m => m.requestId === requestId);
-	}
-
-	remove(goalId: string, requestId: string): boolean {
-		const list = this.readFile(goalId);
-		const idx = list.findIndex(m => m.requestId === requestId);
-		if (idx < 0) return false;
-		list.splice(idx, 1);
-		this.writeFile(goalId, list);
-		return true;
-	}
-
-	listForGoal(goalId: string): PendingMutation[] {
+	/** Wait for preceding writes without blocking later writes from joining the queue. */
+	private async readAfterWrites(goalId: string): Promise<PendingMutation[]> {
+		const preceding = this.goalOperations.get(goalId);
+		if (preceding) await preceding;
 		return this.readFile(goalId);
+	}
+
+	put(m: PendingMutation): Promise<void> {
+		return this.mutateGoal(m.goalId, async () => {
+			const list = await this.readFile(m.goalId);
+			// Replace if requestId already exists, otherwise append.
+			const idx = list.findIndex(x => x.requestId === m.requestId);
+			if (idx >= 0) {
+				list[idx] = m;
+			} else {
+				list.push(m);
+			}
+			await this.writeFile(m.goalId, list);
+		});
+	}
+
+	async get(goalId: string, requestId: string): Promise<PendingMutation | undefined> {
+		return (await this.readAfterWrites(goalId)).find(m => m.requestId === requestId);
+	}
+
+	remove(goalId: string, requestId: string): Promise<boolean> {
+		return this.mutateGoal(goalId, async () => {
+			const list = await this.readFile(goalId);
+			const idx = list.findIndex(m => m.requestId === requestId);
+			if (idx < 0) return false;
+			list.splice(idx, 1);
+			await this.writeFile(goalId, list);
+			return true;
+		});
+	}
+
+	listForGoal(goalId: string): Promise<PendingMutation[]> {
+		return this.readAfterWrites(goalId);
 	}
 
 	/**
@@ -148,24 +203,45 @@ export class PlanMutationStore {
 	 * removed entries. Idempotent and best-effort — failures on individual
 	 * goals are logged and skipped.
 	 */
-	pruneExpired(now: number = this.clock.now()): number {
-		let removed = 0;
+	async pruneExpired(now: number = this.clock.now()): Promise<number> {
+		let entries: string[];
 		try {
-			if (!this.fs.existsSync(this.dir)) return 0;
-			const entries = this.fs.readdirSync(this.dir);
-			for (const name of entries) {
-				if (!name.endsWith(".json")) continue;
-				const goalId = name.slice(0, -".json".length);
-				const list = this.readFile(goalId);
-				const kept = list.filter(m => m.expiresAt > now);
-				if (kept.length !== list.length) {
-					removed += list.length - kept.length;
-					this.writeFile(goalId, kept);
+			entries = await this.fs.promises.readdir(this.dir) as string[];
+		} catch (err) {
+			if (!isEnoent(err)) console.warn("[plan-mutation-store] pruneExpired failed:", err);
+			return 0;
+		}
+
+		const goalIds = entries
+			.filter(name => name.endsWith(".json"))
+			.map(name => name.slice(0, -".json".length));
+		if (goalIds.length === 0) return 0;
+
+		const removedByGoal = new Array<number>(goalIds.length).fill(0);
+		let nextIndex = 0;
+		const worker = async (): Promise<void> => {
+			while (nextIndex < goalIds.length) {
+				const index = nextIndex++;
+				const goalId = goalIds[index];
+				try {
+					removedByGoal[index] = await this.mutateGoal(goalId, async () => {
+						const list = await this.readFile(goalId);
+						const kept = list.filter(m => m.expiresAt > now);
+						const removed = list.length - kept.length;
+						if (removed > 0) await this.writeFile(goalId, kept);
+						return removed;
+					});
+				} catch (err) {
+					console.warn(`[plan-mutation-store] Failed to prune mutations for ${goalId}:`, err);
 				}
 			}
-		} catch (err) {
-			console.warn("[plan-mutation-store] pruneExpired failed:", err);
-		}
-		return removed;
+		};
+
+		const workers = Array.from(
+			{ length: Math.min(PLAN_MUTATION_PRUNE_CONCURRENCY, goalIds.length) },
+			() => worker(),
+		);
+		await Promise.all(workers);
+		return removedByGoal.reduce((total, count) => total + count, 0);
 	}
 }

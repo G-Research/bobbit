@@ -3,17 +3,19 @@
 // Bucket: v2-core | Method: codemod | Classification: clean
 
 /**
- * Phase 4 — `PlanMutationStore` round-trip + expiry tests.
+ * Phase 4 — `PlanMutationStore` round-trip, expiry, and async-I/O tests.
  */
-import { describe, it, beforeEach } from "vitest";
+import { beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
 import {
 	PlanMutationStore,
 	DEFAULT_MUTATION_TTL_MS,
+	PLAN_MUTATION_PRUNE_CONCURRENCY,
 	type PendingMutation,
 } from "../../src/server/agent/plan-mutation-store.ts";
+import type { Clock } from "../../src/server/gateway-deps.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 const stateDir = path.resolve("/memfs/plan-mutation-store/state");
@@ -45,74 +47,356 @@ function makeMutation(goalId: string, requestId: string, overrides: Partial<Pend
 	};
 }
 
+function mutationFile(goalId: string): string {
+	return path.join(stateDir, "plan-mutations", `${goalId}.json`);
+}
+
+interface Deferred<T> {
+	promise: Promise<T>;
+	resolve(value: T | PromiseLike<T>): void;
+	reject(reason?: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+/** Wait a fixed number of event-loop turns, never a wall-clock threshold. */
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+	for (let turn = 0; turn < 20; turn++) {
+		if (predicate()) return;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	assert.fail(message);
+}
+
+function manualSweepClock(now = Date.now()) {
+	let tick: (() => void) | undefined;
+	let intervalMs: number | undefined;
+	let clearCalls = 0;
+	let unrefCalls = 0;
+	const handle = {
+		unref: () => { unrefCalls++; },
+	} as unknown as ReturnType<Clock["setInterval"]>;
+	const clock = {
+		now: () => now,
+		setTimeout: () => { throw new Error("unexpected timeout"); },
+		clearTimeout: () => {},
+		setInterval: (handler: () => void, ms: number) => {
+			assert.equal(tick, undefined, "only one sweep interval is installed");
+			tick = handler;
+			intervalMs = ms;
+			return handle;
+		},
+		clearInterval: (candidate: ReturnType<Clock["setInterval"]>) => {
+			assert.strictEqual(candidate, handle);
+			clearCalls++;
+		},
+	} as Clock;
+	return {
+		clock,
+		fire: () => {
+			assert.ok(tick, "sweep interval must be installed before firing");
+			tick();
+		},
+		get intervalMs() { return intervalMs; },
+		get clearCalls() { return clearCalls; },
+		get unrefCalls() { return unrefCalls; },
+	};
+}
+
 describe("PlanMutationStore", () => {
-	it("put / get round-trip", () => {
+	it("put / get round-trip preserves the direct JSON shape", async () => {
 		const store = makeStore();
 		const m = makeMutation("g1", "r1");
-		store.put(m);
-		const got = store.get("g1", "r1");
+		await store.put(m);
+		const got = await store.get("g1", "r1");
 		assert.ok(got);
-		assert.equal(got!.requestId, "r1");
-		assert.equal(got!.kind, "fix-up");
+		assert.equal(got.requestId, "r1");
+		assert.equal(got.kind, "fix-up");
+		assert.deepEqual(JSON.parse(memfs.files.get(mutationFile("g1"))!), [m]);
 	});
 
-	it("get returns undefined for missing", () => {
+	it("get returns undefined for missing without warning on ENOENT", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const store = makeStore();
+			assert.equal(await store.get("nope", "nope"), undefined);
+			assert.equal(warn.mock.calls.length, 0);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("replacement keeps the original append position and request count", async () => {
 		const store = makeStore();
-		assert.equal(store.get("nope", "nope"), undefined);
+		await store.put(makeMutation("g1", "r1", { summary: "v1" }));
+		await store.put(makeMutation("g1", "r2", { summary: "middle" }));
+		await store.put(makeMutation("g1", "r1", { summary: "v2" }));
+		const list = await store.listForGoal("g1");
+		assert.equal(list.length, 2);
+		assert.deepEqual(list.map((entry) => entry.requestId), ["r1", "r2"]);
+		assert.deepEqual(list.map((entry) => entry.summary), ["v2", "middle"]);
 	});
 
-	it("put twice with same requestId replaces", () => {
+	it("remove returns true on hit, false on miss, and deletes an empty goal file", async () => {
 		const store = makeStore();
-		store.put(makeMutation("g1", "r1", { summary: "v1" }));
-		store.put(makeMutation("g1", "r1", { summary: "v2" }));
-		const list = store.listForGoal("g1");
-		assert.equal(list.length, 1);
-		assert.equal(list[0].summary, "v2");
+		await store.put(makeMutation("g1", "r1"));
+		assert.equal(memfs.files.has(mutationFile("g1")), true);
+		assert.equal(await store.remove("g1", "r1"), true);
+		assert.equal(memfs.files.has(mutationFile("g1")), false);
+		assert.equal(await store.remove("g1", "r1"), false);
+		assert.equal(await store.get("g1", "r1"), undefined);
 	});
 
-	it("remove returns true on hit, false on miss", () => {
+	it("listForGoal preserves append order and goal isolation", async () => {
 		const store = makeStore();
-		store.put(makeMutation("g1", "r1"));
-		assert.equal(store.remove("g1", "r1"), true);
-		assert.equal(store.remove("g1", "r1"), false);
-		assert.equal(store.get("g1", "r1"), undefined);
+		await store.put(makeMutation("g1", "r1"));
+		await store.put(makeMutation("g1", "r2"));
+		await store.put(makeMutation("g2", "rA"));
+		assert.deepEqual((await store.listForGoal("g1")).map((entry) => entry.requestId), ["r1", "r2"]);
+		assert.deepEqual((await store.listForGoal("g2")).map((entry) => entry.requestId), ["rA"]);
+		assert.deepEqual(await store.listForGoal("g3"), []);
 	});
 
-	it("listForGoal isolation", () => {
+	it("treats a non-ENOENT read error as an empty read and logs it once", async () => {
 		const store = makeStore();
-		store.put(makeMutation("g1", "r1"));
-		store.put(makeMutation("g1", "r2"));
-		store.put(makeMutation("g2", "rA"));
-		assert.equal(store.listForGoal("g1").length, 2);
-		assert.equal(store.listForGoal("g2").length, 1);
-		assert.equal(store.listForGoal("g3").length, 0);
+		const persisted = makeMutation("g1", "r1");
+		await store.put(persisted);
+		const originalReadFile = memfs.promises.readFile.bind(memfs.promises) as any;
+		(memfs.promises as any).readFile = async () => {
+			throw Object.assign(new Error("injected read failure"), { code: "EIO" });
+		};
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			assert.deepEqual(await store.listForGoal("g1"), []);
+			assert.equal(warn.mock.calls.length, 1);
+			assert.match(String(warn.mock.calls[0][0]), /Failed to read mutations for g1/);
+		} finally {
+			(memfs.promises as any).readFile = originalReadFile;
+			warn.mockRestore();
+		}
+		assert.deepEqual(await store.get("g1", "r1"), persisted, "a failed read must not mutate the persisted file");
 	});
 
-	it("pruneExpired removes only expired entries", () => {
+	it("pruneExpired removes only expired entries and returns the exact count", async () => {
 		const store = makeStore();
 		const now = Date.now();
-		store.put(makeMutation("g1", "fresh", { createdAt: now, expiresAt: now + 60_000 }));
-		store.put(makeMutation("g1", "stale", { createdAt: now - 100_000, expiresAt: now - 1_000 }));
-		store.put(makeMutation("g2", "stale2", { createdAt: now - 100_000, expiresAt: now - 1_000 }));
-		const removed = store.pruneExpired(now);
+		await store.put(makeMutation("g1", "fresh", { createdAt: now, expiresAt: now + 60_000 }));
+		await store.put(makeMutation("g1", "stale", { createdAt: now - 100_000, expiresAt: now - 1_000 }));
+		await store.put(makeMutation("g2", "stale2", { createdAt: now - 100_000, expiresAt: now - 1_000 }));
+		const removed = await store.pruneExpired(now);
 		assert.equal(removed, 2);
-		assert.equal(store.get("g1", "fresh") !== undefined, true);
-		assert.equal(store.get("g1", "stale"), undefined);
-		assert.equal(store.get("g2", "stale2"), undefined);
+		assert.equal((await store.get("g1", "fresh")) !== undefined, true);
+		assert.equal(await store.get("g1", "stale"), undefined);
+		assert.equal(await store.get("g2", "stale2"), undefined);
 	});
 
-	it("pruneExpired is idempotent (second call returns 0)", () => {
+	it("pruneExpired is idempotent (second call returns 0)", async () => {
 		const store = makeStore();
-		store.put(makeMutation("g1", "r1"));
-		assert.equal(store.pruneExpired(), 0);
-		assert.equal(store.pruneExpired(), 0);
-		assert.equal(store.get("g1", "r1") !== undefined, true);
+		await store.put(makeMutation("g1", "r1"));
+		assert.equal(await store.pruneExpired(), 0);
+		assert.equal(await store.pruneExpired(), 0);
+		assert.equal((await store.get("g1", "r1")) !== undefined, true);
 	});
 
-	it("survives across instances (file-backed persistence)", () => {
+	it("survives across instances (file-backed persistence)", async () => {
 		const a = makeStore();
-		a.put(makeMutation("g1", "r1"));
+		await a.put(makeMutation("g1", "r1"));
 		const b = makeStore();
-		assert.ok(b.get("g1", "r1"));
+		assert.ok(await b.get("g1", "r1"));
+	});
+
+	it("lets the event loop progress while prune directory I/O is pending", async () => {
+		const store = makeStore();
+		const readdirGate = deferred<void>();
+		const originalReaddir = memfs.promises.readdir.bind(memfs.promises) as any;
+		let ioStarted = false;
+		(memfs.promises as any).readdir = async (...args: any[]) => {
+			ioStarted = true;
+			await readdirGate.promise;
+			return originalReaddir(...args);
+		};
+
+		let pruneSettled = false;
+		const pruning = store.pruneExpired().then((count) => {
+			pruneSettled = true;
+			return count;
+		});
+		assert.equal(ioStarted, true);
+
+		let microtaskRan = false;
+		let immediateRan = false;
+		queueMicrotask(() => { microtaskRan = true; });
+		await new Promise<void>((resolve) => setImmediate(() => {
+			immediateRan = true;
+			resolve();
+		}));
+		assert.equal(microtaskRan, true);
+		assert.equal(immediateRan, true);
+		assert.equal(pruneSettled, false, "prune must remain pending until fake I/O is released");
+
+		readdirGate.resolve(undefined);
+		assert.equal(await pruning, 0);
+	});
+
+	it("serializes concurrent writes for one goal in invocation order", async () => {
+		const store = makeStore();
+		const originalWriteFile = memfs.promises.writeFile.bind(memfs.promises) as any;
+		const writeGates: Deferred<void>[] = [];
+		const snapshots: string[][] = [];
+		let activeWrites = 0;
+		let maxActiveWrites = 0;
+		(memfs.promises as any).writeFile = async (...args: any[]) => {
+			activeWrites++;
+			maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+			snapshots.push((JSON.parse(String(args[1])) as PendingMutation[]).map((entry) => entry.requestId));
+			const gate = deferred<void>();
+			writeGates.push(gate);
+			await gate.promise;
+			try {
+				return await originalWriteFile(...args);
+			} finally {
+				activeWrites--;
+			}
+		};
+
+		const writes = [
+			store.put(makeMutation("g1", "r1")),
+			store.put(makeMutation("g1", "r2")),
+			store.put(makeMutation("g1", "r3")),
+		];
+		await waitFor(() => writeGates.length === 1, "first queued goal write did not reach fake I/O");
+		assert.deepEqual(snapshots, [["r1"]]);
+		assert.equal(activeWrites, 1);
+
+		writeGates[0].resolve(undefined);
+		await waitFor(() => writeGates.length === 2, "second goal write did not follow the first");
+		assert.deepEqual(snapshots, [["r1"], ["r1", "r2"]]);
+
+		writeGates[1].resolve(undefined);
+		await waitFor(() => writeGates.length === 3, "third goal write did not follow the second");
+		assert.deepEqual(snapshots, [["r1"], ["r1", "r2"], ["r1", "r2", "r3"]]);
+
+		writeGates[2].resolve(undefined);
+		await Promise.all(writes);
+		assert.equal(maxActiveWrites, 1);
+		assert.equal(activeWrites, 0);
+		(memfs.promises as any).writeFile = originalWriteFile;
+		assert.deepEqual((await store.listForGoal("g1")).map((entry) => entry.requestId), ["r1", "r2", "r3"]);
+	});
+
+	it("bounds cross-goal prune reads by PLAN_MUTATION_PRUNE_CONCURRENCY", async () => {
+		const store = makeStore();
+		const now = Date.now();
+		const goalCount = PLAN_MUTATION_PRUNE_CONCURRENCY * 2 + 1;
+		await Promise.all(Array.from({ length: goalCount }, (_, index) =>
+			store.put(makeMutation(`g${index}`, `r${index}`, { expiresAt: now - 1 })),
+		));
+
+		const originalReadFile = memfs.promises.readFile.bind(memfs.promises) as any;
+		const readGates: Deferred<void>[] = [];
+		let activeReads = 0;
+		let maxActiveReads = 0;
+		(memfs.promises as any).readFile = async (...args: any[]) => {
+			activeReads++;
+			maxActiveReads = Math.max(maxActiveReads, activeReads);
+			const gate = deferred<void>();
+			readGates.push(gate);
+			await gate.promise;
+			try {
+				return await originalReadFile(...args);
+			} finally {
+				activeReads--;
+			}
+		};
+
+		const pruning = store.pruneExpired(now);
+		await waitFor(
+			() => readGates.length === PLAN_MUTATION_PRUNE_CONCURRENCY,
+			"prune workers did not fill the exported concurrency ceiling",
+		);
+		assert.equal(activeReads, PLAN_MUTATION_PRUNE_CONCURRENCY);
+		assert.equal(maxActiveReads, PLAN_MUTATION_PRUNE_CONCURRENCY);
+
+		let released = 0;
+		while (released < goalCount) {
+			await waitFor(() => readGates.length > released, "next bounded prune batch did not start");
+			const end = readGates.length;
+			for (let index = released; index < end; index++) readGates[index].resolve(undefined);
+			released = end;
+		}
+		assert.equal(await pruning, goalCount);
+		assert.equal(readGates.length, goalCount, "each goal file is read exactly once");
+		assert.equal(maxActiveReads, PLAN_MUTATION_PRUNE_CONCURRENCY);
+		assert.equal(activeReads, 0);
+
+		(memfs.promises as any).readFile = originalReadFile;
+		assert.equal(await store.pruneExpired(now), 0, "all expired entries were removed exactly once");
+	});
+
+	it("coalesces two overlapping scheduled ticks into one prune run", async () => {
+		const timer = manualSweepClock();
+		const readdirGate = deferred<void>();
+		const originalReaddir = memfs.promises.readdir.bind(memfs.promises) as any;
+		let readdirCalls = 0;
+		(memfs.promises as any).readdir = async (...args: any[]) => {
+			readdirCalls++;
+			if (readdirCalls === 1) await readdirGate.promise;
+			return originalReaddir(...args);
+		};
+		const store = new PlanMutationStore(stateDir, undefined, memfs, timer.clock);
+		assert.equal(readdirCalls, 0, "constructing the timer must not run a startup prune");
+		assert.equal(timer.unrefCalls, 1);
+
+		timer.fire();
+		const firstRun = (store as any).sweepRun as Promise<number>;
+		timer.fire();
+		assert.equal(readdirCalls, 1, "overlapping ticks must share one prune");
+		assert.strictEqual((store as any).sweepRun, firstRun);
+
+		readdirGate.resolve(undefined);
+		assert.equal(await firstRun, 0);
+		await Promise.resolve();
+		timer.fire();
+		const laterRun = (store as any).sweepRun as Promise<number>;
+		assert.equal(readdirCalls, 2, "a later tick may run after the first settles");
+		assert.equal(await laterRun, 0);
+		await store.stopSweep();
+		assert.equal(timer.clearCalls, 1);
+	});
+
+	it("stopSweep clears future ticks and waits for the in-flight scheduled run", async () => {
+		const timer = manualSweepClock();
+		const readdirGate = deferred<void>();
+		const originalReaddir = memfs.promises.readdir.bind(memfs.promises) as any;
+		let readdirCalls = 0;
+		(memfs.promises as any).readdir = async (...args: any[]) => {
+			readdirCalls++;
+			await readdirGate.promise;
+			return originalReaddir(...args);
+		};
+		const store = new PlanMutationStore(stateDir, { sweepIntervalMs: 1234 }, memfs, timer.clock);
+		assert.equal(timer.intervalMs, 1234);
+		timer.fire();
+		assert.equal(readdirCalls, 1);
+
+		let stopSettled = false;
+		const stopping = store.stopSweep().then(() => { stopSettled = true; });
+		assert.equal(timer.clearCalls, 1, "the interval is cleared before waiting");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(stopSettled, false, "stop must remain pending with the active prune");
+
+		readdirGate.resolve(undefined);
+		await stopping;
+		assert.equal(stopSettled, true);
+		await store.stopSweep();
+		assert.equal(timer.clearCalls, 1, "stopping twice is idempotent");
 	});
 });
