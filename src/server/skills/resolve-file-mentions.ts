@@ -989,10 +989,13 @@ function isWindowsNamespaceToken(rawPath: string): boolean {
 function scanTokens(text: string): ScannedToken[] {
 	const re = /(^|\s)@([^\s@]+)/g;
 	// Ordinary prompts need no Markdown token tree or normalized-source copy.
-	// Backticks can introduce inline/fenced code; a run of 3+ tildes can
-	// introduce a fenced block. Only those delimiter-bearing prompts pay for
-	// Marked and sparse original-offset mapping.
-	const excluded = text.includes("`") || /~{3,}/.test(text)
+	// Backticks and 3+ tildes can delimit code; four columns of leading
+	// indentation can introduce a code block. A tab reaches the next four-column
+	// stop, so up to three preceding spaces still form a valid indented start.
+	// Only prompts with one of those code markers pay for Marked and sparse
+	// original-offset mapping.
+	const hasIndentedCodeLine = /(?:^|\r\n?|\n)(?: {4}| {0,3}\t)/.test(text);
+	const excluded = text.includes("`") || /~{3,}/.test(text) || hasIndentedCodeLine
 		? scanMarkdownCodeRanges(text)
 		: undefined;
 	const out: ScannedToken[] = [];
