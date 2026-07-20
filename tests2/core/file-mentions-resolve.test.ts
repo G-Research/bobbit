@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { marked } from "marked";
 
 const NOTES_CONTENT = "hello world\nline two";
@@ -49,6 +50,18 @@ const {
 	MAX_MENTION_AGGREGATE_BYTES,
 	MAX_MENTIONS_PER_SEND,
 } = resolverModule;
+
+const MAX_FILE_MENTION_RAW_CANDIDATES = Reflect.get(
+	resolverModule,
+	"MAX_FILE_MENTION_RAW_CANDIDATES",
+) as number;
+const MAX_FILE_MENTION_UNIQUE_PROBES = Reflect.get(
+	resolverModule,
+	"MAX_FILE_MENTION_UNIQUE_PROBES",
+) as number;
+const FileMentionBudgetError = Reflect.get(resolverModule, "FileMentionBudgetError") as unknown;
+const EXPECTED_RAW_CANDIDATE_LIMIT = 8_192;
+const EXPECTED_UNIQUE_PROBE_LIMIT = 4_096;
 
 const FILE_MENTION_RESOLUTION_CONCURRENCY = (
 	Reflect.get(resolverModule, "FILE_MENTION_RESOLUTION_CONCURRENCY")
@@ -120,6 +133,9 @@ describe("resolveFileMentions", () => {
 		assert.equal(MAX_MENTION_FILE_BYTES, 10 * 1024 * 1024);
 		assert.equal(MAX_MENTION_AGGREGATE_BYTES, 20 * 1024 * 1024);
 		assert.equal(MAX_MENTIONS_PER_SEND, 50);
+		assert.equal(MAX_FILE_MENTION_RAW_CANDIDATES, EXPECTED_RAW_CANDIDATE_LIMIT);
+		assert.equal(MAX_FILE_MENTION_UNIQUE_PROBES, EXPECTED_UNIQUE_PROBE_LIMIT);
+		assert.equal(typeof FileMentionBudgetError, "function");
 	});
 
 	it("no mentions → text unchanged, empty mentions", async () => {
@@ -152,7 +168,7 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
-	it("keeps a practical large fenced and inline-code prompt with more than 512 candidates literal", async () => {
+	it("excludes 600 code-contained candidates from the post-Markdown raw budget and keeps them literal", async () => {
 		const fencedCandidates = Array.from(
 			{ length: 300 },
 			(_, index) => `@fenced-candidate-${index}.txt`,
@@ -161,12 +177,17 @@ describe("resolveFileMentions", () => {
 			{ length: 300 },
 			(_, index) => `@inline-candidate-${index}.txt`,
 		).join(" ");
+		const proseCandidates = Array.from(
+			{ length: EXPECTED_RAW_CANDIDATE_LIMIT },
+			() => "@budget-edge-missing.txt",
+		).join(" ");
 		const text = [
 			"```text",
 			fencedCandidates,
 			"x".repeat(1024 * 1024),
 			"```",
 			`inline \`${inlineCandidates}\``,
+			proseCandidates,
 		].join("\n");
 		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
 		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
@@ -180,13 +201,101 @@ describe("resolveFileMentions", () => {
 			assert.equal(result.modelText, text);
 			assert.deepEqual(result.mentions, []);
 			assert.deepEqual(result.warnings, []);
-			assert.equal(lstatSpy.mock.calls.length, 0, "code-contained candidates must not reach lstat");
-			assert.equal(promiseOpenSpy.mock.calls.length, 0, "code-contained candidates must not reach promises.open");
-			assert.equal(openSpy.mock.calls.length, 0, "code-contained candidates must not reach openSync");
+			assert.equal(lstatSpy.mock.calls.length, 1, "only the repeated prose target may reach lstat");
+			assert.match(String(lstatSpy.mock.calls[0][0]), /budget-edge-missing\.txt$/);
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "missing candidates must not reach promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "missing candidates must not reach openSync");
 		} finally {
 			openSpy.mockRestore();
 			promiseOpenSpy.mockRestore();
 			lstatSpy.mockRestore();
+		}
+	});
+
+	it("rejects non-code candidates above the raw budget before filesystem work", async () => {
+		const text = Array.from(
+			{ length: EXPECTED_RAW_CANDIDATE_LIMIT + 128 },
+			() => "@raw-budget-missing.txt",
+		).join(" ");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			await assert.rejects(
+				() => resolveFileMentions(text, cwdDir),
+				(error: unknown) => {
+					const record = error as { name?: unknown; code?: unknown; message?: unknown };
+					assert.equal(record.name, "FileMentionBudgetError");
+					assert.equal(record.code, "FILE_MENTION_CANDIDATE_LIMIT");
+					assert.match(String(record.message), /8192.*non-code file-mention candidates/i);
+					return true;
+				},
+				"raw budget overflow must reject the whole prompt explicitly",
+			);
+			assert.equal(lstatSpy.mock.calls.length, 0, "raw overflow must reject before lstat");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "raw overflow must reject before promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "raw overflow must reject before openSync");
+			assert.equal(readSpy.mock.calls.length, 0, "raw overflow must reject before readSync");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("stops unique-target preparation at the limit-plus-one sentinel and probes nothing", async () => {
+		const overflowTail = 128;
+		const text = Array.from(
+			{ length: EXPECTED_UNIQUE_PROBE_LIMIT + overflowTail },
+			(_, index) => `@unique-budget-${index}.txt`,
+		).join(" ");
+		const resolvedCwd = path.resolve(cwdDir);
+		const resolvePathSpy = vi.spyOn(path, "resolve");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			await assert.rejects(
+				() => resolveFileMentions(text, cwdDir),
+				(error: unknown) => {
+					const record = error as { name?: unknown; code?: unknown; message?: unknown };
+					assert.equal(record.name, "FileMentionBudgetError");
+					assert.equal(record.code, "FILE_MENTION_PROBE_LIMIT");
+					assert.match(String(record.message), /4096.*distinct file-mention targets/i);
+					return true;
+				},
+				"unique-target overflow must reject the whole prompt explicitly",
+			);
+			const preparedCandidates = resolvePathSpy.mock.calls.filter(
+				(call) => call[0] === resolvedCwd
+					&& typeof call[1] === "string"
+					&& /^unique-budget-\d+\.txt$/.test(call[1]),
+			);
+			assert.equal(
+				preparedCandidates.length,
+				EXPECTED_UNIQUE_PROBE_LIMIT + 1,
+				"the resolver must retain only the limit plus one overflow sentinel",
+			);
+			assert.equal(preparedCandidates.at(-1)?.[1], `unique-budget-${EXPECTED_UNIQUE_PROBE_LIMIT}.txt`);
+			assert.ok(
+				!preparedCandidates.some((call) => call[1] === `unique-budget-${EXPECTED_UNIQUE_PROBE_LIMIT + 1}.txt`),
+				"candidate preparation must stop immediately at the overflow sentinel",
+			);
+			assert.equal(lstatSpy.mock.calls.length, 0, "unique overflow must reject before lstat");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "unique overflow must reject before promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "unique overflow must reject before openSync");
+			assert.equal(readSpy.mock.calls.length, 0, "unique overflow must reject before readSync");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+			resolvePathSpy.mockRestore();
 		}
 	});
 
@@ -791,6 +900,58 @@ describe("resolveFileMentions", () => {
 			assert.match(r.warnings[0], /unreadable/);
 		} finally {
 			readSpy.mockRestore();
+		}
+	});
+
+	it("classifies an existing directory as unresolved without opening or reading it", async () => {
+		const directory = path.join(cwdDir, "non-regular-directory");
+		fs.mkdirSync(directory, { recursive: true });
+		const openSpy = vi.spyOn(fs, "openSync").mockImplementation((() => {
+			throw new Error("non-regular target reached openSync");
+		}) as typeof fs.openSync);
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			const text = "inspect @non-regular-directory";
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.equal(result.mentions.length, 1);
+			assert.equal(result.mentions[0].kind, "unresolved");
+			assert.equal(result.mentions[0].reason, "unreadable");
+			assert.deepEqual(result.warnings, ["@non-regular-directory: unreadable"]);
+			assert.equal(openSpy.mock.calls.length, 0, "directory classification must reject before openSync");
+			assert.equal(readSpy.mock.calls.length, 0, "directory classification must reject before readSync");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	itOnPosix("classifies an existing FIFO as unresolved without opening or reading it", async () => {
+		const fifo = path.join(cwdDir, "non-regular-fifo");
+		execFileSync("mkfifo", [fifo]);
+		const openSpy = vi.spyOn(fs, "openSync").mockImplementation((() => {
+			throw new Error("FIFO reached openSync");
+		}) as typeof fs.openSync);
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			const text = "inspect @non-regular-fifo";
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.equal(result.mentions.length, 1);
+			assert.equal(result.mentions[0].kind, "unresolved");
+			assert.equal(result.mentions[0].reason, "unreadable");
+			assert.deepEqual(result.warnings, ["@non-regular-fifo: unreadable"]);
+			assert.equal(openSpy.mock.calls.length, 0, "FIFO classification must reject before openSync");
+			assert.equal(readSpy.mock.calls.length, 0, "FIFO classification must reject before readSync");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			fs.rmSync(fifo, { force: true });
 		}
 	});
 
