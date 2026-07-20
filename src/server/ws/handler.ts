@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import type { RawData, WebSocket } from "ws";
+import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { spliceInFlightMessage, spliceInFlightSteers } from "../agent/splice-inflight-message.js";
@@ -482,20 +482,7 @@ export function handleWebSocketConnection(
 		}
 	}, 5000);
 
-	const handleRawMessage = async (data: RawData): Promise<void> => {
-		const frameBytes = rawWsMessageBytes(data);
-		if (!authenticated && frameBytes > MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES) {
-			send(ws, { type: "error", message: "Unauthenticated WebSocket frame exceeds maximum envelope size", code: "FRAME_TOO_LARGE" });
-			return;
-		}
-		let msg: ClientMessage;
-		try {
-			msg = JSON.parse(data.toString());
-		} catch {
-			send(ws, { type: "error", message: "Invalid JSON", code: "INVALID_JSON" });
-			return;
-		}
-
+	const handleMessage = async (msg: ClientMessage, frameBytes: number): Promise<void> => {
 		// First message must be auth
 		if (!authenticated) {
 			if (msg.type !== "auth") {
@@ -1685,13 +1672,29 @@ export function handleWebSocketConnection(
 	};
 
 	ws.on("message", (data) => {
-		void SESSION_COMMAND_SERIALISER.serialise(
-			commandSerialisationKey,
-			() => handleRawMessage(data),
-		).catch((err) => {
+		const frameBytes = rawWsMessageBytes(data);
+		if (!authenticated && frameBytes > MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES) {
+			send(ws, { type: "error", message: "Unauthenticated WebSocket frame exceeds maximum envelope size", code: "FRAME_TOO_LARGE" });
+			return;
+		}
+
+		let msg: ClientMessage;
+		try {
+			msg = JSON.parse(data.toString());
+		} catch {
+			send(ws, { type: "error", message: "Invalid JSON", code: "INVALID_JSON" });
+			return;
+		}
+
+		const dispatch = () => handleMessage(msg, frameBytes);
+		const messageType = (msg as { type?: unknown } | null)?.type;
+		const result = authenticated && (messageType === "prompt" || messageType === "steer")
+			? SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, dispatch)
+			: dispatch();
+		void result.catch((err) => {
 			// Covers authentication/archive branches and any future routing added
 			// outside the command-level try/catch. The serialiser's fulfilled tail
-			// still permits the next same-session command to run.
+			// still permits the next same-session prompt or steer to run.
 			console.error(`[ws-handler] Unhandled command failure for ${sessionId}:`, err);
 			sendCommandFailure(err);
 		});
