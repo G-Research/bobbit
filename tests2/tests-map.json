@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1135,
+  "censusTotal": 1136,
   "buckets": {
     "daily": 61,
     "v2-browser": 216,
-    "v2-core": 512,
+    "v2-core": 513,
     "v2-dom": 144,
     "v2-integration": 202
   },
@@ -20,6 +20,15 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/server-boot-worktree-ordering.test.ts",
+      "reason": "Deterministic deferred regression proving the post-listen orphan-worktree sweep settles before pool initialization can expose claimable entries, while unrelated request work remains responsive.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
     {
       "path": "tests2/core/async-background-cleanup-static.test.ts",
       "reason": "TypeScript AST/type-checker guard for the Async Background Cleanup goal: follows only the complete named preview artifact/mount/route/listener, worktree, plan-mutation, archive-purge, and orphan-cleanup production call graphs, and reports ASYNC_BACKGROUND_CLEANUP_SYNC_IO root-to-violation traces for direct, aliased, destructured, injected, or wrapped synchronous filesystem/subprocess/Atomics.wait operations.",

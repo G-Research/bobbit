@@ -104,7 +104,6 @@ const ROOT_SPECS: RootSpec[] = [
 		"writeJsonAtomic",
 		"hashDirectory",
 		"listFiles",
-		"safeStat",
 		"safeLstat",
 	].map((name) => ({ file: "src/server/preview/artifacts.ts", name, required: true })),
 
