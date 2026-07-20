@@ -1,31 +1,33 @@
 # `@`-Mention File References
 
-Type `@` in the prompt composer to reference a file by path. On send, Bobbit
-resolves each `@path` token into the referenced file's content: **text files are
-inlined into the model-facing prompt**, while **images and other binaries are
-attached** via the existing attachment pipeline. Each reference renders as a
-clickable chip in the sent message that expands to show the exact content the
-model saw.
+Type `@` in the prompt composer to reference a file by path. At send time,
+Bobbit turns a token into a file reference only when it appears outside Markdown
+code and its filesystem target exists. Existing text files are inlined into the
+model-facing prompt; images and other binaries use the attachment pipeline.
+
+This distinction keeps ordinary text ordinary. A missing token such as
+`@variableName` or `@missing/path.ts` remains literal text with no mention
+metadata, warning, attachment, sidecar entry, or chip. The same is true for any
+`@` token inside Markdown code.
 
 ## Why it works this way
 
-The feature is built as a deliberate parallel to the [`/` slash-skill
-feature](design/skill-ux-and-autonomous-activation.md) — same autocomplete UX,
-same send-time resolution shape, same chip + sidecar persistence model. Reusing
-those patterns keeps the two features consistent for users and lets the merge,
-chip, and replay machinery be shared rather than duplicated.
+Three design choices define the feature:
 
-Two design choices drive the rest of the behaviour:
+- **Respect Markdown intent.** Code examples often contain `@` identifiers and
+  paths that are not requests to attach a file. Excluding Markdown code also
+  preserves pasted examples byte-for-byte.
+- **Classify existence before delivery.** Missing paths are ordinary prose, but
+  an existing target that fails a later access or safety check remains visible
+  as an unresolved reference. This avoids false-positive chips without hiding a
+  real delivery failure.
+- **Snapshot at send time.** Bobbit captures delivered content or bytes with the
+  message. Reloading a transcript therefore shows what the model received even
+  if the source file later changes or disappears.
 
-- **Snapshot at send time.** When you send, the file content (or image/binary
-  bytes) is captured into the message. Replaying the `.jsonl` transcript later
-  renders exactly what the model originally saw, even if the file has since
-  changed or been deleted on disk. This is the same stability guarantee skill
-  expansions provide.
-- **Never tear down a send.** Any reference that cannot be resolved — missing,
-  unreadable, too large, outside the working directory, or over a count/size cap
-  — degrades to the literal `@path` text plus a non-fatal warning. A bad
-  reference never fails the whole message.
+Whole-send admission limits are separate from per-reference delivery limits.
+Admission overflow rejects the send atomically to bound work; a delivery failure
+within those bounds preserves the send and records an unresolved reference.
 
 ## Autocomplete UX
 
@@ -78,137 +80,227 @@ The endpoint enumerates the **session's host worktree**, not the project root.
 This matters: the project-root redirect used for *skill discovery* is wrong here
 because a goal/session worktree has its own branch-local, untracked, and
 gitignored files that the project root does not see. When `sessionId` is
-provided, the server resolves the session's `worktreePath` (the host path —
-required for sandboxed sessions, whose `cwd` is a container path) and falls back
-to the session `cwd`, then to the raw `cwd` query param. It never falls back to
-the project root.
+provided, the server prefers the session's `worktreePath` (the host path —
+required for sandboxed sessions, whose `cwd` is a container path), then falls
+back through the session `cwd` and raw `cwd`. The resolved project root is only
+a final defensive fallback when none of those host paths is available; it is not
+the normal skill-discovery redirect.
 
-## Resolution on send (hybrid)
+## Resolution on send
 
-At send time the server runs the pure resolver
-`resolveFileMentions(text, cwd)` (`src/server/skills/resolve-file-mentions.ts`)
-against the verbatim text. It scans `@path` tokens with an inline,
-word-boundary-anchored regex (`(^|\s)@([^\s@]+)`), trims trailing punctuation
-(`. , ) : ;`) off each token, and classifies each reference into one of four
-kinds:
+Resolution runs against the user's original text and records source ranges
+without rewriting the text during scanning.
 
-| Kind | Detection | Model delivery | `modelText` |
+### Candidate scanning and Markdown code
+
+A candidate begins at the start of the prompt or after whitespace. It continues
+until whitespace or another `@`. Bobbit removes trailing `.`, `,`, `)`, `:`, and
+`;` from the candidate, leaving that punctuation outside the mention and chip
+range.
+
+The scanner excludes candidates in Markdown code recognized from the original
+source:
+
+- backtick or tilde fenced code blocks, including unterminated fences;
+- matched inline backtick code spans, including multi-backtick delimiters;
+- four-space or tab-indented code blocks; and
+- fenced or indented code nested inside blockquotes, lists, or combinations of
+  those containers.
+
+Excluded code remains byte-for-byte literal in both the original and
+model-facing text. It produces no mention metadata, warning, attachment, inline
+content, chip, or filesystem probe. Code-contained tokens also consume neither
+the candidate budget nor the distinct-target budget.
+
+### Existence first
+
+Candidates outside code are deduplicated into lexical filesystem targets for
+admission, then classified with a bounded metadata-only existence probe. A
+classification of genuinely missing (`ENOENT` or `ENOTDIR`) omits every matching
+token from the mention result. Its literal bytes remain unchanged and it does
+not consume the existing-reference delivery limit. There is no failed-reference
+record or content I/O: a missing target is never canonicalized, opened, or read.
+
+On Windows, network/device namespace paths and reserved DOS-device tokens are
+also always ordinary text. They consume the non-code candidate budget, but are
+not probed and do not consume the distinct-target budget.
+
+A non-missing target proceeds through delivery checks. If any later check fails,
+the literal token stays in the model-facing text and Bobbit records an
+`unresolved` mention with a warning and chip. These failures include:
+
+- access, canonicalization, stat, open, or read errors;
+- lexical or canonical containment failure, including a symlink escape;
+- a directory, FIFO, socket, device, or other non-regular target;
+- a per-file, existing-mention-count, or aggregate delivery limit; and
+- a target that disappears, grows beyond an applicable cap, or fails a
+  containment, type, or identity check during a race between existence
+  classification and its descriptor-bound snapshot.
+
+This separation is intentional: absence means the user wrote ordinary text;
+failure after existence means Bobbit found a real target but could not deliver
+it safely.
+
+### Delivery kinds
+
+| Kind | Detection | Snapshot and routing | Model-facing text |
 |---|---|---|---|
-| `text` | content sniffs as UTF-8 text | inlined as a `<file-reference>` block | rewritten |
-| `image` | image extension (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`, …) | base64 via the `images[]` frame | unchanged (literal `@path` kept) |
-| `binary` | non-text, non-image | base64 document via the attachment pipeline | unchanged (literal `@path` kept) |
-| `unresolved` | failed any check below | not delivered | unchanged (literal `@path` kept) |
+| `text` | readable content recognized as UTF-8 text | snapshotted content in a `<file-reference>` block | `@path` is replaced by the block |
+| `image` | supported image extension (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`, and others) | snapshotted base64 bytes through `images[]` | literal `@path` remains |
+| `binary` | readable non-image content not recognized as text | snapshotted base64 document attachment | literal `@path` remains |
+| `unresolved` | existing or otherwise non-missing target fails a later delivery check | no content or bytes delivered | literal `@path` remains |
 
-Text content is spliced into the model-facing prompt inside a delimiter that
-names the path:
+Binary document attachments preserve the UI chip and send-time snapshot in the
+same shape as uploaded documents. The current agent prompt RPC forwards text and
+images, not document bytes; model-side binary delivery remains an attachment
+pipeline concern outside this feature.
 
-```
+A text block names and delimits the snapshot:
+
+```xml
 <file-reference path="src/foo.ts">
 …file content…
 </file-reference>
 ```
 
-The path is XML-attribute-escaped so a quote or angle bracket in a filename
-cannot break out of the `path="…"` delimiter. Text mentions are spliced
-**right-to-left** by range so earlier indices stay valid.
+The path is XML-attribute-escaped so filename characters cannot break the
+delimiter. Multiple text references are spliced right-to-left, preserving all
+source indices and surrounding literal text.
 
-For `image` and `binary` mentions, `modelText` is left untouched — the literal
-`@path` stays so the model still sees the filename — and the bytes are routed
-through the existing prompt frames: images into `images[]`, binaries as
-`document` attachments. Binaries are attached primarily for UI chip + snapshot
-parity with user-uploaded documents.
+### Overlap with a prefix slash skill
 
-### Overlap with a prefix slash-skill
+A prefix-only slash skill can claim the whole message range and therefore
+overlap an `@file` token. The skill expansion wins the overlapping splice so its
+body is not corrupted. A resolved text snapshot is appended as a
+`<file-reference>` block after the skill body; image and binary snapshots keep
+using their attachment frames. The chip still uses the token's original range.
 
-A *prefix-only* slash skill (e.g. `/mockup …`) claims the whole-message range,
-which overlaps any `@file` token in the same message. On overlap, the skill
-expansion wins: the file content is **appended** after the spliced skill body as
-a `<file-reference>` block rather than spliced inline (which would corrupt the
-skill body). The chip still renders at the original `@path` range either way.
-The merge is handled by `buildMergedModelText`
-(`src/server/skills/merge-mentions.ts`), which combines skill expansions and
-text mentions into a single right-to-left splice over the original text.
+## Whole-send admission limits
 
-## Caps and degradation
+An authenticated send is admitted only when all three bounds hold:
 
-Caps are enforced in the resolver. Mention-count and per-file caps are checked
-**before** any file read so an oversized or over-the-limit reference never loads
-bytes into memory:
+| Admission bound | Maximum | Structured error when exceeded |
+|---|---:|---|
+| Authenticated prompt text | 8 MiB (8,388,608 UTF-8 bytes) | `PROMPT_TOO_LARGE` |
+| Candidate tokens outside Markdown code | 8,192 | `FILE_MENTION_CANDIDATE_LIMIT` |
+| Distinct lexical filesystem targets | 4,096 | `FILE_MENTION_PROBE_LIMIT` |
 
-| Cap | Value | Over-cap kind |
-|---|---|---|
-| Inline text per file | 256 KiB | `too-large` |
-| Image/binary per file | 10 MiB | `too-large` |
-| Aggregate across one send | 20 MiB | `aggregate-cap` |
-| Mentions per send | 50 | `too-many-mentions` |
+The text-size check runs before Markdown processing or session command queuing.
+Candidate and distinct-target preflight runs before slash-skill discovery,
+filesystem classification, or prompt enqueue. Repeated candidates count toward
+the candidate bound but a repeated lexical target counts once toward the target
+bound. Markdown-code-contained tokens count toward neither.
 
-The aggregate budget is pre-checked against each file's stat size before
-reading, then re-validated against the actual bytes after reading to handle the
-file growing between stat and read (TOCTOU). Every degraded reference is
-recorded as kind `unresolved` with a human-readable `reason`
-(`missing`, `unreadable`, `too-large`, `outside-cwd`, `aggregate-cap`,
-`too-many-mentions`) and surfaces a non-fatal `console.warn` on the server; the
-literal `@path` text is preserved in the prompt.
+Exceeding any admission bound rejects the whole send. Bobbit returns the
+structured error without partially resolving, persisting, or enqueueing the
+prompt and without probing candidate targets. This is different from the
+following delivery limits, which apply only after the whole send has been
+admitted.
 
-## Path safety
+## Delivery limits and unresolved references
 
-References are confined to the working directory:
+| Delivery limit | Maximum | Existing-reference result when exceeded |
+|---|---:|---|
+| Inline text per file | 256 KiB | `unresolved` (`too-large`) |
+| Image or binary per file | 10 MiB | `unresolved` (`too-large`) |
+| Snapshotted bytes across one send | 20 MiB | `unresolved` (`aggregate-cap`) |
+| Existing mention occurrences per send | 50 | `unresolved` (`too-many-mentions`) |
 
-1. **Lexical reject** — `path.resolve(cwd, rel)` followed by a containment check
-   cheaply rejects obvious `..`/absolute escapes (and non-existent traversal
-   paths).
-2. **Canonical reject** — the target is canonicalized with `fs.realpathSync` and
-   the containment check is re-run on the **canonical** paths **before any
-   stat/read**. This defeats a symlink that lives inside `cwd` but points
-   outside it — it cannot leak host files. A `realpath` failure is treated as
-   `missing`.
+Missing tokens do not consume the existing-mention or aggregate limits.
+Existing references beyond a delivery limit are still classified and recorded;
+they are not silently converted to plain text. After distinct targets are
+classified, occurrences are processed in source order. Every non-missing
+occurrence, including one that fails a later check, consumes the 50-occurrence
+limit; repeated paths count separately. Successful snapshots consume aggregate
+bytes in the same order. Size limits are checked against metadata and against
+the bounded descriptor read so growth between checks cannot bypass them.
 
-The canonical absolute path is kept internally for the read but stripped
-(`toWireMention`) before the mention crosses the wire or is persisted, so the
-host filesystem layout is never exposed to the client.
+## Bounded work, cancellation, and ordering
+
+Markdown scanning and existence classification use process-wide permits and
+fixed worker pools rather than unbounded work per candidate. Every admitted
+distinct target is still classified, so a long run of missing paths cannot hide
+a later existing reference.
+
+Enqueue-producing commands for the same session share an ordered FIFO boundary,
+so a later command cannot overtake a prompt still resolving file mentions. The
+pending queue is bounded; overload is returned as the structured
+`SESSION_COMMAND_QUEUE_FULL` error rather than silently reordering or dropping a
+command.
+
+Stop remains available while preprocessing is waiting or running. It cancels
+the active admission/resolution path and prevents that send from enqueueing;
+cancellation never returns a partial mention result. Filesystem operations that
+have already reached the OS are observed to completion under their global
+permit, while cancellation prevents queued follow-up work from starting.
+
+## Path and snapshot safety
+
+Existence classification precedes delivery validation so a missing traversal is
+still ordinary text, while an existing outside target becomes an unresolved
+reference. Existing targets then pass layered checks:
+
+1. A lexical containment check rejects paths outside the permitted working
+   directory.
+2. Canonical paths for the working directory and target are compared before any
+   payload read, blocking symlinks that escape the worktree.
+3. Non-regular targets are rejected before open. Regular targets are opened with
+   no-follow and non-blocking protections where supported.
+4. The opened descriptor is revalidated for canonical containment, type, and
+   size before bytes are read. Platforms without direct descriptor-path
+   verification also compare stable pathname identity. The snapshot is read
+   only from the descriptor, which closes path-swap race windows.
+
+Any validation, stat, open, read, close, or race failure leaves an unresolved
+chip and warning without exposing file bytes. Canonical host paths remain
+resolver-internal and are removed before data crosses the wire or reaches the
+sidecar.
 
 ## Chips, persistence, and replay
 
-Each `@file` reference renders an inline `<file-mention-chip>` in the sent user
-message (`src/ui/components/FileMentionChip.ts`), mirroring `SkillChip`.
-Clicking the chip toggles a disclosure showing the snapshotted content:
+Every resolved or unresolved existing reference renders an inline
+`<file-mention-chip>` at the original token range. Missing and code-contained
+tokens have no mention record, so they render as ordinary literal text with no
+chip.
 
-- `text` → a `<pre>` of the captured content,
-- `image` → an `<img>` of the snapshotted bytes,
-- `binary` / `unresolved` → a note (size / reason).
+Clicking a chip shows the send-time result:
 
-Chips are spliced into the user bubble at the recorded `@path` range by the
-shared chip-item builder in `src/ui/components/Messages.ts`, which handles both
-`<skill-chip>` and `<file-mention-chip>`.
+- `text` — the captured content;
+- `image` — the captured image bytes;
+- `binary` — the captured filename and size; or
+- `unresolved` — the failure reason.
 
-Persistence reuses the **skill sidecar**
-(`src/server/skills/skill-sidecar.ts`). The pi-coding-agent CLI owns the
-`.jsonl` transcript schema, so mentions are stored out-of-band in a sidecar
-file (one JSON line per user message) under a `fileMentions` field alongside
-`skillExpansions`. On replay, the sidecar entry is matched to the message by
-`modelText` (with a small timestamp tolerance) and both `skillExpansions` and
-`fileMentions` are re-attached so chips and the original `@path` text restore
-correctly. A missing or unreadable sidecar degrades to plain text — old sessions
-render with the literal `@path`, fully backward compatible.
+Mention ranges are UTF-16 code-unit offsets into the original text, matching
+JavaScript string slicing. Astral characters before a mention therefore do not
+displace its chip, and trimmed trailing punctuation remains outside the range.
+Right-to-left model-text replacement and left-to-right chip splicing preserve
+multiple references and all untouched source text.
+
+Persistence reuses the skill sidecar because the transcript owner does not
+support file-mention fields directly. Each user message stores its file
+references and snapshots out of band, then reattaches them on reload. Chips,
+UTF-16 ranges, original literal text, and captured content remain stable across
+reloads even if the source file changes or disappears. A missing or unreadable
+sidecar degrades to the original plain text for backward compatibility.
 
 ## Key source files
 
 | Concern | File |
 |---|---|
-| Pure send-time resolver | `src/server/skills/resolve-file-mentions.ts` |
-| Skill + mention merge into model text | `src/server/skills/merge-mentions.ts` |
-| Bounded file enumeration (autocomplete backend) | `src/server/skills/file-enumeration.ts` |
+| Send-time admission and resolver | `src/server/skills/resolve-file-mentions.ts` |
+| Skill and mention merge into model text | `src/server/skills/merge-mentions.ts` |
+| Bounded file enumeration | `src/server/skills/file-enumeration.ts` |
 | REST endpoint | `GET /api/file-mentions` in `src/server/server.ts` |
-| Send-time wiring (resolve, merge, route, persist) | `src/server/ws/handler.ts` |
-| Sidecar persistence / replay | `src/server/skills/skill-sidecar.ts` |
-| Composer autocomplete (`@` menu, keyboard nav, insertion) | `src/ui/components/MessageEditor.ts` |
+| Send-time routing and persistence | `src/server/ws/handler.ts` |
+| Same-session command ordering | `src/server/ws/session-command-serialiser.ts` |
+| Sidecar persistence and replay | `src/server/skills/skill-sidecar.ts` |
+| Composer autocomplete | `src/ui/components/MessageEditor.ts` |
 | Chip component | `src/ui/components/FileMentionChip.ts` |
-| Chip splicing into the user bubble | `src/ui/components/Messages.ts` |
+| Chip splicing | `src/ui/components/Messages.ts` |
 
 ## Related
 
-- [Skills (slash commands)](features.md#skills) — the sibling `/` feature this
-  one parallels.
-- [Skill chip rendering & sidecar persistence](internals.md#skill-chip-rendering--autonomous-activation)
-  — the shared chip + sidecar machinery.
+- [Skills (slash commands)](features.md#skills) — the sibling `/` feature.
+- [Skill chip rendering and sidecar persistence](internals.md#skill-chip-rendering--autonomous-activation)
+  — the shared chip and replay machinery.
 - [Slash-skill UX design](design/skill-ux-and-autonomous-activation.md).
