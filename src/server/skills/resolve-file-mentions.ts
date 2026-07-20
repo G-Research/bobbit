@@ -1001,7 +1001,7 @@ function scanTokens(text: string): ScannedToken[] {
 	while ((m = re.exec(text)) !== null) {
 		const prefixLen = m[1].length; // 0 at string start, 1 after whitespace
 		const tokenStart = m.index + prefixLen; // position of "@"
-		const untrimmedEnd = tokenStart + 1 + m[2].length;
+		let untrimmedEnd = tokenStart + 1 + m[2].length;
 		if (excluded) {
 			while (
 				excludedIndex < excluded.length &&
@@ -1011,11 +1011,17 @@ function scanTokens(text: string): ScannedToken[] {
 			}
 			const codeRange = excluded[excludedIndex];
 			if (codeRange && codeRange.start < untrimmedEnd && codeRange.end > tokenStart) {
-				continue;
+				// A candidate whose `@` begins inside code is entirely literal. When
+				// code starts later in the same whitespace-bound regex match, retain
+				// only the outside prefix (for example `@notes.txt`code``). This keeps
+				// the code bytes untouched while preserving the real mention's source
+				// range in UTF-16 code units.
+				if (codeRange.start <= tokenStart) continue;
+				untrimmedEnd = codeRange.start;
 			}
 		}
 
-		let token = m[2];
+		let token = text.slice(tokenStart + 1, untrimmedEnd);
 		// Trim trailing punctuation that is unlikely to be part of a path.
 		while (token.length > 0 && TRAILING_PUNCT.has(token[token.length - 1])) {
 			token = token.slice(0, -1);
@@ -1067,6 +1073,33 @@ function collectUniqueLexicalTargets(
 		}
 	}
 	return targets;
+}
+
+interface FileMentionAdmission {
+	tokens: ScannedToken[];
+	resolvedCwd: string;
+	lexicalTargets: string[];
+}
+
+/** Single source of truth for pure candidate/target admission. */
+function prepareFileMentionAdmission(text: string, cwd: string): FileMentionAdmission {
+	const tokens = scanTokens(text);
+	const resolvedCwd = path.resolve(cwd);
+	return {
+		tokens,
+		resolvedCwd,
+		lexicalTargets: collectUniqueLexicalTargets(tokens, resolvedCwd),
+	};
+}
+
+/**
+ * Reject an over-budget prompt without filesystem work. The WebSocket ingress
+ * runs this before slash-skill discovery; resolution repeats it as defense in
+ * depth and consumes the same shared scan/target logic to prevent drift.
+ */
+export function preflightFileMentionAdmission(text: string, cwd: string): void {
+	if (!text.includes("@")) return;
+	prepareFileMentionAdmission(text, cwd);
 }
 
 /**
@@ -1346,26 +1379,21 @@ async function resolveFileMentionsUnderPermit(
 	const maxFileBytes = configuredCap(opts?.maxMentionFileBytes, MAX_MENTION_FILE_BYTES);
 	const maxAggregate = configuredCap(opts?.maxAggregateBytes, MAX_MENTION_AGGREGATE_BYTES);
 
-	const tokens = scanTokens(text);
-	if (tokens.length === 0) return plainResult();
+	// Repeat whole-send admission under the resolver permit as defense in depth.
+	// This is the same pure scan/target check used by the WebSocket preflight.
+	const { tokens, resolvedCwd, lexicalTargets } = prepareFileMentionAdmission(text, cwd);
+	if (tokens.length === 0 || lexicalTargets.length === 0) return plainResult();
 
-	// Win32 network/device-namespace tokens are ordinary text. Return before
-	// path resolution or filesystem I/O when they are the only candidates, and
-	// never pass them to the lexical-target classifier. On POSIX these tokens
-	// follow the normal existence-first path.
-	if (!tokens.some((token) => !isWindowsNamespaceToken(token.rawPath))) {
-		return plainResult();
-	}
-
+	// Win32 network/device-namespace tokens are ordinary text and are omitted
+	// from lexicalTargets. On POSIX the same spellings follow the normal
+	// existence-first path.
 	const mentions: FileMention[] = [];
 	const warnings: string[] = [];
 	const replacements: Array<{ start: number; end: number; expanded: string }> = [];
-	const resolvedCwd = path.resolve(cwd);
 
 	// Classify every distinct lexical target before applying delivery limits.
 	// Missing candidates neither consume the existing-reference cap nor prevent
 	// a later valid target from being discovered.
-	const lexicalTargets = collectUniqueLexicalTargets(tokens, resolvedCwd);
 	const classificationCache = await classifyFileMentionTargets(lexicalTargets);
 	let hasExistingCandidate = false;
 	for (const classification of classificationCache.values()) {
