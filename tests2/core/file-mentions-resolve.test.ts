@@ -144,6 +144,51 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
+	it.each([
+		["LF", "\n"],
+		["CRLF", "\r\n"],
+		["CR", "\r"],
+	])("ignores four-space and tab-indented Markdown code with %s endings", async (_label, eol) => {
+		const text = [
+			"    existing @notes.txt; missing @variableName and @missing/four-space.ts",
+			"    preserve this entire indented block",
+			"",
+			"\texisting @notes.txt; missing @tabVariable and @missing/tab.ts",
+			"\tpreserve this tab-indented block too",
+			"",
+			"😀 prose resolves @src/a.ts.",
+		].join(eol);
+		const token = "@src/a.ts";
+		const start = text.lastIndexOf(token);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+
+		try {
+			const r = await resolveFileMentions(text, cwdDir);
+			const referenceBlock = buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT);
+
+			assert.equal(r.originalText, text);
+			assert.deepEqual(
+				r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "src/a.ts", range: [start, start + token.length] }],
+				"only the valid prose reference may resolve",
+			);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + referenceBlock + text.slice(start + token.length),
+				"indented code must remain byte-for-byte literal around the exact prose splice",
+			);
+			assert.equal(r.modelText.slice(0, start), text.slice(0, start), "both indented code blocks must remain literal");
+			assert.deepEqual(r.warnings, []);
+			assert.deepEqual(
+				lstatSpy.mock.calls.map(([target]) => path.resolve(String(target))),
+				[path.resolve(cwdDir, "src/a.ts")],
+				"code-contained existing and missing candidates must not trigger filesystem probes",
+			);
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
 	it("ignores candidates inside matched single- and multi-backtick inline code spans", async () => {
 		const text = "before `use @notes.txt and @variableName` middle ``keep @src/a.ts and a ` tick`` after";
 		const r = await resolveFileMentions(text, cwdDir);
