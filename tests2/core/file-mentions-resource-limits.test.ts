@@ -11,11 +11,14 @@ import path from "node:path";
 import { marked } from "marked";
 
 const NOTES_CONTENT = "hello world\nline two";
+const SOURCE_CONTENT = "export const x = 1;";
 let cwdDir: string;
 
 beforeAll(() => {
 	cwdDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mentions-resource-test-"));
+	fs.mkdirSync(path.join(cwdDir, "src"), { recursive: true });
 	fs.writeFileSync(path.join(cwdDir, "notes.txt"), NOTES_CONTENT, "utf-8");
+	fs.writeFileSync(path.join(cwdDir, "src", "a.ts"), SOURCE_CONTENT, "utf-8");
 });
 
 afterAll(() => {
@@ -716,6 +719,92 @@ describe("resolveFileMentions resource limits", () => {
 			}
 			lstatSpy.mockRestore();
 		}
+	});
+
+	it("recovers ordinary code ranges when a second deep list overflows after a deep fence is masked", async () => {
+		const depth = 4_096;
+		const markers = "- ".repeat(depth);
+		const indentation = "  ".repeat(depth);
+		const deepFence = [
+			`${markers}~~~text`,
+			`${indentation}keep @pixel.png literal`,
+			`${indentation}~~~`,
+		].join("\n");
+		const secondDeepList = `${markers}terminal prose`;
+		const inlineCode = "ordinary inline `keep @notes.txt literal`";
+		const fencedCode = ["ordinary fence", "```text", "keep @src/a.ts literal", "```"].join("\n");
+		const prose = "outside resolves @notes.txt";
+		const text = [deepFence, secondDeepList, inlineCode, fencedCode, prose].join("\n\n");
+		const start = text.lastIndexOf("@notes.txt");
+
+		assert.throws(
+			() => marked.lexer(deepFence, { async: false }),
+			(error: unknown) => error instanceof RangeError && /call stack/i.test(error.message),
+			"the recognized deep-fence fixture must exhaust Marked's recursive list lexer",
+		);
+		assert.throws(
+			() => marked.lexer(secondDeepList, { async: false }),
+			(error: unknown) => error instanceof RangeError && /call stack/i.test(error.message),
+			"the second list must independently overflow the masked recovery pass",
+		);
+
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.originalText, text);
+		assert.deepEqual(
+			r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+			[{ kind: "text", path: "notes.txt", range: [start, start + "@notes.txt".length] }],
+			"only the ordinary prose reference may resolve",
+		);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + "@notes.txt".length),
+			"all deep-fence, inline-code, and ordinary fenced-code text must stay literal",
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it.each([
+		{
+			label: "plain prose",
+			terminal: "terminal prose stays literal",
+			prose: "unrelated reference @notes.txt",
+			path: "notes.txt",
+			content: NOTES_CONTENT,
+		},
+		{
+			label: "inline code",
+			terminal: "`terminal code keeps @notes.txt literal`",
+			prose: "unrelated reference @src/a.ts",
+			path: "src/a.ts",
+			content: SOURCE_CONTENT,
+		},
+	])("recovers an unrelated prose reference when a deep list ends in $label", async ({ terminal, prose, path: mentionPath, content }) => {
+		const deepList = `${"- ".repeat(4_096)}${terminal}`;
+		const text = `${prose}\n\n${deepList}`;
+		const token = `@${mentionPath}`;
+		const start = text.indexOf(token);
+
+		assert.throws(
+			() => marked.lexer(deepList, { async: false }),
+			(error: unknown) => error instanceof RangeError && /call stack/i.test(error.message),
+			"the deep-list fixture must exhaust Marked's recursive list lexer",
+		);
+
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.originalText, text);
+		assert.deepEqual(
+			r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+			[{ kind: "text", path: mentionPath, range: [start, start + token.length] }],
+			"an overflow in one block must not suppress an unrelated prose reference",
+		);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock(mentionPath, content) + text.slice(start + token.length),
+			"the deep-list terminal must remain literal while prose is resolved",
+		);
+		assert.deepEqual(r.warnings, []);
 	});
 
 	it("reuses identical-path existence classification while preserving the existing mention limit", async () => {
