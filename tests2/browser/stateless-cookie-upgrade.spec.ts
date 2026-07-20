@@ -89,6 +89,18 @@ async function expectCookieOnlyRequest(response: Response, cookieValue: string):
 	expect(await setCookieHeader(response), `${response.url()} must not issue another cookie`).toBeNull();
 }
 
+async function expectCookieAuthenticatedNavigation(response: Response): Promise<void> {
+	// Playwright does not expose Chromium's Cookie header for document
+	// navigations. On this force-auth gateway, 200 with no Bearer/query token
+	// proves the already-asserted stored browser cookie authorized the request.
+	expect(
+		await response.request().headerValue("authorization"),
+		`${response.url()} must authenticate with the browser cookie, not Bearer`,
+	).toBeNull();
+	expect(new URL(response.url()).searchParams.has("token"), `${response.url()} must not use a query token`).toBe(false);
+	expect(await setCookieHeader(response), `${response.url()} must not issue another cookie`).toBeNull();
+}
+
 async function cookieOnlySessionFetch(page: Page, sessionId: string): Promise<Response> {
 	const responsePromise = page.waitForResponse(
 		response => pathname(response) === `/api/sessions/${sessionId}`
@@ -115,7 +127,10 @@ test.describe("Stateless browser cookie upgrade", () => {
 	test("upgrades a legacy cookie once, then keeps API, preview iframe/new-tab, and SSE cookie-authenticated", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		const context = page.context();
-		const recorder = createCookieWriteRecorder(context, gateway.baseURL);
+		const browserURL = new URL(gateway.baseURL);
+		browserURL.hostname = "localhost";
+		const browserOrigin = browserURL.origin;
+		const recorder = createCookieWriteRecorder(context, browserOrigin);
 		let sessionId: string | undefined;
 		let popup: Page | undefined;
 
@@ -146,11 +161,11 @@ test.describe("Stateless browser cookie upgrade", () => {
 			await context.addCookies([{
 				name: COOKIE_NAME,
 				value: LEGACY_COOKIE,
-				url: `${gateway.baseURL}/`,
+				url: `${browserOrigin}/`,
 				httpOnly: true,
 				sameSite: "Lax",
 			}]);
-			expect((await storedCookie(context, gateway.baseURL))?.value).toBe(LEGACY_COOKIE);
+			expect((await storedCookie(context, browserOrigin))?.value).toBe(LEGACY_COOKIE);
 
 			const token = await readE2ETokenAsync();
 			const healthPromise = page.waitForResponse(
@@ -170,7 +185,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			);
 
 			await page.goto(
-				`${gateway.baseURL}/?token=${encodeURIComponent(token)}#/session/${sessionId}`,
+				`${browserOrigin}/?token=${encodeURIComponent(token)}#/session/${sessionId}`,
 				{ waitUntil: "domcontentloaded" },
 			);
 
@@ -194,7 +209,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 				{ timeout: 15_000, message: "the authenticated UI should restore the preview session" },
 			).toBe(sessionId);
 
-			const upgraded = await storedCookie(context, gateway.baseURL);
+			const upgraded = await storedCookie(context, browserOrigin);
 			expect(upgraded).toEqual(expect.objectContaining({
 				value: signedValue,
 				httpOnly: true,
@@ -210,7 +225,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 
 			const iframeResponse = await iframePromise;
 			expect(iframeResponse.status()).toBe(200);
-			await expectCookieOnlyRequest(iframeResponse, signedValue);
+			await expectCookieAuthenticatedNavigation(iframeResponse);
 			const iframe = page.locator(".goal-preview-panel iframe").first();
 			await expect(iframe).toBeVisible({ timeout: 20_000 });
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("body")).toContainText(PREVIEW_TEXT, { timeout: 15_000 });
@@ -239,7 +254,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			expect(sseMountBody.contentHash).toMatch(/^[a-f0-9]{64}$/);
 			const sseIframeResponse = await sseIframePromise;
 			expect(sseIframeResponse.status()).toBe(200);
-			await expectCookieOnlyRequest(sseIframeResponse, signedValue);
+			await expectCookieAuthenticatedNavigation(sseIframeResponse);
 			await expect.poll(
 				() => page.evaluate(() => (window as any).bobbitState?.previewPanelContentHash ?? ""),
 				{ timeout: 15_000, message: "preview SSE should deliver the updated mount identity" },
@@ -256,7 +271,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			const popupReload = await popup.reload({ waitUntil: "domcontentloaded" });
 			expect(popupReload, "new-tab preview reload should return a response").not.toBeNull();
 			expect(popupReload!.status()).toBe(200);
-			await expectCookieOnlyRequest(popupReload!, signedValue);
+			await expectCookieAuthenticatedNavigation(popupReload!);
 			await popup.close();
 			popup = undefined;
 
@@ -293,19 +308,19 @@ test.describe("Stateless browser cookie upgrade", () => {
 			await expectCookieOnlyRequest(reloadSse, signedValue);
 			const reloadIframe = await reloadIframePromise;
 			expect(reloadIframe.status()).toBe(200);
-			await expectCookieOnlyRequest(reloadIframe, signedValue);
+			await expectCookieAuthenticatedNavigation(reloadIframe);
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("body")).toContainText(SSE_PREVIEW_TEXT, { timeout: 15_000 });
 
 			const reloadedApi = await cookieOnlySessionFetch(page, sessionId);
 			await expectCookieOnlyRequest(reloadedApi, signedValue);
-			expect((await storedCookie(context, gateway.baseURL))?.value).toBe(signedValue);
+			expect((await storedCookie(context, browserOrigin))?.value).toBe(signedValue);
 			await recorder.flush();
 			expect(recorder.writes, "reload, API, preview, and SSE must not reissue the cookie").toHaveLength(1);
 
 			await deleteSession(sessionId);
 			sessionId = undefined;
 			await context.clearCookies();
-			expect(await storedCookie(context, gateway.baseURL)).toBeUndefined();
+			expect(await storedCookie(context, browserOrigin)).toBeUndefined();
 		} finally {
 			recorder.dispose();
 			if (popup && !popup.isClosed()) await popup.close().catch(() => {});
