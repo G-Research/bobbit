@@ -13,7 +13,6 @@ import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import {
-	FileMentionResolutionLimitError,
 	resolveFileMentions,
 	toWireMention,
 } from "../skills/resolve-file-mentions.js";
@@ -441,10 +440,6 @@ export function handleWebSocketConnection(
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
 
 	const sendCommandFailure = (err: unknown): void => {
-		if (err instanceof FileMentionResolutionLimitError) {
-			send(ws, { type: "error", message: err.message, code: err.code });
-			return;
-		}
 		send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
 	};
 
