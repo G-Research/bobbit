@@ -545,7 +545,7 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
  * `maxNestingDepth` — see the split classifier in `nested-goal-routes.ts`).
  * These are the human-in-the-loop verbs the web UI drives, so a verified
  * `bobbit_session` cookie authorizes them. A node `apiFetch` carries no cookie,
- * so without one these would 403; we therefore auto-inject the gateway-minted
+ * so without one these would 403; we therefore auto-inject the cached signed
  * cookie. (Browser-initiated requests carry the cookie automatically and don't
  * need this.) Tests that deliberately exercise the agent/deny path use
  * `rawApiFetch` with explicit headers.
@@ -623,12 +623,12 @@ export function seedTeamLeadHeader(
 }
 
 /**
- * Lazily capture the gateway-minted `bobbit_session` cookie for the human/UI
- * operator authz path. In localhost mode the gateway issues the cookie on the
- * first authenticated response that doesn't already carry one (see
- * `issueCookieIfMissing` in src/server/server.ts). Cached per-port for worker
- * isolation. Returns "" if (unexpectedly) no cookie was minted, in which case
- * we fall back to no extra header and let the call fail loudly.
+ * Lazily bootstrap a signed `bobbit_session` cookie for the human/UI operator
+ * authz path. Cookie issuance requires an authenticated, browser-signaled
+ * request, so this helper supplies the same Fetch Metadata as the web UI.
+ * Cached per-port for worker isolation. Returns "" if (unexpectedly) no cookie
+ * was issued, in which case we fall back to no extra header and let the call
+ * fail loudly.
  */
 const _humanCookieCache: Record<string, string> = {};
 async function humanSessionCookie(): Promise<string> {
@@ -636,7 +636,11 @@ async function humanSessionCookie(): Promise<string> {
 	if (_humanCookieCache[p]) return _humanCookieCache[p];
 	try {
 		const resp = await fetch(`${base()}/api/goals`, {
-			headers: { Authorization: `Bearer ${token()}` },
+			headers: {
+				Authorization: `Bearer ${token()}`,
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+			},
 		});
 		const setCookies = (resp.headers as any).getSetCookie?.() as string[] | undefined
 			?? (resp.headers.get("set-cookie") ? [resp.headers.get("set-cookie") as string] : []);

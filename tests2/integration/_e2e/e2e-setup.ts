@@ -295,12 +295,19 @@ function maybeInjectTeamLeadSecret(path: string, headers: Record<string, string>
 	return { ...headers, "X-Bobbit-Session-Secret": store.getOrCreateSecret(lead) };
 }
 
+/** Bootstrap and cache the signed human/operator cookie via a browser-signaled request. */
 const _humanCookieCache: Record<string, string> = {};
 async function humanSessionCookie(): Promise<string> {
 	const key = base();
 	if (_humanCookieCache[key]) return _humanCookieCache[key];
 	try {
-		const resp = await fetch(`${base()}/api/goals`, { headers: { Authorization: `Bearer ${token()}` } });
+		const resp = await fetch(`${base()}/api/goals`, {
+			headers: {
+				Authorization: `Bearer ${token()}`,
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+			},
+		});
 		const setCookies = (resp.headers as any).getSetCookie?.() as string[] | undefined
 			?? (resp.headers.get("set-cookie") ? [resp.headers.get("set-cookie") as string] : []);
 		const cookie = setCookies.map(c => c.split(";")[0]).find(c => c.startsWith("bobbit_session=")) ?? "";

@@ -98,7 +98,7 @@ Final production files receiving `Clock` or a local `clock` option:
 | `src/server/agent/staff-trigger-engine.ts` | 3 | trigger poll |
 | `src/server/agent/team-manager.ts` | 21 | stuck sweep and idle/no-worker nudges |
 | `src/server/agent/verification-harness.ts` | 21 | command waits, cancellation sync, heartbeat |
-| `src/server/auth/cookie.ts` | 2 | debounced write |
+| `src/server/auth/cookie.ts` | 0 | injected wall clock for signed expiry/renewal only; no timers or persistence I/O after the stateless-cookie migration |
 | `src/server/auth/oauth.ts` | 3 | flow cleanup |
 | `src/server/exec-file-safe.ts` | 1 | retry delay helper |
 | `src/server/extension-host/action-dispatcher.ts` | 3 | request timeout |
