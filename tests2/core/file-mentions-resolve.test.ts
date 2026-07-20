@@ -189,6 +189,72 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
+	it.each([
+		{
+			label: "four-space blockquote with LF",
+			eol: "\n",
+			lines: ["> quoted", ">", ">     @notes.txt", ">     @missing-quoted.txt"],
+		},
+		{
+			label: "tab-indented blockquote with CRLF",
+			eol: "\r\n",
+			lines: ["> quoted", ">", "> \t@notes.txt", "> \t@missing-tab.txt"],
+		},
+		{
+			label: "list item with CR",
+			eol: "\r",
+			lines: ["- item", "", "      @notes.txt", "      @missing-list.txt"],
+		},
+		{
+			label: "list then blockquote nesting with LF",
+			eol: "\n",
+			lines: ["- > quoted", "  >", "  >     @notes.txt", "  >     @missing-nested.txt"],
+		},
+	])("ignores Marked-recognized indented code in $label", async ({ eol, lines }) => {
+		const containerCode = lines.join(eol);
+		const text = `${containerCode}${eol}${eol}😀 prose resolves @src/a.ts.`;
+		const token = "@src/a.ts";
+		const start = text.indexOf(token);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+
+		try {
+			assert.match(
+				String(marked.parse(containerCode, { async: false })),
+				/<pre><code>@notes\.txt/,
+				"the fixture must be an indented code block according to the production Markdown parser",
+			);
+			assert.equal(
+				[...text.slice(0, start)].length,
+				start - 1,
+				"the astral prose prefix must distinguish UTF-16 ranges from code-point offsets",
+			);
+
+			const r = await resolveFileMentions(text, cwdDir);
+			const referenceBlock = buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT);
+
+			assert.equal(r.originalText, text);
+			assert.deepEqual(
+				r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "src/a.ts", range: [start, start + token.length] }],
+				"only the prose reference outside container code may resolve",
+			);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + referenceBlock + text.slice(start + token.length),
+				"existing and missing code-contained tokens must remain byte-for-byte literal",
+			);
+			assert.equal(r.modelText.slice(0, start), text.slice(0, start));
+			assert.deepEqual(r.warnings, []);
+			assert.deepEqual(
+				lstatSpy.mock.calls.map(([target]) => path.resolve(String(target))),
+				[path.resolve(cwdDir, "src/a.ts")],
+				"container-code candidates must not consume probes; only prose may reach the filesystem",
+			);
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
 	it("ignores candidates inside matched single- and multi-backtick inline code spans", async () => {
 		const text = "before `use @notes.txt and @variableName` middle ``keep @src/a.ts and a ` tick`` after";
 		const r = await resolveFileMentions(text, cwdDir);

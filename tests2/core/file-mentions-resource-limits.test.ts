@@ -209,6 +209,58 @@ describe("resolveFileMentions resource limits", () => {
 		}
 	});
 
+	it("excludes nested container indented code beyond both admission budgets without filesystem work", async () => {
+		const candidates = [
+			"@notes.txt",
+			"@missing/nested-path.ts",
+			...Array.from(
+				{ length: EXPECTED_RAW_CANDIDATE_LIMIT - 1 },
+				(_, index) => `@nested-indented-budget-${index}.txt`,
+			),
+		];
+		const text = [
+			"- > quoted",
+			"  >",
+			`  >     ${candidates.join(" ")}`,
+		].join("\n");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
+		const statSpy = vi.spyOn(fs, "statSync");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			assert.equal(candidates.length, EXPECTED_RAW_CANDIDATE_LIMIT + 1);
+			assert.ok(candidates.length > EXPECTED_UNIQUE_PROBE_LIMIT);
+			assert.match(
+				String(marked.parse(text, { async: false })),
+				/<pre><code>@notes\.txt/,
+				"Marked must recognize the nested list/blockquote fixture as indented code",
+			);
+
+			const result = await resolveFileMentions(text, cwdDir);
+
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text, "nested container code must remain literal");
+			assert.deepEqual(result.mentions, []);
+			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, 0, "nested code candidates must not reach lstat");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "nested code candidates must not reach promises.open");
+			assert.equal(realpathSpy.mock.calls.length, 0, "nested code candidates must not reach realpath");
+			assert.equal(statSpy.mock.calls.length, 0, "nested code candidates must not reach stat");
+			assert.equal(openSpy.mock.calls.length, 0, "nested code candidates must not reach openSync");
+			assert.equal(readSpy.mock.calls.length, 0, "nested code candidates must not reach readSync");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			statSpy.mockRestore();
+			realpathSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
+	});
+
 	it("rejects non-code candidates above the raw budget before filesystem work", async () => {
 		const text = Array.from(
 			{ length: EXPECTED_RAW_CANDIDATE_LIMIT + 128 },
