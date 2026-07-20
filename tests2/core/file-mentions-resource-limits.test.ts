@@ -48,6 +48,16 @@ const FILE_MENTION_RESOLUTION_CONCURRENCY = (
 		?? Reflect.get(resolverModule, "FILE_MENTION_RESOLVER_CONCURRENCY")
 ) as number;
 const EXPECTED_LSTAT_CONCURRENCY = 8;
+const preflightWithSignal = preflightFileMentionAdmission as (
+	text: string,
+	cwd: string,
+	signal?: AbortSignal,
+) => Promise<void>;
+const resolveWithSignal = resolveFileMentions as (
+	text: string,
+	cwd: string,
+	opts?: NonNullable<Parameters<typeof resolveFileMentions>[2]> & { signal?: AbortSignal },
+) => ReturnType<typeof resolveFileMentions>;
 
 interface Deferred<T> {
 	promise: Promise<T>;
@@ -71,6 +81,20 @@ async function drainMicrotasksUntil(predicate: () => boolean, label: string): Pr
 		await Promise.resolve();
 	}
 	assert.fail(`microtask condition not reached: ${label}`);
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<T>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 
 function missingPathError(): NodeJS.ErrnoException {
@@ -121,6 +145,37 @@ describe("resolveFileMentions resource limits", () => {
 		assert.equal(MAX_FILE_MENTION_RAW_CANDIDATES, EXPECTED_RAW_CANDIDATE_LIMIT);
 		assert.equal(MAX_FILE_MENTION_UNIQUE_PROBES, EXPECTED_UNIQUE_PROBE_LIMIT);
 		assert.equal(typeof FileMentionBudgetError, "function");
+	});
+
+	it("rejects a pre-aborted admission scan atomically without filesystem work", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			await assert.rejects(
+				() => preflightWithSignal("@notes.txt", cwdDir, controller.signal),
+				(error: unknown) => {
+					assert.equal((error as { name?: unknown }).name, "AbortError");
+					return true;
+				},
+			);
+			assert.equal(lstatSpy.mock.calls.length, 0);
+			assert.equal(promiseOpenSpy.mock.calls.length, 0);
+			assert.equal(realpathSpy.mock.calls.length, 0);
+			assert.equal(openSpy.mock.calls.length, 0);
+			assert.equal(readSpy.mock.calls.length, 0);
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			realpathSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
 	});
 
 	it("preflights bounded 8 MiB-density backtick/CRLF input atomically without filesystem work", async () => {
@@ -565,6 +620,39 @@ describe("resolveFileMentions resource limits", () => {
 		}
 	});
 
+	it("keeps a post-lstat realpath ENOENT race unresolved as unreadable", async () => {
+		const lexicalFile = path.join(cwdDir, "realpath-disappeared.txt");
+		fs.writeFileSync(lexicalFile, "existed during lstat", "utf-8");
+		const originalRealpath = fs.realpathSync.native.bind(fs.realpathSync);
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((target: fs.PathLike) => {
+			if (path.resolve(String(target)) === lexicalFile) {
+				throw Object.assign(new Error("removed after lstat"), { code: "ENOENT" });
+			}
+			return originalRealpath(target);
+		}) as typeof fs.realpathSync.native);
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			const text = "inspect @realpath-disappeared.txt";
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, reason: mention.reason })),
+				[{ kind: "unresolved", path: "realpath-disappeared.txt", reason: "unreadable" }],
+			);
+			assert.deepEqual(result.warnings, ["@realpath-disappeared.txt: unreadable"]);
+			assert.equal(openSpy.mock.calls.length, 0, "a target lost before canonicalization must never be opened");
+			assert.equal(readSpy.mock.calls.length, 0, "a target lost before canonicalization must never be read");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			realpathSpy.mockRestore();
+			fs.rmSync(lexicalFile, { force: true });
+		}
+	});
+
 	it("classifies an existing directory as unresolved without opening or reading it", async () => {
 		const directory = path.join(cwdDir, "non-regular-directory");
 		fs.mkdirSync(directory, { recursive: true });
@@ -791,6 +879,127 @@ describe("resolveFileMentions resource limits", () => {
 			assert.ok(results.every((result) => result.mentions.length === 0));
 		} finally {
 			await drainRejectedProbeGates(resolutions, gates, "module-global lstat limit");
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("aborts stalled lstat classification promptly without partial delivery and preserves global probe capacity", async () => {
+		const stalledCandidateCount = EXPECTED_LSTAT_CONCURRENCY * 2;
+		const stalledTokens = Array.from(
+			{ length: stalledCandidateCount },
+			(_, index) => `@abort-stall-${index}.txt`,
+		);
+		const text = `${stalledTokens.join(" ")} @notes.txt`;
+		const notesPath = path.join(cwdDir, "notes.txt");
+		const controller = new AbortController();
+		const gates: Array<Deferred<fs.Stats>> = [];
+		const probedTargets: string[] = [];
+		let active = 0;
+		let maxActive = 0;
+		const originalLstat = fs.promises.lstat.bind(fs.promises);
+		let stalledProbeCount = 0;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((target: fs.PathLike) => {
+			const resolvedTarget = path.resolve(String(target));
+			probedTargets.push(resolvedTarget);
+			active++;
+			maxActive = Math.max(maxActive, active);
+			if (
+				/abort-stall-\d+\.txt$/.test(resolvedTarget)
+				&& stalledProbeCount++ < EXPECTED_LSTAT_CONCURRENCY
+			) {
+				const gate = deferred<fs.Stats>();
+				gates.push(gate);
+				return gate.promise.finally(() => { active--; });
+			}
+			const operation = /abort-stall-\d+\.txt$/.test(resolvedTarget)
+				? Promise.reject(missingPathError())
+				: originalLstat(target);
+			return operation.finally(() => { active--; });
+		}) as typeof fs.promises.lstat);
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		await preflightWithSignal(text, cwdDir, controller.signal);
+		const resolution = resolveWithSignal(text, cwdDir, { signal: controller.signal });
+		const pendingResolutions: Array<Promise<unknown>> = [resolution];
+
+		try {
+			await drainMicrotasksUntil(
+				() => gates.length === EXPECTED_LSTAT_CONCURRENCY,
+				"abort fixture initial lstat wave",
+			);
+			assert.equal(active, EXPECTED_LSTAT_CONCURRENCY);
+			assert.equal(probedTargets.length, EXPECTED_LSTAT_CONCURRENCY);
+
+			controller.abort();
+			const outcome = await settleWithin(
+				resolution.then(
+					(value) => ({ kind: "resolved" as const, value }),
+					(error: unknown) => ({ kind: "rejected" as const, error }),
+				),
+				250,
+				"aborted file mention caller",
+			).catch((error: unknown) => ({ kind: "timeout" as const, error }));
+			if (outcome.kind === "timeout") {
+				// Release the fake OS operations before reporting the regression so a
+				// failing retry cannot leak module-global semaphore permits.
+				for (const gate of gates.splice(0)) gate.reject(missingPathError());
+				await settleWithin(resolution, 1_000, "non-cancellable resolver cleanup");
+				assert.fail((outcome.error as Error).message);
+			}
+			assert.equal(outcome.kind, "rejected", "cancellation must reject rather than return a partial result");
+			if (outcome.kind === "rejected") {
+				assert.equal((outcome.error as { name?: unknown }).name, "AbortError");
+				assert.ok(
+					!(outcome.error && typeof outcome.error === "object" && "mentions" in outcome.error),
+					"an abort must not surface partial mentions or warnings",
+				);
+			}
+
+			await Promise.resolve();
+			await Promise.resolve();
+			assert.equal(
+				probedTargets.length,
+				EXPECTED_LSTAT_CONCURRENCY,
+				"cancellation must not launch queued probes after the stalled wave",
+			);
+			assert.equal(promiseOpenSpy.mock.calls.length, 0);
+			assert.equal(realpathSpy.mock.calls.length, 0);
+			assert.equal(openSpy.mock.calls.length, 0);
+			assert.equal(readSpy.mock.calls.length, 0);
+
+			const subsequent = resolveFileMentions("@notes.txt", cwdDir);
+			pendingResolutions.push(subsequent);
+			await Promise.resolve();
+			await Promise.resolve();
+			assert.ok(
+				!probedTargets.includes(notesPath),
+				"a subsequent resolver must not oversubscribe the lstat pool while cancelled probes remain live",
+			);
+
+			for (const gate of gates.splice(0)) gate.reject(missingPathError());
+			const subsequentResult = await settleWithin(subsequent, 1_000, "post-abort resolver recovery");
+			assert.deepEqual(
+				subsequentResult.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
+				[{ kind: "text", path: "notes.txt" }],
+			);
+			assert.deepEqual(subsequentResult.warnings, []);
+			assert.equal(
+				probedTargets.filter((target) => /abort-stall-\d+\.txt$/.test(target)).length,
+				EXPECTED_LSTAT_CONCURRENCY,
+				"released cancelled workers must clean up without resuming the abandoned prompt",
+			);
+			assert.equal(probedTargets.filter((target) => target === notesPath).length, 1);
+			assert.ok(maxActive <= EXPECTED_LSTAT_CONCURRENCY, "global lstat concurrency must remain sound");
+			await drainMicrotasksUntil(() => active === 0, "post-abort lstat cleanup");
+		} finally {
+			await drainRejectedProbeGates(pendingResolutions, gates, "aborted lstat classification");
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			realpathSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
 			lstatSpy.mockRestore();
 		}
 	});
