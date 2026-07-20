@@ -6,6 +6,77 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { Semaphore } from "../../src/server/agent/semaphore.js";
 
+type AcquireOutcome = "acquired" | "aborted";
+
+function captureAcquire(promise: Promise<void>): Promise<AcquireOutcome> {
+	return promise.then(
+		() => "acquired",
+		(error: unknown) => {
+			assert.equal((error as { name?: unknown }).name, "AbortError");
+			return "aborted";
+		},
+	);
+}
+
+function trackedAbortSignal(): {
+	signal: AbortSignal;
+	abort: () => void;
+	listenerCount: () => number;
+} {
+	const controller = new AbortController();
+	const listeners = new Map<EventListenerOrEventListenerObject, boolean>();
+	const add = controller.signal.addEventListener.bind(controller.signal) as (
+		type: string,
+		listener: EventListenerOrEventListenerObject | null,
+		options?: boolean | AddEventListenerOptions,
+	) => void;
+	const remove = controller.signal.removeEventListener.bind(controller.signal) as (
+		type: string,
+		listener: EventListenerOrEventListenerObject | null,
+		options?: boolean | EventListenerOptions,
+	) => void;
+
+	Object.defineProperties(controller.signal, {
+		addEventListener: {
+			configurable: true,
+			value: (
+				type: string,
+				listener: EventListenerOrEventListenerObject | null,
+				options?: boolean | AddEventListenerOptions,
+			): void => {
+				if (type === "abort" && listener) {
+					listeners.set(listener, typeof options === "object" && options.once === true);
+				}
+				add(type, listener, options);
+			},
+		},
+		removeEventListener: {
+			configurable: true,
+			value: (
+				type: string,
+				listener: EventListenerOrEventListenerObject | null,
+				options?: boolean | EventListenerOptions,
+			): void => {
+				if (type === "abort" && listener) listeners.delete(listener);
+				remove(type, listener, options);
+			},
+		},
+	});
+
+	return {
+		signal: controller.signal,
+		abort: () => {
+			controller.abort();
+			// EventTarget removes `{ once: true }` listeners after dispatch without
+			// calling the public removeEventListener method, so mirror that here.
+			for (const [listener, once] of listeners) {
+				if (once) listeners.delete(listener);
+			}
+		},
+		listenerCount: () => listeners.size,
+	};
+}
+
 describe("Semaphore", () => {
 	it("allows up to N concurrent acquires", async () => {
 		const sem = new Semaphore(2);
@@ -85,6 +156,146 @@ describe("Semaphore", () => {
 		await sem.acquire();
 		assert.equal(sem.available, 0);
 
+		sem.release();
+		assert.equal(sem.available, 1);
+	});
+});
+
+describe("Semaphore.acquire cancellation", () => {
+	it("rejects a pre-aborted acquire without taking a permit or queueing", async () => {
+		const sem = new Semaphore(1);
+		const tracked = trackedAbortSignal();
+		tracked.abort();
+
+		const outcome = await captureAcquire(sem.acquire(tracked.signal));
+
+		assert.equal(outcome, "aborted");
+		assert.equal(sem.available, 1);
+		assert.equal(sem.waiting, 0);
+		assert.equal(tracked.listenerCount(), 0);
+	});
+
+	it("removes a canceled queued acquire from waiting immediately", async () => {
+		const sem = new Semaphore(1);
+		await sem.acquire();
+		const tracked = trackedAbortSignal();
+		const outcome = captureAcquire(sem.acquire(tracked.signal));
+		assert.equal(sem.waiting, 1);
+		assert.equal(tracked.listenerCount(), 1);
+
+		tracked.abort();
+
+		assert.equal(sem.waiting, 0);
+		assert.equal(tracked.listenerCount(), 0);
+		assert.equal(await outcome, "aborted");
+		sem.release();
+		assert.equal(sem.available, 1);
+	});
+
+	it("does not accumulate thousands of canceled waiters", async () => {
+		const sem = new Semaphore(1);
+		await sem.acquire();
+		const outcomes: Array<Promise<AcquireOutcome>> = [];
+		const trackedSignals: ReturnType<typeof trackedAbortSignal>[] = [];
+
+		for (let i = 0; i < 4_096; i++) {
+			const tracked = trackedAbortSignal();
+			trackedSignals.push(tracked);
+			outcomes.push(captureAcquire(sem.acquire(tracked.signal)));
+			tracked.abort();
+		}
+
+		assert.equal(sem.waiting, 0);
+		assert.equal(trackedSignals.reduce((sum, tracked) => sum + tracked.listenerCount(), 0), 0);
+		assert.deepEqual(new Set(await Promise.all(outcomes)), new Set<AcquireOutcome>(["aborted"]));
+		sem.release();
+		assert.equal(sem.available, 1);
+	});
+
+	it("skips canceled waiters and wakes live waiters in FIFO order", async () => {
+		const sem = new Semaphore(1);
+		await sem.acquire();
+		const firstCanceled = trackedAbortSignal();
+		const secondCanceled = trackedAbortSignal();
+		const canceled1 = captureAcquire(sem.acquire(firstCanceled.signal));
+		const order: number[] = [];
+		const live2 = sem.acquire().then(() => { order.push(2); });
+		const canceled3 = captureAcquire(sem.acquire(secondCanceled.signal));
+		const live4 = sem.acquire().then(() => { order.push(4); });
+		assert.equal(sem.waiting, 4);
+
+		firstCanceled.abort();
+		secondCanceled.abort();
+		assert.equal(sem.waiting, 2);
+
+		sem.release();
+		await live2;
+		assert.deepEqual(order, [2]);
+		assert.equal(sem.waiting, 1);
+
+		sem.release();
+		await live4;
+		assert.deepEqual(order, [2, 4]);
+		assert.equal(sem.waiting, 0);
+		assert.equal(await canceled1, "aborted");
+		assert.equal(await canceled3, "aborted");
+		sem.release();
+		assert.equal(sem.available, 1);
+	});
+
+	it("accounts for the permit exactly once when abort wins release", async () => {
+		const sem = new Semaphore(1);
+		await sem.acquire();
+		const tracked = trackedAbortSignal();
+		const outcome = captureAcquire(sem.acquire(tracked.signal));
+
+		tracked.abort();
+		sem.release();
+
+		assert.equal(await outcome, "aborted");
+		assert.equal(sem.waiting, 0);
+		assert.equal(sem.available, 1);
+		assert.equal(sem.tryAcquire(), true);
+		assert.equal(sem.tryAcquire(), false);
+		sem.release();
+		assert.equal(sem.available, 1);
+		assert.throws(() => sem.release(), { message: /over-release/ });
+	});
+
+	it("accounts for the permit exactly once when release wins abort", async () => {
+		const sem = new Semaphore(1);
+		await sem.acquire();
+		const tracked = trackedAbortSignal();
+		const outcome = captureAcquire(sem.acquire(tracked.signal));
+		assert.equal(tracked.listenerCount(), 1);
+
+		sem.release();
+		tracked.abort();
+
+		assert.equal(await outcome, "acquired");
+		assert.equal(tracked.listenerCount(), 0);
+		assert.equal(sem.waiting, 0);
+		assert.equal(sem.available, 0);
+		sem.release();
+		assert.equal(sem.available, 1);
+		assert.throws(() => sem.release(), { message: /over-release/ });
+	});
+
+	it("cleans up abort listeners after immediate and queued grants", async () => {
+		const sem = new Semaphore(1);
+		const immediate = trackedAbortSignal();
+		await sem.acquire(immediate.signal);
+		assert.equal(immediate.listenerCount(), 0);
+
+		const queued = trackedAbortSignal();
+		const outcome = captureAcquire(sem.acquire(queued.signal));
+		assert.equal(queued.listenerCount(), 1);
+		sem.release();
+		assert.equal(await outcome, "acquired");
+		assert.equal(queued.listenerCount(), 0);
+
+		queued.abort();
+		assert.equal(sem.available, 0);
 		sem.release();
 		assert.equal(sem.available, 1);
 	});
@@ -200,6 +411,68 @@ describe("Semaphore.resize (C2)", () => {
 		assert.equal(w2, true);
 		assert.equal(sem.waiting, 0);
 		assert.equal(sem.available, 0); // 3 held (1 original + 2 woken), cap 3
+	});
+
+	it("keeps canceled waiters out of shrink debt accounting", async () => {
+		const sem = new Semaphore(3);
+		await sem.acquire();
+		await sem.acquire();
+		await sem.acquire();
+		const canceledSignal = trackedAbortSignal();
+		const liveSignal = trackedAbortSignal();
+		const canceled = captureAcquire(sem.acquire(canceledSignal.signal));
+		let liveResolved = false;
+		const live = sem.acquire(liveSignal.signal).then(() => { liveResolved = true; });
+		assert.equal(sem.waiting, 2);
+
+		canceledSignal.abort();
+		assert.equal(sem.waiting, 1);
+		sem.resize(1);
+
+		sem.release();
+		sem.release();
+		assert.equal(liveResolved, false);
+		assert.equal(sem.waiting, 1);
+		assert.equal(sem.available, 0);
+
+		sem.release();
+		await live;
+		assert.equal(liveResolved, true);
+		assert.equal(sem.waiting, 0);
+		assert.equal(sem.available, 0);
+		assert.equal(await canceled, "aborted");
+		assert.equal(canceledSignal.listenerCount(), 0);
+		assert.equal(liveSignal.listenerCount(), 0);
+
+		sem.release();
+		assert.equal(sem.available, 1);
+		assert.throws(() => sem.release(), { message: /over-release/ });
+	});
+
+	it("growing wakes a live waiter after removing a canceled predecessor", async () => {
+		const sem = new Semaphore(1);
+		await sem.acquire();
+		const canceledSignal = trackedAbortSignal();
+		const liveSignal = trackedAbortSignal();
+		const canceled = captureAcquire(sem.acquire(canceledSignal.signal));
+		const live = captureAcquire(sem.acquire(liveSignal.signal));
+
+		canceledSignal.abort();
+		assert.equal(sem.waiting, 1);
+		sem.resize(2);
+
+		assert.equal(await live, "acquired");
+		assert.equal(await canceled, "aborted");
+		assert.equal(sem.waiting, 0);
+		assert.equal(sem.available, 0);
+		assert.equal(canceledSignal.listenerCount(), 0);
+		assert.equal(liveSignal.listenerCount(), 0);
+
+		liveSignal.abort();
+		sem.release();
+		sem.release();
+		assert.equal(sem.available, 2);
+		assert.throws(() => sem.release(), { message: /over-release/ });
 	});
 
 	it("floors fractional and clamps sub-1 capacities", () => {
