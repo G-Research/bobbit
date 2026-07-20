@@ -148,28 +148,42 @@ async function readAllDeletionTombstonesAsync(
 }
 
 async function drainTombstones(
+	writerKey: string,
 	stateDir: string,
 	state: TombstoneWriteState,
 	fsImpl: DeletionTombstoneAsyncFs,
 ): Promise<void> {
-	while (state.pending.length > 0) {
-		const batch = state.pending.splice(0);
-		try {
-			await fsImpl.mkdir(stateDir, { recursive: true });
-			const all = await readAllDeletionTombstonesAsync(stateDir, fsImpl);
-			let changed = false;
-			for (const { fileName, key } of batch) {
-				const list = all[fileName] ?? [];
-				if (list.includes(key)) continue;
-				list.push(key);
-				all[fileName] = list;
-				changed = true;
+	try {
+		while (state.pending.length > 0) {
+			const batch = state.pending.splice(0);
+			try {
+				await fsImpl.mkdir(stateDir, { recursive: true });
+				const all = await readAllDeletionTombstonesAsync(stateDir, fsImpl);
+				let changed = false;
+				for (const { fileName, key } of batch) {
+					const list = all[fileName] ?? [];
+					if (list.includes(key)) continue;
+					list.push(key);
+					all[fileName] = list;
+					changed = true;
+				}
+				if (changed) {
+					await fsImpl.writeFile(deletionTombstoneFile(stateDir), JSON.stringify(all, null, 2), "utf-8");
+				}
+			} catch {
+				/* best-effort — deletion must succeed even if the tombstone write fails */
 			}
-			if (changed) {
-				await fsImpl.writeFile(deletionTombstoneFile(stateDir), JSON.stringify(all, null, 2), "utf-8");
+		}
+	} finally {
+		if (asyncWriters.get(writerKey) === state) {
+			// Retire or restart the writer before this promise settles. Deferring
+			// deletion to a reaction leaves a microtask window where a tombstone can
+			// be queued onto an already-settled writer and never persisted.
+			asyncWriters.delete(writerKey);
+			if (state.pending.length > 0) {
+				asyncWriters.set(writerKey, state);
+				state.inFlight = drainTombstones(writerKey, stateDir, state, fsImpl);
 			}
-		} catch {
-			/* best-effort — deletion must succeed even if the tombstone write fails */
 		}
 	}
 }
@@ -194,10 +208,9 @@ export function recordDeletionTombstoneAsync(
 	}
 
 	const state = { pending: [{ fileName, key }], inFlight: Promise.resolve() } as TombstoneWriteState;
-	state.inFlight = drainTombstones(stateDir, state, fsImpl);
+	// Publish the state before starting the async function so even an injected
+	// filesystem that throws synchronously cannot finalize an unpublished writer.
 	asyncWriters.set(writerKey, state);
-	void state.inFlight.then(() => {
-		if (asyncWriters.get(writerKey) === state) asyncWriters.delete(writerKey);
-	});
+	state.inFlight = drainTombstones(writerKey, stateDir, state, fsImpl);
 	return state.inFlight;
 }

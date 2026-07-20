@@ -134,20 +134,26 @@ export class ColorStore {
 	}
 
 	private async drainAsyncSaves(): Promise<void> {
-		do {
-			this.asyncSaveRequested = false;
-			await this.saveAsyncOnce();
-		} while (this.asyncSaveRequested);
+		try {
+			do {
+				this.asyncSaveRequested = false;
+				await this.saveAsyncOnce();
+			} while (this.asyncSaveRequested);
+		} finally {
+			// Clear before this promise settles. A mutation cannot then observe a
+			// settled writer, enqueue against it, and lose its requested save in a
+			// later promise reaction.
+			this.asyncSaveInFlight = null;
+			if (this.asyncSaveRequested) {
+				this.asyncSaveInFlight = this.drainAsyncSaves();
+			}
+		}
 	}
 
 	private requestAsyncSave(): Promise<void> {
 		this.asyncSaveRequested = true;
 		if (!this.asyncSaveInFlight) {
-			const task = this.drainAsyncSaves();
-			this.asyncSaveInFlight = task;
-			void task.then(() => {
-				if (this.asyncSaveInFlight === task) this.asyncSaveInFlight = null;
-			});
+			this.asyncSaveInFlight = this.drainAsyncSaves();
 		}
 		return this.asyncSaveInFlight;
 	}
