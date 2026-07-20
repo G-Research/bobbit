@@ -865,7 +865,7 @@ export function handleWebSocketConnection(
 					// sandboxed sessions session.cwd is a container path, so
 					// worktreePath is required to reach the real files.
 					const fileMentionCwd = session.worktreePath || session.cwd;
-					const fileMentionResult = resolveFileMentions(msg.text, fileMentionCwd);
+					const fileMentionResult = await resolveFileMentions(msg.text, fileMentionCwd);
 					for (const w of fileMentionResult.warnings) {
 						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
 					}
