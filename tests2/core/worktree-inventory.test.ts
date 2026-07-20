@@ -28,7 +28,7 @@ function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?
 
 function makeService(
 	ctx: any,
-	porcelain: string | ((repoPath: string, args: readonly string[]) => string),
+	porcelain: string | ((repoPath: string, args: readonly string[]) => string | Promise<string>),
 	pools = new Map(),
 	opts?: { fs?: WorktreeInventoryFs; ioConcurrency?: number; commandRunner?: CommandRunner },
 ) {
@@ -39,7 +39,7 @@ function makeService(
 			getAllWorktreePools: () => pools,
 			listArchivedSessionWorktrees: async () => { throw new Error("inventory must not use legacy archived scanner"); },
 		} as any,
-		execGit: async (repoPath, args) => args[0] === "worktree" ? (typeof porcelain === "function" ? porcelain(repoPath, args) : porcelain) : "",
+		execGit: async (repoPath, args) => args[0] === "worktree" ? await (typeof porcelain === "function" ? porcelain(repoPath, args) : porcelain) : "",
 		commandRunner: opts?.commandRunner,
 		clock: () => 1,
 		fs: opts?.fs ?? ctx._inventoryFs?.promises,
@@ -286,6 +286,59 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.defaultSelected, false);
 			assert.equal(report.counts.poolEntries, 1);
 		} finally { cleanup(); }
+	});
+
+	it("revalidates session and pool claims arriving during a deferred cleanup scan", async () => {
+		for (const claimKind of ["session", "pool"] as const) {
+			const { root, repo, filesystem, cleanup } = tmpProject();
+			try {
+				const wt = path.join(root, "repo-wt", `session-race-${claimKind}`);
+				filesystem.mkdirSync(wt, { recursive: true });
+				const liveSessions: any[] = [];
+				const pools = new Map();
+				const ctx = makeCtx(repo, { filesystem, liveSessions });
+				let deferShowRef = false;
+				let scanPending = false;
+				let releaseScan!: () => void;
+				const scanGate = new Promise<void>(resolve => { releaseScan = resolve; });
+				const mutations: string[] = [];
+				const commandRunner: CommandRunner = {
+					execFile: async (_file, args) => {
+						if (args[0] === "show-ref" && deferShowRef) {
+							deferShowRef = false;
+							scanPending = true;
+							await scanGate;
+						}
+						if (args[0] === "worktree" || args[0] === "branch" || args[0] === "push") mutations.push(args.join(" "));
+						return { stdout: "", stderr: "" };
+					},
+				};
+				const porcelain = `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/race-${claimKind}\n`;
+				const service = makeService(ctx, porcelain, pools, { commandRunner });
+				const initial = await service.scan();
+				const item = initial.items.find(candidate => candidate.path === wt)!;
+				assert.equal(item.actionable, true);
+
+				deferShowRef = true;
+				const cleanupPromise = service.cleanup({ mode: "selected", itemIds: [item.id] });
+				await waitFor(() => scanPending, `${claimKind} cleanup scan did not reach deferred branch lookup`);
+				if (claimKind === "session") {
+					liveSessions.push({ id: "claimed-session", title: "Claimed", repoPath: repo, worktreePath: wt, cwd: wt, branch: "session/claimed" });
+				} else {
+					pools.set("p1", { snapshotEntries: () => ({ entries: [{ branchName: "pool/_pool-claimed", worktreePath: wt, createdAt: 2 }], target: 1, filling: false }) });
+				}
+				releaseScan();
+
+				const response = await cleanupPromise;
+				assert.equal(response.counts.requested, 1);
+				assert.equal(response.counts.skipped, 1);
+				assert.equal(response.counts.notActionable, 1);
+				assert.equal(response.results[0]?.status, "skipped");
+				assert.equal(response.results[0]?.reason, claimKind === "session" ? "referenced-by-live-session" : "safe-pool-entry");
+				assert.deepEqual(mutations, []);
+				assert.equal(filesystem.existsSync(wt), true);
+			} finally { cleanup(); }
+		}
 	});
 
 	it("yields during deferred discovery, caps path checks, and sorts out-of-order results", async () => {
