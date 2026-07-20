@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
@@ -6,11 +6,17 @@ import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import { getGateway, type GatewayFixture } from "../harness/gateway.js";
+import { createScope } from "../harness/scope.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 const COOKIE_NAME = "bobbit_session";
+const COOKIE_SIGNING_KEY_FILE = "cookie-signing-key";
+const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+const COOKIE_RENEWAL_WINDOW_SECONDS = 60 * 60 * 24 * 7;
 const LEGACY_COOKIE = "a".repeat(64);
 const WRITE_SETTLE_MS = 200;
 const MAX_STATELESS_REQUEST_MS = 1_500;
+const PREVIEW_SSE_SESSION_ID = "00000000-0000-4000-8000-000000000001";
 
 interface RawResponse {
 	status: number;
@@ -45,6 +51,30 @@ function rawRequest(baseURL: string, path: string, options: RequestOptions = {})
 		});
 		request.on("error", reject);
 		if (options.body !== undefined) request.write(options.body);
+		request.end();
+	});
+}
+
+function openStreamingRequest(baseURL: string, path: string, options: RequestOptions = {}): Promise<RawResponse> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const request = http.request(new URL(path, baseURL), {
+			method: options.method ?? "GET",
+			headers: options.headers,
+		}, (response) => {
+			settled = true;
+			const result = {
+				status: response.statusCode ?? 0,
+				setCookies: response.headers["set-cookie"] ?? [],
+				body: "",
+			};
+			response.destroy();
+			request.destroy();
+			resolve(result);
+		});
+		request.on("error", (error) => {
+			if (!settled) reject(error);
+		});
 		request.end();
 	});
 }
@@ -89,6 +119,23 @@ function expectSignedCookie(response: RawResponse): string {
 
 function digest(bytes: Buffer): string {
 	return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function signedCookieAtRenewalBoundary(gateway: GatewayFixture): Promise<string> {
+	const runtime = await loadServerTestRuntime();
+	const signingKey = readFileSync(join(runtime.bobbitDir.serverSecretsDir(), COOKIE_SIGNING_KEY_FILE));
+	expect(signingKey).toHaveLength(32);
+
+	// Derive the boundary from the same injected clock used by the live gateway.
+	// Backdating iat avoids advancing the shared fork clock while leaving exactly
+	// seven days before expiry after both sides floor milliseconds to Unix seconds.
+	const now = Math.floor(gateway.clock.now() / 1_000);
+	const expiresAt = now + COOKIE_RENEWAL_WINDOW_SECONDS;
+	const issuedAt = expiresAt - COOKIE_MAX_AGE_SECONDS;
+	const nonce = Buffer.alloc(16, 0x5a).toString("base64url");
+	const payload = `v1.${issuedAt}.${expiresAt}.${nonce}`;
+	const signature = createHmac("sha256", signingKey).update(payload, "ascii").digest("base64url");
+	return `${payload}.${signature}`;
 }
 
 async function withRegistryPreserved<T>(gateway: GatewayFixture, action: (file: string) => Promise<T>): Promise<T> {
@@ -258,6 +305,57 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 		});
 	});
 
+	it("rejects extra-segment Google token paths instead of dispatching them as callbacks", async () => {
+		const gateway = await getGateway();
+		const scope = createScope(gateway);
+		try {
+			const session = await scope.createSession({});
+			const response = await rawRequest(
+				gateway.baseURL,
+				`/api/sessions/${session.id}/extra/google-code-assist/token`,
+				{ headers: { Authorization: `Bearer ${gateway.token}` } },
+			);
+			expect(response.status, response.body).toBe(404);
+			expect(response.setCookies, "a rejected noncanonical callback path must not mint a cookie").toEqual([]);
+		} finally {
+			await scope.cleanup();
+		}
+	});
+
+	it("renews a near-expiry signed cookie once on API traffic but never on preview SSE", async () => {
+		const gateway = await getGateway();
+		const expiringValue = await signedCookieAtRenewalBoundary(gateway);
+		const expiringPair = `${COOKIE_NAME}=${expiringValue}`;
+		const cookieOnlyBrowserHeaders = browserHeaders(gateway, {
+			Authorization: undefined,
+			Cookie: expiringPair,
+		});
+
+		const sse = await openStreamingRequest(
+			gateway.baseURL,
+			`/api/sessions/${PREVIEW_SSE_SESSION_ID}/preview-events`,
+			{ headers: cookieOnlyBrowserHeaders },
+		);
+		expect(sse.status).toBe(200);
+		expect(sse.setCookies, "preview SSE must authenticate without renewing a near-expiry cookie").toEqual([]);
+
+		const renewal = await rawRequest(gateway.baseURL, "/api/health", {
+			headers: cookieOnlyBrowserHeaders,
+		});
+		expect(renewal.status, renewal.body).toBe(200);
+		const replacement = expectSignedCookie(renewal);
+		expect(cookieValue(replacement)).not.toBe(expiringValue);
+
+		const followUp = await rawRequest(gateway.baseURL, "/api/health", {
+			headers: browserHeaders(gateway, {
+				Authorization: undefined,
+				Cookie: cookiePair(replacement),
+			}),
+		});
+		expect(followUp.status, followUp.body).toBe(200);
+		expect(followUp.setCookies, "the fresh replacement must not be issued again").toEqual([]);
+	});
+
 	it("upgrades a legacy cookie once and reuses the signed cookie without repeated issuance", async () => {
 		const gateway = await getGateway();
 		await withRegistryPreserved(gateway, async (registryFile) => {
@@ -292,7 +390,12 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 		});
 	});
 
-	it("leaves valid, corrupt, and large legacy registries byte-identical with bounded request time", async () => {
+	it("leaves post-start valid, corrupt, and large legacy registries byte-identical with bounded request time", async () => {
+		// The shared integration fixture allocates its private state root inside
+		// getGateway() and exposes it only after start(), so it has no clean pre-boot
+		// injection point. A true pre-start case would require a harness API change
+		// outside this task's ownership; the structural no-registry guard provides
+		// that startup proof while this live test pins request latency and byte identity.
 		const gateway = await getGateway();
 		await withRegistryPreserved(gateway, async (registryFile) => {
 			const fixtures: Array<{ label: string; bytes: Buffer }> = [

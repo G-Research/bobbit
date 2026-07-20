@@ -13783,8 +13783,9 @@ async function handleApiRoute(
 	// way the spawned pi-coding-agent runtime obtains credentials for
 	// google-gemini-cli session models, so it can refresh per request instead of
 	// relying on a stale env-only token. Never returns the OAuth refresh token.
-	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/google-code-assist/token')) {
-		const id = url.pathname.split('/')[3];
+	const googleCodeAssistTokenMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/google-code-assist\/token$/);
+	if (req.method === 'GET' && googleCodeAssistTokenMatch) {
+		const id = googleCodeAssistTokenMatch[1];
 		const session = sessionManager.getSession(id);
 		if (!session) {
 			json({ error: "Session not found" }, 404);
