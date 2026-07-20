@@ -50,6 +50,26 @@ const {
 	MAX_MENTIONS_PER_SEND,
 } = resolverModule;
 
+type ResolutionLimitErrorConstructor = new (...args: unknown[]) => Error & {
+	code: string;
+	limitKind: "text-length" | "candidate-count";
+	limit: number;
+	observed: number;
+};
+const MAX_FILE_MENTION_TEXT_CHARS = (
+	Reflect.get(resolverModule, "MAX_FILE_MENTION_TEXT_CHARS")
+		?? Reflect.get(resolverModule, "MAX_FILE_MENTION_PROMPT_CHARS")
+) as number;
+const MAX_FILE_MENTION_CANDIDATES = Reflect.get(resolverModule, "MAX_FILE_MENTION_CANDIDATES") as number;
+const FILE_MENTION_RESOLUTION_CONCURRENCY = (
+	Reflect.get(resolverModule, "FILE_MENTION_RESOLUTION_CONCURRENCY")
+		?? Reflect.get(resolverModule, "FILE_MENTION_RESOLVER_CONCURRENCY")
+) as number;
+const FileMentionResolutionLimitError = Reflect.get(
+	resolverModule,
+	"FileMentionResolutionLimitError",
+) as ResolutionLimitErrorConstructor;
+
 const EXPECTED_LSTAT_CONCURRENCY = 8;
 
 interface Deferred<T> {
@@ -80,6 +100,22 @@ function missingPathError(): NodeJS.ErrnoException {
 	return Object.assign(new Error("missing fixture"), { code: "ENOENT" });
 }
 
+async function drainRejectedProbeGates(
+	resolutions: Array<Promise<unknown>>,
+	gates: Array<Deferred<fs.Stats>>,
+	label: string,
+): Promise<void> {
+	let settled = false;
+	const completion = Promise.allSettled(resolutions).then(() => { settled = true; });
+	for (let turn = 0; turn < 10_000 && !settled; turn++) {
+		for (const gate of gates.splice(0)) gate.reject(missingPathError());
+		await Promise.resolve();
+		await Promise.resolve();
+	}
+	assert.equal(settled, true, `deferred resolutions did not settle: ${label}`);
+	await completion;
+}
+
 function requestedReadLength(call: unknown[]): number {
 	const buffer = call[1];
 	assert.ok(Buffer.isBuffer(buffer), "descriptor read must receive a caller-owned buffer");
@@ -97,6 +133,12 @@ describe("resolveFileMentions", () => {
 		assert.equal(MAX_MENTION_FILE_BYTES, 10 * 1024 * 1024);
 		assert.equal(MAX_MENTION_AGGREGATE_BYTES, 20 * 1024 * 1024);
 		assert.equal(MAX_MENTIONS_PER_SEND, 50);
+	});
+
+	it("exports explicit resolver text and candidate admission limits", async () => {
+		assert.equal(MAX_FILE_MENTION_TEXT_CHARS, 1024 * 1024);
+		assert.equal(MAX_FILE_MENTION_CANDIDATES, 512);
+		assert.equal(typeof FileMentionResolutionLimitError, "function");
 	});
 
 	it("no mentions → text unchanged, empty mentions", async () => {
@@ -126,6 +168,121 @@ describe("resolveFileMentions", () => {
 			assert.deepEqual(r.warnings, []);
 		} finally {
 			markdownLexer.mockRestore();
+		}
+	});
+
+	it("rejects text above the admission limit before Markdown or filesystem work", async () => {
+		assert.ok(Number.isSafeInteger(MAX_FILE_MENTION_TEXT_CHARS));
+		const prefix = "`code` @notes.txt ";
+		const text = `${prefix}${"x".repeat(MAX_FILE_MENTION_TEXT_CHARS - prefix.length + 1)}`;
+		const markdownLexer = vi.spyOn(marked, "lexer");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
+
+		try {
+			const rejection = await resolveFileMentions(text, cwdDir).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			assert.equal(markdownLexer.mock.calls.length, 0, "over-limit text must not invoke Marked");
+			assert.equal(lstatSpy.mock.calls.length, 0, "over-limit text must not probe targets");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0);
+			assert.equal(openSpy.mock.calls.length, 0);
+			assert.equal(realpathSpy.mock.calls.length, 0, "over-limit text must not canonicalize cwd");
+			assert.ok(rejection instanceof FileMentionResolutionLimitError);
+			assert.equal(rejection.code, "FILE_MENTION_RESOLUTION_LIMIT");
+			assert.equal(rejection.limitKind, "text-length");
+			assert.equal(rejection.limit, MAX_FILE_MENTION_TEXT_CHARS);
+			assert.equal(rejection.observed, text.length);
+		} finally {
+			realpathSpy.mockRestore();
+			openSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+			markdownLexer.mockRestore();
+		}
+	});
+
+	it("rejects candidates above the admission limit before Markdown or filesystem work", async () => {
+		assert.ok(Number.isSafeInteger(MAX_FILE_MENTION_CANDIDATES));
+		const candidates = Array.from(
+			{ length: MAX_FILE_MENTION_CANDIDATES + 1 },
+			(_, index) => `@admission-${index}.txt`,
+		).join(" ");
+		const text = `\`code\` ${candidates}`;
+		const markdownLexer = vi.spyOn(marked, "lexer");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
+
+		try {
+			const rejection = await resolveFileMentions(text, cwdDir).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			assert.equal(markdownLexer.mock.calls.length, 0, "over-limit candidates must not invoke Marked");
+			assert.equal(lstatSpy.mock.calls.length, 0, "over-limit candidates must not probe targets");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0);
+			assert.equal(openSpy.mock.calls.length, 0);
+			assert.equal(realpathSpy.mock.calls.length, 0, "over-limit candidates must not canonicalize cwd");
+			assert.ok(rejection instanceof FileMentionResolutionLimitError);
+			assert.equal(rejection.code, "FILE_MENTION_RESOLUTION_LIMIT");
+			assert.equal(rejection.limitKind, "candidate-count");
+			assert.equal(rejection.limit, MAX_FILE_MENTION_CANDIDATES);
+			assert.equal(rejection.observed, MAX_FILE_MENTION_CANDIDATES + 1);
+		} finally {
+			realpathSpy.mockRestore();
+			openSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+			markdownLexer.mockRestore();
+		}
+	});
+
+	it("resolves a valid reference exactly at the text admission boundary", async () => {
+		assert.ok(Number.isSafeInteger(MAX_FILE_MENTION_TEXT_CHARS));
+		const suffix = " @notes.txt";
+		const text = `${"x".repeat(MAX_FILE_MENTION_TEXT_CHARS - suffix.length)}${suffix}`;
+		const result = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(text.length, MAX_FILE_MENTION_TEXT_CHARS);
+		assert.deepEqual(
+			result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
+			[{ kind: "text", path: "notes.txt" }],
+		);
+		assert.equal(
+			result.modelText,
+			`${text.slice(0, -"@notes.txt".length)}${buildFileReferenceBlock("notes.txt", NOTES_CONTENT)}`,
+		);
+	});
+
+	it("resolves a valid reference at the candidate admission boundary", async () => {
+		assert.ok(Number.isSafeInteger(MAX_FILE_MENTION_CANDIDATES));
+		const missing = Array.from(
+			{ length: MAX_FILE_MENTION_CANDIDATES - 1 },
+			(_, index) => `@boundary-missing-${index}.txt`,
+		);
+		const text = [...missing, "@notes.txt"].join(" ");
+		const originalLstat = fs.promises.lstat.bind(fs.promises);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((target: fs.PathLike) => {
+			if (path.resolve(String(target)) === path.join(cwdDir, "notes.txt")) return originalLstat(target);
+			return Promise.reject(missingPathError());
+		}) as typeof fs.promises.lstat);
+
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(lstatSpy.mock.calls.length, MAX_FILE_MENTION_CANDIDATES);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
+				[{ kind: "text", path: "notes.txt" }],
+			);
+			assert.ok(result.modelText.endsWith(buildFileReferenceBlock("notes.txt", NOTES_CONTENT)));
+			assert.deepEqual(result.warnings, []);
+		} finally {
+			lstatSpy.mockRestore();
 		}
 	});
 
@@ -685,6 +842,123 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
+	it("rejects an opened descriptor that resolves outside cwd before reading and closes it", async () => {
+		const file = path.join(cwdDir, "descriptor-containment.txt");
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mention-fd-outside-"));
+		const outsideFile = path.join(outsideDir, "outside.txt");
+		fs.writeFileSync(file, "inside bytes must not be read", "utf-8");
+		fs.writeFileSync(outsideFile, "outside bytes must not be read", "utf-8");
+		const canonicalFile = fs.realpathSync.native(file);
+		const canonicalOutside = fs.realpathSync.native(outsideFile);
+		const originalRealpathNative = fs.realpathSync.native;
+		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((target: unknown, ...args: unknown[]) => {
+			const normalized = String(target).replace(/\\/g, "/");
+			if (/\/(?:proc\/self\/fd|dev\/fd)\/\d+$/.test(normalized)) return canonicalOutside;
+			return (originalRealpathNative as (...callArgs: unknown[]) => unknown)(target, ...args);
+		}) as typeof fs.realpathSync.native);
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+		const closeSpy = vi.spyOn(fs, "closeSync");
+
+		try {
+			const text = "@descriptor-containment.txt";
+			const result = await resolveFileMentions(text, cwdDir);
+			const openIndex = openSpy.mock.calls.findIndex(
+				(call, index) => path.resolve(String(call[0])) === canonicalFile
+					&& openSpy.mock.results[index].type === "return",
+			);
+			assert.notEqual(openIndex, -1, "the contained path must be opened before descriptor validation");
+			const descriptor = openSpy.mock.results[openIndex].value as number;
+			assert.ok(
+				realpathSpy.mock.calls.some(([target]) => {
+					const normalized = String(target).replace(/\\/g, "/");
+					return /\/(?:proc\/self\/fd|dev\/fd)\/\d+$/.test(normalized);
+				}),
+				"the opened descriptor itself must be canonicalized",
+			);
+			assert.equal(result.mentions.length, 1);
+			assert.equal(result.mentions[0].kind, "unresolved");
+			assert.equal(result.modelText, text);
+			assert.ok(
+				!readSpy.mock.calls.some((call) => call[0] === descriptor),
+				"an outside descriptor must be rejected before any payload read",
+			);
+			assert.ok(closeSpy.mock.calls.some((call) => call[0] === descriptor));
+		} finally {
+			closeSpy.mockRestore();
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			realpathSpy.mockRestore();
+			platformSpy.mockRestore();
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+			fs.rmSync(file, { force: true });
+		}
+	});
+
+	it("rejects a fallback post-open path identity mismatch before reading and closes it", async () => {
+		const file = path.join(cwdDir, "fallback-identity.txt");
+		fs.writeFileSync(file, "identity bytes must not be read", "utf-8");
+		const canonicalFile = fs.realpathSync.native(file);
+		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		const originalStat = fs.statSync.bind(fs);
+		const originalPromiseStat = fs.promises.stat.bind(fs.promises);
+		const withMismatchedIdentity = (stat: fs.Stats): fs.Stats => ({
+			...stat,
+			ino: stat.ino + 1,
+			isFile: () => stat.isFile(),
+			isDirectory: () => stat.isDirectory(),
+			isBlockDevice: () => stat.isBlockDevice(),
+			isCharacterDevice: () => stat.isCharacterDevice(),
+			isSymbolicLink: () => stat.isSymbolicLink(),
+			isFIFO: () => stat.isFIFO(),
+			isSocket: () => stat.isSocket(),
+		});
+		const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike) => {
+			const stat = originalStat(target);
+			return path.resolve(String(target)) === canonicalFile ? withMismatchedIdentity(stat) : stat;
+		}) as typeof fs.statSync);
+		const promiseStatSpy = vi.spyOn(fs.promises, "stat").mockImplementation(async (target: fs.PathLike) => {
+			const stat = await originalPromiseStat(target);
+			return path.resolve(String(target)) === canonicalFile ? withMismatchedIdentity(stat) : stat;
+		});
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+		const closeSpy = vi.spyOn(fs, "closeSync");
+
+		try {
+			const text = "@fallback-identity.txt";
+			const result = await resolveFileMentions(text, cwdDir);
+			const openIndex = openSpy.mock.calls.findIndex(
+				(call, index) => path.resolve(String(call[0])) === canonicalFile
+					&& openSpy.mock.results[index].type === "return",
+			);
+			assert.notEqual(openIndex, -1, "the fallback path must be opened before identity validation");
+			const descriptor = openSpy.mock.results[openIndex].value as number;
+			assert.ok(
+				statSpy.mock.calls.some(([target]) => path.resolve(String(target)) === canonicalFile)
+					|| promiseStatSpy.mock.calls.some(([target]) => path.resolve(String(target)) === canonicalFile),
+				"the fallback must compare the opened descriptor with post-open path identity",
+			);
+			assert.equal(result.mentions.length, 1);
+			assert.equal(result.mentions[0].kind, "unresolved");
+			assert.equal(result.modelText, text);
+			assert.ok(
+				!readSpy.mock.calls.some((call) => call[0] === descriptor),
+				"an identity mismatch must be rejected before any payload read",
+			);
+			assert.ok(closeSpy.mock.calls.some((call) => call[0] === descriptor));
+		} finally {
+			closeSpy.mockRestore();
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			promiseStatSpy.mockRestore();
+			statSpy.mockRestore();
+			platformSpy.mockRestore();
+			fs.rmSync(file, { force: true });
+		}
+	});
+
 	it("keeps post-open fstat EACCES and ENOENT failures unresolved", async () => {
 		const file = path.join(cwdDir, "stat-race.txt");
 		fs.writeFileSync(file, "present during existence classification", "utf-8");
@@ -893,6 +1167,42 @@ describe("resolveFileMentions", () => {
 		assert.equal(binaryResult.warnings.length, 1);
 	});
 
+	it("keeps Windows network and device namespace tokens literal without metadata or target I/O", async () => {
+		const candidates = [
+			"//attacker.example/share/file.txt",
+			"\\\\attacker.example\\share\\file.txt",
+			"\\\\?\\C:\\secret.txt",
+			"\\\\.\\PhysicalDrive0",
+			"NUL",
+			"CON.txt",
+			"COM1",
+			"LPT9.log",
+		];
+		const text = candidates.map((candidate) => `@${candidate}`).join(" ");
+		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(
+			Object.assign(new Error("namespace target must not be probed"), { code: "EACCES" }),
+		);
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const openSpy = vi.spyOn(fs, "openSync");
+
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.deepEqual(result.mentions, []);
+			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, 0, "namespace tokens must not reach lstat");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "namespace tokens must not reach promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "namespace tokens must not reach openSync");
+		} finally {
+			openSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+			platformSpy.mockRestore();
+		}
+	});
+
 	it("an existing target outside cwd remains unresolved (outside-cwd)", async () => {
 		const fileName = `outside-${path.basename(cwdDir)}.txt`;
 		const outsideFile = path.join(path.dirname(cwdDir), fileName);
@@ -989,6 +1299,115 @@ describe("resolveFileMentions", () => {
 			"every missing token must remain byte-for-byte literal",
 		);
 		assert.deepEqual(r.warnings, []);
+	});
+
+	it("shares a module-global resolver limit across concurrent resolutions", async () => {
+		const expectedConcurrency = Number.isSafeInteger(FILE_MENTION_RESOLUTION_CONCURRENCY)
+			? FILE_MENTION_RESOLUTION_CONCURRENCY
+			: 4;
+		const resolutionCount = expectedConcurrency + 2;
+		const gates: Array<Deferred<fs.Stats>> = [];
+		let active = 0;
+		let maxActive = 0;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((_target: fs.PathLike) => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			const gate = deferred<fs.Stats>();
+			const originalReject = gate.reject;
+			gate.reject = (error: unknown) => {
+				active--;
+				originalReject(error);
+			};
+			gates.push(gate);
+			return gate.promise;
+		}) as unknown as typeof fs.promises.lstat);
+		const resolutions = Array.from(
+			{ length: resolutionCount },
+			(_, index) => resolveFileMentions(`@resolver-global-${index}.txt`, cwdDir),
+		);
+
+		try {
+			await drainMicrotasksUntil(() => gates.length >= expectedConcurrency, "global resolver admission");
+			assert.equal(gates.length, expectedConcurrency, "excess resolver calls must wait module-globally");
+			assert.equal(FILE_MENTION_RESOLUTION_CONCURRENCY, 4);
+
+			while (lstatSpy.mock.calls.length < resolutionCount) {
+				const wave = gates.splice(0);
+				assert.ok(wave.length > 0);
+				for (const gate of wave) gate.reject(missingPathError());
+				await drainMicrotasksUntil(
+					() => gates.length > 0 || lstatSpy.mock.calls.length === resolutionCount,
+					"next resolver admission wave",
+				);
+				assert.ok(active <= expectedConcurrency);
+			}
+			for (const gate of gates.splice(0)) gate.reject(missingPathError());
+			const results = await Promise.all(resolutions);
+			assert.equal(maxActive, expectedConcurrency);
+			assert.ok(results.every((result) => result.mentions.length === 0));
+		} finally {
+			await drainRejectedProbeGates(resolutions, gates, "module-global resolver limit");
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("shares the lstat concurrency limit across multiple concurrent resolutions", async () => {
+		const resolutionCount = 3;
+		const candidatesPerResolution = EXPECTED_LSTAT_CONCURRENCY + 2;
+		const totalCandidates = resolutionCount * candidatesPerResolution;
+		const gates: Array<Deferred<fs.Stats>> = [];
+		let active = 0;
+		let maxActive = 0;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((_target: fs.PathLike) => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			const gate = deferred<fs.Stats>();
+			const originalReject = gate.reject;
+			gate.reject = (error: unknown) => {
+				active--;
+				originalReject(error);
+			};
+			gates.push(gate);
+			return gate.promise;
+		}) as unknown as typeof fs.promises.lstat);
+		const resolutions = Array.from({ length: resolutionCount }, (_, resolutionIndex) => {
+			const text = Array.from(
+				{ length: candidatesPerResolution },
+				(_, candidateIndex) => `@lstat-global-${resolutionIndex}-${candidateIndex}.txt`,
+			).join(" ");
+			return resolveFileMentions(text, cwdDir);
+		});
+
+		try {
+			await drainMicrotasksUntil(
+				() => lstatSpy.mock.calls.length >= EXPECTED_LSTAT_CONCURRENCY,
+				"global lstat admission",
+			);
+			assert.equal(
+				lstatSpy.mock.calls.length,
+				EXPECTED_LSTAT_CONCURRENCY,
+				"concurrent resolver calls must share one lstat pool",
+			);
+			assert.equal(active, EXPECTED_LSTAT_CONCURRENCY);
+
+			while (lstatSpy.mock.calls.length < totalCandidates) {
+				const wave = gates.splice(0);
+				assert.ok(wave.length > 0);
+				for (const gate of wave) gate.reject(missingPathError());
+				await drainMicrotasksUntil(
+					() => gates.length > 0 || lstatSpy.mock.calls.length === totalCandidates,
+					"next global lstat wave",
+				);
+				assert.ok(active <= EXPECTED_LSTAT_CONCURRENCY);
+			}
+			for (const gate of gates.splice(0)) gate.reject(missingPathError());
+			const results = await Promise.all(resolutions);
+			assert.equal(maxActive, EXPECTED_LSTAT_CONCURRENCY);
+			assert.ok(results.every((result) => result.mentions.length === 0));
+		} finally {
+			await drainRejectedProbeGates(resolutions, gates, "module-global lstat limit");
+			lstatSpy.mockRestore();
+		}
 	});
 
 	it("bounds asynchronous lstat work at fixed concurrency and caches repeated lexical paths", async () => {
