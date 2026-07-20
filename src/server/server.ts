@@ -34,6 +34,7 @@ import {
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
 import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
+import { BOBBIT_APP_INFO } from "./app-info.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
@@ -4316,6 +4317,13 @@ async function handleApiRoute(
 		if (sandboxScope.goalIds.has(task.goalId)) return true;
 		json({ error: "Forbidden: task is outside the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
 		return false;
+	}
+
+	// GET /api/app-info — report the running package version and whether this is
+	// an installed package or a source checkout (with its short commit SHA).
+	if (url.pathname === "/api/app-info" && req.method === "GET") {
+		json(BOBBIT_APP_INFO);
+		return;
 	}
 
 	// GET /api/harness-status — report whether the dev restart harness is active

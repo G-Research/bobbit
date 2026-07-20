@@ -2977,8 +2977,30 @@ export async function dismissSetup(): Promise<void> {
 }
 
 // ============================================================================
-// HARNESS STATUS API
+// APP INFO + HARNESS STATUS API
 // ============================================================================
+
+export interface AppInfo {
+	version: string;
+	buildType: "installed" | "source";
+	commitSha?: string;
+}
+
+export async function fetchAppInfo(): Promise<AppInfo | null> {
+	try {
+		const res = await gatewayFetch("/api/app-info");
+		if (!res.ok) return null;
+		const data = await res.json().catch(() => null);
+		if (typeof data?.version !== "string" || (data?.buildType !== "installed" && data?.buildType !== "source")) return null;
+		return {
+			version: data.version,
+			buildType: data.buildType,
+			...(typeof data.commitSha === "string" ? { commitSha: data.commitSha } : {}),
+		};
+	} catch {
+		return null;
+	}
+}
 
 export interface HarnessStatus {
 	restartAvailable: boolean;

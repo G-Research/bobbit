@@ -21,7 +21,7 @@ import {
 	type GatewaySession,
 	type Project,
 } from "./state.js";
-import { fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog, isGoalPauseResumeActionPending } from "./api.js";
+import { fetchAppInfo, fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog, isGoalPauseResumeActionPending, type AppInfo } from "./api.js";
 import { headerToast, showHeaderToast } from "./header-toast.js";
 export { showHeaderToast } from "./header-toast.js";
 import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
@@ -111,6 +111,42 @@ import {
 } from "./side-panel-workspace.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
+
+let settingsAppInfo: AppInfo | null = null;
+let settingsAppInfoLoadStarted = false;
+
+function loadSettingsAppInfo(): void {
+	if (settingsAppInfoLoadStarted) return;
+	settingsAppInfoLoadStarted = true;
+	fetchAppInfo().then(info => {
+		settingsAppInfo = info;
+		if (!info) {
+			// Allow a later render (including navigating away and back or a gateway
+			// reconnect) to retry. Do not render here: a persistent failure would
+			// otherwise create an immediate fetch/render retry loop.
+			settingsAppInfoLoadStarted = false;
+			return;
+		}
+		renderApp();
+	});
+}
+
+function settingsAppVersionLabel(info: AppInfo): string {
+	return `Bobbit v${info.version}${info.buildType === "source" ? ` [${info.commitSha || "source"}]` : ""}`;
+}
+
+function renderSettingsAppVersionHeaderSlot() {
+	if (!settingsAppInfo) return html``;
+	return html`
+		<div class="flex items-center px-3" data-testid="settings-version-header-slot">
+			<span
+				class="text-xs text-muted-foreground whitespace-nowrap"
+				data-testid="settings-app-version"
+				title=${settingsAppInfo.buildType === "source" ? "Running from source" : "Running from an installed build"}
+			>${settingsAppVersionLabel(settingsAppInfo)}</span>
+		</div>
+	`;
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Splash-screen new-session gating
@@ -2120,6 +2156,7 @@ export function doRenderApp(): void {
 
 	// Session action buttons (shared between headerLeft mobile and headerRight desktop)
 	const route = getRouteFromHash();
+	if (route.view === "settings") loadSettingsAppInfo();
 	const routeSessionId = route.view === "session" ? route.sessionId : undefined;
 	const routeCachedSession = routeSessionId
 		? state.gatewaySessions.find(s => s.id === routeSessionId) ?? state.archivedSessions.find(s => s.id === routeSessionId)
@@ -2239,8 +2276,10 @@ export function doRenderApp(): void {
 
 	const headerRight = () => {
 		if (desktop) {
+			if (route.view === "settings" && settingsAppInfo) return renderSettingsAppVersionHeaderSlot();
 			return hasHeaderSessionActions ? html`<div class="flex items-center gap-1 px-2">${headerSessionActions}</div>` : html``;
 		}
+		if (route.view === "settings" && settingsAppInfo) return renderSettingsAppVersionHeaderSlot();
 		const settingsBtn = Button({
 			variant: "ghost",
 			size: "sm",
@@ -3069,7 +3108,7 @@ export function doRenderApp(): void {
 				${headerToast()}
 				${extRouteUnavailable()}
 				${renderClientDebugButton()}
-				<div class="flex items-center border-b border-border shrink-0 header-shadow">
+				<div class="flex items-center border-b border-border shrink-0 header-shadow" data-testid="app-header-row">
 					${state.sidebarCollapsed ? html`
 					<div class="w-14 shrink-0 flex items-center justify-center self-stretch" style="background: var(--sidebar);">
 						${bobbitIcon}
@@ -3126,7 +3165,7 @@ export function doRenderApp(): void {
 				${renderClientDebugButton()}
 				<div id="app-header"
 					class="fixed top-0 left-0 right-0 z-50 bg-background flex flex-col">
-					<div class="flex items-center justify-between border-b border-border">
+					<div class="flex items-center justify-between border-b border-border" data-testid="app-header-row">
 						${headerLeft()}
 						${headerRight()}
 					</div>
@@ -3149,7 +3188,7 @@ export function doRenderApp(): void {
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
 				${headerToast()}
 				${extRouteUnavailable()}
-				<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow">
+				<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow" data-testid="app-header-row">
 					${headerLeft()}
 					${headerRight()}
 				</div>
