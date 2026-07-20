@@ -163,17 +163,22 @@ test.describe("Journey: Prompt Interaction", () => {
 	test("a mixed sent prompt resolves only the existing file outside Markdown code", async ({ page }) => {
 		test.setTimeout(90_000);
 		const cwd = mkdtempSync(join(tmpdir(), `bobbit-v2-atchip-${process.env.E2E_PORT ?? "0"}-`));
+		const proseFile = "prose-reference.txt";
+		const inlineCodeFile = "inline-code-reference.txt";
+		const fencedCodeFile = "fenced-code-reference.txt";
 		const mixedPrompt = [
-			"Please read @notes.md while leaving @variableName and @missing/path.txt literal.",
-			"Inline code: `@inlineVariable @notes.md`.",
+			`Please read @${proseFile} while leaving @variableName and @missing/path.txt literal.`,
+			`Inline existing file: \`@${inlineCodeFile}\`.`,
 			"```text",
-			"@fencedVariable @notes.md",
+			`Fenced existing file: @${fencedCodeFile}`,
 			"```",
 		].join("\n");
 		let sessionId = "";
 		let projectId = "";
 		try {
-			writeFileSync(join(cwd, "notes.md"), "# deterministic mention fixture\n", "utf8");
+			writeFileSync(join(cwd, proseFile), "prose mention fixture\n", "utf8");
+			writeFileSync(join(cwd, inlineCodeFile), "inline code fixture\n", "utf8");
+			writeFileSync(join(cwd, fencedCodeFile), "fenced code fixture\n", "utf8");
 			const projResp = await apiFetch("/api/projects", {
 				method: "POST",
 				body: JSON.stringify({ name: `v2-atchip-${Date.now()}`, rootPath: cwd }),
@@ -197,11 +202,15 @@ test.describe("Journey: Prompt Interaction", () => {
 				await expect(bubble).toBeVisible({ timeout: 20_000 });
 				await expect(bubble).toContainText("@variableName");
 				await expect(bubble).toContainText("@missing/path.txt");
-				await expect(bubble).toContainText("@inlineVariable @notes.md");
-				await expect(bubble).toContainText("@fencedVariable @notes.md");
-				const chips = page.locator(".file-mention-chip-pill");
+				await expect(bubble).toContainText(`@${inlineCodeFile}`);
+				await expect(bubble).toContainText(`@${fencedCodeFile}`);
+
+				const chips = bubble.locator(".file-mention-chip-pill");
 				await expect(chips).toHaveCount(1);
-				await expect(chips.first()).toContainText("@notes.md");
+				await expect(chips).toHaveText(`@${proseFile}`);
+				await expect(chips).toHaveAttribute("title", `File: @${proseFile}`);
+				await expect(chips.filter({ hasText: `@${inlineCodeFile}` })).toHaveCount(0);
+				await expect(chips.filter({ hasText: `@${fencedCodeFile}` })).toHaveCount(0);
 			};
 
 			await expectMixedPrompt();
