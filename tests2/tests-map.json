@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/file-mentions-resource-limits.test.ts",
+      "reason": "Structural resource, admission, concurrency, and non-regular-target coverage split from the semantic file-mention resolver suite to keep both within the tier-1 per-file wall budget.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/ws-session-command-serialiser.test.ts",
       "reason": "Pure unit coverage for per-session WebSocket command ordering, cross-session concurrency, rejection isolation, and idle-key cleanup using deterministic deferred promises.",
       "execution": {
