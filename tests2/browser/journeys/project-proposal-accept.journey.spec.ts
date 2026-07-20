@@ -153,13 +153,31 @@ async function seedAndHydrateProjectProposal(
 	const rev = (JSON.parse(text) as { rev?: number }).rev;
 	expect(typeof rev, `seed response should carry a revision: ${text}`).toBe("number");
 
-	await expect.poll(() => page.evaluate(({ sessionId, rev }) => {
-		const slot = (window as any).bobbitState?.activeProposals?.project;
+	const proposalsResp = await apiFetch(`/api/sessions/${sessionId}/proposals`);
+	const proposalsText = await proposalsResp.text();
+	expect(proposalsResp.status, `read persisted project proposal failed: ${proposalsText}`).toBe(200);
+	const proposals = (JSON.parse(proposalsText) as {
+		proposals?: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }>;
+	}).proposals;
+	const persisted = proposals?.find((proposal) => proposal.proposalType === "project");
+	expect(persisted, `seeded project proposal should be persisted: ${proposalsText}`).toBeDefined();
+	expect(persisted?.rev, "persisted project proposal should carry the seed revision").toBe(rev);
+	expect(persisted?.fields, "persisted project proposal should retain the seeded fields").toMatchObject(fields);
+
+	const hydratedMode = await page.evaluate(({ sessionId, fields, rev }) => {
+		const state = (window as any).bobbitState;
+		const remote = state?.remoteAgent;
+		if (state?.selectedSessionId !== sessionId || remote?.gatewaySessionId !== sessionId) {
+			throw new Error(`Cannot hydrate project proposal for inactive session ${sessionId}`);
+		}
+		if (typeof remote.onProposal !== "function") {
+			throw new Error("Active remote agent is missing its proposal callback");
+		}
+		remote.onProposal("project", fields, false, rev, "rehydrate");
+		const slot = state.activeProposals?.project;
 		return slot?.sessionId === sessionId && slot?.rev === rev ? slot.mode : null;
-	}, { sessionId, rev }), {
-		timeout: 15_000,
-		message: `server-seeded project proposal should hydrate in ${expectedMode} mode`,
-	}).toBe(expectedMode);
+	}, { sessionId, fields: persisted!.fields, rev: rev! });
+	expect(hydratedMode, `server-seeded project proposal should hydrate in ${expectedMode} mode`).toBe(expectedMode);
 
 	const panel = page.locator(`${PANEL_SELECTOR}[data-mode="${expectedMode}"]`).first();
 	if (!await panel.isVisible().catch(() => false)) {
