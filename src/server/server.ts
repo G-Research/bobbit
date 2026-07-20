@@ -520,7 +520,7 @@ import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth 
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
 import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
-import { handlePreviewRequest } from "./preview/content-route.js";
+import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
@@ -1718,6 +1718,8 @@ export interface TlsConfig {
 	caCert?: string;  // path to CA certificate (for mkcert-based certs)
 }
 
+type PreviewSessionOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+
 export interface GatewayConfig {
 	host: string;
 	port: number;
@@ -2566,6 +2568,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Sandbox manager — assigned in start() when sandbox=docker
 	let sandboxManager: SandboxManager | null = null;
 
+	// Preview mount mutations and snapshots share a per-session promise queue.
+	// Different sessions remain independent, while one session retains the
+	// critical section previously supplied accidentally by synchronous I/O.
+	const previewOperationTails = new Map<string, Promise<void>>();
+	const withPreviewSessionOperation: PreviewSessionOperation = async (sessionId, operation) => {
+		const previous = previewOperationTails.get(sessionId) ?? Promise.resolve();
+		let release!: () => void;
+		const current = new Promise<void>((resolve) => { release = resolve; });
+		previewOperationTails.set(sessionId, current);
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			release();
+			if (previewOperationTails.get(sessionId) === current) previewOperationTails.delete(sessionId);
+		}
+	};
+
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
 		const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
@@ -2718,7 +2738,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -3054,14 +3074,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// so sidebars and dashboards update instantly. Replaces a 5s polling tick
 	// for a documented class of races (e.g. clicking a stale sidebar entry just
 	// after another tab archived the session).
-	sessionManager.addTerminationListener((sessionId, info) => {
+	sessionManager.addTerminationListener(async (sessionId, info) => {
 		try {
 			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
 		} catch (err) {
 			console.error(`[broadcast] session_removed failed for ${sessionId}:`, err);
 		}
 		if (info.reason === "purged") {
-			try { previewArtifacts.removeArtifacts(sessionId); } catch (err) {
+			try {
+				await withPreviewSessionOperation(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
+			} catch (err) {
+				// This listener owns preview-artifact cleanup errors; SessionManager
+				// only awaits the listener contract and must not duplicate this log.
 				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
 			}
 		}
@@ -3170,6 +3194,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	ck("post-VerificationHarness-to-return");
 	bootLog(`[boot] ctor total (createGateway body) ${Date.now() - __ckT0}ms`);
+	let bootBackgroundTask: Promise<void> | null = null;
 	return {
 		server,
 		deps: gatewayDeps,
@@ -3576,6 +3601,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath, serverCommandRunner);
 								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
+								await sessionManager.getWorktreePool(ctx.project.id)?.initialize();
 								bootLog(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
 								bootLog(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
@@ -3620,7 +3646,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					});
 				});
 				const addr = server.address() as import("node:net").AddressInfo;
-				void runBootBackgroundTasks();
+				bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
+					console.warn("[boot] background tasks failed (non-fatal):", err);
+				});
 				return addr.port;
 			}
 
@@ -3639,7 +3667,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					if (port !== config.port) {
 						console.log(`Port ${config.port} in use, using port ${port}`);
 					}
-					void runBootBackgroundTasks();
+					bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
+						console.warn("[boot] background tasks failed (non-fatal):", err);
+					});
 					return port;
 				} catch (err: any) {
 					if (err.code === "EADDRINUSE" && port < maxPort) {
@@ -3676,6 +3706,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				triggerEngine.stop();
 				inboxNudger.stop();
 				wss.close();
+				if (bootBackgroundTask) {
+					await phase("boot-background", () => bootBackgroundTask!);
+				}
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
@@ -3903,6 +3936,7 @@ async function handleApiRoute(
 	commandRunner?: CommandRunner,
 	fsImpl?: FsLike,
 	clock?: Clock,
+	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -5159,6 +5193,7 @@ async function handleApiRoute(
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath, serverCommandRunner);
 						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined, project.rootPath);
+						await sessionManager.getWorktreePool(project.id)?.initialize();
 					}
 				} catch { /* best-effort */ }
 			}
@@ -5267,7 +5302,7 @@ async function handleApiRoute(
 				try { await sessionManager.terminateSession(s.id); } catch {}
 			}
 			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
-			projectContextManager.remove(projectId);
+			await projectContextManager.remove(projectId);
 			if (project?.provisional) {
 				projectRegistry.removeProvisional(projectId);
 			} else {
@@ -14896,6 +14931,36 @@ async function handleApiRoute(
 		}
 	};
 
+	type PreviewMountSnapshot = {
+		url: string;
+		path: string;
+		relPath: string;
+		entry: string;
+		mtime: number;
+		contentHash: string;
+		artifactId?: string;
+	};
+	const readPreviewMountSnapshot = async (sessionId: string): Promise<PreviewMountSnapshot | null> => {
+		const dir = previewMount.mountPath(sessionId);
+		const entry = await pickEntry(dir);
+		if (!entry) return null;
+		const entryPath = path.join(dir, entry);
+		let stat: fs.Stats;
+		try { stat = await fs.promises.stat(entryPath); }
+		catch { return null; }
+		const contentHash = await previewMount.contentHashForMount(sessionId);
+		const artifact = await previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
+		return {
+			url: `/preview/${sessionId}/${entry}`,
+			path: entryPath,
+			relPath: path.posix.join(sessionId, entry),
+			entry,
+			mtime: Math.floor(stat.mtimeMs),
+			contentHash,
+			artifactId: artifact?.artifactId,
+		};
+	};
+
 	// POST /api/preview/mount?sessionId=<sid> — v3 per-session preview mount.
 	// Accepts {html} (with optional {entry}) or {file: absolutePath}. Returns
 	// {url, path, entry, mtime, contentHash}. See docs/design/embedded-html-preview-rewrite.md §6.
@@ -14932,122 +14997,117 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
-			if (hasArtifact) {
-				const restored = previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
-				if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, restored);
+			await withPreviewSessionOperation(sessionId, async () => {
+				let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
+				if (hasArtifact) {
+					const restored = await previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
+					if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, restored);
+					broadcastPreviewChanged(sessionId, {
+						entry: restored.entry,
+						mtime: restored.mtime,
+						url: restored.url,
+						path: restored.path,
+						contentHash: restored.contentHash,
+						artifactId: restored.artifactId,
+					});
+					json(restored);
+					return;
+				}
+				if (hasHtml) {
+					// `html` wins over `file` when both are provided.
+					let entry: string | undefined;
+					if (typeof body.entry === "string" && body.entry.length > 0) {
+						const e = body.entry;
+						if (e.includes("/") || e.includes("\\") || e.includes("..") || e.includes("\0")) {
+							json({ error: "Invalid entry name" }, 400);
+							return;
+						}
+						entry = e;
+					}
+					result = await previewMount.writeInline(sessionId, body.html as string, entry);
+				} else {
+					const filePath = body.file as string;
+					if (!path.isAbsolute(filePath)) {
+						json({ error: "file path must be absolute" }, 400);
+						return;
+					}
+					let stat: fs.Stats;
+					try { stat = await fs.promises.stat(filePath); } catch {
+						json({ error: "file not found" }, 404);
+						return;
+					}
+					if (!stat.isFile()) {
+						json({ error: "path is not a regular file" }, 404);
+						return;
+					}
+					const base = path.basename(filePath).toLowerCase();
+					if (!base.endsWith(".html") && !base.endsWith(".htm")) {
+						json({ error: "file must end in .html or .htm" }, 400);
+						return;
+					}
+					// Collect assets from inline `assets[]` and optional `manifest` JSON.
+					const declared: string[] = [];
+					if (hasAssets) {
+						for (const a of body.assets as unknown[]) {
+							if (typeof a !== "string") {
+								json({ error: "`assets[]` entries must be strings" }, 400);
+								return;
+							}
+							declared.push(a);
+						}
+					}
+					if (hasManifest) {
+						const manifestRel = body.manifest as string;
+						if (path.isAbsolute(manifestRel) || manifestRel.includes("\0") ||
+							manifestRel.includes("\\") || manifestRel.split("/").some(s => s === "..")) {
+							json({ error: "Invalid manifest path" }, 400);
+							return;
+						}
+						const manifestAbs = path.resolve(path.dirname(filePath), manifestRel);
+						let manifestParsed: any;
+						try {
+							manifestParsed = JSON.parse(await fs.promises.readFile(manifestAbs, "utf-8"));
+						} catch (err: any) {
+							if (err?.code === "ENOENT") json({ error: `Manifest '${manifestRel}' not found` }, 404);
+							else jsonError(400, err, { error: `Manifest JSON parse error: ${err?.message ?? err}` });
+							return;
+						}
+						if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
+							json({ error: "Manifest must be an object with an `assets[]` array" }, 400);
+							return;
+						}
+						for (const a of manifestParsed.assets) {
+							if (typeof a !== "string") {
+								json({ error: "Manifest `assets[]` entries must be strings" }, 400);
+								return;
+							}
+							declared.push(a);
+						}
+					}
+					// De-duplicate while preserving order.
+					const seen = new Set<string>();
+					const dedup: string[] = [];
+					for (const a of declared) {
+						const k = a.trim();
+						if (seen.has(k)) continue;
+						seen.add(k);
+						dedup.push(a);
+					}
+					result = await previewMount.mountFile(sessionId, filePath, dedup);
+				}
+				const artifact = await previewArtifacts.persistPreviewArtifact(sessionId, result);
+				const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
+				if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, resultWithArtifact);
 				broadcastPreviewChanged(sessionId, {
-					entry: restored.entry,
-					mtime: restored.mtime,
-					url: restored.url,
-					path: restored.path,
-					contentHash: restored.contentHash,
-					artifactId: restored.artifactId,
+					entry: result.entry,
+					mtime: result.mtime,
+					url: result.url,
+					path: result.path,
+					contentHash: result.contentHash,
+					artifactId: artifact.artifactId,
 				});
-				json(restored);
-				return;
-			}
-			if (hasHtml) {
-				// `html` wins over `file` when both are provided.
-				let entry: string | undefined;
-				if (typeof body.entry === "string" && body.entry.length > 0) {
-					const e = body.entry;
-					if (e.includes("/") || e.includes("\\") || e.includes("..") || e.includes("\0")) {
-						json({ error: "Invalid entry name" }, 400);
-						return;
-					}
-					entry = e;
-				}
-				result = previewMount.writeInline(sessionId, body.html as string, entry);
-			} else {
-				const filePath = body.file as string;
-				if (!path.isAbsolute(filePath)) {
-					json({ error: "file path must be absolute" }, 400);
-					return;
-				}
-				if (!fs.existsSync(filePath)) {
-					json({ error: "file not found" }, 404);
-					return;
-				}
-				let stat: fs.Stats;
-				try { stat = fs.statSync(filePath); } catch {
-					json({ error: "file not found" }, 404);
-					return;
-				}
-				if (!stat.isFile()) {
-					json({ error: "path is not a regular file" }, 404);
-					return;
-				}
-				const base = path.basename(filePath).toLowerCase();
-				if (!base.endsWith(".html") && !base.endsWith(".htm")) {
-					json({ error: "file must end in .html or .htm" }, 400);
-					return;
-				}
-				// Collect assets from inline `assets[]` and optional `manifest` JSON.
-				const declared: string[] = [];
-				if (hasAssets) {
-					for (const a of body.assets as unknown[]) {
-						if (typeof a !== "string") {
-							json({ error: "`assets[]` entries must be strings" }, 400);
-							return;
-						}
-						declared.push(a);
-					}
-				}
-				if (hasManifest) {
-					const manifestRel = body.manifest as string;
-					if (path.isAbsolute(manifestRel) || manifestRel.includes("\0") ||
-						manifestRel.includes("\\") || manifestRel.split("/").some(s => s === "..")) {
-						json({ error: "Invalid manifest path" }, 400);
-						return;
-					}
-					const manifestAbs = path.resolve(path.dirname(filePath), manifestRel);
-					if (!fs.existsSync(manifestAbs)) {
-						json({ error: `Manifest '${manifestRel}' not found` }, 404);
-						return;
-					}
-					let manifestParsed: any;
-					try {
-						manifestParsed = JSON.parse(fs.readFileSync(manifestAbs, "utf-8"));
-					} catch (err: any) {
-						jsonError(400, err, { error: `Manifest JSON parse error: ${err?.message ?? err}` });
-						return;
-					}
-					if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
-						json({ error: "Manifest must be an object with an `assets[]` array" }, 400);
-						return;
-					}
-					for (const a of manifestParsed.assets) {
-						if (typeof a !== "string") {
-							json({ error: "Manifest `assets[]` entries must be strings" }, 400);
-							return;
-						}
-						declared.push(a);
-					}
-				}
-				// De-duplicate while preserving order.
-				const seen = new Set<string>();
-				const dedup: string[] = [];
-				for (const a of declared) {
-					const k = a.trim();
-					if (seen.has(k)) continue;
-					seen.add(k);
-					dedup.push(a);
-				}
-				result = previewMount.mountFile(sessionId, filePath, dedup);
-			}
-			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
-			const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
-			if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, resultWithArtifact);
-			broadcastPreviewChanged(sessionId, {
-				entry: result.entry,
-				mtime: result.mtime,
-				url: result.url,
-				path: result.path,
-				contentHash: result.contentHash,
-				artifactId: artifact.artifactId,
+				json(resultWithArtifact);
 			});
-			json(resultWithArtifact);
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
@@ -15083,16 +15143,18 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const restored = previewArtifacts.restorePreviewArtifact(sessionId, artifactId);
-			broadcastPreviewChanged(sessionId, {
-				entry: restored.entry,
-				mtime: restored.mtime,
-				url: restored.url,
-				path: restored.path,
-				contentHash: restored.contentHash,
-				artifactId: restored.artifactId,
+			await withPreviewSessionOperation(sessionId, async () => {
+				const restored = await previewArtifacts.restorePreviewArtifact(sessionId, artifactId);
+				broadcastPreviewChanged(sessionId, {
+					entry: restored.entry,
+					mtime: restored.mtime,
+					url: restored.url,
+					path: restored.path,
+					contentHash: restored.contentHash,
+					artifactId: restored.artifactId,
+				});
+				json(restored);
 			});
-			json(restored);
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewArtifacts.PreviewArtifactError) {
@@ -15118,30 +15180,15 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const { pickEntry } = await import("./preview/content-route.js");
-			const dir = previewMount.mountDir(sessionId);
-			const entry = pickEntry(dir);
-			if (!entry) {
+			const snapshot = await withPreviewSessionOperation(
+				sessionId,
+				() => readPreviewMountSnapshot(sessionId),
+			);
+			if (!snapshot) {
 				json({ error: "no preview mount" }, 404);
 				return;
 			}
-			const entryPath = path.join(dir, entry);
-			let stat: fs.Stats;
-			try { stat = fs.statSync(entryPath); } catch {
-				json({ error: "no preview mount" }, 404);
-				return;
-			}
-			const contentHash = previewMount.contentHashForMount(sessionId);
-			const artifact = previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
-			json({
-				url: `/preview/${sessionId}/${entry}`,
-				path: entryPath,
-				relPath: path.posix.join(sessionId, entry),
-				entry,
-				mtime: Math.floor(stat.mtimeMs),
-				contentHash,
-				artifactId: artifact?.artifactId,
-			});
+			json(snapshot);
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
@@ -15177,52 +15224,56 @@ async function handleApiRoute(
 		// Initial hello so the client knows the stream is live.
 		res.write(`event: hello\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
 
-		// Subscribe to the in-process preview-changed channel populated by the
-		// mount POST endpoint. Payload shape `{entry, mtime, url, path}` is
-		// forwarded verbatim — the client reads `entry` to seed the iframe.
-		const unsubscribe = subscribePreviewChanged(sid, payload => {
-			try {
-				res.write(`event: preview-changed\ndata: ${JSON.stringify(payload)}\n\n`);
-			} catch { /* socket closed */ }
-		});
-		// Bootstrap: if a mount already exists for this session, emit the
-		// current state synchronously so the just-connected client doesn't
-		// wait for the next agent write. Avoids a race where
-		// broadcastPreviewChanged fires between EventSource open and the
-		// subscription being registered. Payload shape `{entry, mtime, url,
-		// path}` matches broadcastPreviewChanged so the client doesn't need
-		// to distinguish bootstrap from live events.
-		try {
-			const { pickEntry } = await import("./preview/content-route.js");
-			const dir = previewMount.mountDir(sid);
-			if (fs.existsSync(dir)) {
-				const entry = pickEntry(dir);
-				if (entry) {
-					const entryPath = path.join(dir, entry);
-					const stat = fs.statSync(entryPath);
-					const contentHash = previewMount.contentHashForMount(sid);
-					const artifact = previewArtifacts.findPreviewArtifactByHash(sid, contentHash);
-					res.write(`event: preview-changed\ndata: ${JSON.stringify({
-						entry,
-						mtime: Math.floor(stat.mtimeMs),
-						url: `/preview/${sid}/${entry}`,
-						path: entryPath,
-						contentHash,
-						artifactId: artifact?.artifactId,
-					})}\n\n`);
-				}
-			}
-		} catch { /* ok — bootstrap is best-effort */ }
-		const keepalive = setInterval(() => {
-			try { res.write(":keepalive\n\n"); } catch { /* ok */ }
-		}, 25_000);
-		if (typeof keepalive.unref === "function") keepalive.unref();
+		let unsubscribe: (() => void) | undefined;
+		let keepalive: ReturnType<typeof setInterval> | undefined;
+		let closed = false;
 		const cleanup = () => {
-			clearInterval(keepalive);
-			try { unsubscribe(); } catch { /* ok */ }
+			closed = true;
+			if (keepalive) {
+				clearInterval(keepalive);
+				keepalive = undefined;
+			}
+			const currentUnsubscribe = unsubscribe;
+			unsubscribe = undefined;
+			try { currentUnsubscribe?.(); } catch { /* ok */ }
 		};
 		req.on("close", cleanup);
 		req.on("error", cleanup);
+
+		// Subscribe and bootstrap while holding the same per-session critical
+		// section as preview mutation. A writer therefore cannot publish a live
+		// event between snapshot capture and bootstrap delivery, so clients always
+		// observe bootstrap before later live state and never receive a stale
+		// bootstrap overwrite after a newer event.
+		try {
+			await withPreviewSessionOperation(sid, async () => {
+				if (closed) return;
+				unsubscribe = subscribePreviewChanged(sid, payload => {
+					if (closed) return;
+					try {
+						res.write(`event: preview-changed\ndata: ${JSON.stringify(payload)}\n\n`);
+					} catch { /* socket closed */ }
+				});
+				const snapshot = await readPreviewMountSnapshot(sid);
+				if (!snapshot || closed) return;
+				res.write(`event: preview-changed\ndata: ${JSON.stringify({
+					entry: snapshot.entry,
+					mtime: snapshot.mtime,
+					url: snapshot.url,
+					path: snapshot.path,
+					contentHash: snapshot.contentHash,
+					artifactId: snapshot.artifactId,
+				})}\n\n`);
+			});
+		} catch { /* ok — bootstrap is best-effort */ }
+		if (closed) {
+			cleanup();
+			return;
+		}
+		keepalive = setInterval(() => {
+			try { res.write(":keepalive\n\n"); } catch { /* ok */ }
+		}, 25_000);
+		if (typeof keepalive.unref === "function") keepalive.unref();
 		return;
 	}
 
