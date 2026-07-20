@@ -18,9 +18,13 @@
  *      `<container>/web/` is treated as active in both repos).
  *   2. Aggregating two per-repo classifications yields the expected union.
  */
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import { classifyWorktrees } from "../../src/server/agent/worktree-sweeper.ts";
+import path from "node:path";
+import { RECOVERY_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
+import { classifyWorktrees, sweepOrphanedWorktrees } from "../../src/server/agent/worktree-sweeper.ts";
+import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import type { RemoteGitPolicy } from "../../src/server/skills/git.ts";
 
 describe("worktree-sweeper — multi-repo classification", () => {
 	it("recognises per-repo worktrees of the same session as active in both repos", () => {
@@ -158,5 +162,293 @@ branch refs/heads/goal/fix-abcdef12
 		assert.equal(apiOut.orphan.length, 0);
 		assert.equal(sharedOut.active.length, 1);
 		assert.equal(sharedOut.orphan.length, 0);
+	});
+});
+
+class Deferred {
+	readonly promise: Promise<void>;
+	private resolvePromise!: () => void;
+
+	constructor() {
+		this.promise = new Promise<void>(resolve => { this.resolvePromise = resolve; });
+	}
+
+	resolve(): void {
+		this.resolvePromise();
+	}
+}
+
+async function drainMicrotasksUntil(predicate: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 200; attempt++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	assert.fail("condition did not become true while draining microtasks");
+}
+
+function porcelainWorktree(worktreePath: string, branch?: string): string {
+	return `worktree ${worktreePath}\n${branch ? `branch refs/heads/${branch}\n` : "detached\n"}`;
+}
+
+function cannedRunner(listings: Map<string, string>, failingRepos = new Set<string>()) {
+	const calls: Array<{ args: string[]; cwd?: string; options?: Record<string, unknown> }> = [];
+	const runner: CommandRunner = {
+		async execFile(file, args, options) {
+			assert.equal(file, "git");
+			const cwd = typeof options?.cwd === "string" ? options.cwd : undefined;
+			calls.push({ args: [...args], cwd, options: options as Record<string, unknown> | undefined });
+			if (args[0] === "worktree" && args[1] === "list") {
+				if (cwd && failingRepos.has(cwd)) throw new Error("list failed");
+				return { stdout: cwd ? listings.get(cwd) ?? "" : "", stderr: "" };
+			}
+			return { stdout: "", stderr: "" };
+		},
+	};
+	return { calls, runner };
+}
+
+describe("worktree-sweeper — bounded asynchronous sweep", () => {
+	it("bounds deferred repo probes and yields to unrelated event-loop work", async () => {
+		const gate = new Deferred();
+		let active = 0;
+		let maxActive = 0;
+		const accessCalls: string[] = [];
+		const fs = {
+			async access(filePath: string) {
+				accessCalls.push(filePath);
+				active++;
+				maxActive = Math.max(maxActive, active);
+				try {
+					await gate.promise;
+				} finally {
+					active--;
+				}
+			},
+		};
+		const roots = Array.from(
+			{ length: RECOVERY_IO_CONCURRENCY * 3 + 1 },
+			(_, index) => path.resolve("virtual-sweeper", `repo-${index}`),
+		);
+		const listings = new Map(roots.map(root => [root, porcelainWorktree(root, "master")]));
+		const { runner } = cannedRunner(listings);
+		let settled = false;
+		let unrelatedMicrotaskRan = false;
+		const sweep = sweepOrphanedWorktrees({
+			projects: roots.map((rootPath, index) => ({ id: `p${index}`, rootPath })),
+			goals: [],
+			sessions: [],
+			staff: [],
+			fs,
+			commandRunner: runner,
+		}).finally(() => { settled = true; });
+		queueMicrotask(() => { unrelatedMicrotaskRan = true; });
+
+		await drainMicrotasksUntil(() => accessCalls.length === RECOVERY_IO_CONCURRENCY);
+		assert.equal(unrelatedMicrotaskRan, true);
+		assert.equal(settled, false);
+		assert.equal(active, RECOVERY_IO_CONCURRENCY);
+		assert.equal(maxActive, RECOVERY_IO_CONCURRENCY);
+		assert.equal(accessCalls.length, RECOVERY_IO_CONCURRENCY,
+			"a deferred scan must not start work beyond the shared ceiling");
+
+		gate.resolve();
+		assert.deepEqual(await sweep, { reclaimed: 0, cleaned: 0, repaired: 0 });
+		assert.equal(accessCalls.length, roots.length);
+		assert.ok(maxActive <= RECOVERY_IO_CONCURRENCY);
+	});
+
+	it("bounds cleanup across repos while keeping each repo sequential", async () => {
+		const roots = Array.from(
+			{ length: RECOVERY_IO_CONCURRENCY * 2 + 1 },
+			(_, index) => path.resolve("virtual-cleanup", `repo-${index}`),
+		);
+		const listings = new Map(roots.map((root, index) => [root, [
+			porcelainWorktree(root, "master"),
+			porcelainWorktree(path.resolve("virtual-cleanup-wt", `orphan-${index}-a`), `session/orphan-${index}-a`),
+			porcelainWorktree(path.resolve("virtual-cleanup-wt", `orphan-${index}-b`), `session/orphan-${index}-b`),
+		].join("\n")]));
+		const { runner } = cannedRunner(listings);
+		const gate = new Deferred();
+		const activeByRepo = new Map<string, number>();
+		let active = 0;
+		let maxActive = 0;
+		let cleanupCalls = 0;
+		const cleanup = async (repoPath: string): Promise<void> => {
+			cleanupCalls++;
+			active++;
+			activeByRepo.set(repoPath, (activeByRepo.get(repoPath) ?? 0) + 1);
+			maxActive = Math.max(maxActive, active);
+			assert.equal(activeByRepo.get(repoPath), 1, "one repo must never mutate two worktrees concurrently");
+			try {
+				await gate.promise;
+			} finally {
+				active--;
+				activeByRepo.set(repoPath, (activeByRepo.get(repoPath) ?? 1) - 1);
+			}
+		};
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			const sweep = sweepOrphanedWorktrees({
+				projects: roots.map((rootPath, index) => ({ id: `p${index}`, rootPath })),
+				goals: [],
+				sessions: [],
+				staff: [],
+				fs: { access: async () => {} },
+				commandRunner: runner,
+				cleanupWorktreeImpl: cleanup,
+			});
+
+			await drainMicrotasksUntil(() => cleanupCalls === RECOVERY_IO_CONCURRENCY);
+			assert.equal(active, RECOVERY_IO_CONCURRENCY);
+			assert.equal(maxActive, RECOVERY_IO_CONCURRENCY);
+			gate.resolve();
+			assert.deepEqual(await sweep, { reclaimed: 0, cleaned: roots.length * 2, repaired: 0 });
+			assert.equal(cleanupCalls, roots.length * 2);
+			assert.ok(maxActive <= RECOVERY_IO_CONCURRENCY);
+		} finally {
+			log.mockRestore();
+		}
+	});
+
+	it("preserves every ownership, pool, container, detached, archive, and repair guard", async () => {
+		const repo = path.resolve(".");
+		const worktreeRoot = path.resolve("virtual-safety-wt");
+		const paths = {
+			goal: path.join(worktreeRoot, "goal-live"),
+			shared: path.join(worktreeRoot, "shared-live"),
+			repoOwned: path.join(worktreeRoot, "repo-owned", "api"),
+			teamContainer: path.join(worktreeRoot, "team-container"),
+			teamComponent: path.join(worktreeRoot, "team-container", "api"),
+			staff: path.join(worktreeRoot, "staff-live"),
+			drifted: path.join(worktreeRoot, "drifted"),
+			expected: path.join(worktreeRoot, "expected"),
+			pool: path.join(worktreeRoot, "pool-_pool-abcd1234"),
+			orphan: path.join(worktreeRoot, "orphan"),
+			archived: path.join(worktreeRoot, "archived"),
+			detached: path.join(worktreeRoot, "detached"),
+		};
+		const listing = [
+			porcelainWorktree(repo, "master"),
+			porcelainWorktree(paths.goal, "goal/live"),
+			porcelainWorktree(paths.shared, "session/archived-shared"),
+			porcelainWorktree(paths.repoOwned, "session/repo-owned"),
+			porcelainWorktree(paths.teamComponent, "session/team-component"),
+			porcelainWorktree(paths.staff, "staff-live"),
+			porcelainWorktree(paths.drifted, "session/drift"),
+			porcelainWorktree(paths.pool, "pool/_pool-abcd1234"),
+			porcelainWorktree(paths.orphan, "session/orphan"),
+			porcelainWorktree(paths.archived, "session/archive"),
+			porcelainWorktree(paths.detached),
+			porcelainWorktree("/workspace/session-container", "session/container"),
+		].join("\n");
+		const { calls, runner } = cannedRunner(new Map([[repo, listing]]));
+		const remotePolicy: RemoteGitPolicy = { skipRemotePush: true };
+		const cleanups: Array<{
+			repoPath: string;
+			worktreePath: string;
+			branchName?: string;
+			deleteBranch: boolean;
+			commandRunner?: CommandRunner;
+			remotePolicy?: RemoteGitPolicy;
+		}> = [];
+		const cleanup = async (
+			repoPath: string,
+			worktreePath: string,
+			branchName?: string,
+			deleteBranch = false,
+			commandRunner?: CommandRunner,
+			policy?: RemoteGitPolicy,
+		): Promise<void> => {
+			cleanups.push({ repoPath, worktreePath, branchName, deleteBranch, commandRunner, remotePolicy: policy });
+		};
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			const result = await sweepOrphanedWorktrees({
+				projects: [{ id: "project", rootPath: repo, worktreeRoot }],
+				goals: [{ id: "goal", branch: "goal/live", worktreePath: paths.goal }],
+				sessions: [
+					{ id: "archived-shared", branch: "session/archived-shared", worktreePath: paths.shared, archived: true },
+					{ id: "live-shared", cwd: path.join(paths.shared, "subdir") },
+					{ id: "repo-owned", branch: "session/repo-owned", repoWorktrees: { api: paths.repoOwned } },
+					{ id: "drift", branch: "session/drift", worktreePath: paths.expected },
+					{ id: "archive", branch: "session/archive", worktreePath: paths.archived, archived: true },
+				],
+				teams: [{ id: "team", branch: "session/team", worktreePath: paths.teamContainer, archived: true }],
+				staff: [{ id: "staff", branch: "staff-live", worktreePath: paths.staff }],
+				fs: { access: async () => {} },
+				commandRunner: runner,
+				remotePolicy,
+				cleanupWorktreeImpl: cleanup,
+			});
+
+			assert.deepEqual(result, { reclaimed: 1, cleaned: 2, repaired: 1 });
+			assert.deepEqual(cleanups.map(item => [item.worktreePath, item.branchName, item.deleteBranch]), [
+				[paths.orphan, "session/orphan", true],
+				[paths.archived, "session/archive", false],
+			]);
+			assert.ok(cleanups.every(item => item.repoPath === repo));
+			assert.ok(cleanups.every(item => item.commandRunner === runner), "cleanup must receive the injected runner");
+			assert.ok(cleanups.every(item => item.remotePolicy === remotePolicy), "cleanup must receive the remote policy");
+			const repair = calls.find(call => call.args[0] === "worktree" && call.args[1] === "repair");
+			assert.deepEqual(repair?.args, ["worktree", "repair", paths.drifted]);
+			assert.equal(repair?.cwd, repo, "repair must run through the injected runner in the owning repo");
+			assert.equal(
+				(repair?.options?.env as NodeJS.ProcessEnv | undefined)?.GIT_CEILING_DIRECTORIES,
+				path.dirname(repo),
+				"Git commands must be fenced against upward repo discovery",
+			);
+		} finally {
+			log.mockRestore();
+		}
+	});
+
+	it("requires the configured repo's own .git marker instead of searching upward", async () => {
+		const nestedRoot = path.join(path.resolve("."), "nested-non-repo-fixture");
+		const orphan = path.resolve("virtual-upward-wt", "orphan");
+		const { calls, runner } = cannedRunner(new Map([[
+			nestedRoot,
+			[porcelainWorktree(path.resolve("."), "master"), porcelainWorktree(orphan, "session/orphan")].join("\n"),
+		]]));
+		const cleaned: string[] = [];
+		const result = await sweepOrphanedWorktrees({
+			projects: [{ id: "nested", rootPath: nestedRoot }],
+			goals: [],
+			sessions: [],
+			staff: [],
+			fs: { access: async () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); } },
+			commandRunner: runner,
+			cleanupWorktreeImpl: async (_repo, worktreePath) => { cleaned.push(worktreePath); },
+		});
+		assert.deepEqual(result, { reclaimed: 0, cleaned: 0, repaired: 0 });
+		assert.deepEqual(calls, [], "Git must not inspect an ancestor checkout");
+		assert.deepEqual(cleaned, []);
+	});
+
+	it("isolates a failed repo listing and still cleans later repositories", async () => {
+		const projectRoot = path.resolve("virtual-multi-project");
+		const badRepo = path.join(projectRoot, "bad");
+		const goodRepo = path.join(projectRoot, "good");
+		const orphan = path.resolve("virtual-multi-wt", "orphan");
+		const { runner } = cannedRunner(
+			new Map([[goodRepo, [porcelainWorktree(goodRepo, "master"), porcelainWorktree(orphan, "session/orphan")].join("\n")]]),
+			new Set([badRepo]),
+		);
+		const cleaned: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			const result = await sweepOrphanedWorktrees({
+				projects: [{ id: "multi", rootPath: projectRoot, repos: ["bad", "good"] }],
+				goals: [],
+				sessions: [],
+				staff: [],
+				fs: { access: async () => {} },
+				commandRunner: runner,
+				cleanupWorktreeImpl: async (_repo, worktreePath) => { cleaned.push(worktreePath); },
+			});
+			assert.deepEqual(result, { reclaimed: 0, cleaned: 1, repaired: 0 });
+			assert.deepEqual(cleaned, [orphan]);
+		} finally {
+			log.mockRestore();
+		}
 	});
 });
