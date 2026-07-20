@@ -3340,8 +3340,9 @@ Only truly global state lives in the server's central state directory.
 | `preview-artifacts/<sid>/<artifactId>/` | `src/server/preview/artifacts.ts` | Immutable copies of the mounted bytes captured on every successful `POST /api/preview/mount`. Each artifact directory holds `artifact.json` metadata plus the exact mount tree. Deduplicated by `contentHash` per session. Survives session archival; removed on session purge (`removeArtifacts(sid)`) or via the `sweepOrphanArtifacts(knownIds)` maintenance helper. Full lifecycle and restore semantics in [`docs/design/side-panel-tab-contract.md`](design/side-panel-tab-contract.md) and [`docs/preview-architecture.md`](preview-architecture.md). |
 `auth-cookies.json` is not global state any more. If a legacy copy exists here,
 the gateway leaves its bytes untouched and never reads, parses, stats, migrates,
-prunes, rewrites, or deletes it. Legacy 64-hex cookies are invalid and can be
-replaced only through an eligible browser bootstrap.
+prunes, rewrites, or deletes it. Legacy 64-hex cookies are invalid; an existing
+UI tab self-heals only when an eligible Bearer-authenticated browser API request
+replaces its cookie, without touching the file.
 
 ### `<serverSecretsDir>/` — live cookie secret
 
@@ -3351,15 +3352,16 @@ replaced only through an eligible browser bootstrap.
 
 The cookie wire format is
 `v1.<iat>.<exp>.<nonce>.<signature>` with a 30-day signed lifetime. Bootstrap
-requires an admin Bearer or localhost-trusted authentication plus qualifying
-browser Fetch Metadata/Origin; renewal is limited to valid signed-cookie API
-requests within the inclusive seven-day window. Plain Bearer, sandbox,
-session-bound, internal callback, preview content, and preview SSE requests do
-not receive `Set-Cookie`. These browser headers are routing metadata, not a
-human identity proof: a shared-admin-token holder can deliberately make an
-eligible browser-shaped request and obtain the weak operator cookie. There is
-no independent per-cookie revocation; rotating the stable key invalidates all
-cookies.
+requires admin Bearer or localhost-trusted authentication plus the browser
+Fetch Metadata and Origin rules; renewal is limited to signed-cookie API
+requests in the inclusive seven-day window. Bearer-only requests lacking that
+metadata, sandbox or session-bound traffic, internal callbacks, preview
+content, and preview SSE do not receive `Set-Cookie`. These browser headers are
+routing metadata, not a human identity proof: a shared-admin-token holder can
+deliberately make an eligible browser-shaped request and obtain the weak
+operator cookie. There is no independent per-cookie revocation; rotating the
+stable key invalidates all cookies. See [Preview cookie auth](preview-architecture.md#cookie-auth)
+for the exact issuance matrix.
 
 ### Active agent directory
 

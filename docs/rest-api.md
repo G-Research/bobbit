@@ -7,23 +7,38 @@ instead authenticate with a valid `bobbit_session` cookie. Scoped sandbox and
 session credentials remain limited to their existing route allow-lists.
 
 `bobbit_session` is a stateless signed value:
-`v1.<iat>.<exp>.<nonce>.<signature>`. Its 30-day issuance and expiry timestamps
-and 16-byte random nonce are authenticated with HMAC-SHA-256. Only the stable,
-exact 32-byte key at `<serverSecretsDir>/cookie-signing-key` is persisted; it is
-loaded or safely created once at gateway startup. Verification is bounded,
-constant-memory, timing-safe, and entirely in memory. The admin Bearer token is
-never embedded in the cookie. A legacy `auth-cookies.json`, regardless of size
-or corruption, is left untouched and is never loaded or rewritten.
+`v1.<iat>.<exp>.<nonce>.<signature>`. The canonical issuance and expiry Unix
+seconds and 16-byte random nonce are authenticated by a 32-byte HMAC-SHA-256
+tag over the exact ASCII `v1.<iat>.<exp>.<nonce>` prefix. Cookies have a fixed
+30-day lifetime. Verification, including fixed-size timing-safe signature
+comparison, is bounded and entirely in memory.
 
-An absent, invalid, or legacy cookie is bootstrapped only after admin Bearer or
-localhost-trusted authentication on an eligible browser-signaled API request.
-A valid signed cookie is renewed only within the inclusive seven-day window.
-Plain Bearer traffic without qualifying same-origin Fetch Metadata, sandbox or
-session-bound traffic, internal callbacks, preview content, and preview SSE do
-not receive `Set-Cookie`. Fetch Metadata and Origin classify browser traffic;
-they do not establish authority or prove a human caller. Consequently, a holder
-of the shared admin token can still deliberately make an otherwise eligible
-browser-shaped request and obtain the weak operator cookie. Cookies have
+The only cookie state persisted is the stable, exact 32-byte signing key at
+`<serverSecretsDir>/cookie-signing-key`. It is safely created or loaded once at
+gateway startup with mode `0o600` and a `0o700` parent directory where Unix
+permissions are supported. Invalid existing key material fails startup. The
+admin Bearer token is never embedded in the cookie.
+
+A legacy `<stateDir>/auth-cookies.json`, regardless of size or corruption, is
+never inspected, migrated, rewritten, or deleted. A legacy 64-hex cookie is
+invalid, but an existing UI tab self-heals when its next eligible
+Bearer-authenticated API request replaces it with a signed cookie; the legacy
+file remains untouched.
+
+Bootstrap requires admin Bearer or localhost-trusted authentication on an
+eligible browser-signaled API request. Renewal requires a qualifying API
+request authenticated by the signed cookie and occurs only at or within the
+inclusive seven-day window. A fresh valid cookie is not issued repeatedly.
+Plain Bearer traffic without the required same-origin Fetch Metadata, sandbox
+or session-bound traffic, internal callbacks, preview content, and preview SSE
+do not receive `Set-Cookie`. The [preview cookie-auth reference](preview-architecture.md#cookie-auth)
+documents the exact Fetch Metadata, Origin, Vite, credential, header, and route
+exclusions.
+
+Those browser headers classify issuance only; they do not establish authority
+or prove a human caller. Consequently, a holder of the shared admin token can
+still deliberately make an otherwise eligible browser-shaped request and
+obtain the weak operator cookie. Cookies have
 `HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`, plus `Secure` outside
 localhost HTTP mode. Individual cookies are not independently revocable;
 rotating the signing key invalidates all of them.

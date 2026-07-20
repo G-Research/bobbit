@@ -307,48 +307,104 @@ eligibility).
 Set-Cookie: bobbit_session=v1.<iat>.<exp>.<nonce>.<signature>; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000
 ```
 
-`iat` and `exp` are canonical Unix seconds, `nonce` is 16 random bytes encoded
-as unpadded base64url, and `signature` is a 32-byte HMAC-SHA-256 tag over the
-preceding four fields, also encoded as unpadded base64url. The fixed lifetime is
-30 days. `Secure` is added outside localhost HTTP mode (the browser would
-otherwise discard the cookie on plain HTTP).
+The signed ASCII value has these canonical fields:
 
-- **Persisted material:** only the stable 32-byte signing key at
-  `<serverSecretsDir>/cookie-signing-key` (`0o600`, with the secrets directory
-  restricted to `0o700`, where supported). It is safely created or loaded once
-  at gateway startup. The admin Bearer token is never a key or payload field.
-- **Legacy registry:** any `<stateDir>/auth-cookies.json` is retired legacy
-  data. The gateway leaves arbitrary or corrupt copies untouched: it does not
-  read, parse, stat, migrate, prune, rewrite, or delete them.
-- **Verified:** `tryAuth(req, store)` validates the signed value entirely in
-  memory with bounded work and constant memory, including fixed-length
-  timing-safe signature comparison, timestamps, lifetime, and expiry. Request
-  authentication performs no filesystem I/O and no registry lookup.
-- **Bootstrap:** an absent, invalid, or legacy cookie is replaced only after
-  admin Bearer or localhost-trusted authentication on a qualifying
-  browser-signaled API request. The request must carry accepted same-origin
-  Fetch Metadata and, when present, a trusted Origin. Plain Bearer requests,
-  session-bound agent traffic, sandbox credentials, and internal callback
-  routes never receive `Set-Cookie`.
-- **Renewal:** a valid signed-cookie-authenticated browser API request receives
-  one replacement only when expiry is at or within the inclusive seven-day
-  renewal window. Preview content and preview SSE authenticate cookies but do
-  not issue or renew them.
-- **Revocation:** cookies are not independently revocable because there is no
-  per-cookie registry. Rotating the stable signing key invalidates all cookies;
-  otherwise each cookie expires from its bounded signed timestamp.
-- **Localhost short-circuit:** the content route honours `isLocalhost: true`
-  and skips the cookie check, matching legacy behaviour.
-- **Sandbox tokens** keep their existing scoped allow-list. The content route
-  refuses sandbox-scoped requests, and sandbox-authenticated traffic never
-  mints or renews cookies.
+- `iat` and `exp` are unsigned base-10 Unix seconds represented as safe
+  integers. The signer sets `exp = iat + 2592000` (30 days).
+- `nonce` is exactly 16 random bytes encoded as canonical unpadded base64url.
+- `signature` is the canonical unpadded base64url encoding of the 32-byte
+  HMAC-SHA-256 tag over the exact ASCII prefix
+  `v1.<iat>.<exp>.<nonce>`.
 
-Fetch Metadata and Origin are issuance-routing signals, not a new security
-boundary: a holder of the shared admin token can deliberately make an otherwise
-eligible browser-shaped request and obtain the weak operator cookie. The
-Bearer-token-in-URL flow remains a one-shot UI credential bootstrap (mobile
-links, OAuth callback); it does not authenticate per-request UI traffic and a
-query token alone does not bypass cookie eligibility.
+Verification rejects unsupported versions, malformed or non-canonical fields,
+a changed key, a bad signature, non-positive or over-30-day lifetimes, an `iat`
+more than five minutes in the future, and expiry at `now >= exp`. Parsing and
+verification use bounded work and memory. The signature comparison uses
+fixed-size buffers and `timingSafeEqual`; request authentication performs no
+filesystem I/O. `Secure` is added outside localhost HTTP mode because a browser
+would discard it on plain localhost HTTP.
+
+Only the stable, exact 32-byte signing key is persisted at
+`<serverSecretsDir>/cookie-signing-key`. The loader creates or reads it once
+while the gateway starts, before request handling, and then passes an in-memory
+copy to the signer/verifier. Reusing that key keeps signed cookies valid across
+gateway restarts. On platforms with Unix permission semantics, the file is
+`0o600` and the secrets directory is `0o700`. Safe first publication
+uses a fully written, fsynced same-directory temporary file and a
+create-if-absent hard link, so concurrent gateway starts converge on one
+complete key. An unreadable, malformed, or non-regular existing key stops
+startup rather than being silently replaced. The admin Bearer token is never a
+key or payload field.
+
+Any `<stateDir>/auth-cookies.json` is retired legacy data. The gateway never
+opens, reads, parses, stats, migrates, prunes, rewrites, or deletes it, so even a
+large or corrupt copy cannot affect startup or request handling. A legacy
+64-hex cookie is simply invalid. An existing UI tab self-heals when its next
+otherwise eligible Bearer-authenticated API request replaces that value with a
+signed cookie; the legacy file remains byte-for-byte untouched.
+
+### Issuance eligibility
+
+Cookie authentication and cookie issuance are separate decisions. A valid
+signed cookie continues to authenticate supported API, preview content, and
+preview SSE requests without Fetch Metadata. Only the decision to emit
+`Set-Cookie` uses the central browser classifier after credential
+authentication; the classifier neither grants nor changes route authorization.
+
+Every issuing request must satisfy all of these metadata rules:
+
+- Exactly one `Sec-Fetch-Site` value normalizes to `same-origin`.
+- Exactly one `Sec-Fetch-Mode` value normalizes to `cors` or `same-origin`.
+- A non-`GET` request has exactly one `Origin`. `GET` may omit it. When present,
+  it must be one serialized `http:` or `https:` origin with no credentials,
+  resource path, query, or fragment.
+- With the built UI served directly, `Origin` must match the request origin
+  derived from the actual TLS socket and validated `Host`, including its port.
+  In Vite development, the preserved browser Origin may use a different port
+  when both sides use the configured host, or when both sides are loopback
+  aliases. Non-loopback HTTP is always rejected.
+- `Forwarded` and `X-Forwarded-*` are not trusted because the gateway has no
+  configured trusted-proxy boundary.
+
+After those rules pass:
+
+- **Bootstrap:** admin Bearer authentication or localhost-trusted
+  authentication may replace an absent, invalid, or legacy cookie.
+- **Renewal:** a valid signed-cookie-authenticated API request may receive one
+  replacement when `exp - now <= 604800` (the inclusive seven-day window). A
+  fresh cookie is not reissued on later requests.
+
+The following are ineligible. The identity and route exclusions still win when
+a request authenticates successfully and presents browser-shaped headers:
+
+- Bearer-only traffic without the Fetch Metadata above;
+- any request carrying `X-Bobbit-Session-Id`,
+  `X-Bobbit-Spawning-Session`, or `X-Bobbit-Session-Secret`;
+- any request presenting a sandbox token in an Authorization or `?token=`
+  credential, including a mixed admin-plus-sandbox request;
+- `/api/internal` and its descendants;
+- `POST /api/sessions/:id/provider-hooks/before-prompt`,
+  `POST /api/sessions/:id/provider-hooks/before-compact`,
+  `GET /api/sessions/:id/google-code-assist/token`, and
+  `POST /api/sessions/:id/tool-grant-request`;
+- preview content under `/preview/...` and
+  `GET /api/sessions/:id/preview-events`.
+
+These exclusions prevent CLI, agent, sandbox, and callback volume from
+creating browser state. They do not alter Bearer validation, session and
+sandbox route guards, or preview authorization. Sandbox tokens keep their
+existing scoped allow-list, while the preview content route refuses them.
+Localhost content serving keeps its existing trusted-local authentication
+short-circuit.
+
+Fetch Metadata and Origin are spoofable issuance-routing signals, not a new
+security boundary or proof of a human caller. A holder of the shared admin token
+can deliberately make an otherwise eligible browser-shaped request and obtain
+the weak operator cookie. The Bearer-token-in-URL flow remains a one-shot UI
+credential bootstrap (mobile links, OAuth callback); it does not authenticate
+per-request UI traffic, and a query token alone does not bypass cookie
+eligibility. Cookies are not independently revocable because there is no
+registry; rotating the signing key invalidates all signed cookies.
 
 ## SSE — `GET /api/sessions/:sid/preview-events`
 

@@ -301,9 +301,12 @@ helpers so REST and the verification harness share one code path:
 The mutating Children REST endpoints are reachable by anything holding gateway
 credentials, so they are guarded server-side by `authorizeChildrenMutation`
 (`src/server/auth/children-mutation-authz.ts`). Because agents read the
-**shared admin Bearer token** off disk and any holder of it can mint the
-server-issued `bobbit_session` cookie, the cookie is only a **weak human
-signal**. To shrink the blast radius the mutations are split into two classes:
+**shared admin Bearer token** off disk and any holder can deliberately make an
+eligible browser-shaped API request to obtain the signed `bobbit_session`
+cookie, the cookie is only a **weak human signal**. The issuance classifier
+prevents accidental minting by plain Bearer, session-bound, sandbox, and
+internal callback traffic, but its browser headers are not proof of a human. To
+shrink the blast radius the mutations are split into two classes:
 
 - **`orchestration`** — `spawn-child`, plan `PATCH`, `integrate-child`, and
   `policy` bodies carrying `divergencePolicy` / `maxConcurrentChildren`. The
@@ -323,16 +326,16 @@ The header is never trusted as a bare claim — only compared for equality
 against `TeamManager.getTeamState(goalId)?.teamLeadSessionId`.
 
 **Residual risk (accepted; future work).** The `operator` endpoints still
-trust the shared admin Bearer token: any token holder can mint the
-`bobbit_session` cookie and drive the operator verbs. This is an **inherent
-property of Bobbit's single shared-credential model** — agents and the human
-share one gateway token, so the cookie path cannot cryptographically
-distinguish a human operator from a token-holding agent. **Full separation
-requires a dedicated operator credential** (a distinct human-only secret that
-agents never possess), which is out of scope for this port and tracked as
-future work. The orchestration/operator split removes the cookie bypass from
-the high-impact orchestration surface without claiming to fully isolate the
-operator surface.
+indirectly trust the shared admin Bearer token: any token holder can synthesize
+an eligible browser-shaped request, obtain the `bobbit_session` cookie, and
+drive the operator verbs. This is an **inherent property of Bobbit's single
+shared-credential model** — agents and the human share one gateway token, so
+the cookie path cannot cryptographically distinguish a human operator from a
+token-holding agent. **Full separation requires a dedicated operator
+credential** (a distinct human-only secret that agents never possess), which is
+out of scope for this port and tracked as future work. The
+orchestration/operator split removes the cookie bypass from the high-impact
+orchestration surface without claiming to fully isolate the operator surface.
 
 ### Persisted `PersistedGoal` fields (owned by `goal-store.ts`)
 `parentGoalId?`, `subgoalsAllowed?`, `maxNestingDepth?`,
