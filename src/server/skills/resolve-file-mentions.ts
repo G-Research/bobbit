@@ -1040,10 +1040,21 @@ function admitFileMentionSource(text: string): boolean {
 	return true;
 }
 
-/** Windows network/device namespaces are never filesystem mention targets. */
+const WINDOWS_DOS_DEVICE_SEGMENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?=$|[.:])/i;
+
+/** Windows network/device namespaces and reserved DOS devices are never
+ * filesystem mention targets, regardless of the resolver host platform. */
 function isWindowsNamespaceToken(rawPath: string): boolean {
 	const normalized = rawPath.replace(/\\/g, "/");
-	return normalized.startsWith("//") || normalized.startsWith("/??/");
+	if (normalized.startsWith("//") || normalized.startsWith("/??/")) return true;
+
+	// A drive-relative path such as `C:CON.txt` addresses the same reserved
+	// device as `CON.txt`. Every later component is checked too: Win32 treats a
+	// reserved basename as a device even with an extension or colon suffix.
+	const pathWithoutDrive = /^[a-z]:/i.test(normalized) ? normalized.slice(2) : normalized;
+	return pathWithoutDrive
+		.split("/")
+		.some((segment) => WINDOWS_DOS_DEVICE_SEGMENT.test(segment));
 }
 
 /** Scan prose for `@path` tokens while preserving original UTF-16 indices. */
