@@ -50,27 +50,14 @@ const {
 	MAX_MENTIONS_PER_SEND,
 } = resolverModule;
 
-type ResolutionLimitErrorConstructor = new (...args: unknown[]) => Error & {
-	code: string;
-	limitKind: "text-length" | "candidate-count";
-	limit: number;
-	observed: number;
-};
-const MAX_FILE_MENTION_TEXT_CHARS = (
-	Reflect.get(resolverModule, "MAX_FILE_MENTION_TEXT_CHARS")
-		?? Reflect.get(resolverModule, "MAX_FILE_MENTION_PROMPT_CHARS")
-) as number;
-const MAX_FILE_MENTION_CANDIDATES = Reflect.get(resolverModule, "MAX_FILE_MENTION_CANDIDATES") as number;
 const FILE_MENTION_RESOLUTION_CONCURRENCY = (
 	Reflect.get(resolverModule, "FILE_MENTION_RESOLUTION_CONCURRENCY")
 		?? Reflect.get(resolverModule, "FILE_MENTION_RESOLVER_CONCURRENCY")
 ) as number;
-const FileMentionResolutionLimitError = Reflect.get(
-	resolverModule,
-	"FileMentionResolutionLimitError",
-) as ResolutionLimitErrorConstructor;
 
 const EXPECTED_LSTAT_CONCURRENCY = 8;
+const itOnWin32 = process.platform === "win32" ? it : it.skip;
+const itOnPosix = process.platform === "win32" ? it.skip : it;
 
 interface Deferred<T> {
 	promise: Promise<T>;
@@ -135,12 +122,6 @@ describe("resolveFileMentions", () => {
 		assert.equal(MAX_MENTIONS_PER_SEND, 50);
 	});
 
-	it("exports explicit resolver text and candidate admission limits", async () => {
-		assert.equal(MAX_FILE_MENTION_TEXT_CHARS, 1024 * 1024);
-		assert.equal(MAX_FILE_MENTION_CANDIDATES, 512);
-		assert.equal(typeof FileMentionResolutionLimitError, "function");
-	});
-
 	it("no mentions → text unchanged, empty mentions", async () => {
 		const text = "just a normal message";
 		const r = await resolveFileMentions(text, cwdDir);
@@ -171,116 +152,113 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
-	it("rejects text above the admission limit before Markdown or filesystem work", async () => {
-		assert.ok(Number.isSafeInteger(MAX_FILE_MENTION_TEXT_CHARS));
-		const prefix = "`code` @notes.txt ";
-		const text = `${prefix}${"x".repeat(MAX_FILE_MENTION_TEXT_CHARS - prefix.length + 1)}`;
-		const markdownLexer = vi.spyOn(marked, "lexer");
-		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
-		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
-		const openSpy = vi.spyOn(fs, "openSync");
-		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
-
-		try {
-			const rejection = await resolveFileMentions(text, cwdDir).then(
-				() => undefined,
-				(error: unknown) => error,
-			);
-			assert.equal(markdownLexer.mock.calls.length, 0, "over-limit text must not invoke Marked");
-			assert.equal(lstatSpy.mock.calls.length, 0, "over-limit text must not probe targets");
-			assert.equal(promiseOpenSpy.mock.calls.length, 0);
-			assert.equal(openSpy.mock.calls.length, 0);
-			assert.equal(realpathSpy.mock.calls.length, 0, "over-limit text must not canonicalize cwd");
-			assert.ok(rejection instanceof FileMentionResolutionLimitError);
-			assert.equal(rejection.code, "FILE_MENTION_RESOLUTION_LIMIT");
-			assert.equal(rejection.limitKind, "text-length");
-			assert.equal(rejection.limit, MAX_FILE_MENTION_TEXT_CHARS);
-			assert.equal(rejection.observed, text.length);
-		} finally {
-			realpathSpy.mockRestore();
-			openSpy.mockRestore();
-			promiseOpenSpy.mockRestore();
-			lstatSpy.mockRestore();
-			markdownLexer.mockRestore();
-		}
-	});
-
-	it("rejects candidates above the admission limit before Markdown or filesystem work", async () => {
-		assert.ok(Number.isSafeInteger(MAX_FILE_MENTION_CANDIDATES));
-		const candidates = Array.from(
-			{ length: MAX_FILE_MENTION_CANDIDATES + 1 },
-			(_, index) => `@admission-${index}.txt`,
+	it("keeps a practical large fenced and inline-code prompt with more than 512 candidates literal", async () => {
+		const fencedCandidates = Array.from(
+			{ length: 300 },
+			(_, index) => `@fenced-candidate-${index}.txt`,
 		).join(" ");
-		const text = `\`code\` ${candidates}`;
-		const markdownLexer = vi.spyOn(marked, "lexer");
+		const inlineCandidates = Array.from(
+			{ length: 300 },
+			(_, index) => `@inline-candidate-${index}.txt`,
+		).join(" ");
+		const text = [
+			"```text",
+			fencedCandidates,
+			"x".repeat(1024 * 1024),
+			"```",
+			`inline \`${inlineCandidates}\``,
+		].join("\n");
 		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
 		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
 		const openSpy = vi.spyOn(fs, "openSync");
-		const realpathSpy = vi.spyOn(fs.realpathSync, "native");
 
 		try {
-			const rejection = await resolveFileMentions(text, cwdDir).then(
-				() => undefined,
-				(error: unknown) => error,
-			);
-			assert.equal(markdownLexer.mock.calls.length, 0, "over-limit candidates must not invoke Marked");
-			assert.equal(lstatSpy.mock.calls.length, 0, "over-limit candidates must not probe targets");
-			assert.equal(promiseOpenSpy.mock.calls.length, 0);
-			assert.equal(openSpy.mock.calls.length, 0);
-			assert.equal(realpathSpy.mock.calls.length, 0, "over-limit candidates must not canonicalize cwd");
-			assert.ok(rejection instanceof FileMentionResolutionLimitError);
-			assert.equal(rejection.code, "FILE_MENTION_RESOLUTION_LIMIT");
-			assert.equal(rejection.limitKind, "candidate-count");
-			assert.equal(rejection.limit, MAX_FILE_MENTION_CANDIDATES);
-			assert.equal(rejection.observed, MAX_FILE_MENTION_CANDIDATES + 1);
+			assert.ok(text.length > 1024 * 1024, "fixture must exercise large raw Markdown");
+			assert.equal(text.match(/@(?:fenced|inline)-candidate-/g)?.length, 600);
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.deepEqual(result.mentions, []);
+			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, 0, "code-contained candidates must not reach lstat");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "code-contained candidates must not reach promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "code-contained candidates must not reach openSync");
 		} finally {
-			realpathSpy.mockRestore();
 			openSpy.mockRestore();
 			promiseOpenSpy.mockRestore();
 			lstatSpy.mockRestore();
-			markdownLexer.mockRestore();
 		}
 	});
 
-	it("resolves a valid reference exactly at the text admission boundary", async () => {
-		assert.ok(Number.isSafeInteger(MAX_FILE_MENTION_TEXT_CHARS));
-		const suffix = " @notes.txt";
-		const text = `${"x".repeat(MAX_FILE_MENTION_TEXT_CHARS - suffix.length)}${suffix}`;
-		const result = await resolveFileMentions(text, cwdDir);
+	it("keeps more than 512 genuinely missing prose candidates literal under bounded lstat concurrency", async () => {
+		const candidateCount = 513;
+		const text = Array.from(
+			{ length: candidateCount },
+			(_, index) => `@missing-prose-${index}.txt`,
+		).join(" ");
+		let active = 0;
+		let maxActive = 0;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation((async () => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			try {
+				await Promise.resolve();
+				throw missingPathError();
+			} finally {
+				active--;
+			}
+		}) as typeof fs.promises.lstat);
+		const openSpy = vi.spyOn(fs, "openSync");
 
-		assert.equal(text.length, MAX_FILE_MENTION_TEXT_CHARS);
-		assert.deepEqual(
-			result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
-			[{ kind: "text", path: "notes.txt" }],
-		);
-		assert.equal(
-			result.modelText,
-			`${text.slice(0, -"@notes.txt".length)}${buildFileReferenceBlock("notes.txt", NOTES_CONTENT)}`,
-		);
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.deepEqual(result.mentions, []);
+			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, candidateCount);
+			assert.ok(maxActive > 0);
+			assert.ok(maxActive <= EXPECTED_LSTAT_CONCURRENCY, "missing-target probes must remain bounded");
+			assert.equal(openSpy.mock.calls.length, 0, "missing targets must never be opened");
+		} finally {
+			openSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
 	});
 
-	it("resolves a valid reference at the candidate admission boundary", async () => {
-		assert.ok(Number.isSafeInteger(MAX_FILE_MENTION_CANDIDATES));
+	it("resolves an existing text file after more than 512 missing candidates with an exact UTF-16 splice", async () => {
 		const missing = Array.from(
-			{ length: MAX_FILE_MENTION_CANDIDATES - 1 },
-			(_, index) => `@boundary-missing-${index}.txt`,
+			{ length: 513 },
+			(_, index) => `@missing-before-valid-${index}.txt`,
+		).join(" ");
+		const text = `😀 ${missing} then @notes.txt.`;
+		const token = "@notes.txt";
+		const start = text.lastIndexOf(token);
+		assert.equal(
+			[...text.slice(0, start)].length,
+			start - 1,
+			"the astral prefix must make UTF-16 and code-point offsets differ",
 		);
-		const text = [...missing, "@notes.txt"].join(" ");
 		const originalLstat = fs.promises.lstat.bind(fs.promises);
+		const notesPath = path.join(cwdDir, "notes.txt");
 		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((target: fs.PathLike) => {
-			if (path.resolve(String(target)) === path.join(cwdDir, "notes.txt")) return originalLstat(target);
+			if (path.resolve(String(target)) === notesPath) return originalLstat(target);
 			return Promise.reject(missingPathError());
 		}) as typeof fs.promises.lstat);
 
 		try {
 			const result = await resolveFileMentions(text, cwdDir);
-			assert.equal(lstatSpy.mock.calls.length, MAX_FILE_MENTION_CANDIDATES);
+			assert.equal(result.originalText, text);
 			assert.deepEqual(
-				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
-				[{ kind: "text", path: "notes.txt" }],
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "notes.txt", range: [start, start + token.length] }],
 			);
-			assert.ok(result.modelText.endsWith(buildFileReferenceBlock("notes.txt", NOTES_CONTENT)));
+			assert.equal(
+				result.modelText,
+				text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + token.length),
+			);
 			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, 514);
 		} finally {
 			lstatSpy.mockRestore();
 		}
@@ -842,7 +820,7 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
-	it("rejects an opened descriptor that resolves outside cwd before reading and closes it", async () => {
+	itOnPosix("rejects an opened descriptor that resolves outside cwd before reading and closes it", async () => {
 		const file = path.join(cwdDir, "descriptor-containment.txt");
 		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mention-fd-outside-"));
 		const outsideFile = path.join(outsideDir, "outside.txt");
@@ -851,7 +829,6 @@ describe("resolveFileMentions", () => {
 		const canonicalFile = fs.realpathSync.native(file);
 		const canonicalOutside = fs.realpathSync.native(outsideFile);
 		const originalRealpathNative = fs.realpathSync.native;
-		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("linux");
 		const realpathSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((target: unknown, ...args: unknown[]) => {
 			const normalized = String(target).replace(/\\/g, "/");
 			if (/\/(?:proc\/self\/fd|dev\/fd)\/\d+$/.test(normalized)) return canonicalOutside;
@@ -890,17 +867,15 @@ describe("resolveFileMentions", () => {
 			readSpy.mockRestore();
 			openSpy.mockRestore();
 			realpathSpy.mockRestore();
-			platformSpy.mockRestore();
 			fs.rmSync(outsideDir, { recursive: true, force: true });
 			fs.rmSync(file, { force: true });
 		}
 	});
 
-	it("rejects a fallback post-open path identity mismatch before reading and closes it", async () => {
+	itOnWin32("rejects a fallback post-open path identity mismatch before reading and closes it", async () => {
 		const file = path.join(cwdDir, "fallback-identity.txt");
 		fs.writeFileSync(file, "identity bytes must not be read", "utf-8");
 		const canonicalFile = fs.realpathSync.native(file);
-		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
 		const originalStat = fs.statSync.bind(fs);
 		const originalPromiseStat = fs.promises.stat.bind(fs.promises);
 		const withMismatchedIdentity = (stat: fs.Stats): fs.Stats => ({
@@ -954,7 +929,6 @@ describe("resolveFileMentions", () => {
 			openSpy.mockRestore();
 			promiseStatSpy.mockRestore();
 			statSpy.mockRestore();
-			platformSpy.mockRestore();
 			fs.rmSync(file, { force: true });
 		}
 	});
@@ -1167,7 +1141,7 @@ describe("resolveFileMentions", () => {
 		assert.equal(binaryResult.warnings.length, 1);
 	});
 
-	it("keeps Windows network and device namespace tokens literal without metadata or target I/O", async () => {
+	itOnWin32("keeps Windows network and device namespace tokens literal without metadata or target I/O", async () => {
 		const candidates = [
 			"//attacker.example/share/file.txt",
 			"\\\\attacker.example\\share\\file.txt",
@@ -1179,7 +1153,6 @@ describe("resolveFileMentions", () => {
 			"LPT9.log",
 		];
 		const text = candidates.map((candidate) => `@${candidate}`).join(" ");
-		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
 		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(
 			Object.assign(new Error("namespace target must not be probed"), { code: "EACCES" }),
 		);
@@ -1199,7 +1172,57 @@ describe("resolveFileMentions", () => {
 			openSpy.mockRestore();
 			promiseOpenSpy.mockRestore();
 			lstatSpy.mockRestore();
-			platformSpy.mockRestore();
+		}
+	});
+
+	itOnPosix("treats an existing double-slash absolute target as outside cwd", async () => {
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mention-double-absolute-"));
+		const outsideFile = path.join(outsideDir, "outside.txt");
+		fs.writeFileSync(outsideFile, "DO NOT INLINE", "utf-8");
+		const doubleSlashPath = `//${outsideFile.replace(/^\/+/, "")}`;
+		const text = `read @${doubleSlashPath}`;
+
+		try {
+			assert.equal(path.isAbsolute(doubleSlashPath), true);
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, reason: mention.reason })),
+				[{ kind: "unresolved", path: doubleSlashPath, reason: "outside-cwd" }],
+			);
+			assert.equal(result.warnings.length, 1);
+			assert.match(result.warnings[0], /outside-cwd/);
+			assert.ok(!JSON.stringify(result).includes("DO NOT INLINE"));
+		} finally {
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	itOnPosix("resolves in-cwd files named NUL and CON.txt normally", async () => {
+		const nulPath = path.join(cwdDir, "NUL");
+		const conPath = path.join(cwdDir, "CON.txt");
+		fs.writeFileSync(nulPath, "posix nul file", "utf-8");
+		fs.writeFileSync(conPath, "posix con file", "utf-8");
+		const text = "read @NUL then @CON.txt.";
+
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
+				[
+					{ kind: "text", path: "NUL" },
+					{ kind: "text", path: "CON.txt" },
+				],
+			);
+			assert.equal(
+				result.modelText,
+				`read ${buildFileReferenceBlock("NUL", "posix nul file")} then ${buildFileReferenceBlock("CON.txt", "posix con file")}.`,
+			);
+			assert.deepEqual(result.warnings, []);
+		} finally {
+			fs.rmSync(conPath, { force: true });
+			fs.rmSync(nulPath, { force: true });
 		}
 	});
 
