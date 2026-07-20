@@ -117,12 +117,24 @@ async function ensureArchivedRowVisible(page: Page, sessionId: string): Promise<
 }
 
 async function openArchivedSidebarMenu(page: Page, sessionId: string): Promise<void> {
-	const row = await ensureArchivedRowVisible(page, sessionId);
-	await row.hover();
-	const trigger = sidebarTrigger(row, sessionId);
-	await expect(trigger, "archived session hamburger should be visible").toBeVisible({ timeout: 5_000 });
-	await trigger.click();
-	await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+	const menu = page.locator("sidebar-actions-popover [role='menu']");
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 4; attempt++) {
+		const row = await ensureArchivedRowVisible(page, sessionId);
+		const trigger = sidebarTrigger(row, sessionId);
+		try {
+			// Keyboard focus exposes the desktop action cluster without depending on a
+			// hover target that can be replaced by an asynchronous sidebar render.
+			await trigger.focus({ timeout: 1_000 });
+			await trigger.press("Enter", { timeout: 1_000 });
+			await expect(menu).toBeVisible({ timeout: 1_000 });
+			return;
+		} catch (error) {
+			lastError = error;
+			if (await menu.isVisible().catch(() => false)) return;
+		}
+	}
+	throw lastError;
 }
 
 async function openHeaderMenu(page: Page): Promise<void> {
