@@ -1,4 +1,3 @@
-import type { Dirent } from "node:fs";
 import type { Clock, FsLike } from "../gateway-deps.js";
 import { realClock, realFs } from "../gateway-deps.js";
 import path from "node:path";
@@ -6,8 +5,6 @@ import { recordDeletionTombstone, recordDeletionTombstoneAsync } from "./deletio
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
-/** 24h in ms — recency threshold for `shouldKeepDespiteOrphan`. */
-const RECENT_TRANSCRIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
 function isVerifierSessionId(id: string): boolean {
@@ -16,31 +13,6 @@ function isVerifierSessionId(id: string): boolean {
 
 function defaultVerifierAccessory(id: string): string {
 	return id.startsWith("agent-qa-") ? "stamp" : "magnifier";
-}
-
-/**
- * Tightened orphan-cleanup gate. Returns true when an apparently-orphaned
- * session must NOT be archived because its worktree directory still exists
- * AND its agent JSONL has been written within the last 24h. Caller is
- * `SessionManager`'s boot orphan sweep — leave the session live; the user
- * can archive manually from the UI if it really is dead.
- *
- * `now` is injectable for testability.
- */
-export function shouldKeepDespiteOrphan(
-	ps: { worktreePath?: string; agentSessionFile?: string },
-	now: number = Date.now(),
-	fsImpl: FsLike = realFs,
-): boolean {
-	const wtAlive = !!ps.worktreePath && (() => {
-		try { return fsImpl.existsSync(ps.worktreePath!); } catch { return false; }
-	})();
-	if (!wtAlive) return false;
-	const recentTranscript = !!ps.agentSessionFile && (() => {
-		try { return now - fsImpl.statSync(ps.agentSessionFile!).mtimeMs < RECENT_TRANSCRIPT_WINDOW_MS; }
-		catch { return false; }
-	})();
-	return recentTranscript;
 }
 
 /** Legacy persisted value. Retained only so older session records remain readable. */
@@ -625,101 +597,31 @@ export class SessionStore {
 	}
 
 	private async drainAsyncSaves(): Promise<void> {
-		do {
-			this.asyncSaveRequested = false;
-			await this.saveNowAsync();
-		} while (this.asyncSaveRequested);
+		try {
+			do {
+				this.asyncSaveRequested = false;
+				await this.saveNowAsync();
+			} while (this.asyncSaveRequested);
+		} finally {
+			// Publish the idle state in the drain's own final continuation, before
+			// its promise can settle. A mutation in the following microtask must
+			// either see this writer as active and request another loop iteration,
+			// or see it as idle and persist/start a new writer itself. Clearing the
+			// state from a later `.then()` leaves a window where that mutation can
+			// mark an already-completed writer and lose its save request.
+			this.asyncSaveInFlight = null;
+			if (this.asyncSaveRequested) void this.requestAsyncSave();
+		}
 	}
 
 	private requestAsyncSave(): Promise<void> {
 		this.asyncSaveRequested = true;
-		if (!this.asyncSaveInFlight) {
-			const task = this.drainAsyncSaves();
+		let task = this.asyncSaveInFlight;
+		if (!task) {
+			task = this.drainAsyncSaves();
 			this.asyncSaveInFlight = task;
-			void task.then(() => {
-				if (this.asyncSaveInFlight === task) this.asyncSaveInFlight = null;
-			});
 		}
-		return this.asyncSaveInFlight;
-	}
-
-	/**
-	 * Walk `agentSessionsRoot` for `*.jsonl` transcripts that are not referenced
-	 * by any persisted session (`agentSessionFile`) and whose mtime is newer
-	 * than the most recent `lastActivity` in the store. Useful as a divergence
-	 * signal after crash recovery — the agent CLI may have written transcripts
-	 * that never made it into the session-metadata index.
-	 *
-	 * Does NOT auto-import. Caps the returned `paths` at `maxPaths` (default 50)
-	 * and emits at most 20 `[session-store] WARN: orphaned transcript: …` log
-	 * lines.
-	 */
-	scanOrphanedTranscripts(
-		agentSessionsRoot: string,
-		options: { mostRecentLastActivity?: number; maxPaths?: number; maxLogLines?: number } = {},
-	): { count: number; paths: string[] } {
-		const maxPaths = options.maxPaths ?? 50;
-		const maxLogLines = options.maxLogLines ?? 20;
-		const threshold = options.mostRecentLastActivity ?? this.computeMostRecentLastActivity();
-
-		const tracked = new Set<string>();
-		for (const s of this.sessions.values()) {
-			if (s.agentSessionFile) {
-				tracked.add(path.resolve(s.agentSessionFile));
-			}
-		}
-
-		const paths: string[] = [];
-		let count = 0;
-		let logged = 0;
-
-		const walk = (dir: string) => {
-			let entries: Dirent[];
-			try {
-				entries = this.fs.readdirSync(dir, { withFileTypes: true });
-			} catch {
-				return;
-			}
-			for (const ent of entries) {
-				const full = path.join(dir, ent.name);
-				if (ent.isDirectory()) {
-					walk(full);
-					continue;
-				}
-				if (!ent.isFile()) continue;
-				if (!ent.name.endsWith(".jsonl")) continue;
-				const resolved = path.resolve(full);
-				if (tracked.has(resolved)) continue;
-				try {
-					const st = this.fs.statSync(full);
-					if (st.mtimeMs < threshold) continue;
-				} catch {
-					continue;
-				}
-				count++;
-				if (paths.length < maxPaths) paths.push(resolved);
-				if (logged < maxLogLines) {
-					console.warn(`[session-store] WARN: orphaned transcript: ${resolved}`);
-					logged++;
-				}
-			}
-		};
-
-		try {
-			if (this.fs.existsSync(agentSessionsRoot)) walk(agentSessionsRoot);
-		} catch {
-			// non-fatal — return whatever we collected
-		}
-
-		return { count, paths };
-	}
-
-	private computeMostRecentLastActivity(): number {
-		let max = 0;
-		for (const s of this.sessions.values()) {
-			if (typeof s.lastActivity === "number" && s.lastActivity > max) max = s.lastActivity;
-		}
-		return max;
+		return task;
 	}
 
 	/** Schedule a debounced save — coalesces rapid writes into one disk flush. */
