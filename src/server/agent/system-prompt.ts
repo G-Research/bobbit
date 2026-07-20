@@ -64,6 +64,18 @@ function resolvePromptsDir(stateDir?: string): string {
 	return getPromptsDir();
 }
 
+/** Resolve the prompt directory without recreating it during purge cleanup. */
+function resolvePromptsDirForCleanup(stateDir?: string): string {
+	if (stateDir) return path.join(stateDir, "session-prompts");
+	if (!_promptsDir) throw new Error("system-prompt: initPromptDirs() not called");
+	return _promptsDir;
+}
+
+function isMissingFileError(error: unknown): boolean {
+	return !!error && typeof error === "object" && "code" in error
+		&& (error as { code?: unknown }).code === "ENOENT";
+}
+
 /**
  * Resolve `@path` references in markdown content, matching Claude Code behavior.
  *
@@ -769,6 +781,20 @@ export function purgePromptSectionsJson(sessionId: string, stateDir?: string): v
 }
 
 /**
+ * Promise-based archive-purge seam for the persisted prompt-section snapshot.
+ * Missing files are an idempotent success; other errors stay owned by the
+ * awaited purge caller rather than disappearing behind a synchronous helper.
+ */
+export async function purgePromptSectionsJsonAsync(sessionId: string, stateDir?: string): Promise<void> {
+	const jsonPath = path.join(resolvePromptsDirForCleanup(stateDir), `${sessionId}-prompt.json`);
+	try {
+		await fs.promises.unlink(jsonPath);
+	} catch (error) {
+		if (!isMissingFileError(error)) throw error;
+	}
+}
+
+/**
  * Clean up a session's assembled prompt file.
  */
 export function cleanupSessionPrompt(sessionId: string, stateDir?: string): void {
@@ -776,6 +802,28 @@ export function cleanupSessionPrompt(sessionId: string, stateDir?: string): void
 	try {
 		if (fs.existsSync(promptPath)) fs.unlinkSync(promptPath);
 	} catch { /* ignore */ }
-	// Per-session preview mount (WP-A): <stateDir>/preview/<sid>/.
-	try { removePreviewMount(sessionId); } catch { /* ignore */ }
+	// Per-session preview mount (WP-A): <stateDir>/preview/<sid>/. Keep the
+	// legacy void API best-effort even when removeMount is promise-based.
+	try { void Promise.resolve(removePreviewMount(sessionId)).catch(() => {}); } catch { /* ignore */ }
+}
+
+/**
+ * Promise-based archive-purge cleanup. Prompt deletion and preview-mount
+ * removal are both attempted in the historical order. The mount call is
+ * awaited so purge completion includes its bounded asynchronous tree removal.
+ */
+export async function cleanupSessionPromptAsync(sessionId: string, stateDir?: string): Promise<void> {
+	const promptPath = path.join(resolvePromptsDirForCleanup(stateDir), `${sessionId}.md`);
+	let failure: unknown;
+	try {
+		await fs.promises.unlink(promptPath);
+	} catch (error) {
+		if (!isMissingFileError(error)) failure = error;
+	}
+	try {
+		await removePreviewMount(sessionId);
+	} catch (error) {
+		failure ??= error;
+	}
+	if (failure) throw failure;
 }
