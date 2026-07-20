@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { promises as fs } from "node:fs";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import path from "node:path";
@@ -44,8 +44,16 @@ export interface CpuDiagnostics {
 	recordWsBroadcast(label: string, type: string, counters: WsBroadcastCounters): void;
 	recordTimer(label: string, durationMs: number, counters?: Record<string, number>): void;
 	recordChildProcess(label: string, durationMs: number, metadata?: Record<string, string | number>): void;
-	flush(reason?: string): void;
-	shutdown(): void;
+	/** Snapshot immediately and resolve once this and all earlier snapshots have been written. */
+	flush(reason?: string): Promise<void>;
+	/** Stop future snapshots and resolve once the final snapshot and queued writes have settled. */
+	shutdown(): Promise<void>;
+}
+
+export interface CpuDiagnosticsIo {
+	mkdir(dirPath: string): Promise<void>;
+	appendFile(filePath: string, data: string): Promise<void>;
+	writeStderr(data: string): Promise<void>;
 }
 
 interface TimedBucket {
@@ -98,8 +106,25 @@ const disabledDiagnostics: CpuDiagnostics = {
 	recordWsBroadcast() { /* no-op */ },
 	recordTimer() { /* no-op */ },
 	recordChildProcess() { /* no-op */ },
-	flush() { /* no-op */ },
-	shutdown() { /* no-op */ },
+	flush() { return Promise.resolve(); },
+	shutdown() { return Promise.resolve(); },
+};
+
+const realCpuDiagnosticsIo: CpuDiagnosticsIo = {
+	async mkdir(dirPath) {
+		await fs.mkdir(dirPath, { recursive: true });
+	},
+	async appendFile(filePath, data) {
+		await fs.appendFile(filePath, data);
+	},
+	writeStderr(data) {
+		return new Promise<void>((resolve, reject) => {
+			process.stderr.write(data, (error) => {
+				if (error) reject(error);
+				else resolve();
+			});
+		});
+	},
 };
 
 function safeNumber(value: number): number {
@@ -181,7 +206,9 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 	private lastElu: EventLoopUtilization = performance.eventLoopUtilization();
 	private delay: ReturnType<typeof monitorEventLoopDelay>;
 	private timer: ReturnType<Clock["setInterval"]> | null = null;
-	private shutdownCalled = false;
+	private shutdownPromise: Promise<void> | null = null;
+	private writeQueue: Promise<void> = Promise.resolve();
+	private outputReady = false;
 	private readonly outFile?: string;
 	private readonly beforeExitHandler: () => void;
 	private readonly exitHandler: () => void;
@@ -189,15 +216,27 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 	constructor(
 		private readonly clock: Clock = realClock,
 		config: CpuDiagnosticsConfig = RUNTIME_CONFIG,
+		private readonly io: CpuDiagnosticsIo = realCpuDiagnosticsIo,
 	) {
 		this.outFile = config.jsonlPath;
-		if (this.outFile) fs.mkdirSync(path.dirname(this.outFile), { recursive: true });
+		if (this.outFile) this.enqueueOutputDirectory();
 		this.delay = monitorEventLoopDelay({ resolution: 20 });
 		this.delay.enable();
-		this.timer = this.clock.setInterval(() => this.flush("tick"), config.flushMs);
+		this.timer = this.clock.setInterval(() => {
+			// flush owns and logs write failures, so this scheduled promise cannot reject.
+			void this.flush("tick");
+		}, config.flushMs);
 		if (typeof this.timer.unref === "function") this.timer.unref();
-		this.beforeExitHandler = () => { try { this.flush("beforeExit"); } catch { /* best-effort */ } };
-		this.exitHandler = () => { try { this.flush("exit"); } catch { /* best-effort */ } };
+		this.beforeExitHandler = () => {
+			// Stopping removes this handler synchronously; the queued I/O keeps a natural
+			// process exit alive without causing a repeating beforeExit cycle.
+			void this.stop("beforeExit");
+		};
+		this.exitHandler = () => {
+			// Async work cannot delay an explicit process.exit(), but retaining this
+			// best-effort snapshot preserves the existing exit diagnostic.
+			void this.stop("exit");
+		};
 		process.on("beforeExit", this.beforeExitHandler);
 		process.on("exit", this.exitHandler);
 	}
@@ -247,24 +286,33 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		}
 	}
 
-	flush(reason = "manual"): void {
-		const snapshot = this.buildSnapshot(reason);
-		this.resetBuckets();
-		this.writeSnapshot(snapshot);
+	flush(reason = "manual"): Promise<void> {
+		try {
+			const snapshot = this.buildSnapshot(reason);
+			this.resetBuckets();
+			return this.enqueueSnapshot(snapshot);
+		} catch (error) {
+			this.logWriteFailure(error);
+			return this.writeQueue;
+		}
 	}
 
-	shutdown(): void {
-		if (this.shutdownCalled) return;
-		this.shutdownCalled = true;
+	shutdown(): Promise<void> {
+		return this.stop("shutdown");
+	}
+
+	private stop(reason: string): Promise<void> {
+		if (this.shutdownPromise) return this.shutdownPromise;
 		if (this.timer) {
 			this.clock.clearInterval(this.timer);
 			this.timer = null;
 		}
-		try { this.flush("shutdown"); } catch { /* best-effort */ }
 		try { this.delay.disable(); } catch { /* best-effort */ }
 		process.off("beforeExit", this.beforeExitHandler);
 		process.off("exit", this.exitHandler);
 		if (singleton === this) singleton = null;
+		this.shutdownPromise = this.flush(reason);
+		return this.shutdownPromise;
 	}
 
 	private buildSnapshot(reason?: string): CpuDiagnosticsSnapshot {
@@ -349,13 +397,48 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		this.child.clear();
 	}
 
-	private writeSnapshot(snapshot: CpuDiagnosticsSnapshot): void {
-		const line = JSON.stringify(snapshot);
-		if (this.outFile) {
-			fs.appendFileSync(this.outFile, `${line}\n`);
-			return;
+	private enqueueOutputDirectory(): void {
+		const outFile = this.outFile;
+		if (!outFile) return;
+		const pending = this.writeQueue.then(async () => {
+			await this.io.mkdir(path.dirname(outFile));
+			this.outputReady = true;
+		});
+		this.writeQueue = this.ownWriteFailure(pending);
+	}
+
+	private enqueueSnapshot(snapshot: CpuDiagnosticsSnapshot): Promise<void> {
+		const line = `${JSON.stringify(snapshot)}\n`;
+		const pending = this.writeQueue.then(async () => {
+			if (this.outFile) {
+				if (!this.outputReady) {
+					await this.io.mkdir(path.dirname(this.outFile));
+					this.outputReady = true;
+				}
+				await this.io.appendFile(this.outFile, line);
+				return;
+			}
+			await this.io.writeStderr(line);
+		});
+		this.writeQueue = this.ownWriteFailure(pending);
+		return this.writeQueue;
+	}
+
+	private ownWriteFailure(pending: Promise<void>): Promise<void> {
+		// Diagnostics are best-effort. Own each queued rejection here so timer,
+		// beforeExit, and existing synchronous-style callers cannot leak one.
+		return pending.then(
+			() => undefined,
+			(error) => { this.logWriteFailure(error); },
+		);
+	}
+
+	private logWriteFailure(error: unknown): void {
+		try {
+			console.error("[cpu-diagnostics] Failed to write snapshot:", error);
+		} catch {
+			// Diagnostics must never destabilize the gateway, including a broken logger.
 		}
-		process.stderr.write(`${line}\n`);
 	}
 }
 
@@ -366,9 +449,9 @@ export function cpuDiagnosticsEnabled(env?: NodeJS.ProcessEnv): boolean {
 }
 
 /** Create an isolated diagnostics instance without mutating the process-wide singleton. */
-export function createCpuDiagnostics(options: { env: NodeJS.ProcessEnv; clock?: Clock }): CpuDiagnostics {
+export function createCpuDiagnostics(options: { env: NodeJS.ProcessEnv; clock?: Clock; io?: CpuDiagnosticsIo }): CpuDiagnostics {
 	const config = cpuDiagnosticsConfig(options.env);
-	return config.enabled ? new EnabledCpuDiagnostics(options.clock, config) : disabledDiagnostics;
+	return config.enabled ? new EnabledCpuDiagnostics(options.clock, config, options.io) : disabledDiagnostics;
 }
 
 export function getCpuDiagnostics(clock?: Clock): CpuDiagnostics {
