@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/ws-session-command-serialiser.test.ts",
+      "reason": "Pure unit coverage for per-session WebSocket command ordering, cross-session concurrency, rejection isolation, and idle-key cleanup using deterministic deferred promises.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/aigw-wellknown-config-atomic.test.ts",
       "reason": "Unit coverage for atomic AIGW models/configuration failure behavior.",
       "execution": {
