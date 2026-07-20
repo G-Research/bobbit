@@ -13,7 +13,6 @@ import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import {
-	FileMentionBudgetError,
 	resolveFileMentions,
 	toWireMention,
 } from "../skills/resolve-file-mentions.js";
@@ -379,8 +378,6 @@ type ExtensionChannelRegistry = {
 
 const MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
-/** Generic authenticated text ceiling for prompts, steers, and pack posts. */
-export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
 const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
@@ -450,20 +447,14 @@ export function handleWebSocketConnection(
 		if (msg.type !== "prompt" && msg.type !== "steer" && msg.type !== "ext_session_post") {
 			return false;
 		}
-		const promptText = (msg as { text?: unknown }).text;
-		const invalid = typeof promptText !== "string";
-		const tooLarge = !invalid && Buffer.byteLength(promptText, "utf8") > MAX_AUTHENTICATED_PROMPT_TEXT_BYTES;
-		if (!invalid && !tooLarge) return false;
+		if (typeof (msg as { text?: unknown }).text === "string") return false;
 
-		const code = invalid ? "INVALID_PROMPT_TEXT" : "PROMPT_TOO_LARGE";
-		const message = invalid
-			? "Prompt text must be a string"
-			: `Prompt text exceeds maximum size (${MAX_AUTHENTICATED_PROMPT_TEXT_BYTES} UTF-8 bytes)`;
+		const code = "INVALID_PROMPT_TEXT";
 		if (msg.type === "ext_session_post") {
 			const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
 			send(ws, { type: "ext_session_post_result", requestId, ok: false, error: code });
 		} else {
-			send(ws, { type: "error", message, code });
+			send(ws, { type: "error", message: "Prompt text must be a string", code });
 		}
 		return true;
 	};
@@ -892,14 +883,7 @@ export function handleWebSocketConnection(
 					const fileMentionResult = await resolveFileMentions(
 						msg.text,
 						fileMentionCwd,
-					).catch((error: unknown) => {
-						if (error instanceof FileMentionBudgetError) {
-							send(ws, { type: "error", message: error.message, code: error.code });
-							return undefined;
-						}
-						throw error;
-					});
-					if (!fileMentionResult) return;
+					);
 					for (const w of fileMentionResult.warnings) {
 						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
 					}
@@ -1708,23 +1692,40 @@ export function handleWebSocketConnection(
 			return;
 		}
 
-		let msg: ClientMessage;
+		let parsed: unknown;
 		try {
-			msg = JSON.parse(data.toString());
+			parsed = JSON.parse(data.toString());
 		} catch {
 			send(ws, { type: "error", message: "Invalid JSON", code: "INVALID_JSON" });
 			return;
 		}
+		if (
+			parsed === null ||
+			typeof parsed !== "object" ||
+			Array.isArray(parsed) ||
+			typeof (parsed as Record<string, unknown>).type !== "string"
+		) {
+			send(ws, {
+				type: "error",
+				message: "WebSocket message must be a non-null object with a string type",
+				code: "INVALID_MESSAGE",
+			});
+			return;
+		}
+		const msg = parsed as ClientMessage;
 
-		// Limit every authenticated command that can inject prompt text before it
-		// enters command serialization, Markdown parsing, a session queue, or the
-		// extension-post permit flow. Attachments retain their separate envelope
-		// limits; this ceiling applies only to attacker-controlled text bytes.
+		// Validate text-bearing commands before they enter Markdown parsing, a
+		// session queue, or the extension-post permit flow.
 		if (authenticated && rejectInvalidPromptText(msg)) return;
 
 		const dispatch = () => handleMessage(msg, frameBytes);
-		const messageType = (msg as { type?: unknown } | null)?.type;
-		const result = authenticated && (messageType === "prompt" || messageType === "steer")
+		const liveSession = authenticated && sessionId !== "__viewer__"
+			? sessionManager.getSession(sessionId)
+			: undefined;
+		const liveStreamingSteer = msg.type === "steer" && liveSession?.status === "streaming";
+		const serialisedSessionCommand = msg.type === "prompt" ||
+			(msg.type === "steer" && !liveStreamingSteer);
+		const result = authenticated && serialisedSessionCommand
 			? SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, dispatch)
 			: dispatch();
 		void result.catch((err) => {

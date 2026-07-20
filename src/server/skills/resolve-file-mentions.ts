@@ -32,8 +32,6 @@
  *       • genuinely missing targets are ordinary text and are omitted from
  *                   mentions and warnings. Delivery failures for existing
  *                   targets degrade gracefully without rejecting the prompt.
- *       • prompts above the explicit raw-candidate or unique-probe budgets are
- *                   rejected as a whole; candidates are never silently dropped.
  *
  *   - **Snapshot at resolve time** — text content and image/binary base64
  *     bytes are captured now so replaying a `.jsonl` later renders the same
@@ -106,25 +104,6 @@ export const FILE_MENTION_PROBE_CONCURRENCY = 8;
 export const FILE_MENTION_RESOLUTION_CONCURRENCY = 4;
 /** Process-wide cap for in-flight lstat probes across every session. */
 export const FILE_MENTION_LSTAT_CONCURRENCY = 8;
-/** Max retained non-code `@path` candidates in one prompt. */
-export const MAX_FILE_MENTION_RAW_CANDIDATES = 8_192;
-/** Max distinct lexical filesystem targets probed in one prompt. */
-export const MAX_FILE_MENTION_UNIQUE_PROBES = 4_096;
-
-export type FileMentionBudgetErrorCode =
-	| "FILE_MENTION_CANDIDATE_LIMIT"
-	| "FILE_MENTION_PROBE_LIMIT";
-
-/** Typed admission failure: callers must reject the whole prompt explicitly. */
-export class FileMentionBudgetError extends Error {
-	readonly code: FileMentionBudgetErrorCode;
-
-	constructor(code: FileMentionBudgetErrorCode, message: string) {
-		super(message);
-		this.name = "FileMentionBudgetError";
-		this.code = code;
-	}
-}
 
 // Module-global FIFO semaphores prevent independent sessions from multiplying
 // resolver/parser and metadata-probe concurrency. Each acquire is released in
@@ -1025,12 +1004,6 @@ function scanTokens(text: string): ScannedToken[] {
 		if (token.length === 0) continue;
 		const tokenEnd = tokenStart + 1 + token.length; // covers "@" + path
 		out.push({ rawPath: token, range: [tokenStart, tokenEnd] });
-		if (out.length > MAX_FILE_MENTION_RAW_CANDIDATES) {
-			throw new FileMentionBudgetError(
-				"FILE_MENTION_CANDIDATE_LIMIT",
-				`Prompt contains more than ${MAX_FILE_MENTION_RAW_CANDIDATES} non-code file-mention candidates`,
-			);
-		}
 	}
 	return out;
 }
@@ -1045,11 +1018,7 @@ type FileMentionTargetClassification =
 	| { kind: "missing" }
 	| { kind: "unreadable" };
 
-/**
- * Retain distinct lexical probes only up to the explicit budget. This pass
- * completes before lstat workers start, so an over-budget prompt is rejected
- * atomically without partially probing the filesystem.
- */
+/** Deduplicate lexical targets before the fixed worker pool probes them. */
 function collectUniqueLexicalTargets(
 	tokens: readonly ScannedToken[],
 	resolvedCwd: string,
@@ -1065,19 +1034,13 @@ function collectUniqueLexicalTargets(
 		if (seen.has(target)) continue;
 		seen.add(target);
 		targets.push(target);
-		if (targets.length > MAX_FILE_MENTION_UNIQUE_PROBES) {
-			throw new FileMentionBudgetError(
-				"FILE_MENTION_PROBE_LIMIT",
-				`Prompt contains more than ${MAX_FILE_MENTION_UNIQUE_PROBES} distinct file-mention targets`,
-			);
-		}
 	}
 	return targets;
 }
 
 /**
- * Classify every budgeted lexical target with a fixed asynchronous worker
- * pool. Workers pull directly from the bounded source iterator, so
+ * Classify every distinct lexical target with a fixed asynchronous worker
+ * pool. Workers pull directly from the source iterator, so
  * classification does not prebuild a task/promise per candidate. The result
  * map retains lstat type information, allowing direct non-regular targets to
  * be rejected before any open. Every admitted target is consumed, so a long
@@ -1368,10 +1331,9 @@ async function resolveFileMentionsUnderPermit(
 	const replacements: Array<{ start: number; end: number; expanded: string }> = [];
 	const resolvedCwd = path.resolve(cwd);
 
-	// Bound and classify every distinct lexical target before applying delivery
-	// limits. Missing candidates neither consume the existing-reference cap nor
-	// prevent a later valid target from being discovered. Budget overflow is
-	// detected before the first lstat, so the whole prompt is rejected atomically.
+	// Classify every distinct lexical target before applying delivery limits.
+	// Missing candidates neither consume the existing-reference cap nor prevent
+	// a later valid target from being discovered.
 	const lexicalTargets = collectUniqueLexicalTargets(tokens, resolvedCwd);
 	const classificationCache = await classifyFileMentionTargets(lexicalTargets);
 	let hasExistingCandidate = false;
