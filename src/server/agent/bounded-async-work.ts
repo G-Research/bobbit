@@ -1,7 +1,23 @@
 import fs from "node:fs";
+import path from "node:path";
 
-/** Small shared ceiling for boot-time recovery filesystem work. */
-export const RECOVERY_IO_CONCURRENCY = 8;
+/** Small shared ceiling for gateway background filesystem work. */
+export const BACKGROUND_IO_CONCURRENCY = 8;
+
+/** Backwards-compatible name used by the boot recovery paths. */
+export const RECOVERY_IO_CONCURRENCY = BACKGROUND_IO_CONCURRENCY;
+
+const COOPERATIVE_YIELD_INTERVAL = 256;
+
+function validateConcurrency(limit: number): void {
+	if (!Number.isInteger(limit) || limit <= 0) {
+		throw new RangeError("concurrency limit must be a positive integer");
+	}
+}
+
+function yieldToEventLoop(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
 
 /**
  * Map items with a fixed number of index-cursor workers. Results retain input
@@ -12,22 +28,151 @@ export async function mapWithConcurrency<T, R>(
 	limit: number,
 	worker: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-	if (!Number.isInteger(limit) || limit <= 0) {
-		throw new RangeError("concurrency limit must be a positive integer");
-	}
+	validateConcurrency(limit);
 
 	const results = new Array<R>(items.length);
 	let cursor = 0;
+	let completedSinceYield = 0;
 	const workerCount = Math.min(limit, items.length);
 	const workers = Array.from({ length: workerCount }, async () => {
 		while (true) {
 			const index = cursor++;
 			if (index >= items.length) return;
 			results[index] = await worker(items[index]!, index);
+			completedSinceYield++;
+			if (completedSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
+				completedSinceYield = 0;
+				await yieldToEventLoop();
+			}
 		}
 	});
+	// The promise array contains at most `limit` long-lived workers, never one
+	// promise per input item.
 	await Promise.all(workers);
 	return results;
+}
+
+export interface DynamicQueueController<T> {
+	/**
+	 * Offer more work to this operation. The queue has a small fixed capacity;
+	 * false means the caller must retain/process the item itself rather than
+	 * dropping it. This backpressure is what prevents a wide tree from being
+	 * materialised in memory merely to schedule it.
+	 */
+	tryEnqueue(item: T): boolean;
+}
+
+export interface DynamicQueueOptions {
+	/** Pending-item ceiling. Defaults to the worker concurrency. */
+	maxQueued?: number;
+}
+
+/**
+ * Process work that can discover more work without creating one promise per
+ * item. Active workers and the pending queue are independently bounded.
+ *
+ * A worker that receives `false` from `tryEnqueue` must process the item in its
+ * own iterative stack. In particular, it must not recursively call another
+ * bounded helper: one operation owns one queue and therefore one ceiling.
+ */
+export async function processDynamicQueue<T>(
+	initialItems: readonly T[],
+	limit: number,
+	worker: (item: T, queue: DynamicQueueController<T>) => Promise<void>,
+	options: DynamicQueueOptions = {},
+): Promise<void> {
+	validateConcurrency(limit);
+	const maxQueued = options.maxQueued ?? limit;
+	if (!Number.isInteger(maxQueued) || maxQueued <= 0) {
+		throw new RangeError("pending queue limit must be a positive integer");
+	}
+	if (initialItems.length === 0) return;
+
+	await new Promise<void>((resolve, reject) => {
+		let initialCursor = 0;
+		let pending: T[] = [];
+		let pendingCursor = 0;
+		let active = 0;
+		let stopped = false;
+		let firstError: unknown;
+		let completionsSinceYield = 0;
+		let yieldScheduled = false;
+
+		const pendingLength = (): number => pending.length - pendingCursor;
+		const hasWork = (): boolean => pendingLength() > 0 || initialCursor < initialItems.length;
+		const takeWork = (): T => {
+			if (pendingCursor < pending.length) {
+				const item = pending[pendingCursor++]!;
+				if (pendingCursor >= COOPERATIVE_YIELD_INTERVAL && pendingCursor * 2 >= pending.length) {
+					pending = pending.slice(pendingCursor);
+					pendingCursor = 0;
+				}
+				return item;
+			}
+			return initialItems[initialCursor++]!;
+		};
+
+		let schedule: () => void;
+		const controller: DynamicQueueController<T> = {
+			tryEnqueue(item): boolean {
+				if (stopped || pendingLength() >= maxQueued) return false;
+				pending.push(item);
+				schedule();
+				return true;
+			},
+		};
+
+		const settleIfDone = (): void => {
+			if (active !== 0) return;
+			if (stopped) {
+				reject(firstError);
+				return;
+			}
+			if (!hasWork()) resolve();
+		};
+
+		const afterWork = (failed: boolean, error?: unknown): void => {
+			active--;
+			if (failed && !stopped) {
+				stopped = true;
+				firstError = error;
+				pending = [];
+				pendingCursor = 0;
+				initialCursor = initialItems.length;
+			}
+			completionsSinceYield++;
+			if (!stopped && completionsSinceYield >= COOPERATIVE_YIELD_INTERVAL && hasWork()) {
+				completionsSinceYield = 0;
+				if (!yieldScheduled) {
+					yieldScheduled = true;
+					setImmediate(() => {
+						yieldScheduled = false;
+						schedule();
+					});
+				}
+			} else {
+				schedule();
+			}
+			settleIfDone();
+		};
+
+		schedule = (): void => {
+			if (stopped || yieldScheduled) {
+				settleIfDone();
+				return;
+			}
+			while (active < limit && hasWork()) {
+				const item = takeWork();
+				active++;
+				void Promise.resolve()
+					.then(() => worker(item, controller))
+					.then(() => afterWork(false), (error: unknown) => afterWork(true, error));
+			}
+			settleIfDone();
+		};
+
+		schedule();
+	});
 }
 
 export interface RecoveryStats {
@@ -63,3 +208,388 @@ export const realRecoveryFs: RecoveryFs = {
 	open: (filePath, flags) => fs.promises.open(filePath, flags),
 	readFile: (filePath, encoding) => fs.promises.readFile(filePath, encoding),
 };
+
+export interface AsyncTreeStats {
+	atime?: Date;
+	mtime?: Date;
+	isDirectory(): boolean;
+	isFile(): boolean;
+	isSymbolicLink(): boolean;
+}
+
+export interface AsyncTreeDirent {
+	name: string;
+	isDirectory(): boolean;
+	isFile(): boolean;
+	isSymbolicLink(): boolean;
+}
+
+export interface AsyncTreeDirectory {
+	read(): Promise<AsyncTreeDirent | null>;
+	close(): Promise<void>;
+}
+
+export interface AsyncTreeFileHandle {
+	read(
+		buffer: Uint8Array,
+		offset: number,
+		length: number,
+		position: number,
+	): Promise<{ bytesRead: number }>;
+	close(): Promise<void>;
+}
+
+/** Promise-only seam for bounded traversal/copy/delete and chunked reads. */
+export interface AsyncTreeFs {
+	lstat(filePath: string): Promise<AsyncTreeStats>;
+	opendir(dirPath: string): Promise<AsyncTreeDirectory>;
+	mkdir(dirPath: string, options: { recursive: boolean }): Promise<unknown>;
+	copyFile(source: string, destination: string, mode?: number): Promise<void>;
+	readlink(filePath: string): Promise<string>;
+	symlink(target: string, filePath: string): Promise<void>;
+	unlink(filePath: string): Promise<void>;
+	rmdir(dirPath: string): Promise<void>;
+	utimes(filePath: string, atime: Date, mtime: Date): Promise<void>;
+	open(filePath: string, flags: "r"): Promise<AsyncTreeFileHandle>;
+}
+
+export const realAsyncTreeFs: AsyncTreeFs = {
+	lstat: (filePath) => fs.promises.lstat(filePath),
+	opendir: (dirPath) => fs.promises.opendir(dirPath),
+	mkdir: (dirPath, options) => fs.promises.mkdir(dirPath, options),
+	copyFile: (source, destination, mode) => mode === undefined
+		? fs.promises.copyFile(source, destination)
+		: fs.promises.copyFile(source, destination, mode),
+	readlink: (filePath) => fs.promises.readlink(filePath),
+	symlink: (target, filePath) => fs.promises.symlink(target, filePath),
+	unlink: (filePath) => fs.promises.unlink(filePath),
+	rmdir: (dirPath) => fs.promises.rmdir(dirPath),
+	utimes: (filePath, atime, mtime) => fs.promises.utimes(filePath, atime, mtime),
+	open: (filePath, flags) => fs.promises.open(filePath, flags),
+};
+
+export type AsyncTreeEntryKind = "directory" | "file" | "symlink" | "other";
+
+export interface AsyncTreeEntry {
+	absolutePath: string;
+	/** POSIX relative path; the root itself is represented by an empty string. */
+	relativePath: string;
+	depth: number;
+	kind: AsyncTreeEntryKind;
+	stats: AsyncTreeStats;
+}
+
+export interface WalkTreeOptions {
+	concurrency?: number;
+	fs?: Pick<AsyncTreeFs, "lstat" | "opendir">;
+}
+
+interface TreeWork {
+	absolutePath: string;
+	relativePath: string;
+	depth: number;
+}
+
+interface TreeFrame {
+	absolutePath: string;
+	relativePath: string;
+	depth: number;
+	directory: AsyncTreeDirectory;
+}
+
+function entryKind(stats: AsyncTreeStats): AsyncTreeEntryKind {
+	if (stats.isSymbolicLink()) return "symlink";
+	if (stats.isDirectory()) return "directory";
+	if (stats.isFile()) return "file";
+	return "other";
+}
+
+/**
+ * Walk a tree through one bounded operation-level queue. Every entry is
+ * classified with `lstat`; directory symlinks are reported as symlinks and are
+ * never opened or traversed. `opendir().read()` streams directory entries, and
+ * overflow beyond the small pending queue is handled by an iterative local DFS
+ * rather than an unbounded tree-node queue.
+ */
+export async function walkTree(
+	root: string,
+	visitor: (entry: AsyncTreeEntry) => Promise<void> | void,
+	options: WalkTreeOptions = {},
+): Promise<void> {
+	const concurrency = options.concurrency ?? BACKGROUND_IO_CONCURRENCY;
+	validateConcurrency(concurrency);
+	const treeFs = options.fs ?? realAsyncTreeFs;
+
+	await processDynamicQueue<TreeWork>(
+		[{ absolutePath: root, relativePath: "", depth: 0 }],
+		concurrency,
+		async (seed, queue) => {
+			const frames: TreeFrame[] = [];
+			let next: TreeWork | undefined = seed;
+			let stepsSinceYield = 0;
+			try {
+				while (next || frames.length > 0) {
+					if (next) {
+						const current = next;
+						next = undefined;
+						const stats = await treeFs.lstat(current.absolutePath);
+						const kind = entryKind(stats);
+						await visitor({ ...current, kind, stats });
+						if (kind === "directory") {
+							frames.push({
+								...current,
+								directory: await treeFs.opendir(current.absolutePath),
+							});
+						}
+					} else {
+						const frame = frames[frames.length - 1]!;
+						const dirent = await frame.directory.read();
+						if (!dirent) {
+							frames.pop();
+							await frame.directory.close();
+						} else {
+							const child: TreeWork = {
+								absolutePath: path.join(frame.absolutePath, dirent.name),
+								relativePath: frame.relativePath
+									? `${frame.relativePath}/${dirent.name}`
+									: dirent.name,
+								depth: frame.depth + 1,
+							};
+							// The Dirent provides streaming enumeration; lstat in the
+							// receiving lane remains authoritative for symlink safety.
+							if (!queue.tryEnqueue(child)) next = child;
+						}
+					}
+
+					stepsSinceYield++;
+					if (stepsSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
+						stepsSinceYield = 0;
+						await yieldToEventLoop();
+					}
+				}
+			} finally {
+				for (let index = frames.length - 1; index >= 0; index--) {
+					try { await frames[index]!.directory.close(); } catch { /* preserve the traversal error */ }
+				}
+			}
+		},
+		{ maxQueued: concurrency },
+	);
+}
+
+/** Collect the complete sorted relative file list required by preview metadata. */
+export async function listTreeFiles(root: string, options: WalkTreeOptions = {}): Promise<string[]> {
+	const files: string[] = [];
+	await walkTree(root, (entry) => {
+		if (entry.kind === "file" && entry.relativePath) files.push(entry.relativePath);
+	}, options);
+	return files.sort();
+}
+
+export interface ReadFileChunksOptions {
+	fs?: Pick<AsyncTreeFs, "open">;
+	chunkSize?: number;
+}
+
+/**
+ * Read a file through one reusable fixed-size buffer. The chunk view is valid
+ * only until the callback resolves; callers that need to retain bytes must copy
+ * that individual chunk explicitly.
+ */
+export async function readFileInChunks(
+	filePath: string,
+	onChunk: (chunk: Uint8Array) => Promise<void> | void,
+	options: ReadFileChunksOptions = {},
+): Promise<void> {
+	const chunkSize = options.chunkSize ?? 64 * 1024;
+	if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+		throw new RangeError("chunk size must be a positive integer");
+	}
+	const fileSystem = options.fs ?? realAsyncTreeFs;
+	const handle = await fileSystem.open(filePath, "r");
+	const buffer = new Uint8Array(chunkSize);
+	let position = 0;
+	let chunksSinceYield = 0;
+	let operationError: unknown;
+	try {
+		while (true) {
+			const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+			if (bytesRead === 0) break;
+			await onChunk(buffer.subarray(0, bytesRead));
+			position += bytesRead;
+			chunksSinceYield++;
+			if (chunksSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
+				chunksSinceYield = 0;
+				await yieldToEventLoop();
+			}
+		}
+	} catch (error) {
+		operationError = error;
+		throw error;
+	} finally {
+		try {
+			await handle.close();
+		} catch (closeError) {
+			if (operationError === undefined) throw closeError;
+		}
+	}
+}
+
+export interface CopyTreeOptions {
+	concurrency?: number;
+	fs?: AsyncTreeFs;
+	/** Copy links as links (default) or omit them. Links are never followed. */
+	symlinks?: "copy" | "skip";
+	/** Preserve regular-file atime/mtime when available (default true). */
+	preserveTimestamps?: boolean;
+	/** Copy flag; defaults to COPYFILE_EXCL to retain error-on-exist semantics. */
+	copyFileMode?: number;
+}
+
+/** Symlink-safe bounded tree copy. */
+export async function copyTree(source: string, destination: string, options: CopyTreeOptions = {}): Promise<void> {
+	const sourceRoot = path.resolve(source);
+	const destinationRoot = path.resolve(destination);
+	const relativeDestination = path.relative(sourceRoot, destinationRoot);
+	if (relativeDestination === "" || (!relativeDestination.startsWith("..") && !path.isAbsolute(relativeDestination))) {
+		throw new RangeError("copy destination must be outside the source tree");
+	}
+
+	const treeFs = options.fs ?? realAsyncTreeFs;
+	const symlinks = options.symlinks ?? "copy";
+	const preserveTimestamps = options.preserveTimestamps ?? true;
+	const copyFileMode = options.copyFileMode ?? fs.constants.COPYFILE_EXCL;
+	await treeFs.mkdir(path.dirname(destinationRoot), { recursive: true });
+
+	await walkTree(sourceRoot, async (entry) => {
+		const target = entry.relativePath
+			? path.join(destinationRoot, ...entry.relativePath.split("/"))
+			: destinationRoot;
+		if (entry.kind === "directory") {
+			await treeFs.mkdir(target, { recursive: false });
+			return;
+		}
+		if (entry.kind === "file") {
+			await treeFs.copyFile(entry.absolutePath, target, copyFileMode);
+			if (preserveTimestamps && entry.stats.atime && entry.stats.mtime) {
+				await treeFs.utimes(target, entry.stats.atime, entry.stats.mtime);
+			}
+			return;
+		}
+		if (entry.kind === "symlink") {
+			if (symlinks === "copy") {
+				const linkTarget = await treeFs.readlink(entry.absolutePath);
+				await treeFs.symlink(linkTarget, target);
+			}
+			return;
+		}
+		throw new Error(`Unsupported tree entry: ${entry.absolutePath}`);
+	}, { concurrency: options.concurrency, fs: treeFs });
+}
+
+export interface RemoveTreeOptions {
+	fs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir">;
+	/** Ignore a missing root or entries removed concurrently (default true). */
+	force?: boolean;
+}
+
+function isMissing(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+/**
+ * Remove a tree post-order without recursive rm. The iterative opendir walk
+ * retains only active directory frames, never follows a symlink, and has at
+ * most one filesystem promise pending. Use `mapWithConcurrency` around
+ * independent roots when wider deletion is safe for the caller's policy.
+ */
+export async function removeTree(root: string, options: RemoveTreeOptions = {}): Promise<void> {
+	const treeFs = options.fs ?? realAsyncTreeFs;
+	const force = options.force ?? true;
+	let rootStats: AsyncTreeStats;
+	try {
+		rootStats = await treeFs.lstat(root);
+	} catch (error) {
+		if (force && isMissing(error)) return;
+		throw error;
+	}
+
+	if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+		try {
+			await treeFs.unlink(root);
+		} catch (error) {
+			if (!force || !isMissing(error)) throw error;
+		}
+		return;
+	}
+
+	let rootDirectory: AsyncTreeDirectory;
+	try {
+		rootDirectory = await treeFs.opendir(root);
+	} catch (error) {
+		if (force && isMissing(error)) return;
+		throw error;
+	}
+	const frames: TreeFrame[] = [{
+		absolutePath: root,
+		relativePath: "",
+		depth: 0,
+		directory: rootDirectory,
+	}];
+	let stepsSinceYield = 0;
+	try {
+		while (frames.length > 0) {
+			const frame = frames[frames.length - 1]!;
+			const dirent = await frame.directory.read();
+			if (!dirent) {
+				frames.pop();
+				await frame.directory.close();
+				try {
+					await treeFs.rmdir(frame.absolutePath);
+				} catch (error) {
+					if (!force || !isMissing(error)) throw error;
+				}
+			} else {
+				const childPath = path.join(frame.absolutePath, dirent.name);
+				let childStats: AsyncTreeStats;
+				try {
+					childStats = await treeFs.lstat(childPath);
+				} catch (error) {
+					if (force && isMissing(error)) continue;
+					throw error;
+				}
+				if (childStats.isDirectory() && !childStats.isSymbolicLink()) {
+					let childDirectory: AsyncTreeDirectory;
+					try {
+						childDirectory = await treeFs.opendir(childPath);
+					} catch (error) {
+						if (force && isMissing(error)) continue;
+						throw error;
+					}
+					frames.push({
+						absolutePath: childPath,
+						relativePath: "",
+						depth: frame.depth + 1,
+						directory: childDirectory,
+					});
+				} else {
+					try {
+						await treeFs.unlink(childPath);
+					} catch (error) {
+						if (!force || !isMissing(error)) throw error;
+					}
+				}
+			}
+
+			stepsSinceYield++;
+			if (stepsSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
+				stepsSinceYield = 0;
+				await yieldToEventLoop();
+			}
+		}
+	} finally {
+		for (let index = frames.length - 1; index >= 0; index--) {
+			try { await frames[index]!.directory.close(); } catch { /* preserve the removal error */ }
+		}
+	}
+}
