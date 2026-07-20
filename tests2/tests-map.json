@@ -237,6 +237,24 @@
       }
     },
     {
+      "path": "tests2/dom/portrait-session-cache-repro.test.ts",
+      "reason": "Failing-first deterministic DOM reproducer for portrait session-list navigation: backToSessions must transfer a matching connected ChatPanel/RemoteAgent pair into the bounded session cache without disconnecting it, clear active ownership, and leave explicit uncache eviction responsible for disconnecting the cached agent.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/portrait-session-cache.journey.spec.ts",
+      "reason": "Portrait 375x667 real-harness regression journey for session A→list→B→list→A caching, using a pre-click MutationObserver plus stable pi-chat-panel identity and WebSocket creation counts to prove healthy reuse without a loader; also pins stale cached-socket fresh fallback with transcript hydration, landscape direct-switch parity, reload-only cache loss, and deterministic session cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/cross-session-proposal-mirror.journey.spec.ts",
       "reason": "Reproducing test for the 'Fix cross-session proposal panels' goal: from a NON-matching session (assistantType === null) a role/tool/staff proposal that reaches the panel through the UNIFIED remote.onProposal path alone (source 'seed'/'rehydrate'/'edit'/'restore'/switch-back — not the live tool-use scan that also fires the legacy per-type callback) leaves the legacy form-mirror (rolePreviewName…, toolPreviewName…, staffPreviewName…) empty, so the panel renders blank and its primary submit stays disabled/absent. Drives onProposal directly (same technique as tests2/browser/e2e/proposal-inline-comments.spec.ts) and asserts the mirror is populated + submit enabled. FAILS on HEAD (no role/tool/staff bridge in the unified callback, only goal is bridged), passes once the bridge is added.",
       "execution": {
