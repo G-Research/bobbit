@@ -30,8 +30,9 @@
  *                   aggregate cap / beyond the mention-count cap. Literal
  *                   `@path` is left in `modelText`, with `reason` set.
  *       • genuinely missing targets are ordinary text and are omitted from
- *                   mentions and warnings. **Never throws** — every failure
- *                   path degrades gracefully.
+ *                   mentions and warnings. Admitted prompts degrade delivery
+ *                   failures gracefully; oversized/adversarial inputs throw a
+ *                   typed admission error so the caller rejects the whole send.
  *
  *   - **Snapshot at resolve time** — text content and image/binary base64
  *     bytes are captured now so replaying a `.jsonl` later renders the same
@@ -51,6 +52,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { marked, type Token, type Tokens } from "marked";
+import { Semaphore } from "../agent/semaphore.js";
 
 /** Char range, in UTF-16 code units (matches `String.prototype.slice`). */
 export type MentionRange = [number, number];
@@ -97,8 +99,42 @@ export const MAX_MENTION_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_MENTION_AGGREGATE_BYTES = 20 * 1024 * 1024; // 20 MiB
 /** Max existing `@path` targets resolved per send. Extra existing targets → unresolved (too-many-mentions). */
 export const MAX_MENTIONS_PER_SEND = 50;
-/** Fixed width of the asynchronous existence-classification worker pool. */
+/** Fixed width of each resolver's asynchronous existence-classification pool. */
 export const FILE_MENTION_PROBE_CONCURRENCY = 8;
+/** Maximum UTF-16 source length admitted when file-mention syntax is present. */
+export const MAX_FILE_MENTION_TEXT_CHARS = 1024 * 1024; // 1 Mi UTF-16 code units
+/** Maximum candidate tokens admitted before Markdown parsing or filesystem work. */
+export const MAX_FILE_MENTION_CANDIDATES = 512;
+/** Process-wide cap for resolver calls doing Markdown/filesystem work. */
+export const FILE_MENTION_RESOLUTION_CONCURRENCY = 4;
+/** Process-wide cap for in-flight lstat probes across every session. */
+export const FILE_MENTION_LSTAT_CONCURRENCY = 8;
+
+export type FileMentionResolutionLimitKind = "text-length" | "candidate-count";
+
+/** Explicit, protocol-safe rejection for resolver admission limits. */
+export class FileMentionResolutionLimitError extends Error {
+	readonly code = "FILE_MENTION_RESOLUTION_LIMIT";
+
+	constructor(
+		readonly limitKind: FileMentionResolutionLimitKind,
+		readonly limit: number,
+		readonly observed: number,
+	) {
+		super(
+			limitKind === "text-length"
+				? `File-mention source exceeds the ${limit}-character admission limit`
+				: `Prompt exceeds the ${limit}-candidate file-mention admission limit`,
+		);
+		this.name = "FileMentionResolutionLimitError";
+	}
+}
+
+// Module-global FIFO semaphores prevent independent sessions from multiplying
+// resolver/parser and metadata-probe concurrency. Each acquire is released in
+// a finally block; Semaphore hands permits to waiters in arrival order.
+const resolutionSemaphore = new Semaphore(FILE_MENTION_RESOLUTION_CONCURRENCY);
+const lstatSemaphore = new Semaphore(FILE_MENTION_LSTAT_CONCURRENCY);
 
 /** Image extensions → MIME type. */
 const IMAGE_MIME: Record<string, string> = {
@@ -933,6 +969,83 @@ function scanMarkdownCodeRanges(text: string): SourceRange[] {
 	}
 }
 
+const WHITESPACE_CODE_UNIT = /\s/;
+
+function isWhitespaceCodeUnit(value: string): boolean {
+	return WHITESPACE_CODE_UNIT.test(value);
+}
+
+/**
+ * Count raw candidate syntax without constructing token objects or invoking
+ * Markdown. Stops at `limit + 1`, so hostile inputs cannot make admission
+ * allocate an unbounded candidate list before rejection.
+ */
+function boundedCandidateCount(text: string, limit: number): number {
+	let count = 0;
+	let searchFrom = 0;
+	while (searchFrom < text.length) {
+		const tokenStart = text.indexOf("@", searchFrom);
+		if (tokenStart < 0) break;
+		searchFrom = tokenStart + 1;
+		if (tokenStart > 0 && !isWhitespaceCodeUnit(text[tokenStart - 1])) continue;
+		if (
+			searchFrom >= text.length ||
+			text[searchFrom] === "@" ||
+			isWhitespaceCodeUnit(text[searchFrom])
+		) continue;
+
+		let tokenEnd = searchFrom + 1;
+		while (
+			tokenEnd < text.length &&
+			text[tokenEnd] !== "@" &&
+			!isWhitespaceCodeUnit(text[tokenEnd])
+		) tokenEnd++;
+		let trimmedEnd = tokenEnd;
+		while (trimmedEnd > searchFrom && TRAILING_PUNCT.has(text[trimmedEnd - 1])) {
+			trimmedEnd--;
+		}
+		if (trimmedEnd > searchFrom) {
+			count++;
+			if (count > limit) return count;
+		}
+		searchFrom = tokenEnd;
+	}
+	return count;
+}
+
+/** Return whether resolver work is needed, throwing before parser/fs work. */
+function admitFileMentionSource(text: string): boolean {
+	if (!text.includes("@")) return false;
+	// Oversized ordinary text that merely contains a non-candidate @ remains
+	// ordinary text. Once real candidate syntax is present, reject explicitly.
+	const scanLimit = text.length > MAX_FILE_MENTION_TEXT_CHARS
+		? 0
+		: MAX_FILE_MENTION_CANDIDATES;
+	const candidateCount = boundedCandidateCount(text, scanLimit);
+	if (candidateCount === 0) return false;
+	if (text.length > MAX_FILE_MENTION_TEXT_CHARS) {
+		throw new FileMentionResolutionLimitError(
+			"text-length",
+			MAX_FILE_MENTION_TEXT_CHARS,
+			text.length,
+		);
+	}
+	if (candidateCount > MAX_FILE_MENTION_CANDIDATES) {
+		throw new FileMentionResolutionLimitError(
+			"candidate-count",
+			MAX_FILE_MENTION_CANDIDATES,
+			candidateCount,
+		);
+	}
+	return true;
+}
+
+/** Windows network/device namespaces are never filesystem mention targets. */
+function isWindowsNamespaceToken(rawPath: string): boolean {
+	const normalized = rawPath.replace(/\\/g, "/");
+	return normalized.startsWith("//") || normalized.startsWith("/??/");
+}
+
 /** Scan prose for `@path` tokens while preserving original UTF-16 indices. */
 function scanTokens(text: string): ScannedToken[] {
 	const re = /(^|\s)@([^\s@]+)/g;
@@ -993,7 +1106,15 @@ export async function classifyFileMentionTargets(
 ): Promise<ReadonlyMap<string, FileMentionTargetClassification>> {
 	const classifications = new Map<string, FileMentionTargetClassification>();
 	for (const target of lexicalTargets) {
-		if (!classifications.has(target)) classifications.set(target, "unreadable");
+		if (classifications.has(target)) continue;
+		if (classifications.size >= MAX_FILE_MENTION_CANDIDATES) {
+			throw new FileMentionResolutionLimitError(
+				"candidate-count",
+				MAX_FILE_MENTION_CANDIDATES,
+				MAX_FILE_MENTION_CANDIDATES + 1,
+			);
+		}
+		classifications.set(target, "unreadable");
 	}
 
 	// A shared synchronous iterator hands each key to exactly one async worker;
@@ -1006,14 +1127,19 @@ export async function classifyFileMentionTargets(
 			const next = targets.next();
 			if (next.done) return;
 			const target = next.value;
+			await lstatSemaphore.acquire();
 			try {
-				await fs.promises.lstat(target);
-				classifications.set(target, "exists");
-			} catch (error) {
-				classifications.set(
-					target,
-					isMissingPathError(error) ? "missing" : "unreadable",
-				);
+				try {
+					await fs.promises.lstat(target);
+					classifications.set(target, "exists");
+				} catch (error) {
+					classifications.set(
+						target,
+						isMissingPathError(error) ? "missing" : "unreadable",
+					);
+				}
+			} finally {
+				lstatSemaphore.release();
 			}
 		}
 	});
@@ -1050,7 +1176,7 @@ function isLikelyText(buf: Buffer): boolean {
 const FILE_READ_CHUNK_BYTES = 64 * 1024;
 
 type DescriptorSnapshot =
-	| { ok: true; buffer: Buffer; size: number }
+	| { ok: true; buffer: Buffer; size: number; canonicalPath: string }
 	| { ok: false; reason: string; size?: number };
 
 function configuredCap(value: number | undefined, hardLimit: number): number {
@@ -1076,13 +1202,103 @@ function readBoundedDescriptor(fd: number, limit: number): Buffer {
 	return Buffer.concat(chunks, total);
 }
 
+type DescriptorPathResult =
+	| { kind: "verified"; canonicalPath: string }
+	| { kind: "unsupported" }
+	| { kind: "error" };
+
+const DESCRIPTOR_PATH_UNSUPPORTED_ERRORS = new Set(["ENOENT", "ENOTDIR", "EINVAL", "ENOSYS"]);
+
 /**
- * Bind validation and reads to one descriptor. O_NOFOLLOW closes the final
- * pathname-component race on platforms that expose it; O_RDONLY is the only
- * portable fallback (notably on Windows). The descriptor is always closed.
+ * Resolve the kernel-bound descriptor path where the platform exposes one.
+ * A descriptor namespace that merely canonicalizes back to itself is not a
+ * target-path facility and therefore falls through to identity validation.
+ */
+function resolveDescriptorCanonicalPath(fd: number): DescriptorPathResult {
+	const roots = process.platform === "win32"
+		? []
+		: process.platform === "linux"
+			? ["/proc/self/fd", "/dev/fd"]
+			: ["/dev/fd", "/proc/self/fd"];
+	for (const root of roots) {
+		const descriptorPath = `${root}/${fd}`;
+		try {
+			const canonicalPath = fs.realpathSync.native(descriptorPath);
+			if (
+				canonicalPath === descriptorPath ||
+				canonicalPath.startsWith(`${root}/`)
+			) continue;
+			return { kind: "verified", canonicalPath };
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException | undefined)?.code;
+			if (code && DESCRIPTOR_PATH_UNSUPPORTED_ERRORS.has(code)) continue;
+			return { kind: "error" };
+		}
+	}
+	return { kind: "unsupported" };
+}
+
+function boundedBigIntSize(size: bigint): number {
+	return size > BigInt(Number.MAX_SAFE_INTEGER)
+		? Number.MAX_SAFE_INTEGER
+		: Number(size);
+}
+
+/** Stable identity comparison; unavailable identity fails closed. */
+function sameStableFileIdentity(
+	opened: fs.BigIntStats,
+	pathname: fs.BigIntStats,
+): boolean {
+	// Node exposes the OS file identity as (dev, ino). inode zero is treated as
+	// unavailable rather than letting metadata lookalikes pass. The safe
+	// fallback for filesystems without stable IDs is explicit rejection.
+	if (opened.ino === 0n || pathname.ino === 0n) return false;
+	return opened.dev === pathname.dev && opened.ino === pathname.ino;
+}
+
+/**
+ * Validate the object actually bound to `fd` before reading any bytes. Kernel
+ * descriptor paths defeat parent-component replacement races on Unix. Where
+ * unavailable, a post-open canonical containment check plus pathname/fd file
+ * identity comparison fails closed if the opened object cannot be proven.
+ */
+function validateOpenedDescriptor(
+	fd: number,
+	absPath: string,
+	canonicalCwd: string,
+	openedStat: fs.BigIntStats,
+): { ok: true; canonicalPath: string } | { ok: false; reason: string } {
+	const descriptorPath = resolveDescriptorCanonicalPath(fd);
+	if (descriptorPath.kind === "error") return { ok: false, reason: "unreadable" };
+	if (descriptorPath.kind === "verified") {
+		return escapesDir(canonicalCwd, descriptorPath.canonicalPath)
+			? { ok: false, reason: "outside-cwd" }
+			: { ok: true, canonicalPath: descriptorPath.canonicalPath };
+	}
+
+	try {
+		const postOpenCanonicalPath = fs.realpathSync.native(absPath);
+		if (escapesDir(canonicalCwd, postOpenCanonicalPath)) {
+			return { ok: false, reason: "outside-cwd" };
+		}
+		const pathnameStat = fs.statSync(postOpenCanonicalPath, { bigint: true });
+		if (!pathnameStat.isFile() || !sameStableFileIdentity(openedStat, pathnameStat)) {
+			return { ok: false, reason: "unreadable" };
+		}
+		return { ok: true, canonicalPath: postOpenCanonicalPath };
+	} catch {
+		return { ok: false, reason: "unreadable" };
+	}
+}
+
+/**
+ * Bind validation and bounded reads to one descriptor. O_NOFOLLOW closes the
+ * final-component race where available; descriptor containment/identity closes
+ * the parent-component race. The descriptor is always closed.
  */
 function snapshotCanonicalFile(
 	absPath: string,
+	canonicalCwd: string,
 	perFileCap: number,
 	aggregateRemaining: number,
 ): DescriptorSnapshot {
@@ -1093,24 +1309,35 @@ function snapshotCanonicalFile(
 		const flags = fs.constants.O_RDONLY |
 			(typeof noFollow === "number" ? noFollow : 0);
 		fd = fs.openSync(absPath, flags);
-		const stat = fs.fstatSync(fd);
+		const stat = fs.fstatSync(fd, { bigint: true });
+		const size = boundedBigIntSize(stat.size);
 		if (!stat.isFile()) {
-			result = { ok: false, reason: "missing", size: stat.size };
-		} else if (stat.size > perFileCap) {
-			result = { ok: false, reason: "too-large", size: stat.size };
-		} else if (stat.size > aggregateRemaining) {
-			result = { ok: false, reason: "aggregate-cap", size: stat.size };
+			result = { ok: false, reason: "missing", size };
 		} else {
-			const readCap = Math.min(perFileCap, aggregateRemaining);
-			const buffer = readBoundedDescriptor(fd, readCap);
-			if (buffer.length > readCap) {
-				result = {
-					ok: false,
-					reason: perFileCap <= aggregateRemaining ? "too-large" : "aggregate-cap",
-					size: stat.size,
-				};
+			const validation = validateOpenedDescriptor(fd, absPath, canonicalCwd, stat);
+			if (!validation.ok) {
+				result = { ok: false, reason: validation.reason, size };
+			} else if (stat.size > BigInt(perFileCap)) {
+				result = { ok: false, reason: "too-large", size };
+			} else if (stat.size > BigInt(aggregateRemaining)) {
+				result = { ok: false, reason: "aggregate-cap", size };
 			} else {
-				result = { ok: true, buffer, size: buffer.length };
+				const readCap = Math.min(perFileCap, aggregateRemaining);
+				const buffer = readBoundedDescriptor(fd, readCap);
+				if (buffer.length > readCap) {
+					result = {
+						ok: false,
+						reason: perFileCap <= aggregateRemaining ? "too-large" : "aggregate-cap",
+						size,
+					};
+				} else {
+					result = {
+						ok: true,
+						buffer,
+						size: buffer.length,
+						canonicalPath: validation.canonicalPath,
+					};
+				}
 			}
 		}
 	} catch {
@@ -1127,11 +1354,8 @@ function snapshotCanonicalFile(
 	return result;
 }
 
-/**
- * Resolve all `@path` file mentions in `text`, relative to `cwd`.
- * See module doc for semantics. Pure — only reads the referenced files.
- */
-export async function resolveFileMentions(
+/** Resolve a source that already passed cheap admission checks. */
+async function resolveAdmittedFileMentions(
 	text: string,
 	cwd: string,
 	opts?: ResolveFileMentionsOptions,
@@ -1143,14 +1367,19 @@ export async function resolveFileMentions(
 		mentions: [],
 		warnings: [],
 	});
-	if (!text.includes("@")) return plainResult();
-
 	const maxTextBytes = configuredCap(opts?.maxFileBytes, MAX_INLINE_TEXT_BYTES);
 	const maxFileBytes = configuredCap(opts?.maxMentionFileBytes, MAX_MENTION_FILE_BYTES);
 	const maxAggregate = configuredCap(opts?.maxAggregateBytes, MAX_MENTION_AGGREGATE_BYTES);
 
 	const tokens = scanTokens(text);
 	if (tokens.length === 0) return plainResult();
+
+	// UNC and Windows device-namespace tokens are ordinary text on every host.
+	// Return before path resolution or filesystem I/O when they are the only
+	// candidates, and never pass them to the lexical-target classifier.
+	if (!tokens.some((token) => !isWindowsNamespaceToken(token.rawPath))) {
+		return plainResult();
+	}
 
 	const mentions: FileMention[] = [];
 	const warnings: string[] = [];
@@ -1162,6 +1391,7 @@ export async function resolveFileMentions(
 	// a later valid target from being discovered.
 	const lexicalTargets = function* (): Generator<string> {
 		for (const token of tokens) {
+			if (isWindowsNamespaceToken(token.rawPath)) continue;
 			yield path.resolve(resolvedCwd, token.rawPath.replace(/\\/g, "/"));
 		}
 	};
@@ -1189,6 +1419,7 @@ export async function resolveFileMentions(
 
 	for (const tok of tokens) {
 		const rawPath = tok.rawPath;
+		if (isWindowsNamespaceToken(rawPath)) continue;
 		const normRel = rawPath.replace(/\\/g, "/");
 		const base: FileMention = { path: rawPath, range: tok.range, kind: "unresolved" };
 
@@ -1242,14 +1473,19 @@ export async function resolveFileMentions(
 		}
 
 		const aggregateRemaining = Math.max(0, maxAggregate - aggregateUsed);
-		const snapshot = snapshotCanonicalFile(absPath, maxFileBytes, aggregateRemaining);
+		const snapshot = snapshotCanonicalFile(
+			absPath,
+			canonicalCwd,
+			maxFileBytes,
+			aggregateRemaining,
+		);
 		if (snapshot.size !== undefined) base.bytes = snapshot.size;
 		if (!snapshot.ok) {
 			markUnresolved(snapshot.reason);
 			continue;
 		}
 
-		base.absPath = absPath;
+		base.absPath = snapshot.canonicalPath;
 		const buf = snapshot.buffer;
 		base.bytes = buf.length;
 		const ext = path.extname(normRel).toLowerCase();
@@ -1309,4 +1545,25 @@ export async function resolveFileMentions(
 	}
 
 	return { originalText, modelText, mentions, warnings };
+}
+
+/**
+ * Resolve all admitted `@path` file mentions relative to `cwd`. Admission is
+ * intentionally outside the process-wide semaphore and before Markdown/fs
+ * work, so rejected prompts fail promptly and consume no shared capacity.
+ */
+export async function resolveFileMentions(
+	text: string,
+	cwd: string,
+	opts?: ResolveFileMentionsOptions,
+): Promise<ResolvedMentions> {
+	if (!admitFileMentionSource(text)) {
+		return { originalText: text, modelText: text, mentions: [], warnings: [] };
+	}
+	await resolutionSemaphore.acquire();
+	try {
+		return await resolveAdmittedFileMentions(text, cwd, opts);
+	} finally {
+		resolutionSemaphore.release();
+	}
 }

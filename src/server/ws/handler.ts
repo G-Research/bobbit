@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import type { WebSocket } from "ws";
+import type { RawData, WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { spliceInFlightMessage, spliceInFlightSteers } from "../agent/splice-inflight-message.js";
@@ -12,7 +12,11 @@ import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
-import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
+import {
+	FileMentionResolutionLimitError,
+	resolveFileMentions,
+	toWireMention,
+} from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { resolveModelStateMeta } from "../agent/model-registry.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
@@ -38,6 +42,7 @@ import { applyRuntimeSessionModelSelection, broadcastRuntimeSessionActualModelSt
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
+import { SessionCommandSerialiser } from "./session-command-serialiser.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -374,6 +379,7 @@ type ExtensionChannelRegistry = {
 
 const MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
+const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
 type ExtensionChannelClientMessageType = Extract<ClientMessage, { type: `ext_channel_${string}` }>['type'];
@@ -428,8 +434,19 @@ export function handleWebSocketConnection(
 	const ip = getClientIp(req);
 	let authenticated = false;
 	const clientId = randomUUID();
+	const commandSerialisationKey = sessionId === "__viewer__"
+		? `viewer:${clientId}`
+		: `session:${sessionId}`;
 	let surfaceTokenAuthorityKey: string | undefined;
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
+
+	const sendCommandFailure = (err: unknown): void => {
+		if (err instanceof FileMentionResolutionLimitError) {
+			send(ws, { type: "error", message: err.message, code: err.code });
+			return;
+		}
+		send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
+	};
 
 	const sendExtChannelFailure = (requestId: string, err: unknown, fallback = "channel operation failed"): void => {
 		const record = err as { code?: unknown; status?: unknown; message?: unknown };
@@ -465,7 +482,7 @@ export function handleWebSocketConnection(
 		}
 	}, 5000);
 
-	ws.on("message", async (data) => {
+	const handleRawMessage = async (data: RawData): Promise<void> => {
 		const frameBytes = rawWsMessageBytes(data);
 		if (!authenticated && frameBytes > MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES) {
 			send(ws, { type: "error", message: "Unauthenticated WebSocket frame exceeds maximum envelope size", code: "FRAME_TOO_LARGE" });
@@ -1663,8 +1680,21 @@ export function handleWebSocketConnection(
 					send(ws, { type: "error", message: "Unknown message type", code: "UNKNOWN_TYPE" });
 			}
 		} catch (err) {
-			send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
+			sendCommandFailure(err);
 		}
+	};
+
+	ws.on("message", (data) => {
+		void SESSION_COMMAND_SERIALISER.serialise(
+			commandSerialisationKey,
+			() => handleRawMessage(data),
+		).catch((err) => {
+			// Covers authentication/archive branches and any future routing added
+			// outside the command-level try/catch. The serialiser's fulfilled tail
+			// still permits the next same-session command to run.
+			console.error(`[ws-handler] Unhandled command failure for ${sessionId}:`, err);
+			sendCommandFailure(err);
+		});
 	});
 
 	ws.on("close", () => {
