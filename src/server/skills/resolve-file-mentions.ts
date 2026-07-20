@@ -104,6 +104,25 @@ export const FILE_MENTION_PROBE_CONCURRENCY = 8;
 export const FILE_MENTION_RESOLUTION_CONCURRENCY = 4;
 /** Process-wide cap for in-flight lstat probes across every session. */
 export const FILE_MENTION_LSTAT_CONCURRENCY = 8;
+/** Max retained non-code `@path` candidates in one prompt. */
+export const MAX_FILE_MENTION_RAW_CANDIDATES = 8_192;
+/** Max distinct lexical filesystem targets probed in one prompt. */
+export const MAX_FILE_MENTION_UNIQUE_PROBES = 4_096;
+
+export type FileMentionBudgetErrorCode =
+	| "FILE_MENTION_CANDIDATE_LIMIT"
+	| "FILE_MENTION_PROBE_LIMIT";
+
+/** Typed admission failure: callers reject the whole prompt explicitly. */
+export class FileMentionBudgetError extends Error {
+	readonly code: FileMentionBudgetErrorCode;
+
+	constructor(code: FileMentionBudgetErrorCode, message: string) {
+		super(message);
+		this.name = "FileMentionBudgetError";
+		this.code = code;
+	}
+}
 
 // Module-global FIFO semaphores prevent independent sessions from multiplying
 // resolver/parser and metadata-probe concurrency. Each acquire is released in
@@ -1004,6 +1023,12 @@ function scanTokens(text: string): ScannedToken[] {
 		if (token.length === 0) continue;
 		const tokenEnd = tokenStart + 1 + token.length; // covers "@" + path
 		out.push({ rawPath: token, range: [tokenStart, tokenEnd] });
+		if (out.length > MAX_FILE_MENTION_RAW_CANDIDATES) {
+			throw new FileMentionBudgetError(
+				"FILE_MENTION_CANDIDATE_LIMIT",
+				`Prompt contains more than ${MAX_FILE_MENTION_RAW_CANDIDATES} non-code file-mention candidates`,
+			);
+		}
 	}
 	return out;
 }
@@ -1034,6 +1059,12 @@ function collectUniqueLexicalTargets(
 		if (seen.has(target)) continue;
 		seen.add(target);
 		targets.push(target);
+		if (targets.length > MAX_FILE_MENTION_UNIQUE_PROBES) {
+			throw new FileMentionBudgetError(
+				"FILE_MENTION_PROBE_LIMIT",
+				`Prompt contains more than ${MAX_FILE_MENTION_UNIQUE_PROBES} distinct file-mention targets`,
+			);
+		}
 	}
 	return targets;
 }

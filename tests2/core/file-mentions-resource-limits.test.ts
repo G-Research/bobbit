@@ -24,6 +24,11 @@ afterAll(() => {
 
 const resolverModule = await import("../../src/server/skills/resolve-file-mentions.ts");
 const { resolveFileMentions, buildFileReferenceBlock, MAX_MENTIONS_PER_SEND } = resolverModule;
+const MAX_FILE_MENTION_RAW_CANDIDATES = Reflect.get(resolverModule, "MAX_FILE_MENTION_RAW_CANDIDATES") as number;
+const MAX_FILE_MENTION_UNIQUE_PROBES = Reflect.get(resolverModule, "MAX_FILE_MENTION_UNIQUE_PROBES") as number;
+const FileMentionBudgetError = Reflect.get(resolverModule, "FileMentionBudgetError") as unknown;
+const EXPECTED_RAW_CANDIDATE_LIMIT = 8_192;
+const EXPECTED_UNIQUE_PROBE_LIMIT = 4_096;
 const FILE_MENTION_RESOLUTION_CONCURRENCY = (
 	Reflect.get(resolverModule, "FILE_MENTION_RESOLUTION_CONCURRENCY")
 		?? Reflect.get(resolverModule, "FILE_MENTION_RESOLVER_CONCURRENCY")
@@ -86,6 +91,12 @@ function requestedReadLength(call: unknown[]): number {
 }
 
 describe("resolveFileMentions resource limits", () => {
+	it("exports the documented admission cap constants", async () => {
+		assert.equal(MAX_FILE_MENTION_RAW_CANDIDATES, EXPECTED_RAW_CANDIDATE_LIMIT);
+		assert.equal(MAX_FILE_MENTION_UNIQUE_PROBES, EXPECTED_UNIQUE_PROBE_LIMIT);
+		assert.equal(typeof FileMentionBudgetError, "function");
+	});
+
 	it("resolves a valid file in more than 256 KiB of ordinary prose without invoking Marked", async () => {
 		const text = `${"x".repeat(256 * 1024 + 1)} @notes.txt`;
 		const markdownLexer = vi.spyOn(marked, "lexer");
@@ -107,7 +118,7 @@ describe("resolveFileMentions resource limits", () => {
 		}
 	});
 
-	it("keeps 600 code-contained candidates literal without filesystem classification", async () => {
+	it("excludes 600 code-contained candidates from the post-Markdown raw budget and keeps them literal", async () => {
 		const fencedCandidates = Array.from(
 			{ length: 300 },
 			(_, index) => `@fenced-candidate-${index}.txt`,
@@ -116,46 +127,125 @@ describe("resolveFileMentions resource limits", () => {
 			{ length: 300 },
 			(_, index) => `@inline-candidate-${index}.txt`,
 		).join(" ");
+		const proseCandidates = Array.from(
+			{ length: EXPECTED_RAW_CANDIDATE_LIMIT },
+			() => "@budget-edge-missing.txt",
+		).join(" ");
 		const text = [
 			"```text",
 			fencedCandidates,
+			"x".repeat(1024 * 1024),
 			"```",
 			`inline \`${inlineCandidates}\``,
-			"resolve @notes.txt",
+			proseCandidates,
 		].join("\n");
-		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
 		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
 		const openSpy = vi.spyOn(fs, "openSync");
 
 		try {
+			assert.ok(text.length > 1024 * 1024, "fixture must exercise large raw Markdown");
 			assert.equal(text.match(/@(?:fenced|inline)-candidate-/g)?.length, 600);
 			const result = await resolveFileMentions(text, cwdDir);
-			const token = "@notes.txt";
-			const start = text.lastIndexOf(token);
 			assert.equal(result.originalText, text);
-			assert.equal(
-				result.modelText,
-				text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT),
-			);
-			assert.deepEqual(
-				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
-				[{ kind: "text", path: "notes.txt", range: [start, start + token.length] }],
-			);
+			assert.equal(result.modelText, text);
+			assert.deepEqual(result.mentions, []);
 			assert.deepEqual(result.warnings, []);
-			assert.deepEqual(
-				lstatSpy.mock.calls.map(([target]) => path.resolve(String(target))),
-				[path.join(cwdDir, "notes.txt")],
-				"only the prose reference may reach existence classification",
-			);
-			assert.equal(promiseOpenSpy.mock.calls.length, 0);
-			assert.ok(
-				openSpy.mock.calls.every(([target]) => path.resolve(String(target)) === path.join(cwdDir, "notes.txt")),
-				"code-contained candidates must never be opened",
-			);
+			assert.equal(lstatSpy.mock.calls.length, 1, "only the repeated prose target may reach lstat");
+			assert.match(String(lstatSpy.mock.calls[0][0]), /budget-edge-missing\.txt$/);
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "missing candidates must not reach promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "missing candidates must not reach openSync");
 		} finally {
 			openSpy.mockRestore();
 			promiseOpenSpy.mockRestore();
 			lstatSpy.mockRestore();
+		}
+	});
+
+	it("rejects non-code candidates above the raw budget before filesystem work", async () => {
+		const text = Array.from(
+			{ length: EXPECTED_RAW_CANDIDATE_LIMIT + 128 },
+			() => "@raw-budget-missing.txt",
+		).join(" ");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			await assert.rejects(
+				() => resolveFileMentions(text, cwdDir),
+				(error: unknown) => {
+					const record = error as { name?: unknown; code?: unknown; message?: unknown };
+					assert.equal(record.name, "FileMentionBudgetError");
+					assert.equal(record.code, "FILE_MENTION_CANDIDATE_LIMIT");
+					assert.match(String(record.message), /8192.*non-code file-mention candidates/i);
+					return true;
+				},
+				"raw budget overflow must reject the whole prompt explicitly",
+			);
+			assert.equal(lstatSpy.mock.calls.length, 0, "raw overflow must reject before lstat");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "raw overflow must reject before promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "raw overflow must reject before openSync");
+			assert.equal(readSpy.mock.calls.length, 0, "raw overflow must reject before readSync");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("stops unique-target preparation at the limit-plus-one sentinel and probes nothing", async () => {
+		const overflowTail = 128;
+		const text = Array.from(
+			{ length: EXPECTED_UNIQUE_PROBE_LIMIT + overflowTail },
+			(_, index) => `@unique-budget-${index}.txt`,
+		).join(" ");
+		const resolvedCwd = path.resolve(cwdDir);
+		const resolvePathSpy = vi.spyOn(path, "resolve");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(missingPathError());
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			await assert.rejects(
+				() => resolveFileMentions(text, cwdDir),
+				(error: unknown) => {
+					const record = error as { name?: unknown; code?: unknown; message?: unknown };
+					assert.equal(record.name, "FileMentionBudgetError");
+					assert.equal(record.code, "FILE_MENTION_PROBE_LIMIT");
+					assert.match(String(record.message), /4096.*distinct file-mention targets/i);
+					return true;
+				},
+				"unique-target overflow must reject the whole prompt explicitly",
+			);
+			const preparedCandidates = resolvePathSpy.mock.calls.filter(
+				(call) => call[0] === resolvedCwd
+					&& typeof call[1] === "string"
+					&& /^unique-budget-\d+\.txt$/.test(call[1]),
+			);
+			assert.equal(
+				preparedCandidates.length,
+				EXPECTED_UNIQUE_PROBE_LIMIT + 1,
+				"the resolver must retain only the limit plus one overflow sentinel",
+			);
+			assert.equal(preparedCandidates.at(-1)?.[1], `unique-budget-${EXPECTED_UNIQUE_PROBE_LIMIT}.txt`);
+			assert.ok(
+				!preparedCandidates.some((call) => call[1] === `unique-budget-${EXPECTED_UNIQUE_PROBE_LIMIT + 1}.txt`),
+				"candidate preparation must stop immediately at the overflow sentinel",
+			);
+			assert.equal(lstatSpy.mock.calls.length, 0, "unique overflow must reject before lstat");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "unique overflow must reject before promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "unique overflow must reject before openSync");
+			assert.equal(readSpy.mock.calls.length, 0, "unique overflow must reject before readSync");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+			resolvePathSpy.mockRestore();
 		}
 	});
 
@@ -195,7 +285,7 @@ describe("resolveFileMentions resource limits", () => {
 		}
 	});
 
-	it("exhaustively classifies more than 513 accepted candidates and preserves the later UTF-16 splice", async () => {
+	it("resolves an existing text file after more than 512 missing candidates with an exact UTF-16 splice", async () => {
 		const missing = Array.from(
 			{ length: 513 },
 			(_, index) => `@missing-before-valid-${index}.txt`,

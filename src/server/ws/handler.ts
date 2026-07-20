@@ -13,6 +13,7 @@ import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import {
+	FileMentionBudgetError,
 	resolveFileMentions,
 	toWireMention,
 } from "../skills/resolve-file-mentions.js";
@@ -378,6 +379,8 @@ type ExtensionChannelRegistry = {
 
 const MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
+/** Generic authenticated text ceiling for prompts, steers, and pack posts. */
+export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
 const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
@@ -447,14 +450,20 @@ export function handleWebSocketConnection(
 		if (msg.type !== "prompt" && msg.type !== "steer" && msg.type !== "ext_session_post") {
 			return false;
 		}
-		if (typeof (msg as { text?: unknown }).text === "string") return false;
+		const promptText = (msg as { text?: unknown }).text;
+		const invalid = typeof promptText !== "string";
+		const tooLarge = !invalid && Buffer.byteLength(promptText, "utf8") > MAX_AUTHENTICATED_PROMPT_TEXT_BYTES;
+		if (!invalid && !tooLarge) return false;
 
-		const code = "INVALID_PROMPT_TEXT";
+		const code = invalid ? "INVALID_PROMPT_TEXT" : "PROMPT_TOO_LARGE";
+		const message = invalid
+			? "Prompt text must be a string"
+			: `Prompt text exceeds maximum size (${MAX_AUTHENTICATED_PROMPT_TEXT_BYTES} UTF-8 bytes)`;
 		if (msg.type === "ext_session_post") {
 			const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
 			send(ws, { type: "ext_session_post_result", requestId, ok: false, error: code });
 		} else {
-			send(ws, { type: "error", message: "Prompt text must be a string", code });
+			send(ws, { type: "error", message, code });
 		}
 		return true;
 	};
@@ -883,7 +892,14 @@ export function handleWebSocketConnection(
 					const fileMentionResult = await resolveFileMentions(
 						msg.text,
 						fileMentionCwd,
-					);
+					).catch((error: unknown) => {
+						if (error instanceof FileMentionBudgetError) {
+							send(ws, { type: "error", message: error.message, code: error.code });
+							return undefined;
+						}
+						throw error;
+					});
+					if (!fileMentionResult) return;
 					for (const w of fileMentionResult.warnings) {
 						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
 					}
