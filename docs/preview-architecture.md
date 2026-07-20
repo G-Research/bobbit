@@ -16,9 +16,10 @@ Five pieces, one mount, one URL shape:
 2. **Content origin** — the gateway serves the mount at `/preview/<sid>/<path>`.
    Same shape for the iframe `src`, the "Open in new tab" button, and any link
    the user clicks inside the preview.
-3. **Cookie auth** — `bobbit_session` HttpOnly cookie issued on first
-   authenticated request. iframe loads, link navigation, and new-tab opens all
-   carry the cookie automatically; no token-in-URL hacks.
+3. **Cookie auth** — stateless signed `bobbit_session` HttpOnly cookie issued
+   only by a qualifying browser-signaled API bootstrap or seven-day renewal.
+   iframe loads, link navigation, and new-tab opens all carry the cookie
+   automatically; no token-in-URL hacks.
 4. **SSE hot reload** — `GET /api/sessions/:sid/preview-events` streams a
    `preview-changed` event whenever the gateway repopulates the mount. The panel
    bumps `#mtime=<n>` on the iframe `src` to force a reload.
@@ -297,30 +298,57 @@ cookie path; the bearer fallback is for `curl` and SSE callers.
 
 ## Cookie auth
 
-Single source of truth: `src/server/auth/cookie.ts`.
+Sources of truth: `src/server/auth/cookie.ts` (wire format and in-memory
+signing/verification), `src/server/auth/cookie-signing-key.ts` (startup-only
+key persistence), and `src/server/auth/browser-cookie.ts` (central issuance
+eligibility).
 
 ```
-Set-Cookie: bobbit_session=<32-byte hex>; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000
+Set-Cookie: bobbit_session=v1.<iat>.<exp>.<nonce>.<signature>; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000
 ```
 
-`Secure` is added outside localhost mode (the browser would discard a
-`Secure` cookie on plain HTTP).
+`iat` and `exp` are canonical Unix seconds, `nonce` is 16 random bytes encoded
+as unpadded base64url, and `signature` is a 32-byte HMAC-SHA-256 tag over the
+preceding four fields, also encoded as unpadded base64url. The fixed lifetime is
+30 days. `Secure` is added outside localhost HTTP mode (the browser would
+otherwise discard the cookie on plain HTTP).
 
-- **Storage:** `<stateDir>/auth-cookies.json` (`mode 0o600`, debounced
-  flushes). Survives gateway restart.
-- **Value:** opaque 32-byte hex, minted server-side. The bearer token is
-  never embedded — the cookie can be revoked independently.
-- **Issued:** by the API request guard the first time a Bearer-authenticated
-  request lands without a valid cookie (`issueIfMissing`).
-- **Verified:** `tryAuth(req, store)` reads the `bobbit_session` cookie and
-  checks it against the store.
+- **Persisted material:** only the stable 32-byte signing key at
+  `<serverSecretsDir>/cookie-signing-key` (`0o600`, with the secrets directory
+  restricted to `0o700`, where supported). It is safely created or loaded once
+  at gateway startup. The admin Bearer token is never a key or payload field.
+- **Legacy registry:** any `<stateDir>/auth-cookies.json` is retired legacy
+  data. The gateway leaves arbitrary or corrupt copies untouched: it does not
+  read, parse, stat, migrate, prune, rewrite, or delete them.
+- **Verified:** `tryAuth(req, store)` validates the signed value entirely in
+  memory with bounded work and constant memory, including fixed-length
+  timing-safe signature comparison, timestamps, lifetime, and expiry. Request
+  authentication performs no filesystem I/O and no registry lookup.
+- **Bootstrap:** an absent, invalid, or legacy cookie is replaced only after
+  admin Bearer or localhost-trusted authentication on a qualifying
+  browser-signaled API request. The request must carry accepted same-origin
+  Fetch Metadata and, when present, a trusted Origin. Plain Bearer requests,
+  session-bound agent traffic, sandbox credentials, and internal callback
+  routes never receive `Set-Cookie`.
+- **Renewal:** a valid signed-cookie-authenticated browser API request receives
+  one replacement only when expiry is at or within the inclusive seven-day
+  renewal window. Preview content and preview SSE authenticate cookies but do
+  not issue or renew them.
+- **Revocation:** cookies are not independently revocable because there is no
+  per-cookie registry. Rotating the stable signing key invalidates all cookies;
+  otherwise each cookie expires from its bounded signed timestamp.
 - **Localhost short-circuit:** the content route honours `isLocalhost: true`
   and skips the cookie check, matching legacy behaviour.
-- **Sandbox tokens** keep their existing scoped allow-list and do **not**
-  mint cookies. The content route refuses sandbox-scoped requests.
+- **Sandbox tokens** keep their existing scoped allow-list. The content route
+  refuses sandbox-scoped requests, and sandbox-authenticated traffic never
+  mints or renews cookies.
 
-The Bearer-token-in-URL flow stays as a one-shot bootstrap (mobile links,
-OAuth callback). It does not authenticate per-request UI traffic any more.
+Fetch Metadata and Origin are issuance-routing signals, not a new security
+boundary: a holder of the shared admin token can deliberately make an otherwise
+eligible browser-shaped request and obtain the weak operator cookie. The
+Bearer-token-in-URL flow remains a one-shot UI credential bootstrap (mobile
+links, OAuth callback); it does not authenticate per-request UI traffic and a
+query token alone does not bypass cookie eligibility.
 
 ## SSE — `GET /api/sessions/:sid/preview-events`
 
@@ -640,7 +668,9 @@ back the preview tree sees the same bytes the gateway just wrote.
 | `src/server/preview/path-guard.ts` | Path-traversal defence (realpath-based) |
 | `src/server/preview/mime.ts` | MIME-type lookup |
 | `src/server/preview/events.ts` | Per-session `preview-changed` channel carrying mount identity payloads |
-| `src/server/auth/cookie.ts` | `bobbit_session` cookie issuance + verification, on-disk store |
+| `src/server/auth/cookie.ts` | Stateless `bobbit_session` v1 signing + constant-memory verification (no filesystem capability) |
+| `src/server/auth/cookie-signing-key.ts` | Startup-only load/create of `<serverSecretsDir>/cookie-signing-key` |
+| `src/server/auth/browser-cookie.ts` | Central browser bootstrap/renewal eligibility classifier |
 | `src/server/server.ts` | `POST/GET /api/preview/mount`, SSE route, broadcast on success |
 | `src/server/agent/docker-args.ts` | Sandbox bind mounts (`/bobbit/preview`, `/bobbit/preview-root`) |
 | `src/shared/preview-bridge-scripts.ts` | Theme/swipe bridge scripts injected into HTML responses |

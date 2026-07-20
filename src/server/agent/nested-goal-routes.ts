@@ -49,9 +49,10 @@ export interface NestedGoalRouteDeps {
 	teamManager: TeamManager;
 	sessionManager: SessionManager;
 	/**
-	 * Cookie store used to compute the human-operator signal for S1 authz on
-	 * the mutating Children endpoints. A request carrying a verified
-	 * `bobbit_session` cookie is treated as a trusted human/UI gateway call.
+	 * In-memory signed-cookie verifier used to compute the weak human-operator
+	 * signal for S1 authz on the mutating Children endpoints. A verified
+	 * `bobbit_session` is accepted as a human/UI signal for operator verbs, but
+	 * it is not proof of a human caller (see `children-mutation-authz.ts`).
 	 */
 	cookieStore: CookieStore;
 	requireSubgoalsEnabled(): boolean;
@@ -263,10 +264,11 @@ export async function tryHandleNestedGoalRoute(
 	 * `src/server/auth/children-mutation-authz.ts`):
 	 *
 	 *   - `orchestration` (spawn-child, plan PATCH, integrate-child, policy):
-	 *     team-lead-only. The `bobbit_session` cookie does NOT bypass — it is
-	 *     mintable by any holder of the shared admin Bearer token, so it is a
-	 *     weak human signal. We REQUIRE the AUTHENTIC caller (resolved from the
-	 *     per-session secret) to match the authoritative team-lead for
+	 *     team-lead-only. The signed `bobbit_session` cookie does NOT bypass. A
+	 *     shared-admin-token holder can deliberately make an eligible
+	 *     browser-shaped request and obtain one from the gateway, so it remains
+	 *     a weak human signal. We REQUIRE the AUTHENTIC caller (resolved from
+	 *     the per-session secret) to match the authoritative team-lead for
 	 *     `goalIdForTeam`.
 	 *   - `operator` (pause, resume, mutation decision, archive-child): the
 	 *     human-in-the-loop verbs the web UI drives. A verified cookie is

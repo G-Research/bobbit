@@ -1,6 +1,32 @@
 # REST API
 
-All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
+Gateway routes require an authentication source accepted by that surface. Most
+programmatic API calls use `Authorization: Bearer <admin-token>`; routes that
+support it also accept `?token=`. Browser API requests and preview resources may
+instead authenticate with a valid `bobbit_session` cookie. Scoped sandbox and
+session credentials remain limited to their existing route allow-lists.
+
+`bobbit_session` is a stateless signed value:
+`v1.<iat>.<exp>.<nonce>.<signature>`. Its 30-day issuance and expiry timestamps
+and 16-byte random nonce are authenticated with HMAC-SHA-256. Only the stable,
+exact 32-byte key at `<serverSecretsDir>/cookie-signing-key` is persisted; it is
+loaded or safely created once at gateway startup. Verification is bounded,
+constant-memory, timing-safe, and entirely in memory. The admin Bearer token is
+never embedded in the cookie. A legacy `auth-cookies.json`, regardless of size
+or corruption, is left untouched and is never loaded or rewritten.
+
+An absent, invalid, or legacy cookie is bootstrapped only after admin Bearer or
+localhost-trusted authentication on an eligible browser-signaled API request.
+A valid signed cookie is renewed only within the inclusive seven-day window.
+Plain Bearer traffic without qualifying same-origin Fetch Metadata, sandbox or
+session-bound traffic, internal callbacks, preview content, and preview SSE do
+not receive `Set-Cookie`. Fetch Metadata and Origin classify browser traffic;
+they do not establish authority or prove a human caller. Consequently, a holder
+of the shared admin token can still deliberately make an otherwise eligible
+browser-shaped request and obtain the weak operator cookie. Cookies have
+`HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`, plus `Secure` outside
+localhost HTTP mode. Individual cookies are not independently revocable;
+rotating the signing key invalidates all of them.
 
 ### Driving the gateway from an agent
 
@@ -1219,14 +1245,14 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 The preview side-panel iframe is fed by a per-session content mount served from a cookie-authed origin path. Both `html=` and `file=` arguments to the agent's `preview_open` tool converge on the same mount, so there is no longer an inline-vs-file mode distinction. Full reference: [docs/preview-architecture.md](preview-architecture.md).
 
-**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. Auth is by the `bobbit_session` cookie (HttpOnly, `Path=/`, 30-day max-age, `Secure` outside localhost) — iframe loads, link navigation, and "Open in new tab" all carry it automatically. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
+**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. Auth is by the signed `bobbit_session` cookie (HttpOnly, `Path=/`, 30-day max-age, `Secure` outside localhost) — iframe loads, link navigation, and "Open in new tab" all carry it automatically. Preview content verifies cookies entirely in memory and never issues or renews them. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
 
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount, OR restore an immutable artifact. Body is one of: `{ html, entry? }` (inline), `{ file: "/abs/path/report.html", assets?: string[], manifest?: string }` (copy entry plus explicitly declared siblings), or `{ artifactId }` (restore a previously captured artifact — mutually exclusive with `html`/`file`/`assets`/`manifest`). Returns `200 { url, path, relPath, entry, mtime, contentHash, artifactId }` for inline, plus `assets: string[]` (resolved + sorted) for the `file` form. `contentHash` is a lowercase SHA-256 hex string for the populated mount tree; `artifactId` is the id of the immutable artifact written alongside the mount (see [docs/design/side-panel-tab-contract.md](design/side-panel-tab-contract.md) and the [Preview architecture](preview-architecture.md) doc for lifecycle). `relPath` is the host-invariant `<sessionId>/<entry>` identifier (forward slashes on all OS) used by the agent tool to build the v3 snapshot marker. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm` / `assets` or `manifest` passed with `html` / invalid asset path (absolute, `..`, `\`, `\0`, `**`, `[...]`, `{a,b}`) / manifest JSON parse error / `artifactId` combined with another body field; `403` sandbox-out-of-scope or symlink escape; `404` source file / manifest file / literal asset missing / `artifactId` unknown or owned by a different session. No size cap — asset inclusion is explicit and agent-driven. On success the server fans out a `preview-changed` SSE event. |
 | `POST` | `/api/preview/artifacts/<artifactId>/restore?sessionId=<sid>` | Restore a previously captured immutable preview artifact into the session's live mount and broadcast `preview-changed`. The artifact must belong to `<sid>`; cross-session ids return `404`. Returns the same shape as the mount `POST` (`{ url, path, relPath, entry, mtime, contentHash, artifactId }`). Used by the preview-renderer Open button on historical `preview_open` tool cards. Equivalent to `POST /api/preview/mount` with `{ artifactId }` body; this dedicated route keeps the URL self-describing for the client restore path. |
 | `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns `{ url, path, relPath, entry, mtime, contentHash, artifactId? }` (artifactId present iff an artifact was persisted for the current mount), or `404 { error: "no preview mount" }` if the mount is missing or empty. |
-| `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path, contentHash, artifactId?}` after every successful mount or artifact restore. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
+| `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path, contentHash, artifactId?}` after every successful mount or artifact restore. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. This route authenticates but never issues or renews a cookie. |
 
 ### Maintenance
 

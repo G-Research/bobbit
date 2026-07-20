@@ -2711,7 +2711,7 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 - **Constant-size snapshots (≤ 250 bytes)** - tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The `path` field is the host-invariant `<sessionId>/<entry>` form (forward slashes on all OSes) rather than the host-absolute path — keeping block size bounded by content shape, not install location. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
-- **Cookie auth for the content origin** - `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens.
+- **Cookie auth for the content origin** - the stateless HMAC-signed `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens. A stable 32-byte key is loaded once from `<serverSecretsDir>/cookie-signing-key`; request verification is bounded and entirely in memory. Cookie bootstrap and seven-day renewal happen only on centrally classified browser-signaled API requests, never on preview content or SSE.
 - **SSE replaces 1 s polling for hot reload** - `subscribePreviewChanged` pushes `preview-changed` events; the panel bumps `#mtime=<n>` on the iframe `src` to force reload, typically within 100 ms of the agent writing.
 - **Truncation layer recognises all three markers** - `truncateSnapshotBlock()` matches against `PREVIEW_SNAPSHOT_MARKERS`. v3 blocks are always tiny so the lazy-load branch is dead code for v3, but kept live for legacy archived sessions whose v1/v2 blocks may exceed the 32 KB threshold.
 
@@ -2723,7 +2723,9 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 | `src/server/preview/artifacts.ts` | Immutable preview artifact store — `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash` (dedupe), `removeArtifacts`, `sweepOrphanArtifacts` |
 | `src/server/preview/content-route.ts` | `/preview/<sid>/<path>` static serve + bridge injection |
 | `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel (payload now includes `contentHash` + `artifactId`) |
-| `src/server/auth/cookie.ts` | `bobbit_session` cookie store and verifier |
+| `src/server/auth/cookie.ts` | Stateless `bobbit_session` v1 signer and constant-memory verifier; no filesystem capability |
+| `src/server/auth/cookie-signing-key.ts` | Startup-only safe load/create of the stable 32-byte key under `serverSecretsDir()` |
+| `src/server/auth/browser-cookie.ts` | Central browser bootstrap/renewal eligibility classifier |
 | `defaults/tools/html/snapshot.ts` | v3 marker constant + builder + parser; v1/v2 parser arms preserved for archived sessions |
 | `defaults/tools/html/extension.ts` | Tool extension emits `[status, v3-snapshot]` tool_result after PATCH + POST mount |
 | `src/server/agent/truncate-large-content.ts` | Recognises v1/v2/v3 markers (via `PREVIEW_SNAPSHOT_MARKERS`); v3 blocks always small so lazy-load only fires on legacy archived sessions |
@@ -3336,7 +3338,28 @@ Only truly global state lives in the server's central state directory.
 | `tool-result-error-bridge/` | `tool-result-error-bridge-extension.ts` | Content-addressed generated bridge extension that preserves returned MCP-style tool error flags. Mounted read-only into Docker sandboxes. |
 | `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
 | `preview-artifacts/<sid>/<artifactId>/` | `src/server/preview/artifacts.ts` | Immutable copies of the mounted bytes captured on every successful `POST /api/preview/mount`. Each artifact directory holds `artifact.json` metadata plus the exact mount tree. Deduplicated by `contentHash` per session. Survives session archival; removed on session purge (`removeArtifacts(sid)`) or via the `sweepOrphanArtifacts(knownIds)` maintenance helper. Full lifecycle and restore semantics in [`docs/design/side-panel-tab-contract.md`](design/side-panel-tab-contract.md) and [`docs/preview-architecture.md`](preview-architecture.md). |
-| `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
+`auth-cookies.json` is not global state any more. If a legacy copy exists here,
+the gateway leaves its bytes untouched and never reads, parses, stats, migrates,
+prunes, rewrites, or deletes it. Legacy 64-hex cookies are invalid and can be
+replaced only through an eligible browser bootstrap.
+
+### `<serverSecretsDir>/` — live cookie secret
+
+| File | Owner | Purpose |
+|---|---|---|
+| `cookie-signing-key` | `src/server/auth/cookie-signing-key.ts` | Stable, exact 32-byte HMAC-SHA-256 key, loaded or safely created once at startup (`0o600`; parent directory `0o700` where supported). Request-time signing and verification use the in-memory key and perform no filesystem I/O. |
+
+The cookie wire format is
+`v1.<iat>.<exp>.<nonce>.<signature>` with a 30-day signed lifetime. Bootstrap
+requires an admin Bearer or localhost-trusted authentication plus qualifying
+browser Fetch Metadata/Origin; renewal is limited to valid signed-cookie API
+requests within the inclusive seven-day window. Plain Bearer, sandbox,
+session-bound, internal callback, preview content, and preview SSE requests do
+not receive `Set-Cookie`. These browser headers are routing metadata, not a
+human identity proof: a shared-admin-token holder can deliberately make an
+eligible browser-shaped request and obtain the weak operator cookie. There is
+no independent per-cookie revocation; rotating the stable key invalidates all
+cookies.
 
 ### Active agent directory
 
