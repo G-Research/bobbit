@@ -120,6 +120,119 @@ describe("resolveFileMentions", () => {
 		assert.deepEqual(r.warnings, []);
 	});
 
+	it("does not treat backslash-escaped backticks as inline code delimiters", () => {
+		const text = "escaped \\` marker @notes.txt and another \\` marker";
+		const start = text.indexOf("@notes.txt");
+		const r = resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1);
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "notes.txt");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + "@notes.txt".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("does not suppress mentions after unmatched backtick runs", () => {
+		const cases = [
+			"an unmatched ` run before @notes.txt",
+			"different unmatched ` and `` runs before @notes.txt",
+		];
+
+		for (const text of cases) {
+			const start = text.indexOf("@notes.txt");
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, text);
+			assert.equal(r.mentions[0].path, "notes.txt");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		}
+	});
+
+	it("does not pair unmatched backtick runs across Markdown paragraphs or list items", () => {
+		const cases = [
+			[
+				"first paragraph has an unmatched ` run",
+				"",
+				"second paragraph has @notes.txt before another unmatched ` run",
+			].join("\n"),
+			[
+				"- first item has an unmatched ` run",
+				"- second item has @notes.txt before another unmatched ` run",
+			].join("\n"),
+		];
+
+		for (const text of cases) {
+			const start = text.indexOf("@notes.txt");
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, text);
+			assert.equal(r.mentions[0].kind, "text");
+			assert.equal(r.mentions[0].path, "notes.txt");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		}
+	});
+
+	it("ignores fenced code inside common blockquote and list containers", () => {
+		const cases = [
+			["> ~~~text", "> @notes.txt", "> ~~~", "outside @src/a.ts"].join("\n"),
+			["- ~~~text", "  @notes.txt", "  ~~~", "outside @src/a.ts"].join("\n"),
+			["1. ~~~text", "   @notes.txt", "   ~~~", "outside @src/a.ts"].join("\n"),
+		];
+
+		for (const text of cases) {
+			const start = text.lastIndexOf("@src/a.ts");
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, text);
+			assert.equal(r.mentions[0].path, "src/a.ts");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+			);
+		}
+	});
+
+	it("recognizes fenced code with CR-only, LF, and CRLF line endings", () => {
+		for (const eol of ["\r", "\n", "\r\n"]) {
+			const text = ["before", "~~~text", "@notes.txt", "~~~", "after @src/a.ts"].join(eol);
+			const start = text.indexOf("@src/a.ts");
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, `line ending ${JSON.stringify(eol)}`);
+			assert.equal(r.mentions[0].path, "src/a.ts");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+			);
+		}
+	});
+
+	it("keeps mentions literal inside an unterminated fenced code block", () => {
+		const text = ["before", "~~~text", "@notes.txt", "still fenced @src/a.ts"].join("\n");
+		const r = resolveFileMentions(text, cwdDir);
+		assert.equal(r.originalText, text);
+		assert.equal(r.modelText, text);
+		assert.deepEqual(r.mentions, []);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("accepts a longer fence run as a valid closing fence", () => {
+		const cases = [
+			["before", "```ts", "@notes.txt", "````", "after @src/a.ts"].join("\n"),
+			["before", "~~~text", "@notes.txt", "~~~~~", "after @src/a.ts"].join("\n"),
+		];
+
+		for (const text of cases) {
+			const start = text.indexOf("@src/a.ts");
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, text);
+			assert.equal(r.mentions[0].path, "src/a.ts");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		}
+	});
+
 	it("resolves only the existing prose target in mixed valid, missing, inline-code, and fenced-code text", () => {
 		const text = [
 			"😀 resolve @notes.txt; keep @variableName and @missing/path.ts.",
@@ -284,6 +397,61 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
+	it("keeps an existing candidate unresolved when realpath fails with EACCES", () => {
+		const file = path.join(cwdDir, "realpath-denied.txt");
+		fs.writeFileSync(file, "private", "utf-8");
+		const lookupPath = path.resolve(file);
+		const originalRealpathNative = fs.realpathSync.native;
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((target: unknown, ...args: unknown[]) => {
+			if (path.resolve(String(target)) === lookupPath) {
+				throw Object.assign(new Error("permission denied during realpath"), { code: "EACCES" });
+			}
+			return (originalRealpathNative as (...callArgs: unknown[]) => unknown)(target, ...args);
+		}) as typeof fs.realpathSync.native);
+
+		try {
+			const text = "open @realpath-denied.txt";
+			const r = resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1);
+			assert.equal(r.mentions[0].kind, "unresolved");
+			assert.equal(r.mentions[0].reason, "unreadable");
+			assert.equal(r.modelText, text);
+			assert.equal(r.warnings.length, 1);
+			assert.match(r.warnings[0], /unreadable/);
+		} finally {
+			realpathSpy.mockRestore();
+		}
+	});
+
+	it("keeps post-realpath stat EACCES and ENOENT failures unresolved", () => {
+		const file = path.join(cwdDir, "stat-race.txt");
+		fs.writeFileSync(file, "present during existence classification", "utf-8");
+		const canonicalFile = fs.realpathSync.native(file);
+
+		for (const errorCode of ["EACCES", "ENOENT"] as const) {
+			const originalStatSync = fs.statSync;
+			const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((target: unknown, ...args: unknown[]) => {
+				if (path.resolve(String(target)) === canonicalFile) {
+					throw Object.assign(new Error(`stat failed with ${errorCode}`), { code: errorCode });
+				}
+				return (originalStatSync as (...callArgs: unknown[]) => unknown)(target, ...args);
+			}) as typeof fs.statSync);
+
+			try {
+				const text = "open @stat-race.txt";
+				const r = resolveFileMentions(text, cwdDir);
+				assert.equal(r.mentions.length, 1, errorCode);
+				assert.equal(r.mentions[0].kind, "unresolved", errorCode);
+				assert.equal(typeof r.mentions[0].reason, "string", errorCode);
+				if (errorCode === "EACCES") assert.equal(r.mentions[0].reason, "unreadable");
+				assert.equal(r.modelText, text, errorCode);
+				assert.equal(r.warnings.length, 1, errorCode);
+			} finally {
+				statSpy.mockRestore();
+			}
+		}
+	});
+
 	it("existing text and binary files over their per-file caps remain unresolved", () => {
 		fs.writeFileSync(path.join(cwdDir, "big.txt"), "x".repeat(2048), "utf-8");
 		fs.writeFileSync(path.join(cwdDir, "big.bin"), Buffer.alloc(2048, 0));
@@ -398,6 +566,19 @@ describe("resolveFileMentions", () => {
 		assert.equal(r.mentions.length, 1, "only the existing target should count as a mention");
 		assert.equal(r.mentions[0].kind, "text");
 		assert.equal(r.mentions[0].path, "notes.txt");
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("a missing candidate after the existing-reference limit stays ordinary text", () => {
+		const existing = Array.from({ length: MAX_MENTIONS_PER_SEND }, () => "@notes.txt").join(" ");
+		const missing = "@missing-after-limit.txt";
+		const text = `${existing} ${missing}`;
+		const r = resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, MAX_MENTIONS_PER_SEND);
+		assert.ok(r.mentions.every((mention) => mention.kind === "text" && mention.path === "notes.txt"));
+		assert.ok(!r.mentions.some((mention) => mention.path === "missing-after-limit.txt"));
+		assert.ok(r.modelText.endsWith(` ${missing}`), "missing token must remain literal after resolved mentions");
 		assert.deepEqual(r.warnings, []);
 	});
 
