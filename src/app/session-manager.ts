@@ -204,9 +204,10 @@ function transferActiveSessionToCache(expectedSessionId: string | null, targetSe
 	const interfaceSession: unknown = chatPanel?.agentInterface?.session;
 	const remoteBinding: unknown = remoteAgent;
 	const panelOwnsRemote = !!chatPanel && !!remoteAgent
-		&& (panelAgent === remoteBinding || interfaceSession === remoteBinding)
-		&& (!panelAgent || panelAgent === remoteBinding)
-		&& (!interfaceSession || interfaceSession === remoteBinding);
+		&& !!panelAgent
+		&& !!interfaceSession
+		&& panelAgent === remoteBinding
+		&& interfaceSession === remoteBinding;
 	const canCache = !!expectedSessionId
 		&& expectedSessionId !== targetSessionId
 		&& !!remoteAgent?.connected
@@ -1749,6 +1750,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// refreshSessions tick. If the removed session is the one we're viewing,
 		// route to landing.
 		remote.onSessionRemoved = (removedId: string, _reason: string) => {
+			uncacheSession(removedId);
 			const beforeLen = state.gatewaySessions.length;
 			state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== removedId);
 			const changed = state.gatewaySessions.length !== beforeLen;
