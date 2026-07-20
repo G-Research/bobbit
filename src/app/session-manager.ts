@@ -192,6 +192,45 @@ function getCachedSession(sessionId: string): CachedSession | undefined {
 	return sessionCache.get(sessionId);
 }
 
+/**
+ * Release the active panel/agent pair, caching it only when every ownership
+ * marker identifies the expected outgoing session. Returns the outgoing panel
+ * so callers can finish any visual transition after active ownership is cleared.
+ */
+function transferActiveSessionToCache(expectedSessionId: string | null, targetSessionId?: string): ChatPanel | null {
+	const chatPanel = state.chatPanel;
+	const remoteAgent = state.remoteAgent;
+	const panelAgent: unknown = chatPanel?.agent;
+	const interfaceSession: unknown = chatPanel?.agentInterface?.session;
+	const remoteBinding: unknown = remoteAgent;
+	const panelOwnsRemote = !!chatPanel && !!remoteAgent
+		&& !!panelAgent
+		&& !!interfaceSession
+		&& panelAgent === remoteBinding
+		&& interfaceSession === remoteBinding;
+	const canCache = !!expectedSessionId
+		&& expectedSessionId !== targetSessionId
+		&& !!remoteAgent?.connected
+		&& remoteAgent.gatewaySessionId === expectedSessionId
+		&& panelOwnsRemote;
+
+	if (canCache) {
+		cacheSession(expectedSessionId, chatPanel, remoteAgent);
+	} else {
+		remoteAgent?.disconnect();
+	}
+
+	state.remoteAgent = null;
+	state.chatPanel = null;
+	state.connectionStatus = "disconnected";
+	return chatPanel;
+}
+
+function clearSessionCache(): void {
+	for (const cached of sessionCache.values()) cached.remoteAgent.disconnect();
+	sessionCache.clear();
+}
+
 /** Remove a session from cache (e.g. on terminate/archive). */
 export function uncacheSession(sessionId: string): void {
 	const cached = sessionCache.get(sessionId);
@@ -1244,22 +1283,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	stopGitStatusPoll();
 	if (state.selectedSessionId) abortGitStatusForSession(state.selectedSessionId);
 
-	// Cache the outgoing session's panel + agent for fast switch-back
-	const outgoingId = state.selectedSessionId;
-	if (outgoingId && outgoingId !== sessionId && state.chatPanel && state.remoteAgent?.connected) {
-		cacheSession(outgoingId, state.chatPanel, state.remoteAgent);
-		// Don't disconnect — the cached agent stays connected
-		state.remoteAgent = null;
-		state.connectionStatus = "disconnected";
-	} else {
-		// No cache — disconnect normally
-		if (state.remoteAgent) {
-			state.remoteAgent.disconnect();
-			state.remoteAgent = null;
-			state.connectionStatus = "disconnected";
-		}
-	}
-
+	const outgoingPanel = transferActiveSessionToCache(state.selectedSessionId, sessionId);
 	state.selectedSessionId = sessionId;
 
 	// Proposals are scoped to the session that emitted them. Clear stale slots
@@ -1274,14 +1298,9 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	}
 	state.assistantHasProposal = PROPOSAL_TYPES.some((type) => state.activeProposals[type]?.sessionId === sessionId);
 
-	// Fade out the current chat panel instantly
-	if (state.chatPanel) {
-		state.chatPanel.classList.add("session-fade-out");
-	}
-
-	// Clear the old chat panel so the render never shows stale messages
-	// from the previous session while connecting to the new one.
-	state.chatPanel = null;
+	// Fade out the outgoing chat panel instantly. Active ownership was already
+	// released above so it cannot overlap with a cached owner.
+	outgoingPanel?.classList.add("session-fade-out");
 	state.cwdDropdownOpen = false;
 
 	// Update hash route synchronously. Preserve an existing standalone
@@ -1719,6 +1738,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// dominant 'badge stuck after Reconnecting' E2E flake cluster (RP-18,
 		// CT-01-d, S-02). Cheap, idempotent, runs only on non-initial connects.
 		remote.onReconnect = async () => {
+			if (activeSessionId() !== sessionId) return;
 			try { refreshGitStatusForSession(sessionId); } catch { /* ignore */ }
 			try { refreshBgProcessesForSession(sessionId); } catch { /* ignore */ }
 			try {
@@ -1731,6 +1751,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// refreshSessions tick. If the removed session is the one we're viewing,
 		// route to landing.
 		remote.onSessionRemoved = (removedId: string, _reason: string) => {
+			uncacheSession(removedId);
 			const beforeLen = state.gatewaySessions.length;
 			state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== removedId);
 			const changed = state.gatewaySessions.length !== beforeLen;
@@ -2966,9 +2987,11 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 // ============================================================================
 
 export function backToSessions(): void {
-	state.remoteAgent?.disconnect();
-	state.remoteAgent = null;
-	state.connectionStatus = "disconnected";
+	flushAndTeardownDraft();
+	stopGitStatusPoll();
+	const outgoingId = state.selectedSessionId;
+	if (outgoingId) abortGitStatusForSession(outgoingId);
+	transferActiveSessionToCache(outgoingId);
 	state.selectedSessionId = null;
 	delete state.activeProposals.goal;
 	delete state.activeProposals.role;
@@ -3002,6 +3025,7 @@ export function backToSessions(): void {
 export function disconnectGateway(): void {
 	state.remoteAgent?.disconnect();
 	state.remoteAgent = null;
+	clearSessionCache();
 	state.connectionStatus = "disconnected";
 	state.selectedSessionId = null;
 	state.assistantType = null;
