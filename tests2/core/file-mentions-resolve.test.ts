@@ -1279,4 +1279,134 @@ describe("resolveFileMentions", () => {
 		);
 		assert.deepEqual(r.warnings, []);
 	});
+	it("preserves large flat mixed-run Markdown fidelity across LF, CRLF, and CR source offsets", async () => {
+		const backtick = "`";
+		const missingToken = "@flat-scanner-missing.txt";
+		const validToken = "@notes.txt";
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+
+		try {
+			for (const eol of ["\n", "\r\n", "\r"]) {
+				const sections: string[] = [];
+				for (let repetition = 0; repetition < 32; repetition++) {
+					for (let runLength = 1; runLength <= 12; runLength++) {
+						const run = backtick.repeat(runLength);
+						const shorterRun = backtick.repeat(Math.max(0, runLength - 1));
+						sections.push(
+							`matched ${run}keep ${shorterRun} ${validToken} literal${run}`,
+							`multiline ${run}first line${eol}second ${validToken} literal${run}`,
+							`unmatched ${run} stays prose with ${missingToken}`,
+							"",
+						);
+					}
+				}
+
+				const three = backtick.repeat(3);
+				const five = backtick.repeat(5);
+				const deepInline = `${"- ".repeat(4_096)}${backtick}deep ${validToken} literal${backtick}`;
+				const text = [
+					...sections,
+					three + "text",
+					`${validToken} ${"x".repeat(192 * 1024)}`,
+					five,
+					`container fences ${eol}> ${three}text${eol}> ${validToken}${eol}> ${three}`,
+					`- ${five}text${eol}  ${validToken}${eol}  ${five}`,
+					`    indented ${validToken}`,
+					deepInline,
+					`😀 outside ${validToken}; missing ${missingToken}.`,
+				].join(eol);
+				const start = text.lastIndexOf(validToken);
+				const firstLstatCall = lstatSpy.mock.calls.length;
+
+				assert.ok(text.length > 256 * 1024, "fixture must exercise a large flat Markdown scan");
+				assert.throws(
+					() => marked.lexer(deepInline, { async: false }),
+					(error: unknown) => error instanceof RangeError && /call stack/i.test(error.message),
+					"the terminal container must exercise the non-recursive deep-list fallback",
+				);
+				assert.equal(
+					Buffer.byteLength(text.slice(0, start), "utf8"),
+					start + 2,
+					"the final astral prefix must preserve UTF-16 rather than byte offsets",
+				);
+
+				const result = await resolveFileMentions(text, cwdDir);
+				assert.equal(result.originalText, text);
+				assert.deepEqual(
+					result.mentions.map((mention) => ({
+						kind: mention.kind,
+						path: mention.path,
+						range: mention.range,
+					})),
+					[{ kind: "text", path: "notes.txt", range: [start, start + validToken.length] }],
+				);
+				assert.equal(
+					result.modelText,
+					text.slice(0, start)
+						+ buildFileReferenceBlock("notes.txt", NOTES_CONTENT)
+						+ text.slice(start + validToken.length),
+					"matched inline spans, multiline spans, fences, indentation, and fallback containers must stay literal",
+				);
+				assert.deepEqual(result.warnings, []);
+				assert.deepEqual(
+					lstatSpy.mock.calls.slice(firstLstatCall)
+						.map(([target]) => path.resolve(String(target)))
+						.sort(),
+					[
+						path.join(cwdDir, "flat-scanner-missing.txt"),
+						path.join(cwdDir, "notes.txt"),
+					].sort(),
+					"only the repeated unmatched prose token and final valid token may reach the filesystem",
+				);
+			}
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
+
+	it("maps nested CRLF code compactly while preserving an outside UTF-16 mention range", async () => {
+		const nestedCodeLine = "  > ` keep @notes.txt and @nested-code-missing.txt literal\r\n";
+		const text = [
+			"- > ```text\r\n",
+			nestedCodeLine.repeat(2_048),
+			"  > ```\r\n",
+			"\r\n",
+			"unmatched ` marker\r\n",
+			"\r\n",
+			"😀 outside @notes.txt; missing @nested-map-missing.txt",
+		].join("");
+		const token = "@notes.txt";
+		const start = text.lastIndexOf(token);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const openSpy = vi.spyOn(fs, "openSync");
+
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(
+				Buffer.byteLength(text.slice(0, start), "utf8"),
+				start + 2,
+				"the astral prefix must distinguish UTF-8 bytes from UTF-16 code units",
+			);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "notes.txt", range: [start, start + token.length] }],
+			);
+			assert.equal(
+				result.modelText,
+				text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + token.length),
+				"nested code and the missing outside token must remain byte-for-byte literal",
+			);
+			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, 2, "only the two outside-code targets may be classified");
+			assert.equal(openSpy.mock.calls.length, 1, "the missing outside target must never be opened");
+			assert.match(String(openSpy.mock.calls[0][0]), /notes\.txt$/);
+		} finally {
+			openSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
+	});
+
+
 });
