@@ -3,6 +3,16 @@ import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const annotationStoreMocks = vi.hoisted(() => ({
+	initAnnotationStore: vi.fn(),
+}));
+
+vi.mock("../../src/ui/components/review/AnnotationStore.js", async (importOriginal) => ({
+	...await importOriginal<typeof import("../../src/ui/components/review/AnnotationStore.js")>(),
+	initAnnotationStore: annotationStoreMocks.initAnnotationStore,
+}));
+
 import {
 	backToSessions,
 	connectToSession,
@@ -14,7 +24,8 @@ import {
 } from "../../src/app/session-manager.js";
 import { GW_SESSION_KEY, GW_TOKEN_KEY, GW_URL_KEY, setRenderApp, state } from "../../src/app/state.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
-import type { ChatPanel } from "../../src/ui/ChatPanel.js";
+import { ChatPanel } from "../../src/ui/ChatPanel.js";
+import { storage } from "../../src/app/storage.js";
 import * as dialogsLazy from "../../src/app/dialogs-lazy.js";
 import * as packEntrypoints from "../../src/app/pack-entrypoints.js";
 import * as packPanels from "../../src/app/pack-panels.js";
@@ -215,6 +226,8 @@ beforeEach(() => {
 	} as any);
 	resetProjectProposalSpy = vi.spyOn(proposalPanelsLazy, "resetProjectProposalPanel")
 		.mockImplementation(() => {});
+	annotationStoreMocks.initAnnotationStore.mockReset();
+	annotationStoreMocks.initAnnotationStore.mockResolvedValue(undefined);
 
 	localStorage.clear();
 	sessionStorage.clear();
@@ -490,6 +503,105 @@ describe("portrait session-list cache ownership", () => {
 
 		await connectToSession(SESSION_A, true, { onMissing: "toast" });
 		expect(freshConnectSpy).toHaveBeenCalledOnce();
+	});
+
+	it("keeps cached reconnect hydration isolated from the active panel while active reconnect still hydrates", async () => {
+		trackSession(SESSION_A);
+		trackSession(SESSION_B);
+		vi.spyOn(storage.providerKeys, "set").mockResolvedValue();
+		vi.spyOn(ChatPanel.prototype, "setAgent").mockImplementation(async function (this: ChatPanel, agent: any) {
+			const mockPanel = new MockChatPanel(agent as unknown as MockRemoteAgent);
+			this.agent = agent;
+			this.agentInterface = mockPanel.agentInterface as any;
+		});
+		freshConnectSpy.mockImplementation(async function (this: RemoteAgent, _gatewayUrl: string, _token: string, sessionId: string) {
+			const remote = this;
+			(remote as any)._sessionId = sessionId;
+			(remote as any).ws = {
+				readyState: WebSocket.OPEN,
+				close: vi.fn(),
+				send: vi.fn(),
+			};
+		});
+
+		await connectToSession(SESSION_A, true);
+		const cachedAgent = state.remoteAgent!;
+		const cachedPanel = state.chatPanel!;
+		const cachedReconnect = cachedAgent.onReconnect;
+		expect(cachedReconnect).toEqual(expect.any(Function));
+
+		selectSession(SESSION_B);
+		const foregroundAgent = new MockRemoteAgent(SESSION_B);
+		const foregroundPanel = new MockChatPanel(foregroundAgent);
+		const foregroundInterface = foregroundPanel.agentInterface as any;
+		const foregroundGitStatus = {
+			branch: "foreground-branch",
+			status: [{ file: "foreground.txt", status: "M" }],
+			clean: false,
+		};
+		const foregroundBgProcesses = [{ id: "foreground-bg", status: "running" }];
+		Object.assign(foregroundInterface, {
+			gitRepoKnown: "yes",
+			gitStatusLoading: false,
+			gitStatus: foregroundGitStatus,
+			branch: "foreground-branch",
+			partial: false,
+			bgProcesses: foregroundBgProcesses,
+		});
+		setActiveSession(SESSION_B, foregroundAgent, foregroundPanel);
+
+		fetchRecords.length = 0;
+		annotationStoreMocks.initAnnotationStore.mockClear();
+		const foregroundUpdateCalls = foregroundInterface.requestUpdate.mock.calls.length;
+		await cachedReconnect!();
+
+		const inactiveHydrationUrls = fetchRecords
+			.map((record) => record.url)
+			.filter((url) =>
+				url.startsWith(`/api/sessions/${SESSION_A}/git-status`)
+				|| url === `/api/sessions/${SESSION_A}/bg-processes`,
+			);
+		expect(inactiveHydrationUrls).toEqual([]);
+		expect(annotationStoreMocks.initAnnotationStore).not.toHaveBeenCalled();
+		expect(foregroundInterface.gitRepoKnown).toBe("yes");
+		expect(foregroundInterface.gitStatusLoading).toBe(false);
+		expect(foregroundInterface.gitStatus).toBe(foregroundGitStatus);
+		expect(foregroundInterface.branch).toBe("foreground-branch");
+		expect(foregroundInterface.partial).toBe(false);
+		expect(foregroundInterface.bgProcesses).toBe(foregroundBgProcesses);
+		expect(foregroundInterface.requestUpdate).toHaveBeenCalledTimes(foregroundUpdateCalls);
+
+		const cachedInterface = cachedPanel.agentInterface as any;
+		let cachedGitLoading = cachedInterface.gitStatusLoading;
+		let sawFastPathGitLoading = false;
+		let resolveFastPathGit!: () => void;
+		const fastPathGitSettled = new Promise<void>((resolve) => { resolveFastPathGit = resolve; });
+		Object.defineProperty(cachedInterface, "gitStatusLoading", {
+			configurable: true,
+			get: () => cachedGitLoading,
+			set: (value: boolean) => {
+				cachedGitLoading = value;
+				if (value) sawFastPathGitLoading = true;
+				else if (sawFastPathGitLoading) resolveFastPathGit();
+			},
+		});
+
+		await connectToSession(SESSION_A, true);
+		expect(state.remoteAgent).toBe(cachedAgent);
+		expect(state.chatPanel).toBe(cachedPanel);
+		await fastPathGitSettled;
+		fetchRecords.length = 0;
+		annotationStoreMocks.initAnnotationStore.mockClear();
+
+		await cachedReconnect!();
+
+		const activeHydrationUrls = fetchRecords.map((record) => record.url);
+		expect(activeHydrationUrls.some((url) =>
+			url.startsWith(`/api/sessions/${SESSION_A}/git-status`),
+		)).toBe(true);
+		expect(activeHydrationUrls).toContain(`/api/sessions/${SESSION_A}/bg-processes`);
+		expect(annotationStoreMocks.initAnnotationStore).toHaveBeenCalledOnce();
+		expect(annotationStoreMocks.initAnnotationStore).toHaveBeenCalledWith(SESSION_A);
 	});
 
 	it("preserves back navigation proposal, review, preview, inbox, draft, storage, and route cleanup", async () => {
