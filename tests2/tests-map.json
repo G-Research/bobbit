@@ -22,7 +22,34 @@
   "v2Native": [
     {
       "path": "tests2/core/async-background-cleanup-static.test.ts",
-      "reason": "Failing-first TypeScript AST/type-checker guard for the Async Background Cleanup goal: follows only the named preview artifact, worktree, plan-mutation, archive-purge, and orphan-cleanup production call graphs plus scoped server seams, and reports ASYNC_BACKGROUND_CLEANUP_SYNC_IO root-to-violation traces for synchronous filesystem/subprocess/Atomics.wait operations.",
+      "reason": "TypeScript AST/type-checker guard for the Async Background Cleanup goal: follows only the complete named preview artifact/mount/route/listener, worktree, plan-mutation, archive-purge, and orphan-cleanup production call graphs, and reports ASYNC_BACKGROUND_CLEANUP_SYNC_IO root-to-violation traces for direct, aliased, destructured, injected, or wrapped synchronous filesystem/subprocess/Atomics.wait operations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/archive-purge-async.test.ts",
+      "reason": "Deterministic native v2 coverage for bounded deferred archive stats, event-loop progress, scheduled purge single-flight behavior, stop barriers that cancel future ticks and join active cleanup, and awaited failure-isolated termination listeners.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/preview-purge-listener-error.test.ts",
+      "reason": "In-process gateway regression proving purge awaits the preview termination listener, the listener explicitly owns deletion errors without rejecting the purge response, retained artifacts remain targeted for later cleanup, and the gateway stays healthy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/bounded-async-work.test.ts",
+      "reason": "Deterministic native v2 coverage for the shared background-I/O ceiling, bounded dynamic queues and traversal, cooperative deep-tree yielding, sorted files, streamed hashing input, symlink safety, bounded copy, and idempotent post-order deletion.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

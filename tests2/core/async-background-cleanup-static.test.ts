@@ -99,18 +99,36 @@ const ROOT_SPECS: RootSpec[] = [
 		"removeArtifacts",
 		"sweepOrphanArtifacts",
 		"findPreviewArtifactByHash",
+		"validateArtifactMount",
+		"copyDirectory",
+		"writeJsonAtomic",
+		"hashDirectory",
+		"listFiles",
+		"safeStat",
+		"safeLstat",
 	].map((name) => ({ file: "src/server/preview/artifacts.ts", name, required: true })),
 
 	// Cleanup/hash seams reached by preview routes and archive purge. The POST,
 	// GET, restore, and SSE route regions below select only the preview callees
 	// actually used by those routes, rather than rooting handleApiRoute wholesale.
-	{ file: "src/server/preview/mount.ts", name: "contentHashForMount", required: true },
-	{ file: "src/server/preview/mount.ts", name: "removeMount", required: true },
+	...[
+		"contentHashForMount",
+		"removeMount",
+		"listMountFiles",
+		"hashMountDirectory",
+		"copyPreviewDirectory",
+		"removePreviewTrees",
+		"removePreviewTree",
+		"readMountDirectory",
+		"wipePreviewDirectory",
+		"movePreviewDirectoryContents",
+	].map((name) => ({ file: "src/server/preview/mount.ts", name, required: true })),
 
 	// Boot sweeper, pool initialization/reclaim/fill/drain, inventory and shared cleanup.
 	{ file: "src/server/agent/worktree-sweeper.ts", name: "sweepOrphanedWorktrees", required: true },
 	{ file: "src/server/agent/worktree-pool.ts", className: "WorktreePool", name: "constructor", required: true },
 	...[
+		"resolveRepositoryPaths",
 		"initialize",
 		"startFilling",
 		"reclaimOrphaned",
@@ -118,7 +136,12 @@ const ROOT_SPECS: RootSpec[] = [
 		"_fill",
 		"stop",
 		"drain",
-	].map((name) => ({ file: "src/server/agent/worktree-pool.ts", className: "WorktreePool", name })),
+	].map((name) => ({
+		file: "src/server/agent/worktree-pool.ts",
+		className: "WorktreePool",
+		name,
+		required: true,
+	})),
 	{ file: "src/server/agent/session-manager.ts", className: "SessionManager", name: "initWorktreePoolForProject", required: true },
 	...[
 		"scan",
@@ -130,7 +153,7 @@ const ROOT_SPECS: RootSpec[] = [
 		file: "src/server/agent/worktree-inventory.ts",
 		className: "WorktreeInventoryService",
 		name,
-		required: name === "scan" || name === "cleanup",
+		required: true,
 	})),
 	{ file: "src/server/skills/git.ts", name: "cleanupWorktree", required: true },
 
@@ -139,9 +162,13 @@ const ROOT_SPECS: RootSpec[] = [
 	...[
 		"constructor",
 		"stopSweep",
+		"runScheduledSweep",
+		"fileFor",
 		"ensureDir",
 		"readFile",
 		"writeFile",
+		"mutateGoal",
+		"readAfterWrites",
 		"put",
 		"get",
 		"remove",
@@ -151,16 +178,17 @@ const ROOT_SPECS: RootSpec[] = [
 		file: "src/server/agent/plan-mutation-store.ts",
 		className: "PlanMutationStore",
 		name,
-		required: name === "constructor" || name === "stopSweep" || name === "pruneExpired",
+		required: true,
 	})),
 
-	// Scheduled/manual archive purge, stats, and the cleanup/listener call graph.
+	// Scheduled/manual archive purge, stats, timer barrier, and listener graph.
 	...[
 		"purgeArchivedSession",
 		"purgeExpiredArchives",
 		"purgeOneSession",
 		"getExpiredArchiveStats",
 		"startPurgeSchedule",
+		"stopPurgeSchedule",
 	].map((name) => ({
 		file: "src/server/agent/session-manager.ts",
 		className: "SessionManager",
@@ -170,8 +198,8 @@ const ROOT_SPECS: RootSpec[] = [
 	// Child reaping is reached by purge, but rooting its two narrow cleanup
 	// bodies directly avoids treating unrelated session-replacement callbacks as
 	// purge work merely because they share a generic coordinator signature.
-	{ file: "src/server/agent/session-manager.ts", className: "SessionManager", name: "cascadeReapOwner" },
-	{ file: "src/server/agent/session-manager.ts", className: "SessionManager", name: "_terminateSessionOwned" },
+	{ file: "src/server/agent/session-manager.ts", className: "SessionManager", name: "cascadeReapOwner", required: true },
+	{ file: "src/server/agent/session-manager.ts", className: "SessionManager", name: "_terminateSessionOwned", required: true },
 
 	// The bounded async scanner and the worktree-plus-recent-transcript gate.
 	{ file: "src/server/agent/orphan-cleanup.ts", name: "scanOrphanedTranscriptsAsync", required: true },
@@ -184,7 +212,8 @@ const REGION_SPECS: RegionSpec[] = [
 		file: "src/server/server.ts",
 		start: "// POST /api/preview/mount?sessionId=<sid>",
 		end: "// ── Background process endpoints",
-		follow: (file) => file.startsWith("src/server/preview/"),
+		follow: (file, name) => file.startsWith("src/server/preview/")
+			|| (file === "src/server/server.ts" && name === "readPreviewMountSnapshot"),
 	},
 	{
 		label: "server.preview-purge-listener",
@@ -312,13 +341,42 @@ function collectExpressionOrigins(
 	}
 	if (ts.isPropertyAccessExpression(current)) {
 		names.add(current.name.text);
+		const propertySymbol = checker.getSymbolAtLocation(current.name);
+		if (propertySymbol && !seenSymbols.has(propertySymbol)) {
+			seenSymbols.add(propertySymbol);
+			for (const declaration of propertySymbol.declarations ?? []) {
+				if ((ts.isPropertyAssignment(declaration) || ts.isPropertyDeclaration(declaration)) && declaration.initializer) {
+					collectExpressionOrigins(declaration.initializer, checker, names, modules, seenSymbols);
+				}
+			}
+		}
 		collectExpressionOrigins(current.expression, checker, names, modules, seenSymbols);
 		return;
 	}
 	if (ts.isElementAccessExpression(current)) {
 		const argument = current.argumentExpression;
 		if (argument && ts.isStringLiteralLike(argument)) names.add(argument.text);
+		const propertySymbol = argument ? checker.getSymbolAtLocation(argument) : undefined;
+		if (propertySymbol && !seenSymbols.has(propertySymbol)) {
+			seenSymbols.add(propertySymbol);
+			for (const declaration of propertySymbol.declarations ?? []) {
+				if ((ts.isPropertyAssignment(declaration) || ts.isPropertyDeclaration(declaration)) && declaration.initializer) {
+					collectExpressionOrigins(declaration.initializer, checker, names, modules, seenSymbols);
+				}
+			}
+		}
 		collectExpressionOrigins(current.expression, checker, names, modules, seenSymbols);
+		return;
+	}
+	if (ts.isCallExpression(current)) {
+		// Bound aliases such as `const stat = fs.statSync.bind(fs)` retain the
+		// origin of the bound callable rather than becoming an opaque identifier.
+		collectExpressionOrigins(current.expression, checker, names, modules, seenSymbols);
+		return;
+	}
+	if (ts.isConditionalExpression(current)) {
+		collectExpressionOrigins(current.whenTrue, checker, names, modules, seenSymbols);
+		collectExpressionOrigins(current.whenFalse, checker, names, modules, seenSymbols);
 	}
 }
 
@@ -400,41 +458,53 @@ function callTargets(call: ts.CallExpression | ts.NewExpression, checker: ts.Typ
 	return [...out.values()];
 }
 
-function callbackTargets(argument: ts.Expression, checker: ts.TypeChecker): CallableNode[] {
+function callbackTargets(
+	argument: ts.Expression,
+	checker: ts.TypeChecker,
+	seenSymbols = new Set<ts.Symbol>(),
+): CallableNode[] {
 	const expression = unwrapExpression(argument);
-	if (isCallableWithBody(expression)) return [expression];
+	const out = new Map<string, CallableNode>();
+	const add = (node: CallableNode): void => {
+		if (!normalizeFile(node.getSourceFile().fileName).startsWith("src/")) return;
+		out.set(`${normalizeFile(node.getSourceFile().fileName)}:${node.pos}`, node);
+	};
+	if (isCallableWithBody(expression)) {
+		add(expression);
+		return [...out.values()];
+	}
+	if (ts.isObjectLiteralExpression(expression)) {
+		for (const property of expression.properties) {
+			if (ts.isMethodDeclaration(property) && property.body) add(property);
+			else if (ts.isPropertyAssignment(property)) {
+				for (const target of callbackTargets(property.initializer, checker, seenSymbols)) add(target);
+			} else if (ts.isShorthandPropertyAssignment(property)) {
+				for (const target of callbackTargets(property.name, checker, seenSymbols)) add(target);
+			}
+		}
+		return [...out.values()];
+	}
 	let symbol = checker.getSymbolAtLocation(expression);
 	if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
 		try { symbol = checker.getAliasedSymbol(symbol); } catch { symbol = undefined; }
 	}
-	return (symbol?.declarations ?? [])
-		.map(callableFromDeclaration)
-		.filter((node): node is CallableNode => !!node)
-		.filter((node) => normalizeFile(node.getSourceFile().fileName).startsWith("src/"));
+	if (!symbol || seenSymbols.has(symbol)) return [];
+	seenSymbols.add(symbol);
+	for (const declaration of symbol.declarations ?? []) {
+		const callable = callableFromDeclaration(declaration);
+		if (callable) add(callable);
+		if ((ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration) || ts.isPropertyAssignment(declaration))
+			&& declaration.initializer) {
+			for (const target of callbackTargets(declaration.initializer, checker, seenSymbols)) add(target);
+		} else if (ts.isBindingElement(declaration)) {
+			const variable = declaration.parent.parent;
+			if (ts.isVariableDeclaration(variable) && variable.initializer) {
+				for (const target of callbackTargets(variable.initializer, checker, seenSymbols)) add(target);
+			}
+		}
+	}
+	return [...out.values()];
 }
-
-const CALLBACK_INVOKERS = new Set([
-	"allSettledWithConcurrency",
-	"catch",
-	"every",
-	"filter",
-	"finally",
-	"find",
-	"findIndex",
-	"flatMap",
-	"forEach",
-	"map",
-	"mapWithConcurrency",
-	"queueMicrotask",
-	"reduce",
-	"reduceRight",
-	"setImmediate",
-	"setInterval",
-	"setTimeout",
-	"some",
-	"sort",
-	"then",
-]);
 
 function callName(call: ts.CallExpression | ts.NewExpression): string | undefined {
 	const expression = unwrapExpression(call.expression);
@@ -451,6 +521,7 @@ const PURGE_GRAPH_ROOTS = new Set([
 	"root SessionManager.purgeExpiredArchives",
 	"root SessionManager.purgeOneSession",
 	"root SessionManager.startPurgeSchedule",
+	"root SessionManager.stopPurgeSchedule",
 	"root SessionManager.cascadeReapOwner",
 	"root SessionManager._terminateSessionOwned",
 ]);
@@ -465,14 +536,33 @@ const PURGE_CLEANUP_FILES = new Set([
 	"src/server/preview/mount.ts",
 	"src/server/skills/git.ts",
 ]);
-const PURGE_ENTRY_METHODS = new Set(["purgeOneSession", "purgeExpiredArchives"]);
+const PURGE_ENTRY_METHODS = new Set([
+	"purgeArchivedSession",
+	"purgeExpiredArchives",
+	"purgeOneSession",
+	"startPurgeSchedule",
+	"stopPurgeSchedule",
+	"cascadeReapOwner",
+	"_terminateSessionOwned",
+]);
+
+function enclosingCallableName(target: CallableNode): string | undefined {
+	let current: ts.Node | undefined = target.parent;
+	while (current) {
+		if (isCallableWithBody(current)) return nodeName(current) ?? callableLabel(current).split(" ")[0];
+		current = current.parent;
+	}
+	return undefined;
+}
 
 function targetIsInScope(item: WorkItem, target: CallableNode): boolean {
 	const root = item.trace[0];
 	const file = normalizeFile(target.getSourceFile().fileName);
 	if (PURGE_GRAPH_ROOTS.has(root)) {
 		if (PURGE_CLEANUP_FILES.has(file) || file === "src/server/agent/bounded-async-work.ts") return true;
-		return file === "src/server/agent/session-manager.ts" && PURGE_ENTRY_METHODS.has(nodeName(target) ?? "");
+		if (file !== "src/server/agent/session-manager.ts") return false;
+		return PURGE_ENTRY_METHODS.has(nodeName(target) ?? "")
+			|| PURGE_ENTRY_METHODS.has(enclosingCallableName(target) ?? "");
 	}
 	if (root.startsWith("root WorktreeInventoryService.")) {
 		return file === "src/server/agent/worktree-inventory.ts"
@@ -539,6 +629,63 @@ function createScopedProgram(): ts.Program {
 	});
 }
 
+interface CanaryFinding {
+	expression: string;
+	api: string;
+	trace: string[];
+}
+
+function findCanarySyncIo(sourceText: string): CanaryFinding[] {
+	const fileName = path.resolve("src/server/__async-background-cleanup-guard-canary__.ts");
+	const options: ts.CompilerOptions = {
+		target: ts.ScriptTarget.ES2022,
+		module: ts.ModuleKind.Node16,
+		moduleResolution: ts.ModuleResolutionKind.Node16,
+		noLib: true,
+		noResolve: true,
+		skipLibCheck: true,
+		noEmit: true,
+	};
+	const source = ts.createSourceFile(fileName, sourceText, options.target!, true, ts.ScriptKind.TS);
+	const host = ts.createCompilerHost(options, true);
+	host.getSourceFile = requested => path.resolve(requested) === fileName ? source : undefined;
+	host.fileExists = requested => path.resolve(requested) === fileName;
+	host.readFile = requested => path.resolve(requested) === fileName ? sourceText : undefined;
+	host.writeFile = () => undefined;
+	const program = ts.createProgram({ rootNames: [fileName], options, host });
+	const checker = program.getTypeChecker();
+	const root = findRoot(source, { file: normalizeFile(fileName), name: "canaryRoot" });
+	if (!root) throw new Error("guard canary root was not found");
+	const queue: WorkItem[] = [{ callable: root, trace: ["root canaryRoot"] }];
+	const visited = new Set<number>();
+	const findings: CanaryFinding[] = [];
+	while (queue.length > 0) {
+		const item = queue.shift()!;
+		if (visited.has(item.callable.pos)) continue;
+		visited.add(item.callable.pos);
+		const body = item.callable.body;
+		if (!body) continue;
+		const visit = (node: ts.Node): void => {
+			if (node !== body && isCallableWithBody(node)) return;
+			if (ts.isCallExpression(node)) {
+				const api = syncApiFor(node, checker);
+				if (api) findings.push({ expression: node.expression.getText(source), api, trace: item.trace });
+				for (const target of callTargets(node, checker)) {
+					queue.push({ callable: target, trace: [...item.trace, callableLabel(target)] });
+				}
+				for (const argument of node.arguments) {
+					for (const target of callbackTargets(argument, checker)) {
+						queue.push({ callable: target, trace: [...item.trace, callableLabel(target)] });
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(body);
+	}
+	return findings;
+}
+
 function findScopedSyncIo(): { violations: Violation[]; missingRoots: string[] } {
 	const program = createScopedProgram();
 	const checker = program.getTypeChecker();
@@ -581,30 +728,59 @@ function findScopedSyncIo(): { violations: Violation[]; missingRoots: string[] }
 		const source = sourceFor(spec.file);
 		const root = source && findRoot(source, spec);
 		if (!root) {
-			if (spec.required) missingRoots.push(`${spec.file}::${spec.className ? `${spec.className}.` : ""}${spec.name}`);
+			// Every declared production root is mandatory. Name drift must fail the
+			// guard instead of silently shrinking the scoped call graph.
+			missingRoots.push(`${spec.file}::${spec.className ? `${spec.className}.` : ""}${spec.name}`);
 			continue;
 		}
 		enqueue(root, [`root ${spec.className ? `${spec.className}.` : ""}${spec.name}`]);
 	}
 
-	// This unused sync twin is explicitly required to be deleted, not converted
-	// or maintained beside the bounded async scanner.
-	const orphanSource = sourceFor("src/server/agent/orphan-cleanup.ts");
-	const legacyScanner = orphanSource && findRoot(orphanSource, {
-		file: "src/server/agent/orphan-cleanup.ts",
-		name: "scanOrphanedTranscripts",
-	});
-	if (legacyScanner) {
-		const source = legacyScanner.getSourceFile();
-		const position = lineAndColumn(source, legacyScanner);
+	// Legacy synchronous twins must be deleted, not converted or retained in
+	// either historical owner. The production async scanner and predicate live
+	// only in orphan-cleanup.ts and are rooted above.
+	const forbiddenOrphanDeclarations: Array<RootSpec & { label: string; onlyWhenSync?: boolean }> = [
+		{
+			file: "src/server/agent/orphan-cleanup.ts",
+			name: "scanOrphanedTranscripts",
+			label: "orphan-cleanup legacy scanner",
+		},
+		{
+			file: "src/server/agent/session-store.ts",
+			className: "SessionStore",
+			name: "scanOrphanedTranscripts",
+			label: "session-store legacy scanner",
+		},
+		{
+			file: "src/server/agent/session-store.ts",
+			name: "shouldKeepDespiteOrphan",
+			label: "session-store legacy orphan predicate",
+		},
+		{
+			file: "src/server/agent/orphan-cleanup.ts",
+			name: "shouldKeepDespiteOrphan",
+			label: "orphan-cleanup synchronous orphan predicate",
+			onlyWhenSync: true,
+		},
+	];
+	for (const spec of forbiddenOrphanDeclarations) {
+		const source = sourceFor(spec.file);
+		const declaration = source && findRoot(source, spec);
+		if (!declaration) continue;
+		const isAsync = declaration.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+		if (spec.onlyWhenSync && isAsync) continue;
+		const position = lineAndColumn(declaration.getSourceFile(), declaration);
+		const trace = [`root ${spec.label}`];
 		violations.push({
-			root: "root orphan-cleanup legacy scanner",
-			file: normalizeFile(source.fileName),
+			root: trace[0],
+			file: normalizeFile(declaration.getSourceFile().fileName),
 			...position,
-			api: "legacy synchronous scanner must be removed",
-			trace: ["root orphan-cleanup legacy scanner"],
+			api: spec.name === "scanOrphanedTranscripts"
+				? "legacy synchronous scanner must be removed"
+				: "legacy synchronous orphan predicate must be removed",
+			trace,
 		});
-		enqueue(legacyScanner, ["root orphan-cleanup legacy scanner"]);
+		enqueue(declaration, trace);
 	}
 
 	for (const region of REGION_SPECS) {
@@ -664,22 +840,21 @@ function findScopedSyncIo(): { violations: Violation[]; missingRoots: string[] }
 				for (const target of callTargets(node, checker)) {
 					if (targetIsInScope(item, target)) enqueue(target, [...item.trace, callableLabel(target)]);
 				}
-				if (CALLBACK_INVOKERS.has(callName(node) ?? "")) {
-					for (const argument of node.arguments) {
-						for (const target of callbackTargets(argument, checker)) {
-							if (targetIsInScope(item, target)) enqueue(target, [...item.trace, callableLabel(target)]);
-						}
+				// Follow every resolved callable argument, including callbacks held in
+				// object literals or variables. Scoping is decided from the resolved
+				// declaration, not a hand-maintained list of familiar invoker names.
+				for (const argument of node.arguments) {
+					for (const target of callbackTargets(argument, checker)) {
+						if (targetIsInScope(item, target)) enqueue(target, [...item.trace, callableLabel(target)]);
 					}
 				}
 			} else if (ts.isNewExpression(node)) {
 				for (const target of callTargets(node, checker)) {
 					if (targetIsInScope(item, target)) enqueue(target, [...item.trace, callableLabel(target)]);
 				}
-				if (callName(node) === "Promise") {
-					for (const argument of node.arguments ?? []) {
-						for (const target of callbackTargets(argument, checker)) {
-							if (targetIsInScope(item, target)) enqueue(target, [...item.trace, callableLabel(target)]);
-						}
+				for (const argument of node.arguments ?? []) {
+					for (const target of callbackTargets(argument, checker)) {
+						if (targetIsInScope(item, target)) enqueue(target, [...item.trace, callableLabel(target)]);
 					}
 				}
 			}
@@ -707,6 +882,46 @@ function formatFailure(violations: Violation[], missingRoots: string[]): string 
 }
 
 describe("async background cleanup static boundary", () => {
+	it("rejects aliases, destructuring, injection, binding, subprocesses, Atomics.wait, and wrappers with root traces", () => {
+		const findings = findCanarySyncIo(`
+			const fsApi = {
+				readFileSync(_path: string) { return ""; },
+				rmSync(_path: string) {},
+				existsSync(_path: string) { return true; },
+				statSync(_path: string) { return {}; },
+			};
+			const aliasRead = fsApi.readFileSync;
+			const { rmSync: destructuredRemove } = fsApi;
+			const injected = { probe: fsApi.existsSync };
+			const boundStat = fsApi.statSync.bind(fsApi);
+			const runner = { execFileSync(_file: string) {} };
+			const Atomics = { wait(_array: unknown, _index: number, _value: number) {} };
+			function wrapper() { aliasRead("wrapped"); }
+			function canaryRoot() {
+				fsApi.readFileSync("direct");
+				aliasRead("alias");
+				destructuredRemove("destructured");
+				injected.probe("injected");
+				boundStat("bound");
+				runner.execFileSync("git");
+				Atomics.wait({}, 0, 0);
+				wrapper();
+			}
+		`);
+		const byExpression = new Map(findings.map(finding => [finding.expression, finding]));
+		expect(byExpression.get("fsApi.readFileSync")?.api).toBe("filesystem readFileSync");
+		expect(byExpression.get("aliasRead")?.api).toBe("filesystem readFileSync");
+		expect(byExpression.get("destructuredRemove")?.api).toBe("filesystem rmSync");
+		expect(byExpression.get("injected.probe")?.api).toBe("filesystem existsSync");
+		expect(byExpression.get("boundStat")?.api).toBe("filesystem statSync");
+		expect(byExpression.get("runner.execFileSync")?.api).toBe("child-process execFileSync");
+		expect(byExpression.get("Atomics.wait")?.api).toBe("Atomics.wait");
+		const wrapped = findings.find(finding => finding.expression === "aliasRead"
+			&& finding.trace.some(part => part.startsWith("wrapper ")));
+		expect(wrapped?.trace[0]).toBe("root canaryRoot");
+		expect(wrapped?.trace.join(" -> ")).toContain("wrapper");
+	});
+
 	it("has zero synchronous I/O in the scoped production call graph", { retry: 0 }, () => {
 		const { violations, missingRoots } = findScopedSyncIo();
 		expect(
