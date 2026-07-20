@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/async-background-cleanup-static.test.ts",
+      "reason": "Failing-first TypeScript AST/type-checker guard for the Async Background Cleanup goal: follows only the named preview artifact, worktree, plan-mutation, archive-purge, and orphan-cleanup production call graphs plus scoped server seams, and reports ASYNC_BACKGROUND_CLEANUP_SYNC_IO root-to-violation traces for synchronous filesystem/subprocess/Atomics.wait operations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/aigw-wellknown-config-atomic.test.ts",
       "reason": "Unit coverage for atomic AIGW models/configuration failure behavior.",
       "execution": {
