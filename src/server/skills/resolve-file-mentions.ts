@@ -139,42 +139,11 @@ function throwIfFileMentionAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw new FileMentionAbortError(signal.reason);
 }
 
-/** Abort the caller-facing semaphore wait; an abandoned queued permit returns itself. */
-async function acquireSemaphoreLease(
-	semaphore: Semaphore,
-	signal?: AbortSignal,
-): Promise<() => void> {
-	throwIfFileMentionAborted(signal);
-	if (!signal) {
-		await semaphore.acquire();
-		return () => semaphore.release();
-	}
-
-	const acquisition = semaphore.acquire();
-	return await new Promise<() => void>((resolve, reject) => {
-		let cancelled = false;
-		const onAbort = () => {
-			if (cancelled) return;
-			cancelled = true;
-			signal.removeEventListener("abort", onAbort);
-			reject(new FileMentionAbortError(signal.reason));
-		};
-		signal.addEventListener("abort", onAbort, { once: true });
-		if (signal.aborted) onAbort();
-		void acquisition.then(() => {
-			if (cancelled) {
-				semaphore.release();
-				return;
-			}
-			signal.removeEventListener("abort", onAbort);
-			let released = false;
-			resolve(() => {
-				if (released) return;
-				released = true;
-				semaphore.release();
-			});
-		});
-	});
+/** Keep the resolver's stable public abort shape while using the semaphore's
+ * native cancellable FIFO acquisition. A rejected acquisition owns no permit. */
+function rethrowSemaphoreAcquireError(error: unknown, signal?: AbortSignal): never {
+	if (signal?.aborted) throw new FileMentionAbortError(signal.reason ?? error);
+	throw error;
 }
 
 /** Race only a caller-facing wait while continuing to observe the operation. */
@@ -715,32 +684,15 @@ function scanMarkedCodeRanges(
 	if (!leaves.some((leaf) => leaf.containsCode)) return [];
 	const ranges: SourceRange[] = [];
 	if (!collectCodeRangesFromLeaves(leaves, source, ranges)) {
-		appendMappedRange(ranges, source);
+		throw new Error("Unable to align Marked code ranges to prompt source");
 	}
 	return ranges;
-}
-
-interface NormalizedRange extends SourceRange {
-	original: SourceRange;
 }
 
 interface DeepListPrefix {
 	contentOffset: number;
 	indentColumns: number;
-	markerOffsets: number[];
-}
-
-interface DeepListRecovery {
-	source: MappedSource;
-	fences: NormalizedRange[];
-	found: boolean;
-}
-
-function lineEnd(text: string, start: number): { contentEnd: number; end: number } {
-	const newline = text.indexOf("\n", start);
-	return newline === -1
-		? { contentEnd: text.length, end: text.length }
-		: { contentEnd: newline, end: newline + 1 };
+	markerCount: number;
 }
 
 function indentationEnd(
@@ -748,268 +700,92 @@ function indentationEnd(
 	start: number,
 	end: number,
 	requiredColumns: number,
+	signal?: AbortSignal,
 ): number | undefined {
 	let offset = start;
 	let columns = 0;
+	let nextAbortCheck = start + SCAN_ABORT_INTERVAL;
 	while (offset < end && columns < requiredColumns) {
 		if (text[offset] === " ") columns++;
 		else if (text[offset] === "\t") columns += 4 - (columns % 4);
 		else return undefined;
 		offset++;
+		if (offset >= nextAbortCheck) {
+			throwIfFileMentionAborted(signal);
+			nextAbortCheck = offset + SCAN_ABORT_INTERVAL;
+		}
 	}
 	return columns >= requiredColumns ? offset : undefined;
 }
 
-function originalRange(
-	source: MappedSource,
-	start: number,
-	end: number,
-): SourceRange {
-	return {
-		start: mappedUnitRange(source, start).start,
-		end: mappedUnitRange(source, end - 1).end,
-	};
-}
-
-/** Iteratively recognize the same-line list nesting that overflows Marked. */
+/**
+ * Iteratively recognize same-line list nesting before invoking Marked. The
+ * result is constant-size even for an 8 MiB prefix: no marker-offset array and
+ * no character boxing are retained.
+ */
 function deepListPrefix(
 	text: string,
 	start: number,
 	end: number,
+	signal?: AbortSignal,
 ): DeepListPrefix | undefined {
-	const markerOffsets: number[] = [];
+	let markerCount = 0;
 	let offset = start;
 	let columns = 0;
+	let nextAbortCheck = start + SCAN_ABORT_INTERVAL;
 	while (offset < end) {
+		if (offset >= nextAbortCheck) {
+			throwIfFileMentionAborted(signal);
+			nextAbortCheck = offset + SCAN_ABORT_INTERVAL;
+		}
 		const markerStart = offset;
 		const markerColumns = columns;
 		let leadingSpaces = 0;
-		while (leadingSpaces < 3 && text[offset] === " ") {
+		while (leadingSpaces < 3 && text.charCodeAt(offset) === 32) {
 			offset++;
 			columns++;
 			leadingSpaces++;
 		}
 
-		let markerOffset = offset;
-		if (text[offset] === "*" || text[offset] === "+" || text[offset] === "-") {
+		const marker = text.charCodeAt(offset);
+		if (marker === 42 || marker === 43 || marker === 45) {
 			offset++;
 			columns++;
 		} else {
 			let digits = 0;
-			while (digits < 9 && /[0-9]/.test(text[offset] ?? "")) {
+			while (digits < 9) {
+				const code = text.charCodeAt(offset);
+				if (code < 48 || code > 57) break;
 				offset++;
 				columns++;
 				digits++;
 			}
-			if (
-				digits === 0 ||
-				(text[offset] !== "." && text[offset] !== ")")
-			) {
+			const delimiter = text.charCodeAt(offset);
+			if (digits === 0 || (delimiter !== 46 && delimiter !== 41)) {
 				offset = markerStart;
 				columns = markerColumns;
 				break;
 			}
-			markerOffset = offset;
 			offset++;
 			columns++;
 		}
-		if (text[offset] !== " " && text[offset] !== "\t") {
+		const separator = text.charCodeAt(offset);
+		if (separator !== 32 && separator !== 9) {
 			offset = markerStart;
 			columns = markerColumns;
 			break;
 		}
-		while (text[offset] === " " || text[offset] === "\t") {
-			if (text[offset] === " ") columns++;
-			else columns += 4 - (columns % 4);
+		while (offset < end) {
+			const code = text.charCodeAt(offset);
+			if (code === 32) columns++;
+			else if (code === 9) columns += 4 - (columns % 4);
+			else break;
 			offset++;
 		}
-		markerOffsets.push(markerOffset);
+		markerCount++;
 	}
-	if (markerOffsets.length < 256) return undefined;
-	return { contentOffset: offset, indentColumns: columns, markerOffsets };
-}
-
-/**
- * Marked recursively tokenizes list items and can exhaust the JS stack on an
- * adversarial same-line list depth. Recovery replaces only list-marker syntax
- * with same-length, non-Markdown characters, leaving prose and inline code at
- * their original offsets for a normal Marked pass. Deep fenced blocks are
- * additionally recorded and masked as complete ranges so their container
- * semantics remain explicit after the list structure is neutralized.
- */
-function recoverDeepLists(source: MappedSource): DeepListRecovery {
-	const masked = source.text.split("");
-	const fences: NormalizedRange[] = [];
-	let found = false;
-	let open:
-		| { start: number; char: string; length: number; indentColumns: number }
-		| undefined;
-
-	const closeFence = (start: number, end: number) => {
-		fences.push({
-			start,
-			end,
-			original: originalRange(source, start, end),
-		});
-		for (let index = start; index < end; index++) {
-			if (masked[index] !== "\n") masked[index] = " ";
-		}
-	};
-
-	let lineStart = 0;
-	while (lineStart < source.text.length) {
-		const line = lineEnd(source.text, lineStart);
-		if (open) {
-			const contentOffset = indentationEnd(
-				source.text,
-				lineStart,
-				line.contentEnd,
-				open.indentColumns,
-			);
-			if (contentOffset !== undefined) {
-				let offset = contentOffset;
-				let spaces = 0;
-				while (spaces < 3 && source.text[offset] === " ") {
-					offset++;
-					spaces++;
-				}
-				const delimiterStart = offset;
-				while (source.text[offset] === open.char) offset++;
-				if (
-					offset - delimiterStart >= open.length &&
-					/^[ \t]*$/.test(source.text.slice(offset, line.contentEnd))
-				) {
-					closeFence(open.start, line.end);
-					open = undefined;
-				}
-			}
-			lineStart = line.end;
-			continue;
-		}
-
-		const prefix = deepListPrefix(source.text, lineStart, line.contentEnd);
-		if (prefix) {
-			found = true;
-			// Changing one code unit per marker is enough to stop recursive list
-			// construction without turning the long prefix into indented code.
-			for (const markerOffset of prefix.markerOffsets) {
-				masked[markerOffset] = "x";
-			}
-
-			let fenceOffset = prefix.contentOffset;
-			let spaces = 0;
-			while (spaces < 3 && source.text[fenceOffset] === " ") {
-				fenceOffset++;
-				spaces++;
-			}
-			const char = source.text[fenceOffset];
-			if (char === "`" || char === "~") {
-				let delimiterEnd = fenceOffset;
-				while (source.text[delimiterEnd] === char) delimiterEnd++;
-				const length = delimiterEnd - fenceOffset;
-				const info = source.text.slice(delimiterEnd, line.contentEnd);
-				if (length >= 3 && (char !== "`" || !info.includes("`"))) {
-					open = {
-						start: lineStart,
-						char,
-						length,
-						indentColumns: prefix.indentColumns,
-					};
-				}
-			}
-		}
-		lineStart = line.end;
-	}
-	if (open) closeFence(open.start, source.text.length);
-
-	return {
-		source: {
-			text: masked.join(""),
-			root: source.root,
-			units: source.units,
-		},
-		fences,
-		found,
-	};
-}
-
-function mergeOrderedRanges(
-	left: readonly SourceRange[],
-	right: readonly SourceRange[],
-): SourceRange[] {
-	const merged: SourceRange[] = [];
-	let leftIndex = 0;
-	let rightIndex = 0;
-	while (leftIndex < left.length || rightIndex < right.length) {
-		const next =
-			rightIndex >= right.length ||
-			(leftIndex < left.length && left[leftIndex].start <= right[rightIndex].start)
-				? left[leftIndex++]
-				: right[rightIndex++];
-		appendRange(merged, next);
-	}
-	return merged;
-}
-
-/**
- * Last-resort isolation for a parser failure after structural recovery. Blank
- * lines delimit Markdown blocks, except while a conservative fence run is
- * open. A failing block is excluded in full, while every parseable block still
- * contributes its normal code ranges. This cannot fail open and does not make
- * an unrelated prose block disappear because another block exhausted Marked.
- */
-function scanMarkedCodeRangesByBlock(
-	source: MappedSource,
-	signal?: AbortSignal,
-): SourceRange[] {
-	const blocks: MappedSource[] = [];
-	let blockStart = 0;
-	let openFence: { char: string; length: number } | undefined;
-	let lineStart = 0;
-	while (lineStart < source.text.length) {
-		throwIfFileMentionAborted(signal);
-		const line = lineEnd(source.text, lineStart);
-		const content = source.text.slice(lineStart, line.contentEnd);
-		const fenceRuns = [...content.matchAll(/`{3,}|~{3,}/g)];
-		if (!openFence && fenceRuns.length > 0) {
-			const run = fenceRuns[0][0];
-			openFence = { char: run[0], length: run.length };
-		} else if (openFence) {
-			for (const match of fenceRuns) {
-				const run = match[0];
-				const before = content.slice(0, match.index);
-				const after = content.slice(match.index! + run.length);
-				if (
-					run[0] === openFence.char &&
-					run.length >= openFence.length &&
-					/^[ \t>0-9.*+\-)()]*$/.test(before) &&
-					/^[ \t]*$/.test(after)
-				) {
-					openFence = undefined;
-					break;
-				}
-			}
-		}
-		if (!openFence && /^[ \t]*$/.test(content)) {
-			blocks.push(mappedSlice(source, blockStart, line.end));
-			blockStart = line.end;
-		}
-		lineStart = line.end;
-	}
-	if (blockStart < source.text.length) {
-		blocks.push(mappedSlice(source, blockStart, source.text.length));
-	}
-
-	const ranges: SourceRange[] = [];
-	for (const block of blocks) {
-		throwIfFileMentionAborted(signal);
-		try {
-			for (const range of scanMarkedCodeRanges(block, signal)) appendRange(ranges, range);
-		} catch {
-			appendMappedRange(ranges, block);
-		}
-	}
-	return ranges;
+	if (markerCount < 256) return undefined;
+	return { contentOffset: offset, indentColumns: columns, markerCount };
 }
 
 /**
@@ -1023,30 +799,507 @@ function scanMarkdownCodeRanges(text: string, signal?: AbortSignal): SourceRange
 	throwIfFileMentionAborted(signal);
 	const source = normalizeMarkdownSource(text);
 	throwIfFileMentionAborted(signal);
-	try {
-		return scanMarkedCodeRanges(source, signal);
-	} catch (error) {
-		if (error instanceof FileMentionAbortError) throw error;
-		if (error instanceof RangeError) {
-			const recovery = recoverDeepLists(source);
-			if (recovery.found) {
-				let parsedRanges: SourceRange[];
-				try {
-					parsedRanges = scanMarkedCodeRanges(recovery.source, signal);
-				} catch (recoveryError) {
-					if (recoveryError instanceof FileMentionAbortError) throw recoveryError;
-					parsedRanges = scanMarkedCodeRangesByBlock(recovery.source, signal);
-				}
-				return mergeOrderedRanges(
-					recovery.fences.map((range) => range.original),
-					parsedRanges,
-				);
+	return scanMarkedCodeRanges(source, signal);
+}
+
+const STREAMING_MARKDOWN_MIN_UNITS = 128 * 1024;
+const SCAN_ABORT_INTERVAL = 16 * 1024;
+const TOKEN_WHITESPACE = /\s/u;
+
+interface StreamingFence {
+	charCode: number;
+	length: number;
+	/** Deep same-line list fences require their accumulated list indentation
+	 * before a closer; ordinary container prefixes are stripped per line. */
+	indentColumns?: number;
+}
+
+interface StreamingContainerPrefix {
+	contentStart: number;
+	hadContainer: boolean;
+}
+
+function checkScanAbort(offset: number, signal?: AbortSignal): void {
+	if (offset % SCAN_ABORT_INTERVAL === 0) throwIfFileMentionAborted(signal);
+}
+
+function originalLineContentEnd(
+	text: string,
+	start: number,
+	signal?: AbortSignal,
+): number {
+	let offset = start;
+	let nextAbortCheck = start + SCAN_ABORT_INTERVAL;
+	while (offset < text.length) {
+		const code = text.charCodeAt(offset);
+		if (code === 10 || code === 13) break;
+		offset++;
+		if (offset >= nextAbortCheck) {
+			throwIfFileMentionAborted(signal);
+			nextAbortCheck = offset + SCAN_ABORT_INTERVAL;
+		}
+	}
+	return offset;
+}
+
+function originalLineNext(text: string, contentEnd: number): number {
+	if (text.charCodeAt(contentEnd) === 13 && text.charCodeAt(contentEnd + 1) === 10) {
+		return contentEnd + 2;
+	}
+	return contentEnd < text.length ? contentEnd + 1 : contentEnd;
+}
+
+function isBlankRange(
+	text: string,
+	start: number,
+	end: number,
+	signal?: AbortSignal,
+): boolean {
+	let nextAbortCheck = start + SCAN_ABORT_INTERVAL;
+	for (let offset = start; offset < end; offset++) {
+		const code = text.charCodeAt(offset);
+		if (code !== 32 && code !== 9) return false;
+		if (offset >= nextAbortCheck) {
+			throwIfFileMentionAborted(signal);
+			nextAbortCheck = offset + SCAN_ABORT_INTERVAL;
+		}
+	}
+	return true;
+}
+
+/** `String#indexOf` has no end bound and turns millions of tiny Markdown
+ * blocks into quadratic rescans of a later delimiter. Keep every lookup inside
+ * its current source range. */
+function indexOfCodeUnitInRange(
+	text: string,
+	code: number,
+	start: number,
+	end: number,
+	signal?: AbortSignal,
+): number {
+	let nextAbortCheck = start + SCAN_ABORT_INTERVAL;
+	for (let offset = start; offset < end; offset++) {
+		if (text.charCodeAt(offset) === code) return offset;
+		if (offset >= nextAbortCheck) {
+			throwIfFileMentionAborted(signal);
+			nextAbortCheck = offset + SCAN_ABORT_INTERVAL;
+		}
+	}
+	return -1;
+}
+
+/** Strip the common list/blockquote prefixes needed to recognize code in a
+ * large container line. Small and structurally bounded containers still use
+ * Marked for full grammar fidelity. */
+function streamingContainerPrefix(
+	text: string,
+	start: number,
+	end: number,
+): StreamingContainerPrefix {
+	let offset = start;
+	let hadContainer = false;
+	while (offset < end) {
+		const prefixStart = offset;
+		let marker = offset;
+		let spaces = 0;
+		while (spaces < 3 && text.charCodeAt(marker) === 32) {
+			marker++;
+			spaces++;
+		}
+
+		if (text.charCodeAt(marker) === 62) {
+			offset = marker + 1;
+			const following = text.charCodeAt(offset);
+			if (following === 32 || following === 9) offset++;
+			hadContainer = true;
+			continue;
+		}
+
+		let markerEnd = marker;
+		const markerCode = text.charCodeAt(markerEnd);
+		if (markerCode === 42 || markerCode === 43 || markerCode === 45) {
+			markerEnd++;
+		} else {
+			let digits = 0;
+			while (digits < 9) {
+				const code = text.charCodeAt(markerEnd);
+				if (code < 48 || code > 57) break;
+				markerEnd++;
+				digits++;
+			}
+			const delimiter = text.charCodeAt(markerEnd);
+			if (digits === 0 || (delimiter !== 46 && delimiter !== 41)) {
+				markerEnd = marker;
+			} else {
+				markerEnd++;
 			}
 		}
-		// Markdown parser failures must not escape. Isolate them by block and
-		// fail closed only for blocks that still cannot be parsed.
-		return scanMarkedCodeRangesByBlock(source, signal);
+		const separator = text.charCodeAt(markerEnd);
+		if (markerEnd > marker && (separator === 32 || separator === 9)) {
+			offset = markerEnd + 1;
+			hadContainer = true;
+			continue;
+		}
+
+		// Tentative indentation belongs to content when it did not lead to a
+		// container marker (notably the four spaces after a blockquote marker).
+		offset = prefixStart;
+		break;
 	}
+	return { contentStart: offset, hadContainer };
+}
+
+function streamingFenceRun(
+	text: string,
+	start: number,
+	end: number,
+	closing?: StreamingFence,
+	signal?: AbortSignal,
+): StreamingFence | undefined {
+	let offset = start;
+	let spaces = 0;
+	while (spaces < 3 && text.charCodeAt(offset) === 32) {
+		offset++;
+		spaces++;
+	}
+	const charCode = text.charCodeAt(offset);
+	if (charCode !== 96 && charCode !== 126) return undefined;
+	const delimiterStart = offset;
+	while (text.charCodeAt(offset) === charCode) offset++;
+	const length = offset - delimiterStart;
+	if (length < 3) return undefined;
+
+	if (closing) {
+		if (charCode !== closing.charCode || length < closing.length) return undefined;
+		return isBlankRange(text, offset, end, signal)
+			? { charCode, length }
+			: undefined;
+	}
+	// A backtick fence's info string may not itself contain a backtick.
+	if (charCode === 96 && indexOfCodeUnitInRange(text, 96, offset, end, signal) !== -1) {
+		return undefined;
+	}
+	return { charCode, length };
+}
+
+function rangeHasFourColumnIndent(text: string, start: number, end: number): boolean {
+	let columns = 0;
+	for (let offset = start; offset < end && columns < 4; offset++) {
+		const code = text.charCodeAt(offset);
+		if (code === 32) columns++;
+		else if (code === 9) columns += 4 - (columns % 4);
+		else return false;
+	}
+	return columns >= 4;
+}
+
+function isAtxHeadingLine(text: string, start: number, end: number): boolean {
+	let offset = start;
+	let spaces = 0;
+	while (spaces < 3 && text.charCodeAt(offset) === 32) {
+		offset++;
+		spaces++;
+	}
+	let hashes = 0;
+	while (hashes < 7 && text.charCodeAt(offset) === 35) {
+		offset++;
+		hashes++;
+	}
+	return hashes > 0 && hashes <= 6 && (
+		offset === end || text.charCodeAt(offset) === 32 || text.charCodeAt(offset) === 9
+	);
+}
+
+function pushScannedToken(
+	text: string,
+	start: number,
+	untrimmedEnd: number,
+	out: ScannedToken[],
+): void {
+	let end = untrimmedEnd;
+	while (end > start + 1 && TRAILING_PUNCT.has(text[end - 1])) end--;
+	if (end === start + 1) return;
+	out.push({ rawPath: text.slice(start + 1, end), range: [start, end] });
+	if (out.length > MAX_FILE_MENTION_RAW_CANDIDATES) {
+		throw new FileMentionBudgetError(
+			"FILE_MENTION_CANDIDATE_LIMIT",
+			`Prompt contains more than ${MAX_FILE_MENTION_RAW_CANDIDATES} non-code file-mention candidates`,
+		);
+	}
+}
+
+/** Scan one known-prose interval. Interval boundaries may be inline-code
+ * delimiters, so token parsing deliberately stops at `end`. */
+function scanCandidateRange(
+	text: string,
+	start: number,
+	end: number,
+	out: ScannedToken[],
+	signal?: AbortSignal,
+): void {
+	let cursor = start;
+	while (cursor < end) {
+		const tokenStart = indexOfCodeUnitInRange(text, 64, cursor, end, signal);
+		if (tokenStart === -1) return;
+		checkScanAbort(tokenStart, signal);
+		if (tokenStart > 0 && !TOKEN_WHITESPACE.test(text[tokenStart - 1])) {
+			cursor = tokenStart + 1;
+			continue;
+		}
+		let tokenEnd = tokenStart + 1;
+		while (tokenEnd < end) {
+			const char = text[tokenEnd];
+			if (char === "@" || TOKEN_WHITESPACE.test(char)) break;
+			tokenEnd++;
+			checkScanAbort(tokenEnd, signal);
+		}
+		pushScannedToken(text, tokenStart, tokenEnd, out);
+		cursor = Math.max(tokenEnd, tokenStart + 1);
+	}
+}
+
+function backtickIsEscaped(text: string, offset: number, blockStart: number): boolean {
+	let slashes = 0;
+	for (let index = offset - 1; index >= blockStart && text.charCodeAt(index) === 92; index--) {
+		slashes++;
+	}
+	return (slashes & 1) === 1;
+}
+
+/**
+ * Scan a single inline block with two linear passes. The first pass retains one
+ * count per distinct delimiter-run length (at most O(sqrt(n)) distinct lengths
+ * in n source units); the second emits candidates only from prose intervals.
+ * This avoids one range object per span while preserving unmatched, escaped,
+ * multi-run, adjacent, and multiline code-span semantics.
+ */
+function scanInlineBlockCandidates(
+	text: string,
+	start: number,
+	end: number,
+	out: ScannedToken[],
+	signal?: AbortSignal,
+): void {
+	const firstAt = indexOfCodeUnitInRange(text, 64, start, end, signal);
+	if (firstAt === -1) return;
+	const firstBacktick = indexOfCodeUnitInRange(text, 96, start, end, signal);
+	if (firstBacktick === -1) {
+		scanCandidateRange(text, start, end, out, signal);
+		return;
+	}
+
+	const remainingRuns = new Map<number, number>();
+	let offset = firstBacktick;
+	while (offset < end) {
+		if (text.charCodeAt(offset) !== 96) {
+			const next = indexOfCodeUnitInRange(text, 96, offset + 1, end, signal);
+			if (next === -1) break;
+			offset = next;
+		}
+		const runStart = offset;
+		while (offset < end && text.charCodeAt(offset) === 96) {
+			offset++;
+			checkScanAbort(offset, signal);
+		}
+		const length = offset - runStart;
+		remainingRuns.set(length, (remainingRuns.get(length) ?? 0) + 1);
+	}
+
+	let proseStart = start;
+	let openLength = 0;
+	offset = firstBacktick;
+	while (offset < end) {
+		if (text.charCodeAt(offset) !== 96) {
+			const next = indexOfCodeUnitInRange(text, 96, offset + 1, end, signal);
+			if (next === -1) break;
+			offset = next;
+		}
+		const runStart = offset;
+		while (offset < end && text.charCodeAt(offset) === 96) {
+			offset++;
+			checkScanAbort(offset, signal);
+		}
+		const rawLength = offset - runStart;
+		const remaining = (remainingRuns.get(rawLength) ?? 1) - 1;
+		if (remaining === 0) remainingRuns.delete(rawLength);
+		else remainingRuns.set(rawLength, remaining);
+
+		if (openLength !== 0) {
+			if (rawLength === openLength) {
+				openLength = 0;
+				proseStart = offset;
+			}
+			continue;
+		}
+
+		const escaped = backtickIsEscaped(text, runStart, start);
+		const openerStart = escaped ? runStart + 1 : runStart;
+		const openerLength = rawLength - (escaped ? 1 : 0);
+		if (openerLength > 0 && (remainingRuns.get(openerLength) ?? 0) > 0) {
+			scanCandidateRange(text, proseStart, openerStart, out, signal);
+			openLength = openerLength;
+		}
+		checkScanAbort(offset, signal);
+	}
+	// Every accepted opener had a later matching raw run, so this is prose.
+	scanCandidateRange(text, proseStart, end, out, signal);
+}
+
+function containsDeepListPrefix(text: string, signal?: AbortSignal): boolean {
+	let lineStart = 0;
+	while (lineStart < text.length) {
+		const contentEnd = originalLineContentEnd(text, lineStart, signal);
+		if (deepListPrefix(text, lineStart, contentEnd, signal)) return true;
+		lineStart = originalLineNext(text, contentEnd);
+		throwIfFileMentionAborted(signal);
+	}
+	return false;
+}
+
+/**
+ * Bounded-memory Markdown scan for large sources and ultra-deep list input.
+ * It never normalizes/copies the full prompt, constructs an AST, or retains
+ * code-range objects. Bounded, structurally rich sources continue to use Marked.
+ */
+function scanStreamingMarkdownTokens(text: string, signal?: AbortSignal): ScannedToken[] {
+	const out: ScannedToken[] = [];
+	let lineStart = 0;
+	let paragraphStart = -1;
+	let paragraphEnd = -1;
+	let inIndentedCode = false;
+	let openFence: StreamingFence | undefined;
+
+	const flushParagraph = () => {
+		if (paragraphStart >= 0) {
+			scanInlineBlockCandidates(text, paragraphStart, paragraphEnd, out, signal);
+			paragraphStart = -1;
+			paragraphEnd = -1;
+		}
+	};
+
+	while (lineStart < text.length) {
+		throwIfFileMentionAborted(signal);
+		const contentEnd = originalLineContentEnd(text, lineStart, signal);
+		const lineNext = originalLineNext(text, contentEnd);
+
+		if (openFence) {
+			let closeStart: number | undefined;
+			if (openFence.indentColumns !== undefined) {
+				closeStart = indentationEnd(
+					text,
+					lineStart,
+					contentEnd,
+					openFence.indentColumns,
+					signal,
+				);
+			} else {
+				closeStart = streamingContainerPrefix(text, lineStart, contentEnd).contentStart;
+			}
+			if (
+				closeStart !== undefined &&
+				streamingFenceRun(text, closeStart, contentEnd, openFence, signal)
+			) {
+				openFence = undefined;
+			}
+			lineStart = lineNext;
+			continue;
+		}
+
+		const deepPrefix = deepListPrefix(text, lineStart, contentEnd, signal);
+		if (deepPrefix) {
+			flushParagraph();
+			inIndentedCode = false;
+			const fence = streamingFenceRun(
+				text,
+				deepPrefix.contentOffset,
+				contentEnd,
+				undefined,
+				signal,
+			);
+			if (fence) openFence = { ...fence, indentColumns: deepPrefix.indentColumns };
+			else scanInlineBlockCandidates(
+				text,
+				deepPrefix.contentOffset,
+				contentEnd,
+				out,
+				signal,
+			);
+			lineStart = lineNext;
+			continue;
+		}
+
+		const container = streamingContainerPrefix(text, lineStart, contentEnd);
+		const blank = isBlankRange(text, container.contentStart, contentEnd, signal);
+		if (blank) {
+			flushParagraph();
+			inIndentedCode = false;
+			lineStart = lineNext;
+			continue;
+		}
+
+		const fence = streamingFenceRun(
+			text,
+			container.contentStart,
+			contentEnd,
+			undefined,
+			signal,
+		);
+		if (fence) {
+			flushParagraph();
+			inIndentedCode = false;
+			openFence = fence;
+			lineStart = lineNext;
+			continue;
+		}
+
+		const indented = rangeHasFourColumnIndent(
+			text,
+			container.contentStart,
+			contentEnd,
+		);
+		if (container.hadContainer) {
+			flushParagraph();
+			inIndentedCode = false;
+			if (!indented) {
+				scanInlineBlockCandidates(
+					text,
+					container.contentStart,
+					contentEnd,
+					out,
+					signal,
+				);
+			}
+			lineStart = lineNext;
+			continue;
+		}
+
+		if (inIndentedCode) {
+			if (indented) {
+				lineStart = lineNext;
+				continue;
+			}
+			inIndentedCode = false;
+		}
+		if (indented && paragraphStart < 0) {
+			inIndentedCode = true;
+			lineStart = lineNext;
+			continue;
+		}
+
+		if (isAtxHeadingLine(text, lineStart, contentEnd)) {
+			flushParagraph();
+			scanInlineBlockCandidates(text, lineStart, contentEnd, out, signal);
+			lineStart = lineNext;
+			continue;
+		}
+
+		if (paragraphStart < 0) paragraphStart = lineStart;
+		paragraphEnd = lineNext;
+		lineStart = lineNext;
+	}
+	flushParagraph();
+	throwIfFileMentionAborted(signal);
+	return out;
 }
 
 const WINDOWS_DOS_DEVICE_SEGMENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?=$|[.:])/i;
@@ -1076,19 +1329,33 @@ function scanTokens(text: string, signal?: AbortSignal): ScannedToken[] {
 	throwIfFileMentionAborted(signal);
 	const re = /(^|\s)@([^\s@]+)/g;
 	// Ordinary prompts need no Markdown token tree or normalized-source copy.
-	// Backticks and 3+ tildes can delimit code; four columns of leading
-	// indentation can introduce a code block. A tab reaches the next four-column
-	// stop, so up to three preceding spaces still form a valid indented start.
-	// Container starts also need Marked because their prefixes can make later
-	// indentation code-significant (for example `>     @notes.txt`). Route
-	// blockquotes and both list-marker forms to the maintained parser rather than
-	// trying to reproduce their nesting rules here. Only prompts with one of
-	// these Markdown signals pay for Marked and sparse original-offset mapping.
+	// Marked remains the fidelity oracle for bounded Markdown. Large sources and
+	// same-line container depths that could amplify its recursive AST are
+	// admitted through the source-index-preserving streaming path instead.
 	const hasIndentedCodeLine = /(?:^|\r\n?|\n)(?: {4}| {0,3}\t)/.test(text);
 	const hasMarkdownContainerLine = /(?:^|\r\n?|\n) {0,3}(?:>|[-+*](?=[ \t\r\n]|$)|\d{1,9}[.)](?=[ \t\r\n]|$))/.test(text);
-	const excluded = text.includes("`") || /~{3,}/.test(text) || hasIndentedCodeLine || hasMarkdownContainerLine
-		? scanMarkdownCodeRanges(text, signal)
-		: undefined;
+	const hasMarkdownCodeSignal = text.includes("`") || /~{3,}/.test(text)
+		|| hasIndentedCodeLine || hasMarkdownContainerLine;
+	if (
+		hasMarkdownCodeSignal &&
+		(
+			text.length >= STREAMING_MARKDOWN_MIN_UNITS ||
+			(hasMarkdownContainerLine && containsDeepListPrefix(text, signal))
+		)
+	) {
+		return scanStreamingMarkdownTokens(text, signal);
+	}
+	let excluded: SourceRange[] | undefined;
+	if (hasMarkdownCodeSignal) {
+		try {
+			excluded = scanMarkdownCodeRanges(text, signal);
+		} catch (error) {
+			if (error instanceof FileMentionAbortError) throw error;
+			// Parser/alignment failure must not silently exclude its prose. The
+			// non-recursive scanner preserves every admitted candidate instead.
+			return scanStreamingMarkdownTokens(text, signal);
+		}
+	}
 	const out: ScannedToken[] = [];
 	let excludedIndex = 0;
 	let m: RegExpExecArray | null;
@@ -1209,13 +1476,17 @@ export async function preflightFileMentionAdmission(
 	const signal = opts && "aborted" in opts ? opts : opts?.signal;
 	throwIfFileMentionAborted(signal);
 	if (!text.includes("@")) return;
-	const release = await acquireSemaphoreLease(resolutionSemaphore, signal);
+	try {
+		await resolutionSemaphore.acquire(signal);
+	} catch (error) {
+		rethrowSemaphoreAcquireError(error, signal);
+	}
 	try {
 		throwIfFileMentionAborted(signal);
 		prepareFileMentionAdmission(text, cwd, signal);
 		throwIfFileMentionAborted(signal);
 	} finally {
-		release();
+		resolutionSemaphore.release();
 	}
 }
 
@@ -1231,11 +1502,15 @@ async function lstatWithGlobalPermit(
 	target: string,
 	signal?: AbortSignal,
 ): Promise<fs.Stats> {
-	const release = await acquireSemaphoreLease(lstatSemaphore, signal);
+	try {
+		await lstatSemaphore.acquire(signal);
+	} catch (error) {
+		rethrowSemaphoreAcquireError(error, signal);
+	}
 	try {
 		throwIfFileMentionAborted(signal);
 	} catch (error) {
-		release();
+		lstatSemaphore.release();
 		throw error;
 	}
 
@@ -1243,7 +1518,7 @@ async function lstatWithGlobalPermit(
 	try {
 		operation = fs.promises.lstat(target);
 	} catch (error) {
-		release();
+		lstatSemaphore.release();
 		throw error;
 	}
 	// Observe the uncancellable OS probe to settlement and retain its global
@@ -1251,7 +1526,7 @@ async function lstatWithGlobalPermit(
 	const completion = operation.then(
 		(value) => ({ ok: true as const, value }),
 		(error: unknown) => ({ ok: false as const, error }),
-	).finally(release);
+	).finally(() => lstatSemaphore.release());
 	const outcome = await waitForPromiseOrAbort(completion, signal);
 	throwIfFileMentionAborted(signal);
 	if (!outcome.ok) throw outcome.error;
@@ -1739,11 +2014,15 @@ export async function resolveFileMentions(
 	if (!text.includes("@")) {
 		return { originalText: text, modelText: text, mentions: [], warnings: [] };
 	}
-	const release = await acquireSemaphoreLease(resolutionSemaphore, signal);
+	try {
+		await resolutionSemaphore.acquire(signal);
+	} catch (error) {
+		rethrowSemaphoreAcquireError(error, signal);
+	}
 	try {
 		throwIfFileMentionAborted(signal);
 		return await resolveFileMentionsUnderPermit(text, cwd, opts);
 	} finally {
-		release();
+		resolutionSemaphore.release();
 	}
 }
