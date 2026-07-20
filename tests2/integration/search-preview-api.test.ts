@@ -1,15 +1,23 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, base, createSession, deleteSession, readE2EToken } from "./_e2e/e2e-setup.js";
 
+const SIGNED_COOKIE_VALUE = String.raw`v1\.[1-9]\d*\.[1-9]\d*\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`;
+
 async function mintCookie(): Promise<string> {
+	const browserOrigin = new URL(base()).origin;
 	const resp = await fetch(`${base()}/api/health`, {
-		headers: { Authorization: `Bearer ${readE2EToken()}` },
+		headers: {
+			Authorization: `Bearer ${readE2EToken()}`,
+			Origin: browserOrigin,
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+		},
 	});
 	expect(resp.status).toBe(200);
 	const setCookie = resp.headers.get("set-cookie");
-	expect(setCookie).toBeTruthy();
-	const m = String(setCookie).match(/bobbit_session=([0-9a-f]{64})/i);
-	expect(m, `Set-Cookie did not include bobbit_session: ${setCookie}`).not.toBeNull();
+	expect(setCookie, "trusted browser auth should bootstrap a signed cookie").toBeTruthy();
+	const m = String(setCookie).match(new RegExp(`bobbit_session=(${SIGNED_COOKIE_VALUE})(?:;|$)`));
+	expect(m, `Set-Cookie did not include a signed bobbit_session: ${setCookie}`).not.toBeNull();
 	return `bobbit_session=${m![1]}`;
 }
 
