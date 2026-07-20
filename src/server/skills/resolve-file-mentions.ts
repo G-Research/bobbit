@@ -490,6 +490,18 @@ interface NormalizedRange extends SourceRange {
 	original: SourceRange;
 }
 
+interface DeepListPrefix {
+	contentOffset: number;
+	indentColumns: number;
+	markerOffsets: number[];
+}
+
+interface DeepListRecovery {
+	source: MappedSource;
+	fences: NormalizedRange[];
+	found: boolean;
+}
+
 function lineEnd(text: string, start: number): { contentEnd: number; end: number } {
 	const newline = text.indexOf("\n", start);
 	return newline === -1
@@ -514,17 +526,102 @@ function indentationEnd(
 	return columns >= requiredColumns ? offset : undefined;
 }
 
+function originalRange(
+	source: MappedSource,
+	start: number,
+	end: number,
+): SourceRange {
+	return {
+		start: source.starts[start],
+		end: source.ends[end - 1],
+	};
+}
+
+/** Iteratively recognize the same-line list nesting that overflows Marked. */
+function deepListPrefix(
+	text: string,
+	start: number,
+	end: number,
+): DeepListPrefix | undefined {
+	const markerOffsets: number[] = [];
+	let offset = start;
+	let columns = 0;
+	while (offset < end) {
+		const markerStart = offset;
+		const markerColumns = columns;
+		let leadingSpaces = 0;
+		while (leadingSpaces < 3 && text[offset] === " ") {
+			offset++;
+			columns++;
+			leadingSpaces++;
+		}
+
+		let markerOffset = offset;
+		if (text[offset] === "*" || text[offset] === "+" || text[offset] === "-") {
+			offset++;
+			columns++;
+		} else {
+			let digits = 0;
+			while (digits < 9 && /[0-9]/.test(text[offset] ?? "")) {
+				offset++;
+				columns++;
+				digits++;
+			}
+			if (
+				digits === 0 ||
+				(text[offset] !== "." && text[offset] !== ")")
+			) {
+				offset = markerStart;
+				columns = markerColumns;
+				break;
+			}
+			markerOffset = offset;
+			offset++;
+			columns++;
+		}
+		if (text[offset] !== " " && text[offset] !== "\t") {
+			offset = markerStart;
+			columns = markerColumns;
+			break;
+		}
+		while (text[offset] === " " || text[offset] === "\t") {
+			if (text[offset] === " ") columns++;
+			else columns += 4 - (columns % 4);
+			offset++;
+		}
+		markerOffsets.push(markerOffset);
+	}
+	if (markerOffsets.length < 256) return undefined;
+	return { contentOffset: offset, indentColumns: columns, markerOffsets };
+}
+
 /**
  * Marked recursively tokenizes list items and can exhaust the JS stack on an
- * adversarial same-line list depth. Detect only that overflow shape with an
- * iterative fence scanner, then mask it before a second Marked pass. Normal
- * Markdown always stays on Marked's maintained lexer path.
+ * adversarial same-line list depth. Recovery replaces only list-marker syntax
+ * with same-length, non-Markdown characters, leaving prose and inline code at
+ * their original offsets for a normal Marked pass. Deep fenced blocks are
+ * additionally recorded and masked as complete ranges so their container
+ * semantics remain explicit after the list structure is neutralized.
  */
-function scanDeepListFenceRanges(source: MappedSource): NormalizedRange[] {
-	const ranges: NormalizedRange[] = [];
+function recoverDeepLists(source: MappedSource): DeepListRecovery {
+	const masked = source.text.split("");
+	const fences: NormalizedRange[] = [];
+	let found = false;
 	let open:
 		| { start: number; char: string; length: number; indentColumns: number }
 		| undefined;
+
+	const closeFence = (start: number, end: number) => {
+		fences.push({
+			start,
+			end,
+			original: originalRange(source, start, end),
+		});
+		for (let index = start; index < end; index++) {
+			if (masked[index] !== "\n") masked[index] = " ";
+		}
+	};
+
 	let lineStart = 0;
 	while (lineStart < source.text.length) {
 		const line = lineEnd(source.text, lineStart);
@@ -548,14 +645,7 @@ function scanDeepListFenceRanges(source: MappedSource): NormalizedRange[] {
 					offset - delimiterStart >= open.length &&
 					/^[ \t]*$/.test(source.text.slice(offset, line.contentEnd))
 				) {
-					ranges.push({
-						start: open.start,
-						end: line.end,
-						original: {
-							start: source.starts[open.start],
-							end: source.ends[line.end - 1],
-						},
-					});
+					closeFence(open.start, line.end);
 					open = undefined;
 				}
 			}
@@ -563,53 +653,16 @@ function scanDeepListFenceRanges(source: MappedSource): NormalizedRange[] {
 			continue;
 		}
 
-		let offset = lineStart;
-		let columns = 0;
-		let markers = 0;
-		while (offset < line.contentEnd) {
-			const markerStart = offset;
-			let leadingSpaces = 0;
-			while (
-				leadingSpaces < 3 &&
-				source.text[offset] === " "
-			) {
-				offset++;
-				columns++;
-				leadingSpaces++;
+		const prefix = deepListPrefix(source.text, lineStart, line.contentEnd);
+		if (prefix) {
+			found = true;
+			// Changing one code unit per marker is enough to stop recursive list
+			// construction without turning the long prefix into indented code.
+			for (const markerOffset of prefix.markerOffsets) {
+				masked[markerOffset] = "x";
 			}
-			if (source.text[offset] === "*" || source.text[offset] === "+" || source.text[offset] === "-") {
-				offset++;
-				columns++;
-			} else {
-				let digits = 0;
-				while (digits < 9 && /[0-9]/.test(source.text[offset] ?? "")) {
-					offset++;
-					columns++;
-					digits++;
-				}
-				if (
-					digits === 0 ||
-					(source.text[offset] !== "." && source.text[offset] !== ")")
-				) {
-					offset = markerStart;
-					break;
-				}
-				offset++;
-				columns++;
-			}
-			if (source.text[offset] !== " " && source.text[offset] !== "\t") {
-				offset = markerStart;
-				break;
-			}
-			while (source.text[offset] === " " || source.text[offset] === "\t") {
-				if (source.text[offset] === " ") columns++;
-				else columns += 4 - (columns % 4);
-				offset++;
-			}
-			markers++;
-		}
-		if (markers >= 256) {
-			let fenceOffset = offset;
+
+			let fenceOffset = prefix.contentOffset;
 			let spaces = 0;
 			while (spaces < 3 && source.text[fenceOffset] === " ") {
 				fenceOffset++;
@@ -622,23 +675,28 @@ function scanDeepListFenceRanges(source: MappedSource): NormalizedRange[] {
 				const length = delimiterEnd - fenceOffset;
 				const info = source.text.slice(delimiterEnd, line.contentEnd);
 				if (length >= 3 && (char !== "`" || !info.includes("`"))) {
-					open = { start: lineStart, char, length, indentColumns: columns };
+					open = {
+						start: lineStart,
+						char,
+						length,
+						indentColumns: prefix.indentColumns,
+					};
 				}
 			}
 		}
 		lineStart = line.end;
 	}
-	if (open) {
-		ranges.push({
-			start: open.start,
-			end: source.text.length,
-			original: {
-				start: source.starts[open.start],
-				end: source.ends[source.ends.length - 1],
-			},
-		});
-	}
-	return ranges;
+	if (open) closeFence(open.start, source.text.length);
+
+	return {
+		source: {
+			text: masked.join(""),
+			starts: source.starts,
+			ends: source.ends,
+		},
+		fences,
+		found,
+	};
 }
 
 function mergeOrderedRanges(
@@ -659,6 +717,74 @@ function mergeOrderedRanges(
 	return merged;
 }
 
+function mappedSlice(
+	source: MappedSource,
+	start: number,
+	end: number,
+): MappedSource {
+	return {
+		text: source.text.slice(start, end),
+		starts: source.starts.slice(start, end),
+		ends: source.ends.slice(start, end),
+	};
+}
+
+/**
+ * Last-resort isolation for a parser failure after structural recovery. Blank
+ * lines delimit Markdown blocks, except while a conservative fence run is
+ * open. A failing block is excluded in full, while every parseable block still
+ * contributes its normal code ranges. This cannot fail open and does not make
+ * an unrelated prose block disappear because another block exhausted Marked.
+ */
+function scanMarkedCodeRangesByBlock(source: MappedSource): SourceRange[] {
+	const blocks: MappedSource[] = [];
+	let blockStart = 0;
+	let openFence: { char: string; length: number } | undefined;
+	let lineStart = 0;
+	while (lineStart < source.text.length) {
+		const line = lineEnd(source.text, lineStart);
+		const content = source.text.slice(lineStart, line.contentEnd);
+		const fenceRuns = [...content.matchAll(/`{3,}|~{3,}/g)];
+		if (!openFence && fenceRuns.length > 0) {
+			const run = fenceRuns[0][0];
+			openFence = { char: run[0], length: run.length };
+		} else if (openFence) {
+			for (const match of fenceRuns) {
+				const run = match[0];
+				const before = content.slice(0, match.index);
+				const after = content.slice(match.index! + run.length);
+				if (
+					run[0] === openFence.char &&
+					run.length >= openFence.length &&
+					/^[ \t>0-9.*+\-)()]*$/.test(before) &&
+					/^[ \t]*$/.test(after)
+				) {
+					openFence = undefined;
+					break;
+				}
+			}
+		}
+		if (!openFence && /^[ \t]*$/.test(content)) {
+			blocks.push(mappedSlice(source, blockStart, line.end));
+			blockStart = line.end;
+		}
+		lineStart = line.end;
+	}
+	if (blockStart < source.text.length) {
+		blocks.push(mappedSlice(source, blockStart, source.text.length));
+	}
+
+	const ranges: SourceRange[] = [];
+	for (const block of blocks) {
+		try {
+			for (const range of scanMarkedCodeRanges(block)) appendRange(ranges, range);
+		} catch {
+			appendMappedRange(ranges, block);
+		}
+	}
+	return ranges;
+}
+
 /**
  * Find Markdown code ranges using Marked's maintained block/inline lexer.
  * Marked supplies faithful fence-container, leaf-block, ordered-list
@@ -672,34 +798,23 @@ function scanMarkdownCodeRanges(text: string): SourceRange[] {
 		return scanMarkedCodeRanges(source);
 	} catch (error) {
 		if (error instanceof RangeError) {
-			const deepFences = scanDeepListFenceRanges(source);
-			if (deepFences.length > 0) {
-				const masked = source.text.split("");
-				for (const range of deepFences) {
-					for (let index = range.start; index < range.end; index++) {
-						if (masked[index] !== "\n") masked[index] = " ";
-					}
-				}
+			const recovery = recoverDeepLists(source);
+			if (recovery.found) {
+				let parsedRanges: SourceRange[];
 				try {
-					const outsideRanges = scanMarkedCodeRanges({
-						text: masked.join(""),
-						starts: source.starts,
-						ends: source.ends,
-					});
-					return mergeOrderedRanges(
-						deepFences.map((range) => range.original),
-						outsideRanges,
-					);
+					parsedRanges = scanMarkedCodeRanges(recovery.source);
 				} catch {
-					return deepFences.map((range) => range.original);
+					parsedRanges = scanMarkedCodeRangesByBlock(recovery.source);
 				}
+				return mergeOrderedRanges(
+					recovery.fences.map((range) => range.original),
+					parsedRanges,
+				);
 			}
 		}
-		// The resolver must never throw. Fail closed so parser failures cannot
-		// turn code-contained paths into filesystem reads.
-		const ranges: SourceRange[] = [];
-		appendMappedRange(ranges, source);
-		return ranges;
+		// The resolver must never throw. Isolate parser failures by Markdown
+		// block and fail closed only for blocks that still cannot be parsed.
+		return scanMarkedCodeRangesByBlock(source);
 	}
 }
 
