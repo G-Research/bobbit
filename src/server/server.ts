@@ -1720,6 +1720,20 @@ export interface TlsConfig {
 
 type PreviewSessionOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
 
+/**
+ * Serialize the boot-time worktree ownership transition. The sweeper snapshots
+ * durable owners before deleting stale worktrees, so a pool entry must not be
+ * exposed for claim (and renamed out of the pool namespace) until that deletion
+ * phase has settled. Both phases remain post-listen background work.
+ */
+export async function coordinateBootWorktreeLifecycle(
+	runSweepDeletionPhase: () => Promise<void>,
+	initializePools: () => Promise<void>,
+): Promise<void> {
+	await runSweepDeletionPhase();
+	await initializePools();
+}
+
 export interface GatewayConfig {
 	host: string;
 	port: number;
@@ -3445,16 +3459,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// per project. Doing them before listen used to leave the gateway
 			// unreachable for many seconds on installs with stale worktrees.
 			//
-			// Concurrency note: the sweeper and the pool init operate on DISJOINT
-			// branch sets — `worktree-sweeper.ts` explicitly skips Bobbit pool
-			// branches using the shared inventory classifier helpers, and
-			// `WorktreePool.reclaimOrphaned` only inspects pool branches. So the two
-			// phases are run concurrently via `Promise.all`, and project-level pool
-			// init is also parallelised
-			// across projects (each project's pool is independent). This avoids
-			// the previous serial chain that left the pool empty for minutes on
-			// installs with many stale worktrees, forcing every new session
-			// through the cold path (full createWorktree + npm ci).
+			// Ownership ordering: the sweeper snapshots durable owners before it
+			// scans and deletes. Pool initialization must therefore wait for the
+			// deletion phase: once an entry is exposed, a request may claim it and
+			// rename its branch out of the pool namespace, making the stale snapshot
+			// misclassify it as unowned. Both phases still run after listen(), so
+			// health and session requests remain available (sessions use the normal
+			// cold fallback until pools are ready). Independent project pools are
+			// initialized in parallel after the sweep settles.
 			const runBootBackgroundTasks = async (): Promise<void> => {
 				const t0 = Date.now();
 
@@ -3561,7 +3573,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					}
 				})();
 
-				const poolInitTask = (async () => {
+				const initializePools = async (): Promise<void> => {
 					if (gatewayRuntimeFlags.skipWorktreePool) return;
 					// Hidden contexts (synthetic system project) must NOT seed a
 					// worktree pool. When bobbit's state dir is nested inside an
@@ -3610,7 +3622,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							console.warn(`[boot] pool init failed: project=${ctx.project.id} in ${Date.now() - tStart}ms (non-fatal):`, err);
 						}
 					}));
-				})();
+				};
+				const poolInitTask = coordinateBootWorktreeLifecycle(
+					() => sweeperTask,
+					initializePools,
+				);
 				await Promise.all([transcriptBackfillTask, sweeperTask, poolInitTask]);
 				bootLog(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
