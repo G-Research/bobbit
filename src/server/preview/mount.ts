@@ -10,71 +10,40 @@
  *   - `writeInline(sid, html, entry?)` writes only the entry — no siblings.
  *   - `mountFile(sid, srcFile, assets?)` copies only `srcFile` plus the
  *     declared assets (literals or single-segment globs). Sibling files in
- *     the source dir that are NOT declared are NOT copied. There is no
- *     BFS-of-everything fallback. See docs/preview-architecture.md.
- *
- * Public API:
- *   mountDir(sid)                               → host directory
- *   writeInline(sid, html, entry?)              → write inline.html (or chosen entry)
- *   mountFile(sid, srcFile, assets?)            → copy entry + declared assets
- *   removeMount(sid)                            → recursive delete (idempotent)
- *   watchMount(sid, onChange)                   → debounced fs watch + unsubscribe
- *
- * All errors are `PreviewMountError` with a `statusCode` so the route handler
- * can map directly to HTTP. Codes: 400 / 403 / 404 / 500.
+ *     the source dir that are NOT declared are NOT copied.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { mapWithConcurrency, RECOVERY_IO_CONCURRENCY } from "../agent/bounded-async-work.js";
 import { realClock, type Clock, type TimerHandle } from "../gateway-deps.js";
 
-/** Same shape as `VALID_SESSION_ID` in `server.ts` (UUID v4-style). */
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const HASH_READ_BUFFER_BYTES = 64 * 1024;
+const REMOVE_DIRECTORY_BATCH = 128;
 
 /**
  * @deprecated The 100 MiB mount ceiling was removed when asset inclusion
- * became explicit (agents declare what to copy via `assets[]`/`manifest`).
- * Kept as a re-export for backwards compatibility with imports that exist
- * elsewhere in-tree; the value is no longer enforced.
+ * became explicit. Kept for backwards-compatible imports.
  */
 export const MAX_MOUNT_BYTES = 100 * 1024 * 1024;
-
-/** Default entry filename when only inline HTML is supplied. */
 export const DEFAULT_INLINE_ENTRY = "inline.html";
 
 export interface MountResult {
-	/** Public content-origin URL the renderer should open. */
 	url: string;
-	/** Host-absolute path to the entry file (debug parity with v2 markers). */
 	path: string;
-	/**
-	 * Project-root-relative entry identifier — always `<sessionId>/<entry>`
-	 * with forward slashes (POSIX) regardless of host OS. Host-invariant, so
-	 * its size is bounded by content shape, not where `bobbitStateDir()`
-	 * happens to live on disk. Stamped into the v3 preview-snapshot block by
-	 * the agent tool so the per-block size stays under the 250 B cap on
-	 * macOS (`/private/var/folders/...`) and Windows E2E harness paths too.
-	 * See `defaults/tools/html/extension.ts` and `defaults/tools/html/snapshot.ts`.
-	 */
 	relPath: string;
-	/** Relative entry filename inside the mount. */
 	entry: string;
-	/** mtime of the entry file in ms since epoch. */
 	mtime: number;
-	/** Stable SHA-256 identity for the mounted preview tree. */
 	contentHash: string;
 }
 
-/** Extension of MountResult returned by `mountFile`: echoes resolved assets. */
 export interface MountFileResult extends MountResult {
-	/** Asset paths actually copied, relative to the entry file's directory.
-	 *  Useful for the route handler / renderer to round-trip. */
 	assets: string[];
 }
 
-/** Typed error so the route handler can map directly to HTTP. */
 export class PreviewMountError extends Error {
 	statusCode: number;
 	constructor(statusCode: number, message: string) {
@@ -84,40 +53,69 @@ export class PreviewMountError extends Error {
 	}
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// stateDir resolution
-// ──────────────────────────────────────────────────────────────────────────
+/** Promise-only filesystem seam used by preview scans, copies, and cleanup. */
+export interface PreviewAsyncFs {
+	mkdir(filePath: fs.PathLike, options?: fs.MakeDirectoryOptions & { recursive?: boolean }): Promise<string | undefined>;
+	writeFile(filePath: fs.PathLike, data: string | Uint8Array, options?: BufferEncoding | fs.ObjectEncodingOptions): Promise<void>;
+	readFile(filePath: fs.PathLike, encoding: BufferEncoding): Promise<string>;
+	rename(oldPath: fs.PathLike, newPath: fs.PathLike): Promise<void>;
+	unlink(filePath: fs.PathLike): Promise<void>;
+	rmdir(filePath: fs.PathLike): Promise<void>;
+	stat(filePath: fs.PathLike): Promise<fs.Stats>;
+	lstat(filePath: fs.PathLike): Promise<fs.Stats>;
+	realpath(filePath: fs.PathLike): Promise<string>;
+	readdir(filePath: fs.PathLike, options: { withFileTypes: true }): Promise<fs.Dirent[]>;
+	opendir(filePath: fs.PathLike): Promise<fs.Dir>;
+	open(filePath: fs.PathLike, flags: "r"): Promise<fs.promises.FileHandle>;
+	copyFile(src: fs.PathLike, dest: fs.PathLike, mode?: number): Promise<void>;
+	link(existingPath: fs.PathLike, newPath: fs.PathLike): Promise<void>;
+	utimes(filePath: fs.PathLike, atime: string | number | Date, mtime: string | number | Date): Promise<void>;
+}
+
+export function createPreviewAsyncFs(fsImpl: typeof fs | PreviewAsyncFs): PreviewAsyncFs {
+	const candidate = "promises" in fsImpl ? fsImpl.promises : fsImpl;
+	return {
+		mkdir: (filePath, options) => candidate.mkdir(filePath, options as never) as Promise<string | undefined>,
+		writeFile: (filePath, data, options) => candidate.writeFile(filePath, data, options as never),
+		readFile: (filePath, encoding) => candidate.readFile(filePath, encoding) as Promise<string>,
+		rename: (oldPath, newPath) => candidate.rename(oldPath, newPath),
+		unlink: filePath => candidate.unlink(filePath),
+		rmdir: filePath => candidate.rmdir(filePath),
+		stat: filePath => candidate.stat(filePath) as Promise<fs.Stats>,
+		lstat: filePath => candidate.lstat(filePath) as Promise<fs.Stats>,
+		realpath: filePath => candidate.realpath(filePath) as Promise<string>,
+		readdir: (filePath, options) => candidate.readdir(filePath, options) as Promise<fs.Dirent[]>,
+		opendir: filePath => candidate.opendir(filePath) as Promise<fs.Dir>,
+		open: (filePath, flags) => candidate.open(filePath, flags) as Promise<fs.promises.FileHandle>,
+		copyFile: (src, dest, mode) => candidate.copyFile(src, dest, mode),
+		link: (existingPath, newPath) => candidate.link(existingPath, newPath),
+		utimes: (filePath, atime, mtime) => candidate.utimes(filePath, atime, mtime),
+	};
+}
 
 let _previewRootOverride: string | undefined;
-let mountFs: typeof fs = fs;
+let mountSyncFs: typeof fs = fs;
+let mountAsyncFs: PreviewAsyncFs = createPreviewAsyncFs(fs);
 
 export function setPreviewRootForTesting(dir: string | undefined): void {
 	_previewRootOverride = dir;
 }
 
-/** Swap the preview filesystem for a test double. Always reset after the test. */
-export function setPreviewFsForTesting(fsImpl: typeof fs | undefined): void {
-	mountFs = fsImpl ?? fs;
+/** Swap both mount filesystems for a test double. Always reset after the test. */
+export function setPreviewFsForTesting(fsImpl: typeof fs | PreviewAsyncFs | undefined): void {
+	mountSyncFs = fsImpl && "promises" in fsImpl ? fsImpl : fs;
+	mountAsyncFs = fsImpl ? createPreviewAsyncFs(fsImpl) : createPreviewAsyncFs(fs);
 }
 
 function previewRoot(): string {
 	return _previewRootOverride ?? path.join(bobbitStateDir(), "preview");
 }
 
-/**
- * Path to the per-session mount directory WITHOUT creating it as a side
- * effect. Use this when you need to check `fs.existsSync(mountPath(sid))`
- * (e.g. to decide whether a live mount exists before staging a restore).
- * Differs from `mountDir(sid)` which calls `fs.mkdirSync(dir, { recursive: true })`.
- */
+/** Path to the per-session mount without creating it. */
 export function mountPath(sessionId: string): string {
 	validateSessionId(sessionId);
 	return path.join(previewRoot(), sessionId);
 }
-
-// ──────────────────────────────────────────────────────────────────────────
-// Validation helpers
-// ──────────────────────────────────────────────────────────────────────────
 
 function validateSessionId(sessionId: string): void {
 	if (!sessionId || !VALID_SESSION_ID.test(sessionId)) {
@@ -125,77 +123,38 @@ function validateSessionId(sessionId: string): void {
 	}
 }
 
-/**
- * Entry must be a single path segment (no separators, no traversal, no NUL).
- */
 function validateEntry(entry: string): string {
-	if (!entry || typeof entry !== "string") {
-		throw new PreviewMountError(400, "Invalid entry");
-	}
-	if (entry.indexOf("\0") >= 0) throw new PreviewMountError(400, "Invalid entry");
-	if (entry === "." || entry === "..") throw new PreviewMountError(400, "Invalid entry");
-	if (entry.indexOf("/") >= 0 || entry.indexOf("\\") >= 0) {
-		throw new PreviewMountError(400, "Invalid entry");
-	}
-	if (entry.includes("..")) {
+	if (!entry || typeof entry !== "string") throw new PreviewMountError(400, "Invalid entry");
+	if (entry.includes("\0") || entry === "." || entry === ".." || entry.includes("/") || entry.includes("\\") || entry.includes("..")) {
 		throw new PreviewMountError(400, "Invalid entry");
 	}
 	return entry;
 }
 
-/**
- * Asset path validation per the design doc:
- *   1. Must be a non-empty string after trimming.
- *   2. No NUL.
- *   3. Not absolute (incl. `C:\` Windows drives).
- *   4. No backslashes — force forward slashes for portability.
- *   5. No `..` segments after normalisation.
- *   6. For globs: only `*` and `?` allowed; reject `**`, `[abc]`, `{a,b}`.
- *
- * Returns the trimmed asset string. Throws PreviewMountError(400) on reject.
- */
 function validateAssetSpec(asset: unknown): string {
-	if (typeof asset !== "string") {
-		throw new PreviewMountError(400, "Asset must be a string");
-	}
+	if (typeof asset !== "string") throw new PreviewMountError(400, "Asset must be a string");
 	const trimmed = asset.trim();
-	if (trimmed === "") {
-		throw new PreviewMountError(400, "Asset must be a non-empty string");
-	}
-	if (trimmed.indexOf("\0") >= 0) {
-		throw new PreviewMountError(400, `Invalid asset path: ${asset}`);
-	}
-	if (trimmed.indexOf("\\") >= 0) {
-		throw new PreviewMountError(400, `Invalid asset path (use forward slashes): ${asset}`);
-	}
+	if (!trimmed) throw new PreviewMountError(400, "Asset must be a non-empty string");
+	if (trimmed.includes("\0")) throw new PreviewMountError(400, `Invalid asset path: ${asset}`);
+	if (trimmed.includes("\\")) throw new PreviewMountError(400, `Invalid asset path (use forward slashes): ${asset}`);
 	if (path.isAbsolute(trimmed) || /^[a-zA-Z]:\//.test(trimmed)) {
 		throw new PreviewMountError(400, `Asset path must be relative: ${asset}`);
 	}
-	// Reject `..` segments.
-	const segments = trimmed.split("/");
-	for (const seg of segments) {
-		if (seg === "..") {
-			throw new PreviewMountError(400, `Asset path may not contain '..': ${asset}`);
-		}
-	}
-	// Reject unsupported glob constructs.
-	if (trimmed.indexOf("**") >= 0) {
-		throw new PreviewMountError(400, `Glob '**' is not supported: ${asset}`);
-	}
-	if (trimmed.indexOf("[") >= 0 || trimmed.indexOf("]") >= 0) {
+	if (trimmed.split("/").includes("..")) throw new PreviewMountError(400, `Asset path may not contain '..': ${asset}`);
+	if (trimmed.includes("**")) throw new PreviewMountError(400, `Glob '**' is not supported: ${asset}`);
+	if (trimmed.includes("[") || trimmed.includes("]")) {
 		throw new PreviewMountError(400, `Glob character class '[...]' is not supported: ${asset}`);
 	}
-	if (trimmed.indexOf("{") >= 0 || trimmed.indexOf("}") >= 0) {
+	if (trimmed.includes("{") || trimmed.includes("}")) {
 		throw new PreviewMountError(400, `Glob brace expansion '{a,b}' is not supported: ${asset}`);
 	}
 	return trimmed;
 }
 
 function isGlob(spec: string): boolean {
-	return spec.indexOf("*") >= 0 || spec.indexOf("?") >= 0;
+	return spec.includes("*") || spec.includes("?");
 }
 
-/** Compile a single-path glob (no `/`) into a RegExp. */
 function compileGlobSegment(segment: string): RegExp {
 	let re = "^";
 	for (const ch of segment) {
@@ -203,275 +162,162 @@ function compileGlobSegment(segment: string): RegExp {
 		else if (ch === "?") re += "[^/]";
 		else re += ch.replace(/[.+^${}()|\\]/g, "\\$&");
 	}
-	re += "$";
-	return new RegExp(re);
+	return new RegExp(`${re}$`);
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Public API
-// ──────────────────────────────────────────────────────────────────────────
-
+/**
+ * Legacy creating path helper used by the synchronous content/watch surface.
+ * Async mutation and background-cleanup paths use mountPath + ensureMountDir.
+ */
 export function mountDir(sessionId: string): string {
-	validateSessionId(sessionId);
-	const dir = path.join(previewRoot(), sessionId);
-	mountFs.mkdirSync(dir, { recursive: true });
+	const dir = mountPath(sessionId);
+	mountSyncFs.mkdirSync(dir, { recursive: true });
 	return dir;
 }
 
-export function writeInline(sessionId: string, html: string, entry?: string): MountResult {
+async function ensureMountDir(sessionId: string, io = mountAsyncFs): Promise<string> {
+	const dir = mountPath(sessionId);
+	await io.mkdir(dir, { recursive: true });
+	return dir;
+}
+
+export async function writeInline(sessionId: string, html: string, entry?: string): Promise<MountResult> {
 	validateSessionId(sessionId);
 	const safeEntry = validateEntry(entry ?? DEFAULT_INLINE_ENTRY);
-	if (typeof html !== "string") {
-		throw new PreviewMountError(400, "html must be a string");
-	}
+	if (typeof html !== "string") throw new PreviewMountError(400, "html must be a string");
 
-	const dir = mountDir(sessionId);
+	const dir = await ensureMountDir(sessionId);
 	const target = path.join(dir, safeEntry);
-
-	// Atomic write: temp file + rename within the same directory.
 	const tmp = path.join(dir, `.${safeEntry}.tmp-${process.pid}-${Date.now()}`);
-	mountFs.writeFileSync(tmp, html, "utf-8");
+	await mountAsyncFs.writeFile(tmp, html, "utf-8");
 	try {
-		mountFs.renameSync(tmp, target);
+		await mountAsyncFs.rename(tmp, target);
 	} catch (err) {
-		try { mountFs.unlinkSync(tmp); } catch { /* ignore */ }
+		try { await mountAsyncFs.unlink(tmp); } catch { /* ignore cleanup */ }
 		throw err;
 	}
 
-	const stat = mountFs.statSync(target);
+	const stat = await mountAsyncFs.stat(target);
 	return {
 		url: `/preview/${sessionId}/${safeEntry}`,
 		path: target,
 		relPath: path.posix.join(sessionId, safeEntry),
 		entry: safeEntry,
 		mtime: Math.floor(stat.mtimeMs),
-		contentHash: hashMountDirectory(dir),
+		contentHash: await hashMountDirectory(dir),
 	};
 }
 
-/**
- * Mount the entry HTML file plus a caller-declared list of assets.
- *
- * Behaviour:
- *   - Stages the entry + resolved assets into a sibling tmp directory first,
- *     reading ALL source data before touching `destRoot`. This is what makes
- *     re-opening a path that lives inside the existing mount safe (Bug 4):
- *     sources are captured before the wipe runs.
- *   - Then wipes `destRoot`'s contents (preserving its inode so any active
- *     `watchMount()` handle stays valid) and renames each staged entry into
- *     place.
- *   - Copies only `srcFile` plus the resolved `assets` (literals + globs).
- *   - Globs may use `*` and `?` in a single path segment; `**`/`[...]`/`{a,b}`
- *     are rejected.
- *   - Symlink escape: any resolved asset whose realpath is not contained in
- *     the entry's source dir is rejected with 403.
- *   - Unmatched literal asset → 404.
- *   - On any staging error, the tmp dir is deleted and `destRoot` is left
- *     untouched (previous mount preserved).
- *
- * No size cap — the agent is responsible for declaring only what it needs.
- */
-export function mountFile(
+export async function mountFile(
 	sessionId: string,
 	srcFile: string,
 	assets?: string[],
-): MountFileResult {
+): Promise<MountFileResult> {
 	validateSessionId(sessionId);
-	if (!srcFile || typeof srcFile !== "string") {
-		throw new PreviewMountError(400, "srcFile required");
-	}
-	if (!path.isAbsolute(srcFile)) {
-		throw new PreviewMountError(400, "srcFile must be absolute");
-	}
+	if (!srcFile || typeof srcFile !== "string") throw new PreviewMountError(400, "srcFile required");
+	if (!path.isAbsolute(srcFile)) throw new PreviewMountError(400, "srcFile must be absolute");
 
 	const srcDir = path.dirname(srcFile);
 	let srcRoot: string;
-	try {
-		srcRoot = mountFs.realpathSync(srcDir);
-	} catch {
-		throw new PreviewMountError(404, "srcFile parent not found");
-	}
+	try { srcRoot = await mountAsyncFs.realpath(srcDir); }
+	catch { throw new PreviewMountError(404, "srcFile parent not found"); }
 
 	let entryStat: fs.Stats;
-	try {
-		entryStat = mountFs.statSync(srcFile);
-	} catch {
-		throw new PreviewMountError(404, "srcFile not found");
-	}
-	if (!entryStat.isFile()) {
-		throw new PreviewMountError(404, "srcFile not a regular file");
-	}
+	try { entryStat = await mountAsyncFs.stat(srcFile); }
+	catch { throw new PreviewMountError(404, "srcFile not found"); }
+	if (!entryStat.isFile()) throw new PreviewMountError(404, "srcFile not a regular file");
 
-	const entry = path.basename(srcFile);
-	validateEntry(entry);
+	const entry = validateEntry(path.basename(srcFile));
+	const destRoot = await ensureMountDir(sessionId);
+	const specs = (Array.isArray(assets) ? assets : []).map(validateAssetSpec);
 
-	const destRoot = mountDir(sessionId);
-
-	const list = Array.isArray(assets) ? assets : [];
-	// Pre-validate all asset specs first so we fail fast before any extra work.
-	const specs = list.map(validateAssetSpec);
-
-	// Resolve the entry's realpath up-front so we can detect symlink escape.
-	const entryReal = (() => {
-		try { return mountFs.realpathSync(srcFile); } catch { return srcFile; }
-	})();
+	let entryReal: string;
+	try { entryReal = await mountAsyncFs.realpath(srcFile); }
+	catch { entryReal = srcFile; }
 	if (!isContained(entryReal, srcRoot) && entryReal !== path.join(srcRoot, entry)) {
-		// Entry's realpath escapes its declared dir (symlink escape on the entry).
 		throw new PreviewMountError(403, "Entry symlink escapes source tree");
 	}
 
-	// ── Stage into a sibling tmp dir ─────────────────────────────────────
-	// Sibling of `destRoot` so the swap is same-filesystem. The randomised
-	// suffix avoids collisions between concurrent mountFile() calls for the
-	// same sid (we accept last-writer-wins; no cross-call locking).
 	const tmpName = `.${sessionId}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
 	const tmpRoot = path.join(previewRoot(), tmpName);
-	mountFs.mkdirSync(tmpRoot, { recursive: true });
-
-	const resolvedAssets: Set<string> = new Set();
+	await mountAsyncFs.mkdir(tmpRoot, { recursive: true });
+	const resolvedAssets = new Set<string>();
 
 	try {
-		// Copy entry into tmp. Reading from `entryReal` BEFORE we touch
-		// destRoot is what makes "srcFile inside destRoot" safe.
-		copyOneFile(entryReal, path.join(tmpRoot, entry));
-
+		await copyOneFile(entryReal, path.join(tmpRoot, entry));
 		for (const spec of specs) {
 			if (isGlob(spec)) {
-				const matches = expandGlob(srcRoot, spec);
-				// A glob that matches nothing is OK (agent may speculatively list
-				// `img/*.png` even when none exist yet). It's not a hard error —
-				// matches the design doc which only specifies 404 for *literal*
-				// missing assets.
+				const matches = await expandGlob(srcRoot, spec);
 				for (const rel of matches) {
 					const abs = path.join(srcRoot, rel);
 					let real: string;
-					try { real = mountFs.realpathSync(abs); } catch { continue; }
-					if (!isContained(real, srcRoot)) {
-						throw new PreviewMountError(403, `Asset escapes source tree: ${rel}`);
-					}
+					try { real = await mountAsyncFs.realpath(abs); } catch { continue; }
+					if (!isContained(real, srcRoot)) throw new PreviewMountError(403, `Asset escapes source tree: ${rel}`);
 					let st: fs.Stats;
-					try { st = mountFs.statSync(real); } catch { continue; }
+					try { st = await mountAsyncFs.stat(real); } catch { continue; }
 					if (!st.isFile()) continue;
 					const dst = path.join(tmpRoot, rel);
-					mountFs.mkdirSync(path.dirname(dst), { recursive: true });
-					copyOneFile(real, dst);
+					await mountAsyncFs.mkdir(path.dirname(dst), { recursive: true });
+					await copyOneFile(real, dst);
 					resolvedAssets.add(rel.split(path.sep).join("/"));
 				}
 			} else {
-				// Literal — must exist.
-				const rel = spec; // already forward-slash, no `..`, not absolute
+				const rel = spec;
 				const abs = path.resolve(srcRoot, rel);
-				// Containment check against the unresolved path first (file may
-				// not exist as a symlink yet).
-				if (!isContained(abs, srcRoot)) {
-					throw new PreviewMountError(400, `Asset escapes source tree: ${rel}`);
-				}
+				if (!isContained(abs, srcRoot)) throw new PreviewMountError(400, `Asset escapes source tree: ${rel}`);
 				let real: string;
-				try {
-					real = mountFs.realpathSync(abs);
-				} catch {
-					throw new PreviewMountError(404, `Asset '${rel}' not found`);
-				}
-				if (!isContained(real, srcRoot)) {
-					throw new PreviewMountError(403, `Asset symlink escapes source tree: ${rel}`);
-				}
+				try { real = await mountAsyncFs.realpath(abs); }
+				catch { throw new PreviewMountError(404, `Asset '${rel}' not found`); }
+				if (!isContained(real, srcRoot)) throw new PreviewMountError(403, `Asset symlink escapes source tree: ${rel}`);
 				let st: fs.Stats;
-				try { st = mountFs.statSync(real); } catch {
-					throw new PreviewMountError(404, `Asset '${rel}' not found`);
-				}
-				if (!st.isFile()) {
-					throw new PreviewMountError(404, `Asset '${rel}' is not a regular file`);
-				}
+				try { st = await mountAsyncFs.stat(real); }
+				catch { throw new PreviewMountError(404, `Asset '${rel}' not found`); }
+				if (!st.isFile()) throw new PreviewMountError(404, `Asset '${rel}' is not a regular file`);
 				const dst = path.join(tmpRoot, rel);
-				mountFs.mkdirSync(path.dirname(dst), { recursive: true });
-				copyOneFile(real, dst);
+				await mountAsyncFs.mkdir(path.dirname(dst), { recursive: true });
+				await copyOneFile(real, dst);
 				resolvedAssets.add(rel);
 			}
 		}
 
-		// ── Atomic swap ─────────────────────────────────────────────────
-		// All sources are now captured under tmpRoot. Wipe destRoot's
-		// contents (preserving its inode so the existing fs.watch handle in
-		// `watchMount()` stays valid) and rename each staged entry into
-		// place. This also fixes the half-wiped-mount race a concurrent GET
-		// could otherwise hit between wipe and copy.
-		wipeContents(destRoot);
-		moveContents(tmpRoot, destRoot);
+		await wipePreviewDirectory(destRoot, { fs: mountAsyncFs }, true);
+		await movePreviewDirectoryContents(tmpRoot, destRoot, { fs: mountAsyncFs });
 	} catch (err) {
-		// Staging failed — destRoot is untouched if we hadn't reached the
-		// swap yet. Either way, drop the tmp dir.
-		try { mountFs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+		try { await removePreviewTree(tmpRoot, { fs: mountAsyncFs }); } catch { /* ignore cleanup */ }
 		throw err;
 	}
-
-	// Clean up the now-empty tmp dir.
-	try { mountFs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+	try { await removePreviewTree(tmpRoot, { fs: mountAsyncFs }); } catch { /* ignore cleanup */ }
 
 	const target = path.join(destRoot, entry);
-	if (!mountFs.existsSync(target)) {
-		throw new PreviewMountError(500, "Entry file missing after swap");
-	}
+	let stat: fs.Stats;
+	try { stat = await mountAsyncFs.stat(target); }
+	catch { throw new PreviewMountError(500, "Entry file missing after swap"); }
+	if (!stat.isFile()) throw new PreviewMountError(500, "Entry file missing after swap");
 
-	const stat = mountFs.statSync(target);
 	return {
 		url: `/preview/${sessionId}/${entry}`,
 		path: target,
 		relPath: path.posix.join(sessionId, entry),
 		entry,
 		mtime: Math.floor(stat.mtimeMs),
-		contentHash: hashMountDirectory(destRoot),
+		contentHash: await hashMountDirectory(destRoot),
 		assets: Array.from(resolvedAssets).sort(),
 	};
 }
 
-export function contentHashForMount(sessionId: string): string {
+export async function contentHashForMount(sessionId: string): Promise<string> {
 	validateSessionId(sessionId);
-	return hashMountDirectory(mountDir(sessionId));
+	return hashMountDirectory(mountPath(sessionId));
 }
 
-/**
- * Move every entry from `srcDir` into `dstDir` via `fs.renameSync`. Recurses
- * into directories so we preserve `dstDir`'s inode (renaming the staged
- * subdirectories into place rather than replacing the parent).
- *
- * Falls back to copy+unlink if rename fails (cross-device — shouldn't happen
- * for sibling tmp/dest, but be defensive).
- */
-function moveContents(srcDir: string, dstDir: string): void {
-	let entries: fs.Dirent[];
-	try { entries = mountFs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
-	for (const ent of entries) {
-		const from = path.join(srcDir, ent.name);
-		const to = path.join(dstDir, ent.name);
-		try {
-			mountFs.renameSync(from, to);
-		} catch {
-			// Cross-device or destination clash — copy then remove source.
-			try { mountFs.rmSync(to, { recursive: true, force: true }); } catch { /* ignore */ }
-			if (ent.isDirectory()) {
-				mountFs.mkdirSync(to, { recursive: true });
-				moveContents(from, to);
-				try { mountFs.rmdirSync(from); } catch { /* ignore */ }
-			} else {
-				copyOneFile(from, to);
-				try { mountFs.unlinkSync(from); } catch { /* ignore */ }
-			}
-		}
-	}
-}
-
-export function removeMount(sessionId: string): void {
+export async function removeMount(sessionId: string): Promise<void> {
 	if (!sessionId || !VALID_SESSION_ID.test(sessionId)) return;
-	const dir = path.join(previewRoot(), sessionId);
-	try {
-		mountFs.rmSync(dir, { recursive: true, force: true });
-	} catch {
-		/* idempotent */
-	}
+	try { await removePreviewTree(path.join(previewRoot(), sessionId), { fs: mountAsyncFs }); }
+	catch { /* preserve cleanup-local idempotency */ }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Watcher
+// Watcher (content serving is intentionally outside the async cleanup slice)
 // ──────────────────────────────────────────────────────────────────────────
 
 interface WatcherEntry {
@@ -482,14 +328,12 @@ const _watchers = new Map<string, WatcherEntry>();
 
 export interface WatchMountOptions {
 	clock?: Clock;
-	/** Test observation hook fired when the underlying filesystem reports a change. */
 	onFsEvent?: () => void;
 }
 
 export function watchMount(sessionId: string, onChange: () => void, options?: WatchMountOptions): () => void {
 	validateSessionId(sessionId);
 	const dir = mountDir(sessionId);
-
 	let entry = _watchers.get(sessionId);
 	if (!entry) {
 		const subscribers = new Set<() => void>();
@@ -506,10 +350,8 @@ export function watchMount(sessionId: string, onChange: () => void, options?: Wa
 			if (timer !== undefined) return;
 			timer = clock.setTimeout(fire, 50);
 		};
-		const watcher = mountFs.watch(dir, { recursive: true }, debounced);
-		watcher.on("error", err => {
-			console.warn(`[preview/mount] watch error for ${sessionId}: ${err}`);
-		});
+		const watcher = mountSyncFs.watch(dir, { recursive: true }, debounced);
+		watcher.on("error", err => console.warn(`[preview/mount] watch error for ${sessionId}: ${err}`));
 		entry = {
 			subscribers,
 			close: () => {
@@ -519,107 +361,367 @@ export function watchMount(sessionId: string, onChange: () => void, options?: Wa
 		};
 		_watchers.set(sessionId, entry);
 	}
-
 	entry.subscribers.add(onChange);
-	const unsubscribe = () => {
-		const e = _watchers.get(sessionId);
-		if (!e) return;
-		e.subscribers.delete(onChange);
-		if (e.subscribers.size === 0) {
-			e.close();
+	return () => {
+		const current = _watchers.get(sessionId);
+		if (!current) return;
+		current.subscribers.delete(onChange);
+		if (current.subscribers.size === 0) {
+			current.close();
 			_watchers.delete(sessionId);
 		}
 	};
-	return unsubscribe;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Internals
+// Shared bounded tree helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-function hashMountDirectory(root: string): string {
+interface DynamicQueueOptions<T> {
+	initial: T[];
+	limit: number;
+	worker: (item: T, enqueue: (item: T) => void) => Promise<void>;
+}
+
+async function runDynamicQueue<T>({ initial, limit, worker }: DynamicQueueOptions<T>): Promise<void> {
+	if (!Number.isInteger(limit) || limit <= 0) throw new RangeError("concurrency limit must be a positive integer");
+	if (initial.length === 0) return;
+	await new Promise<void>((resolve, reject) => {
+		const queue = [...initial];
+		let active = 0;
+		let firstError: unknown;
+		let settled = false;
+		const enqueue = (item: T) => {
+			queue.push(item);
+			pump();
+		};
+		const pump = () => {
+			if (settled) return;
+			while (active < limit && queue.length > 0) {
+				const item = queue.shift()!;
+				active++;
+				void worker(item, enqueue)
+					.catch(err => { firstError ??= err; })
+					.finally(() => {
+						active--;
+						if (active === 0 && queue.length === 0) {
+							settled = true;
+							if (firstError !== undefined) reject(firstError);
+							else resolve();
+							return;
+						}
+						pump();
+					});
+			}
+		};
+		pump();
+	});
+}
+
+export interface PreviewTreeOptions {
+	fs?: PreviewAsyncFs;
+	concurrency?: number;
+}
+
+interface DirectoryJob {
+	absolute: string;
+	prefix: string;
+}
+
+/** Sorted POSIX relative regular-file paths. Directory read failures are skipped. */
+export async function listMountFiles(root: string, options: PreviewTreeOptions = {}): Promise<string[]> {
+	const io = options.fs ?? mountAsyncFs;
+	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
+	const out: string[] = [];
+	await runDynamicQueue<DirectoryJob>({
+		initial: [{ absolute: root, prefix: "" }],
+		limit,
+		worker: async (job, enqueue) => {
+			let dir: fs.Dir;
+			try { dir = await io.opendir(job.absolute); }
+			catch { return; }
+			const childDirectories: DirectoryJob[] = [];
+			const childFiles: string[] = [];
+			try {
+				for (;;) {
+					const ent = await dir.read();
+					if (!ent) break;
+					const rel = job.prefix ? `${job.prefix}/${ent.name}` : ent.name;
+					if (ent.isDirectory()) childDirectories.push({ absolute: path.join(job.absolute, ent.name), prefix: rel });
+					else if (ent.isFile()) childFiles.push(rel);
+				}
+			} catch {
+				// Match the legacy scanner: an unreadable directory contributes no descendants.
+				return;
+			} finally {
+				try { await dir.close(); } catch { /* a failed read may already close it */ }
+			}
+			for (const child of childDirectories) enqueue(child);
+			out.push(...childFiles);
+		},
+	});
+	return out.sort();
+}
+
+/** Stable SHA-256 of sorted path + NUL + streamed bytes + NUL records. */
+export async function hashMountDirectory(root: string, options: PreviewTreeOptions = {}): Promise<string> {
+	const io = options.fs ?? mountAsyncFs;
+	const files = await listMountFiles(root, options);
 	const hash = crypto.createHash("sha256");
-	for (const rel of listMountFiles(root)) {
+	const buffer = Buffer.allocUnsafe(HASH_READ_BUFFER_BYTES);
+	for (const rel of files) {
 		hash.update(rel, "utf-8");
 		hash.update("\0");
-		hash.update(mountFs.readFileSync(path.join(root, ...rel.split("/"))));
+		const absolute = path.join(root, ...rel.split("/"));
+		const current = await io.lstat(absolute);
+		if (!current.isFile()) throw new Error(`Preview hash source is no longer a regular file: ${rel}`);
+		const handle = await io.open(absolute, "r");
+		try {
+			let position = 0;
+			for (;;) {
+				const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+				if (bytesRead === 0) break;
+				hash.update(buffer.subarray(0, bytesRead));
+				position += bytesRead;
+			}
+		} finally {
+			await handle.close();
+		}
 		hash.update("\0");
 	}
 	return hash.digest("hex");
 }
 
-function listMountFiles(root: string): string[] {
-	const out: string[] = [];
-	const walk = (dir: string, prefix: string) => {
-		let entries: fs.Dirent[];
-		try { entries = mountFs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-		for (const ent of entries) {
-			const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
-			const abs = path.join(dir, ent.name);
-			if (ent.isDirectory()) walk(abs, rel);
-			else if (ent.isFile()) out.push(rel);
-		}
-	};
-	walk(root, "");
-	return out.sort();
+/** Copy regular files without traversing symlinks. */
+export async function copyPreviewDirectory(src: string, dst: string, options: PreviewTreeOptions = {}): Promise<void> {
+	const io = options.fs ?? mountAsyncFs;
+	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
+	const files = await listMountFiles(src, { fs: io, concurrency: limit });
+	await io.mkdir(path.dirname(dst), { recursive: true });
+	await io.mkdir(dst, { recursive: false });
+	await mapWithConcurrency(files, limit, async rel => {
+		const from = path.join(src, ...rel.split("/"));
+		const to = path.join(dst, ...rel.split("/"));
+		await io.mkdir(path.dirname(to), { recursive: true });
+		const stat = await io.lstat(from);
+		if (!stat.isFile()) throw new Error(`Preview copy source is no longer a regular file: ${rel}`);
+		await io.copyFile(from, to, fs.constants.COPYFILE_EXCL);
+		await io.utimes(to, stat.atime, stat.mtime);
+	});
 }
 
-function copyOneFile(src: string, dst: string): void {
-	try { mountFs.unlinkSync(dst); } catch { /* ignore */ }
-	try {
-		mountFs.linkSync(src, dst);
-	} catch {
+interface RemovalNode {
+	absolute: string;
+	parent?: RemovalNode;
+	rootIndex: number;
+	pending: number;
+	afterChildren: "scan" | "rmdir";
+	retries?: number;
+}
+
+type RemovalJob =
+	| { kind: "inspect"; absolute: string; rootIndex: number }
+	| { kind: "scan"; node: RemovalNode }
+	| { kind: "unlink"; absolute: string; parent?: RemovalNode; rootIndex: number }
+	| { kind: "rmdir"; node: RemovalNode };
+
+/**
+ * Delete several independent trees through one operation-level queue. Each
+ * result is null on success/missing, otherwise the first error for that root.
+ */
+export async function removePreviewTrees(
+	roots: readonly string[],
+	options: PreviewTreeOptions = {},
+): Promise<Array<unknown | null>> {
+	const io = options.fs ?? mountAsyncFs;
+	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
+	const errors: Array<unknown | null> = roots.map(() => null);
+	let enqueueJob: (job: RemovalJob) => void = () => undefined;
+	const recordError = (rootIndex: number, error: unknown) => {
+		if (!isEnoent(error) && errors[rootIndex] === null) errors[rootIndex] = error;
+	};
+	const completeNode = (node: RemovalNode) => {
+		node.pending--;
+		if (node.pending === 0) enqueueJob({ kind: node.afterChildren, node });
+	};
+
+	await runDynamicQueue<RemovalJob>({
+		initial: roots.map((absolute, rootIndex) => ({ kind: "inspect" as const, absolute, rootIndex })),
+		limit,
+		worker: async (job, enqueue) => {
+			enqueueJob = enqueue;
+			if (job.kind === "inspect") {
+				try {
+					const stat = await io.lstat(job.absolute);
+					if (stat.isDirectory()) {
+						enqueue({
+							kind: "scan",
+							node: { absolute: job.absolute, rootIndex: job.rootIndex, pending: 1, afterChildren: "rmdir" },
+						});
+					} else {
+						enqueue({ kind: "unlink", absolute: job.absolute, rootIndex: job.rootIndex });
+					}
+				} catch (err) { recordError(job.rootIndex, err); }
+				return;
+			}
+			if (job.kind === "unlink") {
+				try { await io.unlink(job.absolute); }
+				catch (err) { recordError(job.rootIndex, err); }
+				if (job.parent) completeNode(job.parent);
+				return;
+			}
+			if (job.kind === "rmdir") {
+				try {
+					await io.rmdir(job.node.absolute);
+				} catch (err) {
+					const code = (err as NodeJS.ErrnoException | undefined)?.code;
+					if ((code === "ENOTEMPTY" || code === "EEXIST") && (job.node.retries ?? 0) < 2) {
+						// A sibling operation (or an external writer) may have populated the
+						// directory after its scan. Re-scan rather than recursively deleting.
+						job.node.pending = 1;
+						job.node.retries = (job.node.retries ?? 0) + 1;
+						enqueue({ kind: "scan", node: job.node });
+						return;
+					}
+					recordError(job.node.rootIndex, err);
+				}
+				if (job.node.parent) completeNode(job.node.parent);
+				return;
+			}
+
+			const node = job.node;
+			let dir: fs.Dir | undefined;
+			const entries: fs.Dirent[] = [];
+			let exhausted = false;
+			try {
+				dir = await io.opendir(node.absolute);
+				while (entries.length < REMOVE_DIRECTORY_BATCH) {
+					const ent = await dir.read();
+					if (!ent) { exhausted = true; break; }
+					entries.push(ent);
+				}
+			} catch (err) {
+				recordError(node.rootIndex, err);
+				exhausted = true;
+			} finally {
+				if (dir) {
+					try { await dir.close(); } catch { /* ignore close after read failure */ }
+				}
+			}
+			node.afterChildren = exhausted ? "rmdir" : "scan";
+			for (const ent of entries) {
+				const absolute = path.join(node.absolute, ent.name);
+				node.pending++;
+				if (ent.isDirectory()) {
+					enqueue({
+						kind: "scan",
+						node: {
+							absolute,
+							parent: node,
+							rootIndex: node.rootIndex,
+							pending: 1,
+							afterChildren: "rmdir",
+						},
+					});
+				} else {
+					enqueue({ kind: "unlink", absolute, parent: node, rootIndex: node.rootIndex });
+				}
+			}
+			completeNode(node);
+		},
+	});
+	return errors;
+}
+
+export async function removePreviewTree(root: string, options: PreviewTreeOptions = {}): Promise<void> {
+	const [error] = await removePreviewTrees([root], options);
+	if (error !== null) throw error;
+}
+
+/** Async directory enumeration seam used by content-route pickEntry. */
+export async function readMountDirectory(dir: string): Promise<fs.Dirent[]> {
+	return mountAsyncFs.readdir(dir, { withFileTypes: true });
+}
+
+export async function wipePreviewDirectory(
+	dir: string,
+	options: PreviewTreeOptions = {},
+	suppressErrors = false,
+): Promise<void> {
+	const io = options.fs ?? mountAsyncFs;
+	let entries: fs.Dirent[];
+	try { entries = await io.readdir(dir, { withFileTypes: true }); }
+	catch { return; }
+	const errors = await removePreviewTrees(entries.map(ent => path.join(dir, ent.name)), {
+		fs: io,
+		concurrency: options.concurrency,
+	});
+	const error = errors.find(item => item !== null);
+	if (!suppressErrors && error !== undefined) throw error;
+}
+
+export async function movePreviewDirectoryContents(
+	srcDir: string,
+	dstDir: string,
+	options: PreviewTreeOptions = {},
+): Promise<void> {
+	const io = options.fs ?? mountAsyncFs;
+	let entries: fs.Dirent[];
+	try { entries = await io.readdir(srcDir, { withFileTypes: true }); }
+	catch { return; }
+	await io.mkdir(dstDir, { recursive: true });
+	for (const ent of entries) {
+		const from = path.join(srcDir, ent.name);
+		const to = path.join(dstDir, ent.name);
 		try {
-			mountFs.copyFileSync(src, dst);
-		} catch (err) {
-			throw new PreviewMountError(500, `Copy failed: ${(err as Error).message}`);
+			await io.rename(from, to);
+		} catch {
+			await removePreviewTree(to, { fs: io, concurrency: options.concurrency });
+			if (ent.isDirectory()) await copyPreviewDirectory(from, to, { fs: io, concurrency: options.concurrency });
+			else if (ent.isFile()) await copyOneFile(from, to, io);
+			else throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
+			await removePreviewTree(from, { fs: io, concurrency: options.concurrency });
 		}
 	}
 }
 
-/**
- * Expand a single-spec glob (e.g. `img/*.png`, `*.css`, `sub/dir/*.js`)
- * against `srcRoot`. Returns relative paths (POSIX-style, with `/`).
- *
- * Implementation: split spec on `/`. For each segment, if it contains a
- * wildcard, list the directory and match. If not, descend literally. No `**`
- * support — that was rejected in `validateAssetSpec`.
- */
-function expandGlob(srcRoot: string, spec: string): string[] {
+async function copyOneFile(src: string, dst: string, io = mountAsyncFs): Promise<void> {
+	try { await io.unlink(dst); }
+	catch (err) { if (!isEnoent(err)) throw err; }
+	try {
+		await io.link(src, dst);
+	} catch {
+		try { await io.copyFile(src, dst); }
+		catch (err) { throw new PreviewMountError(500, `Copy failed: ${(err as Error).message}`); }
+	}
+}
+
+async function expandGlob(srcRoot: string, spec: string): Promise<string[]> {
 	const segments = spec.split("/");
-	let candidates: string[] = [""]; // relative-to-srcRoot directories so far
-	const isFinalSeg = (i: number) => i === segments.length - 1;
-
+	let candidates = [""];
 	for (let i = 0; i < segments.length; i++) {
-		const seg = segments[i];
+		const seg = segments[i]!;
 		const next: string[] = [];
-		const wildcard = seg.indexOf("*") >= 0 || seg.indexOf("?") >= 0;
+		const wildcard = isGlob(seg);
 		const re = wildcard ? compileGlobSegment(seg) : null;
-
+		const final = i === segments.length - 1;
 		for (const cand of candidates) {
-			const candAbs = cand === "" ? srcRoot : path.join(srcRoot, cand);
+			const candAbs = cand ? path.join(srcRoot, cand) : srcRoot;
 			if (wildcard) {
 				let entries: fs.Dirent[];
-				try { entries = mountFs.readdirSync(candAbs, { withFileTypes: true }); } catch { continue; }
+				try { entries = await mountAsyncFs.readdir(candAbs, { withFileTypes: true }); }
+				catch { continue; }
 				for (const ent of entries) {
 					if (!re!.test(ent.name)) continue;
-					if (isFinalSeg(i)) {
-						if (ent.isFile() || ent.isSymbolicLink()) {
-							next.push(cand === "" ? ent.name : `${cand}/${ent.name}`);
-						}
-					} else if (ent.isDirectory()) {
-						next.push(cand === "" ? ent.name : `${cand}/${ent.name}`);
-					}
+					const rel = cand ? `${cand}/${ent.name}` : ent.name;
+					if (final ? (ent.isFile() || ent.isSymbolicLink()) : ent.isDirectory()) next.push(rel);
 				}
 			} else {
 				const childAbs = path.join(candAbs, seg);
 				let st: fs.Stats;
-				try { st = mountFs.statSync(childAbs); } catch { continue; }
-				if (isFinalSeg(i)) {
-					if (st.isFile()) next.push(cand === "" ? seg : `${cand}/${seg}`);
-				} else if (st.isDirectory()) {
-					next.push(cand === "" ? seg : `${cand}/${seg}`);
-				}
+				try { st = await mountAsyncFs.lstat(childAbs); } catch { continue; }
+				const rel = cand ? `${cand}/${seg}` : seg;
+				if (final ? st.isFile() : st.isDirectory()) next.push(rel);
 			}
 		}
 		candidates = next;
@@ -628,24 +730,12 @@ function expandGlob(srcRoot: string, spec: string): string[] {
 	return candidates;
 }
 
-function wipeContents(dir: string): void {
-	let entries: fs.Dirent[];
-	try {
-		entries = mountFs.readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return;
-	}
-	for (const ent of entries) {
-		const abs = path.join(dir, ent.name);
-		try {
-			mountFs.rmSync(abs, { recursive: true, force: true });
-		} catch { /* ignore */ }
-	}
-}
-
 function isContained(child: string, parent: string): boolean {
 	if (child === parent) return true;
-	const sep = path.sep;
-	const parentWithSep = parent.endsWith(sep) ? parent : parent + sep;
+	const parentWithSep = parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
 	return child.startsWith(parentWithSep);
+}
+
+function isEnoent(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }

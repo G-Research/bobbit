@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { handlePreviewRequest, pickEntry } from "../../src/server/preview/content-route.ts";
+import { setPreviewFsForTesting } from "../../src/server/preview/mount.ts";
 import { COOKIE_NAME, CookieStore } from "../../src/server/auth/cookie.ts";
 import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
@@ -39,6 +40,7 @@ beforeAll(() => {
 		"realpathSync", "statSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
+	setPreviewFsForTesting(scoped.fs);
 	process.env.BOBBIT_DIR = workspaceRoot;
 
 	// The theme snapshot finds the repository root from its module directory.
@@ -69,7 +71,10 @@ beforeAll(() => {
 	fs.writeFileSync(path.join(artifactMountPath, "styles.css"), "body{color:blue}");
 });
 
-afterAll(() => restoreFs());
+afterAll(() => {
+	setPreviewFsForTesting(undefined);
+	restoreFs();
+});
 
 interface FakeRes {
 	statusCode: number;
@@ -145,17 +150,17 @@ function makeOpts(localhost: boolean) {
 }
 
 describe("pickEntry", () => {
-	it("picks index.html when present", () => {
-		assert.equal(pickEntry(path.join(workspaceRoot, "state", "preview", SID)), "index.html");
+	it("picks index.html when present", async () => {
+		assert.equal(await pickEntry(path.join(workspaceRoot, "state", "preview", SID)), "index.html");
 	});
-	it("falls back to inline.html when no index.html", () => {
-		assert.equal(pickEntry(ENTRY_INLINE_DIR), "inline.html");
+	it("falls back to inline.html when no index.html", async () => {
+		assert.equal(await pickEntry(ENTRY_INLINE_DIR), "inline.html");
 	});
-	it("falls back to first .html alphabetically", () => {
-		assert.equal(pickEntry(ENTRY_ALPHA_DIR), "alpha.html");
+	it("falls back to first .html alphabetically", async () => {
+		assert.equal(await pickEntry(ENTRY_ALPHA_DIR), "alpha.html");
 	});
-	it("returns null on empty dir", () => {
-		assert.equal(pickEntry(ENTRY_EMPTY_DIR), null);
+	it("returns null on empty dir", async () => {
+		assert.equal(await pickEntry(ENTRY_EMPTY_DIR), null);
 	});
 });
 
