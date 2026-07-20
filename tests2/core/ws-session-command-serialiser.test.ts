@@ -22,9 +22,14 @@ interface BoundedSerialiser {
 	readonly size: number;
 	readonly pendingCount: number;
 	readonly pendingBytes: number;
+	readonly controlCount: number;
 	cancelActive(key: string): boolean;
 	run<T>(key: string, command: (signal: AbortSignal) => Promise<T> | T, retainedBytes?: number): Promise<T>;
 	serialise<T>(key: string, command: (signal: AbortSignal) => Promise<T> | T, retainedBytes?: number): Promise<T>;
+	serialiseControl(
+		key: string,
+		command: () => Promise<void> | void,
+	): { promise: Promise<void>; created: boolean };
 }
 
 function boundedSerialiser(limits: { maxPendingCommands: number; maxPendingBytes: number }): BoundedSerialiser {
@@ -284,6 +289,174 @@ describe("SessionCommandSerialiser", () => {
 		expect(serialiser.size).toBe(0);
 		expect(serialiser.pendingCount).toBe(0);
 		expect(serialiser.pendingBytes).toBe(0);
+	});
+
+	it("admits one deduplicated control command behind a saturated ordinary queue", async () => {
+		const serialiser = boundedSerialiser({ maxPendingCommands: 2, maxPendingBytes: 10 });
+		const releaseActive = deferred<void>();
+		const activeStarted = deferred<void>();
+		const events: string[] = [];
+		let duplicateControlRan = false;
+
+		const active = serialiser.run("session-a", async () => {
+			events.push("active:start");
+			activeStarted.resolve();
+			await releaseActive.promise;
+			events.push("active:end");
+			return "active";
+		}, 1_000);
+		await activeStarted.promise;
+		const pendingOne = serialiser.run("session-a", () => {
+			events.push("pending:one");
+			return "one";
+		}, 4);
+		const pendingTwo = serialiser.run("session-a", () => {
+			events.push("pending:two");
+			return "two";
+		}, 6);
+		const control = serialiser.serialiseControl("session-a", () => {
+			events.push("control");
+		});
+		const duplicateControl = serialiser.serialiseControl("session-a", () => {
+			duplicateControlRan = true;
+		});
+		const rejectedOrdinary = serialiser.run("session-a", () => "must-not-run", 0);
+
+		try {
+			expect(control.created).toBe(true);
+			expect(duplicateControl.created).toBe(false);
+			expect(duplicateControl.promise).toBe(control.promise);
+			expect(serialiser.pendingCount).toBe(2);
+			expect(serialiser.pendingBytes).toBe(10);
+			expect(serialiser.controlCount).toBe(1);
+			await expectStructuredQueueRejection(rejectedOrdinary, "count");
+			expect(serialiser.pendingCount).toBe(2);
+			expect(serialiser.pendingBytes).toBe(10);
+			expect(serialiser.controlCount).toBe(1);
+
+			releaseActive.resolve();
+			await expect(Promise.all([
+				active,
+				pendingOne,
+				pendingTwo,
+				control.promise,
+				duplicateControl.promise,
+			])).resolves.toEqual(["active", "one", "two", undefined, undefined]);
+			expect(events).toEqual([
+				"active:start",
+				"active:end",
+				"pending:one",
+				"pending:two",
+				"control",
+			]);
+			expect(duplicateControlRan).toBe(false);
+		} finally {
+			releaseActive.resolve();
+			await Promise.allSettled([
+				active,
+				pendingOne,
+				pendingTwo,
+				control.promise,
+				duplicateControl.promise,
+				rejectedOrdinary,
+			]);
+		}
+
+		expect(serialiser.size).toBe(0);
+		expect(serialiser.pendingCount).toBe(0);
+		expect(serialiser.pendingBytes).toBe(0);
+		expect(serialiser.controlCount).toBe(0);
+		const freshControl = serialiser.serialiseControl("session-a", () => {});
+		expect(freshControl.created).toBe(true);
+		await expect(freshControl.promise).resolves.toBeUndefined();
+		expect(serialiser.size).toBe(0);
+		expect(serialiser.controlCount).toBe(0);
+	});
+
+	it("reserves before a synchronous control callback begins and deduplicates same-turn calls", async () => {
+		const serialiser = boundedSerialiser({ maxPendingCommands: 1, maxPendingBytes: 1 });
+		let controlRuns = 0;
+
+		const first = serialiser.serialiseControl("session-a", () => {
+			controlRuns += 1;
+		});
+		const sameTurnDuplicate = serialiser.serialiseControl("session-a", () => {
+			controlRuns += 100;
+		});
+
+		expect(first.created).toBe(true);
+		expect(sameTurnDuplicate.created).toBe(false);
+		expect(sameTurnDuplicate.promise).toBe(first.promise);
+		expect(controlRuns).toBe(0);
+		expect(serialiser.controlCount).toBe(1);
+		await expect(Promise.all([first.promise, sameTurnDuplicate.promise]))
+			.resolves.toEqual([undefined, undefined]);
+		expect(controlRuns).toBe(1);
+		expect(serialiser.controlCount).toBe(0);
+		expect(serialiser.size).toBe(0);
+
+		const laterControl = serialiser.serialiseControl("session-a", () => {
+			controlRuns += 1;
+		});
+		expect(laterControl.created).toBe(true);
+		await expect(laterControl.promise).resolves.toBeUndefined();
+		expect(controlRuns).toBe(2);
+		expect(serialiser.controlCount).toBe(0);
+		expect(serialiser.size).toBe(0);
+	});
+
+	it("cleans a rejected control slot and continues after synchronous command failures", async () => {
+		const serialiser = boundedSerialiser({ maxPendingCommands: 1, maxPendingBytes: 8 });
+		const activeFailure = new Error("synchronous active failure");
+		const controlFailure = new Error("synchronous control failure");
+		const events: string[] = [];
+		let duplicateControlRan = false;
+
+		const active = serialiser.run("session-a", () => {
+			events.push("active:reject");
+			throw activeFailure;
+		});
+		const control = serialiser.serialiseControl("session-a", () => {
+			events.push("control:reject");
+			throw controlFailure;
+		});
+		const duplicateControl = serialiser.serialiseControl("session-a", () => {
+			duplicateControlRan = true;
+		});
+		const later = serialiser.run("session-a", () => {
+			events.push("later");
+			return "recovered";
+		}, 8);
+
+		expect(serialiser.controlCount).toBe(1);
+		expect(serialiser.pendingCount).toBe(1);
+		expect(serialiser.pendingBytes).toBe(8);
+		expect(control.created).toBe(true);
+		expect(duplicateControl.created).toBe(false);
+		expect(duplicateControl.promise).toBe(control.promise);
+		const outcomes = await Promise.allSettled([
+			active,
+			control.promise,
+			duplicateControl.promise,
+			later,
+		]);
+		expect(outcomes).toEqual([
+			{ status: "rejected", reason: activeFailure },
+			{ status: "rejected", reason: controlFailure },
+			{ status: "rejected", reason: controlFailure },
+			{ status: "fulfilled", value: "recovered" },
+		]);
+		expect(events).toEqual(["active:reject", "control:reject", "later"]);
+		expect(duplicateControlRan).toBe(false);
+		expect(serialiser.size).toBe(0);
+		expect(serialiser.pendingCount).toBe(0);
+		expect(serialiser.pendingBytes).toBe(0);
+		expect(serialiser.controlCount).toBe(0);
+
+		const retryControl = serialiser.serialiseControl("session-a", () => {});
+		expect(retryControl.created).toBe(true);
+		await expect(retryControl.promise).resolves.toBeUndefined();
+		expect(serialiser.controlCount).toBe(0);
 	});
 
 	it("rejects only the failed command and continues the same-session queue", async () => {
