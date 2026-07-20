@@ -3,10 +3,12 @@
  *
  * Parallels `resolve-skill-expansions.ts` layer-for-layer (see design §2):
  *
- *   - **Inline scan only** — regex `(^|\s)@([^\s@]+)`. There is no
- *     prefix-only special case (a bare `@path` whole-message still works
- *     through the inline scan). Trailing punctuation (`.`, `,`, `)`, `:`,
- *     `;`) is trimmed off the token end and excluded from the chip range.
+ *   - **Markdown-aware inline scan** — `@path` candidates are found only
+ *     outside fenced code blocks and matched inline backtick spans. Source
+ *     indices are never rewritten during scanning. There is no prefix-only
+ *     special case (a bare `@path` whole-message still works through the
+ *     inline scan). Trailing punctuation (`.`, `,`, `)`, `:`, `;`) is trimmed
+ *     off the token end and excluded from the chip range.
  *
  *   - **Hybrid resolution** — each `@path` is classified:
  *       • `text`  → file content is inlined into `modelText` inside a
@@ -23,9 +25,12 @@
  *                   user-uploaded documents. (See handler note: model-side
  *                   delivery of document bytes is an existing platform concern,
  *                   not a regression of this feature.)
- *       • `unresolved` → missing / unreadable / too-large / outside-cwd /
- *                   aggregate-cap / too-many-mentions. Literal `@path` left in
- *                   `modelText`, `reason` set. **Never throws** — every failure
+ *       • `unresolved` → an existing target that cannot be delivered because
+ *                   it is unreadable / too-large / outside-cwd / over the
+ *                   aggregate cap / beyond the mention-count cap. Literal
+ *                   `@path` is left in `modelText`, with `reason` set.
+ *       • genuinely missing targets are ordinary text and are omitted from
+ *                   mentions and warnings. **Never throws** — every failure
  *                   path degrades gracefully.
  *
  *   - **Snapshot at resolve time** — text content and image/binary base64
@@ -33,10 +38,10 @@
  *     content the model originally saw, even if the file changed on disk.
  *     (Same guarantee as skill expansions.)
  *
- *   - **Path safety** — the target is canonicalized with `fs.realpathSync`
- *     and a `path.relative` containment check is applied to the CANONICAL
- *     paths BEFORE any stat/read, so a symlink inside `cwd` that points
- *     outside `cwd` cannot leak host files.
+ *   - **Path safety** — after a metadata-only existence classification, the
+ *     target is canonicalized with `fs.realpathSync` and a `path.relative`
+ *     containment check is applied to the CANONICAL paths BEFORE any stat/read,
+ *     so a symlink inside `cwd` that points outside `cwd` cannot leak host files.
  *
  * Text inlining splices **right-to-left** by range to preserve indices.
  *
@@ -89,7 +94,7 @@ export const MAX_INLINE_TEXT_BYTES = 256 * 1024; // 256 KiB
 export const MAX_MENTION_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
 /** Aggregate cap across all resolved mentions in one send. */
 export const MAX_MENTION_AGGREGATE_BYTES = 20 * 1024 * 1024; // 20 MiB
-/** Max `@path` tokens resolved per send. Extra tokens → unresolved (too-many-mentions), no fs work. */
+/** Max existing `@path` targets resolved per send. Extra existing targets → unresolved (too-many-mentions). */
 export const MAX_MENTIONS_PER_SEND = 50;
 
 /** Image extensions → MIME type. */
@@ -173,24 +178,151 @@ interface ScannedToken {
 	range: MentionRange;
 }
 
-/** Scan the text for `@path` tokens (inline, word-boundary anchored). */
+interface SourceRange {
+	start: number;
+	end: number;
+}
+
+/** Find Markdown fenced code blocks, including an unterminated final block. */
+function scanFencedCodeRanges(text: string): SourceRange[] {
+	const ranges: SourceRange[] = [];
+	let fenceStart: number | undefined;
+	let fenceChar = "";
+	let fenceLength = 0;
+	let lineStart = 0;
+
+	while (lineStart < text.length) {
+		const newline = text.indexOf("\n", lineStart);
+		const lineEnd = newline === -1 ? text.length : newline;
+		const nextLineStart = newline === -1 ? text.length : newline + 1;
+		const line = text.slice(lineStart, lineEnd).replace(/\r$/, "");
+
+		if (fenceStart !== undefined) {
+			const closing = /^( {0,3})(`+|~+)[ \t]*$/.exec(line);
+			if (
+				closing &&
+				closing[2][0] === fenceChar &&
+				closing[2].length >= fenceLength
+			) {
+				ranges.push({ start: fenceStart, end: nextLineStart });
+				fenceStart = undefined;
+				fenceChar = "";
+				fenceLength = 0;
+			}
+		} else {
+			const opening = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+			if (opening) {
+				const delimiter = opening[2];
+				const info = opening[3];
+				// CommonMark does not allow a backtick in a backtick fence's info string.
+				if (delimiter[0] !== "`" || !info.includes("`")) {
+					fenceStart = lineStart;
+					fenceChar = delimiter[0];
+					fenceLength = delimiter.length;
+				}
+			}
+		}
+
+		if (newline === -1) break;
+		lineStart = nextLineStart;
+	}
+
+	if (fenceStart !== undefined) {
+		ranges.push({ start: fenceStart, end: text.length });
+	}
+	return ranges;
+}
+
+/** Find matched inline backtick spans inside one non-fenced source segment. */
+function scanInlineCodeRanges(
+	text: string,
+	segmentStart: number,
+	segmentEnd: number,
+): SourceRange[] {
+	const runs: Array<SourceRange & { length: number }> = [];
+	let cursor = segmentStart;
+	while (cursor < segmentEnd) {
+		const start = text.indexOf("`", cursor);
+		if (start === -1 || start >= segmentEnd) break;
+		let end = start + 1;
+		while (end < segmentEnd && text[end] === "`") end++;
+		runs.push({ start, end, length: end - start });
+		cursor = end;
+	}
+
+	// Pair each opening run with the next maximal run of exactly the same
+	// length. Precomputing the next equal run keeps adversarial input linear.
+	const nextEqual = new Array<number>(runs.length).fill(-1);
+	const nextByLength = new Map<number, number>();
+	for (let i = runs.length - 1; i >= 0; i--) {
+		nextEqual[i] = nextByLength.get(runs[i].length) ?? -1;
+		nextByLength.set(runs[i].length, i);
+	}
+
+	const ranges: SourceRange[] = [];
+	let runIndex = 0;
+	while (runIndex < runs.length) {
+		const closingIndex = nextEqual[runIndex];
+		if (closingIndex === -1) {
+			runIndex++;
+			continue;
+		}
+		ranges.push({ start: runs[runIndex].start, end: runs[closingIndex].end });
+		runIndex = closingIndex + 1;
+	}
+	return ranges;
+}
+
+/** Find source ranges in which file-mention candidates must stay verbatim. */
+function scanMarkdownCodeRanges(text: string): SourceRange[] {
+	const fenced = scanFencedCodeRanges(text);
+	const inline: SourceRange[] = [];
+	let segmentStart = 0;
+	for (const fence of fenced) {
+		inline.push(...scanInlineCodeRanges(text, segmentStart, fence.start));
+		segmentStart = fence.end;
+	}
+	inline.push(...scanInlineCodeRanges(text, segmentStart, text.length));
+	return [...fenced, ...inline].sort((a, b) => a.start - b.start);
+}
+
+/** Scan prose for `@path` tokens while preserving original UTF-16 indices. */
 function scanTokens(text: string): ScannedToken[] {
 	const re = /(^|\s)@([^\s@]+)/g;
+	const excluded = scanMarkdownCodeRanges(text);
 	const out: ScannedToken[] = [];
+	let excludedIndex = 0;
 	let m: RegExpExecArray | null;
 	while ((m = re.exec(text)) !== null) {
+		const prefixLen = m[1].length; // 0 at string start, 1 after whitespace
+		const tokenStart = m.index + prefixLen; // position of "@"
+		const untrimmedEnd = tokenStart + 1 + m[2].length;
+		while (
+			excludedIndex < excluded.length &&
+			excluded[excludedIndex].end <= tokenStart
+		) {
+			excludedIndex++;
+		}
+		const codeRange = excluded[excludedIndex];
+		if (codeRange && codeRange.start < untrimmedEnd && codeRange.end > tokenStart) {
+			continue;
+		}
+
 		let token = m[2];
 		// Trim trailing punctuation that is unlikely to be part of a path.
 		while (token.length > 0 && TRAILING_PUNCT.has(token[token.length - 1])) {
 			token = token.slice(0, -1);
 		}
 		if (token.length === 0) continue;
-		const prefixLen = m[1].length; // 0 at string start, 1 after whitespace
-		const tokenStart = m.index + prefixLen; // position of "@"
 		const tokenEnd = tokenStart + 1 + token.length; // covers "@" + path
 		out.push({ rawPath: token, range: [tokenStart, tokenEnd] });
 	}
 	return out;
+}
+
+function isMissingPathError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return code === "ENOENT" || code === "ENOTDIR";
 }
 
 /** True when `target` is not contained within `baseDir` (escape via `..` / absolute). */
@@ -263,7 +395,22 @@ export function resolveFileMentions(
 			warnings.push(`@${rawPath}: ${reason}`);
 		};
 
-		// Mention-count cap: beyond the cap, degrade without any filesystem work.
+		const lexicalAbs = path.resolve(resolvedCwd, normRel);
+
+		// Classify existence before safety and delivery checks while also obtaining
+		// the canonical target for the later containment check. ENOENT/ENOTDIR —
+		// including a dangling symlink — means there is no deliverable filesystem
+		// target, so the candidate remains ordinary text. Other failures are not
+		// proof of absence and retain failed-reference metadata below.
+		let absPath: string | undefined;
+		try {
+			absPath = fs.realpathSync.native(lexicalAbs);
+		} catch (error) {
+			if (isMissingPathError(error)) continue;
+		}
+
+		// Missing candidates do not consume this cap. Extra existing candidates
+		// require only the canonical metadata classification above, never stat/read.
 		if (resolvedCount >= MAX_MENTIONS_PER_SEND) {
 			markUnresolved("too-many-mentions");
 			continue;
@@ -271,24 +418,23 @@ export function resolveFileMentions(
 		resolvedCount++;
 
 		// Path safety, step 1: cheap lexical reject of obvious `..` / absolute
-		// escapes (also handles non-existent traversal paths).
-		const lexicalAbs = path.resolve(resolvedCwd, normRel);
+		// escapes. Existence was checked first so a missing traversal stays text,
+		// while an existing outside target remains a failed reference.
 		if (escapesDir(resolvedCwd, lexicalAbs)) {
 			markUnresolved("outside-cwd");
 			continue;
 		}
 
-		// Path safety, step 2: canonicalize to defeat symlink escapes. realpath
-		// throws when the target does not exist → treat as missing. The
-		// containment check runs on the CANONICAL paths BEFORE any stat/read,
-		// so a symlink inside cwd pointing outside cwd is rejected.
-		let absPath: string;
-		try {
-			absPath = fs.realpathSync.native(lexicalAbs);
-		} catch {
-			markUnresolved("missing");
+		// A non-absence realpath error may represent an existing inaccessible or
+		// cyclic-symlink target. Preserve its failed-reference metadata, but never
+		// stat or read when canonical containment could not be established.
+		if (!absPath) {
+			markUnresolved("unreadable");
 			continue;
 		}
+
+		// Path safety, step 2: canonical containment defeats symlink escapes before
+		// any stat/read, so an inside-cwd link cannot leak outside file bytes.
 		if (escapesDir(canonicalCwd, absPath)) {
 			markUnresolved("outside-cwd");
 			continue;
@@ -303,8 +449,8 @@ export function resolveFileMentions(
 				continue;
 			}
 			size = st.size;
-		} catch {
-			markUnresolved("missing");
+		} catch (error) {
+			markUnresolved(isMissingPathError(error) ? "missing" : "unreadable");
 			continue;
 		}
 
