@@ -10,7 +10,6 @@ import {
 	apiFetch,
 	nonGitCwd,
 	connectWs,
-	agentEndPredicate,
 	defaultProjectId,
 } from "./_e2e/e2e-setup.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -159,8 +158,6 @@ test.describe("Slash skill expansion mismatch", () => {
 			// The skill content should be expanded into the snapshot body
 			// (WS handler uses session.projectId to resolve per-project skills).
 			expect(expansions[0].expanded).toContain(SKILL_MARKER);
-
-			await conn.waitFor(agentEndPredicate());
 		} finally {
 			conn.close();
 		}
