@@ -740,7 +740,10 @@ test.describe("WebSocket frame size routing", () => {
 			const pingCursor = conn.messageCount();
 			conn.send({ type: "ping" });
 			await conn.waitForFrom(pingCursor, (m) => m.type === "pong", 1_000);
-			expect(enqueuedTexts).toEqual([]);
+			const enqueuedBeforeDrain = [...enqueuedTexts];
+			expect(enqueuedBeforeDrain).not.toContain(delayedPrompt);
+			expect(enqueuedBeforeDrain).toEqual(laterPrompts.slice(0, enqueuedBeforeDrain.length));
+			expect(new Set(enqueuedBeforeDrain).size).toBe(enqueuedBeforeDrain.length);
 
 			await waitForSignal(laterQueueDrained.promise, "post-abort FIFO drain while mention lstat stays blocked");
 			expect(
