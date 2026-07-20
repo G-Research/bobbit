@@ -19,9 +19,9 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
-import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionFsContextForAgentFile } from "./session-fs.js";
+import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
-import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
+import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
 import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
@@ -43,7 +43,7 @@ import { shouldKeepDespiteOrphan, scanOrphanedTranscriptsAsync } from "./orphan-
 import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
+import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts } from "./system-prompt.js";
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
@@ -95,6 +95,7 @@ import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type Orches
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import { WorktreePool } from "./worktree-pool.js";
+import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency, removeTree } from "./bounded-async-work.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
 import {
 	type SessionSetupPlan,
@@ -1101,6 +1102,16 @@ export interface ExtensionChannelServices {
 	openPermits?: unknown;
 }
 
+export interface SessionTerminationInfo {
+	projectId?: string;
+	reason: "terminated" | "archived" | "purged";
+	cwd?: string;
+	worktreePath?: string;
+	repoWorktrees?: Array<{ worktreePath: string }>;
+}
+
+export type SessionTerminationListener = (sessionId: string, info: SessionTerminationInfo) => void | Promise<void>;
+
 export interface SessionManagerOptions {
 	/** Override the path to pi-coding-agent cli.js */
 	agentCliPath?: string;
@@ -1145,6 +1156,8 @@ export interface SessionManagerOptions {
 	/** Test seam for boot restore lag, in milliseconds. The production default
 	 * samples a `monitorEventLoopDelay()` histogram. */
 	bootRestoreLagSampler?: () => number;
+	/** Promise-only seam for bounded expired-archive transcript stats. */
+	archiveStat?: (filePath: string) => Promise<{ size: number }>;
 }
 
 type SessionReplacementToken = {
@@ -1236,6 +1249,7 @@ export class SessionManager {
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
+	private worktreePoolInitializations = new Map<string, Promise<void>>();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	lifecycleHub?: LifecycleHub;
@@ -1258,7 +1272,7 @@ export class SessionManager {
 	private _inboxNudger: import("./inbox-nudger.js").InboxNudger | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
-	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void> = [];
+	private _terminationListeners: SessionTerminationListener[] = [];
 	private _creationListeners: Array<(session: SessionInfo) => void> = [];
 	private _extensionChannels?: ExtensionChannelServices;
 	/**
@@ -1274,6 +1288,8 @@ export class SessionManager {
 	/** @internal Non-PCM test path only. */
 	private _testTaskManager: TaskManager | null = null;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
+	private archivePurgeInFlight: Promise<void> | null = null;
+	private readonly archiveStat: (filePath: string) => Promise<{ size: number }>;
 	/** Heartbeat timer: re-broadcasts the current `session_status` for every
 	 *  active session every STATUS_HEARTBEAT_INTERVAL_MS, WITHOUT bumping
 	 *  `statusVersion`. Self-heals any client that missed a transition frame.
@@ -1530,8 +1546,8 @@ export class SessionManager {
 		this._verificationHarness = harness;
 	}
 
-	/** Subscribe to session termination events. Listeners are invoked synchronously. */
-	addTerminationListener(fn: (sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void): void {
+	/** Subscribe to session termination events. Listeners settle in registration order. */
+	addTerminationListener(fn: SessionTerminationListener): void {
 		this._terminationListeners.push(fn);
 	}
 
@@ -1653,7 +1669,7 @@ export class SessionManager {
 
 					if (!worktreeOk) {
 						const psForGate = this.getSessionStore(session.projectId).get(session.id);
-						if (psForGate && shouldKeepDespiteOrphan(psForGate)) {
+						if (psForGate && await shouldKeepDespiteOrphan(psForGate)) {
 							console.warn(`[orphan-cleanup] WARN: would-archive ${session.id} but worktree+recent-transcript present — leaving live`);
 						} else {
 							console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
@@ -1759,6 +1775,7 @@ export class SessionManager {
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
 		this.stateDir = options?.stateDir ?? bobbitStateDir();
 		this._bootRestoreLagSampler = options?.bootRestoreLagSampler;
+		this.archiveStat = options?.archiveStat ?? ((filePath) => fsp.stat(filePath));
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -2761,12 +2778,23 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined, projectRoot?: string): void {
-		if (projectId === HEADQUARTERS_PROJECT_ID) {
-			this.worktreePools.delete(projectId);
-			return;
+	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined, projectRoot?: string): Promise<void> {
+		let hiddenProject = false;
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				if (ctx.project.id === projectId) {
+					hiddenProject = ctx.project.hidden === true;
+					break;
+				}
+			}
 		}
-		if (this.worktreePools.has(projectId)) return;
+		if (projectId === HEADQUARTERS_PROJECT_ID || hiddenProject) {
+			this.worktreePools.delete(projectId);
+			return Promise.resolve();
+		}
+		const pending = this.worktreePoolInitializations.get(projectId);
+		if (pending) return pending;
+		if (this.worktreePools.has(projectId)) return Promise.resolve();
 		// `baseRefResolver` reads the live project `base_ref` setting; the resolver
 		// pattern (mirrors `componentsResolver`) lets pool entries auto-adopt the
 		// current configured integration target without a server restart. When
@@ -2784,14 +2812,26 @@ export class SessionManager {
 			if (s.worktreePath) activeWorktreePaths.add(s.worktreePath);
 		}
 
-		pool.startFilling(activeWorktreePaths);
+		let initialization!: Promise<void>;
+		initialization = pool.initialize(activeWorktreePaths)
+			.catch((error) => {
+				if (this.worktreePools.get(projectId) === pool) this.worktreePools.delete(projectId);
+				throw error;
+			})
+			.finally(() => {
+				if (this.worktreePoolInitializations.get(projectId) === initialization) {
+					this.worktreePoolInitializations.delete(projectId);
+				}
+			});
+		this.worktreePoolInitializations.set(projectId, initialization);
+		return initialization;
 	}
 
 	/** @deprecated Use initWorktreePoolForProject instead. */
-	initWorktreePool(repoPath: string, _setupCommand?: string, targetSize = 2): void {
+	initWorktreePool(repoPath: string, _setupCommand?: string, targetSize = 2): Promise<void> {
 		// Legacy shim — uses empty string as key for backward compat. setupCommand
 		// is ignored; canonical path is `components[*].worktreeSetupCommand`.
-		this.initWorktreePoolForProject("", repoPath, undefined, targetSize);
+		return this.initWorktreePoolForProject("", repoPath, undefined, targetSize);
 	}
 
 	/** Get the worktree pool for a specific project. */
@@ -6298,7 +6338,7 @@ export class SessionManager {
 				ps = { ...ps, agentSessionFile: recovered };
 				// Fall through to normal restore below
 			} else {
-				if (shouldKeepDespiteOrphan(ps)) {
+				if (await shouldKeepDespiteOrphan(ps)) {
 					console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
 					this.addDormantSession(ps);
 					return;
@@ -6338,7 +6378,7 @@ export class SessionManager {
 			if (!ps.sandboxed) {
 				console.log(`[session-manager] Session ${ps.id} recorded ${ps.agentSessionFile} but has no transcript yet (pre-flush restart) — restoring live; agent will create the file on first write`);
 				// fall through to restoreSession()
-			} else if (shouldKeepDespiteOrphan(ps)) {
+			} else if (await shouldKeepDespiteOrphan(ps)) {
 				console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
 				this.addDormantSession(ps);
 				return;
@@ -6566,7 +6606,7 @@ export class SessionManager {
 						}
 					}
 					if (!recovered) {
-						if (shouldKeepDespiteOrphan(ps)) {
+						if (await shouldKeepDespiteOrphan(ps)) {
 							console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
 							this.addDormantSession(ps);
 							return;
@@ -9352,8 +9392,8 @@ export class SessionManager {
 		// Clean up model name file
 		try {
 			const modelNameFile = path.join(bobbitStateDir(), "model-name-" + id + ".txt");
-			if (fs.existsSync(modelNameFile)) fs.unlinkSync(modelNameFile);
-		} catch { /* ignore */ }
+			await fsp.unlink(modelNameFile);
+		} catch { /* missing or best-effort cleanup failure */ }
 
 		// NOTE: proposal-drafts cleanup is deferred to purgeOneSession (the
 		// 7-day purge mark). Both Path A (in-place resubmit) and Path B
@@ -9433,7 +9473,7 @@ export class SessionManager {
 			console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
 		});
 
-	// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
+		// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
 		// Pass cwd/worktreePath/repoWorktrees in the info so listeners
 		// can't be defeated by the `sessions.delete(id)` above —
 		// `getSession(id)` would return undefined here and refcounts would leak.
@@ -9442,7 +9482,9 @@ export class SessionManager {
 		const sessionWorktreePath = session.worktreePath;
 		const sessionRepoWorktrees = session.repoWorktrees;
 		for (const listener of this._terminationListeners) {
-			try { listener(id, { projectId: projectIdForListeners, reason: "archived", cwd: sessionCwd, worktreePath: sessionWorktreePath, repoWorktrees: sessionRepoWorktrees }); } catch (err) {
+			try {
+				await listener(id, { projectId: projectIdForListeners, reason: "archived", cwd: sessionCwd, worktreePath: sessionWorktreePath, repoWorktrees: sessionRepoWorktrees });
+			} catch (err) {
 				console.error(`[session ${id}] termination listener failed:`, err);
 			}
 		}
@@ -9583,23 +9625,32 @@ export class SessionManager {
 		return true;
 	}
 
-	/** Purge all archived sessions older than 7 days. */
-	async purgeExpiredArchives(): Promise<void> {
-		const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-		const cutoff = this.clock.now() - SEVEN_DAYS_MS;
-		const archived = this.projectContextManager
-			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
-			: (this._testStore?.getArchived() ?? []);
-		for (const ps of archived) {
-			if (ps.archivedAt && ps.archivedAt < cutoff) {
-				try {
-					await this.purgeOneSession(ps);
-					console.log(`[session-manager] Purged expired archive: "${ps.title}" (${ps.id})`);
-				} catch (err) {
-					console.error(`[session-manager] Failed to purge archive ${ps.id}:`, err);
+	/** Purge all archived sessions older than 7 days. Manual and scheduled calls coalesce. */
+	purgeExpiredArchives(): Promise<void> {
+		if (this.archivePurgeInFlight) return this.archivePurgeInFlight;
+		const run = (async () => {
+			const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+			const cutoff = this.clock.now() - SEVEN_DAYS_MS;
+			const archived = this.projectContextManager
+				? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
+				: (this._testStore?.getArchived() ?? []);
+			for (const ps of archived) {
+				if (ps.archivedAt && ps.archivedAt < cutoff) {
+					try {
+						await this.purgeOneSession(ps);
+						console.log(`[session-manager] Purged expired archive: "${ps.title}" (${ps.id})`);
+					} catch (err) {
+						console.error(`[session-manager] Failed to purge archive ${ps.id}:`, err);
+					}
 				}
 			}
-		}
+		})();
+		let tracked!: Promise<void>;
+		tracked = run.finally(() => {
+			if (this.archivePurgeInFlight === tracked) this.archivePurgeInFlight = null;
+		});
+		this.archivePurgeInFlight = tracked;
+		return tracked;
 	}
 
 	async listArchivedSessionWorktrees(includeAlreadyCleaned = false): Promise<ArchivedSessionWorktreeScanResponse> {
@@ -10381,10 +10432,7 @@ export class SessionManager {
 			// by sandboxed agents). Missing file is fine.
 			if (safeFile) {
 				try {
-					const sidecarPath = sidecarPathFor(safeFile);
-					if (fs.existsSync(sidecarPath)) {
-						fs.unlinkSync(sidecarPath);
-					}
+					await sessionSidecarDelete(safeFile);
 				} catch (err) {
 					console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
 				}
@@ -10397,20 +10445,24 @@ export class SessionManager {
 		// resubmit + Path B continue-assistant). Best-effort — missing dir is
 		// harmless. See docs/design/editable-proposals.md §4.
 		try {
-			await fsp.rm(path.join(bobbitStateDir(), "proposal-drafts", ps.id), { recursive: true, force: true });
+			await removeTree(path.join(bobbitStateDir(), "proposal-drafts", ps.id));
 		} catch (err) {
 			console.warn(`[session-manager] proposal-drafts purge failed for ${ps.id}:`, err);
 		}
 
-		// Delete session prompt file
+		// Delete session prompt file and preview mount.
 		try {
-			cleanupSessionPrompt(ps.id, this.stateDir);
+			await cleanupSessionPromptAsync(ps.id, this.stateDir);
 		} catch (err) {
 			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
 		}
 
-		// Delete persisted prompt sections JSON
-		purgePromptSectionsJson(ps.id, this.stateDir);
+		// Delete persisted prompt sections JSON.
+		try {
+			await purgePromptSectionsJsonAsync(ps.id, this.stateDir);
+		} catch (err) {
+			console.error(`[session-manager] Failed to cleanup prompt sections for ${ps.id}:`, err);
+		}
 
 		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
 		// worktree for server bookkeeping, so we clean those up too.  Skip paths that
@@ -10420,17 +10472,19 @@ export class SessionManager {
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
 				const allPersisted = this.getAllPersistedSessionsForWorktreeGuard();
-				// Multi-repo: clean each repo's worktree in parallel + delete the
-				// shared branch from each repo's remote (Phase 4a).
+				// Multi-repo: clean each repo's worktree with the shared background-I/O
+				// ceiling + delete the shared branch from each repo's remote (Phase 4a).
 				if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
-					await Promise.allSettled(Object.entries(ps.repoWorktrees).map(([repo, wt]) => {
+					await mapWithConcurrency(Object.entries(ps.repoWorktrees), BACKGROUND_IO_CONCURRENCY, async ([repo, wt]) => {
 						if (isWorktreePathReferencedByLiveSession(wt, allPersisted, { ignoreSessionId: ps.id })) {
 							console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${wt}`);
-							return Promise.resolve();
+							return;
 						}
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
-						return cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
-					}));
+						try {
+							await cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
+						} catch { /* preserve per-repo all-settled isolation */ }
+					});
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 				} else {
@@ -10443,13 +10497,13 @@ export class SessionManager {
 
 		// Remove color
 		try {
-			this.colorStore?.remove(ps.id);
+			await this.colorStore?.removeAsync(ps.id);
 		} catch (err) {
 			console.error(`[session-manager] Failed to remove color for ${ps.id}:`, err);
 		}
 
-		// Remove from store
-		this.resolveStoreForId(ps.id)?.purge(ps.id);
+		// Remove from store and durably record its deletion tombstone.
+		await this.resolveStoreForId(ps.id)?.purgeAsync(ps.id);
 
 		// Source-fix for the dangling-team-lead bug: if the purged session was
 		// the team-lead of a team-mode goal, also drop the corresponding
@@ -10465,7 +10519,7 @@ export class SessionManager {
 			try {
 				const ctx = this.projectContextManager.getOrCreate(ps.projectId);
 				if (ctx && ctx.teamStore.get(ps.teamGoalId)) {
-					ctx.teamStore.remove(ps.teamGoalId);
+					await ctx.teamStore.removeAsync(ps.teamGoalId);
 					console.log(`[session-manager] Dropped team-store entry for goal ${ps.teamGoalId} on team-lead purge (session ${ps.id}).`);
 				}
 			} catch (err) {
@@ -10478,7 +10532,9 @@ export class SessionManager {
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
 		// drop the entry without waiting for a polling tick.
 		for (const listener of this._terminationListeners) {
-			try { listener(ps.id, { projectId: ps.projectId, reason: "purged" }); } catch (err) {
+			try {
+				await listener(ps.id, { projectId: ps.projectId, reason: "purged" });
+			} catch (err) {
 				console.error(`[session ${ps.id}] purge listener failed:`, err);
 			}
 		}
@@ -10705,7 +10761,7 @@ export class SessionManager {
 			// Gate: refuse to archive if worktree dir + recent JSONL still present.
 			// Catches the post-crash bulk-archive bug from goal sessions-p-14dc3ec7.
 			const psForGate = this.resolveStoreForId(id)?.get(id);
-			if (psForGate && shouldKeepDespiteOrphan(psForGate)) {
+			if (psForGate && await shouldKeepDespiteOrphan(psForGate)) {
 				console.warn(`[orphan-cleanup] WARN: would-archive ${id} but worktree+recent-transcript present — leaving live`);
 				continue;
 			}
@@ -10744,36 +10800,49 @@ export class SessionManager {
 	async getExpiredArchiveStats(): Promise<{ count: number; totalSizeBytes: number }> {
 		const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 		const cutoff = this.clock.now() - SEVEN_DAYS_MS;
-		let count = 0;
-		let totalSizeBytes = 0;
-
 		const archived = this.projectContextManager
 			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
 			: (this._testStore?.getArchived() ?? []);
-
-		for (const ps of archived) {
-			if (ps.archivedAt && ps.archivedAt < cutoff) {
-				count++;
-				if (ps.agentSessionFile) {
-					try {
-						const stat = fs.statSync(ps.agentSessionFile);
-						totalSizeBytes += stat.size;
-					} catch { /* file may not exist */ }
-				}
+		const expired = archived.filter(ps => ps.archivedAt && ps.archivedAt < cutoff);
+		const sizes = await mapWithConcurrency(expired, BACKGROUND_IO_CONCURRENCY, async (ps) => {
+			if (!ps.agentSessionFile) return 0;
+			try {
+				return (await this.archiveStat(ps.agentSessionFile)).size;
+			} catch {
+				return 0;
 			}
-		}
-		return { count, totalSizeBytes };
+		});
+		return {
+			count: expired.length,
+			totalSizeBytes: sizes.reduce((total, size) => total + size, 0),
+		};
 	}
 
 	/** Start the archive purge schedule — call after restoreSessions(). */
 	startPurgeSchedule(): void {
+		if (this.purgeInterval !== null) return;
 		// No longer purge on startup — use Settings → Maintenance to purge manually.
-		// Purge every 24 hours
-		this.purgeInterval = this.clock.setInterval(() => {
-			this.purgeExpiredArchives().catch(err => {
+		// Purge every 24 hours. A stale queued callback observes the handle mismatch
+		// after stop and cannot start cleanup during shutdown.
+		let timer!: ReturnType<typeof setInterval>;
+		timer = this.clock.setInterval(() => {
+			if (this.purgeInterval !== timer) return;
+			void this.purgeExpiredArchives().catch(err => {
 				console.error("[session-manager] Scheduled purge failed:", err);
 			});
 		}, 24 * 60 * 60 * 1000);
+		this.purgeInterval = timer;
+		(this.purgeInterval as any).unref?.();
+	}
+
+	/** Cancel future archive-purge ticks and join cleanup already in progress. */
+	async stopPurgeSchedule(): Promise<void> {
+		if (this.purgeInterval !== null) {
+			this.clock.clearInterval(this.purgeInterval);
+			this.purgeInterval = null;
+		}
+		const inFlight = this.archivePurgeInFlight;
+		if (inFlight) await inFlight;
 	}
 
 	addClient(sessionId: string, ws: WebSocket): boolean {
@@ -11197,10 +11266,7 @@ export class SessionManager {
 	}
 
 	async shutdown(): Promise<void> {
-		if (this.purgeInterval) {
-			this.clock.clearInterval(this.purgeInterval);
-			this.purgeInterval = null;
-		}
+		await this.stopPurgeSchedule();
 		if (this._statusHeartbeatTimer) {
 			this.clock.clearInterval(this._statusHeartbeatTimer);
 			this._statusHeartbeatTimer = null;
