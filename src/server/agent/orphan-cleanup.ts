@@ -3,16 +3,24 @@
  *
  * Extracted out of session-manager.ts so unit tests can exercise the helpers
  * without paying the transitive cost (and runtime hazards) of importing the
- * full SessionManager. Pinned by tests/session-manager-orphan-keep.test.ts.
+ * full SessionManager. Pinned by tests2/core/session-manager-orphan-keep.test.ts.
  *
  * See goal `goal-goal-sessions-p-14dc3ec7` and the design doc
  * `docs/design/session-store-crash-safety.md` for context.
  */
-import fs from "node:fs";
+import type { Dirent } from "node:fs";
 import path from "node:path";
-import type { FsLike } from "../gateway-deps.js";
-import { realFs } from "../gateway-deps.js";
+import type { Clock, FsLike } from "../gateway-deps.js";
+import { realClock, realFs } from "../gateway-deps.js";
 import type { PersistedSession } from "./session-store.js";
+
+const RECENT_TRANSCRIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export interface OrphanPreservationOptions {
+	/** Promise-only filesystem boundary for deterministic policy tests. */
+	fsImpl?: { promises: Pick<FsLike["promises"], "access" | "stat"> };
+	clock?: Pick<Clock, "now">;
+}
 
 /**
  * Should we keep an otherwise-orphaned session live?
@@ -30,77 +38,28 @@ import type { PersistedSession } from "./session-store.js";
  * the user can still archive manually from the UI if they really are dead.
  *
  * Sandboxed sessions: their `worktreePath` is a container-internal path,
- * so `fs.existsSync` will return false and the gate naturally falls
+ * so the host filesystem access check fails and the gate naturally falls
  * through. That's correct — sandbox health is checked elsewhere.
  */
-export function shouldKeepDespiteOrphan(ps: PersistedSession): boolean {
-	const wtAlive = !!ps.worktreePath && (() => {
-		try { return fs.existsSync(ps.worktreePath!); }
-		catch { return false; }
-	})();
-	if (!wtAlive) return false;
-	const recentTranscript = !!ps.agentSessionFile && (() => {
-		try { return Date.now() - fs.statSync(ps.agentSessionFile!).mtimeMs < 24 * 60 * 60 * 1000; }
-		catch { return false; }
-	})();
-	return recentTranscript;
-}
+export async function shouldKeepDespiteOrphan(
+	ps: PersistedSession,
+	opts: OrphanPreservationOptions = {},
+): Promise<boolean> {
+	if (!ps.worktreePath || !ps.agentSessionFile) return false;
 
-/**
- * Walk `<agentSessionsRoot>` for `*.jsonl` transcripts that are NOT tracked
- * by any `PersistedSession.agentSessionFile`. Used to surface a splash
- * banner when the session-metadata index has diverged from the agent CLI's
- * on-disk transcripts. No auto-import — banner only.
- *
- * @param agentSessionsRoot Root directory of the agent CLI's session files.
- * @param trackedFiles Set of `agentSessionFile` paths from all known sessions
- *                    (live + archived).
- * @param mostRecentLastActivity Skip transcripts whose mtime is older than
- *                               this — they're noise from prior installs.
- * @returns `{ count, paths }` where `paths` is capped at 50.
- */
-export function scanOrphanedTranscripts(
-	agentSessionsRoot: string,
-	trackedFiles: Set<string>,
-	mostRecentLastActivity: number,
-): { count: number; paths: string[] } {
-	const PATH_CAP = 50;
-	const LOG_CAP = 20;
-	const paths: string[] = [];
-	let count = 0;
-	let logged = 0;
+	const asyncFs = opts.fsImpl ?? realFs;
+	try {
+		await asyncFs.promises.access(ps.worktreePath);
+	} catch {
+		return false;
+	}
 
-	let rootExists = false;
-	try { rootExists = fs.existsSync(agentSessionsRoot) && fs.statSync(agentSessionsRoot).isDirectory(); }
-	catch { rootExists = false; }
-	if (!rootExists) return { count: 0, paths: [] };
-
-	const walk = (dir: string): void => {
-		let entries: fs.Dirent[];
-		try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-		catch { return; }
-		for (const ent of entries) {
-			const full = path.join(dir, ent.name);
-			if (ent.isDirectory()) {
-				walk(full);
-				continue;
-			}
-			if (!ent.isFile() || !ent.name.endsWith(".jsonl")) continue;
-			if (trackedFiles.has(full)) continue;
-			let mtime = 0;
-			try { mtime = fs.statSync(full).mtimeMs; }
-			catch { continue; }
-			if (mtime < mostRecentLastActivity) continue;
-			count++;
-			if (paths.length < PATH_CAP) paths.push(full);
-			if (logged < LOG_CAP) {
-				console.warn(`[session-store] WARN: orphaned transcript: ${full}`);
-				logged++;
-			}
-		}
-	};
-	walk(agentSessionsRoot);
-	return { count, paths };
+	try {
+		const transcript = await asyncFs.promises.stat(ps.agentSessionFile);
+		return (opts.clock ?? realClock).now() - transcript.mtimeMs < RECENT_TRANSCRIPT_WINDOW_MS;
+	} catch {
+		return false;
+	}
 }
 
 export interface AsyncOrphanScanOptions {
@@ -116,7 +75,8 @@ type AsyncScanWork =
 	| { kind: "file"; fullPath: string };
 
 /**
- * Async, concurrency-limited equivalent of {@link scanOrphanedTranscripts}.
+ * Walk `<agentSessionsRoot>` for untracked `*.jsonl` transcripts using one
+ * concurrency-limited worker pool.
  *
  * Directory reads and candidate-file stats share one bounded worker pool, so
  * even a single wide directory cannot create an unbounded burst of filesystem
@@ -153,7 +113,7 @@ export async function scanOrphanedTranscriptsAsync(
 
 	const processWork = async (work: AsyncScanWork): Promise<void> => {
 		if (work.kind === "directory") {
-			let entries: fs.Dirent[];
+			let entries: Dirent[];
 			try {
 				entries = await asyncFs.promises.readdir(work.fullPath, { withFileTypes: true });
 			} catch {
