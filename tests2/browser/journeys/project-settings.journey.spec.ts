@@ -205,6 +205,43 @@ test.describe("Journey: Project Assistant", () => {
 	});
 });
 
+test.describe("Journey: Settings App Version", () => {
+	test("installed builds show the package version", async ({ page }) => {
+		await page.route("**/api/app-info", route => route.fulfill({
+			json: { version: "0.14.1", buildType: "installed" },
+		}));
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+
+		const appHeader = page.getByTestId("app-header-row");
+		const version = appHeader.getByTestId("settings-app-version");
+		await expect(version).toHaveText("Bobbit v0.14.1");
+		await expect(version).toHaveAttribute("title", "Running from an installed build");
+	});
+
+	test("source builds show the commit in the app header row", async ({ page }) => {
+		await page.route("**/api/app-info", route => route.fulfill({
+			json: { version: "0.14.1", buildType: "source", commitSha: "e3563ba" },
+		}));
+		await page.route("**/api/harness-status", route => route.fulfill({
+			json: { restartAvailable: true },
+		}));
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+
+		const appHeader = page.getByTestId("app-header-row");
+		const version = appHeader.getByTestId("settings-app-version");
+		const restart = page.getByRole("button", { name: "Restart Server" });
+		await expect(version).toHaveText("Bobbit v0.14.1 [e3563ba]");
+		await expect(version).toHaveAttribute("title", "Running from source");
+		await expect(restart).toBeVisible();
+		const [headerBox, restartBox] = await Promise.all([appHeader.boundingBox(), restart.boundingBox()]);
+		expect(headerBox).not.toBeNull();
+		expect(restartBox).not.toBeNull();
+		expect(headerBox!.y + headerBox!.height).toBeLessThanOrEqual(restartBox!.y);
+	});
+});
+
 // Ported from settings-restart-button.spec.ts (audit: project-settings GAP,
 // mutant BR63): without the dev harness the Restart Server control must be
 // absent — and stay absent across reload + navigation.
