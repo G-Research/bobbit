@@ -105,6 +105,10 @@ function manualSweepClock(now = Date.now()) {
 			assert.ok(tick, "sweep interval must be installed before firing");
 			tick();
 		},
+		capture: () => {
+			assert.ok(tick, "sweep interval must be installed before capture");
+			return tick;
+		},
 		get intervalMs() { return intervalMs; },
 		get clearCalls() { return clearCalls; },
 		get unrefCalls() { return unrefCalls; },
@@ -398,5 +402,25 @@ describe("PlanMutationStore", () => {
 		assert.equal(stopSettled, true);
 		await store.stopSweep();
 		assert.equal(timer.clearCalls, 1, "stopping twice is idempotent");
+	});
+
+	it("ignores an already-queued interval callback after stopSweep settles", async () => {
+		const timer = manualSweepClock();
+		let readdirCalls = 0;
+		const originalReaddir = memfs.promises.readdir.bind(memfs.promises) as any;
+		(memfs.promises as any).readdir = async (...args: any[]) => {
+			readdirCalls++;
+			return originalReaddir(...args);
+		};
+
+		const store = new PlanMutationStore(stateDir, undefined, memfs, timer.clock);
+		const queuedBeforeClear = timer.capture();
+		await store.stopSweep();
+		assert.equal(timer.clearCalls, 1);
+
+		queuedBeforeClear();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(readdirCalls, 0, "a stale callback must not perform I/O after the shutdown barrier");
+		assert.equal((store as any).sweepRun, undefined);
 	});
 });

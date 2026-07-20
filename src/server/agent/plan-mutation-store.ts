@@ -56,6 +56,8 @@ export class PlanMutationStore {
 	private readonly goalOperations = new Map<string, Promise<void>>();
 	private sweepTimer?: ReturnType<Clock["setInterval"]>;
 	private sweepRun?: Promise<number>;
+	private sweepGeneration = 0;
+	private sweepStopped = true;
 
 	constructor(stateDir: string, opts?: { startSweep?: boolean; sweepIntervalMs?: number }, fsImpl: FsLike = realFs, clock: Clock = realClock) {
 		this.fs = fsImpl;
@@ -68,19 +70,29 @@ export class PlanMutationStore {
 		const startSweep = opts?.startSweep ?? true;
 		if (startSweep) {
 			const interval = opts?.sweepIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS;
-			this.sweepTimer = this.clock.setInterval(() => {
+			this.sweepStopped = false;
+			const generation = ++this.sweepGeneration;
+			const timer: ReturnType<Clock["setInterval"]> = this.clock.setInterval(() => {
+				// clearInterval cannot retract a callback that is already queued. Fence
+				// that callback against both this timer installation and shutdown so
+				// stopSweep's awaited barrier cannot be followed by a late prune.
+				if (this.sweepStopped || this.sweepGeneration !== generation || this.sweepTimer !== timer) return;
 				void this.runScheduledSweep();
 			}, interval);
-			this.sweepTimer.unref?.();
+			this.sweepTimer = timer;
+			timer.unref?.();
 		}
 	}
 
 	/** Cancel future sweeps and wait until the active sweep, if any, settles. */
 	async stopSweep(): Promise<void> {
-		if (this.sweepTimer) {
-			this.clock.clearInterval(this.sweepTimer);
-			this.sweepTimer = undefined;
+		if (!this.sweepStopped) {
+			this.sweepStopped = true;
+			this.sweepGeneration++;
 		}
+		const timer = this.sweepTimer;
+		this.sweepTimer = undefined;
+		if (timer) this.clock.clearInterval(timer);
 		const active = this.sweepRun;
 		if (active) await active.catch(() => undefined);
 	}
