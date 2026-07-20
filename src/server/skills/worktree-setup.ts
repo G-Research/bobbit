@@ -117,8 +117,8 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 			const recordPath = opts.recordSetupPath;
 			if (recordPath) {
 				try {
-					fs.mkdirSync(path.dirname(recordPath), { recursive: true });
-					fs.appendFileSync(recordPath, `${c.name}\t${cwd}\t${sourceRepo}\t${c.worktreeSetupCommand}\n`);
+					await fs.promises.mkdir(path.dirname(recordPath), { recursive: true });
+					await fs.promises.appendFile(recordPath, `${c.name}\t${cwd}\t${sourceRepo}\t${c.worktreeSetupCommand}\n`);
 				} catch { /* test-only — don't fail the worktree on audit IO errors */ }
 			}
 
