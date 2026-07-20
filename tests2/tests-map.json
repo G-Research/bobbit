@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1136,
+  "censusTotal": 1135,
   "buckets": {
     "daily": 61,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 202
   },
@@ -1053,6 +1053,42 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/browser-cookie-eligibility.test.ts",
+      "reason": "Native v2 unit coverage for centralized browser-cookie bootstrap and renewal eligibility across direct, localhost, Vite, excluded-route, session-bound, and sandbox credential request shapes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/stateless-cookie-behavior.test.ts",
+      "reason": "Native v2 integration coverage for signed-cookie bootstrap and renewal, excluded traffic, legacy-registry isolation, and constant-size persisted signing state through a real gateway.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/stateless-cookie-regression.test.ts",
+      "reason": "Native v2 integration reproducer proving repeated Bearer-only and internal callback requests neither emit cookies nor create or grow the retired cookie registry.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/stateless-cookie-upgrade.spec.ts",
+      "reason": "Native v2 Chromium journey for transparent legacy-cookie upgrade followed by cookie-authenticated API, preview iframe and new-tab content, and preview SSE without repeated issuance.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
       }
     }
   ],
