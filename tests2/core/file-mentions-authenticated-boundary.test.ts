@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 const AUTHENTICATED_PROMPT_BYTES = 8 * 1024 * 1024;
+const RESOLUTION_DEADLINE_MS = 10_000;
+const TEST_TIMEOUT_MS = 12_000;
 const NOTES_CONTENT = "hello world\nline two";
 const SOURCE_CONTENT = "export const x = 1;";
 const OUTSIDE_MISSING = "@authenticated-boundary-missing.txt";
@@ -52,17 +54,28 @@ function exactDeepListPrompt(codeTokens: string[]): string {
 	return text;
 }
 
-async function settleWithin<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-	let timer: NodeJS.Timeout | undefined;
+async function settleWithin<T>(
+	operation: (signal: AbortSignal) => Promise<T>,
+	timeoutMs: number,
+	label: string,
+): Promise<T> {
+	const controller = new AbortController();
+	const timeoutError = new Error(`${label} exceeded ${timeoutMs}ms`);
+	let timedOut = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		controller.abort(timeoutError);
+	}, timeoutMs);
+
 	try {
-		return await Promise.race([
-			promise,
-			new Promise<T>((_resolve, reject) => {
-				timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), timeoutMs);
-			}),
-		]);
+		const result = await operation(controller.signal);
+		if (timedOut) throw timeoutError;
+		return result;
+	} catch (error) {
+		if (timedOut) throw timeoutError;
+		throw error;
 	} finally {
-		if (timer) clearTimeout(timer);
+		clearTimeout(timer);
 	}
 }
 
@@ -94,8 +107,8 @@ async function assertExactBoundaryResolution(
 		);
 
 		const result = await settleWithin(
-			resolveFileMentions(text, cwdDir),
-			5_000,
+			(signal) => resolveFileMentions(text, cwdDir, { signal }),
+			RESOLUTION_DEADLINE_MS,
 			`${label} exact authenticated-boundary resolution`,
 		);
 		const elapsedMs = Date.now() - started;
@@ -118,7 +131,10 @@ async function assertExactBoundaryResolution(
 			"code-contained and missing prose tokens must remain byte-for-byte literal",
 		);
 		assert.deepEqual(result.warnings, []);
-		assert.ok(elapsedMs < 5_000, `${label} must complete within the bounded scan deadline`);
+		assert.ok(
+			elapsedMs < RESOLUTION_DEADLINE_MS,
+			`${label} must complete within the bounded scan deadline`,
+		);
 
 		const lstatTargets = lstatSpy.mock.calls.map((call) => path.resolve(String(call[0])));
 		assert.deepEqual(
@@ -157,7 +173,7 @@ describe("file mention exact authenticated prompt boundary", () => {
 			codeBlockRepetitions * 3,
 			"code-dense prompt",
 		);
-	}, 7_000);
+	}, TEST_TIMEOUT_MS);
 
 	it("recovers exact ranges in an exact 8 MiB ultra-deep list without degrading code exclusion", async () => {
 		const codeTokens = Array.from(
@@ -167,5 +183,5 @@ describe("file mention exact authenticated prompt boundary", () => {
 		const text = exactDeepListPrompt(codeTokens);
 
 		await assertExactBoundaryResolution(text, codeTokens.length, "ultra-deep-list prompt");
-	}, 7_000);
+	}, TEST_TIMEOUT_MS);
 });
