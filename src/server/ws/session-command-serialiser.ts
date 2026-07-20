@@ -38,21 +38,33 @@ interface PendingUsage {
 	bytes: number;
 }
 
+export interface SessionCommandControlReservation {
+	/** Shared completion for this key's reserved control callback. */
+	promise: Promise<void>;
+	/** True only for the caller whose callback was retained. */
+	created: boolean;
+}
+
 /**
  * FIFO async command chains keyed by session. A rejected command is returned to
  * its caller but handled internally, so later commands always run. Idle keys are
  * removed without disturbing a newer tail for the same session.
  *
- * Only commands waiting behind an active command count toward admission. This
- * lets the first command start regardless of frame size while placing a hard
- * bound on parsed-message closures retained by the FIFO. Each running command
- * receives an advisory cancellation signal; Stop can cancel preprocessing while
- * also performing its immediate out-of-band abort and ordered fallback.
+ * Only ordinary commands waiting behind an active command count toward ordinary
+ * admission. This lets the first command start regardless of frame size while
+ * placing a hard bound on parsed-message closures retained by the FIFO. Each
+ * running ordinary command receives an advisory cancellation signal; Stop can
+ * cancel preprocessing while also performing its immediate out-of-band abort.
+ *
+ * Stop's ordered fallback uses a separate one-entry-per-key control reservation.
+ * It never competes with ordinary count/byte limits, and repeated control calls
+ * for that key share the same promise until the reserved callback settles.
  */
 export class SessionCommandSerialiser {
 	private readonly tails = new Map<string, Promise<unknown>>();
 	private readonly active = new Map<string, AbortController>();
 	private readonly pending = new Map<string, PendingUsage>();
+	private readonly controls = new Map<string, Promise<void>>();
 	private readonly maxPendingCommands: number;
 	private readonly maxPendingBytes: number;
 
@@ -78,11 +90,16 @@ export class SessionCommandSerialiser {
 		return count;
 	}
 
-	/** Aggregate retained frame bytes across session keys. */
+	/** Aggregate retained ordinary-frame bytes across session keys. */
 	get pendingBytes(): number {
 		let bytes = 0;
 		for (const usage of this.pending.values()) bytes += usage.bytes;
 		return bytes;
+	}
+
+	/** Reserved control callbacks, including a callback that is currently running. */
+	get controlCount(): number {
+		return this.controls.size;
 	}
 
 	cancelActive(key: string): boolean {
@@ -158,5 +175,43 @@ export class SessionCommandSerialiser {
 		frameBytes = 0,
 	): Promise<T> {
 		return this.run(key, command, frameBytes);
+	}
+
+	/**
+	 * Append one ordered control callback without consuming ordinary queue
+	 * capacity. A key can retain at most one such callback (queued or running),
+	 * so repeated Stop frames receive its reservation without retaining their
+	 * callbacks. Callers use `created` to start/observe side effects only once.
+	 */
+	serialiseControl(
+		key: string,
+		command: () => Promise<void> | void,
+	): SessionCommandControlReservation {
+		const existing = this.controls.get(key);
+		if (existing) return { promise: existing, created: false };
+
+		const previous = this.tails.get(key);
+		const invoke = (): Promise<void> => {
+			try {
+				return Promise.resolve(command());
+			} catch (err) {
+				return Promise.reject(err);
+			}
+		};
+
+		// Always cross a microtask, including on an idle key, so the reservation
+		// is visible before user code can run or synchronously enqueue more work.
+		const commandResult = previous
+			? previous.then(invoke, invoke)
+			: Promise.resolve().then(invoke);
+		this.controls.set(key, commandResult);
+		this.tails.set(key, commandResult);
+
+		const releaseControl = () => {
+			if (this.controls.get(key) === commandResult) this.controls.delete(key);
+			if (this.tails.get(key) === commandResult) this.tails.delete(key);
+		};
+		void commandResult.then(releaseControl, releaseControl);
+		return { promise: commandResult, created: true };
 	}
 }
