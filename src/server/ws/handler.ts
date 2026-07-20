@@ -503,7 +503,7 @@ export function handleWebSocketConnection(
 		}
 	}, 5000);
 
-	const handleMessage = async (msg: ClientMessage, frameBytes: number): Promise<void> => {
+	const handleMessage = async (msg: ClientMessage, frameBytes: number, commandSignal?: AbortSignal): Promise<void> => {
 		// First message must be auth
 		if (!authenticated) {
 			if (msg.type !== "auth") {
@@ -835,7 +835,7 @@ export function handleWebSocketConnection(
 					// pure check as defense in depth using the same scanner.
 					const fileMentionCwd = session.worktreePath || session.cwd;
 					try {
-						preflightFileMentionAdmission(msg.text, fileMentionCwd);
+						await preflightFileMentionAdmission(msg.text, fileMentionCwd);
 					} catch (error) {
 						if (error instanceof FileMentionBudgetError) {
 							send(ws, { type: "error", message: error.message, code: error.code });
@@ -843,6 +843,7 @@ export function handleWebSocketConnection(
 						}
 						throw error;
 					}
+					if (commandSignal?.aborted) return;
 
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path
@@ -913,7 +914,7 @@ export function handleWebSocketConnection(
 						}
 						throw error;
 					});
-					if (!fileMentionResult) return;
+					if (!fileMentionResult || commandSignal?.aborted) return;
 					for (const w of fileMentionResult.warnings) {
 						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
 					}
@@ -963,6 +964,7 @@ export function handleWebSocketConnection(
 						? fileMentionResult.mentions.map(toWireMention)
 						: undefined;
 
+					if (commandSignal?.aborted) return;
 					await sessionManager.enqueuePrompt(sessionId, originalText, {
 						images: sendImages.length ? sendImages : undefined,
 						attachments: sendAttachments.length ? sendAttachments : undefined,
@@ -993,11 +995,26 @@ export function handleWebSocketConnection(
 				case "reorder_queue":
 					sessionManager.reorderQueue(sessionId, msg.messageIds);
 					break;
-				case "abort":
-					sessionManager.forceAbort(sessionId).catch((err) => {
+				case "abort": {
+					// Stop has two coordinated paths. Cancel the running pre-dispatch
+					// command so a prompt still resolving mentions cannot enqueue after
+					// Stop, and abort active agent work immediately for low latency. The
+					// ordered second attempt closes the race where dispatch crossed the
+					// cancellation check just before the immediate abort observed idle.
+					SESSION_COMMAND_SERIALISER.cancelActive(commandSerialisationKey);
+					let abortErrorReported = false;
+					const reportAbortError = (err: unknown): void => {
+						if (abortErrorReported) return;
+						abortErrorReported = true;
 						send(ws, { type: "error", message: `Abort failed: ${err}`, code: "ABORT_ERROR" });
-					});
+					};
+					const immediateAbort = sessionManager.forceAbort(sessionId).catch(reportAbortError);
+					void SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, async () => {
+						await immediateAbort;
+						await sessionManager.forceAbort(sessionId);
+					}).catch(reportAbortError);
 					break;
+				}
 				case "retry":
 					sessionManager.retryLastPrompt(sessionId).catch((err) => {
 						send(ws, { type: "error", message: `Retry failed: ${err}`, code: "RETRY_ERROR" });
@@ -1685,12 +1702,22 @@ export function handleWebSocketConnection(
 						consumePermit: (nonce, binding) => consumeWritePermit(nonce, binding),
 						post: async (sid, text, opts) => {
 							// Role-aware delivery (text is already system-framed by the handler
-							// for role "system"). "user"/"system" share the user/steer transport;
-							// resumeTurn !== false resumes the turn, === false delivers without.
-							if (opts.resume) {
-								await sessionManager.enqueuePrompt(sid, text, { source: "extension" });
+							// for role "system"). Enqueue-producing posts join the same global,
+							// session-keyed FIFO as prompts from every connection. A non-resuming
+							// post mirrors a steer: keep live streaming delivery low-latency, but
+							// serialize its idle delivery so it cannot overtake prompt preflight.
+							const deliver = async (): Promise<void> => {
+								if (opts.resume) {
+									await sessionManager.enqueuePrompt(sid, text, { source: "extension" });
+								} else {
+									await sessionManager.deliverLiveSteer(sid, text, { source: "extension" });
+								}
+							};
+							const target = sessionManager.getSession(sid);
+							if (!opts.resume && target?.status === "streaming") {
+								await deliver();
 							} else {
-								await sessionManager.deliverLiveSteer(sid, text, { source: "extension" });
+								await SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, deliver);
 							}
 						},
 						audit: (rec) => {
@@ -1748,7 +1775,7 @@ export function handleWebSocketConnection(
 		// session queue, or the extension-post permit flow.
 		if (authenticated && rejectInvalidPromptText(msg)) return;
 
-		const dispatch = () => handleMessage(msg, frameBytes);
+		const dispatch = (signal?: AbortSignal) => handleMessage(msg, frameBytes, signal);
 		const liveSession = authenticated && sessionId !== "__viewer__"
 			? sessionManager.getSession(sessionId)
 			: undefined;
@@ -1761,7 +1788,7 @@ export function handleWebSocketConnection(
 		void result.catch((err) => {
 			// Covers authentication/archive branches and any future routing added
 			// outside the command-level try/catch. The serialiser's fulfilled tail
-			// still permits the next same-session prompt or steer to run.
+			// still permits the next same-session ordered delivery to run.
 			console.error(`[ws-handler] Unhandled command failure for ${sessionId}:`, err);
 			sendCommandFailure(err);
 		});
